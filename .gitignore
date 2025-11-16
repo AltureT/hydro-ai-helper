@@ -1,0 +1,19 @@
+
+
+# Ignore Claude/Specify agent folders
+.claude/
+.specify/
+
+# Ignore environment variable files
+.env
+.env.local
+
+# Node-related ignores (if using JS SDK)
+node_modules/
+
+# Python typical ignores (if using Python in plugin)
+__pycache__/
+*.pyc
+
+# macOS system files
+.DS_Store
