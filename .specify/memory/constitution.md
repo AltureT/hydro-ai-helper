@@ -1,50 +1,177 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# HydroOJ AI 学习助手 - 项目宪章
 
-## Core Principles
+## 项目概述
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+本项目是 HydroOJ 在线判题平台的教学辅助插件，旨在通过 AI 对话为学生提供"导学式"学习支持，帮助学生理解问题、培养思维能力，而非直接提供答案。同时为教师提供对话记录查看、数据导出和学习分析功能。
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+## 核心原则
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### I. 教学优先 - 引导而非代替
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+**核心理念**: AI 的职责是引导学生思考，而非替代学生完成作业。
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+**强制要求**:
+- AI 必须通过 system prompt 明确禁止直接输出完整可提交的 AC 代码
+- 只能提供：思路引导、算法原理讲解、伪代码片段、关键代码片段、调试建议
+- 学生在提问前必须先描述自己的理解和尝试过程（前端强制交互流程）
+- 必须要求学生选择问题类型、描述自己的思路后才能开启对话
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+**禁止行为**:
+- 直接生成可以通过全部测试点的完整代码
+- 在未要求学生说明思路的情况下直接给出解决方案
+- 绕过学生的思考过程直接给出答案
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### II. 插件化架构 - 不侵入核心
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+**核心理念**: 通过 HydroOJ 官方插件机制扩展功能，保持系统的可维护性和可升级性。
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+**强制要求**:
+- 仅使用 HydroOJ 提供的官方插件扩展点和 API
+- 不修改 HydroOJ 核心代码或数据库结构（除非通过官方迁移机制）
+- 保持与 HydroOJ 版本更新的兼容性
+- 所有功能必须在插件卸载后不影响 HydroOJ 核心功能
 
-## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
+**技术约束**:
+- 使用 Node.js + TypeScript 开发
+- 遵循 HydroOJ 插件开发规范
+- 代码模块化，便于二次开发和维护
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+### III. AI 服务解耦 - 模型可替换
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**核心理念**: AI 能力作为可替换的外部服务，不绑定特定提供商。
+
+**强制要求**:
+- 所有 AI API 调用逻辑必须封装在独立模块中
+- 支持 OpenAI 格式 API 的通用接口
+- API Key 和服务端点配置化（支持环境变量和后台配置）
+- 支持切换不同的模型或代理服务无需改动业务代码
+
+**架构要求**:
+- 定义统一的 AI 服务接口层
+- 支持多种 AI 服务提供商（OpenAI、Azure OpenAI、兼容接口等）
+- 提供降级和错误处理机制
+
+### IV. 安全与隐私 - 零信任原则
+
+**核心理念**: 保护学生隐私，确保敏感数据不泄露。
+
+**强制要求**:
+- API Key 只能存储在服务器端（环境变量或加密配置）
+- 前端代码绝不包含任何 API 凭证
+- 调用外部 AI 接口时，最小化传输的身份信息
+- 使用 HydroOJ 用户 ID 而非真实姓名/学号关联数据
+
+**数据处理原则**:
+- 对话记录存储时去除不必要的个人敏感信息
+- 日志中不记录完整的学生代码和对话原文（仅记录必要的诊断信息）
+- 数据导出时提供脱敏选项
+- 遵守数据最小化原则
+
+### V. 可观测与分析 - 支持教学研究
+
+**核心理念**: 为教师提供教学过程的可视化和数据支持。
+
+**强制要求**:
+- 所有对话记录可查询、可筛选（按班级、题目、学生、时间）
+- 支持数据导出（CSV/XLSX 格式）
+- 提供基础统计分析功能：
+  - 对话次数统计（按学生、题目、班级维度）
+  - 有效对话比例分析
+  - 学习活跃度趋势
+- 数据结构预留扩展字段（如"有效对话标记"）
+
+**教师权限**:
+- 教师可查看所管理班级/题目的所有对话记录
+- 支持对话质量标注和反馈
+- 提供学习过程分析报告
+
+### VI. 代码质量 - 可读性与可维护性
+
+**核心理念**: 代码清晰、结构合理，便于其他教师和开发者理解和扩展。
+
+**强制要求**:
+- 使用 TypeScript 类型系统，避免 `any` 类型滥用
+- 模块职责单一，接口清晰
+- 关键逻辑必须有注释说明
+- 公共 API 必须有文档（JSDoc）
+
+**代码组织**:
+- 按功能模块划分目录结构
+- 配置、业务逻辑、数据访问层分离
+- 工具函数和常量集中管理
+
+## 技术约束
+
+### 开发技术栈
+- **语言**: TypeScript (Node.js)
+- **框架**: HydroOJ 插件 API
+- **AI 接口**: OpenAI 格式 API（兼容各类代理服务）
+- **数据存储**: 使用 HydroOJ 提供的数据库接口
+
+### 必须支持的功能模块
+1. **对话管理模块**: 处理学生-AI 对话的创建、存储、检索
+2. **AI 服务封装模块**: 统一 AI API 调用接口
+3. **Prompt 管理模块**: 管理 system prompt 和教学策略
+4. **权限控制模块**: 确保学生只能访问自己的对话，教师可管理班级数据
+5. **数据导出模块**: 支持教师导出对话记录和分析数据
+6. **前端交互模块**: 强制学生先描述思路的交互流程
+
+### 禁止的实现方式
+- 在前端存储或暴露 API Key
+- 直接修改 HydroOJ 核心文件
+- 硬编码 AI 服务提供商相关逻辑
+- 在日志中记录完整的敏感数据
+
+## 开发流程
+
+### 需求验证
+- 新功能必须符合"教学优先"原则
+- 需求文档必须说明如何防止学生滥用 AI 获取答案
+- 涉及数据处理的功能必须通过隐私审查
+
+### 代码审查重点
+- 是否符合插件化架构要求
+- AI 调用是否正确封装
+- 是否存在安全隐患（API Key 泄露、权限漏洞）
+- 数据处理是否符合隐私原则
+- 代码可读性和可维护性
+
+### 测试要求
+- 核心模块必须有单元测试
+- AI 服务模块必须有 mock 测试
+- 权限控制必须有集成测试
+- 必须测试 API Key 不会泄露到前端
+
+## 治理规则
+
+### 宪章地位
+- 本宪章是项目开发的最高准则
+- 所有 `/speckit.specify`、`/speckit.plan`、`/speckit.tasks` 生成的文档必须符合本宪章
+- 代码审查和功能验收必须检查是否符合宪章要求
+
+### 修改流程
+- 宪章修改需要项目负责人批准
+- 重大原则变更需要更新相关文档和代码
+- 修改后需更新版本号和修订日期
+
+### 违规处理
+- 违反"教学优先"原则的功能不得合并
+- 违反"安全与隐私"原则的代码必须立即修复
+- 违反"插件化架构"的实现必须重构
+
+## 项目成功标准
+
+一个符合宪章的实现应该：
+1. ✅ 学生无法通过 AI 直接获得完整可提交的代码
+2. ✅ 所有敏感凭证安全存储在服务端
+3. ✅ 教师可以方便地查看和分析学生对话数据
+4. ✅ 可以轻松切换不同的 AI 服务提供商
+5. ✅ 插件卸载后不影响 HydroOJ 核心功能
+6. ✅ 代码结构清晰，其他教师可以理解和二次开发
+
+---
+
+**版本**: 1.0.0
+**批准日期**: 2025-11-16
+**最后修订**: 2025-11-16
+**项目负责人**: [待填写]
