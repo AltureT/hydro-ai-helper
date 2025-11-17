@@ -1,9 +1,10 @@
 /**
  * AI 学习助手面板 - 学生端
  * 在题目详情页显示的对话界面
+ * T007A: 可折叠/可拖拽/可调尺寸的浮动卡片
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
@@ -31,6 +32,7 @@ interface ProblemInfo {
  * AI 助手面板组件
  */
 export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId }) => {
+  // 原有业务状态
   const [questionType, setQuestionType] = useState<string>('');
   const [userThinking, setUserThinking] = useState<string>('');
   const [code, setCode] = useState<string>('');
@@ -43,6 +45,20 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   const [problemInfo, setProblemInfo] = useState<ProblemInfo | null>(null);
   const [problemInfoError, setProblemInfoError] = useState<string>('');
   const [manualTitle, setManualTitle] = useState<string>('');
+
+  // T007A: 浮动面板 UI 状态
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(false); // 折叠状态
+  const [position, setPosition] = useState({ bottom: 20, right: 20 }); // 面板位置
+  const [size, setSize] = useState({ width: 400, height: 500 }); // 面板尺寸
+  const [isDragging, setIsDragging] = useState<boolean>(false); // 拖拽状态
+  const [isResizing, setIsResizing] = useState<boolean>(false); // 缩放状态
+  const [isMobile, setIsMobile] = useState<boolean>(false); // 移动端检测
+
+  // DOM 引用
+  const panelRef = useRef<HTMLDivElement>(null);
+  const dragStartPos = useRef({ x: 0, y: 0 });
+  const resizeStartSize = useRef({ width: 0, height: 0 });
+  const resizeStartMouse = useRef({ x: 0, y: 0 });
 
   /**
    * 初始化 Markdown 渲染器
@@ -64,6 +80,109 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       }
     });
   }, []);
+
+  /**
+   * T007A: 移动端检测
+   */
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  /**
+   * T007A: 拖拽功能 - 标题栏拖拽
+   */
+  const handleDragStart = (e: React.MouseEvent) => {
+    if (isMobile) return; // 移动端禁用拖拽
+    setIsDragging(true);
+    dragStartPos.current = {
+      x: e.clientX - (window.innerWidth - position.right - size.width),
+      y: e.clientY - (window.innerHeight - position.bottom - size.height)
+    };
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleDragMove = (e: MouseEvent) => {
+      const newX = e.clientX - dragStartPos.current.x;
+      const newY = e.clientY - dragStartPos.current.y;
+
+      // 计算 bottom 和 right 位置
+      const newBottom = window.innerHeight - newY - size.height;
+      const newRight = window.innerWidth - newX - size.width;
+
+      // 边界限制
+      const clampedBottom = Math.max(0, Math.min(window.innerHeight - 100, newBottom));
+      const clampedRight = Math.max(0, Math.min(window.innerWidth - 100, newRight));
+
+      setPosition({ bottom: clampedBottom, right: clampedRight });
+    };
+
+    const handleDragEnd = () => {
+      setIsDragging(false);
+    };
+
+    document.addEventListener('mousemove', handleDragMove);
+    document.addEventListener('mouseup', handleDragEnd);
+
+    return () => {
+      document.removeEventListener('mousemove', handleDragMove);
+      document.removeEventListener('mouseup', handleDragEnd);
+    };
+  }, [isDragging, position, size]);
+
+  /**
+   * T007A: 缩放功能 - 右下角手柄
+   */
+  const handleResizeStart = (e: React.MouseEvent) => {
+    if (isMobile) return; // 移动端禁用缩放
+    e.stopPropagation();
+    setIsResizing(true);
+    resizeStartSize.current = { width: size.width, height: size.height };
+    resizeStartMouse.current = { x: e.clientX, y: e.clientY };
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleResizeMove = (e: MouseEvent) => {
+      const deltaX = e.clientX - resizeStartMouse.current.x;
+      const deltaY = e.clientY - resizeStartMouse.current.y; // 修复:向下拖动增加高度
+
+      const newWidth = resizeStartSize.current.width + deltaX;
+      const newHeight = resizeStartSize.current.height + deltaY; // 修复:正向增加
+
+      // 尺寸限制: 最小 360x400, 最大 600x80vh
+      const maxHeight = Math.min(800, window.innerHeight * 0.8);
+      const clampedWidth = Math.max(300, Math.min(600, newWidth));
+      const clampedHeight = Math.max(360, Math.min(maxHeight, newHeight));
+
+      setSize({ width: clampedWidth, height: clampedHeight });
+    };
+
+    const handleResizeEnd = () => {
+      setIsResizing(false);
+      document.body.style.userSelect = ''; // 恢复文本选择
+    };
+
+    // 禁用文本选择
+    document.body.style.userSelect = 'none';
+
+    document.addEventListener('mousemove', handleResizeMove);
+    document.addEventListener('mouseup', handleResizeEnd);
+
+    return () => {
+      document.removeEventListener('mousemove', handleResizeMove);
+      document.removeEventListener('mouseup', handleResizeEnd);
+      document.body.style.userSelect = '';
+    };
+  }, [isResizing]);
 
   /**
    * 自动读取题目信息
@@ -191,6 +310,38 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     );
   };
 
+  // 计算面板样式(移动端 vs 桌面端)
+  const panelStyle: React.CSSProperties = isMobile ? {
+    // 移动端:全屏模式
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    width: '100vw',
+    height: isCollapsed ? '56px' : '100vh',
+    background: '#f9fafb',
+    zIndex: 1000,
+    display: 'flex',
+    flexDirection: 'column',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    transition: 'height 0.3s ease'
+  } : {
+    // 桌面端:浮动卡片
+    position: 'fixed',
+    bottom: `${position.bottom}px`,
+    right: `${position.right}px`,
+    width: `${size.width}px`,
+    height: isCollapsed ? '48px' : `${size.height}px`,
+    background: '#f9fafb',
+    borderRadius: '12px',
+    boxShadow: '0 10px 25px rgba(0, 0, 0, 0.15), 0 4px 10px rgba(0, 0, 0, 0.1)',
+    zIndex: 1000,
+    display: 'flex',
+    flexDirection: 'column',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    overflow: 'hidden',
+    transition: 'height 0.3s ease'
+  };
+
   return (
     <>
       {/* Markdown 样式 */}
@@ -253,38 +404,53 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
         }
       `}</style>
 
-      <div style={{
-        position: 'fixed',
-        bottom: '20px',
-        right: '20px',
-        width: '400px',
-        maxHeight: '600px',
-        background: 'white',
-        border: '1px solid #ddd',
-        borderRadius: '8px',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-        zIndex: 1000,
-        display: 'flex',
-        flexDirection: 'column',
-        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-      }}>
-      {/* 标题栏 */}
-      <div style={{
-        padding: '15px',
-        borderBottom: '1px solid #eee',
-        background: '#4CAF50',
-        color: 'white',
-        borderRadius: '8px 8px 0 0',
-        fontWeight: 'bold'
-      }}>
-        AI 学习助手
+      <div ref={panelRef} style={panelStyle}>
+      {/* 标题栏 - 可拖拽 */}
+      <div
+        onMouseDown={handleDragStart}
+        style={{
+          padding: '12px 16px',
+          borderBottom: isCollapsed ? 'none' : '1px solid #e5e7eb',
+          background: '#6366f1',
+          color: 'white',
+          borderRadius: isMobile ? '0' : '12px 12px 0 0',
+          fontWeight: '600',
+          fontSize: '15px',
+          cursor: isMobile ? 'default' : (isDragging ? 'grabbing' : 'grab'),
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          userSelect: 'none',
+          height: isMobile ? '56px' : '48px',
+          boxSizing: 'border-box'
+        }}
+      >
+        <span>✨ AI 学习助手</span>
+        <button
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'white',
+            fontSize: '18px',
+            cursor: 'pointer',
+            padding: '4px 8px',
+            lineHeight: '1'
+          }}
+          title={isCollapsed ? '展开面板' : '折叠面板'}
+        >
+          {isCollapsed ? '▲' : '▼'}
+        </button>
       </div>
 
-      {/* 内容区 */}
+      {/* 内容区 - 折叠时隐藏 */}
+      {!isCollapsed && (
       <div style={{
-        padding: '15px',
+        padding: '16px',
         overflowY: 'auto',
-        flex: 1
+        flex: 1,
+        background: '#ffffff',
+        borderRadius: isMobile ? '0' : '0 0 12px 12px'
       }}>
         {/* 如果没有 AI 回复,显示表单 */}
         {!aiResponse ? (
@@ -292,17 +458,32 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
             {/* 题目信息卡片或手动输入 */}
             {problemInfo ? (
               <div style={{
-                background: '#f3f4f6',
-                padding: '12px',
+                background: '#f5f3ff',
+                border: '1px solid #e0ddff',
+                padding: '10px 12px',
                 borderRadius: '8px',
-                marginBottom: '15px',
-                fontSize: '14px'
+                marginBottom: '16px'
               }}>
-                <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-                  📝 {problemInfo.problemId}: {problemInfo.title}
+                <div style={{
+                  fontSize: '12px',
+                  color: '#9333ea',
+                  marginBottom: '4px',
+                  fontWeight: '500'
+                }}>
+                  题目 {problemInfo.problemId}
                 </div>
-                <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                  题目信息已自动读取
+                <div style={{
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  color: '#5b21b6',
+                  lineHeight: '1.4',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical'
+                }}>
+                  {problemInfo.title}
                 </div>
               </div>
             ) : (
@@ -325,7 +506,7 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
                     width: '100%',
                     padding: '8px',
                     border: '1px solid #fbbf24',
-                    borderRadius: '4px',
+                    borderRadius: '6px',
                     fontSize: '13px',
                     boxSizing: 'border-box'
                   }}
@@ -333,30 +514,79 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
               </div>
             )}
 
-            {/* 问题类型选择 */}
-            <div style={{ marginBottom: '15px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', fontSize: '14px' }}>
+            {/* 问题类型选择 - 胶囊式按钮 */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '10px',
+                fontWeight: '600',
+                fontSize: '14px',
+                color: '#374151'
+              }}>
                 问题类型
               </label>
-              {QUESTION_TYPES.map(type => (
-                <label key={type.value} style={{ display: 'block', marginBottom: '6px', fontSize: '13px' }}>
-                  <input
-                    type="radio"
-                    name="questionType"
-                    value={type.value}
-                    checked={questionType === type.value}
-                    onChange={(e) => setQuestionType(e.target.value)}
-                    style={{ marginRight: '6px' }}
-                  />
-                  {type.label}
-                </label>
-              ))}
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '8px'
+              }}>
+                {QUESTION_TYPES.map(type => {
+                  const isSelected = questionType === type.value;
+                  return (
+                    <label
+                      key={type.value}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        padding: '8px 14px',
+                        borderRadius: '999px',
+                        border: `1.5px solid ${isSelected ? '#7c3aed' : '#d1d5db'}`,
+                        background: isSelected ? '#ede9fe' : '#ffffff',
+                        color: isSelected ? '#5b21b6' : '#4b5563',
+                        fontSize: '13px',
+                        fontWeight: isSelected ? '600' : '500',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        userSelect: 'none'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isSelected) {
+                          e.currentTarget.style.borderColor = '#9ca3af';
+                          e.currentTarget.style.background = '#f9fafb';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isSelected) {
+                          e.currentTarget.style.borderColor = '#d1d5db';
+                          e.currentTarget.style.background = '#ffffff';
+                        }
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="questionType"
+                        value={type.value}
+                        checked={isSelected}
+                        onChange={(e) => setQuestionType(e.target.value)}
+                        style={{ display: 'none' }}
+                      />
+                      {type.label}
+                    </label>
+                  );
+                })}
+              </div>
             </div>
 
             {/* 我的理解和尝试 */}
-            <div style={{ marginBottom: '15px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', fontSize: '14px' }}>
-                我的理解和尝试 <span style={{ color: 'red' }}>*</span>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontWeight: '600',
+                fontSize: '14px',
+                color: '#374151'
+              }}>
+                我的理解和尝试 <span style={{ color: '#ef4444' }}>*</span>
               </label>
               <textarea
                 value={userThinking}
@@ -364,41 +594,104 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
                 placeholder="请描述你对这道题的理解和已经尝试的方法(至少 20 字)..."
                 style={{
                   width: '100%',
-                  minHeight: '100px',
-                  padding: '8px',
-                  border: '1px solid #ddd',
-                  borderRadius: '4px',
+                  minHeight: '140px',
+                  padding: '10px 12px',
+                  border: '1px solid #d4d4d8',
+                  borderRadius: '8px',
                   fontSize: '13px',
+                  lineHeight: '1.6',
                   resize: 'vertical',
-                  boxSizing: 'border-box'
+                  boxSizing: 'border-box',
+                  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+                  transition: 'all 0.2s ease',
+                  outline: 'none',
+                  background: '#ffffff'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = '#6366f1';
+                  e.target.style.boxShadow = '0 0 0 3px rgba(99, 102, 241, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = '#d4d4d8';
+                  e.target.style.boxShadow = 'none';
                 }}
               />
-              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                {userThinking.length} / 2000 字
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginTop: '6px'
+              }}>
+                <div style={{
+                  fontSize: '12px',
+                  color: '#9ca3af',
+                  lineHeight: '1.4'
+                }}>
+                  💡 越详细的思路描述,AI 越能针对性地帮你诊断
+                </div>
+                <div style={{
+                  fontSize: '12px',
+                  color: userThinking.length >= 20 ? '#10b981' : '#9ca3af',
+                  fontWeight: '500'
+                }}>
+                  {userThinking.length} / 2000
+                </div>
               </div>
             </div>
 
             {/* 附带代码显式确认 */}
-            <div style={{ marginBottom: '15px' }}>
+            <div style={{ marginBottom: '16px' }}>
               <label style={{
                 display: 'flex',
-                alignItems: 'center',
-                marginBottom: '8px',
-                fontSize: '14px',
-                cursor: 'pointer'
-              }}>
+                alignItems: 'flex-start',
+                cursor: 'pointer',
+                padding: '12px',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                background: includeCode ? '#faf5ff' : '#ffffff',
+                transition: 'all 0.2s ease'
+              }}
+              onMouseEnter={(e) => {
+                if (!includeCode) {
+                  e.currentTarget.style.background = '#f9fafb';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!includeCode) {
+                  e.currentTarget.style.background = '#ffffff';
+                }
+              }}
+              >
                 <input
                   type="checkbox"
                   checked={includeCode}
                   onChange={(e) => setIncludeCode(e.target.checked)}
                   style={{
-                    marginRight: '8px',
-                    width: '16px',
-                    height: '16px',
-                    cursor: 'pointer'
+                    marginRight: '10px',
+                    marginTop: '2px',
+                    width: '18px',
+                    height: '18px',
+                    cursor: 'pointer',
+                    accentColor: '#7c3aed'
                   }}
                 />
-                <span style={{ fontWeight: 'bold' }}>📎 附带当前代码给 AI 检查</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{
+                    fontWeight: '600',
+                    fontSize: '14px',
+                    color: '#374151',
+                    marginBottom: '4px'
+                  }}>
+                    📎 附带当前代码给 AI 检查
+                  </div>
+                  <div style={{
+                    fontSize: '12px',
+                    color: '#6b7280',
+                    lineHeight: '1.4'
+                  }}>
+                    建议在调试错误时勾选,可能略微增加响应时间
+                  </div>
+                </div>
               </label>
 
               {includeCode && (
@@ -448,14 +741,15 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
             {/* 错误提示 */}
             {error && (
               <div style={{
-                padding: '10px',
-                background: '#ffebee',
-                color: '#c62828',
-                borderRadius: '4px',
+                padding: '12px',
+                background: '#fee2e2',
+                color: '#dc2626',
+                borderRadius: '8px',
                 marginBottom: '15px',
-                fontSize: '13px'
+                fontSize: '13px',
+                border: '1px solid #fecaca'
               }}>
-                {error}
+                ⚠️ {error}
               </div>
             )}
 
@@ -470,27 +764,55 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
               }
               style={{
                 width: '100%',
-                padding: '10px',
+                padding: '14px',
                 background: (
                   isLoading ||
                   !questionType ||
                   userThinking.trim().length < 20 ||
                   (includeCode && !code.trim())
-                ) ? '#ccc' : '#4CAF50',
+                ) ? '#d1d5db' : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
                 color: 'white',
                 border: 'none',
-                borderRadius: '4px',
-                fontSize: '14px',
-                fontWeight: 'bold',
+                borderRadius: '999px',
+                fontSize: '15px',
+                fontWeight: '600',
                 cursor: (
                   isLoading ||
                   !questionType ||
                   userThinking.trim().length < 20 ||
                   (includeCode && !code.trim())
-                ) ? 'not-allowed' : 'pointer'
+                ) ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s ease',
+                boxShadow: (
+                  isLoading ||
+                  !questionType ||
+                  userThinking.trim().length < 20 ||
+                  (includeCode && !code.trim())
+                ) ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.3)',
+                transform: 'translateY(0)'
+              }}
+              onMouseEnter={(e) => {
+                if (!(
+                  isLoading ||
+                  !questionType ||
+                  userThinking.trim().length < 20 ||
+                  (includeCode && !code.trim())
+                )) {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 6px 16px rgba(99, 102, 241, 0.4)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.boxShadow = (
+                  isLoading ||
+                  !questionType ||
+                  userThinking.trim().length < 20 ||
+                  (includeCode && !code.trim())
+                ) ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.3)';
               }}
             >
-              {isLoading ? '正在思考...' : '提交问题'}
+              {isLoading ? '⏳ 正在思考...' : '🚀 提交问题'}
             </button>
           </div>
         ) : (
@@ -498,25 +820,28 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
           <div>
             {/* 学生消息 */}
             <div style={{
-              background: '#e3f2fd',
-              padding: '12px',
-              borderRadius: '8px',
-              marginBottom: '15px'
+              background: '#dbeafe',
+              border: '1px solid #93c5fd',
+              padding: '14px',
+              borderRadius: '10px',
+              marginBottom: '16px'
             }}>
-              <div style={{ fontWeight: 'bold', fontSize: '13px', marginBottom: '6px', color: '#1976d2' }}>
-                我的问题
+              <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '8px', color: '#1e40af' }}>
+                💬 我的问题
               </div>
-              <div style={{ fontSize: '13px', whiteSpace: 'pre-wrap' }}>
+              <div style={{ fontSize: '13px', whiteSpace: 'pre-wrap', color: '#1e3a8a' }}>
                 {userThinking}
               </div>
               {includeCode && code && (
                 <pre style={{
-                  background: '#f5f5f5',
-                  padding: '8px',
-                  borderRadius: '4px',
-                  marginTop: '8px',
+                  background: '#f1f5f9',
+                  border: '1px solid #cbd5e1',
+                  padding: '10px',
+                  borderRadius: '6px',
+                  marginTop: '10px',
                   fontSize: '12px',
-                  overflow: 'auto'
+                  overflow: 'auto',
+                  fontFamily: 'Consolas, Monaco, "Courier New", monospace'
                 }}>
                   <code>{code}</code>
                 </pre>
@@ -525,15 +850,16 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
 
             {/* AI 回复 */}
             <div style={{
-              background: '#f5f5f5',
-              padding: '12px',
-              borderRadius: '8px',
-              marginBottom: '15px'
+              background: '#f0fdf4',
+              border: '1px solid #86efac',
+              padding: '14px',
+              borderRadius: '10px',
+              marginBottom: '16px'
             }}>
-              <div style={{ fontWeight: 'bold', fontSize: '13px', marginBottom: '6px', color: '#4CAF50' }}>
-                AI 导师
+              <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '8px', color: '#15803d' }}>
+                🤖 AI 导师
               </div>
-              <div style={{ fontSize: '13px' }}>
+              <div style={{ fontSize: '13px', color: '#166534' }}>
                 {renderMarkdown(aiResponse)}
               </div>
             </div>
@@ -543,21 +869,80 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
               onClick={handleReset}
               style={{
                 width: '100%',
-                padding: '10px',
-                background: '#2196F3',
+                padding: '12px',
+                background: '#8b5cf6',
                 color: 'white',
                 border: 'none',
-                borderRadius: '4px',
+                borderRadius: '8px',
                 fontSize: '14px',
-                fontWeight: 'bold',
-                cursor: 'pointer'
+                fontWeight: '600',
+                cursor: 'pointer',
+                transition: 'background 0.2s'
               }}
             >
-              继续提问
+              💬 继续提问
             </button>
           </div>
         )}
       </div>
+      )}
+
+      {/* 拖拽高度调整把手 - 仅桌面端且未折叠时显示 */}
+      {!isMobile && !isCollapsed && (
+        <div
+          onMouseDown={handleResizeStart}
+          style={{
+            position: 'absolute',
+            bottom: '0',
+            left: '0',
+            right: '0',
+            height: '32px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'ns-resize',
+            background: 'transparent',
+            transition: 'background 0.2s ease',
+            borderRadius: '0 0 12px 12px'
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(99, 102, 241, 0.05)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'transparent';
+          }}
+          title="拖拽调整面板高度"
+        >
+          {/* 三条横线作为拖拽图标 */}
+          <div style={{
+            width: '40px',
+            height: '4px',
+            borderRadius: '2px',
+            background: '#d1d5db',
+            position: 'relative',
+            pointerEvents: 'none'
+          }}>
+            <div style={{
+              position: 'absolute',
+              top: '-6px',
+              left: '0',
+              right: '0',
+              height: '3px',
+              borderRadius: '2px',
+              background: '#d1d5db'
+            }} />
+            <div style={{
+              position: 'absolute',
+              top: '6px',
+              left: '0',
+              right: '0',
+              height: '3px',
+              borderRadius: '2px',
+              background: '#d1d5db'
+            }} />
+          </div>
+        </div>
+      )}
     </div>
     </>
   );
