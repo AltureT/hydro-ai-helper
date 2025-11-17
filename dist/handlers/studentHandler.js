@@ -16,7 +16,7 @@ class ChatHandler extends hydrooj_1.Handler {
     async post() {
         try {
             // 从请求体获取参数
-            const { problemId, questionType, userThinking, code, conversationId } = this.request.body;
+            const { problemId, problemTitle, problemContent, questionType, userThinking, includeCode, code, conversationId } = this.request.body;
             // 验证问题类型
             const validQuestionTypes = ['understand', 'think', 'debug', 'review'];
             if (!validQuestionTypes.includes(questionType)) {
@@ -24,16 +24,43 @@ class ChatHandler extends hydrooj_1.Handler {
             }
             // 初始化服务
             const promptService = new promptService_1.PromptService();
+            // 代码处理逻辑
+            let processedCode;
+            let codeWarning;
+            if (includeCode && code) {
+                // 检查代码长度,超过 5000 字符则截断
+                if (code.length > 5000) {
+                    processedCode = code.substring(0, 5000);
+                    codeWarning = '代码已截断到 5000 字符';
+                }
+                else {
+                    processedCode = code;
+                }
+            }
+            else {
+                // includeCode=false 时忽略代码字段
+                processedCode = undefined;
+            }
             // 验证用户输入
-            const validation = promptService.validateInput(userThinking, code);
+            const validation = promptService.validateInput(userThinking, processedCode);
             if (!validation.valid) {
                 throw new Error(validation.error || '输入验证失败');
             }
+            // 题目内容截断(超过 500 字符)
+            let processedProblemContent;
+            if (problemContent) {
+                if (problemContent.length > 500) {
+                    processedProblemContent = problemContent.substring(0, 500) + '...';
+                }
+                else {
+                    processedProblemContent = problemContent;
+                }
+            }
             // 构造 prompts
-            // TODO: 从数据库获取真实题目标题,这里暂时硬编码
-            const problemTitle = `题目 ${problemId}`;
-            const systemPrompt = promptService.buildSystemPrompt(problemTitle);
-            const userPrompt = promptService.buildUserPrompt(questionType, userThinking, code, undefined // errorInfo 暂不支持
+            // 使用前端传入的题目标题,如果没有则使用题目ID
+            const problemTitleStr = problemTitle || `题目 ${problemId}`;
+            const systemPrompt = promptService.buildSystemPrompt(problemTitleStr, processedProblemContent);
+            const userPrompt = promptService.buildUserPrompt(questionType, userThinking, processedCode, undefined // errorInfo 暂不支持
             );
             // 准备消息数组
             const messages = [
@@ -81,6 +108,10 @@ class ChatHandler extends hydrooj_1.Handler {
                     timestamp: new Date().toISOString()
                 }
             };
+            // 如果代码被截断,添加警告信息
+            if (codeWarning) {
+                response.codeWarning = codeWarning;
+            }
             this.response.body = response;
             this.response.type = 'application/json';
         }

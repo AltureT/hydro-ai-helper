@@ -16,12 +16,21 @@ export class PromptService {
    * 构造 System Prompt
    * 包含教学原则和行为规范
    * @param problemTitle 题目标题
+   * @param problemContent 题目内容摘要(可选)
    * @returns System Prompt 文本
    */
-  buildSystemPrompt(problemTitle: string): string {
-    return `你是一位耐心、专业的算法学习导师,正在帮助学生理解和解决题目"${problemTitle}"。
+  buildSystemPrompt(problemTitle: string, problemContent?: string): string {
+    const problemInfo = problemContent
+      ? `你是一位耐心、专业的算法学习导师,正在帮助学生理解和解决题目"${problemTitle}"。
 
-## 核心教学原则
+## 题目内容摘要
+${problemContent}
+`
+      : `你是一位耐心、专业的算法学习导师,正在帮助学生理解和解决题目"${problemTitle}"。
+
+`;
+
+    return problemInfo + `## 核心教学原则
 
 ### 1. 引导式教学 - 绝不替代思考
 - **严格禁止**直接输出完整的、可以通过全部测试点的代码
