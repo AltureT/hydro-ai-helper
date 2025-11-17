@@ -11,6 +11,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.apply = exports.Config = void 0;
 const hydrooj_1 = require("hydrooj");
 const testHandler_1 = require("./handlers/testHandler");
+const studentHandler_1 = require("./handlers/studentHandler");
 /**
  * 插件入口函数
  * @param ctx HydroOJ Context
@@ -25,8 +26,12 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // 注册测试路由
         // GET /ai-helper/hello - 返回插件状态
         ctx.Route('ai_helper_hello', '/ai-helper/hello', testHandler_1.HelloHandler, testHandler_1.HelloHandlerPriv);
+        // 注册学生端对话路由
+        // POST /ai-helper/chat - 学生提交问题获得 AI 回答
+        ctx.Route('ai_helper_chat', '/ai-helper/chat', studentHandler_1.ChatHandler, studentHandler_1.ChatHandlerPriv);
         console.log('[AI Helper] Routes registered:');
         console.log('  - GET /ai-helper/hello (test route)');
+        console.log('  - POST /ai-helper/chat (student chat API)');
         // TODO: 在后续任务中注册数据库模型和服务
     }
 });

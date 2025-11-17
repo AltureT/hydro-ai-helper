@@ -9,6 +9,7 @@
 
 import { Context, definePlugin, Schema } from 'hydrooj';
 import { HelloHandler, HelloHandlerPriv } from './handlers/testHandler';
+import { ChatHandler, ChatHandlerPriv } from './handlers/studentHandler';
 
 /**
  * 插件配置接口
@@ -34,8 +35,13 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/hello - 返回插件状态
     ctx.Route('ai_helper_hello', '/ai-helper/hello', HelloHandler, HelloHandlerPriv);
 
+    // 注册学生端对话路由
+    // POST /ai-helper/chat - 学生提交问题获得 AI 回答
+    ctx.Route('ai_helper_chat', '/ai-helper/chat', ChatHandler, ChatHandlerPriv);
+
     console.log('[AI Helper] Routes registered:');
     console.log('  - GET /ai-helper/hello (test route)');
+    console.log('  - POST /ai-helper/chat (student chat API)');
 
     // TODO: 在后续任务中注册数据库模型和服务
   }
