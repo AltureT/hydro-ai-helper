@@ -10,6 +10,14 @@
 import { Context, definePlugin, Schema } from 'hydrooj';
 import { HelloHandler, HelloHandlerPriv } from './handlers/testHandler';
 import { ChatHandler, ChatHandlerPriv } from './handlers/studentHandler';
+import {
+  ConversationListHandler,
+  ConversationListHandlerPriv,
+  ConversationDetailHandler,
+  ConversationDetailHandlerPriv
+} from './handlers/teacherHandler';
+import { ConversationModel } from './models/conversation';
+import { MessageModel } from './models/message';
 
 /**
  * 插件配置接口
@@ -28,8 +36,23 @@ const configSchema = Schema.object({}).description('AI 助手插件配置（预�
 const aiHelperPlugin = definePlugin<AIHelperConfig>({
   name: 'hydro-ai-helper',
   schema: configSchema,
-  apply(ctx: Context) {
+  async apply(ctx: Context) {
     console.log('[AI Helper] Plugin loaded successfully');
+
+    // 初始化数据库模型
+    const db = ctx.db;
+    const conversationModel = new ConversationModel(db);
+    const messageModel = new MessageModel(db);
+
+    // 创建数据库索引
+    console.log('[AI Helper] Creating database indexes...');
+    await conversationModel.ensureIndexes();
+    await messageModel.ensureIndexes();
+    console.log('[AI Helper] Database indexes created successfully');
+
+    // 将模型实例注入到 ctx 中,供 Handler 使用
+    ctx.provide('conversationModel', conversationModel);
+    ctx.provide('messageModel', messageModel);
 
     // 注册测试路由
     // GET /ai-helper/hello - 返回插件状态
@@ -39,11 +62,18 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // POST /ai-helper/chat - 学生提交问题获得 AI 回答
     ctx.Route('ai_helper_chat', '/ai-helper/chat', ChatHandler, ChatHandlerPriv);
 
+    // 注册教师端路由
+    // GET /ai-helper/conversations - 获取对话列表
+    ctx.Route('ai_helper_conversations_list', '/ai-helper/conversations', ConversationListHandler, ConversationListHandlerPriv);
+
+    // GET /ai-helper/conversations/:id - 获取对话详情
+    ctx.Route('ai_helper_conversation_detail', '/ai-helper/conversations/:id', ConversationDetailHandler, ConversationDetailHandlerPriv);
+
     console.log('[AI Helper] Routes registered:');
     console.log('  - GET /ai-helper/hello (test route)');
     console.log('  - POST /ai-helper/chat (student chat API)');
-
-    // TODO: 在后续任务中注册数据库模型和服务
+    console.log('  - GET /ai-helper/conversations (teacher conversation list API)');
+    console.log('  - GET /ai-helper/conversations/:id (teacher conversation detail API)');
   }
 });
 

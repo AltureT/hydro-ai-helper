@@ -4,8 +4,11 @@
  */
 
 import { Handler, PRIV } from 'hydrooj';
+import { ObjectId } from 'mongodb';
 import { OpenAIClient, ChatMessage } from '../services/openaiClient';
 import { PromptService, QuestionType } from '../services/promptService';
+import { ConversationModel } from '../models/conversation';
+import { MessageModel } from '../models/message';
 
 /**
  * 学生对话请求接口
@@ -43,6 +46,10 @@ interface ChatResponse {
 export class ChatHandler extends Handler {
   async post() {
     try {
+      // 获取数据库模型实例
+      const conversationModel: ConversationModel = this.ctx.get('conversationModel');
+      const messageModel: MessageModel = this.ctx.get('messageModel');
+
       // 从请求体获取参数
       const {
         problemId,
@@ -54,6 +61,9 @@ export class ChatHandler extends Handler {
         code,
         conversationId
       } = this.request.body as ChatRequest;
+
+      // 获取当前用户 ID
+      const userId = this.user._id;
       // 验证问题类型
       const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'review'];
       if (!validQuestionTypes.includes(questionType as QuestionType)) {
@@ -112,8 +122,59 @@ export class ChatHandler extends Handler {
         { role: 'user', content: userPrompt }
       ];
 
-      // TODO: 如果有 conversationId,从数据库加载历史消息
-      // 当前版本暂不支持多轮对话
+      // 处理对话会话 (新建或复用)
+      let currentConversationId: ObjectId;
+
+      if (conversationId) {
+        // 复用已有会话
+        const conversation = await conversationModel.findById(conversationId);
+        if (!conversation) {
+          // 会话不存在,返回 404
+          this.response.status = 404;
+          this.response.body = { error: '会话不存在' };
+          this.response.type = 'application/json';
+          return;
+        }
+        currentConversationId = conversation._id;
+      } else {
+        // 创建新会话
+        const now = new Date();
+        currentConversationId = await conversationModel.create({
+          userId,
+          problemId,
+          classId: undefined, // TODO: 从用户信息获取班级 ID
+          startTime: now,
+          endTime: now,
+          messageCount: 0,
+          isEffective: false, // 初始标记为无效,后续通过有效对话判定服务更新
+          tags: [],
+          metadata: {
+            problemTitle: problemTitleStr,
+            problemContent: processedProblemContent
+          }
+        });
+      }
+
+      // 保存学生消息到数据库
+      await messageModel.create({
+        conversationId: currentConversationId,
+        role: 'student',
+        content: userThinking,
+        timestamp: new Date(),
+        questionType: questionType as QuestionType,
+        attachedCode: includeCode && !!processedCode,
+        attachedError: false, // TODO: 支持附带错误信息
+        metadata: processedCode ? {
+          codeLength: processedCode.length,
+          codeWarning
+        } : undefined
+      });
+
+      // 增加会话的消息计数
+      await conversationModel.incrementMessageCount(currentConversationId);
+
+      // TODO: 加载历史消息用于多轮对话 (后续 Phase)
+      // const historyMessages = await messageModel.findByConversationId(currentConversationId);
 
       // 获取 AI 配置
       // TODO: 从数据库读取配置,这里暂时使用环境变量
@@ -147,16 +208,29 @@ export class ChatHandler extends Handler {
         return;
       }
 
-      // TODO: 保存对话和消息到数据库
-      // 当前版本返回临时 conversationId
+      // 保存 AI 消息到数据库
+      const aiMessageTimestamp = new Date();
+      await messageModel.create({
+        conversationId: currentConversationId,
+        role: 'ai',
+        content: aiResponse,
+        timestamp: aiMessageTimestamp,
+        questionType: undefined, // AI 消息没有问题类型
+        attachedCode: false,
+        attachedError: false
+      });
 
-      // 构造响应
+      // 增加会话的消息计数并更新结束时间
+      await conversationModel.incrementMessageCount(currentConversationId);
+      await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+
+      // 构造响应 (返回真实的 conversationId)
       const response: ChatResponse = {
-        conversationId: conversationId || `temp-${Date.now()}`,
+        conversationId: currentConversationId.toHexString(),
         message: {
           role: 'ai',
           content: aiResponse,
-          timestamp: new Date().toISOString()
+          timestamp: aiMessageTimestamp.toISOString()
         }
       };
 
