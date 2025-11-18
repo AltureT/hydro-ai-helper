@@ -64,7 +64,7 @@
 1. **克隆代码仓库**
 
    ```bash
-   git clone https://github.com/your-org/hydro-ai-helper.git
+   git clone https://github.com/AltureT/hydro-ai-helper.git
    cd hydro-ai-helper
    ```
 
@@ -152,14 +152,14 @@ openssl rand -base64 24 | head -c 32
 
 #### 配置字段说明
 
-| 字段名称 | 说明 | 示例 | 必需 |
-|---------|------|------|------|
-| **API Base URL** | AI 服务的 API 基础 URL | `https://api.openai.com/v1` | ✅ |
-| **模型名称** | 使用的模型名称 | `gpt-4` 或 `gpt-3.5-turbo` | ✅ |
-| **API Key** | AI 服务的 API 密钥 | `sk-...` | ✅ |
-| **频率限制（每分钟）** | 每用户每分钟最大请求次数 | `5`（默认） | ✅ |
-| **超时时间（秒）** | AI 请求超时时间 | `30`（默认） | ✅ |
-| **System Prompt 模板** | AI 的系统提示词模板 | 见下方说明 | ✅ |
+| 字段名称               | 说明                     | 示例                        | 必需 |
+| ---------------------- | ------------------------ | --------------------------- | ---- |
+| **API Base URL**       | AI 服务的 API 基础 URL   | `https://api.openai.com/v1` | ✅    |
+| **模型名称**           | 使用的模型名称           | `gpt-4` 或 `gpt-3.5-turbo`  | ✅    |
+| **API Key**            | AI 服务的 API 密钥       | `sk-...`                    | ✅    |
+| **频率限制（每分钟）** | 每用户每分钟最大请求次数 | `5`（默认）                 | ✅    |
+| **超时时间（秒）**     | AI 请求超时时间          | `30`（默认）                | ✅    |
+| **System Prompt 模板** | AI 的系统提示词模板      | 见下方说明                  | ✅    |
 
 #### 配置工作流程示例
 

@@ -1,19 +1,36 @@
-
-
-# Ignore Claude/Specify agent folders
+# Ignore Claude/Specify/ChatGPT agent folders
 .claude/
 .specify/
+.chatgpt/
 
 # Ignore environment variable files
 .env
 .env.local
 
-# Node-related ignores (if using JS SDK)
+# Dependencies
 node_modules/
+
+# Build outputs（如你希望服务器自己 npm run build，建议忽略）
+dist/
+frontend/dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Python typical ignores (if using Python in plugin)
 __pycache__/
 *.pyc
 
-# macOS system files
+# Editor / OS junk
 .DS_Store
+.vscode/
+*.code-workspace
+
+# other
+PHASE2_DEPLOYMENT.md
+PHASE3_IMPLEMENTATION.md
+docs/
+DEPLOYMENT.md
+hydro-ai-helper.code-workspace
