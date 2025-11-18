@@ -83,7 +83,7 @@ interface ConversationDetailProps {
 export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversationId }) => {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   /**
@@ -94,23 +94,36 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
     setError(null);
 
     try {
-      // 调用 API
-      const response = await fetch(`/ai-helper/conversations/${conversationId}`);
+      // 调用 API (显式设置 Accept 头以获取 JSON 数据)
+      const response = await fetch(`/ai-helper/conversations/${conversationId}`, {
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
 
       if (!response.ok) {
+        const text = await response.text();
+        console.error('[AI Helper] failed to load conversation detail', response.status, text);
+        setConversation(null);
+        setMessages([]);
         if (response.status === 404) {
-          throw new Error('对话不存在');
+          setError('对话不存在');
+        } else {
+          setError(`加载失败：${response.status}`);
         }
-        throw new Error(`加载失败: ${response.statusText}`);
+        return;
       }
 
       const data: ConversationDetailResponse = await response.json();
 
+      console.debug('[AI Helper] conversation detail loaded', data);
       setConversation(data.conversation);
       setMessages(data.messages);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载对话详情失败');
-      console.error('[ConversationDetail] 加载失败:', err);
+      console.error('[AI Helper] error while loading conversation detail', err);
+      setConversation(null);
+      setMessages([]);
+      setError('加载失败：网络错误');
     } finally {
       setLoading(false);
     }

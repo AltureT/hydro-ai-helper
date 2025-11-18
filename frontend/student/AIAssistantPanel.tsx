@@ -47,7 +47,13 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   const [manualTitle, setManualTitle] = useState<string>('');
 
   // T007A: 浮动面板 UI 状态
-  const [isCollapsed, setIsCollapsed] = useState<boolean>(false); // 折叠状态
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true; // SSR/构建安全
+    const saved = window.localStorage.getItem('ai_assistant_collapsed');
+    if (saved === 'true') return true;
+    if (saved === 'false') return false;
+    return true; // 默认折叠
+  }); // 折叠状态
   const [position, setPosition] = useState({ bottom: 20, right: 20 }); // 面板位置
   const [size, setSize] = useState({ width: 400, height: 500 }); // 面板尺寸
   const [isDragging, setIsDragging] = useState<boolean>(false); // 拖拽状态
@@ -59,6 +65,18 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   const dragStartPos = useRef({ x: 0, y: 0 });
   const resizeStartSize = useRef({ width: 0, height: 0 });
   const resizeStartMouse = useRef({ x: 0, y: 0 });
+
+  const toggleCollapse = () => {
+    setIsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('ai_assistant_collapsed', next ? 'true' : 'false');
+      } catch (e) {
+        // 忽略本地存储错误
+      }
+      return next;
+    });
+  };
 
   /**
    * 初始化 Markdown 渲染器
@@ -427,7 +445,7 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       >
         <span>✨ AI 学习助手</span>
         <button
-          onClick={() => setIsCollapsed(!isCollapsed)}
+          onClick={toggleCollapse}
           style={{
             background: 'transparent',
             border: 'none',

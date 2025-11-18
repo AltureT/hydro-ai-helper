@@ -4,13 +4,14 @@
  * 管理学生与 AI 的对话会话,记录会话元数据
  */
 
-import { ObjectId, Db, Collection } from 'mongodb';
+import type { Db, Collection } from 'mongodb';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 
 /**
  * 对话会话接口
  */
 export interface Conversation {
-  _id: ObjectId;           // 会话唯一标识
+  _id: ObjectIdType;       // 会话唯一标识
   userId: number;          // 学生用户 ID
   problemId: string;       // 题目 ID
   classId?: string;        // 班级 ID (可选)
@@ -75,7 +76,7 @@ export class ConversationModel {
    * @param data 会话数据
    * @returns 插入的会话 ID
    */
-  async create(data: Omit<Conversation, '_id'>): Promise<ObjectId> {
+  async create(data: Omit<Conversation, '_id'>): Promise<ObjectIdType> {
     const result = await this.collection.insertOne(data as Conversation);
     return result.insertedId;
   }
@@ -85,7 +86,7 @@ export class ConversationModel {
    * @param id 会话 ID (字符串或 ObjectId)
    * @returns 会话对象或 null
    */
-  async findById(id: string | ObjectId): Promise<Conversation | null> {
+  async findById(id: string | ObjectIdType): Promise<Conversation | null> {
     const _id = typeof id === 'string' ? new ObjectId(id) : id;
     return this.collection.findOne({ _id });
   }
@@ -95,7 +96,7 @@ export class ConversationModel {
    * @param id 会话 ID
    * @param endTime 最后更新时间
    */
-  async updateEndTime(id: string | ObjectId, endTime: Date): Promise<void> {
+  async updateEndTime(id: string | ObjectIdType, endTime: Date): Promise<void> {
     const _id = typeof id === 'string' ? new ObjectId(id) : id;
     await this.collection.updateOne(
       { _id },
@@ -107,7 +108,7 @@ export class ConversationModel {
    * 增加会话的消息计数
    * @param id 会话 ID
    */
-  async incrementMessageCount(id: string | ObjectId): Promise<void> {
+  async incrementMessageCount(id: string | ObjectIdType): Promise<void> {
     const _id = typeof id === 'string' ? new ObjectId(id) : id;
     await this.collection.updateOne(
       { _id },
@@ -120,7 +121,7 @@ export class ConversationModel {
    * @param id 会话 ID
    * @param isEffective 是否有效
    */
-  async updateEffectiveness(id: string | ObjectId, isEffective: boolean): Promise<void> {
+  async updateEffectiveness(id: string | ObjectIdType, isEffective: boolean): Promise<void> {
     const _id = typeof id === 'string' ? new ObjectId(id) : id;
     await this.collection.updateOne(
       { _id },
@@ -194,7 +195,7 @@ export class ConversationModel {
    * @param tags 标签列表
    */
   async updateTeacherAnnotations(
-    id: string | ObjectId,
+    id: string | ObjectIdType,
     teacherNote?: string,
     tags?: string[]
   ): Promise<void> {

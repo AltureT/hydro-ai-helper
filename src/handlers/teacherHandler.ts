@@ -4,9 +4,9 @@
  */
 
 import { Handler, PRIV } from 'hydrooj';
-import { ObjectId } from 'mongodb';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
+import { ObjectId } from '../utils/mongo';
 
 /**
  * 对话列表响应接口
@@ -42,6 +42,10 @@ interface ConversationListResponse {
 export class ConversationListHandler extends Handler {
   async get() {
     try {
+      // 检测请求类型：浏览器 HTML 访问还是前端 JSON API 调用
+      const accept = this.request.headers.accept || '';
+      const wantJson = accept.includes('application/json');
+
       // 获取数据库模型实例
       const conversationModel: ConversationModel = this.ctx.get('conversationModel');
 
@@ -84,7 +88,7 @@ export class ConversationListHandler extends Handler {
       }
 
       // TODO(Phase4): 权限控制 - 教师只能查看所负责班级的对话
-      // 当前版本暂不限制,所有教师可查看所有对话
+      // 当前版本暂不限制,所有 root 用户可查看所有对话
 
       // 查询对话列表
       const { conversations, total } = await conversationModel.findByFilters(
@@ -95,7 +99,7 @@ export class ConversationListHandler extends Handler {
 
       // 转换为响应格式
       const conversationSummaries: ConversationSummary[] = conversations.map(conv => ({
-        _id: conv._id.toHexString(),
+        _id: conv._id.toString(),
         userId: conv.userId,
         classId: conv.classId,
         problemId: conv.problemId,
@@ -108,16 +112,28 @@ export class ConversationListHandler extends Handler {
         metadata: conv.metadata
       }));
 
-      // 构造响应
-      const response: ConversationListResponse = {
-        conversations: conversationSummaries,
+      if (wantJson) {
+        // JSON API 模式：前端 fetch 调用
+        const response: ConversationListResponse = {
+          conversations: conversationSummaries,
+          total,
+          page: pageNum,
+          limit: limitNum
+        };
+
+        this.response.body = response;
+        this.response.type = 'application/json';
+        return;
+      }
+
+      // HTML 页面模式：浏览器直接访问
+      this.response.template = 'ai-helper/teacher_conversations.html';
+      this.response.body = {
         total,
         page: pageNum,
-        limit: limitNum
+        limit: limitNum,
+        // 可以传递初始数据，但也可以让前端完全通过 fetch 获取
       };
-
-      this.response.body = response;
-      this.response.type = 'application/json';
     } catch (err) {
       console.error('[AI Helper] ConversationListHandler error:', err);
       this.response.status = 500;
@@ -134,6 +150,10 @@ export class ConversationListHandler extends Handler {
 export class ConversationDetailHandler extends Handler {
   async get({ id }: { id: string }) {
     try {
+      // 检测请求类型：浏览器 HTML 访问还是前端 JSON API 调用
+      const accept = this.request.headers.accept || '';
+      const wantJson = accept.includes('application/json');
+
       // 获取数据库模型实例
       const conversationModel: ConversationModel = this.ctx.get('conversationModel');
       const messageModel: MessageModel = this.ctx.get('messageModel');
@@ -147,24 +167,30 @@ export class ConversationDetailHandler extends Handler {
       }
 
       // 查询会话详情
+      console.log('[AI Helper] Fetching conversation:', id);
       const conversation = await conversationModel.findById(id);
 
       if (!conversation) {
+        console.log('[AI Helper] Conversation not found:', id);
         this.response.status = 404;
         this.response.body = { error: '会话不存在' };
         this.response.type = 'application/json';
         return;
       }
 
+      console.log('[AI Helper] Conversation found, _id type:', typeof conversation._id, conversation._id.constructor.name);
+
       // TODO(Phase4): 权限控制 - 教师只能查看所负责班级的对话
-      // 当前版本暂不限制
+      // 当前版本暂不限制，所有 root 用户可查看所有对话
 
       // 查询会话的所有消息 (按时间升序)
+      console.log('[AI Helper] Fetching messages for conversation:', id);
       const messages = await messageModel.findByConversationId(id);
+      console.log('[AI Helper] Found', messages.length, 'messages');
 
       // 转换消息格式
       const messagesFormatted = messages.map(msg => ({
-        _id: msg._id.toHexString(),
+        _id: msg._id.toString(),
         role: msg.role,
         content: msg.content,
         timestamp: msg.timestamp.toISOString(),
@@ -174,10 +200,35 @@ export class ConversationDetailHandler extends Handler {
         metadata: msg.metadata
       }));
 
-      // 构造响应
-      const response = {
+      if (wantJson) {
+        // JSON API 模式：前端 fetch 调用
+        const response = {
+          conversation: {
+            _id: conversation._id.toString(),
+            userId: conversation.userId,
+            classId: conversation.classId,
+            problemId: conversation.problemId,
+            startTime: conversation.startTime.toISOString(),
+            endTime: conversation.endTime.toISOString(),
+            messageCount: conversation.messageCount,
+            isEffective: conversation.isEffective,
+            tags: conversation.tags,
+            teacherNote: conversation.teacherNote,
+            metadata: conversation.metadata
+          },
+          messages: messagesFormatted
+        };
+
+        this.response.body = response;
+        this.response.type = 'application/json';
+        return;
+      }
+
+      // HTML 页面模式：浏览器直接访问
+      this.response.template = 'ai-helper/teacher_conversation_detail.html';
+      this.response.body = {
         conversation: {
-          _id: conversation._id.toHexString(),
+          _id: conversation._id.toString(),
           userId: conversation.userId,
           classId: conversation.classId,
           problemId: conversation.problemId,
@@ -191,9 +242,6 @@ export class ConversationDetailHandler extends Handler {
         },
         messages: messagesFormatted
       };
-
-      this.response.body = response;
-      this.response.type = 'application/json';
     } catch (err) {
       console.error('[AI Helper] ConversationDetailHandler error:', err);
       this.response.status = 500;
@@ -204,7 +252,7 @@ export class ConversationDetailHandler extends Handler {
 }
 
 // 导出路由权限配置
-// TODO: 使用更精确的教师权限 (如 PRIV.PRIV_EDIT_PROBLEM 或自定义教师权限)
-// 当前使用较高权限作为占位,确保只有教师/管理员可访问
-export const ConversationListHandlerPriv = PRIV.PRIV_EDIT_PROBLEM_SELF;
-export const ConversationDetailHandlerPriv = PRIV.PRIV_EDIT_PROBLEM_SELF;
+// 使用 PRIV.PRIV_EDIT_SYSTEM (root-only 权限)
+// AI 对话数据敏感，目前仅允许系统管理员访问
+export const ConversationListHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const ConversationDetailHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;

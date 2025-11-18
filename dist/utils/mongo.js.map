@@ -1,0 +1,1 @@
+{"version":3,"file":"mongo.js","sourceRoot":"","sources":["../../src/utils/mongo.ts"],"names":[],"mappings":";;;AAAA;;;;;GAKG;AACH,mCAAuC;AAEvC,2EAA2E;AAC3E,6DAA6D;AAC7D,MAAM,gBAAgB,GAAG,IAAA,sBAAa,EAAC,OAAO,CAAC,OAAO,CAAC,SAAS,CAAC,CAAC,CAAC;AACnE,MAAM,OAAO,GAAG,gBAAgB,CAAC,SAAS,CAA6B,CAAC;AAE3D,QAAA,QAAQ,GAAG,OAAO,CAAC,QAAQ,CAAC"}

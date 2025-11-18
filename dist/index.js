@@ -45,8 +45,12 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // POST /ai-helper/chat - 学生提交问题获得 AI 回答
         ctx.Route('ai_helper_chat', '/ai-helper/chat', studentHandler_1.ChatHandler, studentHandler_1.ChatHandlerPriv);
         // 注册教师端路由
+        // 当前设计：AI 学习助手对话统计非常敏感，仅允许 root 访问。
+        // 注意：这里使用的是 root-only 的系统权限（PRIV.PRIV_EDIT_SYSTEM），普通老师也无权访问。
+        // TODO(如需求变更): 未来若有专门的教师统计角色，再考虑降低权限。
+        ctx.injectUI('ControlPanel', 'ai_helper_conversations');
         // GET /ai-helper/conversations - 获取对话列表
-        ctx.Route('ai_helper_conversations_list', '/ai-helper/conversations', teacherHandler_1.ConversationListHandler, teacherHandler_1.ConversationListHandlerPriv);
+        ctx.Route('ai_helper_conversations', '/ai-helper/conversations', teacherHandler_1.ConversationListHandler, teacherHandler_1.ConversationListHandlerPriv);
         // GET /ai-helper/conversations/:id - 获取对话详情
         ctx.Route('ai_helper_conversation_detail', '/ai-helper/conversations/:id', teacherHandler_1.ConversationDetailHandler, teacherHandler_1.ConversationDetailHandlerPriv);
         console.log('[AI Helper] Routes registered:');

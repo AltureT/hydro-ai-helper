@@ -6,7 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MessageModel = void 0;
-const mongodb_1 = require("mongodb");
+const mongo_1 = require("../utils/mongo");
 /**
  * Message Model 操作类
  * 封装对话消息的 CRUD 操作
@@ -42,7 +42,7 @@ class MessageModel {
      */
     async findByConversationId(conversationId) {
         const _conversationId = typeof conversationId === 'string'
-            ? new mongodb_1.ObjectId(conversationId)
+            ? new mongo_1.ObjectId(conversationId)
             : conversationId;
         return this.collection
             .find({ conversationId: _conversationId })
@@ -55,7 +55,7 @@ class MessageModel {
      * @returns 消息对象或 null
      */
     async findById(id) {
-        const _id = typeof id === 'string' ? new mongodb_1.ObjectId(id) : id;
+        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
         return this.collection.findOne({ _id });
     }
     /**
@@ -65,7 +65,7 @@ class MessageModel {
      */
     async deleteByConversationId(conversationId) {
         const _conversationId = typeof conversationId === 'string'
-            ? new mongodb_1.ObjectId(conversationId)
+            ? new mongo_1.ObjectId(conversationId)
             : conversationId;
         const result = await this.collection.deleteMany({ conversationId: _conversationId });
         return result.deletedCount;
@@ -77,7 +77,7 @@ class MessageModel {
      */
     async countByConversationId(conversationId) {
         const _conversationId = typeof conversationId === 'string'
-            ? new mongodb_1.ObjectId(conversationId)
+            ? new mongo_1.ObjectId(conversationId)
             : conversationId;
         return this.collection.countDocuments({ conversationId: _conversationId });
     }
@@ -88,7 +88,7 @@ class MessageModel {
      */
     async findStudentMessagesByConversationId(conversationId) {
         const _conversationId = typeof conversationId === 'string'
-            ? new mongodb_1.ObjectId(conversationId)
+            ? new mongo_1.ObjectId(conversationId)
             : conversationId;
         return this.collection
             .find({ conversationId: _conversationId, role: 'student' })
@@ -102,7 +102,7 @@ class MessageModel {
      */
     async findAiMessagesByConversationId(conversationId) {
         const _conversationId = typeof conversationId === 'string'
-            ? new mongodb_1.ObjectId(conversationId)
+            ? new mongo_1.ObjectId(conversationId)
             : conversationId;
         return this.collection
             .find({ conversationId: _conversationId, role: 'ai' })

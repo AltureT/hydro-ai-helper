@@ -4,7 +4,8 @@
  * 管理对话中的每条消息 (学生问题 / AI 回答)
  */
 
-import { ObjectId, Db, Collection } from 'mongodb';
+import type { Db, Collection } from 'mongodb';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 
 /**
  * 消息角色类型
@@ -20,8 +21,8 @@ export type QuestionType = 'understand' | 'think' | 'debug' | 'review';
  * 对话消息接口
  */
 export interface Message {
-  _id: ObjectId;              // 消息唯一标识
-  conversationId: ObjectId;   // 所属会话 ID
+  _id: ObjectIdType;          // 消息唯一标识
+  conversationId: ObjectIdType;   // 所属会话 ID
   role: MessageRole;          // 消息角色 (student / ai)
   content: string;            // 消息内容 (Markdown 格式)
   timestamp: Date;            // 消息时间戳
@@ -71,7 +72,7 @@ export class MessageModel {
    * @param data 消息数据
    * @returns 插入的消息 ID
    */
-  async create(data: Omit<Message, '_id'>): Promise<ObjectId> {
+  async create(data: Omit<Message, '_id'>): Promise<ObjectIdType> {
     const result = await this.collection.insertOne(data as Message);
     return result.insertedId;
   }
@@ -81,7 +82,7 @@ export class MessageModel {
    * @param conversationId 会话 ID (字符串或 ObjectId)
    * @returns 消息列表
    */
-  async findByConversationId(conversationId: string | ObjectId): Promise<Message[]> {
+  async findByConversationId(conversationId: string | ObjectIdType): Promise<Message[]> {
     const _conversationId = typeof conversationId === 'string'
       ? new ObjectId(conversationId)
       : conversationId;
@@ -97,7 +98,7 @@ export class MessageModel {
    * @param id 消息 ID (字符串或 ObjectId)
    * @returns 消息对象或 null
    */
-  async findById(id: string | ObjectId): Promise<Message | null> {
+  async findById(id: string | ObjectIdType): Promise<Message | null> {
     const _id = typeof id === 'string' ? new ObjectId(id) : id;
     return this.collection.findOne({ _id });
   }
@@ -107,7 +108,7 @@ export class MessageModel {
    * @param conversationId 会话 ID
    * @returns 删除的消息数量
    */
-  async deleteByConversationId(conversationId: string | ObjectId): Promise<number> {
+  async deleteByConversationId(conversationId: string | ObjectIdType): Promise<number> {
     const _conversationId = typeof conversationId === 'string'
       ? new ObjectId(conversationId)
       : conversationId;
@@ -121,7 +122,7 @@ export class MessageModel {
    * @param conversationId 会话 ID
    * @returns 消息数量
    */
-  async countByConversationId(conversationId: string | ObjectId): Promise<number> {
+  async countByConversationId(conversationId: string | ObjectIdType): Promise<number> {
     const _conversationId = typeof conversationId === 'string'
       ? new ObjectId(conversationId)
       : conversationId;
@@ -134,7 +135,7 @@ export class MessageModel {
    * @param conversationId 会话 ID
    * @returns 学生消息列表
    */
-  async findStudentMessagesByConversationId(conversationId: string | ObjectId): Promise<Message[]> {
+  async findStudentMessagesByConversationId(conversationId: string | ObjectIdType): Promise<Message[]> {
     const _conversationId = typeof conversationId === 'string'
       ? new ObjectId(conversationId)
       : conversationId;
@@ -150,7 +151,7 @@ export class MessageModel {
    * @param conversationId 会话 ID
    * @returns AI 消息列表
    */
-  async findAiMessagesByConversationId(conversationId: string | ObjectId): Promise<Message[]> {
+  async findAiMessagesByConversationId(conversationId: string | ObjectIdType): Promise<Message[]> {
     const _conversationId = typeof conversationId === 'string'
       ? new ObjectId(conversationId)
       : conversationId;

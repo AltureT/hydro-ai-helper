@@ -6,7 +6,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConversationDetailHandlerPriv = exports.ConversationListHandlerPriv = exports.ConversationDetailHandler = exports.ConversationListHandler = void 0;
 const hydrooj_1 = require("hydrooj");
-const mongodb_1 = require("mongodb");
+const mongo_1 = require("../utils/mongo");
 /**
  * ConversationListHandler - 获取对话列表
  * GET /ai-helper/conversations
@@ -14,6 +14,9 @@ const mongodb_1 = require("mongodb");
 class ConversationListHandler extends hydrooj_1.Handler {
     async get() {
         try {
+            // 检测请求类型：浏览器 HTML 访问还是前端 JSON API 调用
+            const accept = this.request.headers.accept || '';
+            const wantJson = accept.includes('application/json');
             // 获取数据库模型实例
             const conversationModel = this.ctx.get('conversationModel');
             // 从查询参数读取筛选条件
@@ -39,12 +42,12 @@ class ConversationListHandler extends hydrooj_1.Handler {
                 filters.userId = parseInt(userId, 10);
             }
             // TODO(Phase4): 权限控制 - 教师只能查看所负责班级的对话
-            // 当前版本暂不限制,所有教师可查看所有对话
+            // 当前版本暂不限制,所有 root 用户可查看所有对话
             // 查询对话列表
             const { conversations, total } = await conversationModel.findByFilters(filters, pageNum, limitNum);
             // 转换为响应格式
             const conversationSummaries = conversations.map(conv => ({
-                _id: conv._id.toHexString(),
+                _id: conv._id.toString(),
                 userId: conv.userId,
                 classId: conv.classId,
                 problemId: conv.problemId,
@@ -56,15 +59,26 @@ class ConversationListHandler extends hydrooj_1.Handler {
                 teacherNote: conv.teacherNote,
                 metadata: conv.metadata
             }));
-            // 构造响应
-            const response = {
-                conversations: conversationSummaries,
+            if (wantJson) {
+                // JSON API 模式：前端 fetch 调用
+                const response = {
+                    conversations: conversationSummaries,
+                    total,
+                    page: pageNum,
+                    limit: limitNum
+                };
+                this.response.body = response;
+                this.response.type = 'application/json';
+                return;
+            }
+            // HTML 页面模式：浏览器直接访问
+            this.response.template = 'ai-helper/teacher_conversations.html';
+            this.response.body = {
                 total,
                 page: pageNum,
-                limit: limitNum
+                limit: limitNum,
+                // 可以传递初始数据，但也可以让前端完全通过 fetch 获取
             };
-            this.response.body = response;
-            this.response.type = 'application/json';
         }
         catch (err) {
             console.error('[AI Helper] ConversationListHandler error:', err);
@@ -82,31 +96,39 @@ exports.ConversationListHandler = ConversationListHandler;
 class ConversationDetailHandler extends hydrooj_1.Handler {
     async get({ id }) {
         try {
+            // 检测请求类型：浏览器 HTML 访问还是前端 JSON API 调用
+            const accept = this.request.headers.accept || '';
+            const wantJson = accept.includes('application/json');
             // 获取数据库模型实例
             const conversationModel = this.ctx.get('conversationModel');
             const messageModel = this.ctx.get('messageModel');
             // 验证 conversationId 格式
-            if (!mongodb_1.ObjectId.isValid(id)) {
+            if (!mongo_1.ObjectId.isValid(id)) {
                 this.response.status = 400;
                 this.response.body = { error: '无效的会话 ID' };
                 this.response.type = 'application/json';
                 return;
             }
             // 查询会话详情
+            console.log('[AI Helper] Fetching conversation:', id);
             const conversation = await conversationModel.findById(id);
             if (!conversation) {
+                console.log('[AI Helper] Conversation not found:', id);
                 this.response.status = 404;
                 this.response.body = { error: '会话不存在' };
                 this.response.type = 'application/json';
                 return;
             }
+            console.log('[AI Helper] Conversation found, _id type:', typeof conversation._id, conversation._id.constructor.name);
             // TODO(Phase4): 权限控制 - 教师只能查看所负责班级的对话
-            // 当前版本暂不限制
+            // 当前版本暂不限制，所有 root 用户可查看所有对话
             // 查询会话的所有消息 (按时间升序)
+            console.log('[AI Helper] Fetching messages for conversation:', id);
             const messages = await messageModel.findByConversationId(id);
+            console.log('[AI Helper] Found', messages.length, 'messages');
             // 转换消息格式
             const messagesFormatted = messages.map(msg => ({
-                _id: msg._id.toHexString(),
+                _id: msg._id.toString(),
                 role: msg.role,
                 content: msg.content,
                 timestamp: msg.timestamp.toISOString(),
@@ -115,10 +137,33 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
                 attachedError: msg.attachedError,
                 metadata: msg.metadata
             }));
-            // 构造响应
-            const response = {
+            if (wantJson) {
+                // JSON API 模式：前端 fetch 调用
+                const response = {
+                    conversation: {
+                        _id: conversation._id.toString(),
+                        userId: conversation.userId,
+                        classId: conversation.classId,
+                        problemId: conversation.problemId,
+                        startTime: conversation.startTime.toISOString(),
+                        endTime: conversation.endTime.toISOString(),
+                        messageCount: conversation.messageCount,
+                        isEffective: conversation.isEffective,
+                        tags: conversation.tags,
+                        teacherNote: conversation.teacherNote,
+                        metadata: conversation.metadata
+                    },
+                    messages: messagesFormatted
+                };
+                this.response.body = response;
+                this.response.type = 'application/json';
+                return;
+            }
+            // HTML 页面模式：浏览器直接访问
+            this.response.template = 'ai-helper/teacher_conversation_detail.html';
+            this.response.body = {
                 conversation: {
-                    _id: conversation._id.toHexString(),
+                    _id: conversation._id.toString(),
                     userId: conversation.userId,
                     classId: conversation.classId,
                     problemId: conversation.problemId,
@@ -132,8 +177,6 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
                 },
                 messages: messagesFormatted
             };
-            this.response.body = response;
-            this.response.type = 'application/json';
         }
         catch (err) {
             console.error('[AI Helper] ConversationDetailHandler error:', err);
@@ -145,8 +188,8 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
 }
 exports.ConversationDetailHandler = ConversationDetailHandler;
 // 导出路由权限配置
-// TODO: 使用更精确的教师权限 (如 PRIV.PRIV_EDIT_PROBLEM 或自定义教师权限)
-// 当前使用较高权限作为占位,确保只有教师/管理员可访问
-exports.ConversationListHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_PROBLEM_SELF;
-exports.ConversationDetailHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_PROBLEM_SELF;
+// 使用 PRIV.PRIV_EDIT_SYSTEM (root-only 权限)
+// AI 对话数据敏感，目前仅允许系统管理员访问
+exports.ConversationListHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.ConversationDetailHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 //# sourceMappingURL=teacherHandler.js.map

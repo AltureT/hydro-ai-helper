@@ -6,7 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConversationModel = void 0;
-const mongodb_1 = require("mongodb");
+const mongo_1 = require("../utils/mongo");
 /**
  * Conversation Model 操作类
  * 封装对话会话的 CRUD 操作
@@ -45,7 +45,7 @@ class ConversationModel {
      * @returns 会话对象或 null
      */
     async findById(id) {
-        const _id = typeof id === 'string' ? new mongodb_1.ObjectId(id) : id;
+        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
         return this.collection.findOne({ _id });
     }
     /**
@@ -54,7 +54,7 @@ class ConversationModel {
      * @param endTime 最后更新时间
      */
     async updateEndTime(id, endTime) {
-        const _id = typeof id === 'string' ? new mongodb_1.ObjectId(id) : id;
+        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
         await this.collection.updateOne({ _id }, { $set: { endTime } });
     }
     /**
@@ -62,7 +62,7 @@ class ConversationModel {
      * @param id 会话 ID
      */
     async incrementMessageCount(id) {
-        const _id = typeof id === 'string' ? new mongodb_1.ObjectId(id) : id;
+        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
         await this.collection.updateOne({ _id }, { $inc: { messageCount: 1 } });
     }
     /**
@@ -71,7 +71,7 @@ class ConversationModel {
      * @param isEffective 是否有效
      */
     async updateEffectiveness(id, isEffective) {
-        const _id = typeof id === 'string' ? new mongodb_1.ObjectId(id) : id;
+        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
         await this.collection.updateOne({ _id }, { $set: { isEffective } });
     }
     /**
@@ -122,7 +122,7 @@ class ConversationModel {
      * @param tags 标签列表
      */
     async updateTeacherAnnotations(id, teacherNote, tags) {
-        const _id = typeof id === 'string' ? new mongodb_1.ObjectId(id) : id;
+        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
         const update = {};
         if (teacherNote !== undefined) {
             update.teacherNote = teacherNote;

@@ -4,11 +4,11 @@
  */
 
 import { Handler, PRIV } from 'hydrooj';
-import { ObjectId } from 'mongodb';
 import { OpenAIClient, ChatMessage } from '../services/openaiClient';
 import { PromptService, QuestionType } from '../services/promptService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 
 /**
  * 学生对话请求接口
@@ -123,7 +123,7 @@ export class ChatHandler extends Handler {
       ];
 
       // 处理对话会话 (新建或复用)
-      let currentConversationId: ObjectId;
+      let currentConversationId: ObjectIdType;
 
       if (conversationId) {
         // 复用已有会话

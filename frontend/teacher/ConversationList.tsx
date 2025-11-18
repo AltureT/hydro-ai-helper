@@ -43,7 +43,7 @@ export const ConversationList: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [limit] = useState(50);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // 筛选条件
@@ -75,20 +75,32 @@ export const ConversationList: React.FC = () => {
       if (filters.classId) params.append('classId', filters.classId);
       if (filters.userId) params.append('userId', filters.userId);
 
-      // 调用 API
-      const response = await fetch(`/ai-helper/conversations?${params.toString()}`);
+      // 调用 API (显式设置 Accept 头以获取 JSON 数据)
+      const response = await fetch(`/ai-helper/conversations?${params.toString()}`, {
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
 
       if (!response.ok) {
-        throw new Error(`加载失败: ${response.statusText}`);
+        const text = await response.text();
+        console.error('[AI Helper] failed to load conversations', response.status, text);
+        setConversations([]);
+        setTotal(0);
+        setError(`加载失败：${response.status}`);
+        return;
       }
 
       const data: ConversationListResponse = await response.json();
 
-      setConversations(data.conversations);
-      setTotal(data.total);
+      console.debug('[AI Helper] conversations loaded', data);
+      setConversations(data.conversations || []);
+      setTotal(data.total ?? 0);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载对话列表失败');
-      console.error('[ConversationList] 加载失败:', err);
+      console.error('[AI Helper] error while loading conversations', err);
+      setConversations([]);
+      setTotal(0);
+      setError('加载失败：网络错误');
     } finally {
       setLoading(false);
     }
@@ -194,52 +206,58 @@ export const ConversationList: React.FC = () => {
       </form>
 
       {/* 加载状态 */}
-      {loading && <p>加载中...</p>}
+      {loading && <p>正在加载对话列表...</p>}
 
       {/* 错误提示 */}
-      {error && <p style={{ color: 'red' }}>错误: {error}</p>}
+      {error && <p style={{ color: 'red' }}>{error}</p>}
 
       {/* 对话列表表格 */}
       {!loading && !error && (
         <>
-          <p>共 {total} 条记录,当前第 {page} 页</p>
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px' }}>
-            <thead>
-              <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生 ID</th>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>班级</th>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>开始时间</th>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>消息数</th>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>有效对话</th>
-                <th style={{ padding: '10px', border: '1px solid #ccc' }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {conversations.map(conv => (
-                <tr key={conv._id} style={{ borderBottom: '1px solid #ccc' }}>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.userId}</td>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.classId || '-'}</td>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                    {conv.metadata?.problemTitle || conv.problemId}
-                  </td>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>{formatDateTime(conv.startTime)}</td>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.messageCount}</td>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                    {conv.isEffective ? '✓' : '✗'}
-                  </td>
-                  <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                    <a
-                      href={`/ai-helper/conversations/${conv._id}`}
-                      style={{ color: '#6366f1', textDecoration: 'none' }}
-                    >
-                      查看详情
-                    </a>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {conversations.length === 0 ? (
+            <p>暂无对话记录。</p>
+          ) : (
+            <>
+              <p>共 {total} 条记录,当前第 {page} 页</p>
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生 ID</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>班级</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>开始时间</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>消息数</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>有效对话</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {conversations.map(conv => (
+                    <tr key={conv._id} style={{ borderBottom: '1px solid #ccc' }}>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.userId}</td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.classId || '-'}</td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
+                        {conv.metadata?.problemTitle || conv.problemId}
+                      </td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{formatDateTime(conv.startTime)}</td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.messageCount}</td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
+                       {conv.isEffective ? '✓' : '✗'}
+                      </td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
+                        <a
+                          href={`/ai-helper/conversations/${conv._id}`}
+                          style={{ color: '#6366f1', textDecoration: 'none' }}
+                        >
+                          查看详情
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
 
           {/* 分页控件 */}
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
