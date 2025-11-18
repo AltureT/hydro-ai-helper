@@ -8,6 +8,7 @@ exports.ChatHandlerPriv = exports.ChatHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const openaiClient_1 = require("../services/openaiClient");
 const promptService_1 = require("../services/promptService");
+const rateLimitService_1 = require("../services/rateLimitService");
 /**
  * ChatHandler - 处理学生的 AI 对话请求
  * POST /ai-helper/chat
@@ -15,13 +16,33 @@ const promptService_1 = require("../services/promptService");
 class ChatHandler extends hydrooj_1.Handler {
     async post() {
         try {
+            // 获取当前用户 ID（尽早获取，用于频率限制检查）
+            const userId = this.user._id;
+            // 调试日志：确认 userId 的值和类型
+            console.log('[ChatHandler] Rate limit check - userId:', userId, 'type:', typeof userId);
+            // 频率限制检查（在任何 AI 请求调用之前执行）
+            const DEFAULT_RATE_LIMIT_PER_MINUTE = 1; // 临时改为 1 方便测试
+            const rateLimitService = new rateLimitService_1.RateLimitService(this.ctx);
+            const allowed = await rateLimitService.checkAndIncrement(userId, DEFAULT_RATE_LIMIT_PER_MINUTE);
+            console.log('[ChatHandler] Rate limit result - allowed:', allowed);
+            if (!allowed) {
+                // 返回 429 + JSON 提示
+                console.log('[ChatHandler] Rate limit exceeded, returning 429');
+                this.response.status = 429;
+                this.response.body = {
+                    error: {
+                        code: 'RATE_LIMIT_EXCEEDED',
+                        message: '请求过于频繁，请稍后再试'
+                    }
+                };
+                this.response.type = 'application/json';
+                return;
+            }
             // 获取数据库模型实例
             const conversationModel = this.ctx.get('conversationModel');
             const messageModel = this.ctx.get('messageModel');
             // 从请求体获取参数
             const { problemId, problemTitle, problemContent, questionType, userThinking, includeCode, code, conversationId } = this.request.body;
-            // 获取当前用户 ID
-            const userId = this.user._id;
             // 验证问题类型
             const validQuestionTypes = ['understand', 'think', 'debug', 'review'];
             if (!validQuestionTypes.includes(questionType)) {

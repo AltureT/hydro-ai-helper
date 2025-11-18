@@ -17,6 +17,7 @@ const analyticsHandler_1 = require("./handlers/analyticsHandler");
 const adminConfigHandler_1 = require("./handlers/adminConfigHandler");
 const conversation_1 = require("./models/conversation");
 const message_1 = require("./models/message");
+const rateLimitRecord_1 = require("./models/rateLimitRecord");
 /**
  * 插件入口函数
  * @param ctx HydroOJ Context
@@ -32,14 +33,17 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const db = ctx.db;
         const conversationModel = new conversation_1.ConversationModel(db);
         const messageModel = new message_1.MessageModel(db);
+        const rateLimitRecordModel = new rateLimitRecord_1.RateLimitRecordModel(db);
         // 创建数据库索引
         console.log('[AI Helper] Creating database indexes...');
         await conversationModel.ensureIndexes();
         await messageModel.ensureIndexes();
+        await rateLimitRecordModel.ensureIndexes();
         console.log('[AI Helper] Database indexes created successfully');
         // 将模型实例注入到 ctx 中,供 Handler 使用
         ctx.provide('conversationModel', conversationModel);
         ctx.provide('messageModel', messageModel);
+        ctx.provide('rateLimitRecordModel', rateLimitRecordModel);
         // 注册测试路由
         // GET /ai-helper/hello - 返回插件状态
         ctx.Route('ai_helper_hello', '/ai-helper/hello', testHandler_1.HelloHandler, testHandler_1.HelloHandlerPriv);

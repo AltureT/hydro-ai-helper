@@ -20,6 +20,7 @@ import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHand
 import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
 import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
+import { RateLimitRecordModel } from './models/rateLimitRecord';
 
 /**
  * 插件配置接口
@@ -45,16 +46,19 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const db = ctx.db;
     const conversationModel = new ConversationModel(db);
     const messageModel = new MessageModel(db);
+    const rateLimitRecordModel = new RateLimitRecordModel(db);
 
     // 创建数据库索引
     console.log('[AI Helper] Creating database indexes...');
     await conversationModel.ensureIndexes();
     await messageModel.ensureIndexes();
+    await rateLimitRecordModel.ensureIndexes();
     console.log('[AI Helper] Database indexes created successfully');
 
     // 将模型实例注入到 ctx 中,供 Handler 使用
     ctx.provide('conversationModel', conversationModel);
     ctx.provide('messageModel', messageModel);
+    ctx.provide('rateLimitRecordModel', rateLimitRecordModel);
 
     // 注册测试路由
     // GET /ai-helper/hello - 返回插件状态

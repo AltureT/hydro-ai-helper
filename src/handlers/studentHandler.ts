@@ -6,6 +6,7 @@
 import { Handler, PRIV } from 'hydrooj';
 import { OpenAIClient, ChatMessage } from '../services/openaiClient';
 import { PromptService, QuestionType } from '../services/promptService';
+import { RateLimitService } from '../services/rateLimitService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
@@ -46,6 +47,33 @@ interface ChatResponse {
 export class ChatHandler extends Handler {
   async post() {
     try {
+      // 获取当前用户 ID（尽早获取，用于频率限制检查）
+      const userId = this.user._id;
+
+      // 调试日志：确认 userId 的值和类型
+      console.log('[ChatHandler] Rate limit check - userId:', userId, 'type:', typeof userId);
+
+      // 频率限制检查（在任何 AI 请求调用之前执行）
+      const DEFAULT_RATE_LIMIT_PER_MINUTE = 1;  // 临时改为 1 方便测试
+      const rateLimitService = new RateLimitService(this.ctx);
+      const allowed = await rateLimitService.checkAndIncrement(userId, DEFAULT_RATE_LIMIT_PER_MINUTE);
+
+      console.log('[ChatHandler] Rate limit result - allowed:', allowed);
+
+      if (!allowed) {
+        // 返回 429 + JSON 提示
+        console.log('[ChatHandler] Rate limit exceeded, returning 429');
+        this.response.status = 429;
+        this.response.body = {
+          error: {
+            code: 'RATE_LIMIT_EXCEEDED',
+            message: '请求过于频繁，请稍后再试'
+          }
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
       // 获取数据库模型实例
       const conversationModel: ConversationModel = this.ctx.get('conversationModel');
       const messageModel: MessageModel = this.ctx.get('messageModel');
@@ -62,8 +90,6 @@ export class ChatHandler extends Handler {
         conversationId
       } = this.request.body as ChatRequest;
 
-      // 获取当前用户 ID
-      const userId = this.user._id;
       // 验证问题类型
       const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'review'];
       if (!validQuestionTypes.includes(questionType as QuestionType)) {
