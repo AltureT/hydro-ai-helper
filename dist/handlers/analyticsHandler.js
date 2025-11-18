@@ -13,8 +13,17 @@ const hydrooj_1 = require("hydrooj");
 class AnalyticsHandler extends hydrooj_1.Handler {
     async get() {
         try {
+            // 区分 HTML 页面访问与 JSON API 请求
+            const accept = this.request.headers.accept || '';
+            const preferJson = accept.includes('application/json');
             // 读取查询参数
             const { dimension, startDate, endDate, classId, problemId } = this.request.query;
+            // 浏览器直接访问页面时（无 dimension 参数且未声明 JSON），返回模板而不是报错
+            if (!dimension && !preferJson) {
+                this.response.template = 'ai-helper/analytics.html';
+                this.response.body = {};
+                return;
+            }
             // 验证 dimension 参数
             if (!dimension || !['class', 'problem', 'student'].includes(dimension)) {
                 this.response.status = 400;

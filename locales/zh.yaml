@@ -13,3 +13,18 @@ ai_helper_export_sensitive_hint: "建议在对外分享时关闭此选项；关�
 ai_helper_export_filters_label: "导出范围预览"
 ai_helper_export_cancel: "取消"
 ai_helper_export_confirm: "导出"
+
+# 统计分析相关
+ai_helper_analytics_title: "AI 使用统计"
+ai_helper_analytics_dimension_label: "统计维度"
+ai_helper_analytics_dimension_class: "按班级"
+ai_helper_analytics_dimension_problem: "按题目"
+ai_helper_analytics_dimension_student: "按学生"
+ai_helper_analytics_date_start: "开始日期"
+ai_helper_analytics_date_end: "结束日期"
+ai_helper_analytics_class_id: "班级"
+ai_helper_analytics_problem_id: "题目 ID"
+ai_helper_analytics_search: "查询"
+ai_helper_analytics_loading: "加载中..."
+ai_helper_analytics_empty: "暂无数据，请调整筛选条件后重新查询。"
+ai_helper_analytics_error_prefix: "加载统计数据失败："
