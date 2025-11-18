@@ -9,6 +9,7 @@ const hydrooj_1 = require("hydrooj");
 const openaiClient_1 = require("../services/openaiClient");
 const promptService_1 = require("../services/promptService");
 const rateLimitService_1 = require("../services/rateLimitService");
+const effectivenessService_1 = require("../services/effectivenessService");
 /**
  * ChatHandler - 处理学生的 AI 对话请求
  * POST /ai-helper/chat
@@ -28,12 +29,11 @@ class ChatHandler extends hydrooj_1.Handler {
             if (!allowed) {
                 // 返回 429 + JSON 提示
                 console.log('[ChatHandler] Rate limit exceeded, returning 429');
+                const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
                 this.response.status = 429;
                 this.response.body = {
-                    error: {
-                        code: 'RATE_LIMIT_EXCEEDED',
-                        message: '请求过于频繁，请稍后再试'
-                    }
+                    error: rateLimitMessage,
+                    code: 'RATE_LIMIT_EXCEEDED'
                 };
                 this.response.type = 'application/json';
                 return;
@@ -185,6 +185,16 @@ class ChatHandler extends hydrooj_1.Handler {
             // 增加会话的消息计数并更新结束时间
             await conversationModel.incrementMessageCount(currentConversationId);
             await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+            // 后台异步触发有效对话判定（不阻塞主流程）
+            try {
+                const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
+                // 使用 void 丢弃 Promise，fire-and-forget
+                void effectivenessService.analyzeConversation(currentConversationId);
+            }
+            catch (err) {
+                // 捕获同步错误（如构造函数异常），记录日志但不影响主流程
+                this.ctx.logger.error('Schedule effectiveness analyze failed', err);
+            }
             // 构造响应 (返回真实的 conversationId)
             const response = {
                 conversationId: currentConversationId.toHexString(),

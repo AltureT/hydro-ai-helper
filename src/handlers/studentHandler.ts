@@ -7,6 +7,7 @@ import { Handler, PRIV } from 'hydrooj';
 import { OpenAIClient, ChatMessage } from '../services/openaiClient';
 import { PromptService, QuestionType } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
+import { EffectivenessService } from '../services/effectivenessService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
@@ -63,12 +64,11 @@ export class ChatHandler extends Handler {
       if (!allowed) {
         // 返回 429 + JSON 提示
         console.log('[ChatHandler] Rate limit exceeded, returning 429');
+        const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
         this.response.status = 429;
         this.response.body = {
-          error: {
-            code: 'RATE_LIMIT_EXCEEDED',
-            message: '请求过于频繁，请稍后再试'
-          }
+          error: rateLimitMessage,
+          code: 'RATE_LIMIT_EXCEEDED'
         };
         this.response.type = 'application/json';
         return;
@@ -249,6 +249,16 @@ export class ChatHandler extends Handler {
       // 增加会话的消息计数并更新结束时间
       await conversationModel.incrementMessageCount(currentConversationId);
       await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+
+      // 后台异步触发有效对话判定（不阻塞主流程）
+      try {
+        const effectivenessService = new EffectivenessService(this.ctx);
+        // 使用 void 丢弃 Promise，fire-and-forget
+        void effectivenessService.analyzeConversation(currentConversationId);
+      } catch (err) {
+        // 捕获同步错误（如构造函数异常），记录日志但不影响主流程
+        this.ctx.logger.error('Schedule effectiveness analyze failed', err);
+      }
 
       // 构造响应 (返回真实的 conversationId)
       const response: ChatResponse = {
