@@ -50,6 +50,19 @@ export class ExportService {
   ): Promise<string> {
     // 1. 构造查询条件
     const query: Filter<Conversation> = {};
+    const projection: Partial<Record<keyof Conversation, 1 | 0>> = {
+      _id: 1,
+      userId: 1,
+      classId: 1,
+      problemId: 1,
+      startTime: 1,
+      endTime: 1,
+      messageCount: 1,
+      isEffective: 1,
+      teacherNote: 1,
+      tags: 1,
+      metadata: 1
+    };
 
     // 时间范围筛选
     if (filters.startDate || filters.endDate) {
@@ -75,13 +88,10 @@ export class ExportService {
 
     // 2. 查询所有符合条件的会话记录(按开始时间升序排序)
     const db = this.ctx.db;
-    const collection = db.collection('ai_conversations');
-    const conversations = await collection
-      .find(query)
-      .sort({ startTime: 1 })
-      .toArray() as Conversation[];
-
-    console.log(`[ExportService] Exporting ${conversations.length} conversations`);
+    const collection = db.collection<Conversation>('ai_conversations');
+    const cursor = collection
+      .find(query, { projection })
+      .sort({ startTime: 1 });
 
     // 3. 脱敏逻辑(如果 includeSensitive=false)
     const userIdMap = new Map<number, string>();
@@ -121,7 +131,8 @@ export class ExportService {
     rows.push(headers);
 
     // 数据行
-    for (const conv of conversations) {
+    let exportedCount = 0;
+    for await (const conv of cursor) {
       const row = [
         conv._id.toString(),
         getAnonymousId(conv.userId),
@@ -136,7 +147,10 @@ export class ExportService {
         Array.isArray(conv.tags) ? conv.tags.join(';') : ''
       ];
       rows.push(row);
+      exportedCount++;
     }
+
+    console.log(`[ExportService] Exporting ${exportedCount} conversations`);
 
     // 5. 转换为 CSV 字符串
     return this.convertToCsv(rows);

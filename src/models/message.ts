@@ -58,6 +58,12 @@ export class MessageModel {
       { name: 'idx_conversationId_timestamp' }
     );
 
+    // 创建复合索引: 会话 ID + 角色 + 时间戳 (用于按角色筛选并排序)
+    await this.collection.createIndex(
+      { conversationId: 1, role: 1, timestamp: 1 },
+      { name: 'idx_conversationId_role_timestamp' }
+    );
+
     // 创建索引: 会话 ID (用于快速查找某个会话的所有消息)
     await this.collection.createIndex(
       { conversationId: 1 },

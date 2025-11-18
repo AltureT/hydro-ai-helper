@@ -648,6 +648,11 @@ npm test
 - 参考 `.specify/specs/ai-learning-assistant/tasks.md` 中的 T026 任务
 - 使用 Postman 或 curl 测试各个 API 端点；详见 `tests/integration/README.md` 获取可执行脚本与说明
 
+### 性能测试 (Performance Testing)
+
+- `tests/performance/README.md` 提供了压测准备、k6 脚本示例与目标值，建议在独立的测试环境运行
+- 重点关注 `/ai-helper/chat`、`/ai-helper/conversations`、`/ai-helper/export` 等高频接口的 P95 耗时
+
 ### 代码风格检查
 
 ```bash

@@ -56,10 +56,22 @@ export class ConversationModel {
       { name: 'idx_problemId' }
     );
 
+    // 创建复合索引: 题目 ID + 开始时间
+    await this.collection.createIndex(
+      { problemId: 1, startTime: -1 },
+      { name: 'idx_problemId_startTime' }
+    );
+
     // 创建索引: 班级 ID (稀疏索引,因为 classId 可选)
     await this.collection.createIndex(
       { classId: 1 },
       { name: 'idx_classId', sparse: true }
+    );
+
+    // 创建复合索引: 班级 ID + 开始时间 (稀疏)
+    await this.collection.createIndex(
+      { classId: 1, startTime: -1 },
+      { name: 'idx_classId_startTime', sparse: true }
     );
 
     // 创建索引: 开始时间 (用于时间范围筛选)
@@ -178,8 +190,22 @@ export class ConversationModel {
 
     // 查询分页数据 (按开始时间降序排序)
     const skip = (page - 1) * limit;
+    const projection: Partial<Record<keyof Conversation, 1 | 0>> = {
+      _id: 1,
+      userId: 1,
+      classId: 1,
+      problemId: 1,
+      startTime: 1,
+      endTime: 1,
+      messageCount: 1,
+      isEffective: 1,
+      tags: 1,
+      teacherNote: 1,
+      metadata: 1
+    };
+
     const conversations = await this.collection
-      .find(query)
+      .find(query, { projection })
       .sort({ startTime: -1 })
       .skip(skip)
       .limit(limit)
