@@ -646,7 +646,7 @@ npm test
 **集成测试**（手动执行）：
 
 - 参考 `.specify/specs/ai-learning-assistant/tasks.md` 中的 T026 任务
-- 使用 Postman 或 curl 测试各个 API 端点
+- 使用 Postman 或 curl 测试各个 API 端点；详见 `tests/integration/README.md` 获取可执行脚本与说明
 
 ### 代码风格检查
 
