@@ -1,7 +1,7 @@
 "use strict";
 /**
  * AI 使用统计分析 Handler
- * 处理统计分析 API 请求，支持按班级/题目/学生维度聚合数据
+ * 处理统计分析 API 请求,支持按班级/题目/学生维度聚合数据
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AnalyticsHandlerPriv = exports.AnalyticsHandler = void 0;
@@ -88,6 +88,8 @@ class AnalyticsHandler extends hydrooj_1.Handler {
     }
     /**
      * 按班级维度聚合统计
+     * @param filters 筛选条件
+     * @returns 按班级聚合的统计数据
      */
     async aggregateByClass(filters) {
         const db = this.ctx.db;
@@ -112,7 +114,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         if (Object.keys(match).length > 0) {
             pipeline.push({ $match: match });
         }
-        // 2. 以 classId + userId 做中间分组，用于统计 studentCount
+        // 2. 以 classId + userId 做中间分组,用于统计 studentCount
         pipeline.push({
             $group: {
                 _id: { classId: '$classId', userId: '$userId' },
@@ -160,6 +162,8 @@ class AnalyticsHandler extends hydrooj_1.Handler {
     }
     /**
      * 按题目维度聚合统计
+     * @param filters 筛选条件
+     * @returns 按题目聚合的统计数据
      */
     async aggregateByProblem(filters) {
         const db = this.ctx.db;
@@ -184,7 +188,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         if (Object.keys(match).length > 0) {
             pipeline.push({ $match: match });
         }
-        // 2. 按 problemId + userId 汇总，用于 studentCount
+        // 2. 按 problemId + userId 汇总,用于 studentCount
         pipeline.push({
             $group: {
                 _id: { problemId: '$problemId', userId: '$userId' },
@@ -234,6 +238,8 @@ class AnalyticsHandler extends hydrooj_1.Handler {
     }
     /**
      * 按学生维度聚合统计
+     * @param filters 筛选条件
+     * @returns 按学生聚合的统计数据
      */
     async aggregateByStudent(filters) {
         const db = this.ctx.db;

@@ -5,7 +5,7 @@
  */
 
 import type { Db, Collection } from 'mongodb';
-import { ObjectId, type ObjectIdType } from '../utils/mongo';
+import { type ObjectIdType } from '../utils/mongo';
 
 /**
  * 频率限制记录接口

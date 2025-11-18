@@ -1,9 +1,10 @@
 /**
  * AI 使用统计分析 Handler
- * 处理统计分析 API 请求，支持按班级/题目/学生维度聚合数据
+ * 处理统计分析 API 请求,支持按班级/题目/学生维度聚合数据
  */
 
 import { Handler, PRIV } from 'hydrooj';
+import type { Document } from 'mongodb';
 
 /**
  * 筛选条件接口
@@ -109,13 +110,15 @@ export class AnalyticsHandler extends Handler {
 
   /**
    * 按班级维度聚合统计
+   * @param filters 筛选条件
+   * @returns 按班级聚合的统计数据
    */
   private async aggregateByClass(filters: AnalyticsFilters) {
     const db = this.ctx.db;
     const col = db.collection('ai_conversations');
 
     // 构造 match 条件
-    const match: any = {};
+    const match: Document = {};
 
     if (filters.startDate || filters.endDate) {
       match.startTime = {};
@@ -131,14 +134,14 @@ export class AnalyticsHandler extends Handler {
       match.problemId = filters.problemId;
     }
 
-    const pipeline: any[] = [];
+    const pipeline: Document[] = [];
 
     // 1. Match 阶段
     if (Object.keys(match).length > 0) {
       pipeline.push({ $match: match });
     }
 
-    // 2. 以 classId + userId 做中间分组，用于统计 studentCount
+    // 2. 以 classId + userId 做中间分组,用于统计 studentCount
     pipeline.push({
       $group: {
         _id: { classId: '$classId', userId: '$userId' },
@@ -191,13 +194,15 @@ export class AnalyticsHandler extends Handler {
 
   /**
    * 按题目维度聚合统计
+   * @param filters 筛选条件
+   * @returns 按题目聚合的统计数据
    */
   private async aggregateByProblem(filters: AnalyticsFilters) {
     const db = this.ctx.db;
     const col = db.collection('ai_conversations');
 
     // 构造 match 条件
-    const match: any = {};
+    const match: Document = {};
 
     if (filters.startDate || filters.endDate) {
       match.startTime = {};
@@ -213,14 +218,14 @@ export class AnalyticsHandler extends Handler {
       match.problemId = filters.problemId;
     }
 
-    const pipeline: any[] = [];
+    const pipeline: Document[] = [];
 
     // 1. Match 阶段
     if (Object.keys(match).length > 0) {
       pipeline.push({ $match: match });
     }
 
-    // 2. 按 problemId + userId 汇总，用于 studentCount
+    // 2. 按 problemId + userId 汇总,用于 studentCount
     pipeline.push({
       $group: {
         _id: { problemId: '$problemId', userId: '$userId' },
@@ -275,13 +280,15 @@ export class AnalyticsHandler extends Handler {
 
   /**
    * 按学生维度聚合统计
+   * @param filters 筛选条件
+   * @returns 按学生聚合的统计数据
    */
   private async aggregateByStudent(filters: AnalyticsFilters) {
     const db = this.ctx.db;
     const col = db.collection('ai_conversations');
 
     // 构造 match 条件
-    const match: any = {};
+    const match: Document = {};
 
     if (filters.startDate || filters.endDate) {
       match.startTime = {};
@@ -297,7 +304,7 @@ export class AnalyticsHandler extends Handler {
       match.problemId = filters.problemId;
     }
 
-    const pipeline: any[] = [];
+    const pipeline: Document[] = [];
 
     // 1. Match 阶段
     if (Object.keys(match).length > 0) {

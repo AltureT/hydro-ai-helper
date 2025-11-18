@@ -4,7 +4,7 @@
  * 管理学生与 AI 的对话会话,记录会话元数据
  */
 
-import type { Db, Collection } from 'mongodb';
+import type { Db, Collection, Filter } from 'mongodb';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 
 /**
@@ -148,7 +148,7 @@ export class ConversationModel {
     limit: number = 50
   ): Promise<{ conversations: Conversation[]; total: number }> {
     // 构造查询条件
-    const query: any = {};
+    const query: Filter<Conversation> = {};
 
     if (filters.userId !== undefined) {
       query.userId = filters.userId;
@@ -200,7 +200,7 @@ export class ConversationModel {
     tags?: string[]
   ): Promise<void> {
     const _id = typeof id === 'string' ? new ObjectId(id) : id;
-    const update: any = {};
+    const update: Partial<Pick<Conversation, 'teacherNote' | 'tags'>> = {};
 
     if (teacherNote !== undefined) {
       update.teacherNote = teacherNote;

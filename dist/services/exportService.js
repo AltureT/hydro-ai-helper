@@ -65,7 +65,9 @@ class ExportService {
                 userIdMap.set(realUserId, anonymousId);
                 userCounter++;
             }
-            return userIdMap.get(realUserId);
+            // 安全断言: 上面的 if 语句确保了 userIdMap 中一定存在 realUserId
+            const anonymousId = userIdMap.get(realUserId);
+            return anonymousId;
         };
         // 4. 构建 CSV 数据
         const rows = [];

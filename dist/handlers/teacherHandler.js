@@ -7,6 +7,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConversationDetailHandlerPriv = exports.ConversationListHandlerPriv = exports.ConversationDetailHandler = exports.ConversationListHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
+const httpHelpers_1 = require("../lib/httpHelpers");
+const queryHelpers_1 = require("../lib/queryHelpers");
 /**
  * ConversationListHandler - 获取对话列表
  * GET /ai-helper/conversations
@@ -14,16 +16,12 @@ const mongo_1 = require("../utils/mongo");
 class ConversationListHandler extends hydrooj_1.Handler {
     async get() {
         try {
-            // 检测请求类型：浏览器 HTML 访问还是前端 JSON API 调用
-            const accept = this.request.headers.accept || '';
-            const wantJson = accept.includes('application/json');
-            // 获取数据库模型实例
+            const wantJson = (0, httpHelpers_1.expectsJson)(this);
             const conversationModel = this.ctx.get('conversationModel');
             // 从查询参数读取筛选条件
             const { startDate, endDate, problemId, classId, userId, page = '1', limit = '50' } = this.request.query;
             // 解析分页参数
-            const pageNum = parseInt(page, 10) || 1;
-            const limitNum = Math.min(parseInt(limit, 10) || 50, 100); // 最大 100 条/页
+            const { page: pageNum, limit: limitNum } = (0, queryHelpers_1.parsePaginationParams)(page, limit);
             // 构造筛选条件
             const filters = {};
             if (startDate) {
@@ -60,31 +58,23 @@ class ConversationListHandler extends hydrooj_1.Handler {
                 metadata: conv.metadata
             }));
             if (wantJson) {
-                // JSON API 模式：前端 fetch 调用
-                const response = {
+                (0, httpHelpers_1.setJsonResponse)(this, {
                     conversations: conversationSummaries,
                     total,
                     page: pageNum,
                     limit: limitNum
-                };
-                this.response.body = response;
-                this.response.type = 'application/json';
+                });
                 return;
             }
-            // HTML 页面模式：浏览器直接访问
-            this.response.template = 'ai-helper/teacher_conversations.html';
-            this.response.body = {
+            (0, httpHelpers_1.setTemplateResponse)(this, 'ai-helper/teacher_conversations.html', {
                 total,
                 page: pageNum,
-                limit: limitNum,
-                // 可以传递初始数据，但也可以让前端完全通过 fetch 获取
-            };
+                limit: limitNum
+            });
         }
         catch (err) {
             console.error('[AI Helper] ConversationListHandler error:', err);
-            this.response.status = 500;
-            this.response.body = { error: err instanceof Error ? err.message : '服务器内部错误' };
-            this.response.type = 'application/json';
+            (0, httpHelpers_1.setErrorResponse)(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : '服务器内部错误', 500);
         }
     }
 }
@@ -96,17 +86,11 @@ exports.ConversationListHandler = ConversationListHandler;
 class ConversationDetailHandler extends hydrooj_1.Handler {
     async get({ id }) {
         try {
-            // 检测请求类型：浏览器 HTML 访问还是前端 JSON API 调用
-            const accept = this.request.headers.accept || '';
-            const wantJson = accept.includes('application/json');
-            // 获取数据库模型实例
+            const wantJson = (0, httpHelpers_1.expectsJson)(this);
             const conversationModel = this.ctx.get('conversationModel');
             const messageModel = this.ctx.get('messageModel');
-            // 验证 conversationId 格式
             if (!mongo_1.ObjectId.isValid(id)) {
-                this.response.status = 400;
-                this.response.body = { error: '无效的会话 ID' };
-                this.response.type = 'application/json';
+                (0, httpHelpers_1.setErrorResponse)(this, 'INVALID_ID', '无效的会话 ID');
                 return;
             }
             // 查询会话详情
@@ -114,9 +98,7 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
             const conversation = await conversationModel.findById(id);
             if (!conversation) {
                 console.log('[AI Helper] Conversation not found:', id);
-                this.response.status = 404;
-                this.response.body = { error: '会话不存在' };
-                this.response.type = 'application/json';
+                (0, httpHelpers_1.setErrorResponse)(this, 'NOT_FOUND', '会话不存在', 404);
                 return;
             }
             console.log('[AI Helper] Conversation found, _id type:', typeof conversation._id, conversation._id.constructor.name);
@@ -137,52 +119,34 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
                 attachedError: msg.attachedError,
                 metadata: msg.metadata
             }));
+            const conversationData = {
+                _id: conversation._id.toString(),
+                userId: conversation.userId,
+                classId: conversation.classId,
+                problemId: conversation.problemId,
+                startTime: conversation.startTime.toISOString(),
+                endTime: conversation.endTime.toISOString(),
+                messageCount: conversation.messageCount,
+                isEffective: conversation.isEffective,
+                tags: conversation.tags,
+                teacherNote: conversation.teacherNote,
+                metadata: conversation.metadata
+            };
             if (wantJson) {
-                // JSON API 模式：前端 fetch 调用
-                const response = {
-                    conversation: {
-                        _id: conversation._id.toString(),
-                        userId: conversation.userId,
-                        classId: conversation.classId,
-                        problemId: conversation.problemId,
-                        startTime: conversation.startTime.toISOString(),
-                        endTime: conversation.endTime.toISOString(),
-                        messageCount: conversation.messageCount,
-                        isEffective: conversation.isEffective,
-                        tags: conversation.tags,
-                        teacherNote: conversation.teacherNote,
-                        metadata: conversation.metadata
-                    },
+                (0, httpHelpers_1.setJsonResponse)(this, {
+                    conversation: conversationData,
                     messages: messagesFormatted
-                };
-                this.response.body = response;
-                this.response.type = 'application/json';
+                });
                 return;
             }
-            // HTML 页面模式：浏览器直接访问
-            this.response.template = 'ai-helper/teacher_conversation_detail.html';
-            this.response.body = {
-                conversation: {
-                    _id: conversation._id.toString(),
-                    userId: conversation.userId,
-                    classId: conversation.classId,
-                    problemId: conversation.problemId,
-                    startTime: conversation.startTime.toISOString(),
-                    endTime: conversation.endTime.toISOString(),
-                    messageCount: conversation.messageCount,
-                    isEffective: conversation.isEffective,
-                    tags: conversation.tags,
-                    teacherNote: conversation.teacherNote,
-                    metadata: conversation.metadata
-                },
+            (0, httpHelpers_1.setTemplateResponse)(this, 'ai-helper/teacher_conversation_detail.html', {
+                conversation: conversationData,
                 messages: messagesFormatted
-            };
+            });
         }
         catch (err) {
             console.error('[AI Helper] ConversationDetailHandler error:', err);
-            this.response.status = 500;
-            this.response.body = { error: err instanceof Error ? err.message : '服务器内部错误' };
-            this.response.type = 'application/json';
+            (0, httpHelpers_1.setErrorResponse)(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : '服务器内部错误', 500);
         }
     }
 }

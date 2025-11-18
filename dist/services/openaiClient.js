@@ -21,9 +21,11 @@ class OpenAIClient {
     }
     /**
      * 发送对话请求并获取 AI 回答
-     * @param messages 对话消息数组
-     * @param systemPrompt 系统提示词
-     * @returns AI 回答内容
+     *
+     * @param messages 对话消息数组,包含用户和助手的历史消息
+     * @param systemPrompt 系统提示词,用于定义 AI 的行为和角色
+     * @returns AI 回答的文本内容
+     * @throws {Error} 当 API Key 无效、调用频率超限、网络错误或 AI 服务不可用时抛出错误
      */
     async chat(messages, systemPrompt) {
         // 构造 OpenAI 格式请求
@@ -93,7 +95,9 @@ class OpenAIClient {
     }
     /**
      * 测试连接是否正常
-     * @returns 测试结果
+     * 发送一个简单的测试请求以验证 API 配置是否正确
+     *
+     * @returns 测试结果对象,包含 success(是否成功)、error(错误信息)和 latency(响应延迟,毫秒)
      */
     async testConnection() {
         const startTime = Date.now();
@@ -113,9 +117,11 @@ class OpenAIClient {
 exports.OpenAIClient = OpenAIClient;
 /**
  * 从数据库配置创建 OpenAI 客户端
- * @param ctx HydroOJ Context
+ * 自动读取数据库中的 AI 配置,解密 API Key,并创建客户端实例
+ *
+ * @param ctx HydroOJ Context,用于访问数据库和日志服务
  * @returns OpenAI 客户端实例
- * @throws 如果配置不存在或不完整
+ * @throws {Error} 如果配置不存在、不完整或 API Key 解密失败
  */
 async function createOpenAIClientFromConfig(ctx) {
     const aiConfigModel = ctx.get('aiConfigModel');

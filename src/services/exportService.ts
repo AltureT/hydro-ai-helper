@@ -5,6 +5,7 @@
  */
 
 import type { Context } from 'hydrooj';
+import type { Filter } from 'mongodb';
 import { ConversationModel, Conversation } from '../models/conversation';
 
 /**
@@ -48,7 +49,7 @@ export class ExportService {
     options: ConversationExportOptions = {}
   ): Promise<string> {
     // 1. 构造查询条件
-    const query: any = {};
+    const query: Filter<Conversation> = {};
 
     // 时间范围筛选
     if (filters.startDate || filters.endDate) {
@@ -95,7 +96,9 @@ export class ExportService {
         userIdMap.set(realUserId, anonymousId);
         userCounter++;
       }
-      return userIdMap.get(realUserId)!;
+      // 安全断言: 上面的 if 语句确保了 userIdMap 中一定存在 realUserId
+      const anonymousId = userIdMap.get(realUserId);
+      return anonymousId as string;
     };
 
     // 4. 构建 CSV 数据

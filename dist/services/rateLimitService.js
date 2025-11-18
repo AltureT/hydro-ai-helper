@@ -48,9 +48,9 @@ class RateLimitService {
                 }
             }, {
                 upsert: true,
-                // `returnOriginal` 兼容老版本 MongoDB 驱动，`returnDocument` 兼容新版本
+                // `returnOriginal` 兼容老版本 MongoDB 驱动,`returnDocument` 兼容新版本
                 returnDocument: 'after',
-                // @ts-ignore - 老版本驱动使用 returnOriginal，忽略即可
+                // @ts-expect-error - 老版本驱动使用 returnOriginal,忽略即可
                 returnOriginal: false
             });
             // 兼容处理：部分环境下 findOneAndUpdate 可能不返回 value（老驱动忽略 returnDocument）

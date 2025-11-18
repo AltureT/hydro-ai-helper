@@ -10,7 +10,7 @@ import { RateLimitService } from '../services/rateLimitService';
 import { EffectivenessService } from '../services/effectivenessService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
-import { ObjectId, type ObjectIdType } from '../utils/mongo';
+import { type ObjectIdType } from '../utils/mongo';
 
 /**
  * 学生对话请求接口
