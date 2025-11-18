@@ -2,6 +2,52 @@ ai_helper_conversations: "AI 对话记录"
 ai_helper_analytics: "AI 使用统计"
 ai_helper_admin_config: "AI 配置"
 
+# 管理员配置页面
+ai_helper_config_title: "AI 学习助手配置"
+ai_helper_config_loading: "正在加载配置..."
+ai_helper_config_save_success: "配置已保存"
+ai_helper_config_test_success: "连接成功，AI 服务可用"
+ai_helper_config_test_failed: "连接失败，AI 服务不可用"
+
+# 配置分区标题
+ai_helper_config_basic_section: "基础配置"
+ai_helper_config_rate_limit_section: "频率限制"
+ai_helper_config_advanced_section: "高级设置"
+ai_helper_config_api_key_section: "API Key 设置"
+
+# 配置字段标签
+ai_helper_config_api_base_url: "API Base URL"
+ai_helper_config_model_name: "模型名称"
+ai_helper_config_timeout_seconds: "超时时间（秒）"
+ai_helper_config_rate_limit_per_minute: "每分钟最大请求数"
+ai_helper_config_rate_limit_hint: "限制每个学生每分钟可发送的请求次数，防止滥用"
+ai_helper_config_system_prompt: "System Prompt 模板"
+ai_helper_config_system_prompt_hint: "AI 助手的系统提示词，定义其角色和行为规范"
+
+# API Key 相关
+ai_helper_config_current_api_key: "当前 API Key 状态"
+ai_helper_config_api_key_configured: "已配置：{masked}"
+ai_helper_config_api_key_not_configured: "尚未配置 API Key"
+ai_helper_config_new_api_key: "新的 API Key（留空则不修改）"
+ai_helper_config_new_api_key_hint: "出于安全考虑，无法查看已保存的完整 API Key。输入新值将覆盖原有密钥，留空则保持不变。"
+ai_helper_config_show_api_key: "显示"
+ai_helper_config_hide_api_key: "隐藏"
+
+# 按钮
+ai_helper_config_test_connection: "测试连接"
+ai_helper_config_testing: "测试中..."
+ai_helper_config_save: "保存配置"
+ai_helper_config_saving: "保存中..."
+
+# 错误和提示
+ai_helper_config_error_api_base_url_empty: "API Base URL 不能为空"
+ai_helper_config_error_model_name_empty: "模型名称不能为空"
+ai_helper_config_error_rate_limit_invalid: "每分钟最大请求数必须大于 0"
+ai_helper_config_error_timeout_invalid: "超时时间必须大于 0"
+ai_helper_config_error_load_failed: "加载配置失败：{msg}"
+ai_helper_config_error_save_failed: "保存配置失败：{msg}"
+ai_helper_config_error_test_failed: "连接测试失败：{msg}"
+
 # 导出功能相关
 ai_helper_export_button: "导出数据"
 ai_helper_export_title: "导出对话数据"
