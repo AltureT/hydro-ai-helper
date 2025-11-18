@@ -5,7 +5,7 @@
  */
 
 import type { Context } from 'hydrooj';
-import type { Filter } from 'mongodb';
+import type { Collection, Filter } from 'mongodb';
 import { ConversationModel, Conversation } from '../models/conversation';
 
 /**
@@ -88,7 +88,7 @@ export class ExportService {
 
     // 2. 查询所有符合条件的会话记录(按开始时间升序排序)
     const db = this.ctx.db;
-    const collection = db.collection<Conversation>('ai_conversations');
+    const collection = this.ctx.db.collection('ai_conversations') as unknown as Collection<Conversation>;
     const cursor = collection
       .find(query, { projection })
       .sort({ startTime: 1 });
