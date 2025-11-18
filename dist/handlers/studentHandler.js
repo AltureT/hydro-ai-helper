@@ -142,23 +142,20 @@ class ChatHandler extends hydrooj_1.Handler {
             await conversationModel.incrementMessageCount(currentConversationId);
             // TODO: 加载历史消息用于多轮对话 (后续 Phase)
             // const historyMessages = await messageModel.findByConversationId(currentConversationId);
-            // 获取 AI 配置
-            // TODO: 从数据库读取配置,这里暂时使用环境变量
-            const aiConfig = {
-                apiBaseUrl: process.env.OPENAI_API_BASE || 'https://api.openai.com/v1',
-                modelName: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
-                apiKey: process.env.OPENAI_API_KEY || '',
-                timeoutSeconds: 30
-            };
-            // 检查 API Key 是否配置
-            if (!aiConfig.apiKey) {
+            // 从数据库配置创建 AI 客户端
+            let openaiClient;
+            try {
+                openaiClient = await (0, openaiClient_1.createOpenAIClientFromConfig)(this.ctx);
+            }
+            catch (error) {
+                // 配置不存在或不完整
+                console.error('[AI Helper] 创建 AI 客户端失败:', error);
                 this.response.status = 500;
-                this.response.body = { error: 'AI 服务未配置,请联系管理员' };
+                this.response.body = { error: error instanceof Error ? error.message : 'AI 服务未配置' };
                 this.response.type = 'application/json';
                 return;
             }
             // 调用 AI 服务
-            const openaiClient = new openaiClient_1.OpenAIClient(aiConfig);
             let aiResponse;
             try {
                 aiResponse = await openaiClient.chat(messages, systemPrompt);

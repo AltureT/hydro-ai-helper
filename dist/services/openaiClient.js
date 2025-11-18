@@ -8,7 +8,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OpenAIClient = void 0;
+exports.createOpenAIClientFromConfig = createOpenAIClientFromConfig;
 const axios_1 = __importDefault(require("axios"));
+const crypto_1 = require("../lib/crypto");
 /**
  * OpenAI 客户端类
  * 封装所有 AI API 调用逻辑
@@ -109,4 +111,37 @@ class OpenAIClient {
     }
 }
 exports.OpenAIClient = OpenAIClient;
+/**
+ * 从数据库配置创建 OpenAI 客户端
+ * @param ctx HydroOJ Context
+ * @returns OpenAI 客户端实例
+ * @throws 如果配置不存在或不完整
+ */
+async function createOpenAIClientFromConfig(ctx) {
+    const aiConfigModel = ctx.get('aiConfigModel');
+    // 读取配置
+    const config = await aiConfigModel.getConfig();
+    if (!config) {
+        throw new Error('AI 服务尚未配置，请联系管理员在控制面板中完成配置。');
+    }
+    // 检查配置完整性
+    if (!config.apiBaseUrl || !config.modelName || !config.apiKeyEncrypted) {
+        throw new Error('AI 服务配置不完整，请联系管理员检查 API Base URL、模型名称和 API Key。');
+    }
+    // 解密 API Key
+    let apiKey;
+    try {
+        apiKey = (0, crypto_1.decrypt)(config.apiKeyEncrypted);
+    }
+    catch (err) {
+        throw new Error('AI 服务配置错误：API Key 解密失败，请联系管理员重新配置。');
+    }
+    // 创建客户端实例
+    return new OpenAIClient({
+        apiBaseUrl: config.apiBaseUrl,
+        modelName: config.modelName,
+        apiKey,
+        timeoutSeconds: config.timeoutSeconds || 30
+    });
+}
 //# sourceMappingURL=openaiClient.js.map

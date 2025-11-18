@@ -16,9 +16,11 @@ const teacherHandler_1 = require("./handlers/teacherHandler");
 const analyticsHandler_1 = require("./handlers/analyticsHandler");
 const adminConfigHandler_1 = require("./handlers/adminConfigHandler");
 const exportHandler_1 = require("./handlers/exportHandler");
+const adminHandler_1 = require("./handlers/adminHandler");
 const conversation_1 = require("./models/conversation");
 const message_1 = require("./models/message");
 const rateLimitRecord_1 = require("./models/rateLimitRecord");
+const aiConfig_1 = require("./models/aiConfig");
 /**
  * 插件入口函数
  * @param ctx HydroOJ Context
@@ -35,16 +37,19 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const conversationModel = new conversation_1.ConversationModel(db);
         const messageModel = new message_1.MessageModel(db);
         const rateLimitRecordModel = new rateLimitRecord_1.RateLimitRecordModel(db);
+        const aiConfigModel = new aiConfig_1.AIConfigModel(db);
         // 创建数据库索引
         console.log('[AI Helper] Creating database indexes...');
         await conversationModel.ensureIndexes();
         await messageModel.ensureIndexes();
         await rateLimitRecordModel.ensureIndexes();
+        await aiConfigModel.ensureIndexes();
         console.log('[AI Helper] Database indexes created successfully');
         // 将模型实例注入到 ctx 中,供 Handler 使用
         ctx.provide('conversationModel', conversationModel);
         ctx.provide('messageModel', messageModel);
         ctx.provide('rateLimitRecordModel', rateLimitRecordModel);
+        ctx.provide('aiConfigModel', aiConfigModel);
         // 注册测试路由
         // GET /ai-helper/hello - 返回插件状态
         ctx.Route('ai_helper_hello', '/ai-helper/hello', testHandler_1.HelloHandler, testHandler_1.HelloHandlerPriv);
@@ -69,14 +74,24 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', adminConfigHandler_1.AdminConfigHandler, adminConfigHandler_1.AdminConfigHandlerPriv);
         // GET /ai-helper/export - 数据导出 API
         ctx.Route('ai_helper_export', '/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
+        // 管理员配置 API (T021)
+        // GET /ai-helper/admin/config - 获取当前配置
+        ctx.Route('ai_helper_admin_get_config', '/ai-helper/admin/config', adminHandler_1.GetConfigHandler, adminHandler_1.GetConfigHandlerPriv);
+        // PUT /ai-helper/admin/config - 更新配置
+        ctx.Route('ai_helper_admin_update_config', '/ai-helper/admin/config', adminHandler_1.UpdateConfigHandler, adminHandler_1.UpdateConfigHandlerPriv);
+        // POST /ai-helper/admin/test-connection - 测试连接
+        ctx.Route('ai_helper_admin_test_connection', '/ai-helper/admin/test-connection', adminHandler_1.TestConnectionHandler, adminHandler_1.TestConnectionHandlerPriv);
         console.log('[AI Helper] Routes registered:');
         console.log('  - GET /ai-helper/hello (test route)');
         console.log('  - POST /ai-helper/chat (student chat API)');
         console.log('  - GET /ai-helper/conversations (teacher conversation list API)');
         console.log('  - GET /ai-helper/conversations/:id (teacher conversation detail API)');
         console.log('  - GET /ai-helper/analytics (teacher analytics page)');
-        console.log('  - GET /ai-helper/admin/config (admin config page)');
+        console.log('  - GET /ai-helper/admin/config (admin config page - legacy)');
         console.log('  - GET /ai-helper/export (data export API)');
+        console.log('  - GET /ai-helper/admin/config (get AI config - T021)');
+        console.log('  - PUT /ai-helper/admin/config (update AI config - T021)');
+        console.log('  - POST /ai-helper/admin/test-connection (test AI connection - T021)');
     }
 });
 exports.Config = configSchema;
