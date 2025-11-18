@@ -16,6 +16,8 @@ import {
   ConversationDetailHandler,
   ConversationDetailHandlerPriv
 } from './handlers/teacherHandler';
+import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
+import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
 import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
 
@@ -67,7 +69,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // 注意：这里使用的是 root-only 的系统权限（PRIV.PRIV_EDIT_SYSTEM），普通老师也无权访问。
     // TODO(如需求变更): 未来若有专门的教师统计角色，再考虑降低权限。
 
+    // 注入控制面板菜单项
     ctx.injectUI('ControlPanel', 'ai_helper_conversations');
+    ctx.injectUI('ControlPanel', 'ai_helper_analytics');
+    ctx.injectUI('ControlPanel', 'ai_helper_admin_config');
 
     // GET /ai-helper/conversations - 获取对话列表
     ctx.Route('ai_helper_conversations', '/ai-helper/conversations', ConversationListHandler, ConversationListHandlerPriv);
@@ -75,11 +80,19 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/conversations/:id - 获取对话详情
     ctx.Route('ai_helper_conversation_detail', '/ai-helper/conversations/:id', ConversationDetailHandler, ConversationDetailHandlerPriv);
 
+    // GET /ai-helper/analytics - AI 使用统计页面
+    ctx.Route('ai_helper_analytics', '/ai-helper/analytics', AnalyticsHandler, AnalyticsHandlerPriv);
+
+    // GET /ai-helper/admin/config - AI 配置页面
+    ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', AdminConfigHandler, AdminConfigHandlerPriv);
+
     console.log('[AI Helper] Routes registered:');
     console.log('  - GET /ai-helper/hello (test route)');
     console.log('  - POST /ai-helper/chat (student chat API)');
     console.log('  - GET /ai-helper/conversations (teacher conversation list API)');
     console.log('  - GET /ai-helper/conversations/:id (teacher conversation detail API)');
+    console.log('  - GET /ai-helper/analytics (teacher analytics page)');
+    console.log('  - GET /ai-helper/admin/config (admin config page)');
   }
 });
 
