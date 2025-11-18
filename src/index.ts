@@ -18,6 +18,7 @@ import {
 } from './handlers/teacherHandler';
 import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
 import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
+import { ExportHandler, ExportHandlerPriv } from './handlers/exportHandler';
 import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
 import { RateLimitRecordModel } from './models/rateLimitRecord';
@@ -90,6 +91,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/admin/config - AI 配置页面
     ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', AdminConfigHandler, AdminConfigHandlerPriv);
 
+    // GET /ai-helper/export - 数据导出 API
+    ctx.Route('ai_helper_export', '/ai-helper/export', ExportHandler, ExportHandlerPriv);
+
     console.log('[AI Helper] Routes registered:');
     console.log('  - GET /ai-helper/hello (test route)');
     console.log('  - POST /ai-helper/chat (student chat API)');
@@ -97,6 +101,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     console.log('  - GET /ai-helper/conversations/:id (teacher conversation detail API)');
     console.log('  - GET /ai-helper/analytics (teacher analytics page)');
     console.log('  - GET /ai-helper/admin/config (admin config page)');
+    console.log('  - GET /ai-helper/export (data export API)');
   }
 });
 

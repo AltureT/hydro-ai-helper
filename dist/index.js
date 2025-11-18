@@ -15,6 +15,7 @@ const studentHandler_1 = require("./handlers/studentHandler");
 const teacherHandler_1 = require("./handlers/teacherHandler");
 const analyticsHandler_1 = require("./handlers/analyticsHandler");
 const adminConfigHandler_1 = require("./handlers/adminConfigHandler");
+const exportHandler_1 = require("./handlers/exportHandler");
 const conversation_1 = require("./models/conversation");
 const message_1 = require("./models/message");
 const rateLimitRecord_1 = require("./models/rateLimitRecord");
@@ -66,6 +67,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_analytics', '/ai-helper/analytics', analyticsHandler_1.AnalyticsHandler, analyticsHandler_1.AnalyticsHandlerPriv);
         // GET /ai-helper/admin/config - AI 配置页面
         ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', adminConfigHandler_1.AdminConfigHandler, adminConfigHandler_1.AdminConfigHandlerPriv);
+        // GET /ai-helper/export - 数据导出 API
+        ctx.Route('ai_helper_export', '/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
         console.log('[AI Helper] Routes registered:');
         console.log('  - GET /ai-helper/hello (test route)');
         console.log('  - POST /ai-helper/chat (student chat API)');
@@ -73,6 +76,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         console.log('  - GET /ai-helper/conversations/:id (teacher conversation detail API)');
         console.log('  - GET /ai-helper/analytics (teacher analytics page)');
         console.log('  - GET /ai-helper/admin/config (admin config page)');
+        console.log('  - GET /ai-helper/export (data export API)');
     }
 });
 exports.Config = configSchema;
