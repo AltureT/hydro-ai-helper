@@ -89,7 +89,7 @@ class ExportHandler extends hydrooj_1.Handler {
             // 7. 设置响应头并返回 CSV 文件
             this.response.status = 200;
             this.response.type = 'text/csv';
-            this.response.set('Content-Disposition', `attachment; filename="${filename}"`);
+            this.response.addHeader('Content-Disposition', `attachment; filename="${filename}"`);
             this.response.body = csv;
         }
         catch (err) {

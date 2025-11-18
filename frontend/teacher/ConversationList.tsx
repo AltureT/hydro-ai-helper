@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { ExportDialog } from './ExportDialog';
 
 /**
  * 对话摘要接口
@@ -54,6 +55,9 @@ export const ConversationList: React.FC = () => {
     classId: '',
     userId: ''
   });
+
+  // 导出弹窗状态
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   /**
    * 加载对话列表
@@ -149,7 +153,25 @@ export const ConversationList: React.FC = () => {
 
       {/* 筛选表单 */}
       <form onSubmit={handleFilterSubmit} style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-        <h3>筛选条件</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+          <h3 style={{ margin: 0 }}>筛选条件</h3>
+          <button
+            type="button"
+            onClick={() => setExportDialogOpen(true)}
+            style={{
+              padding: '8px 16px',
+              fontSize: '14px',
+              fontWeight: 500,
+              color: '#ffffff',
+              backgroundColor: '#10b981',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+            }}
+          >
+            导出数据
+          </button>
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' }}>
           <div>
             <label>开始日期:</label>
@@ -293,6 +315,19 @@ export const ConversationList: React.FC = () => {
           </div>
         </>
       )}
+
+      {/* 导出对话框 */}
+      <ExportDialog
+        isOpen={exportDialogOpen}
+        onClose={() => setExportDialogOpen(false)}
+        filters={{
+          startDate: filters.startDate || undefined,
+          endDate: filters.endDate || undefined,
+          classId: filters.classId || undefined,
+          problemId: filters.problemId || undefined,
+          userId: filters.userId || undefined,
+        }}
+      />
     </div>
   );
 };
