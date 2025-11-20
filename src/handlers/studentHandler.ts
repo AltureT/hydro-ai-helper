@@ -117,6 +117,7 @@ export class ChatHandler extends Handler {
       }
 
       // 验证用户输入
+      // validateInput 现在同时做长度校验和越狱关键词检测，防止学生尝试修改系统规则
       const validation = promptService.validateInput(userThinking, processedCode);
       if (!validation.valid) {
         throw new Error(validation.error || '输入验证失败');
