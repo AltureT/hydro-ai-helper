@@ -37,8 +37,8 @@ const initAiHelperBanner = () => {
     <div style="font-weight: bold; margin-bottom: 5px;">
       ✓ AI 助手插件已加载
     </div>
-    <div style="font-size: 12px; opacity: 0.9;">
-      版本: 0.1.0 | Phase 1 完成
+    <div style="font-size: 12px; opacity: 0.5;">
+      版本: 1.1.0
     </div>
   `;
 
@@ -86,7 +86,7 @@ const initAiHelperBanner = () => {
     notification.style.transition = 'opacity 0.5s';
     notification.style.opacity = '0';
     setTimeout(() => notification.remove(), 500);
-  }, 5000);
+  }, 2000);
 };
 
 if (document.readyState === 'loading') {

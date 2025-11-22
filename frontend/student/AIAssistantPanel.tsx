@@ -343,21 +343,25 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     transition: 'height 0.3s ease'
   } : {
-    // 桌面端:浮动卡片
+    // 桌面端:浮动按钮/卡片
     position: 'fixed',
     bottom: `${position.bottom}px`,
     right: `${position.right}px`,
-    width: `${size.width}px`,
-    height: isCollapsed ? '48px' : `${size.height}px`,
-    background: '#f9fafb',
-    borderRadius: '12px',
-    boxShadow: '0 10px 25px rgba(0, 0, 0, 0.15), 0 4px 10px rgba(0, 0, 0, 0.1)',
+    width: isCollapsed ? '64px' : `${size.width}px`,
+    height: isCollapsed ? '64px' : `${size.height}px`,
+    background: isCollapsed ? '#6366f1' : '#f9fafb',
+    borderRadius: isCollapsed ? '50%' : '12px',
+    boxShadow: isCollapsed
+      ? '0 8px 16px rgba(99, 102, 241, 0.4), 0 2px 8px rgba(99, 102, 241, 0.3)'
+      : '0 10px 25px rgba(0, 0, 0, 0.15), 0 4px 10px rgba(0, 0, 0, 0.1)',
     zIndex: 1000,
     display: 'flex',
     flexDirection: 'column',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     overflow: 'hidden',
-    transition: 'height 0.3s ease'
+    transition: 'all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)',
+    transform: isCollapsed ? 'scale(1)' : 'scale(1)',
+    cursor: isCollapsed ? 'pointer' : 'default'
   };
 
   return (
@@ -422,44 +426,73 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
         }
       `}</style>
 
-      <div ref={panelRef} style={panelStyle}>
-      {/* 标题栏 - 可拖拽 */}
       <div
-        onMouseDown={handleDragStart}
-        style={{
-          padding: '12px 16px',
-          borderBottom: isCollapsed ? 'none' : '1px solid #e5e7eb',
-          background: '#6366f1',
-          color: 'white',
-          borderRadius: isMobile ? '0' : '12px 12px 0 0',
-          fontWeight: '600',
-          fontSize: '15px',
-          cursor: isMobile ? 'default' : (isDragging ? 'grabbing' : 'grab'),
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          userSelect: 'none',
-          height: isMobile ? '56px' : '48px',
-          boxSizing: 'border-box'
-        }}
+        ref={panelRef}
+        style={panelStyle}
+        onClick={isCollapsed && !isMobile ? toggleCollapse : undefined}
       >
-        <span>✨ AI 学习助手</span>
-        <button
-          onClick={toggleCollapse}
+      {/* 标题栏 - 可拖拽 */}
+      {isMobile || !isCollapsed ? (
+        <div
+          onMouseDown={handleDragStart}
           style={{
-            background: 'transparent',
-            border: 'none',
+            padding: '12px 16px',
+            borderBottom: isCollapsed ? 'none' : '1px solid #e5e7eb',
+            background: '#6366f1',
             color: 'white',
-            fontSize: '18px',
-            cursor: 'pointer',
-            padding: '4px 8px',
-            lineHeight: '1'
+            borderRadius: isMobile ? '0' : '12px 12px 0 0',
+            fontWeight: '600',
+            fontSize: '15px',
+            cursor: isMobile ? 'default' : (isDragging ? 'grabbing' : 'grab'),
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            userSelect: 'none',
+            height: isMobile ? '56px' : '48px',
+            boxSizing: 'border-box'
           }}
-          title={isCollapsed ? '展开面板' : '折叠面板'}
         >
-          {isCollapsed ? '▲' : '▼'}
-        </button>
-      </div>
+          <span>✨ AI 学习助手</span>
+          <button
+            onClick={toggleCollapse}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'white',
+              fontSize: '18px',
+              cursor: 'pointer',
+              padding: '4px 8px',
+              lineHeight: '1'
+            }}
+            title={isCollapsed ? '展开面板' : '折叠面板'}
+          >
+            {isCollapsed ? '▲' : '▼'}
+          </button>
+        </div>
+      ) : (
+        /* 桌面端折叠时显示圆形按钮 */
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '28px',
+            userSelect: 'none',
+            transition: 'transform 0.2s ease'
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.transform = 'scale(1.1)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = 'scale(1)';
+          }}
+          title="展开 AI 学习助手"
+        >
+          ✨
+        </div>
+      )}
 
       {/* 内容区 - 折叠时隐藏 */}
       {!isCollapsed && (
