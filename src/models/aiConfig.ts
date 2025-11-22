@@ -18,6 +18,7 @@ export interface AIConfig {
   rateLimitPerMinute: number;   // 频率限制(每分钟最大请求数)
   timeoutSeconds: number;       // 超时时间(秒)
   systemPromptTemplate?: string; // 系统提示词模板(可选)
+  extraJailbreakPatternsText?: string; // 自定义越狱规则(多行文本)
   updatedAt: Date;              // 最后更新时间
 }
 

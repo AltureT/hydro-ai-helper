@@ -31,6 +31,7 @@ import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
 import { RateLimitRecordModel } from './models/rateLimitRecord';
 import { AIConfigModel } from './models/aiConfig';
+import { JailbreakLogModel } from './models/jailbreakLog';
 
 /**
  * 插件配置接口
@@ -58,6 +59,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const messageModel = new MessageModel(db);
     const rateLimitRecordModel = new RateLimitRecordModel(db);
     const aiConfigModel = new AIConfigModel(db);
+    const jailbreakLogModel = new JailbreakLogModel(db);
 
     // 创建数据库索引
     console.log('[AI Helper] Creating database indexes...');
@@ -65,6 +67,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await messageModel.ensureIndexes();
     await rateLimitRecordModel.ensureIndexes();
     await aiConfigModel.ensureIndexes();
+    await jailbreakLogModel.ensureIndexes();
     console.log('[AI Helper] Database indexes created successfully');
 
     // 将模型实例注入到 ctx 中,供 Handler 使用
@@ -72,6 +75,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('messageModel', messageModel);
     ctx.provide('rateLimitRecordModel', rateLimitRecordModel);
     ctx.provide('aiConfigModel', aiConfigModel);
+    ctx.provide('jailbreakLogModel', jailbreakLogModel);
 
     // 注册测试路由
     // GET /ai-helper/hello - 返回插件状态

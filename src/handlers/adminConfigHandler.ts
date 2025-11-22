@@ -6,6 +6,9 @@
 import { Handler, PRIV } from 'hydrooj';
 import { AIConfig, AIConfigModel } from '../models/aiConfig';
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
+import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
+import { JailbreakLogModel } from '../models/jailbreakLog';
+import type { JailbreakLog } from '../models/jailbreakLog';
 
 /**
  * 更新配置请求接口
@@ -17,6 +20,7 @@ interface UpdateConfigRequest {
   rateLimitPerMinute?: number;
   timeoutSeconds?: number;
   systemPromptTemplate?: string;
+  extraJailbreakPatternsText?: string;
 }
 
 /**
@@ -37,10 +41,16 @@ export class AdminConfigHandler extends Handler {
       }
 
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
 
       const config = await aiConfigModel.getConfig();
+      const recentLogs = await jailbreakLogModel.listRecent(20);
       if (!config) {
-        this.response.body = { config: null };
+        this.response.body = {
+          config: null,
+          builtinJailbreakPatterns: builtinJailbreakPatternSources,
+          recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
+        };
         this.response.type = 'application/json';
         return;
       }
@@ -66,10 +76,13 @@ export class AdminConfigHandler extends Handler {
           rateLimitPerMinute: config.rateLimitPerMinute,
           timeoutSeconds: config.timeoutSeconds,
           systemPromptTemplate: config.systemPromptTemplate,
+          extraJailbreakPatternsText: config.extraJailbreakPatternsText || '',
           apiKeyMasked,
           hasApiKey,
           updatedAt: config.updatedAt.toISOString()
-        }
+        },
+        builtinJailbreakPatterns: builtinJailbreakPatternSources,
+        recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
     } catch (err) {
@@ -125,6 +138,10 @@ export class AdminConfigHandler extends Handler {
         partial.systemPromptTemplate = body.systemPromptTemplate;
       }
 
+      if (body.extraJailbreakPatternsText !== undefined) {
+        partial.extraJailbreakPatternsText = body.extraJailbreakPatternsText;
+      }
+
       if (body.apiKey !== undefined && body.apiKey !== '') {
         try {
           partial.apiKeyEncrypted = encrypt(body.apiKey.trim());
@@ -137,6 +154,8 @@ export class AdminConfigHandler extends Handler {
           return;
         }
       }
+
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
 
       await aiConfigModel.updateConfig(partial);
 
@@ -158,6 +177,8 @@ export class AdminConfigHandler extends Handler {
         hasApiKey = false;
       }
 
+      const recentLogs = await jailbreakLogModel.listRecent(20);
+
       this.response.body = {
         config: {
           apiBaseUrl: updatedConfig.apiBaseUrl,
@@ -165,10 +186,13 @@ export class AdminConfigHandler extends Handler {
           rateLimitPerMinute: updatedConfig.rateLimitPerMinute,
           timeoutSeconds: updatedConfig.timeoutSeconds,
           systemPromptTemplate: updatedConfig.systemPromptTemplate,
+          extraJailbreakPatternsText: updatedConfig.extraJailbreakPatternsText || '',
           apiKeyMasked,
           hasApiKey,
           updatedAt: updatedConfig.updatedAt.toISOString()
-        }
+        },
+        builtinJailbreakPatterns: builtinJailbreakPatternSources,
+        recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
     } catch (err) {
@@ -184,3 +208,16 @@ export class AdminConfigHandler extends Handler {
 
 // 导出路由权限配置（使用系统管理员权限）
 export const AdminConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+
+function formatJailbreakLog(log: JailbreakLog) {
+  return {
+    id: log._id.toHexString(),
+    userId: log.userId,
+    problemId: log.problemId,
+    conversationId: log.conversationId ? log.conversationId.toHexString() : undefined,
+    questionType: log.questionType,
+    matchedPattern: log.matchedPattern,
+    matchedText: log.matchedText,
+    createdAt: log.createdAt.toISOString()
+  };
+}

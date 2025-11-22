@@ -5,7 +5,7 @@
 
 import { Handler, PRIV } from 'hydrooj';
 import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig } from '../services/openaiClient';
-import { PromptService, QuestionType } from '../services/promptService';
+import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
 import { EffectivenessService } from '../services/effectivenessService';
 import { ConversationModel } from '../models/conversation';
@@ -117,10 +117,34 @@ export class ChatHandler extends Handler {
         processedCode = undefined;
       }
 
+      const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+      const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
+      const customSystemPromptTemplate = aiConfig?.systemPromptTemplate?.trim() || undefined;
+      const extraJailbreakPatterns = parseExtraJailbreakPatterns(aiConfig?.extraJailbreakPatternsText);
+
       // 验证用户输入
       // validateInput 现在同时做长度校验和越狱关键词检测，防止学生尝试修改系统规则
-      const validation = promptService.validateInput(userThinking, processedCode);
+      const validation: ValidateInputResult = promptService.validateInput(
+        userThinking,
+        processedCode,
+        extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined
+      );
       if (!validation.valid) {
+        if (validation.matchedPattern) {
+          try {
+            const effectivenessService = new EffectivenessService(this.ctx);
+            await effectivenessService.logJailbreakAttempt({
+              userId,
+              conversationId,
+              problemId,
+              questionType,
+              matchedPattern: validation.matchedPattern,
+              matchedText: validation.matchedText || userThinking.substring(0, 120)
+            });
+          } catch (logErr) {
+            console.error('[ChatHandler] 记录越狱日志失败', logErr);
+          }
+        }
         throw new Error(validation.error || '输入验证失败');
       }
 
@@ -133,11 +157,6 @@ export class ChatHandler extends Handler {
           processedProblemContent = problemContent;
         }
       }
-
-      // 加载管理员配置，用于合并 System Prompt 模板
-      const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
-      const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
-      const customSystemPromptTemplate = aiConfig?.systemPromptTemplate?.trim() || undefined;
 
       // 构造 prompts
       // 使用前端传入的题目标题,如果没有则使用题目ID
@@ -294,3 +313,24 @@ export class ChatHandler extends Handler {
 
 // 导出路由权限配置 - 需要用户登录
 export const ChatHandlerPriv = PRIV.PRIV_USER_PROFILE;
+
+function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
+  if (!raw) {
+    return [];
+  }
+
+  const patterns: RegExp[] = [];
+  const lines = raw.split(/\r?\n/);
+
+  for (const line of lines) {
+    const patternText = line.trim();
+    if (!patternText) continue;
+    try {
+      patterns.push(new RegExp(patternText, 'gi'));
+    } catch (err) {
+      console.warn('[ChatHandler] 自定义越狱规则解析失败，已跳过:', patternText, err);
+    }
+  }
+
+  return patterns;
+}

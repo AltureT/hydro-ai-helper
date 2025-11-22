@@ -14,8 +14,20 @@ interface ConfigState {
   rateLimitPerMinute: number | '';
   timeoutSeconds: number | '';
   systemPromptTemplate: string;
+  extraJailbreakPatternsText: string;
   apiKeyMasked: string;  // 只读展示
   hasApiKey: boolean;
+}
+
+interface JailbreakLogEntry {
+  id: string;
+  userId?: number;
+  problemId?: string;
+  conversationId?: string;
+  questionType?: string;
+  matchedPattern: string;
+  matchedText: string;
+  createdAt: string;
 }
 
 /**
@@ -32,6 +44,8 @@ export const ConfigPanel: React.FC = () => {
 
   const [newApiKey, setNewApiKey] = useState<string>('');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
+  const [builtinJailbreakPatterns, setBuiltinJailbreakPatterns] = useState<string[]>([]);
+  const [jailbreakLogs, setJailbreakLogs] = useState<JailbreakLogEntry[]>([]);
 
   /**
    * 初始化：加载配置
@@ -60,6 +74,11 @@ export const ConfigPanel: React.FC = () => {
 
       const json = await res.json();
 
+      const builtinPatterns: string[] = json.builtinJailbreakPatterns || [];
+      const logs: JailbreakLogEntry[] = json.recentJailbreakLogs || [];
+      setBuiltinJailbreakPatterns(builtinPatterns);
+      setJailbreakLogs(logs);
+
       if (json.config == null) {
         // 使用默认值
         setConfig({
@@ -68,6 +87,7 @@ export const ConfigPanel: React.FC = () => {
           rateLimitPerMinute: 5,
           timeoutSeconds: 30,
           systemPromptTemplate: '',
+          extraJailbreakPatternsText: '',
           apiKeyMasked: '',
           hasApiKey: false,
         });
@@ -78,6 +98,7 @@ export const ConfigPanel: React.FC = () => {
           rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
           timeoutSeconds: json.config.timeoutSeconds ?? 30,
           systemPromptTemplate: json.config.systemPromptTemplate || '',
+          extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
           apiKeyMasked: json.config.apiKeyMasked || '',
           hasApiKey: Boolean(json.config.hasApiKey),
         });
@@ -125,6 +146,7 @@ export const ConfigPanel: React.FC = () => {
         rateLimitPerMinute: Number(config.rateLimitPerMinute) || 5,
         timeoutSeconds: Number(config.timeoutSeconds) || 30,
         systemPromptTemplate: config.systemPromptTemplate,
+        extraJailbreakPatternsText: config.extraJailbreakPatternsText,
       };
 
       // 仅当 newApiKey 非空时才发送 apiKey 字段
@@ -155,9 +177,17 @@ export const ConfigPanel: React.FC = () => {
           rateLimitPerMinute: json.config.rateLimitPerMinute ?? prev?.rateLimitPerMinute ?? 5,
           timeoutSeconds: json.config.timeoutSeconds ?? prev?.timeoutSeconds ?? 30,
           systemPromptTemplate: json.config.systemPromptTemplate || '',
+          extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
           apiKeyMasked: json.config.apiKeyMasked || '',
           hasApiKey: Boolean(json.config.hasApiKey),
         }));
+      }
+
+      if (json.builtinJailbreakPatterns) {
+        setBuiltinJailbreakPatterns(json.builtinJailbreakPatterns);
+      }
+      if (json.recentJailbreakLogs) {
+        setJailbreakLogs(json.recentJailbreakLogs);
       }
 
       setNewApiKey(''); // 保存成功后清空输入框
@@ -202,6 +232,38 @@ export const ConfigPanel: React.FC = () => {
     } finally {
       setTesting(false);
     }
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        setSuccessMessage('已复制到剪贴板');
+        setTimeout(() => setSuccessMessage(null), 2000);
+      } else {
+        window.prompt('请复制以下内容', text);
+      }
+    } catch (err) {
+      console.error('Copy to clipboard failed:', err);
+      window.prompt('复制失败，请手动复制：', text);
+    }
+  };
+
+  const appendPatternToCustomRules = (pattern: string) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const existing = prev.extraJailbreakPatternsText || '';
+      const normalizedPattern = pattern.trim();
+      if (!normalizedPattern) {
+        return prev;
+      }
+      const prefix = existing.length > 0 ? `${existing}${existing.endsWith('\n') ? '' : '\n'}` : '';
+      const updated = `${prefix}${normalizedPattern}`;
+      return {
+        ...prev,
+        extraJailbreakPatternsText: updated,
+      };
+    });
   };
 
   /**
@@ -413,6 +475,61 @@ export const ConfigPanel: React.FC = () => {
             AI 助手的系统提示词，定义其角色和行为规范
           </div>
         </div>
+
+        <div style={{ marginBottom: '15px' }}>
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+            内置越狱规则（只读）
+          </label>
+          <div style={{
+            maxHeight: '200px',
+            overflowY: 'auto',
+            padding: '12px',
+            borderRadius: '6px',
+            border: '1px solid #d1d5db',
+            backgroundColor: '#fff'
+          }}>
+            {builtinJailbreakPatterns.length === 0 ? (
+              <div style={{ color: '#6b7280', fontSize: '13px' }}>暂无内置规则</div>
+            ) : (
+              <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                {builtinJailbreakPatterns.map((pattern, index) => (
+                  <li key={`${pattern}-${index}`} style={{ marginBottom: '6px', fontFamily: 'monospace', fontSize: '13px' }}>
+                    {pattern}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
+            系统内置的越狱检测规则，供管理员参考，无法直接修改。
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '15px' }}>
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+            自定义越狱规则（每行一个正则表达式）
+          </label>
+          <textarea
+            value={config.extraJailbreakPatternsText}
+            onChange={(e) => setConfig({ ...config, extraJailbreakPatternsText: e.target.value })}
+            placeholder="忽略.*提示词"
+            disabled={saving || testing}
+            rows={5}
+            style={{
+              width: '100%',
+              padding: '10px',
+              borderRadius: '6px',
+              border: '1px solid #d1d5db',
+              fontSize: '14px',
+              fontFamily: 'monospace',
+              resize: 'vertical',
+              boxSizing: 'border-box'
+            }}
+          />
+          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
+            支持 JavaScript 正则表达式语法。保存后立即生效，解析失败的规则会在后端日志中记录并自动忽略。
+          </div>
+        </div>
       </div>
 
       {/* API Key 设置 */}
@@ -482,6 +599,130 @@ export const ConfigPanel: React.FC = () => {
             出于安全考虑，无法查看已保存的完整 API Key。输入新值将覆盖原有密钥，留空则保持不变。
           </div>
         </div>
+      </div>
+
+      {/* 越狱尝试记录 */}
+      <div style={{
+        marginTop: '20px',
+        padding: '20px',
+        backgroundColor: '#f9fafb',
+        borderRadius: '8px',
+        border: '1px solid #e5e7eb'
+      }}>
+        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>越狱尝试记录</h2>
+
+        {jailbreakLogs.length === 0 ? (
+          <div style={{
+            padding: '15px',
+            backgroundColor: '#fff',
+            borderRadius: '6px',
+            border: '1px dashed #d1d5db',
+            color: '#6b7280',
+            fontSize: '14px'
+          }}>
+            暂无命中记录，说明最近没有学生尝试修改系统提示词。
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+            {jailbreakLogs.map((log) => {
+              const contextPieces: string[] = [];
+              if (log.userId !== undefined) {
+                contextPieces.push(`用户 ID：${log.userId}`);
+              }
+              if (log.problemId) {
+                contextPieces.push(`题目 ID：${log.problemId}`);
+              }
+              if (log.conversationId) {
+                contextPieces.push(`会话 ID：${log.conversationId}`);
+              }
+              if (log.questionType) {
+                contextPieces.push(`问题类型：${log.questionType}`);
+              }
+              const contextText = contextPieces.join(' · ');
+              return (
+                <div key={log.id} style={{
+                  padding: '15px',
+                  backgroundColor: '#fff',
+                  borderRadius: '8px',
+                  border: '1px solid #e5e7eb'
+                }}>
+                  <div style={{ fontSize: '14px', color: '#111827', fontWeight: 500 }}>
+                    时间：{new Date(log.createdAt).toLocaleString()}
+                  </div>
+                  <div style={{ marginTop: '6px', fontSize: '13px', color: '#4b5563' }}>
+                    命中规则：<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
+                  </div>
+                  <pre style={{
+                    marginTop: '10px',
+                    padding: '12px',
+                    backgroundColor: '#1f2937',
+                    color: '#f9fafb',
+                    borderRadius: '6px',
+                    fontSize: '13px',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word'
+                  }}>
+                    {log.matchedText}
+                  </pre>
+                  {contextText && (
+                    <div style={{ marginTop: '6px', fontSize: '12px', color: '#6b7280' }}>
+                      {contextText}
+                    </div>
+                  )}
+                  <div style={{
+                    marginTop: '10px',
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '10px'
+                  }}>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(log.matchedText)}
+                      style={{
+                        padding: '8px 12px',
+                        backgroundColor: '#e5e7eb',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '6px',
+                        fontSize: '13px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      复制命中文本
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(log.matchedPattern)}
+                      style={{
+                        padding: '8px 12px',
+                        backgroundColor: '#e5e7eb',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '6px',
+                        fontSize: '13px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      复制命中正则
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => appendPatternToCustomRules(log.matchedPattern)}
+                      style={{
+                        padding: '8px 12px',
+                        backgroundColor: '#eef2ff',
+                        border: '1px solid #c7d2fe',
+                        borderRadius: '6px',
+                        fontSize: '13px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      追加到自定义规则
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 底部按钮区域 */}

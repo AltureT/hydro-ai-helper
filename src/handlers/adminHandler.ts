@@ -7,6 +7,9 @@ import { Handler, PRIV } from 'hydrooj';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { encrypt, decrypt, maskApiKey } from '../lib/crypto';
 import { OpenAIClient } from '../services/openaiClient';
+import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
+import { JailbreakLogModel } from '../models/jailbreakLog';
+import type { JailbreakLog } from '../models/jailbreakLog';
 
 /**
  * 更新配置请求接口
@@ -18,6 +21,7 @@ interface UpdateConfigRequest {
   rateLimitPerMinute?: number;
   timeoutSeconds?: number;
   systemPromptTemplate?: string;
+  extraJailbreakPatternsText?: string;
 }
 
 /**
@@ -28,14 +32,18 @@ export class GetConfigHandler extends Handler {
   async get() {
     try {
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
 
       // 读取配置
       const config = await aiConfigModel.getConfig();
+      const recentLogs = await jailbreakLogModel.listRecent(20);
 
       if (!config) {
         // 尚未配置，返回 null
         this.response.body = {
-          config: null
+          config: null,
+          builtinJailbreakPatterns: builtinJailbreakPatternSources,
+          recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
         };
         this.response.type = 'application/json';
         return;
@@ -65,10 +73,13 @@ export class GetConfigHandler extends Handler {
           rateLimitPerMinute: config.rateLimitPerMinute,
           timeoutSeconds: config.timeoutSeconds,
           systemPromptTemplate: config.systemPromptTemplate,
+          extraJailbreakPatternsText: config.extraJailbreakPatternsText || '',
           apiKeyMasked,
           hasApiKey,
           updatedAt: config.updatedAt.toISOString()
-        }
+        },
+        builtinJailbreakPatterns: builtinJailbreakPatternSources,
+        recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
 
@@ -137,6 +148,10 @@ export class UpdateConfigHandler extends Handler {
         partial.systemPromptTemplate = body.systemPromptTemplate;
       }
 
+      if (body.extraJailbreakPatternsText !== undefined) {
+        partial.extraJailbreakPatternsText = body.extraJailbreakPatternsText;
+      }
+
       // 处理 API Key
       if (body.apiKey !== undefined && body.apiKey !== '') {
         // 提供了新的 API Key，加密后存储
@@ -154,6 +169,8 @@ export class UpdateConfigHandler extends Handler {
       // 如果 apiKey 字段不存在或为空字符串，不修改现有 key
 
       // 更新配置
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+
       await aiConfigModel.updateConfig(partial);
 
       // 重新读取配置并返回
@@ -179,6 +196,8 @@ export class UpdateConfigHandler extends Handler {
       }
 
       // 返回更新后的配置
+      const recentLogs = await jailbreakLogModel.listRecent(20);
+
       this.response.body = {
         config: {
           apiBaseUrl: updatedConfig.apiBaseUrl,
@@ -186,10 +205,13 @@ export class UpdateConfigHandler extends Handler {
           rateLimitPerMinute: updatedConfig.rateLimitPerMinute,
           timeoutSeconds: updatedConfig.timeoutSeconds,
           systemPromptTemplate: updatedConfig.systemPromptTemplate,
+          extraJailbreakPatternsText: updatedConfig.extraJailbreakPatternsText || '',
           apiKeyMasked,
           hasApiKey,
           updatedAt: updatedConfig.updatedAt.toISOString()
-        }
+        },
+        builtinJailbreakPatterns: builtinJailbreakPatternSources,
+        recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
 
@@ -302,3 +324,16 @@ export class TestConnectionHandler extends Handler {
 export const GetConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const UpdateConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const TestConnectionHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+
+function formatJailbreakLog(log: JailbreakLog) {
+  return {
+    id: log._id.toHexString(),
+    userId: log.userId,
+    problemId: log.problemId,
+    conversationId: log.conversationId ? log.conversationId.toHexString() : undefined,
+    questionType: log.questionType,
+    matchedPattern: log.matchedPattern,
+    matchedText: log.matchedText,
+    createdAt: log.createdAt.toISOString()
+  };
+}

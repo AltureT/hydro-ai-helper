@@ -8,6 +8,8 @@ import type { Context } from 'hydrooj';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import type { MessageModel } from '../models/message';
 import type { ConversationModel } from '../models/conversation';
+import type { JailbreakLogModel } from '../models/jailbreakLog';
+import type { QuestionType } from './promptService';
 
 /**
  * 有效对话判定规则
@@ -119,6 +121,41 @@ export class EffectivenessService {
       }
 
       return false;
+    }
+  }
+
+  /**
+   * 记录越狱尝试日志，供管理员分析
+   */
+  async logJailbreakAttempt(payload: {
+    userId?: number;
+    problemId?: string;
+    conversationId?: string | ObjectIdType;
+    questionType?: QuestionType;
+    matchedPattern: string;
+    matchedText: string;
+    createdAt?: Date;
+  }): Promise<void> {
+    try {
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      const formattedConversationId =
+        payload.conversationId === undefined
+          ? undefined
+          : typeof payload.conversationId === 'string'
+            ? new ObjectId(payload.conversationId)
+            : payload.conversationId;
+
+      await jailbreakLogModel.create({
+        userId: payload.userId,
+        problemId: payload.problemId,
+        conversationId: formattedConversationId,
+        questionType: payload.questionType,
+        matchedPattern: payload.matchedPattern,
+        matchedText: payload.matchedText,
+        createdAt: payload.createdAt ?? new Date()
+      });
+    } catch (err) {
+      this.ctx.logger.error('EffectivenessService logJailbreakAttempt error', err);
     }
   }
 }
