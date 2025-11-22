@@ -5,7 +5,7 @@
 
 import axios, { AxiosError } from 'axios';
 import type { Context } from 'hydrooj';
-import { AIConfigModel } from '../models/aiConfig';
+import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { decrypt } from '../lib/crypto';
 
 /**
@@ -167,11 +167,16 @@ export class OpenAIClient {
  * @returns OpenAI 客户端实例
  * @throws {Error} 如果配置不存在、不完整或 API Key 解密失败
  */
-export async function createOpenAIClientFromConfig(ctx: Context): Promise<OpenAIClient> {
-  const aiConfigModel: AIConfigModel = ctx.get('aiConfigModel');
+export async function createOpenAIClientFromConfig(
+  ctx: Context,
+  existingConfig?: AIConfig | null
+): Promise<OpenAIClient> {
+  let config = existingConfig ?? null;
 
-  // 读取配置
-  const config = await aiConfigModel.getConfig();
+  if (!config) {
+    const aiConfigModel: AIConfigModel = ctx.get('aiConfigModel');
+    config = await aiConfigModel.getConfig();
+  }
 
   if (!config) {
     throw new Error('AI 服务尚未配置，请联系管理员在控制面板中完成配置。');

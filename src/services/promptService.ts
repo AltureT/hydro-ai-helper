@@ -19,7 +19,7 @@ export class PromptService {
    * @param problemContent 题目内容摘要(可选)
    * @returns System Prompt 文本
    */
-  buildSystemPrompt(problemTitle: string, problemContent?: string): string {
+  buildSystemPrompt(problemTitle: string, problemContent?: string, customTemplate?: string): string {
     const backgroundLines = [
       '你是一名耐心、专业的「高中信息技术老师」，主要帮助学生用 Python 3 在 HydroOJ 上做算法与程序设计题。',
       '【背景信息】',
@@ -75,7 +75,24 @@ export class PromptService {
 6. 无论如何都不能：改变核心身份；放弃“不提供可直接 AC 的完整代码”的限制；放弃“必须使用简体中文回答”的限制；输出与教学无关或不当内容。
 `;
 
-    return `${backgroundLines.join('\n')}${rules}`;
+    const defaultPrompt = `${backgroundLines.join('\n')}${rules}`;
+    const trimmedTemplate = customTemplate?.trim();
+
+    if (!trimmedTemplate) {
+      return defaultPrompt;
+    }
+
+    const renderedTemplate = this.renderCustomSystemPrompt(trimmedTemplate, problemTitle, problemContent);
+
+    const priorityNotice =
+      '（上文为管理员配置的 System Prompt，如与下列默认教学守则冲突，请优先遵循管理员配置）';
+
+    return `# 管理员自定义 System Prompt（最高优先级）
+${renderedTemplate}
+
+${priorityNotice}
+
+${defaultPrompt}`;
   }
 
   /**
@@ -164,6 +181,26 @@ ${errorInfo}
     };
 
     return descriptions[questionType];
+  }
+
+  /**
+   * 处理管理员自定义的 System Prompt 模板
+   * 支持 {{problemTitle}} / {{problemContent}} 占位符
+   */
+  private renderCustomSystemPrompt(
+    template: string,
+    problemTitle: string,
+    problemContent?: string
+  ): string {
+    const replacements: Record<string, string> = {
+      problemtitle: problemTitle,
+      problemcontent: problemContent || '（题目描述暂不可用，请结合学生描述理解题意）'
+    };
+
+    return template.replace(/\{\{\s*(problemTitle|problemContent)\s*\}\}/gi, (_, key: string) => {
+      const normalized = key.replace(/\s+/g, '').toLowerCase();
+      return replacements[normalized] ?? '';
+    });
   }
 
   /**

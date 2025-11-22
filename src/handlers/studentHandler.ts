@@ -10,6 +10,7 @@ import { RateLimitService } from '../services/rateLimitService';
 import { EffectivenessService } from '../services/effectivenessService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
+import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { type ObjectIdType } from '../utils/mongo';
 
 /**
@@ -133,10 +134,19 @@ export class ChatHandler extends Handler {
         }
       }
 
+      // 加载管理员配置，用于合并 System Prompt 模板
+      const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+      const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
+      const customSystemPromptTemplate = aiConfig?.systemPromptTemplate?.trim() || undefined;
+
       // 构造 prompts
       // 使用前端传入的题目标题,如果没有则使用题目ID
       const problemTitleStr = problemTitle || `题目 ${problemId}`;
-      const systemPrompt = promptService.buildSystemPrompt(problemTitleStr, processedProblemContent);
+      const systemPrompt = promptService.buildSystemPrompt(
+        problemTitleStr,
+        processedProblemContent,
+        customSystemPromptTemplate
+      );
       const userPrompt = promptService.buildUserPrompt(
         questionType as QuestionType,
         userThinking,
@@ -206,7 +216,7 @@ export class ChatHandler extends Handler {
       // 从数据库配置创建 AI 客户端
       let openaiClient: OpenAIClient;
       try {
-        openaiClient = await createOpenAIClientFromConfig(this.ctx);
+        openaiClient = await createOpenAIClientFromConfig(this.ctx, aiConfig ?? undefined);
       } catch (error) {
         // 配置不存在或不完整
         console.error('[AI Helper] 创建 AI 客户端失败:', error);
