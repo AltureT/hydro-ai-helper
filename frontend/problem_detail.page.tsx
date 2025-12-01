@@ -7,17 +7,34 @@ import React from 'react';
 import * as ReactDOM from 'react-dom';
 import { AIAssistantPanel } from './student/AIAssistantPanel';
 
+// 支持的题目详情页 URL 模式
+const PROBLEM_DETAIL_PATTERNS: RegExp[] = [
+  /^\/p\/([^/]+)/, // 根域题目：/p/D3102
+  /^\/d\/[^/]+\/p\/([^/]+)/, // 域下题目：/d/:domain/p/:pid
+];
+
 /**
  * 判断是否为题目详情页
  */
-const isProblemDetailPage = () => /^\/p\/[^/]+/.test(window.location.pathname);
+const isProblemDetailPage = () => {
+  const pathname = window.location.pathname;
+  return PROBLEM_DETAIL_PATTERNS.some((pattern) => pattern.test(pathname));
+};
 
 /**
  * 从 URL 提取题目 ID
  */
 const extractProblemId = (): string => {
-  const match = window.location.pathname.match(/^\/p\/([^/]+)/);
-  return match ? match[1] : '';
+  const pathname = window.location.pathname;
+
+  for (const pattern of PROBLEM_DETAIL_PATTERNS) {
+    const match = pathname.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return '';
 };
 
 /**
