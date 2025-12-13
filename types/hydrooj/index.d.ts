@@ -1,4 +1,6 @@
 declare module 'hydrooj' {
+  import { Collection, Db } from 'mongodb';
+
   export interface Context {
     Route(name: string, path: string, handler: any, privilege?: any): void;
     [key: string]: any;
@@ -26,4 +28,10 @@ declare module 'hydrooj' {
   };
 
   export const Schema: any;
+
+  export interface DbService {
+    collection<T = any>(name: string): Collection<T>;
+  }
+
+  export const db: DbService;
 }

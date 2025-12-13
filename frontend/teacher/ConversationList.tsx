@@ -12,6 +12,7 @@ import { ExportDialog } from './ExportDialog';
 interface ConversationSummary {
   _id: string;
   userId: number;
+  userName?: string;
   classId?: string;
   problemId: string;
   startTime: string;
@@ -37,6 +38,19 @@ interface ConversationListResponse {
 }
 
 /**
+ * 从 URL query 中解析初始筛选条件
+ */
+function getInitialFiltersFromUrl(): { userId: string } {
+  if (typeof window === 'undefined') {
+    return { userId: '' };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    userId: params.get('userId') || '',
+  };
+}
+
+/**
  * ConversationList 组件
  */
 export const ConversationList: React.FC = () => {
@@ -47,13 +61,14 @@ export const ConversationList: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 筛选条件
+  // 筛选条件（从 URL query 初始化 userId）
+  const initialFilters = getInitialFiltersFromUrl();
   const [filters, setFilters] = useState({
     startDate: '',
     endDate: '',
     problemId: '',
     classId: '',
-    userId: ''
+    userId: initialFilters.userId
   });
 
   // 导出弹窗状态
@@ -111,11 +126,14 @@ export const ConversationList: React.FC = () => {
   };
 
   /**
-   * 组件加载时获取数据
+   * 组件加载时获取数据（包括初始 URL 筛选条件）
    */
   useEffect(() => {
     loadConversations();
   }, [page]); // 页码变化时重新加载
+
+  // 初始加载时立即执行一次（带 URL query 参数）
+  // 注意：上面的 useEffect 已经会在组件首次渲染时执行
 
   /**
    * 处理筛选表单提交
@@ -244,7 +262,7 @@ export const ConversationList: React.FC = () => {
               <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px' }}>
                 <thead>
                   <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生 ID</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>班级</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>开始时间</th>
@@ -256,7 +274,9 @@ export const ConversationList: React.FC = () => {
                 <tbody>
                   {conversations.map(conv => (
                     <tr key={conv._id} style={{ borderBottom: '1px solid #ccc' }}>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.userId}</td>
+                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
+                        {conv.userName ? `${conv.userName} (${conv.userId})` : `#${conv.userId}`}
+                      </td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.classId || '-'}</td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>
                         {conv.metadata?.problemTitle || conv.problemId}

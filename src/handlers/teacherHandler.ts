@@ -3,7 +3,7 @@
  * 处理教师查看对话列表和详情的请求
  */
 
-import { Handler, PRIV } from 'hydrooj';
+import { Handler, PRIV, db } from 'hydrooj';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { ObjectId } from '../utils/mongo';
@@ -11,11 +11,49 @@ import { setJsonResponse, setErrorResponse, setTemplateResponse, expectsJson } f
 import { parsePaginationParams } from '../lib/queryHelpers';
 
 /**
+ * 批量获取用户名映射
+ * @param uids 用户 ID 数组
+ * @returns uid -> uname 映射表
+ */
+async function getUserNameMap(uids: number[]): Promise<Map<number, string>> {
+  const uniqueUids = [...new Set(uids)];
+  const userMap = new Map<number, string>();
+
+  if (uniqueUids.length === 0) {
+    return userMap;
+  }
+
+  try {
+    // 直接使用 HydroOJ db 访问 user 集合
+    const userColl = db.collection('user');
+    const users = await userColl.find({ _id: { $in: uniqueUids } }).toArray();
+    for (const user of users) {
+      userMap.set(user._id as number, (user as any).uname || '已删除用户');
+    }
+    // 对于不存在的用户，设置默认值
+    for (const uid of uniqueUids) {
+      if (!userMap.has(uid)) {
+        userMap.set(uid, '已删除用户');
+      }
+    }
+  } catch (err) {
+    console.error('[AI Helper] Failed to fetch user names:', err);
+    // 出错时全部使用默认值
+    for (const uid of uniqueUids) {
+      userMap.set(uid, '已删除用户');
+    }
+  }
+
+  return userMap;
+}
+
+/**
  * 对话概要接口
  */
 interface ConversationSummary {
   _id: string;
   userId: number;
+  userName: string;
   classId?: string;
   problemId: string;
   startTime: string;
@@ -93,10 +131,15 @@ export class ConversationListHandler extends Handler {
         limitNum
       );
 
+      // 批量获取用户名（避免 N+1 查询）
+      const uids = conversations.map(conv => conv.userId);
+      const userNameMap = await getUserNameMap(uids);
+
       // 转换为响应格式
       const conversationSummaries: ConversationSummary[] = conversations.map(conv => ({
         _id: conv._id.toString(),
         userId: conv.userId,
+        userName: userNameMap.get(conv.userId) || '已删除用户',
         classId: conv.classId,
         problemId: conv.problemId,
         startTime: conv.startTime.toISOString(),
@@ -178,9 +221,14 @@ export class ConversationDetailHandler extends Handler {
         metadata: msg.metadata
       }));
 
+      // 获取用户名
+      const userNameMap = await getUserNameMap([conversation.userId]);
+      const userName = userNameMap.get(conversation.userId) || '已删除用户';
+
       const conversationData = {
         _id: conversation._id.toString(),
         userId: conversation.userId,
+        userName,
         classId: conversation.classId,
         problemId: conversation.problemId,
         startTime: conversation.startTime.toISOString(),

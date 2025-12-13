@@ -210,6 +210,7 @@ export const AnalyticsPage: React.FC = () => {
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话占比</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>平均轮数</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>最近使用时间</th>
+              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -223,6 +224,19 @@ export const AnalyticsPage: React.FC = () => {
                   {item.avgMessageCount != null ? formatNumber(item.avgMessageCount) : '-'}
                 </td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatDateTime(item.lastUsedAt)}</td>
+                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
+                  <a
+                    href={`/ai-helper/conversations?userId=${item.key}`}
+                    style={{
+                      color: '#6366f1',
+                      textDecoration: 'none',
+                      fontWeight: 500,
+                    }}
+                    title={`查看学生 ${item.key} 的对话记录`}
+                  >
+                    查看对话
+                  </a>
+                </td>
               </tr>
             ))}
           </tbody>
