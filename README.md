@@ -70,12 +70,12 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 ### 示例截图
 
 - 学生端浮动面板与题目联动示例：
-
-  ![学生端示例](https://github-production-user-asset-6210df.s3.amazonaws.com/39414692/347127857-a606452d-999a-4d2a-801c-b0d441430e6c.png)
+  ![学生端示例](assets/screenshots/1.png)
 
 - 管理端控制面板入口位置示例：
 
-  ![管理端示例](https://github-production-user-asset-6210df.s3.amazonaws.com/39414692/347127863-8874c765-5235-4575-84a9-63a4340a0707.png)
+  ![管理端示例](assets/screenshots/2.png)
+
 
 ## 项目结构
 
