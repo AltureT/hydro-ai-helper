@@ -43,6 +43,10 @@ if [ "${RUN_INVALID_DATE_CHECK:-0}" != "0" ]; then
     -H "Cookie: $COOKIE" \
     -H "Accept: application/json")
   echo "Invalid date check status (expected 400): ${invalid_status}"
+  if [ "${invalid_status}" != "400" ]; then
+    echo "Unexpected status for invalid date: ${invalid_status}" >&2
+    exit 1
+  fi
 fi
 
 echo "[Done] conversation list fetched."
