@@ -40,6 +40,9 @@ export HYDRO_AI_API_KEY="sk-REPLACE-ME"
 export HYDRO_AI_RATE_LIMIT=5
 export HYDRO_AI_TIMEOUT=30
 
+# 学生端默认频率限制为每分钟 5 次，跑示例时可在脚本间留出时间或临时调高
+# `HYDRO_AI_RATE_LIMIT` 配置，以避免意外触发 429。
+
 # 依次执行核心链路
 ./01-admin-config-set.sh
 ./02-student-chat.sh
@@ -80,4 +83,4 @@ export HYDRO_AI_TIMEOUT=30
 --------
 - 真实测试时请替换 `HYDRO_AI_API_KEY` 为有效 Key 或指向可用的 mock 服务；切勿将真实 Key 保存在仓库。
 - 如果已存在历史会话，可设置 `HYDRO_CONVERSATION_ID` 跳过新建对话。
-- 默认频率限制（学生端）为每分钟 1 次，请在 1 分钟内避免重复调用，以免收到 429。
+- 默认频率限制（学生端）为每分钟 5 次，建议控制调用节奏或调高测试环境限额，避免出现 429。
