@@ -67,6 +67,16 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 - **统计分析**：控制面板 → AI 使用统计（`/ai-helper/analytics`）
 - **数据导出**：对话列表页点击"导出数据"
 
+### 示例截图
+
+- 学生端浮动面板与题目联动示例：
+
+  ![学生端示例](assets/screenshots/student-example.svg)
+
+- 管理端控制面板入口位置示例：
+
+  ![管理端示例](assets/screenshots/admin-panel.svg)
+
 ## 项目结构
 
 ```
