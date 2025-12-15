@@ -1,9 +1,0 @@
-<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
-  <rect width="100%" height="100%" fill="#f5f7fa"/>
-  <rect x="40" y="40" width="1200" height="640" fill="none" stroke="#3464a4" stroke-width="4" rx="12"/>
-  <text x="70" y="110" font-size="36" font-family="Arial, sans-serif" fill="#223344">学生端 AI 面板示例</text>
-  <text x="90" y="180" font-size="28" font-family="Arial, sans-serif" fill="#223344">• 题目内容自动读取到输入框，右下角浮动面板</text>
-  <text x="90" y="230" font-size="28" font-family="Arial, sans-serif" fill="#223344">• 需选择问题类型并描述思路，引导而非直接给答案</text>
-  <text x="90" y="280" font-size="28" font-family="Arial, sans-serif" fill="#223344">• 可附带代码段，历史多轮对话展示在面板中</text>
-  <text x="90" y="350" font-size="24" font-family="Arial, sans-serif" fill="#506070">(示意图，仅供说明)</text>
-</svg>
