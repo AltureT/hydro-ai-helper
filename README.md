@@ -91,6 +91,10 @@ npm run build    # 构建
 npm run lint     # 代码检查
 ```
 
+## 关于本项目
+
+本项目是 [HydroOJ](https://github.com/hydro-dev/Hydro) 开源在线评测系统的第三方插件，由 AI 辅助开发完成。如有问题或建议，欢迎提交 Issue。
+
 ## 许可证
 
 MIT License
