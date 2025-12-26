@@ -1,55 +1,13 @@
 /**
  * 教师端对话详情组件
  * 显示单个会话的完整对话内容,支持 Markdown 渲染 (只读)
- * 使用 HydroOJ 官方方案：POST /markdown + vjContentNew + Prism.js
+ * 使用 markdown-it + highlight.js 实现代码高亮（与学生端一致）
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-
-// 声明 HydroOJ 前端全局 API
-declare const vjContentNew: (container: HTMLElement) => void;
-
-/**
- * 调用 HydroOJ 后端渲染 Markdown
- * @param markdown Markdown 文本
- * @returns 渲染后的 HTML
- */
-async function renderMarkdownViaAPI(markdown: string): Promise<string> {
-  try {
-    const response = await fetch('/markdown', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ text: markdown }),
-    });
-
-    if (!response.ok) {
-      console.error('[AI Helper] Markdown API failed:', response.status);
-      // 降级处理：简单转义 HTML
-      return escapeHtml(markdown);
-    }
-
-    const data = await response.json();
-    return data.html || data.text || escapeHtml(markdown);
-  } catch (err) {
-    console.error('[AI Helper] Markdown render error:', err);
-    return escapeHtml(markdown);
-  }
-}
-
-/**
- * HTML 转义（降级方案）
- */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;')
-    .replace(/\n/g, '<br>');
-}
+import React, { useState, useEffect, useMemo } from 'react';
+import MarkdownIt from 'markdown-it';
+import hljs from 'highlight.js';
+import 'highlight.js/styles/github.css';
 
 /**
  * 对话接口
@@ -105,54 +63,37 @@ interface ConversationDetailProps {
 }
 
 /**
+ * 创建 Markdown 渲染器（带代码高亮）
+ */
+function createMarkdownRenderer(): MarkdownIt {
+  return new MarkdownIt({
+    html: false, // 禁用 HTML 标签（安全考虑）
+    linkify: true, // 自动将 URL 转为链接
+    typographer: true, // 启用排版优化
+    highlight: (str, lang) => {
+      if (lang && hljs.getLanguage(lang)) {
+        try {
+          return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
+        } catch (err) {
+          console.error('[AI Helper] Highlight.js error:', err);
+        }
+      }
+      return ''; // 使用默认转义
+    }
+  });
+}
+
+/**
  * MarkdownContent 子组件
- * 使用 HydroOJ 官方 /markdown API + vjContentNew 渲染 Markdown
+ * 使用 markdown-it + highlight.js 渲染 Markdown（与学生端一致）
  */
 const MarkdownContent: React.FC<{ content: string; className?: string }> = ({ content, className }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [html, setHtml] = useState<string>('');
-  const [renderError, setRenderError] = useState<boolean>(false);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const render = async () => {
-      try {
-        const renderedHtml = await renderMarkdownViaAPI(content);
-        if (!cancelled) {
-          setHtml(renderedHtml);
-          setRenderError(false);
-        }
-      } catch (err) {
-        console.error('[AI Helper] Markdown render failed:', err);
-        if (!cancelled) {
-          setHtml(escapeHtml(content));
-          setRenderError(true);
-        }
-      }
-    };
-
-    render();
-    return () => { cancelled = true; };
-  }, [content]);
-
-  // 当 HTML 更新后，调用 vjContentNew 激活 Prism.js 高亮
-  useEffect(() => {
-    if (html && containerRef.current) {
-      try {
-        if (typeof vjContentNew === 'function') {
-          vjContentNew(containerRef.current);
-        }
-      } catch (err) {
-        console.warn('[AI Helper] vjContentNew failed:', err);
-      }
-    }
-  }, [html]);
+  const md = useMemo(() => createMarkdownRenderer(), []);
+  const html = useMemo(() => md.render(content), [md, content]);
 
   return (
     <div
-      ref={containerRef}
-      className={`vjContentNew ${className || ''}`}
+      className={`markdown-body ${className || ''}`}
       style={{ lineHeight: '1.6', color: '#1f2937' }}
       dangerouslySetInnerHTML={{ __html: html }}
     />

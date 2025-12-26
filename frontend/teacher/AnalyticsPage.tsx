@@ -3,7 +3,7 @@
  * 显示 AI 学习助手的使用统计信息（按班级/题目/学生维度）
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 /**
  * 统计维度类型
@@ -36,19 +36,49 @@ interface AnalyticsResponse {
 }
 
 /**
+ * 从 URL query 解析初始筛选参数
+ */
+function getInitialFiltersFromUrl(): {
+  startDate: string;
+  endDate: string;
+  classId: string;
+  problemId: string;
+  userId: string;
+} {
+  if (typeof window === 'undefined') {
+    return { startDate: '', endDate: '', classId: '', problemId: '', userId: '' };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    startDate: params.get('startDate') || '',
+    endDate: params.get('endDate') || '',
+    classId: params.get('classId') || '',
+    problemId: params.get('problemId') || '',
+    userId: params.get('userId') || '',
+  };
+}
+
+/**
  * AnalyticsPage 组件
  */
 export const AnalyticsPage: React.FC = () => {
+  // 从 URL 获取初始筛选条件
+  const initialFilters = getInitialFiltersFromUrl();
+
   // 状态管理
   const [dimension, setDimension] = useState<Dimension>('class');
-  const [startDate, setStartDate] = useState<string>('');
-  const [endDate, setEndDate] = useState<string>('');
-  const [classId, setClassId] = useState<string>('');
-  const [problemId, setProblemId] = useState<string>('');
+  const [startDate, setStartDate] = useState<string>(initialFilters.startDate);
+  const [endDate, setEndDate] = useState<string>(initialFilters.endDate);
+  const [classId, setClassId] = useState<string>(initialFilters.classId);
+  const [problemId, setProblemId] = useState<string>(initialFilters.problemId);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
+
+  // 如果 URL 带有筛选参数，组件加载时自动查询
+  const hasInitialFilters = initialFilters.startDate || initialFilters.endDate ||
+                           initialFilters.classId || initialFilters.problemId;
 
   /**
    * 调用统计 API
@@ -84,6 +114,13 @@ export const AnalyticsPage: React.FC = () => {
       setLoading(false);
     }
   };
+
+  // 组件加载时，如果 URL 带有筛选参数则自动查询
+  useEffect(() => {
+    if (hasInitialFilters) {
+      fetchData();
+    }
+  }, []); // 仅在组件挂载时执行一次
 
   /**
    * 格式化百分比

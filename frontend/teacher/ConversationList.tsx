@@ -173,22 +173,50 @@ export const ConversationList: React.FC = () => {
       <form onSubmit={handleFilterSubmit} style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
           <h3 style={{ margin: 0 }}>筛选条件</h3>
-          <button
-            type="button"
-            onClick={() => setExportDialogOpen(true)}
-            style={{
-              padding: '8px 16px',
-              fontSize: '14px',
-              fontWeight: 500,
-              color: '#ffffff',
-              backgroundColor: '#10b981',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-            }}
-          >
-            导出数据
-          </button>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              type="button"
+              onClick={() => {
+                // 构造带筛选参数的统计页 URL
+                const params = new URLSearchParams();
+                if (filters.startDate) params.append('startDate', filters.startDate);
+                if (filters.endDate) params.append('endDate', filters.endDate);
+                if (filters.classId) params.append('classId', filters.classId);
+                if (filters.problemId) params.append('problemId', filters.problemId);
+                if (filters.userId) params.append('userId', filters.userId);
+                const queryString = params.toString();
+                window.location.href = `/ai-helper/analytics${queryString ? `?${queryString}` : ''}`;
+              }}
+              style={{
+                padding: '8px 16px',
+                fontSize: '14px',
+                fontWeight: 500,
+                color: '#ffffff',
+                backgroundColor: '#6366f1',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+              }}
+            >
+              查看统计
+            </button>
+            <button
+              type="button"
+              onClick={() => setExportDialogOpen(true)}
+              style={{
+                padding: '8px 16px',
+                fontSize: '14px',
+                fontWeight: 500,
+                color: '#ffffff',
+                backgroundColor: '#10b981',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+              }}
+            >
+              导出数据
+            </button>
+          </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' }}>
           <div>
