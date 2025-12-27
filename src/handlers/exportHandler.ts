@@ -11,10 +11,15 @@ import { ExportService, ConversationExportFilters, ConversationExportOptions } f
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
  * GET /ai-helper/export?format=csv&startDate=...&endDate=...&classId=...&problemId=...&userId=...&includeSensitive=false
+ * GET /d/:domainId/ai-helper/export?format=csv&...
  */
 export class ExportHandler extends Handler {
   async get() {
     try {
+      // 获取当前域 ID（用于域隔离）
+      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
+      console.log('[ExportHandler] Domain isolation - domainId:', domainId);
+
       // 1. 解析查询参数
       const {
         format = 'csv',
@@ -39,8 +44,10 @@ export class ExportHandler extends Handler {
         return;
       }
 
-      // 3. 构造筛选条件
-      const filters: ConversationExportFilters = {};
+      // 3. 构造筛选条件（始终包含 domainId 以实现域隔离）
+      const filters: ConversationExportFilters = {
+        domainId  // 域隔离：只导出当前域的数据
+      };
 
       if (startDate) {
         try {

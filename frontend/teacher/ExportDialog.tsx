@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { buildApiUrl } from '../utils/domainUtils';
 
 /**
  * 导出对话框 Props 接口
@@ -52,9 +53,9 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
     // 3. 添加敏感信息选项
     params.includeSensitive = includeSensitive ? 'true' : 'false';
 
-    // 4. 构造导出 URL
+    // 4. 构造导出 URL（使用域前缀）
     const query = new URLSearchParams(params).toString();
-    const url = `/ai-helper/export?${query}`;
+    const url = buildApiUrl(`/ai-helper/export?${query}`);
 
     console.log('[ExportDialog] Exporting with URL:', url);
 

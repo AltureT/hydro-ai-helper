@@ -8,9 +8,14 @@ import * as ReactDOM from 'react-dom';
 import AnalyticsPage from './teacher/AnalyticsPage';
 
 /**
- * 检查是否为 AI 使用统计页面
+ * T025: 检查是否为 AI 使用统计页面
+ * 支持: /ai-helper/analytics 和 /d/:domainId/ai-helper/analytics
  */
-const isAnalyticsPage = () => window.location.pathname === '/ai-helper/analytics';
+const isAnalyticsPage = () => {
+  const pathname = window.location.pathname;
+  return pathname === '/ai-helper/analytics' ||
+    /^\/d\/[^/]+\/ai-helper\/analytics$/.test(pathname);
+};
 
 /**
  * 将统计页面挂载到模板提供的根节点

@@ -52,13 +52,17 @@ export class ChatHandler extends Handler {
       // 获取当前用户 ID（尽早获取，用于频率限制检查）
       const userId = this.user._id;
 
-      // 调试日志：确认 userId 的值和类型
-      console.log('[ChatHandler] Rate limit check - userId:', userId, 'type:', typeof userId);
+      // 获取当前域 ID（用于域隔离）
+      // 优先从路由参数获取，其次从 HydroOJ 的 domain 上下文获取
+      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
+
+      // 调试日志：确认 userId 和 domainId 的值和类型
+      console.log('[ChatHandler] Rate limit check - domainId:', domainId, 'userId:', userId, 'type:', typeof userId);
 
       // 频率限制检查（在任何 AI 请求调用之前执行）
       const DEFAULT_RATE_LIMIT_PER_MINUTE = 1;  // 临时改为 1 方便测试
       const rateLimitService = new RateLimitService(this.ctx);
-      const allowed = await rateLimitService.checkAndIncrement(userId, DEFAULT_RATE_LIMIT_PER_MINUTE);
+      const allowed = await rateLimitService.checkAndIncrement(domainId, userId, DEFAULT_RATE_LIMIT_PER_MINUTE);
 
       console.log('[ChatHandler] Rate limit result - allowed:', allowed);
 
@@ -196,6 +200,7 @@ export class ChatHandler extends Handler {
         // 创建新会话
         const now = new Date();
         currentConversationId = await conversationModel.create({
+          domainId,
           userId,
           problemId,
           classId: undefined, // TODO: 从用户信息获取班级 ID

@@ -12,6 +12,7 @@ import { type ObjectIdType } from '../utils/mongo';
  */
 export interface RateLimitRecord {
   _id?: ObjectIdType;       // MongoDB ObjectId
+  domainId: string;         // 域 ID (用于多租户隔离)
   userId: number;           // 用户 ID（与 HydroOJ 用户系统保持一致）
   minuteKey: string;        // 形如 "2025-11-18T09:32" 的分钟粒度时间键
   count: number;            // 当前分钟内已请求次数
@@ -43,13 +44,19 @@ export class RateLimitRecordModel {
       }
     );
 
-    // 创建复合唯一索引：userId + minuteKey（确保每个用户每分钟只有一条记录）
+    // 创建复合唯一索引：domainId + userId + minuteKey（确保每个域内每个用户每分钟只有一条记录）
     await this.collection.createIndex(
-      { userId: 1, minuteKey: 1 },
+      { domainId: 1, userId: 1, minuteKey: 1 },
       {
-        name: 'idx_userId_minuteKey',
+        name: 'idx_domainId_userId_minuteKey',
         unique: true
       }
+    );
+
+    // 创建索引: 域 ID (用于域隔离查询)
+    await this.collection.createIndex(
+      { domainId: 1 },
+      { name: 'idx_domainId' }
     );
 
     console.log('[RateLimitRecordModel] Indexes created successfully');
