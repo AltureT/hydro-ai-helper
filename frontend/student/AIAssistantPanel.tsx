@@ -8,6 +8,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
+import { buildApiUrl } from '../utils/domainUtils';
 
 /**
  * 问题类型选项
@@ -31,6 +32,19 @@ interface ProblemInfo {
 /**
  * AI 助手面板组件
  */
+/**
+ * T039: 声明 Monaco Editor 全局类型
+ * HydroOJ Scratchpad 使用 Monaco Editor
+ */
+declare global {
+  interface Window {
+    editor?: {
+      getValue: (options?: { lineEnding?: string; preserveBOM?: boolean }) => string;
+    };
+    monaco?: unknown;
+  }
+}
+
 export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId }) => {
   // 原有业务状态
   const [questionType, setQuestionType] = useState<string>('');
@@ -45,6 +59,9 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   const [problemInfo, setProblemInfo] = useState<ProblemInfo | null>(null);
   const [problemInfoError, setProblemInfoError] = useState<string>('');
   const [manualTitle, setManualTitle] = useState<string>('');
+
+  // T039: Scratchpad 代码自动读取相关状态
+  const [scratchpadAvailable, setScratchpadAvailable] = useState<boolean>(false);
 
   // T007A: 浮动面板 UI 状态
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
@@ -111,6 +128,58 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  /**
+   * T040: 从 Scratchpad 读取代码
+   * 使用 monaco.editor.getModels()[0].getValue() 获取当前编辑器内容
+   */
+  const readFromScratchpad = (): string | null => {
+    try {
+      const monaco = (window as any).monaco;
+      if (monaco?.editor?.getModels) {
+        const models = monaco.editor.getModels();
+        if (models && models.length > 0) {
+          return models[0].getValue();
+        }
+      }
+      return null;
+    } catch (err) {
+      console.error('[AI Helper] Failed to read from Scratchpad:', err);
+      return null;
+    }
+  };
+
+  /**
+   * T046: 当用户勾选"附带当前代码"时，自动读取 Scratchpad 代码
+   * 这样确保读取的是用户当前编辑的最新代码
+   */
+  useEffect(() => {
+    if (includeCode && !code) {
+      // 用户刚勾选，尝试自动读取代码
+      const scratchpadCode = readFromScratchpad();
+      if (scratchpadCode !== null) {
+        setCode(scratchpadCode);
+        setScratchpadAvailable(true);
+        console.log('[AI Helper] Auto-read code from Scratchpad');
+      }
+    }
+  }, [includeCode]);
+
+  /**
+   * T041: 处理"从 Scratchpad 读取代码"按钮点击
+   * 用于手动刷新代码（当用户修改了 Scratchpad 中的代码后）
+   */
+  const handleReadFromScratchpad = () => {
+    const scratchpadCode = readFromScratchpad();
+    if (scratchpadCode !== null) {
+      setCode(scratchpadCode);
+      setScratchpadAvailable(true);
+      setError(null);
+      console.log('[AI Helper] Manual refresh code from Scratchpad');
+    } else {
+      setError('无法读取 Scratchpad 代码，请确保 Scratchpad 编辑器已加载');
+    }
+  };
 
   /**
    * T007A: 拖拽功能 - 标题栏拖拽
@@ -266,8 +335,8 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       const finalProblemTitle = problemInfo?.title || manualTitle || undefined;
       const finalProblemContent = problemInfo?.content || undefined;
 
-      // 调用后端 API
-      const response = await fetch('/ai-helper/chat', {
+      // T022: 调用后端 API（使用域前缀 URL）
+      const response = await fetch(buildApiUrl('/ai-helper/chat'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -747,44 +816,94 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
 
               {includeCode && (
                 <div>
-                  <div style={{
-                    fontSize: '13px',
-                    color: '#6b7280',
-                    marginBottom: '8px'
-                  }}>
-                    请将您的代码粘贴到下方输入框中
-                  </div>
-                  <textarea
-                    value={code}
-                    onChange={(e) => setCode(e.target.value)}
-                    placeholder="// 在此粘贴您的代码..."
+                  {/* T041: 刷新代码按钮 - 用于重新读取 Scratchpad 中的最新代码 */}
+                  <button
+                    type="button"
+                    onClick={handleReadFromScratchpad}
                     style={{
                       width: '100%',
-                      minHeight: '150px',
-                      padding: '8px',
-                      border: `1px solid ${code.length > 5000 ? '#ef4444' : '#6366f1'}`,
-                      borderRadius: '4px',
+                      padding: '10px 16px',
+                      background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '8px',
                       fontSize: '14px',
-                      fontFamily: 'Consolas, Monaco, "Courier New", monospace',
-                      lineHeight: '1.6',
-                      background: '#f9fafb',
-                      resize: 'vertical',
-                      boxSizing: 'border-box'
+                      fontWeight: '500',
+                      cursor: 'pointer',
+                      marginBottom: '10px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      transition: 'all 0.2s ease'
                     }}
-                  />
+                  >
+                    🔄 {code ? '刷新代码' : '读取 Scratchpad 代码'}
+                  </button>
+
+                  {/* T044: 代码预览显示（截断到 500 字符） */}
+                  {code && (
+                    <div style={{
+                      background: '#f9fafb',
+                      border: `1px solid ${code.length > 5000 ? '#ef4444' : '#e5e7eb'}`,
+                      borderRadius: '8px',
+                      padding: '10px',
+                      marginBottom: '8px'
+                    }}>
+                      <div style={{
+                        fontSize: '12px',
+                        color: '#6b7280',
+                        marginBottom: '6px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}>
+                        <span>📝 已读取代码预览</span>
+                        <button
+                          type="button"
+                          onClick={() => setCode('')}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#ef4444',
+                            cursor: 'pointer',
+                            fontSize: '12px',
+                            padding: '2px 6px'
+                          }}
+                        >
+                          ✕ 清除
+                        </button>
+                      </div>
+                      <pre style={{
+                        margin: 0,
+                        fontSize: '12px',
+                        fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-all',
+                        color: '#374151',
+                        maxHeight: '120px',
+                        overflow: 'auto',
+                        lineHeight: '1.4'
+                      }}>
+                        {code.length > 500 ? code.substring(0, 500) + '\n...(已截断预览)' : code}
+                      </pre>
+                    </div>
+                  )}
+
                   {/* 代码长度提示 */}
-                  <div style={{
-                    fontSize: '12px',
-                    marginTop: '6px',
-                    color: code.length > 5000 ? '#ef4444' : '#6b7280',
-                    fontWeight: code.length > 5000 ? 'bold' : 'normal'
-                  }}>
-                    {code.length > 5000 ? (
-                      <>⚠️ 代码过长({code.length} 字符),将截断到 5000 字符</>
-                    ) : (
-                      <>当前代码长度: {code.length} 字符</>
-                    )}
-                  </div>
+                  {code && (
+                    <div style={{
+                      fontSize: '12px',
+                      color: code.length > 5000 ? '#ef4444' : '#6b7280',
+                      fontWeight: code.length > 5000 ? 'bold' : 'normal'
+                    }}>
+                      {code.length > 5000 ? (
+                        <>⚠️ 代码过长({code.length} 字符),将截断到 5000 字符</>
+                      ) : (
+                        <>✓ 代码长度: {code.length} 字符</>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

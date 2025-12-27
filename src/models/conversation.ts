@@ -12,6 +12,7 @@ import { ObjectId, type ObjectIdType } from '../utils/mongo';
  */
 export interface Conversation {
   _id: ObjectIdType;       // 会话唯一标识
+  domainId: string;        // 域 ID (用于多租户隔离)
   userId: number;          // 学生用户 ID
   problemId: string;       // 题目 ID
   classId?: string;        // 班级 ID (可选)
@@ -44,6 +45,30 @@ export class ConversationModel {
    * 优化常用查询性能: 按用户、题目、时间筛选
    */
   async ensureIndexes(): Promise<void> {
+    // 创建索引: 域 ID (用于域隔离查询)
+    await this.collection.createIndex(
+      { domainId: 1 },
+      { name: 'idx_domainId' }
+    );
+
+    // 创建复合索引: 域 ID + 开始时间 (域内按时间排序)
+    await this.collection.createIndex(
+      { domainId: 1, startTime: -1 },
+      { name: 'idx_domainId_startTime' }
+    );
+
+    // 创建复合索引: 域 ID + 用户 ID + 开始时间
+    await this.collection.createIndex(
+      { domainId: 1, userId: 1, startTime: -1 },
+      { name: 'idx_domainId_userId_startTime' }
+    );
+
+    // 创建复合索引: 域 ID + 题目 ID + 开始时间
+    await this.collection.createIndex(
+      { domainId: 1, problemId: 1, startTime: -1 },
+      { name: 'idx_domainId_problemId_startTime' }
+    );
+
     // 创建复合索引: 用户 + 开始时间 (降序)
     await this.collection.createIndex(
       { userId: 1, startTime: -1 },
@@ -150,6 +175,7 @@ export class ConversationModel {
    */
   async findByFilters(
     filters: {
+      domainId?: string;    // 域 ID (用于域隔离)
       startDate?: string;   // 开始日期 (ISO 8601)
       endDate?: string;     // 结束日期
       problemId?: string;   // 题目 ID
@@ -161,6 +187,10 @@ export class ConversationModel {
   ): Promise<{ conversations: Conversation[]; total: number }> {
     // 构造查询条件
     const query: Filter<Conversation> = {};
+
+    if (filters.domainId) {
+      query.domainId = filters.domainId;
+    }
 
     if (filters.userId !== undefined) {
       query.userId = filters.userId;
@@ -192,6 +222,7 @@ export class ConversationModel {
     const skip = (page - 1) * limit;
     const projection: Partial<Record<keyof Conversation, 1 | 0>> = {
       _id: 1,
+      domainId: 1,
       userId: 1,
       classId: 1,
       problemId: 1,

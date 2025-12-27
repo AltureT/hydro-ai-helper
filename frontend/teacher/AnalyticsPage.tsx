@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
 
 /**
  * 统计维度类型
@@ -11,10 +12,11 @@ import React, { useState, useEffect } from 'react';
 type Dimension = 'class' | 'problem' | 'student';
 
 /**
- * 统计项接口（通用）
+ * T029: 统计项接口（通用，包含 displayName）
  */
 interface AnalyticsItem {
   key: string;
+  displayName?: string;  // T029: 友好名称（题目标题或用户名）
   totalConversations: number;
   effectiveConversations: number;
   effectiveRatio: number;
@@ -95,7 +97,7 @@ export const AnalyticsPage: React.FC = () => {
       if (classId) params.set('classId', classId);
       if (problemId) params.set('problemId', problemId);
 
-      const res = await fetch(`/ai-helper/analytics?${params.toString()}`, {
+      const res = await fetch(buildApiUrl(`/ai-helper/analytics?${params.toString()}`), {
         method: 'GET',
         credentials: 'include',
       });
@@ -210,7 +212,7 @@ export const AnalyticsPage: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
           <thead>
             <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-              <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目 ID</th>
+              <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>对话总数</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>使用学生数</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>平均轮数</th>
@@ -221,7 +223,8 @@ export const AnalyticsPage: React.FC = () => {
           <tbody>
             {data.items.map((item, idx) => (
               <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.key || '-'}</td>
+                {/* T030: 显示 displayName（题目标题），fallback 到 key */}
+                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.displayName || item.key || '-'}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.totalConversations}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.studentCount ?? '-'}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>
@@ -241,7 +244,7 @@ export const AnalyticsPage: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
           <thead>
             <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-              <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生 ID</th>
+              <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>对话总数</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话数</th>
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话占比</th>
@@ -253,7 +256,8 @@ export const AnalyticsPage: React.FC = () => {
           <tbody>
             {data.items.map((item, idx) => (
               <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.key || '-'}</td>
+                {/* T030: 显示 displayName（用户名），fallback 到 key */}
+                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.displayName || item.key || '-'}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.totalConversations}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.effectiveConversations}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatPercent(item.effectiveRatio)}</td>
@@ -263,7 +267,7 @@ export const AnalyticsPage: React.FC = () => {
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatDateTime(item.lastUsedAt)}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
                   <a
-                    href={`/ai-helper/conversations?userId=${item.key}`}
+                    href={buildPageUrl(`/ai-helper/conversations?userId=${item.key}`)}
                     style={{
                       color: '#6366f1',
                       textDecoration: 'none',

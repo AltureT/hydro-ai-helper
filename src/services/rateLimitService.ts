@@ -20,11 +20,12 @@ export class RateLimitService {
 
   /**
    * 检查用户是否超过频率限制，并原子性地增加计数
+   * @param domainId 域 ID (用于多租户隔离)
    * @param userId 用户 ID
    * @param limitPerMinute 每分钟最大请求次数
    * @returns 返回 true 表示允许通过，false 表示已超限
    */
-  async checkAndIncrement(userId: number, limitPerMinute: number): Promise<boolean> {
+  async checkAndIncrement(domainId: string, userId: number, limitPerMinute: number): Promise<boolean> {
     try {
       // 1. 获取当前时间并生成分钟粒度的时间键
       const now = new Date();
@@ -34,7 +35,7 @@ export class RateLimitService {
       const expireAt = new Date(now.getTime() + 2 * 60 * 1000);
 
       // 调试日志
-      console.log('[RateLimitService] checkAndIncrement called - userId:', userId, 'minuteKey:', minuteKey, 'limit:', limitPerMinute);
+      console.log('[RateLimitService] checkAndIncrement called - domainId:', domainId, 'userId:', userId, 'minuteKey:', minuteKey, 'limit:', limitPerMinute);
 
       // 3. 获取频率限制记录集合
       const collection = getRateLimitCollection(this.ctx.db);
@@ -45,11 +46,13 @@ export class RateLimitService {
       // - 返回更新后的文档（returnDocument: 'after'）
       const result = await collection.findOneAndUpdate(
         {
+          domainId,
           userId,
           minuteKey
         },
         {
           $setOnInsert: {
+            domainId,
             expireAt
           },
           $inc: {
@@ -68,7 +71,7 @@ export class RateLimitService {
       // 兼容处理：部分环境下 findOneAndUpdate 可能不返回 value（老驱动忽略 returnDocument）
       let updatedRecord = result?.value;
       if (!updatedRecord) {
-        updatedRecord = await collection.findOne({ userId, minuteKey });
+        updatedRecord = await collection.findOne({ domainId, userId, minuteKey });
         if (!updatedRecord) {
           console.log('[RateLimitService] WARNING: findOneAndUpdate returned null and fallback findOne failed, allowing request');
           this.ctx.logger.warn('RateLimitService: findOneAndUpdate returned null and fallback findOne failed, allowing request');
@@ -84,8 +87,8 @@ export class RateLimitService {
 
       // 6. 记录调试日志（可选，便于排查问题）
       if (!allowed) {
-        console.log('[RateLimitService] Rate limit EXCEEDED for user', userId);
-        this.ctx.logger.info(`RateLimitService: User ${userId} exceeded rate limit (${updatedRecord.count}/${limitPerMinute}) at ${minuteKey}`);
+        console.log('[RateLimitService] Rate limit EXCEEDED for user', userId, 'in domain', domainId);
+        this.ctx.logger.info(`RateLimitService: User ${userId} in domain ${domainId} exceeded rate limit (${updatedRecord.count}/${limitPerMinute}) at ${minuteKey}`);
       }
 
       return allowed;
@@ -99,11 +102,12 @@ export class RateLimitService {
 
   /**
    * 获取用户当前分钟的剩余请求次数（可选功能，供前端显示）
+   * @param domainId 域 ID (用于多租户隔离)
    * @param userId 用户 ID
    * @param limitPerMinute 每分钟最大请求次数
    * @returns 剩余请求次数，如果获取失败则返回 null
    */
-  async getRemainingRequests(userId: number, limitPerMinute: number): Promise<number | null> {
+  async getRemainingRequests(domainId: string, userId: number, limitPerMinute: number): Promise<number | null> {
     try {
       const now = new Date();
       const minuteKey = now.toISOString().slice(0, 16);
@@ -111,6 +115,7 @@ export class RateLimitService {
       const collection = getRateLimitCollection(this.ctx.db);
 
       const record = await collection.findOne({
+        domainId,
         userId,
         minuteKey
       });

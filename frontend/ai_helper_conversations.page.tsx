@@ -12,9 +12,14 @@ import * as ReactDOM from 'react-dom';
 import ConversationList from './teacher/ConversationList';
 
 /**
- * 检查是否为对话列表页
+ * T024: 检查是否为对话列表页
+ * 支持: /ai-helper/conversations 和 /d/:domainId/ai-helper/conversations
  */
-const isConversationsPage = () => window.location.pathname === '/ai-helper/conversations';
+const isConversationsPage = () => {
+  const pathname = window.location.pathname;
+  return pathname === '/ai-helper/conversations' ||
+    /^\/d\/[^/]+\/ai-helper\/conversations$/.test(pathname);
+};
 
 /**
  * 将对话列表挂载到模板提供的根节点

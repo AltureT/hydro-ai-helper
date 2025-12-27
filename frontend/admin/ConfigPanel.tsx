@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { VersionBadge } from './VersionBadge';
 
 /**
  * 配置状态接口
@@ -294,6 +295,9 @@ export const ConfigPanel: React.FC = () => {
   return (
     <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '900px', margin: '40px auto 20px' }}>
       <h1>AI 学习助手配置</h1>
+
+      {/* T056: 版本信息徽章 */}
+      <VersionBadge />
 
       {/* 错误提示 */}
       {error && (

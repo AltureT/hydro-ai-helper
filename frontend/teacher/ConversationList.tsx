@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { ExportDialog } from './ExportDialog';
+import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
 
 /**
  * 对话摘要接口
@@ -15,6 +16,7 @@ interface ConversationSummary {
   userName?: string;
   classId?: string;
   problemId: string;
+  problemUrl?: string;  // T033: 题目详情页 URL
   startTime: string;
   endTime: string;
   messageCount: number;
@@ -94,8 +96,8 @@ export const ConversationList: React.FC = () => {
       if (filters.classId) params.append('classId', filters.classId);
       if (filters.userId) params.append('userId', filters.userId);
 
-      // 调用 API (显式设置 Accept 头以获取 JSON 数据)
-      const response = await fetch(`/ai-helper/conversations?${params.toString()}`, {
+      // 调用 API (显式设置 Accept 头以获取 JSON 数据，使用域前缀 URL)
+      const response = await fetch(buildApiUrl(`/ai-helper/conversations?${params.toString()}`), {
         headers: {
           'Accept': 'application/json',
         },
@@ -185,7 +187,7 @@ export const ConversationList: React.FC = () => {
                 if (filters.problemId) params.append('problemId', filters.problemId);
                 if (filters.userId) params.append('userId', filters.userId);
                 const queryString = params.toString();
-                window.location.href = `/ai-helper/analytics${queryString ? `?${queryString}` : ''}`;
+                window.location.href = buildPageUrl(`/ai-helper/analytics${queryString ? `?${queryString}` : ''}`);
               }}
               style={{
                 padding: '8px 16px',
@@ -306,8 +308,22 @@ export const ConversationList: React.FC = () => {
                         {conv.userName ? `${conv.userName} (${conv.userId})` : `#${conv.userId}`}
                       </td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.classId || '-'}</td>
+                      {/* T033/T034: 题目列渲染为超链接，无 URL 时显示为纯文本 */}
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                        {conv.metadata?.problemTitle || conv.problemId}
+                        {conv.problemUrl ? (
+                          <a
+                            href={conv.problemUrl}
+                            style={{ color: '#6366f1', textDecoration: 'none' }}
+                            title={`查看题目 ${conv.problemId}`}
+                          >
+                            {conv.metadata?.problemTitle || conv.problemId}
+                          </a>
+                        ) : (
+                          // T034: 题目不存在时显示为纯文本
+                          <span style={{ color: '#9ca3af' }}>
+                            {conv.metadata?.problemTitle || conv.problemId || '-'}
+                          </span>
+                        )}
                       </td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>{formatDateTime(conv.startTime)}</td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.messageCount}</td>
@@ -316,7 +332,7 @@ export const ConversationList: React.FC = () => {
                       </td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>
                         <a
-                          href={`/ai-helper/conversations/${conv._id}`}
+                          href={buildPageUrl(`/ai-helper/conversations/${conv._id}`)}
                           style={{ color: '#6366f1', textDecoration: 'none' }}
                         >
                           查看详情

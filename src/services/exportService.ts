@@ -12,6 +12,7 @@ import { ConversationModel, Conversation } from '../models/conversation';
  * 导出筛选条件接口
  */
 export interface ConversationExportFilters {
+  domainId?: string;     // 域 ID (用于域隔离)
   startDate?: Date;      // 开始日期 (会话 startTime >= startDate)
   endDate?: Date;        // 结束日期 (会话 startTime <= endDate)
   classId?: string;      // 班级 ID
@@ -63,6 +64,11 @@ export class ExportService {
       tags: 1,
       metadata: 1
     };
+
+    // 域隔离：只导出当前域的数据
+    if (filters.domainId) {
+      query.domainId = filters.domainId;
+    }
 
     // 时间范围筛选
     if (filters.startDate || filters.endDate) {
