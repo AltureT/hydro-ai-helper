@@ -48,8 +48,6 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
   name: 'hydro-ai-helper',
   schema: configSchema,
   async apply(ctx: Context) {
-    console.log('[AI Helper] Plugin loaded successfully');
-
     // 初始化数据库模型
     const db = ctx.db;
     const conversationModel = new ConversationModel(db);
@@ -60,20 +58,16 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const versionCacheModel = new VersionCacheModel(db);
 
     // 创建数据库索引
-    console.log('[AI Helper] Creating database indexes...');
     await conversationModel.ensureIndexes();
     await messageModel.ensureIndexes();
     await rateLimitRecordModel.ensureIndexes();
     await aiConfigModel.ensureIndexes();
     await jailbreakLogModel.ensureIndexes();
     await versionCacheModel.ensureIndexes();
-    console.log('[AI Helper] Database indexes created successfully');
 
     // 执行数据迁移（为历史数据添加 domainId）
-    console.log('[AI Helper] Running data migrations...');
     const migrationService = new MigrationService(db);
     await migrationService.runAllMigrations();
-    console.log('[AI Helper] Data migrations completed');
 
     // 将模型实例注入到 ctx 中,供 Handler 使用
     ctx.provide('conversationModel', conversationModel);
@@ -132,22 +126,6 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // T052: GET /ai-helper/version/check - 版本检测
     ctx.Route('ai_helper_version_check', '/ai-helper/version/check', VersionCheckHandler, VersionCheckHandlerPriv);
     ctx.Route('ai_helper_version_check_domain', '/d/:domainId/ai-helper/version/check', VersionCheckHandler, VersionCheckHandlerPriv);
-
-    console.log('[AI Helper] Routes registered:');
-    console.log('  - GET /ai-helper/hello (test route)');
-    console.log('  - POST /ai-helper/chat (student chat API)');
-    console.log('  - POST /d/:domainId/ai-helper/chat (domain-scoped student chat API)');
-    console.log('  - GET /ai-helper/conversations (teacher conversation list API)');
-    console.log('  - GET /d/:domainId/ai-helper/conversations (domain-scoped conversation list API)');
-    console.log('  - GET /ai-helper/conversations/:id (teacher conversation detail API)');
-    console.log('  - GET /d/:domainId/ai-helper/conversations/:id (domain-scoped conversation detail API)');
-    console.log('  - GET /ai-helper/analytics (teacher analytics page)');
-    console.log('  - GET /d/:domainId/ai-helper/analytics (domain-scoped analytics page)');
-    console.log('  - GET /ai-helper/admin/config (admin config page & JSON API)');
-    console.log('  - GET /ai-helper/export (data export API)');
-    console.log('  - GET /d/:domainId/ai-helper/export (domain-scoped data export API)');
-    console.log('  - POST /ai-helper/admin/test-connection (test AI connection)');
-    console.log('  - GET /ai-helper/version/check (version check API)');
   }
 });
 

@@ -12,6 +12,7 @@ import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { type ObjectIdType } from '../utils/mongo';
+import { getDomainId } from '../utils/domainHelper';
 
 /**
  * 学生对话请求接口
@@ -53,22 +54,15 @@ export class ChatHandler extends Handler {
       const userId = this.user._id;
 
       // 获取当前域 ID（用于域隔离）
-      // 优先从路由参数获取，其次从 HydroOJ 的 domain 上下文获取
-      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
-
-      // 调试日志：确认 userId 和 domainId 的值和类型
-      console.log('[ChatHandler] Rate limit check - domainId:', domainId, 'userId:', userId, 'type:', typeof userId);
+      const domainId = getDomainId(this);
 
       // 频率限制检查（在任何 AI 请求调用之前执行）
       const DEFAULT_RATE_LIMIT_PER_MINUTE = 1;  // 临时改为 1 方便测试
       const rateLimitService = new RateLimitService(this.ctx);
       const allowed = await rateLimitService.checkAndIncrement(domainId, userId, DEFAULT_RATE_LIMIT_PER_MINUTE);
 
-      console.log('[ChatHandler] Rate limit result - allowed:', allowed);
-
       if (!allowed) {
         // 返回 429 + JSON 提示
-        console.log('[ChatHandler] Rate limit exceeded, returning 429');
         const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
         this.response.status = 429;
         this.response.body = {

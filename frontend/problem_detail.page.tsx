@@ -279,17 +279,13 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
  */
 const initAIAssistant = () => {
   if (!isProblemDetailPage()) {
-    console.log('[AI Helper] Not a problem detail page, skipping initialization');
     return;
   }
 
   const problemId = extractProblemId();
   if (!problemId) {
-    console.error('[AI Helper] Failed to extract problem ID from URL');
     return;
   }
-
-  console.log('[AI Helper] Initializing AI Assistant for problem:', problemId);
 
   // 创建容器元素
   const container = document.createElement('div');
@@ -307,11 +303,7 @@ const initAIAssistant = () => {
     root.render(<AIAssistantTrigger problemId={problemId} />);
   } else if (typeof reactDom.render === 'function') {
     reactDom.render(<AIAssistantTrigger problemId={problemId} />, container);
-  } else {
-    console.error('[AI Helper] ReactDOM is missing render/createRoot');
   }
-
-  console.log('[AI Helper] AI Assistant trigger mounted successfully');
 };
 
 // 等待 DOM 加载完成

@@ -7,6 +7,7 @@
 
 import { Handler, PRIV } from 'hydrooj';
 import { ExportService, ConversationExportFilters, ConversationExportOptions } from '../services/exportService';
+import { getDomainId } from '../utils/domainHelper';
 
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
@@ -17,8 +18,7 @@ export class ExportHandler extends Handler {
   async get() {
     try {
       // 获取当前域 ID（用于域隔离）
-      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
-      console.log('[ExportHandler] Domain isolation - domainId:', domainId);
+      const domainId = getDomainId(this);
 
       // 1. 解析查询参数
       const {
@@ -98,9 +98,6 @@ export class ExportHandler extends Handler {
         includeSensitive: includeSensitive === 'true'
       };
 
-      console.log('[ExportHandler] Exporting conversations with filters:', filters);
-      console.log('[ExportHandler] Export options:', options);
-
       // 5. 调用 ExportService 生成 CSV
       const exportService = new ExportService(this.ctx);
       const csv = await exportService.exportConversations(filters, options);
@@ -108,8 +105,6 @@ export class ExportHandler extends Handler {
       // 6. 生成文件名(带时间戳)
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `ai_conversations_${timestamp}.csv`;
-
-      console.log(`[ExportHandler] Generated CSV file: ${filename} (${csv.length} bytes)`);
 
       // 7. 设置响应头并返回 CSV 文件
       this.response.status = 200;

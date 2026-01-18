@@ -34,9 +34,6 @@ export class RateLimitService {
       // 2. 计算过期时间（当前时间 + 2 分钟）
       const expireAt = new Date(now.getTime() + 2 * 60 * 1000);
 
-      // 调试日志
-      console.log('[RateLimitService] checkAndIncrement called - domainId:', domainId, 'userId:', userId, 'minuteKey:', minuteKey, 'limit:', limitPerMinute);
-
       // 3. 获取频率限制记录集合
       const collection = getRateLimitCollection(this.ctx.db);
 
@@ -73,7 +70,6 @@ export class RateLimitService {
       if (!updatedRecord) {
         updatedRecord = await collection.findOne({ domainId, userId, minuteKey });
         if (!updatedRecord) {
-          console.log('[RateLimitService] WARNING: findOneAndUpdate returned null and fallback findOne failed, allowing request');
           this.ctx.logger.warn('RateLimitService: findOneAndUpdate returned null and fallback findOne failed, allowing request');
           return true;
         }
@@ -81,15 +77,6 @@ export class RateLimitService {
 
       // 5. 检查更新后的计数是否超过限制
       const allowed = updatedRecord.count <= limitPerMinute;
-
-      // 调试日志：显示当前计数
-      console.log('[RateLimitService] Current count:', updatedRecord.count, 'limit:', limitPerMinute, 'allowed:', allowed);
-
-      // 6. 记录调试日志（可选，便于排查问题）
-      if (!allowed) {
-        console.log('[RateLimitService] Rate limit EXCEEDED for user', userId, 'in domain', domainId);
-        this.ctx.logger.info(`RateLimitService: User ${userId} in domain ${domainId} exceeded rate limit (${updatedRecord.count}/${limitPerMinute}) at ${minuteKey}`);
-      }
 
       return allowed;
     } catch (err) {

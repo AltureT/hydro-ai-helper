@@ -34,8 +34,6 @@ const renderTeacherConversationDetailPage = () => {
     return;
   }
 
-  console.log('[AI Helper] Mounting ConversationDetail component for conversation:', conversationId);
-
   const reactDom = ReactDOM as unknown as {
     createRoot?: (el: Element | DocumentFragment) => { render: (node: React.ReactNode) => void };
     render?: (node: React.ReactNode, el: Element | DocumentFragment | null) => void;
@@ -46,11 +44,7 @@ const renderTeacherConversationDetailPage = () => {
     root.render(<ConversationDetail conversationId={conversationId} />);
   } else if (typeof reactDom.render === 'function') {
     reactDom.render(<ConversationDetail conversationId={conversationId} />, container);
-  } else {
-    console.error('[AI Helper] ReactDOM is missing render/createRoot');
   }
-
-  console.log('[AI Helper] ConversationDetail component mounted successfully');
 };
 
 // 等待 DOM 加载完成后自动执行

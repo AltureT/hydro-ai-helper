@@ -31,8 +31,6 @@ const renderAnalyticsPage = () => {
     return;
   }
 
-  console.log('[AI Helper] Mounting AnalyticsPage component');
-
   const reactDom = ReactDOM as unknown as {
     createRoot?: (el: Element | DocumentFragment) => { render: (node: React.ReactNode) => void };
     render?: (node: React.ReactNode, el: Element | DocumentFragment | null) => void;
@@ -43,11 +41,7 @@ const renderAnalyticsPage = () => {
     root.render(<AnalyticsPage />);
   } else if (typeof reactDom.render === 'function') {
     reactDom.render(<AnalyticsPage />, container);
-  } else {
-    console.error('[AI Helper] ReactDOM is missing render/createRoot');
   }
-
-  console.log('[AI Helper] AnalyticsPage component mounted successfully');
 };
 
 // 等待 DOM 加载完成后自动执行

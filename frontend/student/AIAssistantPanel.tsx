@@ -214,7 +214,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       if (scratchpadCode !== null) {
         setCode(scratchpadCode);
         setScratchpadAvailable(true);
-        console.log('[AI Helper] Auto-read code from Scratchpad');
       }
     }
   }, [includeCode]);
@@ -229,7 +228,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       setCode(scratchpadCode);
       setScratchpadAvailable(true);
       setError(null);
-      console.log('[AI Helper] Manual refresh code from Scratchpad');
     } else {
       setError('无法读取 Scratchpad 代码，请确保 Scratchpad 编辑器已加载');
     }
@@ -375,8 +373,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    * 提交问题到后端
    */
   const handleSubmit = async () => {
-    console.log('[AI Helper] handleSubmit called, conversationId:', conversationId);
-
     // 首次提问必须选择问题类型，追问时可以复用之前的类型
     const effectiveQuestionType = questionType || (conversationHistory.length > 0 ? 'think' : '');
     if (!effectiveQuestionType) {
@@ -429,8 +425,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       const finalProblemTitle = problemInfo?.title || manualTitle || undefined;
       const finalProblemContent = problemInfo?.content || undefined;
 
-      console.log('[AI Helper] Sending request with conversationId:', conversationId);
-
       // T022: 调用后端 API（使用域前缀 URL）
       const response = await fetch(buildApiUrl('/ai-helper/chat'), {
         method: 'POST',
@@ -455,7 +449,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       }
 
       const data = await response.json();
-      console.log('[AI Helper] Response received, conversationId from server:', data.conversationId);
 
       // 添加 AI 消息到历史
       const aiMessage = {
@@ -469,7 +462,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
 
       // 多轮对话：保存 conversationId
       if (data.conversationId) {
-        console.log('[AI Helper] Setting conversationId to:', data.conversationId);
         setConversationId(data.conversationId);
         try {
           window.localStorage.setItem(`ai_conversation_${problemId}`, data.conversationId);
@@ -516,7 +508,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     if (scratchpadCode !== null) {
       setCode(scratchpadCode);
       setIncludeCode(true);
-      console.log('[AI Helper] Refreshed code from Scratchpad for follow-up');
     } else {
       setError('无法读取 Scratchpad 代码');
     }

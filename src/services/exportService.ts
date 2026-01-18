@@ -93,7 +93,6 @@ export class ExportService {
     }
 
     // 2. 查询所有符合条件的会话记录(按开始时间升序排序)
-    const db = this.ctx.db;
     const collection = this.ctx.db.collection('ai_conversations') as unknown as Collection<Conversation>;
     const cursor = collection
       .find(query, { projection })
@@ -137,7 +136,6 @@ export class ExportService {
     rows.push(headers);
 
     // 数据行
-    let exportedCount = 0;
     for await (const conv of cursor) {
       const row = [
         conv._id.toString(),
@@ -153,10 +151,7 @@ export class ExportService {
         Array.isArray(conv.tags) ? conv.tags.join(';') : ''
       ];
       rows.push(row);
-      exportedCount++;
     }
-
-    console.log(`[ExportService] Exporting ${exportedCount} conversations`);
 
     // 5. 转换为 CSV 字符串
     return this.convertToCsv(rows);

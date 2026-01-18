@@ -5,6 +5,8 @@
 
 import { Handler, PRIV, db } from 'hydrooj';
 import type { Document } from 'mongodb';
+import { getDomainId } from '../utils/domainHelper';
+import type { ProblemDocument, UserDocument } from '../types/hydrooj';
 
 /**
  * 统计项接口（包含可选的 displayName）
@@ -27,7 +29,7 @@ interface AnalyticsItem {
  * @param problemIds 题目 ID 数组（字符串格式，如 "P1000"）
  * @returns problemId -> title 映射表
  */
-async function getProblemTitleMap(domainId: string, problemIds: string[]): Promise<Map<string, string>> {
+async function _getProblemTitleMap(domainId: string, problemIds: string[]): Promise<Map<string, string>> {
   const uniqueIds = [...new Set(problemIds)];
   const titleMap = new Map<string, string>();
 
@@ -57,8 +59,9 @@ async function getProblemTitleMap(domainId: string, problemIds: string[]): Promi
     }).project({ docId: 1, title: 1 }).toArray();
 
     for (const prob of problems) {
-      const docId = prob.docId as number;
-      const title = (prob as any).title || `题目 ${docId}`;
+      const p = prob as ProblemDocument;
+      const docId = p.docId;
+      const title = p.title || `题目 ${docId}`;
       // 存储两种格式的映射
       titleMap.set(String(docId), title);
       titleMap.set(`P${docId}`, title);
@@ -99,7 +102,8 @@ async function getUserNameMap(userIds: number[]): Promise<Map<number, string>> {
     const users = await userColl.find({ _id: { $in: uniqueIds } }).toArray();
 
     for (const user of users) {
-      nameMap.set(user._id as number, (user as any).uname || '已删除用户');
+      const u = user as UserDocument;
+      nameMap.set(u._id, u.uname || '已删除用户');
     }
 
     // 对于不存在的用户，设置默认值
@@ -139,8 +143,7 @@ export class AnalyticsHandler extends Handler {
   async get() {
     try {
       // 获取当前域 ID（用于域隔离）
-      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
-      console.log('[AnalyticsHandler] Domain isolation - domainId:', domainId);
+      const domainId = getDomainId(this);
 
       // 区分 HTML 页面访问与 JSON API 请求
       const accept = this.request.headers.accept || '';

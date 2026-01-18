@@ -13,7 +13,6 @@ const isProblemDetailPage = () => /^\/p\/.+/.test(window.location.pathname);
 
 const initAiHelperBanner = () => {
   if (!isProblemDetailPage()) return;
-  console.log('[AI Helper] Frontend script loaded on problem detail page');
 
   // 创建提示元素
   const notification = document.createElement('div');
@@ -45,15 +44,10 @@ const initAiHelperBanner = () => {
   // 添加到页面
   document.body.appendChild(notification);
 
-  // 控制台输出，便于调试
-  console.log('[AI Helper] Notification displayed');
-
   // 测试后端路由连接
   fetch('/ai-helper/hello')
     .then(response => response.json())
     .then(data => {
-      console.log('[AI Helper] Backend API test:', data);
-
       // 更新提示显示后端连接成功
       const backendStatus = document.createElement('div');
       backendStatus.style.cssText = `
@@ -65,9 +59,7 @@ const initAiHelperBanner = () => {
       backendStatus.textContent = '✓ 后端连接正常';
       notification.appendChild(backendStatus);
     })
-    .catch(error => {
-      console.error('[AI Helper] Backend API test failed:', error);
-
+    .catch(() => {
       // 显示错误信息
       const errorStatus = document.createElement('div');
       errorStatus.style.cssText = `

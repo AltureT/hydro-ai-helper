@@ -34,7 +34,7 @@
   "exclude": [
     "node_modules",
     "dist",
-    "**/*.test.ts"
+    "src/__tests__"
   ],
   "ts-node": {
     "transpileOnly": true

@@ -9,6 +9,8 @@ import { MessageModel } from '../models/message';
 import { ObjectId } from '../utils/mongo';
 import { setJsonResponse, setErrorResponse, setTemplateResponse, expectsJson } from '../lib/httpHelpers';
 import { parsePaginationParams } from '../lib/queryHelpers';
+import { getDomainId } from '../utils/domainHelper';
+import type { UserDocument } from '../types/hydrooj';
 
 /**
  * 批量获取用户名映射
@@ -28,7 +30,8 @@ async function getUserNameMap(uids: number[]): Promise<Map<number, string>> {
     const userColl = db.collection('user');
     const users = await userColl.find({ _id: { $in: uniqueUids } }).toArray();
     for (const user of users) {
-      userMap.set(user._id as number, (user as any).uname || '已删除用户');
+      const u = user as UserDocument;
+      userMap.set(u._id, u.uname || '已删除用户');
     }
     // 对于不存在的用户，设置默认值
     for (const uid of uniqueUids) {
@@ -98,9 +101,7 @@ export class ConversationListHandler extends Handler {
       const conversationModel: ConversationModel = this.ctx.get('conversationModel');
 
       // 获取当前域 ID（用于域隔离）
-      // 优先从路由参数获取，其次从 HydroOJ 的 domain 上下文获取
-      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
-      console.log('[ConversationListHandler] Domain isolation - domainId:', domainId);
+      const domainId = getDomainId(this);
 
       // 从查询参数读取筛选条件
       const {
@@ -229,8 +230,7 @@ export class ConversationDetailHandler extends Handler {
       const messageModel: MessageModel = this.ctx.get('messageModel');
 
       // 获取当前域 ID（用于域隔离验证）
-      const domainId = this.args.domainId || (this as any).domain?._id || 'system';
-      console.log('[ConversationDetailHandler] Domain isolation - domainId:', domainId);
+      const domainId = getDomainId(this);
 
       if (!ObjectId.isValid(id)) {
         setErrorResponse(this, 'INVALID_ID', '无效的会话 ID');
@@ -238,11 +238,9 @@ export class ConversationDetailHandler extends Handler {
       }
 
       // 查询会话详情
-      console.log('[AI Helper] Fetching conversation:', id);
       const conversation = await conversationModel.findById(id);
 
       if (!conversation) {
-        console.log('[AI Helper] Conversation not found:', id);
         setErrorResponse(this, 'NOT_FOUND', '会话不存在', 404);
         return;
       }
@@ -253,17 +251,12 @@ export class ConversationDetailHandler extends Handler {
       // 2. 当前访问域为 'system'（主站访问）时，允许访问所有域的对话
       const conversationDomain = conversation.domainId || 'system';
       if (conversationDomain !== domainId && conversationDomain !== 'system' && domainId !== 'system') {
-        console.log('[AI Helper] Domain mismatch - conversation domain:', conversationDomain, 'current domain:', domainId);
         setErrorResponse(this, 'FORBIDDEN', '无权访问此对话', 403);
         return;
       }
 
-      console.log('[AI Helper] Conversation found, _id type:', typeof conversation._id, conversation._id.constructor.name);
-
       // 查询会话的所有消息 (按时间升序)
-      console.log('[AI Helper] Fetching messages for conversation:', id);
       const messages = await messageModel.findByConversationId(id);
-      console.log('[AI Helper] Found', messages.length, 'messages');
 
       // 转换消息格式
       const messagesFormatted = messages.map(msg => ({

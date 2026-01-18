@@ -107,16 +107,23 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 
 ### 示例截图
 
-- 学生端问答面板与题目联动示例：
-  ![学生端示例](assets/screenshots/1.png)
-  ![学生端示例](assets/screenshots/2.png)
+**学生端问答面板与题目联动示例：**
 
-- 后台管理：
-  ![后台管理示例](assets/screenshots/3.png)
-  ![后台管理示例](assets/screenshots/4.png)
-  ![后台管理示例](assets/screenshots/5.png)
-  ![后台管理示例](assets/screenshots/6.png)
-  ![后台管理示例](assets/screenshots/7.png)
+<img src="assets/screenshots/1.png" alt="学生端示例" width="800">
+
+<img src="assets/screenshots/2.png" alt="学生端示例" width="400">
+
+**后台管理：**
+
+<img src="assets/screenshots/3.png" alt="后台管理示例" width="800">
+
+<img src="assets/screenshots/4.png" alt="后台管理示例" width="800">
+
+<img src="assets/screenshots/5.png" alt="后台管理示例" width="800">
+
+<img src="assets/screenshots/6.png" alt="后台管理示例" width="400">
+
+<img src="assets/screenshots/7.png" alt="后台管理示例" width="500">
 
 ## 项目结构
 
