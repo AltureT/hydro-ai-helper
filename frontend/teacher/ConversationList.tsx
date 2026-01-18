@@ -1,6 +1,7 @@
 /**
  * 教师端对话列表组件
  * 显示所有学生的对话记录,支持筛选和分页
+ * 现代简约风格设计
  */
 
 import React, { useState, useEffect } from 'react';
@@ -16,7 +17,7 @@ interface ConversationSummary {
   userName?: string;
   classId?: string;
   problemId: string;
-  problemUrl?: string;  // T033: 题目详情页 URL
+  problemUrl?: string;
   startTime: string;
   endTime: string;
   messageCount: number;
@@ -27,7 +28,7 @@ interface ConversationSummary {
     problemTitle?: string;
     problemContent?: string;
   };
-  firstMessageSummary?: string;  // T048: 学生首条消息摘要
+  firstMessageSummary?: string;
 }
 
 /**
@@ -43,13 +44,15 @@ interface ConversationListResponse {
 /**
  * 从 URL query 中解析初始筛选条件
  */
-function getInitialFiltersFromUrl(): { userId: string } {
+function getInitialFiltersFromUrl(): { userId: string; classId: string; problemId: string } {
   if (typeof window === 'undefined') {
-    return { userId: '' };
+    return { userId: '', classId: '', problemId: '' };
   }
   const params = new URLSearchParams(window.location.search);
   return {
     userId: params.get('userId') || '',
+    classId: params.get('classId') || '',
+    problemId: params.get('problemId') || '',
   };
 }
 
@@ -64,28 +67,22 @@ export const ConversationList: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 筛选条件（从 URL query 初始化 userId）
   const initialFilters = getInitialFiltersFromUrl();
   const [filters, setFilters] = useState({
     startDate: '',
     endDate: '',
-    problemId: '',
-    classId: '',
+    problemId: initialFilters.problemId,
+    classId: initialFilters.classId,
     userId: initialFilters.userId
   });
 
-  // 导出弹窗状态
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
-  /**
-   * 加载对话列表
-   */
   const loadConversations = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      // 构造查询参数
       const params = new URLSearchParams({
         page: page.toString(),
         limit: limit.toString()
@@ -97,7 +94,6 @@ export const ConversationList: React.FC = () => {
       if (filters.classId) params.append('classId', filters.classId);
       if (filters.userId) params.append('userId', filters.userId);
 
-      // 调用 API (显式设置 Accept 头以获取 JSON 数据，使用域前缀 URL)
       const response = await fetch(buildApiUrl(`/ai-helper/conversations?${params.toString()}`), {
         headers: {
           'Accept': 'application/json',
@@ -128,35 +124,20 @@ export const ConversationList: React.FC = () => {
     }
   };
 
-  /**
-   * 组件加载时获取数据（包括初始 URL 筛选条件）
-   */
   useEffect(() => {
     loadConversations();
-  }, [page]); // 页码变化时重新加载
+  }, [page]);
 
-  // 初始加载时立即执行一次（带 URL query 参数）
-  // 注意：上面的 useEffect 已经会在组件首次渲染时执行
-
-  /**
-   * 处理筛选表单提交
-   */
   const handleFilterSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setPage(1); // 重置到第一页
+    setPage(1);
     loadConversations();
   };
 
-  /**
-   * 处理筛选条件变化
-   */
   const handleFilterChange = (field: string, value: string) => {
     setFilters(prev => ({ ...prev, [field]: value }));
   };
 
-  /**
-   * 格式化日期时间
-   */
   const formatDateTime = (isoString: string): string => {
     const date = new Date(isoString);
     return date.toLocaleString('zh-CN', {
@@ -168,19 +149,59 @@ export const ConversationList: React.FC = () => {
     });
   };
 
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '10px 12px',
+    borderRadius: '8px',
+    border: '1px solid #e5e7eb',
+    fontSize: '14px',
+    backgroundColor: '#f9fafb',
+    color: '#1f2937'
+  };
+
+  const labelStyle: React.CSSProperties = {
+    display: 'block',
+    marginBottom: '8px',
+    fontWeight: 500,
+    fontSize: '14px',
+    color: '#374151'
+  };
+
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1>AI 学习助手 - 对话记录</h1>
+    <div style={{
+      padding: '32px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      backgroundColor: '#f8fafc',
+      minHeight: '100vh'
+    }}>
+      {/* 页面标题 - 浅色简约风格 */}
+      <div style={{
+        marginBottom: '32px',
+        padding: '24px 32px',
+        background: '#ffffff',
+        borderRadius: '12px',
+        border: '1px solid #e5e7eb',
+        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
+      }}>
+        <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>💬 对话记录</h1>
+        <p style={{ margin: '8px 0 0', color: '#6b7280', fontSize: '14px' }}>查看和管理学生与 AI 助手的对话记录</p>
+      </div>
 
       {/* 筛选表单 */}
-      <form onSubmit={handleFilterSubmit} style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-          <h3 style={{ margin: 0 }}>筛选条件</h3>
-          <div style={{ display: 'flex', gap: '10px' }}>
+      <form onSubmit={handleFilterSubmit} style={{
+        marginBottom: '24px',
+        padding: '24px',
+        backgroundColor: '#ffffff',
+        borderRadius: '12px',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+        border: '1px solid #e5e7eb'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>筛选条件</h3>
+          <div style={{ display: 'flex', gap: '12px' }}>
             <button
               type="button"
               onClick={() => {
-                // 构造带筛选参数的统计页 URL
                 const params = new URLSearchParams();
                 if (filters.startDate) params.append('startDate', filters.startDate);
                 if (filters.endDate) params.append('endDate', filters.endDate);
@@ -191,209 +212,331 @@ export const ConversationList: React.FC = () => {
                 window.location.href = buildPageUrl(`/ai-helper/analytics${queryString ? `?${queryString}` : ''}`);
               }}
               style={{
-                padding: '8px 16px',
+                padding: '10px 20px',
                 fontSize: '14px',
-                fontWeight: 500,
+                fontWeight: 600,
                 color: '#ffffff',
-                backgroundColor: '#6366f1',
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                 border: 'none',
-                borderRadius: '6px',
+                borderRadius: '8px',
                 cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(102, 126, 234, 0.3)'
               }}
             >
-              查看统计
+              📊 查看统计
             </button>
             <button
               type="button"
               onClick={() => setExportDialogOpen(true)}
               style={{
-                padding: '8px 16px',
+                padding: '10px 20px',
                 fontSize: '14px',
-                fontWeight: 500,
+                fontWeight: 600,
                 color: '#ffffff',
-                backgroundColor: '#10b981',
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
                 border: 'none',
-                borderRadius: '6px',
+                borderRadius: '8px',
                 cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(16, 185, 129, 0.3)'
               }}
             >
-              导出数据
+              📥 导出数据
             </button>
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
           <div>
-            <label>开始日期:</label>
+            <label style={labelStyle}>开始日期</label>
             <input
               type="date"
               value={filters.startDate}
               onChange={(e) => handleFilterChange('startDate', e.target.value)}
-              style={{ width: '100%', padding: '5px', borderRadius: '4px', border: '1px solid #ccc' }}
+              style={inputStyle}
             />
           </div>
           <div>
-            <label>结束日期:</label>
+            <label style={labelStyle}>结束日期</label>
             <input
               type="date"
               value={filters.endDate}
               onChange={(e) => handleFilterChange('endDate', e.target.value)}
-              style={{ width: '100%', padding: '5px', borderRadius: '4px', border: '1px solid #ccc' }}
+              style={inputStyle}
             />
           </div>
           <div>
-            <label>题目 ID:</label>
+            <label style={labelStyle}>题目 ID</label>
             <input
               type="text"
               value={filters.problemId}
               onChange={(e) => handleFilterChange('problemId', e.target.value)}
               placeholder="如: P1000"
-              style={{ width: '100%', padding: '5px', borderRadius: '4px', border: '1px solid #ccc' }}
+              style={inputStyle}
             />
           </div>
           <div>
-            <label>班级 ID:</label>
+            <label style={labelStyle}>班级 ID</label>
             <input
               type="text"
               value={filters.classId}
               onChange={(e) => handleFilterChange('classId', e.target.value)}
               placeholder="班级 ID"
-              style={{ width: '100%', padding: '5px', borderRadius: '4px', border: '1px solid #ccc' }}
+              style={inputStyle}
             />
           </div>
           <div>
-            <label>学生 ID:</label>
+            <label style={labelStyle}>学生 ID</label>
             <input
               type="text"
               value={filters.userId}
               onChange={(e) => handleFilterChange('userId', e.target.value)}
               placeholder="学生用户 ID"
-              style={{ width: '100%', padding: '5px', borderRadius: '4px', border: '1px solid #ccc' }}
+              style={inputStyle}
             />
           </div>
         </div>
-        <button type="submit" style={{ marginTop: '10px', padding: '8px 16px', backgroundColor: '#6366f1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+        <button
+          type="submit"
+          style={{
+            marginTop: '20px',
+            padding: '12px 28px',
+            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            color: 'white',
+            border: 'none',
+            borderRadius: '8px',
+            fontSize: '15px',
+            fontWeight: 600,
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(102, 126, 234, 0.3)'
+          }}
+        >
           搜索
         </button>
       </form>
 
       {/* 加载状态 */}
-      {loading && <p>正在加载对话列表...</p>}
+      {loading && (
+        <div style={{
+          padding: '40px',
+          textAlign: 'center',
+          color: '#6b7280',
+          backgroundColor: '#ffffff',
+          borderRadius: '12px',
+          border: '1px solid #e5e7eb'
+        }}>
+          <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
+          正在加载对话列表...
+        </div>
+      )}
 
       {/* 错误提示 */}
-      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {error && (
+        <div style={{
+          padding: '16px 20px',
+          backgroundColor: '#fef2f2',
+          border: '1px solid #fecaca',
+          borderRadius: '12px',
+          color: '#991b1b',
+          marginBottom: '24px'
+        }}>
+          ⚠️ {error}
+        </div>
+      )}
 
       {/* 对话列表表格 */}
       {!loading && !error && (
         <>
           {conversations.length === 0 ? (
-            <p>暂无对话记录。</p>
+            <div style={{
+              padding: '60px 20px',
+              textAlign: 'center',
+              color: '#9ca3af',
+              backgroundColor: '#f9fafb',
+              borderRadius: '12px',
+              border: '1px dashed #e5e7eb'
+            }}>
+              <div style={{ fontSize: '48px', marginBottom: '16px' }}>💬</div>
+              <div style={{ fontSize: '15px' }}>暂无对话记录</div>
+            </div>
           ) : (
             <>
-              <p>共 {total} 条记录,当前第 {page} 页</p>
-              <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px' }}>
-                <thead>
-                  <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>班级</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc', minWidth: '200px' }}>问题摘要</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>开始时间</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>消息数</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>有效对话</th>
-                    <th style={{ padding: '10px', border: '1px solid #ccc' }}>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {conversations.map(conv => (
-                    <tr key={conv._id} style={{ borderBottom: '1px solid #ccc' }}>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                        {conv.userName ? `${conv.userName} (${conv.userId})` : `#${conv.userId}`}
-                      </td>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.classId || '-'}</td>
-                      {/* T033/T034: 题目列渲染为超链接，无 URL 时显示为纯文本 */}
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                        {conv.problemUrl ? (
-                          <a
-                            href={conv.problemUrl}
-                            style={{ color: '#6366f1', textDecoration: 'none' }}
-                            title={`查看题目 ${conv.problemId}`}
-                          >
-                            {conv.metadata?.problemTitle || conv.problemId}
-                          </a>
-                        ) : (
-                          // T034: 题目不存在时显示为纯文本
-                          <span style={{ color: '#9ca3af' }}>
-                            {conv.metadata?.problemTitle || conv.problemId || '-'}
-                          </span>
-                        )}
-                      </td>
-                      {/* T049: 显示学生问题摘要 */}
-                      <td style={{
-                        padding: '10px',
-                        border: '1px solid #ccc',
-                        fontSize: '13px',
-                        color: '#4b5563',
-                        maxWidth: '300px',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap'
-                      }}
-                        title={conv.firstMessageSummary || ''}
-                      >
-                        {conv.firstMessageSummary || '-'}
-                      </td>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{formatDateTime(conv.startTime)}</td>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.messageCount}</td>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                       {conv.isEffective ? '✓' : '✗'}
-                      </td>
-                      <td style={{ padding: '10px', border: '1px solid #ccc' }}>
-                        <a
-                          href={buildPageUrl(`/ai-helper/conversations/${conv._id}`)}
-                          style={{ color: '#6366f1', textDecoration: 'none' }}
-                        >
-                          查看详情
-                        </a>
-                      </td>
+              <div style={{
+                marginBottom: '16px',
+                padding: '12px 16px',
+                backgroundColor: '#ffffff',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                color: '#4b5563'
+              }}>
+                共 <strong style={{ color: '#1f2937' }}>{total}</strong> 条记录，当前第 <strong style={{ color: '#1f2937' }}>{page}</strong> 页
+              </div>
+              <div style={{
+                backgroundColor: '#ffffff',
+                borderRadius: '12px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                border: '1px solid #e5e7eb',
+                overflow: 'hidden'
+              }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f9fafb' }}>
+                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>学生</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>班级</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>题目</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb', minWidth: '200px' }}>问题摘要</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>开始时间</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>消息数</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>有效</th>
+                      <th style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>操作</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {conversations.map((conv, idx) => (
+                      <tr key={conv._id} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px', fontWeight: 500, color: '#1f2937' }}>
+                          {conv.userName ? `${conv.userName}` : `#${conv.userId}`}
+                          {conv.userName && <span style={{ color: '#9ca3af', fontSize: '12px', marginLeft: '4px' }}>({conv.userId})</span>}
+                        </td>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px', color: '#4b5563' }}>
+                          {conv.classId || <span style={{ color: '#9ca3af' }}>-</span>}
+                        </td>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px' }}>
+                          {conv.problemUrl ? (
+                            <a
+                              href={conv.problemUrl}
+                              style={{ color: '#6366f1', textDecoration: 'none', fontWeight: 500 }}
+                              title={`查看题目 ${conv.problemId}`}
+                            >
+                              {conv.metadata?.problemTitle || conv.problemId}
+                            </a>
+                          ) : (
+                            <span style={{ color: '#9ca3af' }}>
+                              {conv.metadata?.problemTitle || conv.problemId || '-'}
+                            </span>
+                          )}
+                        </td>
+                        <td style={{
+                          padding: '14px 16px',
+                          borderBottom: '1px solid #f3f4f6',
+                          fontSize: '13px',
+                          color: '#6b7280',
+                          maxWidth: '300px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}
+                          title={conv.firstMessageSummary || ''}
+                        >
+                          {conv.firstMessageSummary || <span style={{ color: '#d1d5db' }}>-</span>}
+                        </td>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '13px', color: '#6b7280' }}>
+                          {formatDateTime(conv.startTime)}
+                        </td>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px', color: '#4b5563', textAlign: 'center' }}>
+                          <span style={{
+                            display: 'inline-block',
+                            minWidth: '28px',
+                            padding: '4px 8px',
+                            backgroundColor: '#f3f4f6',
+                            borderRadius: '6px',
+                            fontWeight: 500
+                          }}>
+                            {conv.messageCount}
+                          </span>
+                        </td>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', textAlign: 'center' }}>
+                          <span style={{
+                            display: 'inline-block',
+                            padding: '4px 10px',
+                            borderRadius: '20px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            backgroundColor: conv.isEffective ? '#dcfce7' : '#fee2e2',
+                            color: conv.isEffective ? '#166534' : '#991b1b'
+                          }}>
+                            {conv.isEffective ? '有效' : '无效'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', textAlign: 'center' }}>
+                          <a
+                            href={buildPageUrl(`/ai-helper/conversations/${conv._id}`)}
+                            style={{
+                              color: '#6366f1',
+                              textDecoration: 'none',
+                              fontWeight: 500,
+                              padding: '6px 12px',
+                              borderRadius: '6px',
+                              backgroundColor: '#eef2ff',
+                              display: 'inline-block'
+                            }}
+                          >
+                            查看详情
+                          </a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </>
           )}
 
           {/* 分页控件 */}
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page === 1}
-              style={{
-                padding: '8px 16px',
-                backgroundColor: page === 1 ? '#ccc' : '#6366f1',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: page === 1 ? 'not-allowed' : 'pointer'
-              }}
-            >
-              上一页
-            </button>
-            <span>第 {page} 页</span>
-            <button
-              onClick={() => setPage(p => p + 1)}
-              disabled={page * limit >= total}
-              style={{
-                padding: '8px 16px',
-                backgroundColor: page * limit >= total ? '#ccc' : '#6366f1',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: page * limit >= total ? 'not-allowed' : 'pointer'
-              }}
-            >
-              下一页
-            </button>
-          </div>
+          {conversations.length > 0 && (
+            <div style={{
+              display: 'flex',
+              gap: '12px',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginTop: '24px'
+            }}>
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                style={{
+                  padding: '10px 20px',
+                  background: page === 1 ? '#e5e7eb' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  color: page === 1 ? '#9ca3af' : 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: page === 1 ? 'not-allowed' : 'pointer',
+                  boxShadow: page === 1 ? 'none' : '0 2px 8px rgba(102, 126, 234, 0.3)'
+                }}
+              >
+                ← 上一页
+              </button>
+              <span style={{
+                padding: '10px 20px',
+                backgroundColor: '#ffffff',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                fontWeight: 500,
+                color: '#4b5563'
+              }}>
+                第 {page} 页
+              </span>
+              <button
+                onClick={() => setPage(p => p + 1)}
+                disabled={page * limit >= total}
+                style={{
+                  padding: '10px 20px',
+                  background: page * limit >= total ? '#e5e7eb' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  color: page * limit >= total ? '#9ca3af' : 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: page * limit >= total ? 'not-allowed' : 'pointer',
+                  boxShadow: page * limit >= total ? 'none' : '0 2px 8px rgba(102, 126, 234, 0.3)'
+                }}
+              >
+                下一页 →
+              </button>
+            </div>
+          )}
         </>
       )}
 

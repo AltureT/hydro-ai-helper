@@ -44,7 +44,19 @@ declare global {
   }
 }
 
-export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId }) => {
+interface AIAssistantPanelProps {
+  problemId: string;
+  defaultExpanded?: boolean;  // 默认是否展开
+  onCollapse?: () => void;    // 折叠时的回调
+  embedded?: boolean;         // 嵌入模式：不显示浮动外壳
+}
+
+export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
+  problemId,
+  defaultExpanded,
+  onCollapse,
+  embedded = false
+}) => {
   // 原有业务状态
   const [questionType, setQuestionType] = useState<string>('');
   const [userThinking, setUserThinking] = useState<string>('');
@@ -67,7 +79,7 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   // 选中答疑状态
   const [selectedText, setSelectedText] = useState<string>('');
   const [popupPosition, setPopupPosition] = useState<{x: number; y: number} | null>(null);
-  const aiResponseRef = useRef<HTMLDivElement>(null);
+  const savedRangeRef = useRef<Range | null>(null);
 
   // 自动提交标记（用于"我不理解"功能）
   const [pendingAutoSubmit, setPendingAutoSubmit] = useState<boolean>(false);
@@ -82,6 +94,10 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
 
   // T007A: 浮动面板 UI 状态
   const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
+    // 如果指定了 defaultExpanded，优先使用
+    if (defaultExpanded !== undefined) {
+      return !defaultExpanded;
+    }
     if (typeof window === 'undefined') return true; // SSR/构建安全
     const saved = window.localStorage.getItem('ai_assistant_collapsed');
     if (saved === 'true') return true;
@@ -104,9 +120,16 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     setIsCollapsed((prev) => {
       const next = !prev;
       try {
-        window.localStorage.setItem('ai_assistant_collapsed', next ? 'true' : 'false');
+        // 如果有 onCollapse 回调，不保存到 localStorage（由父组件控制）
+        if (!onCollapse) {
+          window.localStorage.setItem('ai_assistant_collapsed', next ? 'true' : 'false');
+        }
       } catch (e) {
         // 忽略本地存储错误
+      }
+      // 折叠时调用回调
+      if (next && onCollapse) {
+        onCollapse();
       }
       return next;
     });
@@ -374,9 +397,19 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     }
 
     // 添加学生消息到历史
+    // 首次提问时如果没有输入内容，显示问题类型描述
+    const getQuestionTypeLabel = (type: string) => {
+      const found = QUESTION_TYPES.find(t => t.value === type);
+      return found ? found.label.split(' - ')[0] : type;
+    };
+    const messageContent = userThinking.trim()
+      ? userThinking
+      : (conversationHistory.length === 0
+        ? `【${getQuestionTypeLabel(effectiveQuestionType)}】请帮我分析这道题`
+        : '（继续追问）');
     const studentMessage = {
       role: 'student' as const,
-      content: userThinking || '（继续追问）',
+      content: messageContent,
       timestamp: new Date(),
       code: includeCode ? code : undefined
     };
@@ -491,22 +524,41 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
 
   /**
    * 处理 AI 回复中的文本选择
+   * 使用 DOM 检测方式，判断选中文本是否在任意 AI 消息容器内
    */
   const handleTextSelection = () => {
-    if (!aiResponseRef.current) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) {
       setPopupPosition(null);
+      savedRangeRef.current = null;
       return;
     }
     const text = selection.toString().trim();
-    if (text && aiResponseRef.current.contains(selection.anchorNode)) {
+    if (!text) {
+      setPopupPosition(null);
+      savedRangeRef.current = null;
+      return;
+    }
+    // 检查选中内容是否在 AI 消息容器内（使用 data-ai-message 属性标记）
+    let node = selection.anchorNode;
+    let isInAiMessage = false;
+    while (node) {
+      if (node instanceof HTMLElement && node.dataset.aiMessage === 'true') {
+        isInAiMessage = true;
+        break;
+      }
+      node = node.parentNode;
+    }
+    if (isInAiMessage) {
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
+      // 保存 Range 对象用于恢复选中状态
+      savedRangeRef.current = range.cloneRange();
       setSelectedText(text);
       setPopupPosition({ x: rect.left + rect.width / 2, y: rect.top - 40 });
     } else {
       setPopupPosition(null);
+      savedRangeRef.current = null;
     }
   };
 
@@ -515,10 +567,11 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
    */
   const handleDontUnderstand = () => {
     const truncated = selectedText.length > 100 ? selectedText.substring(0, 100) + '...' : selectedText;
-    setQuestionType('understand');
+    setQuestionType('clarify');
     setUserThinking(`我不太理解这部分："${truncated}"，能再解释一下吗？`);
     setAiResponse('');
     setPopupPosition(null);
+    savedRangeRef.current = null;
     setPendingAutoSubmit(true); // 标记需要自动提交
     // conversationId 保持不变，实现追问
   };
@@ -532,6 +585,19 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       handleSubmit();
     }
   }, [pendingAutoSubmit, questionType, userThinking]);
+
+  /**
+   * 恢复选中状态（React 渲染后）
+   */
+  useEffect(() => {
+    if (popupPosition && savedRangeRef.current) {
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(savedRangeRef.current);
+      }
+    }
+  }, [popupPosition]);
 
   /**
    * 渲染 Markdown 内容
@@ -586,67 +652,339 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     cursor: isCollapsed ? 'pointer' : 'default'
   };
 
+  // Markdown 样式（共用）
+  const markdownStyles = `
+    .markdown-body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+      font-weight: bold;
+      margin-top: 16px;
+      margin-bottom: 8px;
+    }
+    .markdown-body h1 { font-size: 18px; }
+    .markdown-body h2 { font-size: 16px; }
+    .markdown-body h3 { font-size: 15px; }
+    .markdown-body ul, .markdown-body ol {
+      padding-left: 20px;
+      margin: 8px 0;
+    }
+    .markdown-body li {
+      margin: 4px 0;
+    }
+    .markdown-body blockquote {
+      padding: 0 1em;
+      color: #6a737d;
+      border-left: 4px solid #dfe2e5;
+      margin: 8px 0;
+    }
+    .markdown-body a {
+      color: #6366f1;
+      text-decoration: underline;
+    }
+    .markdown-body pre {
+      background: #f6f8fa;
+      border: 1px solid #e1e4e8;
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+    .markdown-body pre code {
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      background: transparent;
+      border: none;
+      padding: 0;
+    }
+    .markdown-body code {
+      background: #f0f0f0;
+      border: 1px solid #e0e0e0;
+      border-radius: 3px;
+      padding: 2px 6px;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+    }
+    .markdown-body p {
+      margin: 8px 0;
+    }
+  `;
+
+  // 嵌入模式：直接渲染内容，不显示浮动外壳
+  if (embedded) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#ffffff' }}>
+        <style>{markdownStyles}</style>
+
+        {/* 选中文本弹出框 - "我不理解"按钮 */}
+        {popupPosition && (
+          <div
+            style={{
+              position: 'fixed',
+              left: popupPosition.x,
+              top: popupPosition.y,
+              transform: 'translateX(-50%)',
+              zIndex: 10000,
+              background: '#1f2937',
+              color: 'white',
+              padding: '6px 12px',
+              borderRadius: '6px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+              whiteSpace: 'nowrap'
+            }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={handleDontUnderstand}
+          >
+            ❓ 我不理解
+          </div>
+        )}
+
+        {/* 聊天消息区域 */}
+        <div
+          ref={chatContainerRef}
+          onMouseUp={handleTextSelection}
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            padding: '16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px'
+          }}
+        >
+          {/* 题目信息卡片 + 新对话按钮 */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+            {problemInfo ? (
+              <div style={{
+                flex: 1,
+                background: '#f5f3ff',
+                border: '1px solid #e0ddff',
+                padding: '10px 12px',
+                borderRadius: '8px'
+              }}>
+                <div style={{ fontSize: '12px', color: '#9333ea', marginBottom: '4px', fontWeight: '500' }}>
+                  题目 {problemInfo.problemId}
+                </div>
+                <div style={{
+                  fontWeight: '600', fontSize: '14px', color: '#5b21b6', lineHeight: '1.4',
+                  overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box',
+                  WebkitLineClamp: 2, WebkitBoxOrient: 'vertical'
+                }}>
+                  {problemInfo.title}
+                </div>
+              </div>
+            ) : problemInfoError ? (
+              <div style={{ flex: 1, background: '#fef3c7', border: '1px solid #fbbf24', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ fontSize: '13px', color: '#92400e', marginBottom: '8px' }}>
+                  ⚠️ 无法自动获取题目信息
+                </div>
+                <input
+                  type="text"
+                  placeholder="请手动输入题目标题"
+                  value={manualTitle}
+                  onChange={(e) => setManualTitle(e.target.value)}
+                  style={{
+                    width: '100%', padding: '8px', border: '1px solid #fbbf24',
+                    borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+            ) : <div style={{ flex: 1 }} />}
+
+            {/* 新对话按钮 */}
+            {conversationHistory.length > 0 && (
+              <button
+                onClick={startNewConversation}
+                style={{
+                  padding: '8px 12px',
+                  background: '#f3f4f6',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  color: '#4b5563',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0
+                }}
+                title="开始新对话"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                  <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" fill="#4b5563"/>
+                </svg>
+                新对话
+              </button>
+            )}
+          </div>
+
+          {/* 历史消息 */}
+          {conversationHistory.map((msg, idx) => (
+            <div
+              key={idx}
+              style={{
+                display: 'flex',
+                flexDirection: msg.role === 'student' ? 'row-reverse' : 'row',
+                gap: '8px'
+              }}
+            >
+              <div
+                data-ai-message={msg.role === 'ai' ? 'true' : undefined}
+                style={{
+                  maxWidth: '85%',
+                  padding: '10px 14px',
+                  borderRadius: msg.role === 'student' ? '12px 12px 0 12px' : '12px 12px 12px 0',
+                  background: msg.role === 'student' ? '#6366f1' : '#f3f4f6',
+                  color: msg.role === 'student' ? 'white' : '#1f2937',
+                  fontSize: '13px',
+                  lineHeight: '1.6'
+                }}
+              >
+                {msg.role === 'ai' ? (
+                  <div
+                    className="markdown-body"
+                    style={{ fontSize: '13px' }}
+                    dangerouslySetInnerHTML={{ __html: md.render(msg.content) }}
+                  />
+                ) : (
+                  <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {/* 加载指示器 */}
+          {isLoading && (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <div style={{
+                padding: '10px 14px', borderRadius: '12px 12px 12px 0',
+                background: '#f3f4f6', color: '#6b7280', fontSize: '13px'
+              }}>
+                <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>正在思考中...</span>
+              </div>
+            </div>
+          )}
+
+          {/* 错误提示 */}
+          {error && (
+            <div style={{
+              background: '#fef2f2', border: '1px solid #fecaca',
+              padding: '12px', borderRadius: '8px', color: '#991b1b', fontSize: '13px'
+            }}>
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* 首次对话：问题类型选择 */}
+          {conversationHistory.length === 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ fontSize: '13px', color: '#6b7280', marginBottom: '4px' }}>选择问题类型：</div>
+              {QUESTION_TYPES.map((type) => (
+                <label
+                  key={type.value}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px',
+                    background: questionType === type.value ? '#eef2ff' : '#f9fafb',
+                    border: questionType === type.value ? '2px solid #6366f1' : '1px solid #e5e7eb',
+                    borderRadius: '8px', cursor: 'pointer', fontSize: '13px',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="questionType"
+                    value={type.value}
+                    checked={questionType === type.value}
+                    onChange={(e) => setQuestionType(e.target.value)}
+                    style={{ accentColor: '#6366f1' }}
+                  />
+                  {type.label}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 输入区域 */}
+        <div style={{
+          borderTop: '1px solid #e5e7eb', padding: '12px 16px',
+          background: '#fafafa', flexShrink: 0
+        }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+            <textarea
+              value={userThinking}
+              onChange={(e) => setUserThinking(e.target.value)}
+              placeholder={conversationHistory.length === 0 ? "描述你的问题或疑惑..." : "继续追问..."}
+              style={{
+                flex: 1, minHeight: conversationHistory.length === 0 ? '60px' : '40px',
+                maxHeight: '100px', padding: '10px 12px', border: '1px solid #d4d4d8',
+                borderRadius: '8px', fontSize: '13px', lineHeight: '1.5', resize: 'none',
+                boxSizing: 'border-box', outline: 'none',
+                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+              }}
+              onFocus={(e) => { e.target.style.borderColor = '#6366f1'; }}
+              onBlur={(e) => { e.target.style.borderColor = '#d4d4d8'; }}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+              }}
+            />
+            {conversationHistory.length === 0 && (
+              <label style={{
+                display: 'flex', alignItems: 'center', cursor: 'pointer',
+                fontSize: '12px', color: '#6b7280', whiteSpace: 'nowrap', alignSelf: 'center'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={includeCode}
+                  onChange={(e) => {
+                    setIncludeCode(e.target.checked);
+                    if (e.target.checked && !code) {
+                      const scratchpadCode = readFromScratchpad();
+                      if (scratchpadCode) setCode(scratchpadCode);
+                    }
+                  }}
+                  style={{ marginRight: '6px', accentColor: '#7c3aed' }}
+                />
+                📎 附带代码
+                {includeCode && code && (
+                  <span style={{ marginLeft: '4px', color: '#10b981', fontSize: '11px' }}>✓</span>
+                )}
+              </label>
+            )}
+            <button
+              onClick={handleSubmit}
+              disabled={isLoading || (conversationHistory.length === 0 && !questionType) || (conversationHistory.length > 0 && !userThinking.trim())}
+              style={{
+                padding: '10px 16px',
+                background: (isLoading || (conversationHistory.length === 0 && !questionType) || (conversationHistory.length > 0 && !userThinking.trim()))
+                  ? '#d1d5db' : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                color: 'white', border: 'none', borderRadius: '8px',
+                fontSize: '14px', fontWeight: '600',
+                cursor: (isLoading || (conversationHistory.length === 0 && !questionType) || (conversationHistory.length > 0 && !userThinking.trim()))
+                  ? 'not-allowed' : 'pointer',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {isLoading ? '⏳' : '发送'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       {/* Markdown 样式 */}
-      <style>{`
-        .markdown-body {
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        .markdown-body h1, .markdown-body h2, .markdown-body h3,
-        .markdown-body h4, .markdown-body h5, .markdown-body h6 {
-          font-weight: bold;
-          margin-top: 16px;
-          margin-bottom: 8px;
-        }
-        .markdown-body h1 { font-size: 18px; }
-        .markdown-body h2 { font-size: 16px; }
-        .markdown-body h3 { font-size: 15px; }
-        .markdown-body ul, .markdown-body ol {
-          padding-left: 20px;
-          margin: 8px 0;
-        }
-        .markdown-body li {
-          margin: 4px 0;
-        }
-        .markdown-body blockquote {
-          padding: 0 1em;
-          color: #6a737d;
-          border-left: 4px solid #dfe2e5;
-          margin: 8px 0;
-        }
-        .markdown-body a {
-          color: #6366f1;
-          text-decoration: underline;
-        }
-        .markdown-body pre {
-          background: #f6f8fa;
-          border: 1px solid #e1e4e8;
-          border-radius: 6px;
-          padding: 16px;
-          overflow-x: auto;
-          margin: 8px 0;
-        }
-        .markdown-body pre code {
-          font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-          font-size: 13px;
-          line-height: 1.6;
-          background: transparent;
-          border: none;
-          padding: 0;
-        }
-        .markdown-body code {
-          background: #f0f0f0;
-          border: 1px solid #e0e0e0;
-          border-radius: 3px;
-          padding: 2px 6px;
-          font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-          font-size: 13px;
-        }
-        .markdown-body p {
-          margin: 8px 0;
-        }
-      `}</style>
+      <style>{markdownStyles}</style>
 
       <div
         ref={panelRef}
@@ -799,7 +1137,7 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
           {conversationHistory.map((msg, idx) => (
             <div
               key={idx}
-              ref={msg.role === 'ai' ? aiResponseRef : undefined}
+              data-ai-message={msg.role === 'ai' ? 'true' : undefined}
               onMouseUp={msg.role === 'ai' ? handleTextSelection : undefined}
               style={{
                 background: msg.role === 'student' ? '#dbeafe' : '#f0fdf4',
@@ -867,6 +1205,7 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
               zIndex: 2000
             }}>
               <button
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDontUnderstand();
@@ -893,7 +1232,7 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
         {/* 输入区域 - 固定在底部 */}
         <div style={{
           borderTop: '1px solid #e5e7eb',
-          padding: '12px 16px',
+          padding: '12px 16px 40px 16px',  // 底部留出空间避免被 resize 把手覆盖
           background: '#fafafa'
         }}>
           {/* 错误提示 */}
@@ -1087,6 +1426,40 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
                 }
               }}
             />
+            {/* 首次提问：附带代码选项 - 与输入框同行 */}
+            {conversationHistory.length === 0 && (
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                cursor: 'pointer',
+                fontSize: '12px',
+                color: '#6b7280',
+                whiteSpace: 'nowrap',
+                alignSelf: 'center'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={includeCode}
+                  onChange={(e) => {
+                    setIncludeCode(e.target.checked);
+                    if (e.target.checked && !code) {
+                      const scratchpadCode = readFromScratchpad();
+                      if (scratchpadCode) setCode(scratchpadCode);
+                    }
+                  }}
+                  style={{
+                    marginRight: '6px',
+                    accentColor: '#7c3aed'
+                  }}
+                />
+                📎 附带当前代码
+                {includeCode && code && (
+                  <span style={{ marginLeft: '4px', color: '#10b981', fontSize: '11px' }}>
+                    ✓
+                  </span>
+                )}
+              </label>
+            )}
             <button
               onClick={handleSubmit}
               disabled={
@@ -1117,41 +1490,6 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
               {isLoading ? '⏳' : '发送'}
             </button>
           </div>
-
-          {/* 首次提问：附带代码选项 */}
-          {conversationHistory.length === 0 && (
-            <div style={{ marginTop: '10px' }}>
-              <label style={{
-                display: 'flex',
-                alignItems: 'center',
-                cursor: 'pointer',
-                fontSize: '12px',
-                color: '#6b7280'
-              }}>
-                <input
-                  type="checkbox"
-                  checked={includeCode}
-                  onChange={(e) => {
-                    setIncludeCode(e.target.checked);
-                    if (e.target.checked && !code) {
-                      const scratchpadCode = readFromScratchpad();
-                      if (scratchpadCode) setCode(scratchpadCode);
-                    }
-                  }}
-                  style={{
-                    marginRight: '6px',
-                    accentColor: '#7c3aed'
-                  }}
-                />
-                📎 附带当前代码
-                {includeCode && code && (
-                  <span style={{ marginLeft: '8px', color: '#10b981' }}>
-                    ✓ 已读取 {code.length} 字符
-                  </span>
-                )}
-              </label>
-            </div>
-          )}
         </div>
       </div>
       )}

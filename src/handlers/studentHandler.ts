@@ -96,7 +96,7 @@ export class ChatHandler extends Handler {
       } = this.request.body as ChatRequest;
 
       // 验证问题类型
-      const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug'];
+      const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'clarify'];
       if (!validQuestionTypes.includes(questionType as QuestionType)) {
         throw new Error('无效的问题类型');
       }

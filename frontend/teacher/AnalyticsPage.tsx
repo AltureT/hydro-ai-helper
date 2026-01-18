@@ -1,6 +1,7 @@
 /**
  * AI 使用统计页面
  * 显示 AI 学习助手的使用统计信息（按班级/题目/学生维度）
+ * 现代简约风格设计
  */
 
 import React, { useState, useEffect } from 'react';
@@ -12,20 +13,17 @@ import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
 type Dimension = 'class' | 'problem' | 'student';
 
 /**
- * T029: 统计项接口（通用，包含 displayName）
+ * 统计项接口
  */
 interface AnalyticsItem {
   key: string;
-  displayName?: string;  // T029: 友好名称（题目标题或用户名）
+  displayName?: string;
   totalConversations: number;
   effectiveConversations: number;
   effectiveRatio: number;
-  // class 维度特有
   studentCount?: number;
   avgConversationsPerStudent?: number;
-  // problem 维度特有
   avgMessageCount?: number;
-  // student 维度特有
   lastUsedAt?: string;
 }
 
@@ -61,7 +59,7 @@ function getInitialFiltersFromUrl(): {
 }
 
 /**
- * 可排序表头组件（移到组件外部以避免重复创建）
+ * 可排序表头组件
  */
 interface SortableHeaderProps {
   field: string;
@@ -80,16 +78,25 @@ const SortableHeader: React.FC<SortableHeaderProps> = ({
     <th
       onClick={() => onSort(field)}
       style={{
-        padding: '10px',
-        border: '1px solid #ccc',
+        padding: '14px 16px',
         textAlign: align,
         cursor: 'pointer',
         userSelect: 'none',
-        backgroundColor: isActive ? '#d1d5db' : '#e5e7eb',
-        transition: 'background-color 0.2s'
+        fontWeight: 600,
+        fontSize: '13px',
+        color: isActive ? '#4f46e5' : '#6b7280',
+        backgroundColor: '#f9fafb',
+        borderBottom: '2px solid #e5e7eb',
+        transition: 'all 0.2s',
+        whiteSpace: 'nowrap'
       }}
     >
-      {label} {isActive ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
+      {label}
+      {isActive && (
+        <span style={{ marginLeft: '4px', color: '#4f46e5' }}>
+          {sortOrder === 'asc' ? '↑' : '↓'}
+        </span>
+      )}
     </th>
   );
 };
@@ -98,10 +105,8 @@ const SortableHeader: React.FC<SortableHeaderProps> = ({
  * AnalyticsPage 组件
  */
 export const AnalyticsPage: React.FC = () => {
-  // 从 URL 获取初始筛选条件
   const initialFilters = getInitialFiltersFromUrl();
 
-  // 状态管理
   const [dimension, setDimension] = useState<Dimension>('problem');
   const [startDate, setStartDate] = useState<string>(initialFilters.startDate);
   const [endDate, setEndDate] = useState<string>(initialFilters.endDate);
@@ -112,17 +117,12 @@ export const AnalyticsPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
 
-  // 排序状态
   const [sortField, setSortField] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  // 如果 URL 带有筛选参数，组件加载时自动查询
   const hasInitialFilters = initialFilters.startDate || initialFilters.endDate ||
                            initialFilters.classId || initialFilters.problemId;
 
-  /**
-   * 调用统计 API
-   */
   const fetchData = async () => {
     setLoading(true);
     setError(null);
@@ -155,30 +155,20 @@ export const AnalyticsPage: React.FC = () => {
     }
   };
 
-  // 组件加载时，如果 URL 带有筛选参数则自动查询
   useEffect(() => {
     if (hasInitialFilters) {
       fetchData();
     }
-  }, []); // 仅在组件挂载时执行一次
+  }, []);
 
-  /**
-   * 格式化百分比
-   */
   const formatPercent = (ratio: number): string => {
     return (ratio * 100).toFixed(1) + '%';
   };
 
-  /**
-   * 格式化数字（保留 2 位小数）
-   */
   const formatNumber = (num: number): string => {
     return num.toFixed(2);
   };
 
-  /**
-   * 格式化日期时间
-   */
   const formatDateTime = (isoString: string | undefined): string => {
     if (!isoString) return '-';
     try {
@@ -195,9 +185,6 @@ export const AnalyticsPage: React.FC = () => {
     }
   };
 
-  /**
-   * 处理表头点击排序
-   */
   const handleSort = (field: string) => {
     if (sortField === field) {
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
@@ -207,9 +194,6 @@ export const AnalyticsPage: React.FC = () => {
     }
   };
 
-  /**
-   * 获取排序后的数据
-   */
   const getSortedItems = (items: AnalyticsItem[]): AnalyticsItem[] => {
     if (!sortField) return items;
     return [...items].sort((a, b) => {
@@ -225,61 +209,89 @@ export const AnalyticsPage: React.FC = () => {
     });
   };
 
-  /**
-   * 渲染表格（根据维度）
-   */
   const renderTable = () => {
     if (!data || data.items.length === 0) {
       return (
         <div style={{
-          padding: '40px',
+          padding: '60px 20px',
           textAlign: 'center',
-          color: '#6b7280',
+          color: '#9ca3af',
           backgroundColor: '#f9fafb',
-          borderRadius: '8px'
+          borderRadius: '12px',
+          border: '1px dashed #e5e7eb'
         }}>
-          暂无数据，请调整筛选条件后重新查询。
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>📊</div>
+          <div style={{ fontSize: '15px' }}>暂无数据，请调整筛选条件后重新查询</div>
         </div>
       );
     }
 
-    // 根据维度渲染不同的表头和列
+    const tableStyle: React.CSSProperties = {
+      width: '100%',
+      borderCollapse: 'separate',
+      borderSpacing: 0,
+      borderRadius: '12px',
+      overflow: 'hidden',
+      boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+      border: '1px solid #e5e7eb'
+    };
+
+    const cellStyle: React.CSSProperties = {
+      padding: '14px 16px',
+      borderBottom: '1px solid #f3f4f6',
+      fontSize: '14px'
+    };
+
+    const linkStyle: React.CSSProperties = {
+      color: '#6366f1',
+      textDecoration: 'none',
+      fontWeight: 500,
+      padding: '6px 12px',
+      borderRadius: '6px',
+      backgroundColor: '#eef2ff',
+      transition: 'all 0.2s',
+      display: 'inline-block'
+    };
+
     if (data.dimension === 'class') {
       const sortedItems = getSortedItems(data.items);
       return (
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
+        <table style={tableStyle}>
           <thead>
-            <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
+            <tr>
               <SortableHeader field="key" label="班级" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
               <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="studentCount" label="参与学生数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="avgConversationsPerStudent" label="人均对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveConversations" label="有效对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveRatio" label="有效对话占比" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
+              <SortableHeader field="studentCount" label="参与学生" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="avgConversationsPerStudent" label="人均对话" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <th style={{ ...cellStyle, backgroundColor: '#f9fafb', fontWeight: 600, color: '#6b7280', textAlign: 'center', borderBottom: '2px solid #e5e7eb' }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {sortedItems.map((item, idx) => (
-              <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.key || '-'}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.totalConversations}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.studentCount ?? '-'}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>
+              <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                <td style={{ ...cellStyle, fontWeight: 500, color: '#1f2937' }}>{item.key || '-'}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.totalConversations}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.studentCount ?? '-'}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>
                   {item.avgConversationsPerStudent != null ? formatNumber(item.avgConversationsPerStudent) : '-'}
                 </td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.effectiveConversations}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatPercent(item.effectiveRatio)}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
-                  <a
-                    href={buildPageUrl(`/ai-helper/conversations?classId=${item.key}`)}
-                    style={{
-                      color: '#6366f1',
-                      textDecoration: 'none',
-                      fontWeight: 500,
-                    }}
-                    title={`查看班级 ${item.key} 的对话记录`}
-                  >
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.effectiveConversations}</td>
+                <td style={{ ...cellStyle, textAlign: 'right' }}>
+                  <span style={{
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    backgroundColor: item.effectiveRatio >= 0.7 ? '#dcfce7' : item.effectiveRatio >= 0.4 ? '#fef9c3' : '#fee2e2',
+                    color: item.effectiveRatio >= 0.7 ? '#166534' : item.effectiveRatio >= 0.4 ? '#854d0e' : '#991b1b'
+                  }}>
+                    {formatPercent(item.effectiveRatio)}
+                  </span>
+                </td>
+                <td style={{ ...cellStyle, textAlign: 'center' }}>
+                  <a href={buildPageUrl(`/ai-helper/conversations?classId=${item.key}`)} style={linkStyle}>
                     查看对话
                   </a>
                 </td>
@@ -293,40 +305,51 @@ export const AnalyticsPage: React.FC = () => {
     if (data.dimension === 'problem') {
       const sortedItems = getSortedItems(data.items);
       return (
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
+        <table style={tableStyle}>
           <thead>
-            <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
+            <tr>
               <SortableHeader field="displayName" label="题目" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
               <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="studentCount" label="使用学生数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="studentCount" label="使用学生" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
               <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveConversations" label="有效对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveRatio" label="有效对话占比" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
+              <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <th style={{ ...cellStyle, backgroundColor: '#f9fafb', fontWeight: 600, color: '#6b7280', textAlign: 'center', borderBottom: '2px solid #e5e7eb' }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {sortedItems.map((item, idx) => (
-              <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                {/* T030: 显示 displayName（题目标题），fallback 到 key */}
-                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.displayName || item.key || '-'}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.totalConversations}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.studentCount ?? '-'}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>
+              <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                <td style={{ ...cellStyle, fontWeight: 500, color: '#1f2937' }}>
+                  <a
+                    href={buildPageUrl(`/p/${item.key}`)}
+                    style={{ color: '#4f46e5', textDecoration: 'none' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
+                  >
+                    {item.displayName || item.key || '-'}
+                  </a>
+                </td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.totalConversations}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.studentCount ?? '-'}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>
                   {item.avgMessageCount != null ? formatNumber(item.avgMessageCount) : '-'}
                 </td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.effectiveConversations}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatPercent(item.effectiveRatio)}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
-                  <a
-                    href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)}
-                    style={{
-                      color: '#6366f1',
-                      textDecoration: 'none',
-                      fontWeight: 500,
-                    }}
-                    title={`查看题目 ${item.displayName || item.key} 的对话记录`}
-                  >
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.effectiveConversations}</td>
+                <td style={{ ...cellStyle, textAlign: 'right' }}>
+                  <span style={{
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    backgroundColor: item.effectiveRatio >= 0.7 ? '#dcfce7' : item.effectiveRatio >= 0.4 ? '#fef9c3' : '#fee2e2',
+                    color: item.effectiveRatio >= 0.7 ? '#166534' : item.effectiveRatio >= 0.4 ? '#854d0e' : '#991b1b'
+                  }}>
+                    {formatPercent(item.effectiveRatio)}
+                  </span>
+                </td>
+                <td style={{ ...cellStyle, textAlign: 'center' }}>
+                  <a href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)} style={linkStyle}>
                     查看对话
                   </a>
                 </td>
@@ -340,40 +363,42 @@ export const AnalyticsPage: React.FC = () => {
     if (data.dimension === 'student') {
       const sortedItems = getSortedItems(data.items);
       return (
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
+        <table style={tableStyle}>
           <thead>
-            <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
+            <tr>
               <SortableHeader field="displayName" label="学生" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
               <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveConversations" label="有效对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveRatio" label="有效对话占比" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
               <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="lastUsedAt" label="最近使用时间" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
+              <SortableHeader field="lastUsedAt" label="最近使用" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <th style={{ ...cellStyle, backgroundColor: '#f9fafb', fontWeight: 600, color: '#6b7280', textAlign: 'center', borderBottom: '2px solid #e5e7eb' }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {sortedItems.map((item, idx) => (
-              <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
-                {/* T030: 显示 displayName（用户名），fallback 到 key */}
-                <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.displayName || item.key || '-'}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.totalConversations}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.effectiveConversations}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatPercent(item.effectiveRatio)}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>
+              <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                <td style={{ ...cellStyle, fontWeight: 500, color: '#1f2937' }}>{item.displayName || item.key || '-'}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.totalConversations}</td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.effectiveConversations}</td>
+                <td style={{ ...cellStyle, textAlign: 'right' }}>
+                  <span style={{
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    backgroundColor: item.effectiveRatio >= 0.7 ? '#dcfce7' : item.effectiveRatio >= 0.4 ? '#fef9c3' : '#fee2e2',
+                    color: item.effectiveRatio >= 0.7 ? '#166534' : item.effectiveRatio >= 0.4 ? '#854d0e' : '#991b1b'
+                  }}>
+                    {formatPercent(item.effectiveRatio)}
+                  </span>
+                </td>
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>
                   {item.avgMessageCount != null ? formatNumber(item.avgMessageCount) : '-'}
                 </td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatDateTime(item.lastUsedAt)}</td>
-                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
-                  <a
-                    href={buildPageUrl(`/ai-helper/conversations?userId=${item.key}`)}
-                    style={{
-                      color: '#6366f1',
-                      textDecoration: 'none',
-                      fontWeight: 500,
-                    }}
-                    title={`查看学生 ${item.key} 的对话记录`}
-                  >
+                <td style={{ ...cellStyle, textAlign: 'right', color: '#6b7280', fontSize: '13px' }}>{formatDateTime(item.lastUsedAt)}</td>
+                <td style={{ ...cellStyle, textAlign: 'center' }}>
+                  <a href={buildPageUrl(`/ai-helper/conversations?userId=${item.key}`)} style={linkStyle}>
                     查看对话
                   </a>
                 </td>
@@ -388,36 +413,56 @@ export const AnalyticsPage: React.FC = () => {
   };
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1>AI 使用统计</h1>
+    <div style={{
+      padding: '32px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      backgroundColor: '#f8fafc',
+      minHeight: '100vh'
+    }}>
+      {/* 页面标题 - 浅色简约风格 */}
+      <div style={{
+        marginBottom: '32px',
+        padding: '24px 32px',
+        background: '#ffffff',
+        borderRadius: '12px',
+        border: '1px solid #e5e7eb',
+        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
+      }}>
+        <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>AI 使用统计</h1>
+        <p style={{ margin: '8px 0 0', color: '#6b7280', fontSize: '14px' }}>查看学生使用 AI 学习助手的详细统计数据</p>
+      </div>
 
       {/* 筛选表单 */}
       <div style={{
-        marginTop: '20px',
-        padding: '20px',
-        backgroundColor: '#f5f5f5',
-        borderRadius: '8px'
+        marginBottom: '24px',
+        padding: '24px',
+        backgroundColor: '#ffffff',
+        borderRadius: '12px',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+        border: '1px solid #e5e7eb'
       }}>
-        <h3 style={{ marginTop: 0, marginBottom: '15px' }}>筛选条件</h3>
+        <h3 style={{ margin: '0 0 20px', fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>筛选条件</h3>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px' }}>
-          {/* 统计维度 */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
           <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>统计维度：</label>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '14px', color: '#374151' }}>统计维度</label>
             <select
               value={dimension}
               onChange={(e) => {
                 setDimension(e.target.value as Dimension);
-                setData(null); // 清空数据
-                setSortField(null); // 重置排序
+                setData(null);
+                setSortField(null);
                 setSortOrder('desc');
               }}
               style={{
                 width: '100%',
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                fontSize: '14px'
+                padding: '10px 12px',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                backgroundColor: '#f9fafb',
+                color: '#1f2937',
+                cursor: 'pointer'
               }}
             >
               <option value="class">按班级</option>
@@ -426,43 +471,44 @@ export const AnalyticsPage: React.FC = () => {
             </select>
           </div>
 
-          {/* 开始日期 */}
           <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>开始日期：</label>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '14px', color: '#374151' }}>开始日期</label>
             <input
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
               style={{
                 width: '100%',
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                fontSize: '14px'
+                padding: '10px 12px',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                backgroundColor: '#f9fafb',
+                color: '#1f2937'
               }}
             />
           </div>
 
-          {/* 结束日期 */}
           <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>结束日期：</label>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '14px', color: '#374151' }}>结束日期</label>
             <input
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
               style={{
                 width: '100%',
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                fontSize: '14px'
+                padding: '10px 12px',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                backgroundColor: '#f9fafb',
+                color: '#1f2937'
               }}
             />
           </div>
 
-          {/* 班级 ID */}
           <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>班级：</label>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '14px', color: '#374151' }}>班级</label>
             <input
               type="text"
               value={classId}
@@ -470,17 +516,18 @@ export const AnalyticsPage: React.FC = () => {
               placeholder="班级 ID（可选）"
               style={{
                 width: '100%',
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                fontSize: '14px'
+                padding: '10px 12px',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                backgroundColor: '#f9fafb',
+                color: '#1f2937'
               }}
             />
           </div>
 
-          {/* 题目 ID */}
           <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>题目 ID：</label>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, fontSize: '14px', color: '#374151' }}>题目 ID</label>
             <input
               type="text"
               value={problemId}
@@ -488,45 +535,49 @@ export const AnalyticsPage: React.FC = () => {
               placeholder="题目 ID（可选）"
               style={{
                 width: '100%',
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                fontSize: '14px'
+                padding: '10px 12px',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+                fontSize: '14px',
+                backgroundColor: '#f9fafb',
+                color: '#1f2937'
               }}
             />
           </div>
         </div>
 
-        {/* 查询按钮 */}
         <button
           onClick={fetchData}
           disabled={loading}
           style={{
-            marginTop: '15px',
-            padding: '10px 24px',
-            backgroundColor: loading ? '#9ca3af' : '#6366f1',
+            marginTop: '20px',
+            padding: '12px 28px',
+            background: loading ? '#9ca3af' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
             color: 'white',
             border: 'none',
-            borderRadius: '6px',
-            fontSize: '14px',
-            fontWeight: 500,
-            cursor: loading ? 'not-allowed' : 'pointer'
+            borderRadius: '8px',
+            fontSize: '15px',
+            fontWeight: 600,
+            cursor: loading ? 'not-allowed' : 'pointer',
+            boxShadow: loading ? 'none' : '0 2px 8px rgba(102, 126, 234, 0.3)',
+            transition: 'all 0.2s'
           }}
         >
-          {loading ? '加载中...' : '查询'}
+          {loading ? '查询中...' : '查询'}
         </button>
       </div>
 
       {/* 加载状态 */}
       {loading && (
         <div style={{
-          marginTop: '20px',
-          padding: '20px',
+          padding: '40px',
           textAlign: 'center',
           color: '#6b7280',
-          backgroundColor: '#f9fafb',
-          borderRadius: '8px'
+          backgroundColor: '#ffffff',
+          borderRadius: '12px',
+          border: '1px solid #e5e7eb'
         }}>
+          <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
           正在加载统计数据...
         </div>
       )}
@@ -534,14 +585,14 @@ export const AnalyticsPage: React.FC = () => {
       {/* 错误提示 */}
       {error && (
         <div style={{
-          marginTop: '20px',
-          padding: '15px',
-          backgroundColor: '#fee2e2',
-          border: '1px solid #ef4444',
-          borderRadius: '8px',
-          color: '#991b1b'
+          padding: '16px 20px',
+          backgroundColor: '#fef2f2',
+          border: '1px solid #fecaca',
+          borderRadius: '12px',
+          color: '#991b1b',
+          marginBottom: '24px'
         }}>
-          <strong>加载统计数据失败：</strong> {error}
+          ⚠️ <strong>加载失败：</strong> {error}
         </div>
       )}
 

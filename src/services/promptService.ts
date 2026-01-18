@@ -9,7 +9,7 @@ export { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 /**
  * T035: 问题类型枚举
  */
-export type QuestionType = 'understand' | 'think' | 'debug';
+export type QuestionType = 'understand' | 'think' | 'debug' | 'clarify';
 
 /**
  * T036: 问题类型策略接口
@@ -60,6 +60,16 @@ const QUESTION_TYPE_STRATEGIES: Record<QuestionType, QuestionTypeStrategy> = {
     ],
     responseStyle: '简洁直接，快速锁定问题，避免冗长解释',
     maxParagraphs: 3
+  },
+  clarify: {
+    label: '追问解释',
+    focusAreas: [
+      '针对选中的具体文字进行简明解释',
+      '用更简单的语言或类比重新表述',
+      '如有必要，举一个简短的例子'
+    ],
+    responseStyle: '简洁精炼，直击要点，不展开其他话题',
+    maxParagraphs: 2
   }
 };
 
@@ -221,6 +231,15 @@ ${errorInfo}
 3. 可以适当展开解释，但不要给出可直接 AC 的完整代码；
 4. 最后给出 2-3 条具体的下一步建议。
 `;
+    } else if (questionType === 'clarify') {
+      // 追问解释：针对选中内容简洁回复
+      prompt += `
+【回答要求】
+请结合系统提示中的教学原则和安全规则：
+1. 只针对学生选中的具体内容进行解释，不展开其他话题；
+2. 用更简单的语言或类比重新表述，必要时举一个简短的例子；
+3. 回答控制在 2 段以内，直击要点。
+`;
     } else {
       // 分析错误/检查代码思路：简洁直接
       prompt += `
@@ -252,7 +271,8 @@ ${errorInfo}
     const descriptions: Record<QuestionType, string> = {
       understand: '理解题意 - 我对题目要求不太清楚',
       think: '理清思路 - 我需要帮助梳理解题思路',
-      debug: '分析错误 - 我的代码有问题,需要找出原因'
+      debug: '分析错误 - 我的代码有问题,需要找出原因',
+      clarify: '追问解释 - 我不理解这部分内容'
     };
 
     return descriptions[questionType];
