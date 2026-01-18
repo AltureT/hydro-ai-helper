@@ -15,7 +15,7 @@ export type MessageRole = 'student' | 'ai';
 /**
  * 问题类型 (学生消息专用)
  */
-export type QuestionType = 'understand' | 'think' | 'debug' | 'review';
+export type QuestionType = 'understand' | 'think' | 'debug';
 
 /**
  * 对话消息接口
@@ -166,5 +166,60 @@ export class MessageModel {
       .find({ conversationId: _conversationId, role: 'ai' })
       .sort({ timestamp: 1 })
       .toArray();
+  }
+
+  /**
+   * 获取会话的第一条学生消息
+   * @param conversationId 会话 ID
+   * @returns 第一条学生消息或 null
+   */
+  async findFirstStudentMessage(conversationId: string | ObjectIdType): Promise<Message | null> {
+    const _conversationId = typeof conversationId === 'string'
+      ? new ObjectId(conversationId)
+      : conversationId;
+
+    return this.collection.findOne(
+      { conversationId: _conversationId, role: 'student' },
+      { sort: { timestamp: 1 } }
+    );
+  }
+
+  /**
+   * 批量获取多个会话的第一条学生消息
+   * @param conversationIds 会话 ID 列表
+   * @returns Map<conversationId, Message>
+   */
+  async findFirstStudentMessagesForConversations(
+    conversationIds: (string | ObjectIdType)[]
+  ): Promise<Map<string, Message>> {
+    if (conversationIds.length === 0) {
+      return new Map();
+    }
+
+    const _ids = conversationIds.map(id =>
+      typeof id === 'string' ? new ObjectId(id) : id
+    );
+
+    // 使用聚合管道获取每个会话的第一条学生消息
+    const pipeline = [
+      { $match: { conversationId: { $in: _ids }, role: 'student' } },
+      { $sort: { conversationId: 1, timestamp: 1 } },
+      {
+        $group: {
+          _id: '$conversationId',
+          firstMessage: { $first: '$$ROOT' }
+        }
+      }
+    ];
+
+    const results = await this.collection.aggregate(pipeline).toArray();
+    const map = new Map<string, Message>();
+
+    for (const result of results) {
+      const convId = result._id.toString();
+      map.set(convId, result.firstMessage as Message);
+    }
+
+    return map;
   }
 }

@@ -27,6 +27,7 @@ interface ConversationSummary {
     problemTitle?: string;
     problemContent?: string;
   };
+  firstMessageSummary?: string;  // T048: 学生首条消息摘要
 }
 
 /**
@@ -295,6 +296,7 @@ export const ConversationList: React.FC = () => {
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>班级</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
+                    <th style={{ padding: '10px', border: '1px solid #ccc', minWidth: '200px' }}>问题摘要</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>开始时间</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>消息数</th>
                     <th style={{ padding: '10px', border: '1px solid #ccc' }}>有效对话</th>
@@ -324,6 +326,21 @@ export const ConversationList: React.FC = () => {
                             {conv.metadata?.problemTitle || conv.problemId || '-'}
                           </span>
                         )}
+                      </td>
+                      {/* T049: 显示学生问题摘要 */}
+                      <td style={{
+                        padding: '10px',
+                        border: '1px solid #ccc',
+                        fontSize: '13px',
+                        color: '#4b5563',
+                        maxWidth: '300px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}
+                        title={conv.firstMessageSummary || ''}
+                      >
+                        {conv.firstMessageSummary || '-'}
                       </td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>{formatDateTime(conv.startTime)}</td>
                       <td style={{ padding: '10px', border: '1px solid #ccc' }}>{conv.messageCount}</td>

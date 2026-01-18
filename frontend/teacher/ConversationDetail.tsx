@@ -183,8 +183,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
     const labels: Record<string, string> = {
       understand: '理解题意',
       think: '理清思路',
-      debug: '分析错误',
-      review: '检查代码'
+      debug: '分析错误'
     };
     return type ? labels[type] || type : '';
   };

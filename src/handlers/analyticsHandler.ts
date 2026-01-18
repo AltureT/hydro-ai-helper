@@ -357,6 +357,7 @@ export class AnalyticsHandler extends Handler {
     }
 
     // 2. 按 problemId + userId 汇总,用于 studentCount
+    // 同时保留 metadata.problemTitle（使用 $first 获取任意一条记录的标题）
     pipeline.push({
       $group: {
         _id: { problemId: '$problemId', userId: '$userId' },
@@ -365,6 +366,7 @@ export class AnalyticsHandler extends Handler {
         effectiveConversations: {
           $sum: { $cond: ['$isEffective', 1, 0] },
         },
+        problemTitle: { $first: '$metadata.problemTitle' },
       },
     });
 
@@ -376,6 +378,7 @@ export class AnalyticsHandler extends Handler {
         effectiveConversations: { $sum: '$effectiveConversations' },
         studentCount: { $sum: 1 },
         totalMessageCount: { $sum: '$totalMessageCount' },
+        problemTitle: { $first: '$problemTitle' },
       },
     });
 
@@ -384,6 +387,9 @@ export class AnalyticsHandler extends Handler {
       $project: {
         _id: 0,
         key: '$_id',
+        displayName: {
+          $ifNull: ['$problemTitle', { $concat: ['题目 ', { $toString: '$_id' }] }]
+        },
         totalConversations: 1,
         effectiveConversations: 1,
         studentCount: 1,
@@ -406,20 +412,7 @@ export class AnalyticsHandler extends Handler {
 
     const items = await col.aggregate(pipeline).toArray();
 
-    // T028: 获取题目标题并添加 displayName
-    const problemIds = items.map(item => String(item.key)).filter(id => id);
-    const titleMap = await getProblemTitleMap(filters.domainId || 'system', problemIds);
-
-    const enrichedItems: AnalyticsItem[] = items.map(item => {
-      const key = String(item.key);
-      const title = titleMap.get(key);
-      return {
-        ...item,
-        displayName: title ? `${title} (${key})` : key
-      };
-    });
-
-    return { dimension: 'problem', items: enrichedItems };
+    return { dimension: 'problem', items };
   }
 
   /**

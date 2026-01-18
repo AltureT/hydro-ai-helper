@@ -61,6 +61,40 @@ function getInitialFiltersFromUrl(): {
 }
 
 /**
+ * 可排序表头组件（移到组件外部以避免重复创建）
+ */
+interface SortableHeaderProps {
+  field: string;
+  label: string;
+  align?: 'left' | 'right' | 'center';
+  sortField: string | null;
+  sortOrder: 'asc' | 'desc';
+  onSort: (field: string) => void;
+}
+
+const SortableHeader: React.FC<SortableHeaderProps> = ({
+  field, label, align = 'right', sortField, sortOrder, onSort
+}) => {
+  const isActive = sortField === field;
+  return (
+    <th
+      onClick={() => onSort(field)}
+      style={{
+        padding: '10px',
+        border: '1px solid #ccc',
+        textAlign: align,
+        cursor: 'pointer',
+        userSelect: 'none',
+        backgroundColor: isActive ? '#d1d5db' : '#e5e7eb',
+        transition: 'background-color 0.2s'
+      }}
+    >
+      {label} {isActive ? (sortOrder === 'asc' ? '▲' : '▼') : ''}
+    </th>
+  );
+};
+
+/**
  * AnalyticsPage 组件
  */
 export const AnalyticsPage: React.FC = () => {
@@ -68,7 +102,7 @@ export const AnalyticsPage: React.FC = () => {
   const initialFilters = getInitialFiltersFromUrl();
 
   // 状态管理
-  const [dimension, setDimension] = useState<Dimension>('class');
+  const [dimension, setDimension] = useState<Dimension>('problem');
   const [startDate, setStartDate] = useState<string>(initialFilters.startDate);
   const [endDate, setEndDate] = useState<string>(initialFilters.endDate);
   const [classId, setClassId] = useState<string>(initialFilters.classId);
@@ -77,6 +111,10 @@ export const AnalyticsPage: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
+
+  // 排序状态
+  const [sortField, setSortField] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   // 如果 URL 带有筛选参数，组件加载时自动查询
   const hasInitialFilters = initialFilters.startDate || initialFilters.endDate ||
@@ -158,6 +196,36 @@ export const AnalyticsPage: React.FC = () => {
   };
 
   /**
+   * 处理表头点击排序
+   */
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortOrder('desc');
+    }
+  };
+
+  /**
+   * 获取排序后的数据
+   */
+  const getSortedItems = (items: AnalyticsItem[]): AnalyticsItem[] => {
+    if (!sortField) return items;
+    return [...items].sort((a, b) => {
+      const aVal = (a as any)[sortField];
+      const bVal = (b as any)[sortField];
+      if (aVal == null && bVal == null) return 0;
+      if (aVal == null) return sortOrder === 'asc' ? -1 : 1;
+      if (bVal == null) return sortOrder === 'asc' ? 1 : -1;
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortOrder === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      return sortOrder === 'asc' ? (aVal - bVal) : (bVal - aVal);
+    });
+  };
+
+  /**
    * 渲染表格（根据维度）
    */
   const renderTable = () => {
@@ -177,20 +245,22 @@ export const AnalyticsPage: React.FC = () => {
 
     // 根据维度渲染不同的表头和列
     if (data.dimension === 'class') {
+      const sortedItems = getSortedItems(data.items);
       return (
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
           <thead>
             <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-              <th style={{ padding: '10px', border: '1px solid #ccc' }}>班级</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>对话总数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>参与学生数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>人均对话数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话占比</th>
+              <SortableHeader field="key" label="班级" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="studentCount" label="参与学生数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="avgConversationsPerStudent" label="人均对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveConversations" label="有效对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveRatio" label="有效对话占比" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
             </tr>
           </thead>
           <tbody>
-            {data.items.map((item, idx) => (
+            {sortedItems.map((item, idx) => (
               <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
                 <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.key || '-'}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.totalConversations}</td>
@@ -200,6 +270,19 @@ export const AnalyticsPage: React.FC = () => {
                 </td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.effectiveConversations}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatPercent(item.effectiveRatio)}</td>
+                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
+                  <a
+                    href={buildPageUrl(`/ai-helper/conversations?classId=${item.key}`)}
+                    style={{
+                      color: '#6366f1',
+                      textDecoration: 'none',
+                      fontWeight: 500,
+                    }}
+                    title={`查看班级 ${item.key} 的对话记录`}
+                  >
+                    查看对话
+                  </a>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -208,20 +291,22 @@ export const AnalyticsPage: React.FC = () => {
     }
 
     if (data.dimension === 'problem') {
+      const sortedItems = getSortedItems(data.items);
       return (
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
           <thead>
             <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-              <th style={{ padding: '10px', border: '1px solid #ccc' }}>题目</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>对话总数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>使用学生数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>平均轮数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话占比</th>
+              <SortableHeader field="displayName" label="题目" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="studentCount" label="使用学生数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveConversations" label="有效对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveRatio" label="有效对话占比" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
             </tr>
           </thead>
           <tbody>
-            {data.items.map((item, idx) => (
+            {sortedItems.map((item, idx) => (
               <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
                 {/* T030: 显示 displayName（题目标题），fallback 到 key */}
                 <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.displayName || item.key || '-'}</td>
@@ -232,6 +317,19 @@ export const AnalyticsPage: React.FC = () => {
                 </td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{item.effectiveConversations}</td>
                 <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>{formatPercent(item.effectiveRatio)}</td>
+                <td style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>
+                  <a
+                    href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)}
+                    style={{
+                      color: '#6366f1',
+                      textDecoration: 'none',
+                      fontWeight: 500,
+                    }}
+                    title={`查看题目 ${item.displayName || item.key} 的对话记录`}
+                  >
+                    查看对话
+                  </a>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -240,21 +338,22 @@ export const AnalyticsPage: React.FC = () => {
     }
 
     if (data.dimension === 'student') {
+      const sortedItems = getSortedItems(data.items);
       return (
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
           <thead>
             <tr style={{ backgroundColor: '#e5e7eb', textAlign: 'left' }}>
-              <th style={{ padding: '10px', border: '1px solid #ccc' }}>学生</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>对话总数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>有效对话占比</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>平均轮数</th>
-              <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'right' }}>最近使用时间</th>
+              <SortableHeader field="displayName" label="学生" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveConversations" label="有效对话数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="effectiveRatio" label="有效对话占比" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
+              <SortableHeader field="lastUsedAt" label="最近使用时间" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
               <th style={{ padding: '10px', border: '1px solid #ccc', textAlign: 'center' }}>操作</th>
             </tr>
           </thead>
           <tbody>
-            {data.items.map((item, idx) => (
+            {sortedItems.map((item, idx) => (
               <tr key={idx} style={{ borderBottom: '1px solid #ccc', backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
                 {/* T030: 显示 displayName（用户名），fallback 到 key */}
                 <td style={{ padding: '10px', border: '1px solid #ccc' }}>{item.displayName || item.key || '-'}</td>
@@ -310,6 +409,8 @@ export const AnalyticsPage: React.FC = () => {
               onChange={(e) => {
                 setDimension(e.target.value as Dimension);
                 setData(null); // 清空数据
+                setSortField(null); // 重置排序
+                setSortOrder('desc');
               }}
               style={{
                 width: '100%',

@@ -96,7 +96,7 @@ export class ChatHandler extends Handler {
       } = this.request.body as ChatRequest;
 
       // 验证问题类型
-      const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'review'];
+      const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug'];
       if (!validQuestionTypes.includes(questionType as QuestionType)) {
         throw new Error('无效的问题类型');
       }
@@ -162,7 +162,7 @@ export class ChatHandler extends Handler {
         }
       }
 
-      // 构造 prompts
+      // 构造 system prompt
       // 使用前端传入的题目标题,如果没有则使用题目ID
       const problemTitleStr = problemTitle || `题目 ${problemId}`;
       const systemPrompt = promptService.buildSystemPrompt(
@@ -170,28 +170,31 @@ export class ChatHandler extends Handler {
         processedProblemContent,
         customSystemPromptTemplate
       );
-      const userPrompt = promptService.buildUserPrompt(
-        questionType as QuestionType,
-        userThinking,
-        processedCode,
-        undefined // errorInfo 暂不支持
-      );
-
-      // 准备消息数组
-      const messages: ChatMessage[] = [
-        { role: 'user', content: userPrompt }
-      ];
 
       // 处理对话会话 (新建或复用)
       let currentConversationId: ObjectIdType;
 
       if (conversationId) {
-        // 复用已有会话
+        // 验证 conversationId 格式
+        const { ObjectId } = await import('../utils/mongo');
+        if (!ObjectId.isValid(conversationId)) {
+          this.response.status = 400;
+          this.response.body = { error: '无效的会话 ID' };
+          this.response.type = 'application/json';
+          return;
+        }
+        // 复用已有会话（验证所有权）
         const conversation = await conversationModel.findById(conversationId);
         if (!conversation) {
-          // 会话不存在,返回 404
           this.response.status = 404;
           this.response.body = { error: '会话不存在' };
+          this.response.type = 'application/json';
+          return;
+        }
+        // 验证会话归属当前用户和当前域
+        if (conversation.userId !== userId || conversation.domainId !== domainId) {
+          this.response.status = 403;
+          this.response.body = { error: '无权访问此会话' };
           this.response.type = 'application/json';
           return;
         }
@@ -234,8 +237,27 @@ export class ChatHandler extends Handler {
       // 增加会话的消息计数
       await conversationModel.incrementMessageCount(currentConversationId);
 
-      // TODO: 加载历史消息用于多轮对话 (后续 Phase)
-      // const historyMessages = await messageModel.findByConversationId(currentConversationId);
+      // 加载历史消息用于多轮对话（排除刚保存的当前消息）
+      const historyMessages = (await messageModel.findByConversationId(currentConversationId))
+        .slice(0, -1)
+        .map((msg) => ({
+          role: msg.role,
+          content: msg.content
+        }));
+
+      // 构造 user prompt（包含历史上下文）
+      const userPrompt = promptService.buildUserPrompt(
+        questionType as QuestionType,
+        userThinking,
+        processedCode,
+        undefined, // errorInfo 暂不支持
+        historyMessages
+      );
+
+      // 准备消息数组
+      const messages: ChatMessage[] = [
+        { role: 'user', content: userPrompt }
+      ];
 
       // 从数据库配置创建 AI 客户端
       let openaiClient: OpenAIClient;

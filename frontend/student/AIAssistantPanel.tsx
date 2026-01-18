@@ -16,8 +16,7 @@ import { buildApiUrl } from '../utils/domainUtils';
 const QUESTION_TYPES = [
   { value: 'understand', label: '理解题意 - 我对题目要求不太清楚' },
   { value: 'think', label: '理清思路 - 我需要帮助梳理解题思路' },
-  { value: 'debug', label: '分析错误 - 我的代码有问题,需要找出原因' },
-  { value: 'review', label: '检查代码思路 - 请帮我检查思路是否正确' }
+  { value: 'debug', label: '分析错误 - 我的代码有问题,需要找出原因' }
 ];
 
 /**
@@ -54,6 +53,24 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   const [aiResponse, setAiResponse] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
+
+  // 多轮对话状态
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationHistory, setConversationHistory] = useState<Array<{
+    role: 'student' | 'ai';
+    content: string;
+    timestamp: Date;
+    code?: string;  // 学生消息可能附带代码
+  }>>([]);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+
+  // 选中答疑状态
+  const [selectedText, setSelectedText] = useState<string>('');
+  const [popupPosition, setPopupPosition] = useState<{x: number; y: number} | null>(null);
+  const aiResponseRef = useRef<HTMLDivElement>(null);
+
+  // 自动提交标记（用于"我不理解"功能）
+  const [pendingAutoSubmit, setPendingAutoSubmit] = useState<boolean>(false);
 
   // 题目信息自动读取相关状态
   const [problemInfo, setProblemInfo] = useState<ProblemInfo | null>(null);
@@ -128,6 +145,20 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  /**
+   * 多轮对话：从 localStorage 恢复 conversationId
+   */
+  useEffect(() => {
+    if (problemId) {
+      try {
+        const savedId = window.localStorage.getItem(`ai_conversation_${problemId}`);
+        if (savedId) setConversationId(savedId);
+      } catch (e) {
+        // ignore localStorage error
+      }
+    }
+  }, [problemId]);
 
   /**
    * T040: 从 Scratchpad 读取代码
@@ -307,17 +338,32 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
   }, [problemId]);
 
   /**
+   * 滚动聊天容器到底部
+   */
+  const scrollToBottom = () => {
+    setTimeout(() => {
+      if (chatContainerRef.current) {
+        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      }
+    }, 100);
+  };
+
+  /**
    * 提交问题到后端
    */
   const handleSubmit = async () => {
-    // 验证输入
-    if (!questionType) {
+    console.log('[AI Helper] handleSubmit called, conversationId:', conversationId);
+
+    // 首次提问必须选择问题类型，追问时可以复用之前的类型
+    const effectiveQuestionType = questionType || (conversationHistory.length > 0 ? 'think' : '');
+    if (!effectiveQuestionType) {
       setError('请选择问题类型');
       return;
     }
 
-    if (!userThinking || userThinking.trim().length < 20) {
-      setError('请详细描述你的思路(至少 20 字)');
+    // 追问时至少要有内容
+    if (conversationHistory.length > 0 && !userThinking.trim()) {
+      setError('请输入追问内容');
       return;
     }
 
@@ -327,13 +373,30 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       return;
     }
 
+    // 添加学生消息到历史
+    const studentMessage = {
+      role: 'student' as const,
+      content: userThinking || '（继续追问）',
+      timestamp: new Date(),
+      code: includeCode ? code : undefined
+    };
+    setConversationHistory(prev => [...prev, studentMessage]);
+    scrollToBottom();
+
     setError('');
     setIsLoading(true);
+
+    // 清空输入框
+    const savedUserThinking = userThinking;
+    const savedCode = includeCode ? code : undefined;
+    setUserThinking('');
 
     try {
       // 准备题目信息
       const finalProblemTitle = problemInfo?.title || manualTitle || undefined;
       const finalProblemContent = problemInfo?.content || undefined;
+
+      console.log('[AI Helper] Sending request with conversationId:', conversationId);
 
       // T022: 调用后端 API（使用域前缀 URL）
       const response = await fetch(buildApiUrl('/ai-helper/chat'), {
@@ -345,10 +408,11 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
           problemId,
           problemTitle: finalProblemTitle,
           problemContent: finalProblemContent,
-          questionType,
-          userThinking,
+          questionType: effectiveQuestionType,
+          userThinking: savedUserThinking,
           includeCode,
-          code: includeCode ? code : undefined
+          code: savedCode,
+          conversationId // 多轮对话：携带已有会话 ID
         })
       });
 
@@ -358,26 +422,116 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       }
 
       const data = await response.json();
+      console.log('[AI Helper] Response received, conversationId from server:', data.conversationId);
+
+      // 添加 AI 消息到历史
+      const aiMessage = {
+        role: 'ai' as const,
+        content: data.message.content,
+        timestamp: new Date()
+      };
+      setConversationHistory(prev => [...prev, aiMessage]);
       setAiResponse(data.message.content);
+      scrollToBottom();
+
+      // 多轮对话：保存 conversationId
+      if (data.conversationId) {
+        console.log('[AI Helper] Setting conversationId to:', data.conversationId);
+        setConversationId(data.conversationId);
+        try {
+          window.localStorage.setItem(`ai_conversation_${problemId}`, data.conversationId);
+        } catch (e) {
+          // ignore localStorage error
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '未知错误');
       console.error('[AI Helper] 提交失败:', err);
+      // 恢复输入内容
+      setUserThinking(savedUserThinking);
+      // 移除刚添加的学生消息
+      setConversationHistory(prev => prev.slice(0, -1));
     } finally {
       setIsLoading(false);
     }
   };
 
   /**
-   * 重置表单
+   * 开始新对话（完全重置，清除 localStorage）
    */
-  const handleReset = () => {
+  const startNewConversation = () => {
     setQuestionType('');
     setUserThinking('');
     setCode('');
     setIncludeCode(false);
     setAiResponse('');
     setError('');
+    setConversationId(null);
+    setConversationHistory([]);
+    try {
+      window.localStorage.removeItem(`ai_conversation_${problemId}`);
+    } catch (e) {
+      // ignore
+    }
   };
+
+  /**
+   * 重新获取 Scratchpad 代码（用于追问时更新代码）
+   */
+  const refreshCodeFromScratchpad = () => {
+    const scratchpadCode = readFromScratchpad();
+    if (scratchpadCode !== null) {
+      setCode(scratchpadCode);
+      setIncludeCode(true);
+      console.log('[AI Helper] Refreshed code from Scratchpad for follow-up');
+    } else {
+      setError('无法读取 Scratchpad 代码');
+    }
+  };
+
+  /**
+   * 处理 AI 回复中的文本选择
+   */
+  const handleTextSelection = () => {
+    if (!aiResponseRef.current) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) {
+      setPopupPosition(null);
+      return;
+    }
+    const text = selection.toString().trim();
+    if (text && aiResponseRef.current.contains(selection.anchorNode)) {
+      const range = selection.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      setSelectedText(text);
+      setPopupPosition({ x: rect.left + rect.width / 2, y: rect.top - 40 });
+    } else {
+      setPopupPosition(null);
+    }
+  };
+
+  /**
+   * 处理"我不理解"按钮点击
+   */
+  const handleDontUnderstand = () => {
+    const truncated = selectedText.length > 100 ? selectedText.substring(0, 100) + '...' : selectedText;
+    setQuestionType('understand');
+    setUserThinking(`我不太理解这部分："${truncated}"，能再解释一下吗？`);
+    setAiResponse('');
+    setPopupPosition(null);
+    setPendingAutoSubmit(true); // 标记需要自动提交
+    // conversationId 保持不变，实现追问
+  };
+
+  /**
+   * 自动提交监听（用于"我不理解"功能）
+   */
+  useEffect(() => {
+    if (pendingAutoSubmit && questionType && userThinking.trim()) {
+      setPendingAutoSubmit(false);
+      handleSubmit();
+    }
+  }, [pendingAutoSubmit, questionType, userThinking]);
 
   /**
    * 渲染 Markdown 内容
@@ -429,7 +583,6 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     overflow: 'hidden',
     transition: 'all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)',
-    transform: isCollapsed ? 'scale(1)' : 'scale(1)',
     cursor: isCollapsed ? 'pointer' : 'default'
   };
 
@@ -566,89 +719,212 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
       {/* 内容区 - 折叠时隐藏 */}
       {!isCollapsed && (
       <div style={{
-        padding: '16px',
-        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
         flex: 1,
         background: '#ffffff',
-        borderRadius: isMobile ? '0' : '0 0 12px 12px'
+        borderRadius: isMobile ? '0' : '0 0 12px 12px',
+        overflow: 'hidden'
       }}>
-        {/* 如果没有 AI 回复,显示表单 */}
-        {!aiResponse ? (
-          <div>
-            {/* 题目信息卡片或手动输入 */}
-            {problemInfo ? (
+        {/* 聊天消息区域 - 可滚动 */}
+        <div
+          ref={chatContainerRef}
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            padding: '16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px'
+          }}
+        >
+          {/* 题目信息卡片 - 始终显示在顶部 */}
+          {problemInfo ? (
+            <div style={{
+              background: '#f5f3ff',
+              border: '1px solid #e0ddff',
+              padding: '10px 12px',
+              borderRadius: '8px'
+            }}>
               <div style={{
-                background: '#f5f3ff',
-                border: '1px solid #e0ddff',
-                padding: '10px 12px',
-                borderRadius: '8px',
-                marginBottom: '16px'
+                fontSize: '12px',
+                color: '#9333ea',
+                marginBottom: '4px',
+                fontWeight: '500'
               }}>
-                <div style={{
-                  fontSize: '12px',
-                  color: '#9333ea',
-                  marginBottom: '4px',
-                  fontWeight: '500'
-                }}>
-                  题目 {problemInfo.problemId}
-                </div>
-                <div style={{
-                  fontWeight: '600',
-                  fontSize: '14px',
-                  color: '#5b21b6',
-                  lineHeight: '1.4',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical'
-                }}>
-                  {problemInfo.title}
-                </div>
+                题目 {problemInfo.problemId}
               </div>
-            ) : (
               <div style={{
-                background: '#fef3c7',
-                border: '1px solid #fbbf24',
-                padding: '12px',
-                borderRadius: '8px',
-                marginBottom: '15px'
-              }}>
-                <div style={{ fontSize: '13px', color: '#92400e', marginBottom: '8px' }}>
-                  ⚠️ {problemInfoError}
-                </div>
-                <input
-                  type="text"
-                  value={manualTitle}
-                  onChange={(e) => setManualTitle(e.target.value)}
-                  placeholder="请输入题目标题(如: A+B Problem)"
-                  style={{
-                    width: '100%',
-                    padding: '8px',
-                    border: '1px solid #fbbf24',
-                    borderRadius: '6px',
-                    fontSize: '13px',
-                    boxSizing: 'border-box'
-                  }}
-                />
-              </div>
-            )}
-
-            {/* 问题类型选择 - 胶囊式按钮 */}
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{
-                display: 'block',
-                marginBottom: '10px',
                 fontWeight: '600',
                 fontSize: '14px',
-                color: '#374151'
+                color: '#5b21b6',
+                lineHeight: '1.4',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical'
               }}>
-                问题类型
-              </label>
+                {problemInfo.title}
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              background: '#fef3c7',
+              border: '1px solid #fbbf24',
+              padding: '12px',
+              borderRadius: '8px'
+            }}>
+              <div style={{ fontSize: '13px', color: '#92400e', marginBottom: '8px' }}>
+                ⚠️ {problemInfoError}
+              </div>
+              <input
+                type="text"
+                value={manualTitle}
+                onChange={(e) => setManualTitle(e.target.value)}
+                placeholder="请输入题目标题(如: A+B Problem)"
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  border: '1px solid #fbbf24',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+          )}
+
+          {/* 对话历史消息 */}
+          {conversationHistory.map((msg, idx) => (
+            <div
+              key={idx}
+              ref={msg.role === 'ai' ? aiResponseRef : undefined}
+              onMouseUp={msg.role === 'ai' ? handleTextSelection : undefined}
+              style={{
+                background: msg.role === 'student' ? '#dbeafe' : '#f0fdf4',
+                border: `1px solid ${msg.role === 'student' ? '#93c5fd' : '#86efac'}`,
+                padding: '12px',
+                borderRadius: '10px',
+                position: 'relative'
+              }}
+            >
+              <div style={{
+                fontWeight: '600',
+                fontSize: '13px',
+                marginBottom: '6px',
+                color: msg.role === 'student' ? '#1e40af' : '#15803d'
+              }}>
+                {msg.role === 'student' ? '💬 我' : '🤖 AI 导师'}
+              </div>
+              <div style={{
+                fontSize: '13px',
+                color: msg.role === 'student' ? '#1e3a8a' : '#166534'
+              }}>
+                {msg.role === 'ai' ? renderMarkdown(msg.content) : (
+                  <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                )}
+              </div>
+              {msg.code && (
+                <pre style={{
+                  background: '#f1f5f9',
+                  border: '1px solid #cbd5e1',
+                  padding: '8px',
+                  borderRadius: '6px',
+                  marginTop: '8px',
+                  fontSize: '11px',
+                  overflow: 'auto',
+                  maxHeight: '100px',
+                  fontFamily: 'Consolas, Monaco, "Courier New", monospace'
+                }}>
+                  <code>{msg.code.length > 300 ? msg.code.substring(0, 300) + '...' : msg.code}</code>
+                </pre>
+              )}
+            </div>
+          ))}
+
+          {/* 加载中提示 */}
+          {isLoading && (
+            <div style={{
+              background: '#f0fdf4',
+              border: '1px solid #86efac',
+              padding: '12px',
+              borderRadius: '10px',
+              color: '#15803d',
+              fontSize: '13px'
+            }}>
+              🤖 AI 导师正在思考...
+            </div>
+          )}
+
+          {/* 选中文本弹窗 */}
+          {popupPosition && (
+            <div style={{
+              position: 'fixed',
+              top: popupPosition.y,
+              left: popupPosition.x,
+              transform: 'translateX(-50%)',
+              zIndex: 2000
+            }}>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDontUnderstand();
+                }}
+                style={{
+                  background: '#dc2626',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '8px 14px',
+                  fontSize: '13px',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                ❓ 我不理解
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* 输入区域 - 固定在底部 */}
+        <div style={{
+          borderTop: '1px solid #e5e7eb',
+          padding: '12px 16px',
+          background: '#fafafa'
+        }}>
+          {/* 错误提示 */}
+          {error && (
+            <div style={{
+              padding: '8px 12px',
+              background: '#fee2e2',
+              color: '#dc2626',
+              borderRadius: '6px',
+              marginBottom: '10px',
+              fontSize: '12px',
+              border: '1px solid #fecaca'
+            }}>
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* 首次提问：显示问题类型选择 */}
+          {conversationHistory.length === 0 && (
+            <div style={{ marginBottom: '10px' }}>
+              <div style={{
+                fontSize: '12px',
+                color: '#6b7280',
+                marginBottom: '6px'
+              }}>
+                选择问题类型：
+              </div>
               <div style={{
                 display: 'flex',
                 flexWrap: 'wrap',
-                gap: '8px'
+                gap: '6px'
               }}>
                 {QUESTION_TYPES.map(type => {
                   const isSelected = questionType === type.value;
@@ -658,28 +934,16 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
-                        padding: '8px 14px',
+                        padding: '6px 10px',
                         borderRadius: '999px',
                         border: `1.5px solid ${isSelected ? '#7c3aed' : '#d1d5db'}`,
                         background: isSelected ? '#ede9fe' : '#ffffff',
                         color: isSelected ? '#5b21b6' : '#4b5563',
-                        fontSize: '13px',
+                        fontSize: '12px',
                         fontWeight: isSelected ? '600' : '500',
                         cursor: 'pointer',
                         transition: 'all 0.2s ease',
                         userSelect: 'none'
-                      }}
-                      onMouseEnter={(e) => {
-                        if (!isSelected) {
-                          e.currentTarget.style.borderColor = '#9ca3af';
-                          e.currentTarget.style.background = '#f9fafb';
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        if (!isSelected) {
-                          e.currentTarget.style.borderColor = '#d1d5db';
-                          e.currentTarget.style.background = '#ffffff';
-                        }
                       }}
                     >
                       <input
@@ -690,370 +954,205 @@ export const AIAssistantPanel: React.FC<{ problemId: string }> = ({ problemId })
                         onChange={(e) => setQuestionType(e.target.value)}
                         style={{ display: 'none' }}
                       />
-                      {type.label}
+                      {type.label.split(' - ')[0]}
                     </label>
                   );
                 })}
               </div>
             </div>
+          )}
 
-            {/* 我的理解和尝试 */}
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{
-                display: 'block',
-                marginBottom: '8px',
-                fontWeight: '600',
-                fontSize: '14px',
-                color: '#374151'
-              }}>
-                我的理解和尝试 <span style={{ color: '#ef4444' }}>*</span>
-              </label>
-              <textarea
-                value={userThinking}
-                onChange={(e) => setUserThinking(e.target.value)}
-                placeholder="请描述你对这道题的理解和已经尝试的方法(至少 20 字)..."
+          {/* 追问时：显示刷新代码按钮 */}
+          {conversationHistory.length > 0 && (
+            <div style={{
+              display: 'flex',
+              gap: '8px',
+              marginBottom: '10px'
+            }}>
+              <button
+                type="button"
+                onClick={refreshCodeFromScratchpad}
                 style={{
-                  width: '100%',
-                  minHeight: '140px',
-                  padding: '10px 12px',
-                  border: '1px solid #d4d4d8',
-                  borderRadius: '8px',
-                  fontSize: '13px',
-                  lineHeight: '1.6',
-                  resize: 'vertical',
-                  boxSizing: 'border-box',
-                  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-                  transition: 'all 0.2s ease',
-                  outline: 'none',
-                  background: '#ffffff'
+                  padding: '6px 12px',
+                  background: '#f3f4f6',
+                  color: '#374151',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
                 }}
-                onFocus={(e) => {
-                  e.target.style.borderColor = '#6366f1';
-                  e.target.style.boxShadow = '0 0 0 3px rgba(99, 102, 241, 0.1)';
+              >
+                📎 {includeCode ? '已附带代码' : '附带代码'}
+              </button>
+              <button
+                type="button"
+                onClick={startNewConversation}
+                style={{
+                  padding: '6px 12px',
+                  background: '#f3f4f6',
+                  color: '#6b7280',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  cursor: 'pointer'
                 }}
-                onBlur={(e) => {
-                  e.target.style.borderColor = '#d4d4d8';
-                  e.target.style.boxShadow = 'none';
-                }}
-              />
+              >
+                🔄 新对话
+              </button>
+            </div>
+          )}
+
+          {/* 代码预览（追问时附带代码） */}
+          {conversationHistory.length > 0 && includeCode && code && (
+            <div style={{
+              background: '#f9fafb',
+              border: '1px solid #e5e7eb',
+              borderRadius: '6px',
+              padding: '8px',
+              marginBottom: '10px',
+              fontSize: '11px'
+            }}>
               <div style={{
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginTop: '6px'
+                marginBottom: '4px'
               }}>
-                <div style={{
-                  fontSize: '12px',
-                  color: '#9ca3af',
-                  lineHeight: '1.4'
-                }}>
-                  💡 越详细的思路描述,AI 越能针对性地帮你诊断
-                </div>
-                <div style={{
-                  fontSize: '12px',
-                  color: userThinking.length >= 20 ? '#10b981' : '#9ca3af',
-                  fontWeight: '500'
-                }}>
-                  {userThinking.length} / 2000
-                </div>
-              </div>
-            </div>
-
-            {/* 附带代码显式确认 */}
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{
-                display: 'flex',
-                alignItems: 'flex-start',
-                cursor: 'pointer',
-                padding: '12px',
-                borderRadius: '8px',
-                border: '1px solid #e5e7eb',
-                background: includeCode ? '#faf5ff' : '#ffffff',
-                transition: 'all 0.2s ease'
-              }}
-              onMouseEnter={(e) => {
-                if (!includeCode) {
-                  e.currentTarget.style.background = '#f9fafb';
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!includeCode) {
-                  e.currentTarget.style.background = '#ffffff';
-                }
-              }}
-              >
-                <input
-                  type="checkbox"
-                  checked={includeCode}
-                  onChange={(e) => setIncludeCode(e.target.checked)}
+                <span style={{ color: '#6b7280' }}>📝 已附带代码 ({code.length} 字符)</span>
+                <button
+                  type="button"
+                  onClick={() => { setCode(''); setIncludeCode(false); }}
                   style={{
-                    marginRight: '10px',
-                    marginTop: '2px',
-                    width: '18px',
-                    height: '18px',
+                    background: 'none',
+                    border: 'none',
+                    color: '#ef4444',
                     cursor: 'pointer',
-                    accentColor: '#7c3aed'
+                    fontSize: '11px',
+                    padding: '2px 4px'
                   }}
-                />
-                <div style={{ flex: 1 }}>
-                  <div style={{
-                    fontWeight: '600',
-                    fontSize: '14px',
-                    color: '#374151',
-                    marginBottom: '4px'
-                  }}>
-                    📎 附带当前代码给 AI 检查
-                  </div>
-                  <div style={{
-                    fontSize: '12px',
-                    color: '#6b7280',
-                    lineHeight: '1.4'
-                  }}>
-                    建议在调试错误时勾选,可能略微增加响应时间
-                  </div>
-                </div>
-              </label>
-
-              {includeCode && (
-                <div>
-                  {/* T041: 刷新代码按钮 - 用于重新读取 Scratchpad 中的最新代码 */}
-                  <button
-                    type="button"
-                    onClick={handleReadFromScratchpad}
-                    style={{
-                      width: '100%',
-                      padding: '10px 16px',
-                      background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '8px',
-                      fontSize: '14px',
-                      fontWeight: '500',
-                      cursor: 'pointer',
-                      marginBottom: '10px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    🔄 {code ? '刷新代码' : '读取 Scratchpad 代码'}
-                  </button>
-
-                  {/* T044: 代码预览显示（截断到 500 字符） */}
-                  {code && (
-                    <div style={{
-                      background: '#f9fafb',
-                      border: `1px solid ${code.length > 5000 ? '#ef4444' : '#e5e7eb'}`,
-                      borderRadius: '8px',
-                      padding: '10px',
-                      marginBottom: '8px'
-                    }}>
-                      <div style={{
-                        fontSize: '12px',
-                        color: '#6b7280',
-                        marginBottom: '6px',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center'
-                      }}>
-                        <span>📝 已读取代码预览</span>
-                        <button
-                          type="button"
-                          onClick={() => setCode('')}
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: '#ef4444',
-                            cursor: 'pointer',
-                            fontSize: '12px',
-                            padding: '2px 6px'
-                          }}
-                        >
-                          ✕ 清除
-                        </button>
-                      </div>
-                      <pre style={{
-                        margin: 0,
-                        fontSize: '12px',
-                        fontFamily: 'Consolas, Monaco, "Courier New", monospace',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-all',
-                        color: '#374151',
-                        maxHeight: '120px',
-                        overflow: 'auto',
-                        lineHeight: '1.4'
-                      }}>
-                        {code.length > 500 ? code.substring(0, 500) + '\n...(已截断预览)' : code}
-                      </pre>
-                    </div>
-                  )}
-
-                  {/* 代码长度提示 */}
-                  {code && (
-                    <div style={{
-                      fontSize: '12px',
-                      color: code.length > 5000 ? '#ef4444' : '#6b7280',
-                      fontWeight: code.length > 5000 ? 'bold' : 'normal'
-                    }}>
-                      {code.length > 5000 ? (
-                        <>⚠️ 代码过长({code.length} 字符),将截断到 5000 字符</>
-                      ) : (
-                        <>✓ 代码长度: {code.length} 字符</>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* 错误提示 */}
-            {error && (
-              <div style={{
-                padding: '12px',
-                background: '#fee2e2',
-                color: '#dc2626',
-                borderRadius: '8px',
-                marginBottom: '15px',
-                fontSize: '13px',
-                border: '1px solid #fecaca'
-              }}>
-                ⚠️ {error}
+                >
+                  ✕ 移除
+                </button>
               </div>
-            )}
+              <pre style={{
+                margin: 0,
+                fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+                color: '#374151',
+                maxHeight: '60px',
+                overflow: 'auto'
+              }}>
+                {code.length > 200 ? code.substring(0, 200) + '...' : code}
+              </pre>
+            </div>
+          )}
 
-            {/* 提交按钮 */}
+          {/* 输入框和发送按钮 */}
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+            <textarea
+              value={userThinking}
+              onChange={(e) => setUserThinking(e.target.value)}
+              placeholder={conversationHistory.length === 0
+                ? "描述你的问题或疑惑..."
+                : "继续追问..."}
+              style={{
+                flex: 1,
+                minHeight: conversationHistory.length === 0 ? '80px' : '40px',
+                maxHeight: '120px',
+                padding: '10px 12px',
+                border: '1px solid #d4d4d8',
+                borderRadius: '8px',
+                fontSize: '13px',
+                lineHeight: '1.5',
+                resize: 'none',
+                boxSizing: 'border-box',
+                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+                outline: 'none'
+              }}
+              onFocus={(e) => {
+                e.target.style.borderColor = '#6366f1';
+              }}
+              onBlur={(e) => {
+                e.target.style.borderColor = '#d4d4d8';
+              }}
+              onKeyDown={(e) => {
+                // Ctrl+Enter 或 Cmd+Enter 发送
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+              }}
+            />
             <button
               onClick={handleSubmit}
               disabled={
                 isLoading ||
-                !questionType ||
-                userThinking.trim().length < 20 ||
-                (includeCode && !code.trim())
+                (conversationHistory.length === 0 && !questionType) ||
+                (conversationHistory.length > 0 && !userThinking.trim())
               }
               style={{
-                width: '100%',
-                padding: '14px',
+                padding: '10px 16px',
                 background: (
                   isLoading ||
-                  !questionType ||
-                  userThinking.trim().length < 20 ||
-                  (includeCode && !code.trim())
+                  (conversationHistory.length === 0 && !questionType) ||
+                  (conversationHistory.length > 0 && !userThinking.trim())
                 ) ? '#d1d5db' : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-                color: 'white',
-                border: 'none',
-                borderRadius: '999px',
-                fontSize: '15px',
-                fontWeight: '600',
-                cursor: (
-                  isLoading ||
-                  !questionType ||
-                  userThinking.trim().length < 20 ||
-                  (includeCode && !code.trim())
-                ) ? 'not-allowed' : 'pointer',
-                transition: 'all 0.2s ease',
-                boxShadow: (
-                  isLoading ||
-                  !questionType ||
-                  userThinking.trim().length < 20 ||
-                  (includeCode && !code.trim())
-                ) ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.3)',
-                transform: 'translateY(0)'
-              }}
-              onMouseEnter={(e) => {
-                if (!(
-                  isLoading ||
-                  !questionType ||
-                  userThinking.trim().length < 20 ||
-                  (includeCode && !code.trim())
-                )) {
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 6px 16px rgba(99, 102, 241, 0.4)';
-                }
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0)';
-                e.currentTarget.style.boxShadow = (
-                  isLoading ||
-                  !questionType ||
-                  userThinking.trim().length < 20 ||
-                  (includeCode && !code.trim())
-                ) ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.3)';
-              }}
-            >
-              {isLoading ? '⏳ 正在思考...' : '🚀 提交问题'}
-            </button>
-          </div>
-        ) : (
-          // 显示 AI 回复
-          <div>
-            {/* 学生消息 */}
-            <div style={{
-              background: '#dbeafe',
-              border: '1px solid #93c5fd',
-              padding: '14px',
-              borderRadius: '10px',
-              marginBottom: '16px'
-            }}>
-              <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '8px', color: '#1e40af' }}>
-                💬 我的问题
-              </div>
-              <div style={{ fontSize: '13px', whiteSpace: 'pre-wrap', color: '#1e3a8a' }}>
-                {userThinking}
-              </div>
-              {includeCode && code && (
-                <pre style={{
-                  background: '#f1f5f9',
-                  border: '1px solid #cbd5e1',
-                  padding: '10px',
-                  borderRadius: '6px',
-                  marginTop: '10px',
-                  fontSize: '12px',
-                  overflow: 'auto',
-                  fontFamily: 'Consolas, Monaco, "Courier New", monospace'
-                }}>
-                  <code>{code}</code>
-                </pre>
-              )}
-            </div>
-
-            {/* AI 回复 */}
-            <div style={{
-              background: '#f0fdf4',
-              border: '1px solid #86efac',
-              padding: '14px',
-              borderRadius: '10px',
-              marginBottom: '16px'
-            }}>
-              <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '8px', color: '#15803d' }}>
-                🤖 AI 导师
-              </div>
-              <div style={{ fontSize: '13px', color: '#166534' }}>
-                {renderMarkdown(aiResponse)}
-              </div>
-            </div>
-
-            {/* 继续提问按钮 */}
-            <button
-              onClick={handleReset}
-              style={{
-                width: '100%',
-                padding: '12px',
-                background: '#8b5cf6',
                 color: 'white',
                 border: 'none',
                 borderRadius: '8px',
                 fontSize: '14px',
                 fontWeight: '600',
-                cursor: 'pointer',
-                transition: 'background 0.2s'
+                cursor: (
+                  isLoading ||
+                  (conversationHistory.length === 0 && !questionType) ||
+                  (conversationHistory.length > 0 && !userThinking.trim())
+                ) ? 'not-allowed' : 'pointer',
+                whiteSpace: 'nowrap'
               }}
             >
-              💬 继续提问
+              {isLoading ? '⏳' : '发送'}
             </button>
           </div>
-        )}
+
+          {/* 首次提问：附带代码选项 */}
+          {conversationHistory.length === 0 && (
+            <div style={{ marginTop: '10px' }}>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                cursor: 'pointer',
+                fontSize: '12px',
+                color: '#6b7280'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={includeCode}
+                  onChange={(e) => {
+                    setIncludeCode(e.target.checked);
+                    if (e.target.checked && !code) {
+                      const scratchpadCode = readFromScratchpad();
+                      if (scratchpadCode) setCode(scratchpadCode);
+                    }
+                  }}
+                  style={{
+                    marginRight: '6px',
+                    accentColor: '#7c3aed'
+                  }}
+                />
+                📎 附带当前代码
+                {includeCode && code && (
+                  <span style={{ marginLeft: '8px', color: '#10b981' }}>
+                    ✓ 已读取 {code.length} 字符
+                  </span>
+                )}
+              </label>
+            </div>
+          )}
+        </div>
       </div>
       )}
 

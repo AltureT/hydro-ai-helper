@@ -67,6 +67,7 @@ interface ConversationSummary {
     problemTitle?: string;
     problemContent?: string;
   };
+  firstMessageSummary?: string;  // T048: 学生首条消息摘要（前100字）
 }
 
 /**
@@ -158,22 +159,40 @@ export class ConversationListHandler extends Handler {
       const uids = conversations.map(conv => conv.userId);
       const userNameMap = await getUserNameMap(uids);
 
-      // T031: 转换为响应格式（包含 problemUrl）
-      const conversationSummaries: ConversationSummary[] = conversations.map(conv => ({
-        _id: conv._id.toString(),
-        userId: conv.userId,
-        userName: userNameMap.get(conv.userId) || '已删除用户',
-        classId: conv.classId,
-        problemId: conv.problemId,
-        problemUrl: buildProblemUrl(domainId, conv.problemId),  // T031: 题目链接
-        startTime: conv.startTime.toISOString(),
-        endTime: conv.endTime.toISOString(),
-        messageCount: conv.messageCount,
-        isEffective: conv.isEffective,
-        tags: conv.tags,
-        teacherNote: conv.teacherNote,
-        metadata: conv.metadata
-      }));
+      // T048: 批量获取每个会话的第一条学生消息
+      const messageModel: MessageModel = this.ctx.get('messageModel');
+      const conversationIds = conversations.map(conv => conv._id);
+      const firstMessagesMap = await messageModel.findFirstStudentMessagesForConversations(conversationIds);
+
+      // T031: 转换为响应格式（包含 problemUrl 和 firstMessageSummary）
+      const conversationSummaries: ConversationSummary[] = conversations.map(conv => {
+        const convIdStr = conv._id.toString();
+        const firstMsg = firstMessagesMap.get(convIdStr);
+        // T048: 截取前100字作为摘要
+        let firstMessageSummary: string | undefined;
+        if (firstMsg?.content) {
+          firstMessageSummary = firstMsg.content.length > 100
+            ? firstMsg.content.substring(0, 100) + '...'
+            : firstMsg.content;
+        }
+
+        return {
+          _id: convIdStr,
+          userId: conv.userId,
+          userName: userNameMap.get(conv.userId) || '已删除用户',
+          classId: conv.classId,
+          problemId: conv.problemId,
+          problemUrl: buildProblemUrl(domainId, conv.problemId),  // T031: 题目链接
+          startTime: conv.startTime.toISOString(),
+          endTime: conv.endTime.toISOString(),
+          messageCount: conv.messageCount,
+          isEffective: conv.isEffective,
+          tags: conv.tags,
+          teacherNote: conv.teacherNote,
+          metadata: conv.metadata,
+          firstMessageSummary  // T048: 学生问题摘要
+        };
+      });
 
       if (wantJson) {
         setJsonResponse(this, {
@@ -229,8 +248,12 @@ export class ConversationDetailHandler extends Handler {
       }
 
       // 域隔离验证：确保对话属于当前域
-      if (conversation.domainId && conversation.domainId !== domainId) {
-        console.log('[AI Helper] Domain mismatch - conversation domain:', conversation.domainId, 'current domain:', domainId);
+      // 特殊处理：
+      // 1. 对话的 domainId 为 'system'（历史数据迁移默认值）时，允许任何域访问
+      // 2. 当前访问域为 'system'（主站访问）时，允许访问所有域的对话
+      const conversationDomain = conversation.domainId || 'system';
+      if (conversationDomain !== domainId && conversationDomain !== 'system' && domainId !== 'system') {
+        console.log('[AI Helper] Domain mismatch - conversation domain:', conversationDomain, 'current domain:', domainId);
         setErrorResponse(this, 'FORBIDDEN', '无权访问此对话', 403);
         return;
       }
