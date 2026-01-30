@@ -377,21 +377,19 @@ export class UpdateService {
       log('building', '编译完成');
 
       // Step 4: 延迟执行 pm2 restart hydrooj
-      // 注意：必须延迟执行，确保 HTTP 响应先发送给客户端
-      // 否则 pm2 restart 会立即杀死进程，导致响应无法完成
+      // 使用独立的后台 shell 进程执行延迟重启
+      // sleep 在子进程中执行，不依赖 Node.js 主进程状态
       log('restarting', '准备重启 HydroOJ（将在响应发送后执行）...');
 
-      // 使用 setTimeout 延迟 1 秒执行重启，确保响应先发送
-      setTimeout(() => {
-        spawn('pm2', ['restart', 'hydrooj'], {
-          cwd: this.pluginPath,
-          shell: true,
-          detached: true,
-          stdio: 'ignore'
-        }).unref();
-      }, 1000);
+      // 创建完全独立的后台进程：sleep 15 秒后执行 pm2 restart
+      // detached + unref 确保子进程独立于父进程运行
+      spawn('sh', ['-c', 'sleep 15 && pm2 restart hydrooj'], {
+        cwd: this.pluginPath,
+        detached: true,
+        stdio: 'ignore'
+      }).unref();
 
-      log('restarting', '重启命令已安排，服务将在 1 秒后重启');
+      log('restarting', '重启命令已安排，服务将在 15 秒后重启');
 
       // 完成
       log('completed', '更新完成！页面将在几秒后自动刷新...');

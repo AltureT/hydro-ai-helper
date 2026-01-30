@@ -170,7 +170,7 @@ export const VersionBadge: React.FC = () => {
         setUpdateLogs([`服务器错误: ${response.status} ${response.statusText}`]);
         setUpdateError(
           response.status === 502
-            ? '服务器编译失败，请先在服务器上手动执行: git pull && npm run build && pm2 restart hydrooj'
+            ? '服务器连接中断（可能正在重启中），请稍等几秒后刷新页面。如仍有问题，请在服务器上执行: git pull && npm run build && pm2 restart hydrooj'
             : errorText || `HTTP ${response.status}`
         );
         return;
