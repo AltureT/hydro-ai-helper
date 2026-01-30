@@ -6,7 +6,7 @@
 import { Handler, PRIV } from 'hydrooj';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { encrypt, decrypt, maskApiKey } from '../lib/crypto';
-import { OpenAIClient } from '../services/openaiClient';
+import { OpenAIClient, fetchAvailableModels } from '../services/openaiClient';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
@@ -324,6 +324,94 @@ export class TestConnectionHandler extends Handler {
 export const GetConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const UpdateConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const TestConnectionHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const FetchModelsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+
+/**
+ * FetchModelsHandler - 获取 API 端点的可用模型列表
+ * POST /ai-helper/admin/fetch-models
+ */
+export class FetchModelsHandler extends Handler {
+  async post() {
+    try {
+      const body = this.request.body as {
+        endpointId?: string;
+        apiBaseUrl?: string;
+        apiKey?: string;
+      };
+
+      let apiBaseUrl: string;
+      let apiKey: string;
+
+      if (body.endpointId) {
+        // 从现有端点获取配置
+        const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+        const endpoint = await aiConfigModel.getEndpointById(body.endpointId);
+
+        if (!endpoint) {
+          this.response.status = 404;
+          this.response.body = { success: false, error: '端点不存在' };
+          this.response.type = 'application/json';
+          return;
+        }
+
+        apiBaseUrl = endpoint.apiBaseUrl;
+        try {
+          apiKey = decrypt(endpoint.apiKeyEncrypted);
+        } catch {
+          this.response.status = 400;
+          this.response.body = { success: false, error: 'API Key 解密失败' };
+          this.response.type = 'application/json';
+          return;
+        }
+      } else if (body.apiBaseUrl && body.apiKey) {
+        // 使用传入的参数
+        apiBaseUrl = body.apiBaseUrl;
+        apiKey = body.apiKey;
+      } else {
+        this.response.status = 400;
+        this.response.body = {
+          success: false,
+          error: '请提供 endpointId 或者 apiBaseUrl + apiKey'
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      // 获取模型列表
+      const result = await fetchAvailableModels(apiBaseUrl, apiKey);
+
+      if (result.success) {
+        // 如果是从端点获取的，更新端点的模型列表和时间戳
+        if (body.endpointId) {
+          const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+          await aiConfigModel.updateEndpoint(body.endpointId, {
+            models: result.models || [],
+            modelsLastFetched: new Date()
+          });
+        }
+
+        this.response.body = {
+          success: true,
+          models: result.models
+        };
+      } else {
+        this.response.body = {
+          success: false,
+          error: result.error
+        };
+      }
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[FetchModelsHandler] Error:', err);
+      this.response.status = 500;
+      this.response.body = {
+        success: false,
+        error: err instanceof Error ? err.message : '获取模型列表失败'
+      };
+      this.response.type = 'application/json';
+    }
+  }
+}
 
 function formatJailbreakLog(log: JailbreakLog) {
   return {

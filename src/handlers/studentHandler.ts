@@ -3,8 +3,8 @@
  * 处理学生的 AI 对话请求
  */
 
-import { Handler, PRIV } from 'hydrooj';
-import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig } from '../services/openaiClient';
+import { Handler, PRIV, ProblemModel } from 'hydrooj';
+import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
 import { EffectivenessService } from '../services/effectivenessService';
@@ -120,12 +120,46 @@ export class ChatHandler extends Handler {
       const customSystemPromptTemplate = aiConfig?.systemPromptTemplate?.trim() || undefined;
       const extraJailbreakPatterns = parseExtraJailbreakPatterns(aiConfig?.extraJailbreakPatternsText);
 
+      // 从服务端获取可信的题目内容（用于白名单和 System Prompt）
+      // 安全考虑：不使用客户端传入的 problemContent 作为白名单，避免被利用绕过越狱检测
+      let trustedProblemTitle: string | undefined;
+      let trustedProblemContent: string | undefined;
+      try {
+        const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content']);
+        if (pdoc) {
+          trustedProblemTitle = pdoc.title;
+          // 题目内容可能是字符串或 JSON 对象（多语言支持）
+          if (typeof pdoc.content === 'string') {
+            trustedProblemContent = pdoc.content;
+          } else if (pdoc.content && typeof pdoc.content === 'object') {
+            // 多语言内容，取第一个可用的值
+            const values = Object.values(pdoc.content as Record<string, string>);
+            trustedProblemContent = values[0] || '';
+          }
+        }
+      } catch (err) {
+        // 题目获取失败不阻塞主流程，但不使用白名单
+        console.warn('[ChatHandler] 获取题目内容失败，白名单将为空:', err);
+      }
+
+      // 题目内容截断(超过 500 字符) - 用于白名单和 System Prompt
+      let processedProblemContent: string | undefined;
+      if (trustedProblemContent) {
+        if (trustedProblemContent.length > 500) {
+          processedProblemContent = trustedProblemContent.substring(0, 500) + '...';
+        } else {
+          processedProblemContent = trustedProblemContent;
+        }
+      }
+
       // 验证用户输入
       // validateInput 现在同时做长度校验和越狱关键词检测，防止学生尝试修改系统规则
+      // 使用服务端获取的可信题目内容作为白名单，避免客户端注入绕过检测
       const validation: ValidateInputResult = promptService.validateInput(
         userThinking,
         processedCode,
-        extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined
+        extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined,
+        processedProblemContent
       );
       if (!validation.valid) {
         if (validation.matchedPattern) {
@@ -146,19 +180,9 @@ export class ChatHandler extends Handler {
         throw new Error(validation.error || '输入验证失败');
       }
 
-      // 题目内容截断(超过 500 字符)
-      let processedProblemContent: string | undefined;
-      if (problemContent) {
-        if (problemContent.length > 500) {
-          processedProblemContent = problemContent.substring(0, 500) + '...';
-        } else {
-          processedProblemContent = problemContent;
-        }
-      }
-
       // 构造 system prompt
-      // 使用前端传入的题目标题,如果没有则使用题目ID
-      const problemTitleStr = problemTitle || `题目 ${problemId}`;
+      // 优先使用服务端获取的可信题目标题，其次使用前端传入的，最后使用题目ID
+      const problemTitleStr = trustedProblemTitle || problemTitle || `题目 ${problemId}`;
       const systemPrompt = promptService.buildSystemPrompt(
         problemTitleStr,
         processedProblemContent,
@@ -232,7 +256,8 @@ export class ChatHandler extends Handler {
       await conversationModel.incrementMessageCount(currentConversationId);
 
       // 加载历史消息用于多轮对话（排除刚保存的当前消息）
-      const historyMessages = (await messageModel.findByConversationId(currentConversationId))
+      // 使用 findRecentByConversationId 仅加载最近 7 条，避免长对话的内存压力
+      const historyMessages = (await messageModel.findRecentByConversationId(currentConversationId, 7))
         .slice(0, -1)
         .map((msg) => ({
           role: msg.role,
@@ -253,10 +278,10 @@ export class ChatHandler extends Handler {
         { role: 'user', content: userPrompt }
       ];
 
-      // 从数据库配置创建 AI 客户端
-      let openaiClient: OpenAIClient;
+      // 从数据库配置创建多模型 AI 客户端（支持 fallback）
+      let multiModelClient: MultiModelClient;
       try {
-        openaiClient = await createOpenAIClientFromConfig(this.ctx, aiConfig ?? undefined);
+        multiModelClient = await createMultiModelClientFromConfig(this.ctx, aiConfig ?? undefined);
       } catch (error) {
         // 配置不存在或不完整
         console.error('[AI Helper] 创建 AI 客户端失败:', error);
@@ -266,11 +291,14 @@ export class ChatHandler extends Handler {
         return;
       }
 
-      // 调用 AI 服务
+      // 调用 AI 服务（支持多模型 fallback）
       let aiResponse: string;
 
       try {
-        aiResponse = await openaiClient.chat(messages, systemPrompt);
+        const result = await multiModelClient.chat(messages, systemPrompt);
+        aiResponse = result.content;
+        // 可选：记录使用的模型信息
+        console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       } catch (error) {
         // 记录错误日志
         console.error('[AI Helper] AI 调用失败:', error);

@@ -4,19 +4,31 @@
  */
 
 import { Handler, PRIV } from 'hydrooj';
-import { AIConfig, AIConfigModel } from '../models/aiConfig';
+import { AIConfig, AIConfigModel, APIEndpoint, SelectedModel } from '../models/aiConfig';
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
 
 /**
- * 更新配置请求接口
+ * 更新配置请求接口（兼容旧版 + 新版多端点）
  */
 interface UpdateConfigRequest {
+  // 旧版单端点字段（向后兼容）
   apiBaseUrl?: string;
   modelName?: string;
-  apiKey?: string;             // 新的明文 API Key，若为空字符串则不修改
+  apiKey?: string;
+  // 新版多端点字段
+  endpoints?: Array<{
+    id?: string;
+    name: string;
+    apiBaseUrl: string;
+    apiKey?: string;  // 明文 API Key，仅新建或更新时传入
+    models?: string[];
+    enabled?: boolean;
+  }>;
+  selectedModels?: SelectedModel[];
+  // 通用字段
   rateLimitPerMinute?: number;
   timeoutSeconds?: number;
   systemPromptTemplate?: string;
@@ -43,21 +55,58 @@ export class AdminConfigHandler extends Handler {
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
 
+      // 解析分页参数
+      const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
+      const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
+
       const config = await aiConfigModel.getConfig();
-      const recentLogs = await jailbreakLogModel.listRecent(20);
+      const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+
       if (!config) {
         this.response.body = {
           config: null,
           builtinJailbreakPatterns: builtinJailbreakPatternSources,
-          recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
+          jailbreakLogs: {
+            logs: logResult.logs.map(formatJailbreakLog),
+            total: logResult.total,
+            page: logResult.page,
+            totalPages: logResult.totalPages
+          },
+          // 兼容旧前端
+          recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
         };
         this.response.type = 'application/json';
         return;
       }
 
+      // 处理端点的 API Key 脱敏
+      const endpointsWithMaskedKeys = (config.endpoints || []).map(ep => {
+        let apiKeyMasked = '';
+        let hasApiKey = false;
+        try {
+          if (ep.apiKeyEncrypted) {
+            const apiKeyPlain = decrypt(ep.apiKeyEncrypted);
+            apiKeyMasked = maskApiKey(apiKeyPlain);
+            hasApiKey = true;
+          }
+        } catch {
+          hasApiKey = false;
+        }
+        return {
+          id: ep.id,
+          name: ep.name,
+          apiBaseUrl: ep.apiBaseUrl,
+          models: ep.models || [],
+          modelsLastFetched: ep.modelsLastFetched?.toISOString(),
+          enabled: ep.enabled,
+          apiKeyMasked,
+          hasApiKey,
+        };
+      });
+
+      // 兼容旧版：处理旧版单 API Key
       let apiKeyMasked = '';
       let hasApiKey = false;
-
       try {
         if (config.apiKeyEncrypted) {
           const apiKeyPlain = decrypt(config.apiKeyEncrypted);
@@ -71,6 +120,10 @@ export class AdminConfigHandler extends Handler {
 
       this.response.body = {
         config: {
+          // 新版多端点字段
+          endpoints: endpointsWithMaskedKeys,
+          selectedModels: config.selectedModels || [],
+          // 旧版字段（向后兼容）
           apiBaseUrl: config.apiBaseUrl,
           modelName: config.modelName,
           rateLimitPerMinute: config.rateLimitPerMinute,
@@ -82,7 +135,14 @@ export class AdminConfigHandler extends Handler {
           updatedAt: config.updatedAt.toISOString()
         },
         builtinJailbreakPatterns: builtinJailbreakPatternSources,
-        recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
+        jailbreakLogs: {
+          logs: logResult.logs.map(formatJailbreakLog),
+          total: logResult.total,
+          page: logResult.page,
+          totalPages: logResult.totalPages
+        },
+        // 兼容旧前端
+        recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
     } catch (err) {
@@ -95,7 +155,7 @@ export class AdminConfigHandler extends Handler {
 
   /**
    * PUT /ai-helper/admin/config
-   * 更新配置（与 UpdateConfigHandler 逻辑保持一致，避免路由冲突导致 405）
+   * 更新配置（支持旧版单端点和新版多端点）
    */
   async put() {
     try {
@@ -104,6 +164,51 @@ export class AdminConfigHandler extends Handler {
 
       const partial: Partial<Omit<AIConfig, '_id' | 'updatedAt'>> = {};
 
+      // 处理新版多端点配置
+      if (body.endpoints !== undefined) {
+        const existingConfig = await aiConfigModel.getConfig();
+        const existingEndpoints = existingConfig?.endpoints || [];
+
+        const newEndpoints: APIEndpoint[] = [];
+        for (const ep of body.endpoints) {
+          // 查找是否有现有端点
+          const existing = ep.id ? existingEndpoints.find(e => e.id === ep.id) : null;
+
+          let apiKeyEncrypted = existing?.apiKeyEncrypted || '';
+
+          // 如果提供了新的 API Key，加密它
+          if (ep.apiKey && ep.apiKey.trim()) {
+            try {
+              apiKeyEncrypted = encrypt(ep.apiKey.trim());
+            } catch (err) {
+              this.response.status = 500;
+              this.response.body = {
+                error: `端点 "${ep.name}" 的 API Key 加密失败`
+              };
+              this.response.type = 'application/json';
+              return;
+            }
+          }
+
+          newEndpoints.push({
+            id: ep.id || (await import('crypto')).randomUUID(),
+            name: ep.name,
+            apiBaseUrl: ep.apiBaseUrl,
+            apiKeyEncrypted,
+            models: ep.models || existing?.models || [],
+            modelsLastFetched: existing?.modelsLastFetched,
+            enabled: ep.enabled !== undefined ? ep.enabled : true,
+          });
+        }
+        partial.endpoints = newEndpoints;
+      }
+
+      // 处理选中的模型
+      if (body.selectedModels !== undefined) {
+        partial.selectedModels = body.selectedModels;
+      }
+
+      // 旧版单端点字段（向后兼容）
       if (body.apiBaseUrl !== undefined) {
         partial.apiBaseUrl = body.apiBaseUrl.trim();
       }
@@ -142,6 +247,7 @@ export class AdminConfigHandler extends Handler {
         partial.extraJailbreakPatternsText = body.extraJailbreakPatternsText;
       }
 
+      // 旧版单 API Key（向后兼容）
       if (body.apiKey !== undefined && body.apiKey !== '') {
         try {
           partial.apiKeyEncrypted = encrypt(body.apiKey.trim());
@@ -164,6 +270,32 @@ export class AdminConfigHandler extends Handler {
         throw new Error('配置更新后读取失败');
       }
 
+      // 处理端点的 API Key 脱敏
+      const endpointsWithMaskedKeys = (updatedConfig.endpoints || []).map(ep => {
+        let apiKeyMasked = '';
+        let hasApiKey = false;
+        try {
+          if (ep.apiKeyEncrypted) {
+            const apiKeyPlain = decrypt(ep.apiKeyEncrypted);
+            apiKeyMasked = maskApiKey(apiKeyPlain);
+            hasApiKey = true;
+          }
+        } catch {
+          hasApiKey = false;
+        }
+        return {
+          id: ep.id,
+          name: ep.name,
+          apiBaseUrl: ep.apiBaseUrl,
+          models: ep.models || [],
+          modelsLastFetched: ep.modelsLastFetched?.toISOString(),
+          enabled: ep.enabled,
+          apiKeyMasked,
+          hasApiKey,
+        };
+      });
+
+      // 兼容旧版：处理单 API Key
       let apiKeyMasked = '';
       let hasApiKey = false;
       try {
@@ -177,10 +309,12 @@ export class AdminConfigHandler extends Handler {
         hasApiKey = false;
       }
 
-      const recentLogs = await jailbreakLogModel.listRecent(20);
+      const logResult = await jailbreakLogModel.listWithPagination(1, 20);
 
       this.response.body = {
         config: {
+          endpoints: endpointsWithMaskedKeys,
+          selectedModels: updatedConfig.selectedModels || [],
           apiBaseUrl: updatedConfig.apiBaseUrl,
           modelName: updatedConfig.modelName,
           rateLimitPerMinute: updatedConfig.rateLimitPerMinute,
@@ -192,7 +326,13 @@ export class AdminConfigHandler extends Handler {
           updatedAt: updatedConfig.updatedAt.toISOString()
         },
         builtinJailbreakPatterns: builtinJailbreakPatternSources,
-        recentJailbreakLogs: recentLogs.map(formatJailbreakLog)
+        jailbreakLogs: {
+          logs: logResult.logs.map(formatJailbreakLog),
+          total: logResult.total,
+          page: logResult.page,
+          totalPages: logResult.totalPages
+        },
+        recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
     } catch (err) {

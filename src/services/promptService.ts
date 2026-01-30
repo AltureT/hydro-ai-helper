@@ -354,10 +354,20 @@ ${errorInfo}
     code: string | undefined,
     extraJailbreakPatterns?: RegExp[]
   ): ValidateInputResult;
+  /**
+   * 验证用户输入（允许传入额外的越狱规则和题目内容白名单）
+   */
+  validateInput(
+    userThinking: string,
+    code: string | undefined,
+    extraJailbreakPatterns?: RegExp[],
+    problemContentWhitelist?: string
+  ): ValidateInputResult;
   validateInput(
     userThinking: string,
     code?: string,
-    extraJailbreakPatterns?: RegExp[]
+    extraJailbreakPatterns?: RegExp[],
+    problemContentWhitelist?: string
   ): ValidateInputResult {
     // userThinking 改为选填，不再强制要求
 
@@ -371,6 +381,12 @@ ${errorInfo}
       return { valid: false, error: '代码片段过长(最多 5000 字符)' };
     }
 
+    // 标准化白名单内容（用于匹配比对），设置长度上限避免性能问题
+    const MAX_WHITELIST_LENGTH = 2000;
+    const normalizedWhitelist = problemContentWhitelist
+      ? this.normalizeForComparison(problemContentWhitelist.slice(0, MAX_WHITELIST_LENGTH))
+      : '';
+
     // 越狱关键词检测
     const builtinPatterns = getBuiltinJailbreakPatterns();
     const allPatterns = extraJailbreakPatterns?.length
@@ -381,6 +397,11 @@ ${errorInfo}
         pattern.lastIndex = 0;
         const match = pattern.exec(text);
         if (match) {
+          // 检查匹配文本是否来自题目内容（白名单）
+          if (normalizedWhitelist && this.isMatchFromWhitelist(match[0], normalizedWhitelist)) {
+            // 跳过此匹配，继续检测其他模式
+            continue;
+          }
           return { pattern, match };
         }
       }
@@ -418,6 +439,37 @@ ${errorInfo}
     }
 
     return { valid: true };
+  }
+
+  /**
+   * 标准化文本用于比对（大小写、空白、全角半角）
+   */
+  private normalizeForComparison(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .replace(/[\uFF01-\uFF5E]/g, (char) =>
+        String.fromCharCode(char.charCodeAt(0) - 0xFEE0)
+      )
+      .trim();
+  }
+
+  /**
+   * 检查匹配文本是否来自白名单（题目内容）
+   * 要求匹配文本在白名单中完整出现，且有最小长度限制
+   */
+  private isMatchFromWhitelist(matchedText: string, normalizedWhitelist: string): boolean {
+    const MIN_MATCH_LENGTH = 8; // 最小重合长度阈值，避免短文本被利用绕过
+
+    const normalizedMatch = this.normalizeForComparison(matchedText);
+
+    // 如果匹配文本太短，不允许跳过（防止利用短文本绕过检测）
+    if (normalizedMatch.length < MIN_MATCH_LENGTH) {
+      return false;
+    }
+
+    // 检查标准化后的匹配文本是否存在于白名单中
+    return normalizedWhitelist.includes(normalizedMatch);
   }
 
   private buildDefaultRules(languageAndStyleRule: string, hasCustomTemplate: boolean): string {

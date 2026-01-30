@@ -1,22 +1,50 @@
 /**
  * AI 配置页面
  * 管理员配置 AI 学习助手相关参数
+ * 支持多 API 端点配置、模型自动获取、Fallback 机制
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { VersionBadge } from './VersionBadge';
+
+/**
+ * API 端点接口
+ */
+interface Endpoint {
+  id?: string;
+  name: string;
+  apiBaseUrl: string;
+  apiKeyMasked?: string;
+  hasApiKey?: boolean;
+  newApiKey?: string; // 用于输入新 API Key
+  models: string[];
+  modelsLastFetched?: string;
+  enabled: boolean;
+  isNew?: boolean; // 标记是否是新创建的
+}
+
+/**
+ * 选中的模型
+ */
+interface SelectedModel {
+  endpointId: string;
+  modelName: string;
+}
 
 /**
  * 配置状态接口
  */
 interface ConfigState {
+  endpoints: Endpoint[];
+  selectedModels: SelectedModel[];
+  // 旧版字段（向后兼容）
   apiBaseUrl: string;
   modelName: string;
   rateLimitPerMinute: number | '';
   timeoutSeconds: number | '';
   systemPromptTemplate: string;
   extraJailbreakPatternsText: string;
-  apiKeyMasked: string;  // 只读展示
+  apiKeyMasked: string;
   hasApiKey: boolean;
 }
 
@@ -31,6 +59,34 @@ interface JailbreakLogEntry {
   createdAt: string;
 }
 
+interface JailbreakLogPagination {
+  logs: JailbreakLogEntry[];
+  total: number;
+  page: number;
+  totalPages: number;
+}
+
+/**
+ * API 响应接口（提高类型安全）
+ */
+interface APIConfigResponse {
+  config: {
+    endpoints?: Array<Omit<Endpoint, 'newApiKey' | 'isNew'> & { apiKeyMasked?: string; hasApiKey?: boolean }>;
+    selectedModels?: SelectedModel[];
+    apiBaseUrl?: string;
+    modelName?: string;
+    rateLimitPerMinute?: number;
+    timeoutSeconds?: number;
+    systemPromptTemplate?: string;
+    extraJailbreakPatternsText?: string;
+    apiKeyMasked?: string;
+    hasApiKey?: boolean;
+  } | null;
+  builtinJailbreakPatterns?: string[];
+  jailbreakLogs?: JailbreakLogPagination;
+  recentJailbreakLogs?: JailbreakLogEntry[];
+}
+
 /**
  * ConfigPanel 组件
  */
@@ -40,13 +96,19 @@ export const ConfigPanel: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
   const [testing, setTesting] = useState<boolean>(false);
+  const [fetchingModels, setFetchingModels] = useState<string | null>(null); // 正在获取模型的端点 ID
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [newApiKey, setNewApiKey] = useState<string>('');
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [builtinJailbreakPatterns, setBuiltinJailbreakPatterns] = useState<string[]>([]);
-  const [jailbreakLogs, setJailbreakLogs] = useState<JailbreakLogEntry[]>([]);
+  const [logPagination, setLogPagination] = useState<JailbreakLogPagination>({
+    logs: [],
+    total: 0,
+    page: 1,
+    totalPages: 0
+  });
 
   /**
    * 初始化：加载配置
@@ -58,12 +120,12 @@ export const ConfigPanel: React.FC = () => {
   /**
    * 加载配置
    */
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async (page: number = 1) => {
     setLoading(true);
     setError(null);
 
     try {
-      const res = await fetch('/ai-helper/admin/config', {
+      const res = await fetch(`/ai-helper/admin/config?page=${page}&limit=20`, {
         method: 'GET',
         credentials: 'include',
       });
@@ -73,16 +135,28 @@ export const ConfigPanel: React.FC = () => {
         throw new Error(text || `加载配置失败: ${res.status}`);
       }
 
-      const json = await res.json();
+      const json: APIConfigResponse = await res.json();
 
       const builtinPatterns: string[] = json.builtinJailbreakPatterns || [];
-      const logs: JailbreakLogEntry[] = json.recentJailbreakLogs || [];
       setBuiltinJailbreakPatterns(builtinPatterns);
-      setJailbreakLogs(logs);
+
+      // 处理分页数据
+      if (json.jailbreakLogs) {
+        setLogPagination(json.jailbreakLogs);
+      } else if (json.recentJailbreakLogs) {
+        setLogPagination({
+          logs: json.recentJailbreakLogs,
+          total: json.recentJailbreakLogs.length,
+          page: 1,
+          totalPages: 1
+        });
+      }
 
       if (json.config == null) {
         // 使用默认值
         setConfig({
+          endpoints: [],
+          selectedModels: [],
           apiBaseUrl: '',
           modelName: '',
           rateLimitPerMinute: 5,
@@ -94,6 +168,11 @@ export const ConfigPanel: React.FC = () => {
         });
       } else {
         setConfig({
+          endpoints: (json.config.endpoints || []).map((ep) => ({
+            ...ep,
+            newApiKey: '',
+          })),
+          selectedModels: json.config.selectedModels || [],
           apiBaseUrl: json.config.apiBaseUrl || '',
           modelName: json.config.modelName || '',
           rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
@@ -110,7 +189,7 @@ export const ConfigPanel: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   /**
    * 保存配置
@@ -118,41 +197,37 @@ export const ConfigPanel: React.FC = () => {
   const saveConfig = async () => {
     if (!config) return;
 
-    // 基本校验
-    if (!config.apiBaseUrl.trim()) {
-      setError('API Base URL 不能为空');
-      return;
-    }
-    if (!config.modelName.trim()) {
-      setError('模型名称不能为空');
-      return;
-    }
-    if (typeof config.rateLimitPerMinute === 'number' && config.rateLimitPerMinute <= 0) {
-      setError('每分钟最大请求数必须大于 0');
-      return;
-    }
-    if (typeof config.timeoutSeconds === 'number' && config.timeoutSeconds <= 0) {
-      setError('超时时间必须大于 0');
-      return;
-    }
-
     setError(null);
     setSuccessMessage(null);
     setSaving(true);
 
     try {
+      // 构造请求体
       const body: any = {
-        apiBaseUrl: config.apiBaseUrl.trim(),
-        modelName: config.modelName.trim(),
         rateLimitPerMinute: Number(config.rateLimitPerMinute) || 5,
         timeoutSeconds: Number(config.timeoutSeconds) || 30,
         systemPromptTemplate: config.systemPromptTemplate,
         extraJailbreakPatternsText: config.extraJailbreakPatternsText,
       };
 
-      // 仅当 newApiKey 非空时才发送 apiKey 字段
-      if (newApiKey.trim()) {
-        body.apiKey = newApiKey.trim();
+      // 新版多端点配置
+      if (config.endpoints.length > 0) {
+        body.endpoints = config.endpoints.map(ep => ({
+          id: ep.isNew ? undefined : ep.id,
+          name: ep.name,
+          apiBaseUrl: ep.apiBaseUrl,
+          apiKey: ep.newApiKey || undefined,
+          models: ep.models,
+          enabled: ep.enabled,
+        }));
+        body.selectedModels = config.selectedModels;
+      } else {
+        // 旧版单端点配置
+        body.apiBaseUrl = config.apiBaseUrl.trim();
+        body.modelName = config.modelName.trim();
+        if (newApiKey.trim()) {
+          body.apiKey = newApiKey.trim();
+        }
       }
 
       const res = await fetch('/ai-helper/admin/config', {
@@ -163,38 +238,37 @@ export const ConfigPanel: React.FC = () => {
       });
 
       if (!res.ok) {
-        const json = await res.json();
-        throw new Error(json.error || `保存失败: ${res.status}`);
+        const errorJson = await res.json();
+        throw new Error(errorJson.error || `保存失败: ${res.status}`);
       }
 
-      const json = await res.json();
+      const json: APIConfigResponse = await res.json();
 
-      // 用返回的新 config 更新状态
+      // 更新配置状态
       if (json.config) {
-        setConfig((prev) => ({
-          ...prev!,
+        setConfig({
+          endpoints: (json.config.endpoints || []).map((ep) => ({
+            ...ep,
+            newApiKey: '',
+          })),
+          selectedModels: json.config.selectedModels || [],
           apiBaseUrl: json.config.apiBaseUrl || '',
           modelName: json.config.modelName || '',
-          rateLimitPerMinute: json.config.rateLimitPerMinute ?? prev?.rateLimitPerMinute ?? 5,
-          timeoutSeconds: json.config.timeoutSeconds ?? prev?.timeoutSeconds ?? 30,
+          rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
+          timeoutSeconds: json.config.timeoutSeconds ?? 30,
           systemPromptTemplate: json.config.systemPromptTemplate || '',
           extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
           apiKeyMasked: json.config.apiKeyMasked || '',
           hasApiKey: Boolean(json.config.hasApiKey),
-        }));
+        });
       }
 
-      if (json.builtinJailbreakPatterns) {
-        setBuiltinJailbreakPatterns(json.builtinJailbreakPatterns);
-      }
-      if (json.recentJailbreakLogs) {
-        setJailbreakLogs(json.recentJailbreakLogs);
+      if (json.jailbreakLogs) {
+        setLogPagination(json.jailbreakLogs);
       }
 
-      setNewApiKey(''); // 保存成功后清空输入框
+      setNewApiKey('');
       setSuccessMessage('配置已保存');
-
-      // 3 秒后自动清除成功消息
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (err: any) {
       console.error('Save config error:', err);
@@ -222,7 +296,6 @@ export const ConfigPanel: React.FC = () => {
 
       if (json.success) {
         setSuccessMessage('连接成功，AI 服务可用');
-        // 3 秒后自动清除成功消息
         setTimeout(() => setSuccessMessage(null), 3000);
       } else {
         setError(json.message || '连接失败，AI 服务不可用');
@@ -233,6 +306,172 @@ export const ConfigPanel: React.FC = () => {
     } finally {
       setTesting(false);
     }
+  };
+
+  /**
+   * 获取端点的可用模型
+   */
+  const fetchModelsForEndpoint = async (endpointIndex: number) => {
+    if (!config) return;
+    const endpoint = config.endpoints[endpointIndex];
+    if (!endpoint) return;
+
+    const endpointId = endpoint.id || `new-${endpointIndex}`;
+    setFetchingModels(endpointId);
+    setError(null);
+
+    try {
+      let body: any;
+      if (endpoint.id && !endpoint.isNew) {
+        // 已保存的端点，使用 endpointId
+        body = { endpointId: endpoint.id };
+      } else {
+        // 新端点，使用 URL 和 Key
+        if (!endpoint.apiBaseUrl || !endpoint.newApiKey) {
+          throw new Error('请先填写 API Base URL 和 API Key');
+        }
+        body = {
+          apiBaseUrl: endpoint.apiBaseUrl,
+          apiKey: endpoint.newApiKey,
+        };
+      }
+
+      const res = await fetch('/ai-helper/admin/fetch-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+
+      const json = await res.json();
+
+      if (json.success) {
+        // 更新端点的模型列表
+        const newEndpoints = [...config.endpoints];
+        newEndpoints[endpointIndex] = {
+          ...newEndpoints[endpointIndex],
+          models: json.models || [],
+          modelsLastFetched: new Date().toISOString(),
+        };
+        setConfig({ ...config, endpoints: newEndpoints });
+        setSuccessMessage(`获取到 ${json.models?.length || 0} 个可用模型`);
+        setTimeout(() => setSuccessMessage(null), 3000);
+      } else {
+        setError(json.error || '获取模型列表失败');
+      }
+    } catch (err: any) {
+      console.error('Fetch models error:', err);
+      setError(err.message || '获取模型列表失败');
+    } finally {
+      setFetchingModels(null);
+    }
+  };
+
+  /**
+   * 添加新端点
+   */
+  const addEndpoint = useCallback(() => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      const newEndpoint: Endpoint = {
+        name: `端点 ${prev.endpoints.length + 1}`,
+        apiBaseUrl: '',
+        models: [],
+        enabled: true,
+        isNew: true,
+        newApiKey: '',
+      };
+      return {
+        ...prev,
+        endpoints: [...prev.endpoints, newEndpoint],
+      };
+    });
+  }, []);
+
+  /**
+   * 删除端点
+   */
+  const removeEndpoint = useCallback((index: number) => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      const endpoint = prev.endpoints[index];
+      const newEndpoints = prev.endpoints.filter((_, i) => i !== index);
+      // 同时移除引用该端点的选中模型（仅当端点有 ID 时）
+      const newSelectedModels = endpoint?.id
+        ? prev.selectedModels.filter(sm => sm.endpointId !== endpoint.id)
+        : prev.selectedModels;
+      return {
+        ...prev,
+        endpoints: newEndpoints,
+        selectedModels: newSelectedModels,
+      };
+    });
+  }, []);
+
+  /**
+   * 更新端点
+   */
+  const updateEndpoint = useCallback((index: number, updates: Partial<Endpoint>) => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      const newEndpoints = [...prev.endpoints];
+      newEndpoints[index] = { ...newEndpoints[index], ...updates };
+      return { ...prev, endpoints: newEndpoints };
+    });
+  }, []);
+
+  /**
+   * 添加选中的模型
+   */
+  const addSelectedModel = useCallback((endpointId: string, modelName: string) => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      // 检查是否已存在
+      const exists = prev.selectedModels.some(
+        sm => sm.endpointId === endpointId && sm.modelName === modelName
+      );
+      if (exists) return prev;
+
+      return {
+        ...prev,
+        selectedModels: [...prev.selectedModels, { endpointId, modelName }],
+      };
+    });
+  }, []);
+
+  /**
+   * 移除选中的模型
+   */
+  const removeSelectedModel = useCallback((index: number) => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      const newSelectedModels = prev.selectedModels.filter((_, i) => i !== index);
+      return { ...prev, selectedModels: newSelectedModels };
+    });
+  }, []);
+
+  /**
+   * 移动选中的模型（调整顺序）
+   */
+  const moveSelectedModel = useCallback((index: number, direction: 'up' | 'down') => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      const newIndex = direction === 'up' ? index - 1 : index + 1;
+      if (newIndex < 0 || newIndex >= prev.selectedModels.length) return prev;
+
+      const newSelectedModels = [...prev.selectedModels];
+      [newSelectedModels[index], newSelectedModels[newIndex]] =
+        [newSelectedModels[newIndex], newSelectedModels[index]];
+      return { ...prev, selectedModels: newSelectedModels };
+    });
+  }, []);
+
+  /**
+   * 切换分页
+   */
+  const changePage = (newPage: number) => {
+    if (newPage < 1 || newPage > logPagination.totalPages) return;
+    loadConfig(newPage);
   };
 
   const copyToClipboard = async (text: string) => {
@@ -292,6 +531,8 @@ export const ConfigPanel: React.FC = () => {
     return null;
   }
 
+  const isUsingNewConfig = config.endpoints.length > 0;
+
   return (
     <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '900px', margin: '40px auto 20px' }}>
       <h1>AI 学习助手配置</h1>
@@ -327,7 +568,7 @@ export const ConfigPanel: React.FC = () => {
         </div>
       )}
 
-      {/* 基础配置 */}
+      {/* API 端点配置 */}
       <div style={{
         marginTop: '30px',
         padding: '20px',
@@ -335,77 +576,438 @@ export const ConfigPanel: React.FC = () => {
         borderRadius: '8px',
         border: '1px solid #e5e7eb'
       }}>
-        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>基础配置</h2>
-
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-            API Base URL <span style={{ color: '#ef4444' }}>*</span>
-          </label>
-          <input
-            type="text"
-            value={config.apiBaseUrl}
-            onChange={(e) => setConfig({ ...config, apiBaseUrl: e.target.value })}
-            placeholder="https://api.openai.com/v1"
-            disabled={saving || testing}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <h2 style={{ margin: 0, fontSize: '18px' }}>API 端点配置</h2>
+          <button
+            onClick={addEndpoint}
+            disabled={saving}
             style={{
-              width: '100%',
-              padding: '10px',
+              padding: '8px 16px',
+              backgroundColor: '#3b82f6',
+              color: 'white',
+              border: 'none',
               borderRadius: '6px',
-              border: '1px solid #d1d5db',
               fontSize: '14px',
-              boxSizing: 'border-box'
+              cursor: saving ? 'not-allowed' : 'pointer',
             }}
-          />
+          >
+            + 添加端点
+          </button>
         </div>
 
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-            模型名称 <span style={{ color: '#ef4444' }}>*</span>
-          </label>
-          <input
-            type="text"
-            value={config.modelName}
-            onChange={(e) => setConfig({ ...config, modelName: e.target.value })}
-            placeholder="gpt-4o-mini"
-            disabled={saving || testing}
-            style={{
-              width: '100%',
-              padding: '10px',
-              borderRadius: '6px',
-              border: '1px solid #d1d5db',
-              fontSize: '14px',
-              boxSizing: 'border-box'
-            }}
-          />
-        </div>
+        {config.endpoints.length === 0 ? (
+          <div style={{
+            padding: '20px',
+            backgroundColor: '#fff',
+            borderRadius: '6px',
+            border: '1px dashed #d1d5db',
+            color: '#6b7280',
+            textAlign: 'center'
+          }}>
+            暂无 API 端点配置。点击"添加端点"开始配置，或使用下方的单端点兼容模式。
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+            {config.endpoints.map((endpoint, index) => (
+              <div
+                key={endpoint.id || `new-${index}`}
+                style={{
+                  padding: '15px',
+                  backgroundColor: '#fff',
+                  borderRadius: '8px',
+                  border: endpoint.enabled ? '1px solid #e5e7eb' : '1px solid #fca5a5',
+                  opacity: endpoint.enabled ? 1 : 0.7,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                  <input
+                    type="text"
+                    value={endpoint.name}
+                    onChange={(e) => updateEndpoint(index, { name: e.target.value })}
+                    placeholder="端点名称"
+                    style={{
+                      fontSize: '16px',
+                      fontWeight: 500,
+                      border: 'none',
+                      borderBottom: '1px solid transparent',
+                      backgroundColor: 'transparent',
+                      padding: '4px 0',
+                      flex: 1,
+                    }}
+                    onFocus={(e) => e.target.style.borderBottomColor = '#3b82f6'}
+                    onBlur={(e) => e.target.style.borderBottomColor = 'transparent'}
+                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '14px', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={endpoint.enabled}
+                        onChange={(e) => updateEndpoint(index, { enabled: e.target.checked })}
+                      />
+                      启用
+                    </label>
+                    <button
+                      onClick={() => removeEndpoint(index)}
+                      style={{
+                        padding: '4px 8px',
+                        backgroundColor: '#fee2e2',
+                        color: '#991b1b',
+                        border: 'none',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
 
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-            超时时间（秒） <span style={{ color: '#ef4444' }}>*</span>
-          </label>
-          <input
-            type="number"
-            value={config.timeoutSeconds}
-            onChange={(e) => {
-              const value = e.target.value;
-              setConfig({ ...config, timeoutSeconds: value === '' ? '' : Number(value) });
-            }}
-            placeholder="30"
-            min="1"
-            disabled={saving || testing}
-            style={{
-              width: '100%',
-              padding: '10px',
-              borderRadius: '6px',
-              border: '1px solid #d1d5db',
-              fontSize: '14px',
-              boxSizing: 'border-box'
-            }}
-          />
-        </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontSize: '13px', fontWeight: 500 }}>
+                      API Base URL
+                    </label>
+                    <input
+                      type="text"
+                      value={endpoint.apiBaseUrl}
+                      onChange={(e) => updateEndpoint(index, { apiBaseUrl: e.target.value })}
+                      placeholder="https://api.openai.com/v1"
+                      style={{
+                        width: '100%',
+                        padding: '8px',
+                        borderRadius: '4px',
+                        border: '1px solid #d1d5db',
+                        fontSize: '14px',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontSize: '13px', fontWeight: 500 }}>
+                      API Key {endpoint.hasApiKey && <span style={{ color: '#10b981' }}>(已配置: {endpoint.apiKeyMasked})</span>}
+                    </label>
+                    <input
+                      type="password"
+                      value={endpoint.newApiKey || ''}
+                      onChange={(e) => updateEndpoint(index, { newApiKey: e.target.value })}
+                      placeholder={endpoint.hasApiKey ? '留空保持不变' : 'sk-...'}
+                      style={{
+                        width: '100%',
+                        padding: '8px',
+                        borderRadius: '4px',
+                        border: '1px solid #d1d5db',
+                        fontSize: '14px',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '15px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
+                    <label style={{ fontSize: '13px', fontWeight: 500 }}>
+                      可用模型 ({endpoint.models.length})
+                      {endpoint.modelsLastFetched && (
+                        <span style={{ fontSize: '12px', color: '#6b7280', marginLeft: '8px' }}>
+                          上次获取: {new Date(endpoint.modelsLastFetched).toLocaleString()}
+                        </span>
+                      )}
+                    </label>
+                    <button
+                      onClick={() => fetchModelsForEndpoint(index)}
+                      disabled={fetchingModels !== null}
+                      style={{
+                        padding: '4px 12px',
+                        backgroundColor: fetchingModels === (endpoint.id || `new-${index}`) ? '#9ca3af' : '#e0e7ff',
+                        color: '#4338ca',
+                        border: 'none',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        cursor: fetchingModels !== null ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {fetchingModels === (endpoint.id || `new-${index}`) ? '获取中...' : '获取模型'}
+                    </button>
+                  </div>
+                  {endpoint.models.length > 0 ? (
+                    <div style={{
+                      maxHeight: '120px',
+                      overflowY: 'auto',
+                      padding: '8px',
+                      backgroundColor: '#f9fafb',
+                      borderRadius: '4px',
+                      border: '1px solid #e5e7eb',
+                    }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {endpoint.models.map((model) => (
+                          <button
+                            key={model}
+                            onClick={() => endpoint.id && addSelectedModel(endpoint.id, model)}
+                            disabled={!endpoint.id}
+                            style={{
+                              padding: '4px 8px',
+                              backgroundColor: '#fff',
+                              border: '1px solid #d1d5db',
+                              borderRadius: '4px',
+                              fontSize: '12px',
+                              cursor: endpoint.id ? 'pointer' : 'not-allowed',
+                            }}
+                            title={endpoint.id ? '点击添加到选中模型' : '请先保存端点'}
+                          >
+                            {model}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{
+                      padding: '12px',
+                      backgroundColor: '#f9fafb',
+                      borderRadius: '4px',
+                      border: '1px dashed #d1d5db',
+                      color: '#6b7280',
+                      fontSize: '13px',
+                      textAlign: 'center',
+                    }}>
+                      点击"获取模型"自动加载，或手动在下方添加
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* 频率限制 */}
+      {/* 选中的模型（Fallback 顺序） */}
+      {config.endpoints.length > 0 && (
+        <div style={{
+          marginTop: '20px',
+          padding: '20px',
+          backgroundColor: '#f9fafb',
+          borderRadius: '8px',
+          border: '1px solid #e5e7eb'
+        }}>
+          <h2 style={{ marginTop: 0, marginBottom: '15px', fontSize: '18px' }}>
+            模型优先级（按顺序 Fallback）
+          </h2>
+          <p style={{ fontSize: '13px', color: '#6b7280', marginBottom: '15px' }}>
+            调用时将按以下顺序尝试模型，如果第一个失败则自动切换到下一个。
+          </p>
+
+          {config.selectedModels.length === 0 ? (
+            <div style={{
+              padding: '20px',
+              backgroundColor: '#fff',
+              borderRadius: '6px',
+              border: '1px dashed #d1d5db',
+              color: '#6b7280',
+              textAlign: 'center'
+            }}>
+              尚未选择模型。请在上方端点的可用模型列表中点击添加。
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {config.selectedModels.map((sm, index) => {
+                const endpoint = config.endpoints.find(ep => ep.id === sm.endpointId);
+                return (
+                  <div
+                    key={`${sm.endpointId}-${sm.modelName}`}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '10px 15px',
+                      backgroundColor: '#fff',
+                      borderRadius: '6px',
+                      border: '1px solid #e5e7eb',
+                    }}
+                  >
+                    <span style={{
+                      width: '24px',
+                      height: '24px',
+                      borderRadius: '50%',
+                      backgroundColor: '#e0e7ff',
+                      color: '#4338ca',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      marginRight: '12px',
+                    }}>
+                      {index + 1}
+                    </span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '14px', fontWeight: 500 }}>{sm.modelName}</div>
+                      <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                        {endpoint?.name || '未知端点'}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      <button
+                        onClick={() => moveSelectedModel(index, 'up')}
+                        disabled={index === 0}
+                        style={{
+                          padding: '4px 8px',
+                          backgroundColor: index === 0 ? '#f3f4f6' : '#e5e7eb',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: index === 0 ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        onClick={() => moveSelectedModel(index, 'down')}
+                        disabled={index === config.selectedModels.length - 1}
+                        style={{
+                          padding: '4px 8px',
+                          backgroundColor: index === config.selectedModels.length - 1 ? '#f3f4f6' : '#e5e7eb',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: index === config.selectedModels.length - 1 ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        onClick={() => removeSelectedModel(index)}
+                        style={{
+                          padding: '4px 8px',
+                          backgroundColor: '#fee2e2',
+                          color: '#991b1b',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 兼容模式：单端点配置 */}
+      {config.endpoints.length === 0 && (
+        <div style={{
+          marginTop: '20px',
+          padding: '20px',
+          backgroundColor: '#fef3c7',
+          borderRadius: '8px',
+          border: '1px solid #f59e0b'
+        }}>
+          <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>
+            兼容模式（单端点配置）
+          </h2>
+          <p style={{ fontSize: '13px', color: '#92400e', marginBottom: '15px' }}>
+            推荐使用上方的多端点配置。此处的单端点模式仅用于向后兼容。
+          </p>
+
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+              API Base URL <span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <input
+              type="text"
+              value={config.apiBaseUrl}
+              onChange={(e) => setConfig({ ...config, apiBaseUrl: e.target.value })}
+              placeholder="https://api.openai.com/v1"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+              模型名称 <span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <input
+              type="text"
+              value={config.modelName}
+              onChange={(e) => setConfig({ ...config, modelName: e.target.value })}
+              placeholder="gpt-4o-mini"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+
+          {/* API Key 设置 */}
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+              API Key 状态
+            </label>
+            <div style={{
+              padding: '12px',
+              backgroundColor: config.hasApiKey ? '#d1fae5' : '#fee2e2',
+              borderRadius: '6px',
+              fontSize: '14px',
+              color: config.hasApiKey ? '#065f46' : '#991b1b'
+            }}>
+              {config.hasApiKey ? `已配置：${config.apiKeyMasked}` : '尚未配置 API Key'}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+              新的 API Key（留空则不修改）
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                value={newApiKey}
+                onChange={(e) => setNewApiKey(e.target.value)}
+                placeholder="sk-..."
+                disabled={saving || testing}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '6px',
+                  border: '1px solid #d1d5db',
+                  fontSize: '14px',
+                  fontFamily: 'monospace'
+                }}
+              />
+              <button
+                onClick={() => setShowApiKey(!showApiKey)}
+                disabled={saving || testing}
+                style={{
+                  padding: '10px 16px',
+                  backgroundColor: '#f3f4f6',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {showApiKey ? '隐藏' : '显示'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 通用设置 */}
       <div style={{
         marginTop: '20px',
         padding: '20px',
@@ -413,33 +1015,50 @@ export const ConfigPanel: React.FC = () => {
         borderRadius: '8px',
         border: '1px solid #e5e7eb'
       }}>
-        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>频率限制</h2>
+        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>通用设置</h2>
 
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-            每分钟最大请求数 <span style={{ color: '#ef4444' }}>*</span>
-          </label>
-          <input
-            type="number"
-            value={config.rateLimitPerMinute}
-            onChange={(e) => {
-              const value = e.target.value;
-              setConfig({ ...config, rateLimitPerMinute: value === '' ? '' : Number(value) });
-            }}
-            placeholder="5"
-            min="1"
-            disabled={saving || testing}
-            style={{
-              width: '100%',
-              padding: '10px',
-              borderRadius: '6px',
-              border: '1px solid #d1d5db',
-              fontSize: '14px',
-              boxSizing: 'border-box'
-            }}
-          />
-          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
-            限制每个学生每分钟可发送的请求次数，防止滥用
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+              超时时间（秒）
+            </label>
+            <input
+              type="number"
+              value={config.timeoutSeconds}
+              onChange={(e) => setConfig({ ...config, timeoutSeconds: e.target.value === '' ? '' : Number(e.target.value) })}
+              placeholder="30"
+              min="1"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
+              每分钟最大请求数
+            </label>
+            <input
+              type="number"
+              value={config.rateLimitPerMinute}
+              onChange={(e) => setConfig({ ...config, rateLimitPerMinute: e.target.value === '' ? '' : Number(e.target.value) })}
+              placeholder="5"
+              min="1"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
           </div>
         </div>
       </div>
@@ -475,9 +1094,6 @@ export const ConfigPanel: React.FC = () => {
               boxSizing: 'border-box'
             }}
           />
-          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
-            AI 助手的系统提示词，定义其角色和行为规范
-          </div>
         </div>
 
         <div style={{ marginBottom: '15px' }}>
@@ -504,9 +1120,6 @@ export const ConfigPanel: React.FC = () => {
               </ul>
             )}
           </div>
-          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
-            系统内置的越狱检测规则，供管理员参考，无法直接修改。
-          </div>
         </div>
 
         <div style={{ marginBottom: '15px' }}>
@@ -530,13 +1143,10 @@ export const ConfigPanel: React.FC = () => {
               boxSizing: 'border-box'
             }}
           />
-          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
-            支持 JavaScript 正则表达式语法。保存后立即生效，解析失败的规则会在后端日志中记录并自动忽略。
-          </div>
         </div>
       </div>
 
-      {/* API Key 设置 */}
+      {/* 越狱尝试记录（分页） */}
       <div style={{
         marginTop: '20px',
         padding: '20px',
@@ -544,78 +1154,16 @@ export const ConfigPanel: React.FC = () => {
         borderRadius: '8px',
         border: '1px solid #e5e7eb'
       }}>
-        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>API Key 设置</h2>
-
-        {/* 当前状态展示 */}
-        <div style={{ marginBottom: '20px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-            当前 API Key 状态
-          </label>
-          <div style={{
-            padding: '12px',
-            backgroundColor: config.hasApiKey ? '#d1fae5' : '#fee2e2',
-            borderRadius: '6px',
-            fontSize: '14px',
-            color: config.hasApiKey ? '#065f46' : '#991b1b'
-          }}>
-            {config.hasApiKey ? `已配置：${config.apiKeyMasked}` : '尚未配置 API Key'}
-          </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <h2 style={{ margin: 0, fontSize: '18px' }}>越狱尝试记录</h2>
+          {logPagination.total > 0 && (
+            <span style={{ fontSize: '13px', color: '#6b7280' }}>
+              共 {logPagination.total} 条记录
+            </span>
+          )}
         </div>
 
-        {/* 新 API Key 输入 */}
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-            新的 API Key（留空则不修改）
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <input
-              type={showApiKey ? 'text' : 'password'}
-              value={newApiKey}
-              onChange={(e) => setNewApiKey(e.target.value)}
-              placeholder="sk-..."
-              disabled={saving || testing}
-              style={{
-                flex: 1,
-                padding: '10px',
-                borderRadius: '6px',
-                border: '1px solid #d1d5db',
-                fontSize: '14px',
-                fontFamily: 'monospace'
-              }}
-            />
-            <button
-              onClick={() => setShowApiKey(!showApiKey)}
-              disabled={saving || testing}
-              style={{
-                padding: '10px 16px',
-                backgroundColor: '#f3f4f6',
-                border: '1px solid #d1d5db',
-                borderRadius: '6px',
-                fontSize: '14px',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap'
-              }}
-            >
-              {showApiKey ? '隐藏' : '显示'}
-            </button>
-          </div>
-          <div style={{ marginTop: '5px', fontSize: '13px', color: '#6b7280' }}>
-            出于安全考虑，无法查看已保存的完整 API Key。输入新值将覆盖原有密钥，留空则保持不变。
-          </div>
-        </div>
-      </div>
-
-      {/* 越狱尝试记录 */}
-      <div style={{
-        marginTop: '20px',
-        padding: '20px',
-        backgroundColor: '#f9fafb',
-        borderRadius: '8px',
-        border: '1px solid #e5e7eb'
-      }}>
-        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>越狱尝试记录</h2>
-
-        {jailbreakLogs.length === 0 ? (
+        {logPagination.logs.length === 0 ? (
           <div style={{
             padding: '15px',
             backgroundColor: '#fff',
@@ -627,105 +1175,150 @@ export const ConfigPanel: React.FC = () => {
             暂无命中记录，说明最近没有学生尝试修改系统提示词。
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-            {jailbreakLogs.map((log) => {
-              const contextPieces: string[] = [];
-              if (log.userId !== undefined) {
-                contextPieces.push(`用户 ID：${log.userId}`);
-              }
-              if (log.problemId) {
-                contextPieces.push(`题目 ID：${log.problemId}`);
-              }
-              if (log.conversationId) {
-                contextPieces.push(`会话 ID：${log.conversationId}`);
-              }
-              if (log.questionType) {
-                contextPieces.push(`问题类型：${log.questionType}`);
-              }
-              const contextText = contextPieces.join(' · ');
-              return (
-                <div key={log.id} style={{
-                  padding: '15px',
-                  backgroundColor: '#fff',
-                  borderRadius: '8px',
-                  border: '1px solid #e5e7eb'
-                }}>
-                  <div style={{ fontSize: '14px', color: '#111827', fontWeight: 500 }}>
-                    时间：{new Date(log.createdAt).toLocaleString()}
-                  </div>
-                  <div style={{ marginTop: '6px', fontSize: '13px', color: '#4b5563' }}>
-                    命中规则：<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
-                  </div>
-                  <pre style={{
-                    marginTop: '10px',
-                    padding: '12px',
-                    backgroundColor: '#1f2937',
-                    color: '#f9fafb',
-                    borderRadius: '6px',
-                    fontSize: '13px',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word'
+          <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+              {logPagination.logs.map((log) => {
+                const contextPieces: string[] = [];
+                if (log.userId !== undefined) {
+                  contextPieces.push(`用户 ID：${log.userId}`);
+                }
+                if (log.problemId) {
+                  contextPieces.push(`题目 ID：${log.problemId}`);
+                }
+                if (log.conversationId) {
+                  contextPieces.push(`会话 ID：${log.conversationId}`);
+                }
+                if (log.questionType) {
+                  contextPieces.push(`问题类型：${log.questionType}`);
+                }
+                const contextText = contextPieces.join(' · ');
+                return (
+                  <div key={log.id} style={{
+                    padding: '15px',
+                    backgroundColor: '#fff',
+                    borderRadius: '8px',
+                    border: '1px solid #e5e7eb'
                   }}>
-                    {log.matchedText}
-                  </pre>
-                  {contextText && (
-                    <div style={{ marginTop: '6px', fontSize: '12px', color: '#6b7280' }}>
-                      {contextText}
+                    <div style={{ fontSize: '14px', color: '#111827', fontWeight: 500 }}>
+                      时间：{new Date(log.createdAt).toLocaleString()}
                     </div>
-                  )}
-                  <div style={{
-                    marginTop: '10px',
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '10px'
-                  }}>
-                    <button
-                      type="button"
-                      onClick={() => copyToClipboard(log.matchedText)}
-                      style={{
-                        padding: '8px 12px',
-                        backgroundColor: '#e5e7eb',
-                        border: '1px solid #d1d5db',
-                        borderRadius: '6px',
-                        fontSize: '13px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      复制命中文本
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => copyToClipboard(log.matchedPattern)}
-                      style={{
-                        padding: '8px 12px',
-                        backgroundColor: '#e5e7eb',
-                        border: '1px solid #d1d5db',
-                        borderRadius: '6px',
-                        fontSize: '13px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      复制命中正则
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => appendPatternToCustomRules(log.matchedPattern)}
-                      style={{
-                        padding: '8px 12px',
-                        backgroundColor: '#eef2ff',
-                        border: '1px solid #c7d2fe',
-                        borderRadius: '6px',
-                        fontSize: '13px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      追加到自定义规则
-                    </button>
+                    <div style={{ marginTop: '6px', fontSize: '13px', color: '#4b5563' }}>
+                      命中规则：<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
+                    </div>
+                    <pre style={{
+                      marginTop: '10px',
+                      padding: '12px',
+                      backgroundColor: '#1f2937',
+                      color: '#f9fafb',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word'
+                    }}>
+                      {log.matchedText}
+                    </pre>
+                    {contextText && (
+                      <div style={{ marginTop: '6px', fontSize: '12px', color: '#6b7280' }}>
+                        {contextText}
+                      </div>
+                    )}
+                    <div style={{
+                      marginTop: '10px',
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '10px'
+                    }}>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(log.matchedText)}
+                        style={{
+                          padding: '8px 12px',
+                          backgroundColor: '#e5e7eb',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          fontSize: '13px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        复制命中文本
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(log.matchedPattern)}
+                        style={{
+                          padding: '8px 12px',
+                          backgroundColor: '#e5e7eb',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          fontSize: '13px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        复制命中正则
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => appendPatternToCustomRules(log.matchedPattern)}
+                        style={{
+                          padding: '8px 12px',
+                          backgroundColor: '#eef2ff',
+                          border: '1px solid #c7d2fe',
+                          borderRadius: '6px',
+                          fontSize: '13px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        追加到自定义规则
+                      </button>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+
+            {/* 分页控件 */}
+            {logPagination.totalPages > 1 && (
+              <div style={{
+                marginTop: '20px',
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'center',
+                gap: '10px'
+              }}>
+                <button
+                  onClick={() => changePage(logPagination.page - 1)}
+                  disabled={logPagination.page <= 1 || loading}
+                  style={{
+                    padding: '8px 16px',
+                    backgroundColor: logPagination.page <= 1 ? '#f3f4f6' : '#e5e7eb',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    cursor: logPagination.page <= 1 ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  上一页
+                </button>
+                <span style={{ fontSize: '14px', color: '#4b5563' }}>
+                  第 {logPagination.page} / {logPagination.totalPages} 页
+                </span>
+                <button
+                  onClick={() => changePage(logPagination.page + 1)}
+                  disabled={logPagination.page >= logPagination.totalPages || loading}
+                  style={{
+                    padding: '8px 16px',
+                    backgroundColor: logPagination.page >= logPagination.totalPages ? '#f3f4f6' : '#e5e7eb',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    cursor: logPagination.page >= logPagination.totalPages ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  下一页
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 

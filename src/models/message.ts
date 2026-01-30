@@ -100,6 +100,27 @@ export class MessageModel {
   }
 
   /**
+   * 获取会话最近的消息列表（按时间升序返回）
+   * 性能优化：仅加载最近 N 条消息，避免长对话的内存压力
+   * @param conversationId 会话 ID
+   * @param limit 最大条数（上限 50）
+   */
+  async findRecentByConversationId(conversationId: string | ObjectIdType, limit: number): Promise<Message[]> {
+    const _conversationId = typeof conversationId === 'string'
+      ? new ObjectId(conversationId)
+      : conversationId;
+
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const results = await this.collection
+      .find({ conversationId: _conversationId })
+      .sort({ timestamp: -1 })
+      .limit(safeLimit)
+      .toArray();
+
+    return results.reverse();
+  }
+
+  /**
    * 根据 ID 查找单条消息
    * @param id 消息 ID (字符串或 ObjectId)
    * @returns 消息对象或 null
