@@ -404,7 +404,7 @@ export class UpdateService {
       log('restarting', '重启命令已安排，服务将在 15 秒后重启');
 
       // 完成
-      log('completed', '更新完成！页面将在几秒后自动刷新...');
+      log('completed', '更新完成！页面将在 20 秒后自动刷新...');
       return {
         success: true,
         step: 'completed',

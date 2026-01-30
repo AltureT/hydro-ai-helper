@@ -181,10 +181,10 @@ export const VersionBadge: React.FC = () => {
       if (result.success) {
         setUpdateState('success');
         setUpdateLogs(result.logs);
-        // 更新成功后，5秒后刷新页面
+        // 服务器将在 15 秒后重启，等待 20 秒后刷新页面
         setTimeout(() => {
           window.location.reload();
-        }, 5000);
+        }, 20000);
       } else {
         setUpdateState('error');
         setUpdateLogs(result.logs);
