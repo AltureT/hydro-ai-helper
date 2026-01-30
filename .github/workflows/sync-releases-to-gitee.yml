@@ -1,0 +1,119 @@
+name: Sync Releases to Gitee
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to sync (e.g., v1.5.5)'
+        required: true
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_NAME="${{ github.event.inputs.tag_name }}"
+            # Fetch release info from GitHub API
+            RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG_NAME}")
+            RELEASE_NAME=$(echo "$RELEASE_INFO" | jq -r '.name // .tag_name')
+            RELEASE_BODY=$(echo "$RELEASE_INFO" | jq -r '.body // ""')
+            PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.prerelease')
+          else
+            TAG_NAME="${{ github.event.release.tag_name }}"
+            RELEASE_NAME="${{ github.event.release.name }}"
+            RELEASE_BODY=$(cat << 'RELEASE_BODY_EOF'
+          ${{ github.event.release.body }}
+          RELEASE_BODY_EOF
+          )
+            PRERELEASE="${{ github.event.release.prerelease }}"
+          fi
+
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "release_name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
+
+          # Save body to file to handle multiline
+          echo "$RELEASE_BODY" > /tmp/release_body.txt
+
+      - name: Check if release exists on Gitee
+        id: check
+        run: |
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/tags/${{ steps.release.outputs.tag_name }}?access_token=${{ secrets.GITEE_ACCESS_TOKEN }}")
+
+          if [ "$RESPONSE" = "200" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release already exists on Gitee, will update"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Release does not exist on Gitee, will create"
+          fi
+
+      - name: Create or Update release on Gitee
+        run: |
+          RELEASE_BODY=$(cat /tmp/release_body.txt)
+          TAG_NAME="${{ steps.release.outputs.tag_name }}"
+          RELEASE_NAME="${{ steps.release.outputs.release_name }}"
+          PRERELEASE="${{ steps.release.outputs.prerelease }}"
+
+          # Convert prerelease to boolean
+          if [ "$PRERELEASE" = "true" ]; then
+            PRERELEASE_PARAM="true"
+          else
+            PRERELEASE_PARAM="false"
+          fi
+
+          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
+            # Get existing release ID
+            RELEASE_ID=$(curl -s \
+              "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/tags/${TAG_NAME}?access_token=${{ secrets.GITEE_ACCESS_TOKEN }}" \
+              | jq -r '.id')
+
+            # Update existing release
+            curl -X PATCH \
+              "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/${RELEASE_ID}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg token "${{ secrets.GITEE_ACCESS_TOKEN }}" \
+                --arg tag "$TAG_NAME" \
+                --arg name "$RELEASE_NAME" \
+                --arg body "$RELEASE_BODY" \
+                --argjson prerelease "$PRERELEASE_PARAM" \
+                '{
+                  access_token: $token,
+                  tag_name: $tag,
+                  name: $name,
+                  body: $body,
+                  prerelease: $prerelease
+                }')"
+
+            echo "Release updated on Gitee"
+          else
+            # Create new release
+            curl -X POST \
+              "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg token "${{ secrets.GITEE_ACCESS_TOKEN }}" \
+                --arg tag "$TAG_NAME" \
+                --arg name "$RELEASE_NAME" \
+                --arg body "$RELEASE_BODY" \
+                --arg branch "main" \
+                --argjson prerelease "$PRERELEASE_PARAM" \
+                '{
+                  access_token: $token,
+                  tag_name: $tag,
+                  name: $name,
+                  body: $body,
+                  target_commitish: $branch,
+                  prerelease: $prerelease
+                }')"
+
+            echo "Release created on Gitee"
+          fi
