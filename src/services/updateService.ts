@@ -376,33 +376,22 @@ export class UpdateService {
       }
       log('building', '编译完成');
 
-      // Step 4: pm2 restart hydrooj
-      log('restarting', '正在重启 HydroOJ...');
-      const restartResult = await this.executeCommand(
-        'pm2',
-        ['restart', 'hydrooj'],
-        this.pluginPath,
-        (line) => log('restarting', line.trim())
-      );
+      // Step 4: 延迟执行 pm2 restart hydrooj
+      // 注意：必须延迟执行，确保 HTTP 响应先发送给客户端
+      // 否则 pm2 restart 会立即杀死进程，导致响应无法完成
+      log('restarting', '准备重启 HydroOJ（将在响应发送后执行）...');
 
-      if (restartResult.code !== 0) {
-        // pm2 restart 可能返回非零但实际成功，检查输出
-        if (restartResult.stdout.includes('restart') || restartResult.stderr.includes('restart')) {
-          log('restarting', '重启命令已发送');
-        } else {
-          const errorMsg = `pm2 restart 失败: ${restartResult.stderr}`;
-          log('failed', errorMsg);
-          return {
-            success: false,
-            step: 'failed',
-            message: errorMsg,
-            logs,
-            pluginPath: this.pluginPath,
-            error: restartResult.stderr
-          };
-        }
-      }
-      log('restarting', 'HydroOJ 正在重启');
+      // 使用 setTimeout 延迟 1 秒执行重启，确保响应先发送
+      setTimeout(() => {
+        spawn('pm2', ['restart', 'hydrooj'], {
+          cwd: this.pluginPath,
+          shell: true,
+          detached: true,
+          stdio: 'ignore'
+        }).unref();
+      }, 1000);
+
+      log('restarting', '重启命令已安排，服务将在 1 秒后重启');
 
       // 完成
       log('completed', '更新完成！页面将在几秒后自动刷新...');
