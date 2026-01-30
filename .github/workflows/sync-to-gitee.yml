@@ -15,8 +15,39 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.GITEE_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          cat >> ~/.ssh/config << EOF
+          Host gitee.com
+            HostName gitee.com
+            User git
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking no
+            ServerAliveInterval 60
+            ServerAliveCountMax 3
+            TCPKeepAlive yes
+          EOF
+          chmod 600 ~/.ssh/config
+
       - name: Push to Gitee
         run: |
-          git remote add gitee https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/alture/hydro-ai-helper.git || true
-          git push gitee main --force
-          git push gitee --tags --force
+          git remote add gitee git@gitee.com:alture/hydro-ai-helper.git 2>/dev/null || true
+
+          # Retry logic for push
+          max_retries=3
+          retry_count=0
+
+          until git push gitee main --force; do
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -ge $max_retries ]; then
+              echo "Failed after $max_retries attempts"
+              exit 1
+            fi
+            echo "Retry $retry_count/$max_retries in 10 seconds..."
+            sleep 10
+          done
+
+          git push gitee --tags --force || true
