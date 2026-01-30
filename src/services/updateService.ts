@@ -329,11 +329,23 @@ export class UpdateService {
           };
         }
 
-        // Step 2: Git pull
+        // Step 2a: 重置本地更改，避免 pull 冲突
+        log('pulling', '重置本地更改...');
+        const resetResult = await this.executeCommand(
+          'git',
+          ['reset', '--hard', 'HEAD'],
+          this.pluginPath,
+          (line) => log('pulling', line.trim())
+        );
+        if (resetResult.code !== 0) {
+          log('pulling', `git reset 警告: ${resetResult.stderr}`);
+        }
+
+        // Step 2b: Git pull
         log('pulling', '正在拉取最新代码...');
         const pullResult = await this.executeCommand(
           'git',
-          ['pull', 'origin', 'main'],
+          ['pull', '--ff-only', 'origin', 'main'],
           this.pluginPath,
           (line) => log('pulling', line.trim())
         );
