@@ -108,6 +108,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   const [size, setSize] = useState({ width: 400, height: 500 }); // 面板尺寸
   const [isDragging, setIsDragging] = useState<boolean>(false); // 拖拽状态
   const [isResizing, setIsResizing] = useState<boolean>(false); // 缩放状态
+  const [resizeDirection, setResizeDirection] = useState<'width' | 'height' | null>(null); // 拖拽方向
   const [isMobile, setIsMobile] = useState<boolean>(false); // 移动端检测
 
   // DOM 引用
@@ -277,12 +278,13 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   }, [isDragging, position, size]);
 
   /**
-   * T007A: 缩放功能 - 右下角手柄
+   * T007A: 缩放功能 - 底部高度/左侧宽度手柄
    */
-  const handleResizeStart = (e: React.MouseEvent) => {
+  const handleResizeStart = (e: React.MouseEvent, direction: 'width' | 'height') => {
     if (isMobile) return; // 移动端禁用缩放
     e.stopPropagation();
     setIsResizing(true);
+    setResizeDirection(direction);
     resizeStartSize.current = { width: size.width, height: size.height };
     resizeStartMouse.current = { x: e.clientX, y: e.clientY };
   };
@@ -292,21 +294,28 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
 
     const handleResizeMove = (e: MouseEvent) => {
       const deltaX = e.clientX - resizeStartMouse.current.x;
-      const deltaY = e.clientY - resizeStartMouse.current.y; // 修复:向下拖动增加高度
+      const deltaY = e.clientY - resizeStartMouse.current.y;
 
-      const newWidth = resizeStartSize.current.width + deltaX;
-      const newHeight = resizeStartSize.current.height + deltaY; // 修复:正向增加
-
-      // 尺寸限制: 最小 360x400, 最大 600x80vh
+      // 根据拖拽方向调整尺寸
       const maxHeight = Math.min(800, window.innerHeight * 0.8);
-      const clampedWidth = Math.max(300, Math.min(600, newWidth));
-      const clampedHeight = Math.max(360, Math.min(maxHeight, newHeight));
+      const maxWidth = Math.min(900, window.innerWidth * 0.8);
 
-      setSize({ width: clampedWidth, height: clampedHeight });
+      if (resizeDirection === 'width') {
+        // 左侧拖拽: 向左拖动(deltaX为负)应增加宽度
+        const newWidth = resizeStartSize.current.width - deltaX;
+        const clampedWidth = Math.max(300, Math.min(maxWidth, newWidth));
+        setSize(prev => ({ ...prev, width: clampedWidth }));
+      } else if (resizeDirection === 'height') {
+        // 底部拖拽: 向下拖动增加高度
+        const newHeight = resizeStartSize.current.height + deltaY;
+        const clampedHeight = Math.max(360, Math.min(maxHeight, newHeight));
+        setSize(prev => ({ ...prev, height: clampedHeight }));
+      }
     };
 
     const handleResizeEnd = () => {
       setIsResizing(false);
+      setResizeDirection(null);
       document.body.style.userSelect = ''; // 恢复文本选择
     };
 
@@ -1485,10 +1494,48 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       </div>
       )}
 
+      {/* 拖拽宽度调整把手 - 左侧边缘 */}
+      {!isMobile && !isCollapsed && (
+        <div
+          onMouseDown={(e) => handleResizeStart(e, 'width')}
+          style={{
+            position: 'absolute',
+            top: '48px',
+            left: '0',
+            bottom: '32px',
+            width: '8px',
+            cursor: 'ew-resize',
+            background: 'transparent',
+            transition: 'background 0.2s ease',
+            borderRadius: '12px 0 0 0'
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(99, 102, 241, 0.1)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'transparent';
+          }}
+          title="拖拽调整面板宽度"
+        >
+          {/* 竖线作为拖拽图标 */}
+          <div style={{
+            position: 'absolute',
+            top: '50%',
+            left: '2px',
+            transform: 'translateY(-50%)',
+            width: '3px',
+            height: '40px',
+            borderRadius: '2px',
+            background: '#d1d5db',
+            pointerEvents: 'none'
+          }} />
+        </div>
+      )}
+
       {/* 拖拽高度调整把手 - 仅桌面端且未折叠时显示 */}
       {!isMobile && !isCollapsed && (
         <div
-          onMouseDown={handleResizeStart}
+          onMouseDown={(e) => handleResizeStart(e, 'height')}
           style={{
             position: 'absolute',
             bottom: '0',
