@@ -15,15 +15,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.GITEE_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo "gitee.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBMuEoYdx6to5oxR60IWj8uoe1aI0X1fKOHWOtLqTg1tsLT1iFwXV5JmFjU46EzeMBV/6EmI1uaRI6HiEPtPtJHE=" >> ~/.ssh/known_hosts
-
       - name: Push to Gitee
         run: |
-          git remote add gitee git@gitee.com:alture/hydro-ai-helper.git || true
+          git remote add gitee https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/alture/hydro-ai-helper.git || true
           git push gitee main --force
           git push gitee --tags --force
