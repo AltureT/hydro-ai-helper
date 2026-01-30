@@ -81,27 +81,75 @@ export class UpdateService {
   }
 
   /**
-   * 验证插件路径是否有效
+   * 验证插件路径是否有效（不检查 git 仓库）
    */
-  validatePluginPath(): { valid: boolean; message: string } {
+  validatePluginPath(): { valid: boolean; message: string; needsGitInit: boolean } {
     // 检查路径是否存在
     if (!fs.existsSync(this.pluginPath)) {
-      return { valid: false, message: `插件路径不存在: ${this.pluginPath}` };
+      return { valid: false, message: `插件路径不存在: ${this.pluginPath}`, needsGitInit: false };
     }
 
     // 检查是否有 package.json
     const packageJsonPath = path.join(this.pluginPath, 'package.json');
     if (!fs.existsSync(packageJsonPath)) {
-      return { valid: false, message: `未找到 package.json: ${packageJsonPath}` };
+      return { valid: false, message: `未找到 package.json: ${packageJsonPath}`, needsGitInit: false };
     }
 
     // 检查是否是 git 仓库
     const gitPath = path.join(this.pluginPath, '.git');
     if (!fs.existsSync(gitPath)) {
-      return { valid: false, message: `不是 git 仓库，请先执行 git clone: ${this.pluginPath}` };
+      return { valid: true, message: '需要初始化 git 仓库', needsGitInit: true };
     }
 
-    return { valid: true, message: '路径验证通过' };
+    return { valid: true, message: '路径验证通过', needsGitInit: false };
+  }
+
+  /**
+   * 初始化 git 仓库并拉取代码
+   */
+  private async initGitRepo(repoUrl: string, onLog?: (msg: string) => void): Promise<boolean> {
+    const log = (msg: string) => onLog?.(msg);
+
+    log('目录不是 git 仓库，正在初始化...');
+
+    // git init
+    log('执行 git init...');
+    const initResult = await this.executeCommand('git', ['init'], this.pluginPath);
+    if (initResult.code !== 0) {
+      log(`git init 失败: ${initResult.stderr}`);
+      return false;
+    }
+
+    // git remote add origin
+    log(`添加远程仓库: ${repoUrl}`);
+    const remoteResult = await this.executeCommand('git', ['remote', 'add', 'origin', repoUrl], this.pluginPath);
+    if (remoteResult.code !== 0) {
+      // 如果 remote 已存在，尝试设置 URL
+      const setUrlResult = await this.executeCommand('git', ['remote', 'set-url', 'origin', repoUrl], this.pluginPath);
+      if (setUrlResult.code !== 0) {
+        log(`设置远程仓库失败: ${setUrlResult.stderr}`);
+        return false;
+      }
+    }
+
+    // git fetch
+    log('正在获取远程代码...');
+    const fetchResult = await this.executeCommand('git', ['fetch', 'origin'], this.pluginPath, (line) => log(line.trim()));
+    if (fetchResult.code !== 0) {
+      log(`git fetch 失败: ${fetchResult.stderr}`);
+      return false;
+    }
+
+    // git reset --hard origin/main
+    log('正在同步到最新版本...');
+    const resetResult = await this.executeCommand('git', ['reset', '--hard', 'origin/main'], this.pluginPath, (line) => log(line.trim()));
+    if (resetResult.code !== 0) {
+      log(`git reset 失败: ${resetResult.stderr}`);
+      return false;
+    }
+
+    log('git 仓库初始化完成');
+    return true;
   }
 
   /**
@@ -250,42 +298,60 @@ export class UpdateService {
       const selectedRepo = await this.selectBestRepo((msg) => log('detecting', msg));
       log('detecting', `使用仓库: ${selectedRepo.name} (${selectedRepo.url})`);
 
-      // 设置 remote origin
-      const remoteSet = await this.setRemoteOrigin(selectedRepo.url, (msg) => log('detecting', msg));
-      if (!remoteSet) {
-        log('failed', '设置远程仓库失败');
-        return {
-          success: false,
-          step: 'failed',
-          message: '设置远程仓库失败',
-          logs,
-          pluginPath: this.pluginPath,
-          error: '设置远程仓库失败'
-        };
-      }
+      // Step 1.6: 如果需要初始化 git 仓库
+      if (validation.needsGitInit) {
+        const initSuccess = await this.initGitRepo(selectedRepo.url, (msg) => log('detecting', msg));
+        if (!initSuccess) {
+          log('failed', 'git 仓库初始化失败');
+          return {
+            success: false,
+            step: 'failed',
+            message: 'git 仓库初始化失败',
+            logs,
+            pluginPath: this.pluginPath,
+            error: 'git 仓库初始化失败'
+          };
+        }
+        // 初始化完成后跳过 pull，直接进入 build
+        log('pulling', '代码已通过初始化同步完成');
+      } else {
+        // 设置 remote origin
+        const remoteSet = await this.setRemoteOrigin(selectedRepo.url, (msg) => log('detecting', msg));
+        if (!remoteSet) {
+          log('failed', '设置远程仓库失败');
+          return {
+            success: false,
+            step: 'failed',
+            message: '设置远程仓库失败',
+            logs,
+            pluginPath: this.pluginPath,
+            error: '设置远程仓库失败'
+          };
+        }
 
-      // Step 2: Git pull
-      log('pulling', '正在拉取最新代码...');
-      const pullResult = await this.executeCommand(
-        'git',
-        ['pull', 'origin', 'main'],
-        this.pluginPath,
-        (line) => log('pulling', line.trim())
-      );
+        // Step 2: Git pull
+        log('pulling', '正在拉取最新代码...');
+        const pullResult = await this.executeCommand(
+          'git',
+          ['pull', 'origin', 'main'],
+          this.pluginPath,
+          (line) => log('pulling', line.trim())
+        );
 
-      if (pullResult.code !== 0) {
-        const errorMsg = `git pull 失败: ${pullResult.stderr}`;
-        log('failed', errorMsg);
-        return {
-          success: false,
-          step: 'failed',
-          message: errorMsg,
-          logs,
-          pluginPath: this.pluginPath,
-          error: pullResult.stderr
-        };
+        if (pullResult.code !== 0) {
+          const errorMsg = `git pull 失败: ${pullResult.stderr}`;
+          log('failed', errorMsg);
+          return {
+            success: false,
+            step: 'failed',
+            message: errorMsg,
+            logs,
+            pluginPath: this.pluginPath,
+            error: pullResult.stderr
+          };
+        }
+        log('pulling', '代码拉取完成');
       }
-      log('pulling', '代码拉取完成');
 
       // Step 3: npm run build
       log('building', '正在编��项目...');
@@ -369,8 +435,8 @@ export class UpdateService {
     const validation = this.validatePluginPath();
     return {
       path: this.pluginPath,
-      isValid: validation.valid,
-      message: validation.message
+      isValid: validation.valid,  // needsGitInit 时 valid 也是 true
+      message: validation.needsGitInit ? '需要初始化 git 仓库（将自动处理）' : validation.message
     };
   }
 }
