@@ -4,7 +4,7 @@
  * 展开后形成四列布局：标签栏 | 题目 | 代码 | AI助手
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as ReactDOM from 'react-dom';
 import { AIAssistantPanel } from './student/AIAssistantPanel';
 
@@ -14,8 +14,10 @@ const PROBLEM_DETAIL_PATTERNS: RegExp[] = [
   /^\/d\/[^/]+\/p\/([^/]+)/, // 域下题目：/d/:domain/p/:pid
 ];
 
-// AI 面板宽度
-const AI_PANEL_WIDTH = 380;
+// AI 面板宽度范围
+const AI_PANEL_MIN_WIDTH = 300;
+const AI_PANEL_MAX_WIDTH = 900;
+const AI_PANEL_DEFAULT_WIDTH = 380;
 
 /**
  * 判断是否为题目详情页
@@ -49,16 +51,20 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
   const [isScratchpadActive, setIsScratchpadActive] = useState(false);
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(AI_PANEL_DEFAULT_WIDTH);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartRef = useRef({ mouseX: 0, width: 0 });
 
   // 调整 Scratchpad 容器宽度
-  const adjustScratchpadLayout = useCallback((panelOpen: boolean) => {
+  const adjustScratchpadLayout = useCallback((panelOpen: boolean, width?: number) => {
     const scratchpadContainer = document.querySelector('.scratchpad-container') as HTMLElement;
     if (!scratchpadContainer) return;
 
+    const actualWidth = width ?? panelWidth;
     if (panelOpen) {
       // 面板展开：收缩 Scratchpad 容器，为 AI 面板留出空间
-      scratchpadContainer.style.transition = 'width 0.3s ease, right 0.3s ease';
-      scratchpadContainer.style.width = `calc(100% - ${AI_PANEL_WIDTH}px)`;
+      scratchpadContainer.style.transition = width ? 'none' : 'width 0.3s ease, right 0.3s ease';
+      scratchpadContainer.style.width = `calc(100% - ${actualWidth}px)`;
       scratchpadContainer.style.position = 'absolute';
       scratchpadContainer.style.left = '0';
     } else {
@@ -66,7 +72,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
       scratchpadContainer.style.transition = 'width 0.3s ease';
       scratchpadContainer.style.width = '100%';
     }
-  }, []);
+  }, [panelWidth]);
 
   useEffect(() => {
     // 检测 Scratchpad 是否激活
@@ -113,6 +119,45 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
   const handleClosePanel = () => {
     setIsPanelOpen(false);
   };
+
+  // 开始拖拽调整宽度
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    resizeStartRef.current = { mouseX: e.clientX, width: panelWidth };
+  };
+
+  // 拖拽调整宽度的 effect
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // 向左拖动 (deltaX 为负) 应增加宽度
+      const deltaX = e.clientX - resizeStartRef.current.mouseX;
+      const newWidth = resizeStartRef.current.width - deltaX;
+      const clampedWidth = Math.max(AI_PANEL_MIN_WIDTH, Math.min(AI_PANEL_MAX_WIDTH, newWidth));
+      setPanelWidth(clampedWidth);
+      adjustScratchpadLayout(true, clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'ew-resize';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizing, adjustScratchpadLayout]);
 
   // 不在 Scratchpad 模式下，不显示任何内容
   if (!isScratchpadActive) return null;
@@ -205,7 +250,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             position: 'fixed',
             top: 0,
             right: 0,
-            width: `${AI_PANEL_WIDTH}px`,
+            width: `${panelWidth}px`,
             height: '100vh',
             zIndex: 9999,
             display: 'flex',
@@ -215,6 +260,42 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             boxShadow: '-2px 0 10px rgba(0, 0, 0, 0.1)'
           }}
         >
+          {/* 左侧拖拽调整宽度把手 */}
+          <div
+            onMouseDown={handleResizeStart}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              bottom: 0,
+              width: '6px',
+              cursor: 'ew-resize',
+              background: isResizing ? 'rgba(99, 102, 241, 0.2)' : 'transparent',
+              transition: 'background 0.2s ease',
+              zIndex: 10
+            }}
+            onMouseEnter={(e) => {
+              if (!isResizing) e.currentTarget.style.background = 'rgba(99, 102, 241, 0.1)';
+            }}
+            onMouseLeave={(e) => {
+              if (!isResizing) e.currentTarget.style.background = 'transparent';
+            }}
+            title="拖拽调整面板宽度"
+          >
+            {/* 竖线拖拽指示器 */}
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '1px',
+              transform: 'translateY(-50%)',
+              width: '3px',
+              height: '40px',
+              borderRadius: '2px',
+              background: '#d1d5db',
+              pointerEvents: 'none'
+            }} />
+          </div>
+
           {/* 面板头部 - 浅色简约风格 */}
           <div
             style={{
