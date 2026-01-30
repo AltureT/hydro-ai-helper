@@ -163,6 +163,19 @@ export const VersionBadge: React.FC = () => {
         credentials: 'include'
       });
 
+      // 处理非 JSON 响应（如 502 错误）
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        setUpdateState('error');
+        setUpdateLogs([`服务器错误: ${response.status} ${response.statusText}`]);
+        setUpdateError(
+          response.status === 502
+            ? '服务器编译失败，请先在服务器上手动执行: git pull && npm run build && pm2 restart hydrooj'
+            : errorText || `HTTP ${response.status}`
+        );
+        return;
+      }
+
       const result: UpdateResultResponse = await response.json();
 
       if (result.success) {
