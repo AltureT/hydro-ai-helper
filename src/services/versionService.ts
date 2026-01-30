@@ -3,7 +3,8 @@
  *
  * 提供插件版本检测功能：
  * - 获取当前安装版本
- * - 从 Gitee 仓库检查最新版本
+ * - 同时从 Gitee 和 GitHub 仓库检查最新版本
+ * - 取两个仓库中更新的版本为准
  * - 语义化版本比较
  * - 24 小时缓存机制
  */
@@ -12,15 +13,36 @@ import axios from 'axios';
 import { VersionCacheModel, type VersionCache, VERSION_CACHE_TTL_MS } from '../models/versionCache';
 
 /**
- * Gitee 仓库配置
+ * 仓库配置（按优先级排序）
  */
-const GITEE_CONFIG = {
-  owner: 'alture',
-  repo: 'hydro-ai-helper',
-  branch: 'main',
-  packageJsonPath: 'package.json',
-  releasesUrl: 'https://gitee.com/alture/hydro-ai-helper/releases'
-};
+const REPO_CONFIGS = [
+  {
+    name: 'Gitee',
+    owner: 'alture',
+    repo: 'hydro-ai-helper',
+    branch: 'main',
+    packageJsonUrl: 'https://gitee.com/alture/hydro-ai-helper/raw/main/package.json',
+    releasesUrl: 'https://gitee.com/alture/hydro-ai-helper/releases'
+  },
+  {
+    name: 'GitHub',
+    owner: 'AltureT',
+    repo: 'hydro-ai-helper',
+    branch: 'main',
+    packageJsonUrl: 'https://raw.githubusercontent.com/AltureT/hydro-ai-helper/main/package.json',
+    releasesUrl: 'https://github.com/AltureT/hydro-ai-helper/releases'
+  }
+];
+
+/**
+ * 单个仓库的版本信息
+ */
+interface RepoVersionInfo {
+  name: string;
+  version: string;
+  releasesUrl: string;
+  latency: number;
+}
 
 /**
  * 版本检查结果接口
@@ -33,6 +55,7 @@ export interface VersionCheckResult {
   releaseNotes?: string;
   checkedAt: Date;
   fromCache: boolean;
+  source?: string;  // 版本来源（Gitee/GitHub）
 }
 
 /**
@@ -63,7 +86,7 @@ export class VersionService {
    */
   private readCurrentVersion(): string {
     try {
-      // 尝试从插件目录读取 package.json
+      // 尝试从插件���录读取 package.json
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const pkg = require('../../package.json');
       return pkg.version || '0.0.0';
@@ -74,7 +97,92 @@ export class VersionService {
   }
 
   /**
-   * T048: 从 Gitee 仓库检查最新版本
+   * 从单个仓库获取版本信息
+   * @param config 仓库配置
+   * @returns 版本信息或 null（失败时）
+   */
+  private async fetchVersionFromRepo(config: typeof REPO_CONFIGS[0]): Promise<RepoVersionInfo | null> {
+    const startTime = Date.now();
+    try {
+      const response = await axios.get(config.packageJsonUrl, {
+        timeout: 10000,
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
+      const latency = Date.now() - startTime;
+      const packageJson = response.data;
+
+      let version: string;
+      if (typeof packageJson === 'object' && packageJson.version) {
+        version = packageJson.version;
+      } else if (typeof packageJson === 'string') {
+        const parsed = JSON.parse(packageJson);
+        version = parsed.version || '0.0.0';
+      } else {
+        return null;
+      }
+
+      return {
+        name: config.name,
+        version,
+        releasesUrl: config.releasesUrl,
+        latency
+      };
+    } catch (err) {
+      console.error(`[VersionService] Failed to fetch from ${config.name}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * 从所有仓库获取版本，取最新的
+   * @returns 最新版本信息
+   */
+  private async fetchLatestVersionFromAllRepos(): Promise<{
+    version: string;
+    source: string;
+    releasesUrl: string;
+  }> {
+    console.log('[VersionService] Checking versions from all repositories...');
+
+    // 并行获取所有仓库的版本
+    const results = await Promise.all(
+      REPO_CONFIGS.map(config => this.fetchVersionFromRepo(config))
+    );
+
+    // 过滤掉失败的结果
+    const validResults = results.filter((r): r is RepoVersionInfo => r !== null);
+
+    if (validResults.length === 0) {
+      throw new Error('All repositories failed to respond');
+    }
+
+    // 打印获取到的版本
+    for (const result of validResults) {
+      console.log(`[VersionService] ${result.name}: v${result.version} (${result.latency}ms)`);
+    }
+
+    // 找出最新版本
+    let latest = validResults[0];
+    for (let i = 1; i < validResults.length; i++) {
+      if (this.isNewerVersion(validResults[i].version, latest.version)) {
+        latest = validResults[i];
+      }
+    }
+
+    console.log(`[VersionService] Latest version: v${latest.version} from ${latest.name}`);
+
+    return {
+      version: latest.version,
+      source: latest.name,
+      releasesUrl: latest.releasesUrl
+    };
+  }
+
+  /**
+   * T048: 从仓库检查最新版本
    * @param forceRefresh 是否强制刷新（忽略缓存）
    * @returns 版本检查结果
    */
@@ -87,17 +195,18 @@ export class VersionService {
           currentVersion: this.currentVersion,
           latestVersion: cached.latestVersion,
           hasUpdate: cached.hasUpdate,
-          releaseUrl: cached.releaseUrl || GITEE_CONFIG.releasesUrl,
+          releaseUrl: cached.releaseUrl || REPO_CONFIGS[0].releasesUrl,
           releaseNotes: cached.releaseNotes,
           checkedAt: cached.checkedAt,
-          fromCache: true
+          fromCache: true,
+          source: (cached as any).source
         };
       }
     }
 
-    // 从 Gitee 获取最新版本
+    // 从所有仓库获取最新版本
     try {
-      const latestVersion = await this.fetchLatestVersionFromGitee();
+      const { version: latestVersion, source, releasesUrl } = await this.fetchLatestVersionFromAllRepos();
       const hasUpdate = this.isNewerVersion(latestVersion, this.currentVersion);
 
       // 更新缓存
@@ -105,16 +214,18 @@ export class VersionService {
         currentVersion: this.currentVersion,
         latestVersion,
         hasUpdate,
-        releaseUrl: GITEE_CONFIG.releasesUrl
+        releaseUrl: releasesUrl,
+        source
       });
 
       return {
         currentVersion: this.currentVersion,
         latestVersion,
         hasUpdate,
-        releaseUrl: GITEE_CONFIG.releasesUrl,
+        releaseUrl: releasesUrl,
         checkedAt: new Date(),
-        fromCache: false
+        fromCache: false,
+        source
       };
     } catch (err) {
       console.error('[VersionService] Failed to check for updates:', err);
@@ -126,9 +237,10 @@ export class VersionService {
           currentVersion: this.currentVersion,
           latestVersion: expiredCache.latestVersion,
           hasUpdate: expiredCache.hasUpdate,
-          releaseUrl: expiredCache.releaseUrl || GITEE_CONFIG.releasesUrl,
+          releaseUrl: expiredCache.releaseUrl || REPO_CONFIGS[0].releasesUrl,
           checkedAt: expiredCache.checkedAt,
-          fromCache: true
+          fromCache: true,
+          source: (expiredCache as any).source
         };
       }
 
@@ -137,40 +249,11 @@ export class VersionService {
         currentVersion: this.currentVersion,
         latestVersion: this.currentVersion,
         hasUpdate: false,
-        releaseUrl: GITEE_CONFIG.releasesUrl,
+        releaseUrl: REPO_CONFIGS[0].releasesUrl,
         checkedAt: new Date(),
         fromCache: false
       };
     }
-  }
-
-  /**
-   * 从 Gitee API 获取最新版本
-   * @returns 最新版本号
-   */
-  private async fetchLatestVersionFromGitee(): Promise<string> {
-    // Gitee Raw 文件 API
-    const url = `https://gitee.com/${GITEE_CONFIG.owner}/${GITEE_CONFIG.repo}/raw/${GITEE_CONFIG.branch}/${GITEE_CONFIG.packageJsonPath}`;
-
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: {
-        'Accept': 'application/json'
-      }
-    });
-
-    const packageJson = response.data;
-    if (typeof packageJson === 'object' && packageJson.version) {
-      return packageJson.version;
-    }
-
-    // 如果返回的是字符串，尝试解析
-    if (typeof packageJson === 'string') {
-      const parsed = JSON.parse(packageJson);
-      return parsed.version || '0.0.0';
-    }
-
-    throw new Error('Invalid package.json format from Gitee');
   }
 
   /**
@@ -246,6 +329,7 @@ export class VersionService {
     hasUpdate: boolean;
     releaseUrl?: string;
     releaseNotes?: string;
+    source?: string;
   }): Promise<void> {
     await this.versionCacheModel.set({
       key: VersionService.CACHE_KEY,

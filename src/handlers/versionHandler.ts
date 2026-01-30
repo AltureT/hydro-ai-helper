@@ -46,7 +46,8 @@ export class VersionCheckHandler extends Handler {
         releaseUrl: result.releaseUrl,
         releaseNotes: result.releaseNotes,
         checkedAt: result.checkedAt.toISOString(),
-        fromCache: result.fromCache
+        fromCache: result.fromCache,
+        source: result.source
       });
     } catch (err) {
       console.error('[VersionCheckHandler] Error:', err);

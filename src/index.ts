@@ -19,8 +19,9 @@ import {
 import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
 import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
 import { ExportHandler, ExportHandlerPriv } from './handlers/exportHandler';
-import { TestConnectionHandler, TestConnectionHandlerPriv } from './handlers/adminHandler';
+import { TestConnectionHandler, TestConnectionHandlerPriv, FetchModelsHandler, FetchModelsHandlerPriv } from './handlers/adminHandler';
 import { VersionCheckHandler, VersionCheckHandlerPriv } from './handlers/versionHandler';
+import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerPriv } from './handlers/updateHandler';
 import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
 import { RateLimitRecordModel } from './models/rateLimitRecord';
@@ -123,9 +124,18 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // POST /ai-helper/admin/test-connection - 测试连接
     ctx.Route('ai_helper_admin_test_connection', '/ai-helper/admin/test-connection', TestConnectionHandler, TestConnectionHandlerPriv);
 
+    // POST /ai-helper/admin/fetch-models - 获取可用模型列表
+    ctx.Route('ai_helper_admin_fetch_models', '/ai-helper/admin/fetch-models', FetchModelsHandler, FetchModelsHandlerPriv);
+
     // T052: GET /ai-helper/version/check - 版本检测
     ctx.Route('ai_helper_version_check', '/ai-helper/version/check', VersionCheckHandler, VersionCheckHandlerPriv);
     ctx.Route('ai_helper_version_check_domain', '/d/:domainId/ai-helper/version/check', VersionCheckHandler, VersionCheckHandlerPriv);
+
+    // 插件更新路由
+    // GET /ai-helper/admin/update/info - 获取更新信息
+    ctx.Route('ai_helper_update_info', '/ai-helper/admin/update/info', UpdateInfoHandler, UpdateInfoHandlerPriv);
+    // POST /ai-helper/admin/update - 执行更新
+    ctx.Route('ai_helper_update', '/ai-helper/admin/update', UpdateHandler, UpdateHandlerPriv);
   }
 });
 
