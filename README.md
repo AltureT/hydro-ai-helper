@@ -5,7 +5,7 @@
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/AltureT/hydro-ai-helper?label=版本)
 ![GitHub all releases](https://img.shields.io/github/downloads/AltureT/hydro-ai-helper/total?label=下载量&color=brightgreen)
 ![Installations](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-installs)
-![Active Users (7d)](https://hydro-ai-helper.vercel.app/api/badge-active)
+![Active Users (7d)](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-active)
 ![GitHub stars](https://img.shields.io/github/stars/AltureT/hydro-ai-helper?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/AltureT/hydro-ai-helper?style=social)
 ![License](https://img.shields.io/github/license/AltureT/hydro-ai-helper)
