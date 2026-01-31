@@ -3,8 +3,7 @@
  * 处理学生的 AI 对话请求
  */
 
-import { Handler, PRIV, ProblemModel, RecordModel } from 'hydrooj';
-import { STATUS } from '@hydrooj/utils/lib/status';
+import { Handler, PRIV, ProblemModel, RecordModel, STATUS } from 'hydrooj';
 import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';

@@ -48,4 +48,26 @@ declare module 'hydrooj' {
   };
 
   export const ProblemModel: any;
+
+  // STATUS enum from @hydrooj/common, re-exported via builtin
+  export const STATUS: {
+    STATUS_WAITING: number;
+    STATUS_ACCEPTED: number;
+    STATUS_WRONG_ANSWER: number;
+    STATUS_TIME_LIMIT_EXCEEDED: number;
+    STATUS_MEMORY_LIMIT_EXCEEDED: number;
+    STATUS_OUTPUT_LIMIT_EXCEEDED: number;
+    STATUS_RUNTIME_ERROR: number;
+    STATUS_COMPILE_ERROR: number;
+    STATUS_SYSTEM_ERROR: number;
+    STATUS_CANCELED: number;
+    STATUS_ETC: number;
+    STATUS_HACKED: number;
+    STATUS_JUDGING: number;
+    STATUS_COMPILING: number;
+    STATUS_FETCHED: number;
+    STATUS_IGNORED: number;
+    STATUS_FORMAT_ERROR: number;
+    [key: string]: number;
+  };
 }
