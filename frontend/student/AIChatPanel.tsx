@@ -4,7 +4,7 @@
  * 现代简约风格设计
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
@@ -42,6 +42,42 @@ const readFromScratchpad = (): string | null => {
   }
 };
 
+/**
+ * 将代码写入 Scratchpad 编辑器
+ */
+const writeToScratchpad = (codeToWrite: string): boolean => {
+  try {
+    const editor = (window as any).editor;
+    if (editor?.setValue) {
+      editor.setValue(codeToWrite);
+      return true;
+    }
+
+    const store = (window as any).store;
+    if (store?.dispatch) {
+      store.dispatch({ type: 'SCRATCHPAD_EDITOR_UPDATE_CODE', payload: codeToWrite });
+      return true;
+    }
+
+    const monaco = (window as any).monaco;
+    if (monaco?.editor?.getEditors) {
+      const editors = monaco.editor.getEditors();
+      if (editors && editors.length > 0) {
+        const model = editors[0].getModel();
+        if (model) {
+          model.setValue(codeToWrite);
+          return true;
+        }
+      }
+    }
+
+    return false;
+  } catch (err) {
+    console.error('[AI Helper] Failed to write to Scratchpad:', err);
+    return false;
+  }
+};
+
 export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
   // 业务状态
   const [questionType, setQuestionType] = useState<string>('');
@@ -72,6 +108,8 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
   const [hasAccepted, setHasAccepted] = useState<boolean>(false);
   // 用户最近一次 AC 的代码（用于"代码优化"时自动加载）
   const [acCode, setAcCode] = useState<string | null>(null);
+  // 确认框：是否显示加载AC代码确认框
+  const [showLoadCodeConfirm, setShowLoadCodeConfirm] = useState<boolean>(false);
 
   // 动态生成问题类型列表（已 AC 时显示"代码优化"选项）
   const QUESTION_TYPES = useMemo(() => {
@@ -114,27 +152,60 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
   }, [problemId]);
 
   // 获取用户在该题的提交状态（是否已 AC）
-  useEffect(() => {
-    const fetchSubmissionStatus = async () => {
-      if (!problemId) return;
-      try {
-        const response = await fetch(buildApiUrl(`/ai-helper/problem-status/${problemId}`), {
-          credentials: 'include'
-        });
-        if (response.ok) {
-          const data = await response.json();
-          setHasAccepted(data.hasAccepted);
-          // 保存 AC 代码，供"代码优化"时使用
-          if (data.acCode) {
-            setAcCode(data.acCode);
-          }
+  const fetchSubmissionStatus = useCallback(async () => {
+    if (!problemId) return;
+    try {
+      const response = await fetch(buildApiUrl(`/ai-helper/problem-status/${problemId}`), {
+        credentials: 'include'
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setHasAccepted(data.hasAccepted);
+        if (data.acCode) {
+          setAcCode(data.acCode);
         }
-      } catch (error) {
-        console.error('Failed to fetch submission status:', error);
       }
-    };
-    fetchSubmissionStatus();
+    } catch (error) {
+      console.error('Failed to fetch submission status:', error);
+    }
   }, [problemId]);
+
+  useEffect(() => {
+    fetchSubmissionStatus();
+  }, [fetchSubmissionStatus]);
+
+  // 监听 Redux Store 检测 AC 状态变化
+  useEffect(() => {
+    const STATUS_ACCEPTED = 1;
+    const store = (window as any).store;
+    if (!store || hasAccepted) return;
+
+    let lastRecordsRef: any = null;
+    let lastCheckedRecordId = '';
+    let lastCheckedStatus: number | undefined;
+
+    const unsubscribe = store.subscribe(() => {
+      const state = store.getState();
+      const { rows = [], items = {} } = state?.records || {};
+
+      if (items === lastRecordsRef) return;
+      lastRecordsRef = items;
+
+      const latestRecordId = rows[0];
+      const latestRecord = latestRecordId ? items[latestRecordId] : null;
+      if (!latestRecord) return;
+
+      if (latestRecordId === lastCheckedRecordId && latestRecord.status === lastCheckedStatus) return;
+      lastCheckedRecordId = latestRecordId;
+      lastCheckedStatus = latestRecord.status;
+
+      if (latestRecord.status === STATUS_ACCEPTED) {
+        fetchSubmissionStatus();
+      }
+    });
+
+    return () => unsubscribe();
+  }, [hasAccepted, fetchSubmissionStatus]);
 
   // 当勾选附带代码时自动读取
   useEffect(() => {
@@ -146,13 +217,13 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
     }
   }, [includeCode, code]);
 
-  // 当用户选择"代码优化"类型时，自动加载 AC 代码
-  useEffect(() => {
-    if (questionType === 'optimize' && acCode) {
-      setCode(acCode);
-      setIncludeCode(true);
+  // 处理问题类型变更
+  const handleQuestionTypeChange = (newType: string) => {
+    setQuestionType(newType);
+    if (newType === 'optimize' && acCode) {
+      setShowLoadCodeConfirm(true);
     }
-  }, [questionType, acCode]);
+  };
 
   // 自动提交监听
   useEffect(() => {
@@ -316,6 +387,99 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
         className="ai-markdown-content"
         dangerouslySetInnerHTML={{ __html: html }}
       />
+    );
+  };
+
+  const renderLoadCodeConfirmModal = () => {
+    if (!showLoadCodeConfirm) return null;
+
+    return (
+      <div style={{
+        position: 'fixed',
+        top: 0, left: 0, right: 0, bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        zIndex: 10001
+      }}>
+        <div style={{
+          background: 'white',
+          borderRadius: '12px',
+          padding: '24px',
+          maxWidth: '420px',
+          width: '90%',
+          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'
+        }}>
+          <h3 style={{
+            margin: '0 0 16px 0',
+            fontSize: '16px',
+            fontWeight: '600',
+            color: '#374151'
+          }}>
+            加载AC代码
+          </h3>
+
+          <p style={{
+            margin: '0 0 20px 0',
+            fontSize: '14px',
+            color: '#6b7280',
+            lineHeight: '1.5'
+          }}>
+            是否将最近一次AC的代码加载到当前编辑器？
+            <br />
+            <span style={{ color: '#dc2626', fontSize: '13px' }}>
+              注意：这将覆盖编辑器中的当前代码
+            </span>
+          </p>
+
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => {
+                setShowLoadCodeConfirm(false);
+                const scratchpadCode = readFromScratchpad();
+                if (scratchpadCode) {
+                  setCode(scratchpadCode);
+                }
+                setIncludeCode(true);
+              }}
+              style={{
+                padding: '10px 20px',
+                border: '1px solid #d1d5db',
+                borderRadius: '6px',
+                background: 'white',
+                color: '#374151',
+                cursor: 'pointer',
+                fontSize: '14px'
+              }}
+            >
+              使用当前代码
+            </button>
+            <button
+              onClick={() => {
+                setShowLoadCodeConfirm(false);
+                if (acCode) {
+                  setCode(acCode);
+                  setIncludeCode(true);
+                  writeToScratchpad(acCode);
+                }
+              }}
+              style={{
+                padding: '10px 20px',
+                border: 'none',
+                borderRadius: '6px',
+                background: '#6366f1',
+                color: 'white',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '500'
+              }}
+            >
+              加载AC代码
+            </button>
+          </div>
+        </div>
+      </div>
     );
   };
 
@@ -670,7 +834,7 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
                 <button
                   key={type.value}
                   className={`ai-question-type ${questionType === type.value ? 'selected' : ''}`}
-                  onClick={() => setQuestionType(type.value)}
+                  onClick={() => handleQuestionTypeChange(type.value)}
                 >
                   <span>{type.icon}</span>
                   {type.label}
@@ -735,10 +899,18 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
 
           {/* 首次提问：附带代码选项 */}
           {conversationHistory.length === 0 && (
-            <label className="ai-checkbox-label">
+            <label
+              className="ai-checkbox-label"
+              style={{
+                cursor: questionType === 'optimize' ? 'not-allowed' : 'pointer',
+                color: questionType === 'optimize' ? '#9ca3af' : undefined
+              }}
+              title={questionType === 'optimize' ? '代码优化必须附带代码' : undefined}
+            >
               <input
                 type="checkbox"
                 checked={includeCode}
+                disabled={questionType === 'optimize'}
                 onChange={(e) => {
                   setIncludeCode(e.target.checked);
                   if (e.target.checked && !code) {
@@ -748,7 +920,12 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
                 }}
               />
               📎 附带当前代码
-              {includeCode && code && (
+              {questionType === 'optimize' && (
+                <span style={{ marginLeft: '8px', color: '#f59e0b' }}>
+                  (必需)
+                </span>
+              )}
+              {includeCode && code && questionType !== 'optimize' && (
                 <span style={{ marginLeft: '8px', color: '#10b981' }}>
                   ✓ 已读取 {code.length} 字符
                 </span>
@@ -756,6 +933,9 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
             </label>
           )}
         </div>
+
+        {/* 加载AC代码确认框 */}
+        {renderLoadCodeConfirmModal()}
       </div>
     </>
   );

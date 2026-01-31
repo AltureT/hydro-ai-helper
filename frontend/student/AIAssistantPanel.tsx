@@ -4,7 +4,7 @@
  * T007A: 可折叠/可拖拽/可调尺寸的浮动卡片
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
@@ -96,6 +96,8 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   const [hasAccepted, setHasAccepted] = useState<boolean>(false);
   // 用户最近一次 AC 的代码（用于"代码优化"时自动加载）
   const [acCode, setAcCode] = useState<string | null>(null);
+  // 确认框：是否显示加载AC代码确认框
+  const [showLoadCodeConfirm, setShowLoadCodeConfirm] = useState<boolean>(false);
 
   // 动态生成问题类型列表（已 AC 时显示"代码优化"选项）
   const QUESTION_TYPES = useMemo(() => {
@@ -202,27 +204,63 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    * 获取用户在该题的提交状态（是否已 AC）
    * 用于决定是否显示"代码优化"选项，并预加载 AC 代码
    */
-  useEffect(() => {
-    const fetchSubmissionStatus = async () => {
-      if (!problemId) return;
-      try {
-        const response = await fetch(buildApiUrl(`/ai-helper/problem-status/${problemId}`), {
-          credentials: 'include'
-        });
-        if (response.ok) {
-          const data = await response.json();
-          setHasAccepted(data.hasAccepted);
-          // 保存 AC 代码，供"代码优化"时使用
-          if (data.acCode) {
-            setAcCode(data.acCode);
-          }
+  const fetchSubmissionStatus = useCallback(async () => {
+    if (!problemId) return;
+    try {
+      const response = await fetch(buildApiUrl(`/ai-helper/problem-status/${problemId}`), {
+        credentials: 'include'
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setHasAccepted(data.hasAccepted);
+        if (data.acCode) {
+          setAcCode(data.acCode);
         }
-      } catch (error) {
-        console.error('Failed to fetch submission status:', error);
       }
-    };
-    fetchSubmissionStatus();
+    } catch (error) {
+      console.error('Failed to fetch submission status:', error);
+    }
   }, [problemId]);
+
+  useEffect(() => {
+    fetchSubmissionStatus();
+  }, [fetchSubmissionStatus]);
+
+  /**
+   * 监听 Redux Store 检测 AC 状态变化
+   * 当用户在 Scratchpad 提交代码并 AC 时，自动刷新状态
+   */
+  useEffect(() => {
+    const STATUS_ACCEPTED = 1;
+    const store = (window as any).store;
+    if (!store || isCollapsed || hasAccepted) return;
+
+    let lastRecordsRef: any = null;
+    let lastCheckedRecordId = '';
+    let lastCheckedStatus: number | undefined;
+
+    const unsubscribe = store.subscribe(() => {
+      const state = store.getState();
+      const { rows = [], items = {} } = state?.records || {};
+
+      if (items === lastRecordsRef) return;
+      lastRecordsRef = items;
+
+      const latestRecordId = rows[0];
+      const latestRecord = latestRecordId ? items[latestRecordId] : null;
+      if (!latestRecord) return;
+
+      if (latestRecordId === lastCheckedRecordId && latestRecord.status === lastCheckedStatus) return;
+      lastCheckedRecordId = latestRecordId;
+      lastCheckedStatus = latestRecord.status;
+
+      if (latestRecord.status === STATUS_ACCEPTED) {
+        fetchSubmissionStatus();
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isCollapsed, hasAccepted, fetchSubmissionStatus]);
 
   /**
    * T040: 从 Scratchpad 读取代码
@@ -245,6 +283,43 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   };
 
   /**
+   * 将代码写入 Scratchpad 编辑器
+   * 优先使用 window.editor，其次尝试 Redux dispatch，最后降级到 getEditors()
+   */
+  const writeToScratchpad = (codeToWrite: string): boolean => {
+    try {
+      const editor = (window as any).editor;
+      if (editor?.setValue) {
+        editor.setValue(codeToWrite);
+        return true;
+      }
+
+      const store = (window as any).store;
+      if (store?.dispatch) {
+        store.dispatch({ type: 'SCRATCHPAD_EDITOR_UPDATE_CODE', payload: codeToWrite });
+        return true;
+      }
+
+      const monaco = (window as any).monaco;
+      if (monaco?.editor?.getEditors) {
+        const editors = monaco.editor.getEditors();
+        if (editors && editors.length > 0) {
+          const model = editors[0].getModel();
+          if (model) {
+            model.setValue(codeToWrite);
+            return true;
+          }
+        }
+      }
+
+      return false;
+    } catch (err) {
+      console.error('[AI Helper] Failed to write to Scratchpad:', err);
+      return false;
+    }
+  };
+
+  /**
    * T046: 当用户勾选"附带当前代码"时，自动读取 Scratchpad 代码
    * 这样确保读取的是用户当前编辑的最新代码
    */
@@ -260,15 +335,15 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   }, [includeCode]);
 
   /**
-   * 当用户选择"代码优化"类型时，自动加载 AC 代码
-   * 确保 AI 分析的是确实正确的代码
+   * 处理问题类型变更
+   * 当选择"代码优化"时，显示确认框询问是否加载AC代码
    */
-  useEffect(() => {
-    if (questionType === 'optimize' && acCode) {
-      setCode(acCode);
-      setIncludeCode(true);
+  const handleQuestionTypeChange = (newType: string) => {
+    setQuestionType(newType);
+    if (newType === 'optimize' && acCode) {
+      setShowLoadCodeConfirm(true);
     }
-  }, [questionType, acCode]);
+  };
 
   /**
    * T041: 处理"从 Scratchpad 读取代码"按钮点击
@@ -668,6 +743,102 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     );
   };
 
+  /**
+   * 渲染加载AC代码确认框
+   */
+  const renderLoadCodeConfirmModal = () => {
+    if (!showLoadCodeConfirm) return null;
+
+    return (
+      <div style={{
+        position: 'fixed',
+        top: 0, left: 0, right: 0, bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        zIndex: 10001
+      }}>
+        <div style={{
+          background: 'white',
+          borderRadius: '12px',
+          padding: '24px',
+          maxWidth: '420px',
+          width: '90%',
+          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'
+        }}>
+          <h3 style={{
+            margin: '0 0 16px 0',
+            fontSize: '16px',
+            fontWeight: '600',
+            color: '#374151'
+          }}>
+            加载AC代码
+          </h3>
+
+          <p style={{
+            margin: '0 0 20px 0',
+            fontSize: '14px',
+            color: '#6b7280',
+            lineHeight: '1.5'
+          }}>
+            是否将最近一次AC的代码加载到当前编辑器？
+            <br />
+            <span style={{ color: '#dc2626', fontSize: '13px' }}>
+              注意：这将覆盖编辑器中的当前代码
+            </span>
+          </p>
+
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => {
+                setShowLoadCodeConfirm(false);
+                const scratchpadCode = readFromScratchpad();
+                if (scratchpadCode) {
+                  setCode(scratchpadCode);
+                }
+                setIncludeCode(true);
+              }}
+              style={{
+                padding: '10px 20px',
+                border: '1px solid #d1d5db',
+                borderRadius: '6px',
+                background: 'white',
+                color: '#374151',
+                cursor: 'pointer',
+                fontSize: '14px'
+              }}
+            >
+              使用当前代码
+            </button>
+            <button
+              onClick={() => {
+                setShowLoadCodeConfirm(false);
+                if (acCode) {
+                  setCode(acCode);
+                  setIncludeCode(true);
+                  writeToScratchpad(acCode);
+                }
+              }}
+              style={{
+                padding: '10px 20px',
+                border: 'none',
+                borderRadius: '6px',
+                background: '#6366f1',
+                color: 'white',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '500'
+              }}
+            >
+              加载AC代码
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // 计算面板样式(移动端 vs 桌面端)
   const panelStyle: React.CSSProperties = isMobile ? {
     // 移动端:全屏模式
@@ -951,7 +1122,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                     name="questionType"
                     value={type.value}
                     checked={questionType === type.value}
-                    onChange={(e) => setQuestionType(e.target.value)}
+                    onChange={(e) => handleQuestionTypeChange(e.target.value)}
                     style={{ accentColor: '#6366f1' }}
                   />
                   {type.label}
@@ -989,12 +1160,18 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             />
             {conversationHistory.length === 0 && (
               <label style={{
-                display: 'flex', alignItems: 'center', cursor: 'pointer',
-                fontSize: '12px', color: '#6b7280', whiteSpace: 'nowrap', alignSelf: 'center'
-              }}>
+                display: 'flex', alignItems: 'center',
+                cursor: questionType === 'optimize' ? 'not-allowed' : 'pointer',
+                fontSize: '12px',
+                color: questionType === 'optimize' ? '#9ca3af' : '#6b7280',
+                whiteSpace: 'nowrap', alignSelf: 'center'
+              }}
+              title={questionType === 'optimize' ? '代码优化必须附带代码' : undefined}
+              >
                 <input
                   type="checkbox"
                   checked={includeCode}
+                  disabled={questionType === 'optimize'}
                   onChange={(e) => {
                     setIncludeCode(e.target.checked);
                     if (e.target.checked && !code) {
@@ -1005,7 +1182,10 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   style={{ marginRight: '6px', accentColor: '#7c3aed' }}
                 />
                 📎 附带代码
-                {includeCode && code && (
+                {questionType === 'optimize' && (
+                  <span style={{ marginLeft: '4px', color: '#f59e0b', fontSize: '11px' }}>(必需)</span>
+                )}
+                {includeCode && code && questionType !== 'optimize' && (
                   <span style={{ marginLeft: '4px', color: '#10b981', fontSize: '11px' }}>✓</span>
                 )}
               </label>
@@ -1028,6 +1208,9 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             </button>
           </div>
         </div>
+
+        {/* 加载AC代码确认框 */}
+        {renderLoadCodeConfirmModal()}
       </div>
     );
   }
@@ -1341,7 +1524,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                         name="questionType"
                         value={type.value}
                         checked={isSelected}
-                        onChange={(e) => setQuestionType(e.target.value)}
+                        onChange={(e) => handleQuestionTypeChange(e.target.value)}
                         style={{ display: 'none' }}
                       />
                       {type.label.split(' - ')[0]}
@@ -1482,15 +1665,18 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
               <label style={{
                 display: 'flex',
                 alignItems: 'center',
-                cursor: 'pointer',
+                cursor: questionType === 'optimize' ? 'not-allowed' : 'pointer',
                 fontSize: '12px',
-                color: '#6b7280',
+                color: questionType === 'optimize' ? '#9ca3af' : '#6b7280',
                 whiteSpace: 'nowrap',
                 alignSelf: 'center'
-              }}>
+              }}
+              title={questionType === 'optimize' ? '代码优化必须附带代码' : undefined}
+              >
                 <input
                   type="checkbox"
                   checked={includeCode}
+                  disabled={questionType === 'optimize'}
                   onChange={(e) => {
                     setIncludeCode(e.target.checked);
                     if (e.target.checked && !code) {
@@ -1504,7 +1690,12 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   }}
                 />
                 📎 附带当前代码
-                {includeCode && code && (
+                {questionType === 'optimize' && (
+                  <span style={{ marginLeft: '4px', color: '#f59e0b', fontSize: '11px' }}>
+                    (必需)
+                  </span>
+                )}
+                {includeCode && code && questionType !== 'optimize' && (
                   <span style={{ marginLeft: '4px', color: '#10b981', fontSize: '11px' }}>
                     ✓
                   </span>
@@ -1639,6 +1830,9 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* 加载AC代码确认框 */}
+      {renderLoadCodeConfirmModal()}
     </div>
     </>
   );
