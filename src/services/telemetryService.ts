@@ -40,7 +40,7 @@ interface ReportPayload {
  * Telemetry Service 类
  */
 export class TelemetryService {
-  private readonly REPORT_URL = 'https://hydro-ai-helper-tnyk9a4rq-myalture-gmailcoms-projects.vercel.app/api/report'; // TODO: 替换为实际 URL
+  private readonly REPORT_URL = 'https://hydro-ai-helper.vercel.app//api/report'; // TODO: 替换为实际 URL
   private readonly HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
   private timer?: NodeJS.Timeout;
 
