@@ -98,9 +98,18 @@ export class ChatHandler extends Handler {
       // 服务端授权校验：optimize 类型需要用户已 AC 该题
       // 防止用户绕过前端直接发送 optimize 请求
       if (questionType === 'optimize') {
+        // 先获取题目文档，获取数字类型的 docId（RecordDoc.pid 是 number 类型）
+        const pdoc = await ProblemModel.get(domainId, problemId, ['docId']);
+        if (!pdoc) {
+          this.response.status = 404;
+          this.response.body = { error: '题目不存在' };
+          this.response.type = 'application/json';
+          return;
+        }
+
         const acRecords = await RecordModel.getMulti(domainId, {
           uid: userId,
-          pid: problemId,
+          pid: pdoc.docId,  // 使用数字类型的 docId
           status: STATUS.STATUS_ACCEPTED
         })
         .sort({ _id: -1 })
@@ -426,10 +435,19 @@ export class ProblemStatusHandler extends Handler {
     const userId = this.user._id;
     const domainId = getDomainId(this);
 
-    // 直接查询最近一次 AC 记录（修复 Review 中指出的 .limit(20) 问题）
+    // 先获取题目文档，获取数字类型的 docId（RecordDoc.pid 是 number 类型）
+    const pdoc = await ProblemModel.get(domainId, problemId, ['docId']);
+    if (!pdoc) {
+      // 题目不存在时返回 hasAccepted: false
+      this.response.body = { hasAccepted: false };
+      this.response.type = 'application/json';
+      return;
+    }
+
+    // 使用数字类型的 docId 查询 AC 记录
     const acRecord = await RecordModel.getMulti(domainId, {
       uid: userId,
-      pid: problemId,
+      pid: pdoc.docId,  // 使用数字类型的 docId
       status: STATUS.STATUS_ACCEPTED
     })
     .sort({ _id: -1 })
