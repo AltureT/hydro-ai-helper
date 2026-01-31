@@ -12,7 +12,8 @@
     "learning-assistant"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "echo 'Skipping build for Vercel Functions'",
+    "build:plugin": "tsc",
     "dev": "tsc --watch",
     "lint": "eslint src --ext .ts,.tsx",
     "test": "jest"
