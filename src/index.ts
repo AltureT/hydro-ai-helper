@@ -7,30 +7,59 @@
  * - 符合教学研究需求
  */
 
+console.log('[AI-Helper] Loading plugin...');
+
 import { Context, definePlugin, Schema } from 'hydrooj';
+console.log('[AI-Helper] hydrooj imports OK');
+
 import { HelloHandler, HelloHandlerPriv } from './handlers/testHandler';
+console.log('[AI-Helper] testHandler OK');
+
 import { ChatHandler, ChatHandlerPriv, ProblemStatusHandler, ProblemStatusHandlerPriv } from './handlers/studentHandler';
+console.log('[AI-Helper] studentHandler OK');
+
 import {
   ConversationListHandler,
   ConversationListHandlerPriv,
   ConversationDetailHandler,
   ConversationDetailHandlerPriv
 } from './handlers/teacherHandler';
+console.log('[AI-Helper] teacherHandler OK');
+
 import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
+console.log('[AI-Helper] analyticsHandler OK');
+
 import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
+console.log('[AI-Helper] adminConfigHandler OK');
+
 import { AIHelperDashboardHandler, AIHelperDashboardHandlerPriv } from './handlers/dashboardHandler';
+console.log('[AI-Helper] dashboardHandler OK');
+
 import { ExportHandler, ExportHandlerPriv } from './handlers/exportHandler';
+console.log('[AI-Helper] exportHandler OK');
+
 import { TestConnectionHandler, TestConnectionHandlerPriv, FetchModelsHandler, FetchModelsHandlerPriv } from './handlers/adminHandler';
+console.log('[AI-Helper] adminHandler OK');
+
 import { VersionCheckHandler, VersionCheckHandlerPriv } from './handlers/versionHandler';
+console.log('[AI-Helper] versionHandler OK');
+
 import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerPriv } from './handlers/updateHandler';
+console.log('[AI-Helper] updateHandler OK');
+
 import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
 import { RateLimitRecordModel } from './models/rateLimitRecord';
 import { AIConfigModel } from './models/aiConfig';
 import { JailbreakLogModel } from './models/jailbreakLog';
 import { VersionCacheModel } from './models/versionCache';
+console.log('[AI-Helper] models OK');
+
 import { MigrationService } from './services/migrationService';
 import { VersionService } from './services/versionService';
+console.log('[AI-Helper] services OK');
+
+console.log('[AI-Helper] All imports completed successfully');
 
 /**
  * 插件配置接口
