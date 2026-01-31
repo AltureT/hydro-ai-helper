@@ -4,8 +4,8 @@
 
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/AltureT/hydro-ai-helper?label=版本)
 ![GitHub all releases](https://img.shields.io/github/downloads/AltureT/hydro-ai-helper/total?label=下载量&color=brightgreen)
-![Installations](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-installs)
-![Active Users (7d)](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-active)
+![Installations](https://img.shields.io/endpoint?url=https://hydro-ai-helper-tnyk9a4rq-myalture-gmailcoms-projects.vercel.app/api/badge-installs)
+![Active Users (7d)](https://img.shields.io/endpoint?url=https://hydro-ai-helper-tnyk9a4rq-myalture-gmailcoms-projects.vercel.app/api/badge-active)
 ![GitHub stars](https://img.shields.io/github/stars/AltureT/hydro-ai-helper?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/AltureT/hydro-ai-helper?style=social)
 ![License](https://img.shields.io/github/license/AltureT/hydro-ai-helper)
@@ -31,12 +31,12 @@
 
 ### 差异化问题类型
 
-| 类型 | 说明 | 回复风格 |
-|------|------|----------|
-| 理解题意 | 对题目要求不太清楚 | 详细解释，循序渐进 |
-| 理清思路 | 需要帮助梳理解题思路 | 结构化框架，有层次 |
-| 分析错误 | 代码有问题，需要找出原因 | 简洁直接，快速定位 |
-| 代码优化 | 已 AC 后寻求效率提升 | 复杂度分析，启发式引导 |
+| 类型     | 说明                     | 回复风格               |
+| -------- | ------------------------ | ---------------------- |
+| 理解题意 | 对题目要求不太清楚       | 详细解释，循序渐进     |
+| 理清思路 | 需要帮助梳理解题思路     | 结构化框架，有层次     |
+| 分析错误 | 代码有问题，需要找出原因 | 简洁直接，快速定位     |
+| 代码优化 | 已 AC 后寻求效率提升     | 复杂度分析，启发式引导 |
 
 ### 代码优化功能（v1.8.0）
 
@@ -125,12 +125,12 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 
 支持添加多个 API 端点，每个端点包含：
 
-| 字段 | 说明 | 示例 |
-|------|------|------|
-| 端点名称 | 自定义名称 | `主服务`、`备用服务` |
-| API Base URL | AI 服务地址 | `https://api.openai.com/v1` |
-| API Key | API 密钥（加密存储） | `sk-...` |
-| 启用状态 | 是否参与 AI 调用 | 开启/关闭 |
+| 字段         | 说明                 | 示例                        |
+| ------------ | -------------------- | --------------------------- |
+| 端点名称     | 自定义名称           | `主服务`、`备用服务`        |
+| API Base URL | AI 服务地址          | `https://api.openai.com/v1` |
+| API Key      | API 密钥（加密存储） | `sk-...`                    |
+| 启用状态     | 是否参与 AI 调用     | 开启/关闭                   |
 
 点击「获取模型」按钮自动获取该端点可用的模型列表。
 
@@ -140,10 +140,10 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 
 #### 其他配置
 
-| 字段 | 说明 | 默认值 |
-|------|------|--------|
-| 频率限制 | 每用户每分钟请求数 | `5` |
-| System Prompt | AI 系统提示词 | 内置教学辅导提示词 |
+| 字段          | 说明               | 默认值             |
+| ------------- | ------------------ | ------------------ |
+| 频率限制      | 每用户每分钟请求数 | `5`                |
+| System Prompt | AI 系统提示词      | 内置教学辅导提示词 |
 
 配置后点击「测试连接」验证，然后保存。
 
