@@ -102,9 +102,16 @@ const SortableHeader: React.FC<SortableHeaderProps> = ({
 };
 
 /**
+ * AnalyticsPage 组件 Props
+ */
+interface AnalyticsPageProps {
+  embedded?: boolean;
+}
+
+/**
  * AnalyticsPage 组件
  */
-export const AnalyticsPage: React.FC = () => {
+export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }) => {
   const initialFilters = getInitialFiltersFromUrl();
 
   const [dimension, setDimension] = useState<Dimension>('problem');
@@ -414,12 +421,13 @@ export const AnalyticsPage: React.FC = () => {
 
   return (
     <div style={{
-      padding: '32px',
+      padding: embedded ? '24px' : '32px',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      backgroundColor: '#f8fafc',
-      minHeight: '100vh'
+      backgroundColor: embedded ? 'transparent' : '#f8fafc',
+      minHeight: embedded ? 'auto' : '100vh'
     }}>
-      {/* 页面标题 - 浅色简约风格 */}
+      {/* 页面标题 - 仅在非嵌入模式显示 */}
+      {!embedded && (
       <div style={{
         marginBottom: '32px',
         padding: '24px 32px',
@@ -431,6 +439,7 @@ export const AnalyticsPage: React.FC = () => {
         <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>AI 使用统计</h1>
         <p style={{ margin: '8px 0 0', color: '#6b7280', fontSize: '14px' }}>查看学生使用 AI 学习助手的详细统计数据</p>
       </div>
+      )}
 
       {/* 筛选表单 */}
       <div style={{

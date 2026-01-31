@@ -18,6 +18,7 @@ import {
 } from './handlers/teacherHandler';
 import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
 import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
+import { AIHelperDashboardHandler, AIHelperDashboardHandlerPriv } from './handlers/dashboardHandler';
 import { ExportHandler, ExportHandlerPriv } from './handlers/exportHandler';
 import { TestConnectionHandler, TestConnectionHandlerPriv, FetchModelsHandler, FetchModelsHandlerPriv } from './handlers/adminHandler';
 import { VersionCheckHandler, VersionCheckHandlerPriv } from './handlers/versionHandler';
@@ -97,10 +98,12 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // 注意：这里使用的是 root-only 的系统权限（PRIV.PRIV_EDIT_SYSTEM），普通老师也无权访问。
     // TODO(如需求变更): 未来若有专门的教师统计角色，再考虑降低权限。
 
-    // 注入控制面板菜单项
-    ctx.injectUI('ControlPanel', 'ai_helper_conversations');
-    ctx.injectUI('ControlPanel', 'ai_helper_analytics');
-    ctx.injectUI('ControlPanel', 'ai_helper_admin_config');
+    // 注入控制面板菜单项（统一入口）
+    ctx.injectUI('ControlPanel', 'ai_helper');
+
+    // AI 助手统一入口路由
+    ctx.Route('ai_helper', '/ai-helper', AIHelperDashboardHandler, AIHelperDashboardHandlerPriv);
+    ctx.Route('ai_helper_domain', '/d/:domainId/ai-helper', AIHelperDashboardHandler, AIHelperDashboardHandlerPriv);
 
     // GET /ai-helper/conversations - 获取对话列表
     ctx.Route('ai_helper_conversations', '/ai-helper/conversations', ConversationListHandler, ConversationListHandlerPriv);

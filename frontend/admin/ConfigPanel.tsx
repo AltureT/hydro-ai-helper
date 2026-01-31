@@ -88,9 +88,16 @@ interface APIConfigResponse {
 }
 
 /**
+ * ConfigPanel 组件 Props
+ */
+interface ConfigPanelProps {
+  embedded?: boolean;
+}
+
+/**
  * ConfigPanel 组件
  */
-export const ConfigPanel: React.FC = () => {
+export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) => {
   // 状态管理
   const [config, setConfig] = useState<ConfigState | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -511,10 +518,10 @@ export const ConfigPanel: React.FC = () => {
    */
   if (loading) {
     return (
-      <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '900px', margin: '40px auto 20px' }}>
-        <h1>AI 学习助手配置</h1>
+      <div style={{ padding: embedded ? '24px' : '20px', fontFamily: 'sans-serif', maxWidth: embedded ? 'none' : '900px', margin: embedded ? '0' : '40px auto 20px' }}>
+        {!embedded && <h1>AI 学习助手配置</h1>}
         <div style={{
-          marginTop: '20px',
+          marginTop: embedded ? '0' : '20px',
           padding: '20px',
           textAlign: 'center',
           color: '#6b7280',
@@ -534,8 +541,8 @@ export const ConfigPanel: React.FC = () => {
   const isUsingNewConfig = config.endpoints.length > 0;
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '900px', margin: '40px auto 20px' }}>
-      <h1>AI 学习助手配置</h1>
+    <div style={{ padding: embedded ? '24px' : '20px', fontFamily: 'sans-serif', maxWidth: embedded ? 'none' : '900px', margin: embedded ? '0' : '40px auto 20px' }}>
+      {!embedded && <h1>AI 学习助手配置</h1>}
 
       {/* T056: 版本信息徽章 */}
       <VersionBadge />

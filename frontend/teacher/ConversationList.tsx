@@ -57,9 +57,16 @@ function getInitialFiltersFromUrl(): { userId: string; classId: string; problemI
 }
 
 /**
+ * ConversationList 组件 Props
+ */
+interface ConversationListProps {
+  embedded?: boolean;
+}
+
+/**
  * ConversationList 组件
  */
-export const ConversationList: React.FC = () => {
+export const ConversationList: React.FC<ConversationListProps> = ({ embedded = false }) => {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -169,12 +176,13 @@ export const ConversationList: React.FC = () => {
 
   return (
     <div style={{
-      padding: '32px',
+      padding: embedded ? '24px' : '32px',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      backgroundColor: '#f8fafc',
-      minHeight: '100vh'
+      backgroundColor: embedded ? 'transparent' : '#f8fafc',
+      minHeight: embedded ? 'auto' : '100vh'
     }}>
-      {/* 页面标题 - 浅色简约风格 */}
+      {/* 页面标题 - 仅在非嵌入模式显示 */}
+      {!embedded && (
       <div style={{
         marginBottom: '32px',
         padding: '24px 32px',
@@ -183,9 +191,10 @@ export const ConversationList: React.FC = () => {
         border: '1px solid #e5e7eb',
         boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
       }}>
-        <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>💬 对话记录</h1>
+        <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>对话记录</h1>
         <p style={{ margin: '8px 0 0', color: '#6b7280', fontSize: '14px' }}>查看和管理学生与 AI 助手的对话记录</p>
       </div>
+      )}
 
       {/* 筛选表单 */}
       <form onSubmit={handleFilterSubmit} style={{
