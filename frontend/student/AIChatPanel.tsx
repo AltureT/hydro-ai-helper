@@ -11,9 +11,9 @@ import 'highlight.js/styles/github.css';
 import { buildApiUrl } from '../utils/domainUtils';
 
 /**
- * 问题类型选项
+ * 基础问题类型选项
  */
-const QUESTION_TYPES = [
+const BASE_QUESTION_TYPES = [
   { value: 'understand', label: '理解题意', icon: '📖' },
   { value: 'think', label: '理清思路', icon: '💡' },
   { value: 'debug', label: '分析错误', icon: '🔧' }
@@ -68,6 +68,20 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
   const [popupPosition, setPopupPosition] = useState<{x: number; y: number} | null>(null);
   const [pendingAutoSubmit, setPendingAutoSubmit] = useState<boolean>(false);
 
+  // 用户是否已 AC 该题（用于显示"代码优化"选项）
+  const [hasAccepted, setHasAccepted] = useState<boolean>(false);
+  // 用户最近一次 AC 的代码（用于"代码优化"时自动加载）
+  const [acCode, setAcCode] = useState<string | null>(null);
+
+  // 动态生成问题类型列表（已 AC 时显示"代码优化"选项）
+  const QUESTION_TYPES = useMemo(() => {
+    const types = [...BASE_QUESTION_TYPES];
+    if (hasAccepted) {
+      types.push({ value: 'optimize', label: '代码优化', icon: '🚀' });
+    }
+    return types;
+  }, [hasAccepted]);
+
   // Markdown 渲染器
   const md = useMemo(() => {
     return new MarkdownIt({
@@ -99,6 +113,29 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
     }
   }, [problemId]);
 
+  // 获取用户在该题的提交状态（是否已 AC）
+  useEffect(() => {
+    const fetchSubmissionStatus = async () => {
+      if (!problemId) return;
+      try {
+        const response = await fetch(buildApiUrl(`/ai-helper/problem-status/${problemId}`), {
+          credentials: 'include'
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setHasAccepted(data.hasAccepted);
+          // 保存 AC 代码，供"代码优化"时使用
+          if (data.acCode) {
+            setAcCode(data.acCode);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch submission status:', error);
+      }
+    };
+    fetchSubmissionStatus();
+  }, [problemId]);
+
   // 当勾选附带代码时自动读取
   useEffect(() => {
     if (includeCode && !code) {
@@ -108,6 +145,14 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ problemId }) => {
       }
     }
   }, [includeCode, code]);
+
+  // 当用户选择"代码优化"类型时，自动加载 AC 代码
+  useEffect(() => {
+    if (questionType === 'optimize' && acCode) {
+      setCode(acCode);
+      setIncludeCode(true);
+    }
+  }, [questionType, acCode]);
 
   // 自动提交监听
   useEffect(() => {

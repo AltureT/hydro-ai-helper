@@ -1,5 +1,5 @@
 declare module 'hydrooj' {
-  import { Collection, Db } from 'mongodb';
+  import { Collection, Db, Cursor } from 'mongodb';
 
   export interface Context {
     Route(name: string, path: string, handler: any, privilege?: any): void;
@@ -34,4 +34,18 @@ declare module 'hydrooj' {
   }
 
   export const db: DbService;
+
+  export const RecordModel: {
+    getMulti(domainId: string, query: any): {
+      sort(order: any): {
+        limit(n: number): {
+          project(projection: any): {
+            toArray(): Promise<any[]>;
+          };
+        };
+      };
+    };
+  };
+
+  export const ProblemModel: any;
 }

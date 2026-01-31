@@ -9,7 +9,7 @@ export { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 /**
  * T035: 问题类型枚举
  */
-export type QuestionType = 'understand' | 'think' | 'debug' | 'clarify';
+export type QuestionType = 'understand' | 'think' | 'debug' | 'clarify' | 'optimize';
 
 /**
  * T036: 问题类型策略接口
@@ -70,6 +70,17 @@ const QUESTION_TYPE_STRATEGIES: Record<QuestionType, QuestionTypeStrategy> = {
     ],
     responseStyle: '简洁精炼，直击要点，不展开其他话题',
     maxParagraphs: 2
+  },
+  optimize: {
+    label: '代码优化',
+    focusAreas: [
+      '分析代码的时间复杂度和空间复杂度',
+      '指出可以简化或改进的代码结构',
+      '提示更高效的算法或数据结构方向',
+      '引导学生思考边界情况和特殊输入的处理'
+    ],
+    responseStyle: '启发式引导，提供优化方向但不直接给出优化后的代码',
+    maxParagraphs: 4
   }
 };
 
@@ -240,6 +251,20 @@ ${errorInfo}
 2. 用更简单的语言或类比重新表述，必要时举一个简短的例子；
 3. 回答控制在 2 段以内，直击要点。
 `;
+    } else if (questionType === 'optimize') {
+      // 代码优化：启发式引导，分析复杂度
+      prompt += `
+【回答要求】
+请结合系统提示中的教学原则和安全规则：
+1. 分析当前代码的时间/空间复杂度，说明当前算法的效率水平；
+2. 如果存在多种优化方向，分别介绍每种优化思路：
+   - 说明该优化方向的核心思想
+   - 解释优化后的复杂度预期改进
+   - 提示需要用到的数据结构或算法技巧
+3. 用启发式提问引导学生思考（如"如果数据量增大10倍，当前方案还能接受吗？"）；
+4. 不要给出优化后的完整代码，只提供思路方向；
+5. 如果代码已经足够优秀（接近最优解），明确告知学生并解释为什么难以继续优化。
+`;
     } else {
       // 分析错误/检查代码思路：简洁直接
       prompt += `
@@ -272,7 +297,8 @@ ${errorInfo}
       understand: '理解题意 - 我对题目要求不太清楚',
       think: '理清思路 - 我需要帮助梳理解题思路',
       debug: '分析错误 - 我的代码有问题,需要找出原因',
-      clarify: '追问解释 - 我不理解这部分内容'
+      clarify: '追问解释 - 我不理解这部分内容',
+      optimize: '代码优化 - 我的代码能运行,但想让它更高效'
     };
 
     return descriptions[questionType];

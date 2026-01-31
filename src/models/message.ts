@@ -15,7 +15,7 @@ export type MessageRole = 'student' | 'ai';
 /**
  * 问题类型 (学生消息专用)
  */
-export type QuestionType = 'understand' | 'think' | 'debug' | 'clarify';
+export type QuestionType = 'understand' | 'think' | 'debug' | 'clarify' | 'optimize';
 
 /**
  * 对话消息接口

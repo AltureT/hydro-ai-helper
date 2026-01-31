@@ -3,7 +3,8 @@
  * 处理学生的 AI 对话请求
  */
 
-import { Handler, PRIV, ProblemModel } from 'hydrooj';
+import { Handler, PRIV, ProblemModel, RecordModel } from 'hydrooj';
+import { STATUS } from '@hydrooj/utils/lib/status';
 import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
@@ -90,9 +91,33 @@ export class ChatHandler extends Handler {
       } = this.request.body as ChatRequest;
 
       // 验证问题类型
-      const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'clarify'];
+      const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'clarify', 'optimize'];
       if (!validQuestionTypes.includes(questionType as QuestionType)) {
         throw new Error('无效的问题类型');
+      }
+
+      // 服务端授权校验：optimize 类型需要用户已 AC 该题
+      // 防止用户绕过前端直接发送 optimize 请求
+      if (questionType === 'optimize') {
+        const acRecords = await RecordModel.getMulti(domainId, {
+          uid: userId,
+          pid: problemId,
+          status: STATUS.STATUS_ACCEPTED
+        })
+        .sort({ _id: -1 })
+        .limit(1)
+        .project({ _id: 1 })
+        .toArray();
+
+        if (acRecords.length === 0) {
+          this.response.status = 403;
+          this.response.body = {
+            error: '代码优化功能仅对已通过该题的用户开放',
+            code: 'OPTIMIZE_REQUIRES_AC'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
       }
 
       // 初始化服务
@@ -383,3 +408,47 @@ function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
 
   return patterns;
 }
+
+/**
+ * ProblemStatusHandler - 查询用户在指定题目的提交状态
+ * GET /ai-helper/problem-status/:problemId
+ * 返回用户是否已 AC 该题，以及最近一次 AC 的代码
+ */
+export class ProblemStatusHandler extends Handler {
+  async get({ problemId }: { problemId: string }) {
+    // 输入验证：problemId 不能为空且长度合理
+    if (!problemId || typeof problemId !== 'string' || problemId.length > 50) {
+      this.response.status = 400;
+      this.response.body = { error: '无效的题目 ID' };
+      this.response.type = 'application/json';
+      return;
+    }
+
+    const userId = this.user._id;
+    const domainId = getDomainId(this);
+
+    // 直接查询最近一次 AC 记录（修复 Review 中指出的 .limit(20) 问题）
+    const acRecord = await RecordModel.getMulti(domainId, {
+      uid: userId,
+      pid: problemId,
+      status: STATUS.STATUS_ACCEPTED
+    })
+    .sort({ _id: -1 })
+    .limit(1)
+    .project({ status: 1, code: 1, lang: 1 })
+    .toArray();
+
+    const hasAccepted = acRecord.length > 0;
+    const acCode = hasAccepted ? acRecord[0].code : undefined;
+    const acLang = hasAccepted ? acRecord[0].lang : undefined;
+
+    this.response.body = {
+      hasAccepted,
+      acCode,    // 最近一次 AC 的代码
+      acLang     // 代码语言
+    };
+    this.response.type = 'application/json';
+  }
+}
+
+export const ProblemStatusHandlerPriv = PRIV.PRIV_USER_PROFILE;

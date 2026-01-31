@@ -5,7 +5,7 @@
 import type { Collection, Db } from 'mongodb';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 
-export type JailbreakQuestionType = 'understand' | 'think' | 'debug' | 'review' | 'clarify';
+export type JailbreakQuestionType = 'understand' | 'think' | 'debug' | 'review' | 'clarify' | 'optimize';
 
 export interface JailbreakLog {
   _id: ObjectIdType;

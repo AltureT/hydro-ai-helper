@@ -25,6 +25,9 @@
     "paths": {
       "hydrooj": [
         "types/hydrooj"
+      ],
+      "@hydrooj/utils/lib/status": [
+        "types/@hydrooj/utils/lib/status"
       ]
     }
   },

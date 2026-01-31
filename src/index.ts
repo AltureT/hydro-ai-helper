@@ -9,7 +9,7 @@
 
 import { Context, definePlugin, Schema } from 'hydrooj';
 import { HelloHandler, HelloHandlerPriv } from './handlers/testHandler';
-import { ChatHandler, ChatHandlerPriv } from './handlers/studentHandler';
+import { ChatHandler, ChatHandlerPriv, ProblemStatusHandler, ProblemStatusHandlerPriv } from './handlers/studentHandler';
 import {
   ConversationListHandler,
   ConversationListHandlerPriv,
@@ -92,6 +92,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_helper_chat', '/ai-helper/chat', ChatHandler, ChatHandlerPriv);
     // 域前缀路由: /d/:domainId/ai-helper/chat
     ctx.Route('ai_helper_chat_domain', '/d/:domainId/ai-helper/chat', ChatHandler, ChatHandlerPriv);
+
+    // GET /ai-helper/problem-status/:problemId - 查询用户在该题的提交状态（是否已 AC）
+    ctx.Route('ai_helper_problem_status', '/ai-helper/problem-status/:problemId', ProblemStatusHandler, ProblemStatusHandlerPriv);
+    ctx.Route('ai_helper_problem_status_domain', '/d/:domainId/ai-helper/problem-status/:problemId', ProblemStatusHandler, ProblemStatusHandlerPriv);
 
     // 注册教师端路由 (支持域前缀)
     // 当前设计：AI 学习助手对话统计非常敏感，仅允许 root 访问。
