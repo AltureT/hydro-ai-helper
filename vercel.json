@@ -1,5 +1,15 @@
 {
   "version": 2,
-  "buildCommand": "",
-  "outputDirectory": "api"
+  "builds": [
+    {
+      "src": "api/**/*.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ]
 }

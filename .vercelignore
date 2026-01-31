@@ -1,0 +1,31 @@
+# 排除 HydroOJ 插件相关文件
+src/
+frontend/
+dist/
+specs/
+.specify/
+.claude/
+.chatgpt/
+
+# 排除开发文件
+*.md
+!README.md
+tsconfig.json
+tsconfig.vercel.json
+.eslintrc.json
+.gitignore
+
+# 排除测试文件
+__tests__/
+*.test.ts
+*.spec.ts
+
+# 排除文档
+docs/
+assets/
+DEPLOYMENT*.md
+PHASE*.md
+IMPLEMENTATION*.md
+TROUBLESHOOTING.md
+VERCEL*.md
+QUICKSTART.md
