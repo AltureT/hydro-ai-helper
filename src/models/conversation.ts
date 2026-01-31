@@ -105,6 +105,12 @@ export class ConversationModel {
       { name: 'idx_startTime' }
     );
 
+    // 创建索引: 结束时间 (用于查询最近对话时间)
+    await this.collection.createIndex(
+      { endTime: -1 },
+      { name: 'idx_endTime' }
+    );
+
     console.log('[ConversationModel] Indexes created successfully');
   }
 
@@ -273,5 +279,50 @@ export class ConversationModel {
         { $set: update }
       );
     }
+  }
+
+  /**
+   * 统计活跃用户数（最近 N 天内有对话的用户）
+   * @param days 天数
+   * @param domainId 可选的域 ID 筛选
+   * @returns 活跃用户数
+   */
+  async countActiveUsers(days: number, domainId?: string): Promise<number> {
+    const date = new Date();
+    date.setDate(date.getDate() - days);
+
+    const filter: any = { startTime: { $gte: date } };
+    if (domainId) {
+      filter.domainId = domainId;
+    }
+
+    const users = await this.collection.distinct('userId', filter);
+    return users.length;
+  }
+
+  /**
+   * 统计总对话数
+   * @param domainId 可选的域 ID 筛选
+   * @returns 总对话数
+   */
+  async getTotalConversations(domainId?: string): Promise<number> {
+    const filter = domainId ? { domainId } : {};
+    return this.collection.countDocuments(filter);
+  }
+
+  /**
+   * 获取最近一次对话的结束时间
+   * @param domainId 可选的域 ID 筛选
+   * @returns 最近对话时间或 null
+   */
+  async getLastConversationTime(domainId?: string): Promise<Date | null> {
+    const filter = domainId ? { domainId } : {};
+    const result = await this.collection
+      .find(filter)
+      .sort({ endTime: -1 })
+      .limit(1)
+      .toArray();
+
+    return result[0]?.endTime || null;
   }
 }

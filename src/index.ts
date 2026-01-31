@@ -53,10 +53,12 @@ import { RateLimitRecordModel } from './models/rateLimitRecord';
 import { AIConfigModel } from './models/aiConfig';
 import { JailbreakLogModel } from './models/jailbreakLog';
 import { VersionCacheModel } from './models/versionCache';
+import { PluginInstallModel } from './models/pluginInstall';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
 import { VersionService } from './services/versionService';
+import { TelemetryService } from './services/telemetryService';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -87,6 +89,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const aiConfigModel = new AIConfigModel(db);
     const jailbreakLogModel = new JailbreakLogModel(db);
     const versionCacheModel = new VersionCacheModel(db);
+    const pluginInstallModel = new PluginInstallModel(db);
 
     // 创建数据库索引
     await conversationModel.ensureIndexes();
@@ -95,10 +98,16 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await aiConfigModel.ensureIndexes();
     await jailbreakLogModel.ensureIndexes();
     await versionCacheModel.ensureIndexes();
+    await pluginInstallModel.ensureIndexes();
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
     await migrationService.runAllMigrations();
+
+    // 初始化插件安装记录
+    const packageJson = require('../package.json');
+    const currentVersion = packageJson.version || '1.8.0';
+    await pluginInstallModel.createIfMissing(currentVersion);
 
     // 将模型实例注入到 ctx 中,供 Handler 使用
     ctx.provide('conversationModel', conversationModel);
@@ -107,10 +116,19 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('aiConfigModel', aiConfigModel);
     ctx.provide('jailbreakLogModel', jailbreakLogModel);
     ctx.provide('versionCacheModel', versionCacheModel);
+    ctx.provide('pluginInstallModel', pluginInstallModel);
 
     // 初始化版本服务
     const versionService = new VersionService(versionCacheModel);
     ctx.provide('versionService', versionService);
+
+    // 初始化遥测服务（延迟 5 秒启动，避免阻塞插件加载）
+    const telemetryService = new TelemetryService(pluginInstallModel, conversationModel);
+    setTimeout(() => {
+      telemetryService.init().catch(err => {
+        console.error('[AI-Helper] Telemetry service initialization failed:', err);
+      });
+    }, 5000);
 
     // 注册测试路由
     // GET /ai-helper/hello - 返回插件状态

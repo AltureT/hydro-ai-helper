@@ -1,5 +1,17 @@
 # HydroOJ AI 学习助手
 
+<div align="center">
+
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/AltureT/hydro-ai-helper?label=版本)
+![GitHub all releases](https://img.shields.io/github/downloads/AltureT/hydro-ai-helper/total?label=下载量&color=brightgreen)
+![Installations](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-installs)
+![Active Users (7d)](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-active)
+![GitHub stars](https://img.shields.io/github/stars/AltureT/hydro-ai-helper?style=social)
+![GitHub forks](https://img.shields.io/github/forks/AltureT/hydro-ai-helper?style=social)
+![License](https://img.shields.io/github/license/AltureT/hydro-ai-helper)
+
+</div>
+
 一个以教学为优先的 AI 辅助学习插件，帮助学生在解题过程中获得思路引导而非直接答案。
 
 ## 特色功能
@@ -203,6 +215,54 @@ npm run dev      # 开发模式（watch）
 npm run build    # 构建
 npm run lint     # 代码检查
 ```
+
+## 遥测与隐私
+
+### 数据收集说明
+
+为了更好地了解插件使用情况并改进功能，本插件会收集以下**匿名统计数据**：
+
+- 插件安装数（通过随机 UUID 去重）
+- 最近 7 天活跃用户数（聚合统计）
+- 总对话数
+- 插件版本信息
+
+### 隐私保护措施
+
+✅ **完全匿名**：使用随机 UUID，不收集任何可识别个人身份的信息
+✅ **域名哈希**：域 ID 经过 SHA-256 哈希处理
+✅ **仅聚合数据**：只统计用户数和对话数，不记录具体内容
+✅ **自动清理**：90 天未上报的数据自动删除
+✅ **用户可控**：可通过管理员配置关闭遥测功能
+
+### 如何关闭遥测
+
+如果你不希望上报统计数据，可以在数据库中设置：
+
+```javascript
+// 连接到 MongoDB
+use your_hydro_db
+
+// 关闭遥测
+db.ai_plugin_install.updateOne(
+  { _id: 'install' },
+  { $set: { telemetryEnabled: false } }
+)
+```
+
+关闭后，插件仍可正常使用，但不会上报任何数据。
+
+### 数据用途
+
+收集的数据仅用于：
+- 在 GitHub README 显示安装数和活跃用户数徽章
+- 了解插件使用趋势，优先开发最需要的功能
+- 评估插件稳定性和性能
+
+**我们承诺**：
+- ❌ 不会出售或共享数据给第三方
+- ❌ 不会收集学生的代码、题目内容或对话记录
+- ❌ 不会追踪个人用户行为
 
 ## 关于本项目
 
