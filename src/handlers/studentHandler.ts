@@ -56,21 +56,31 @@ export class ChatHandler extends Handler {
       // 获取当前域 ID（用于域隔离）
       const domainId = getDomainId(this);
 
-      // 频率限制检查（在任何 AI 请求调用之前执行）
-      const DEFAULT_RATE_LIMIT_PER_MINUTE = 1;  // 临时改为 1 方便测试
-      const rateLimitService = new RateLimitService(this.ctx);
-      const allowed = await rateLimitService.checkAndIncrement(domainId, userId, DEFAULT_RATE_LIMIT_PER_MINUTE);
+      // 获取 AI 配置（用于频率限制和其他设置）
+      const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
+      const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
 
-      if (!allowed) {
-        // 返回 429 + JSON 提示
-        const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
-        this.response.status = 429;
-        this.response.body = {
-          error: rateLimitMessage,
-          code: 'RATE_LIMIT_EXCEEDED'
-        };
-        this.response.type = 'application/json';
-        return;
+      // 频率限制检查（在任何 AI 请求调用之前执行）
+      // 优先使用配置中的限制，如果没有配置则使用默认值 5
+      // 注意：使用 ?? 而非 || 以支持 0 值（0 表示禁用限流）
+      const rateLimitPerMinute = aiConfig?.rateLimitPerMinute ?? 5;
+
+      // 仅当限制值 > 0 时才执行频率限制检查（0 表示禁用限流）
+      if (rateLimitPerMinute > 0) {
+        const rateLimitService = new RateLimitService(this.ctx);
+        const allowed = await rateLimitService.checkAndIncrement(domainId, userId, rateLimitPerMinute);
+
+        if (!allowed) {
+          // 返回 429 + JSON 提示
+          const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
+          this.response.status = 429;
+          this.response.body = {
+            error: rateLimitMessage,
+            code: 'RATE_LIMIT_EXCEEDED'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
       }
 
       // 获取数据库模型实例
@@ -148,8 +158,6 @@ export class ChatHandler extends Handler {
         processedCode = undefined;
       }
 
-      const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
-      const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
       const customSystemPromptTemplate = aiConfig?.systemPromptTemplate?.trim() || undefined;
       const extraJailbreakPatterns = parseExtraJailbreakPatterns(aiConfig?.extraJailbreakPatternsText);
 
