@@ -121,7 +121,7 @@ export async function fetchAvailableModels(
       const id = model.id.toLowerCase();
 
       // 包含这些关键词的通常是聊天模型
-      const chatKeywords = ['gpt', 'chat', 'claude', 'gemini', 'llama', 'mistral', 'qwen', 'yi', 'deepseek'];
+      const chatKeywords = ['gpt', 'chat', 'claude', 'gemini', 'llama', 'mistral', 'qwen', 'yi', 'deepseek', 'doubao', 'glm', 'kimi'];
       const hasMatch = chatKeywords.some(keyword => id.includes(keyword));
 
       // 排除明显的非聊天模型
