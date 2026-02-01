@@ -12,6 +12,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import axios from 'axios';
 
 /**
@@ -67,18 +68,48 @@ export interface UpdateResult {
 export type UpdateProgressCallback = (step: UpdateStep, log: string) => void;
 
 /**
+ * 文件锁信息
+ */
+interface LockInfo {
+  pid: number;
+  timestamp: number;
+}
+
+/**
  * UpdateService 类
  */
 export class UpdateService {
   private pluginPath: string;
 
-  // 🔒 更新锁：防止并发更新（静态变量，全局共享）
+  // 🔒 GPG 信任指纹白名单（插件发布者密钥）
+  private readonly TRUSTED_GPG_FINGERPRINTS = [
+    '45DACC0ECFE90852'  // AltureT <myalture@gmail.com>
+  ];
+
+  // 🔒 安全命令路径映射（防止 PATH 劫持）
+  private readonly SAFE_COMMANDS: { [key: string]: string } = {
+    git: '/usr/bin/git',
+    npm: '/usr/bin/npm',
+    pm2: '/usr/local/bin/pm2',
+    gpg: '/usr/bin/gpg',
+    sh: '/bin/sh'
+  };
+
+  // 🔒 文件锁路径
+  private readonly LOCK_FILE: string;
+
+  // 🔒 锁超时时间（30分钟，防止死锁）
+  private readonly LOCK_TIMEOUT_MS = 30 * 60 * 1000;
+
+  // 🔒 更新锁：防止并发更新（静态变量，进程内共享）
+  // 注意：此锁仅在单进程内有效，cluster 模式下依赖文件锁
   private static updateLock = false;
 
   constructor() {
     // 通过 __dirname 自动检测插件安装路径
     // __dirname 指向 dist 目录，需要回退到插件根目录
     this.pluginPath = path.resolve(__dirname, '../..');
+    this.LOCK_FILE = path.join(this.pluginPath, '.update.lock');
   }
 
   /**
@@ -86,6 +117,92 @@ export class UpdateService {
    */
   getPluginPath(): string {
     return this.pluginPath;
+  }
+
+  /**
+   * 🔒 获取安全命令路径（防止 PATH 劫持）
+   */
+  private getSafeCommandPath(cmd: string): string {
+    const safePath = this.SAFE_COMMANDS[cmd];
+    if (safePath) {
+      // 验证命令存在且可执行
+      if (fs.existsSync(safePath)) {
+        return safePath;
+      }
+    }
+    // 降级：使用原始命令名（依赖最小化 PATH）
+    return cmd;
+  }
+
+  /**
+   * 🔒 尝试获取文件锁（支持 cluster 模式）
+   */
+  private async acquireFileLock(): Promise<{ success: boolean; message?: string }> {
+    try {
+      // 检查锁文件是否存在
+      if (fs.existsSync(this.LOCK_FILE)) {
+        const lockContent = await fsPromises.readFile(this.LOCK_FILE, 'utf-8');
+        const lockInfo: LockInfo = JSON.parse(lockContent);
+
+        // 检查锁是否超时
+        const now = Date.now();
+        if (now - lockInfo.timestamp < this.LOCK_TIMEOUT_MS) {
+          // 检查持有锁的进程是否仍在运行
+          try {
+            process.kill(lockInfo.pid, 0);  // 检查进程存在性（不发送信号）
+            return {
+              success: false,
+              message: `更新正在进行中（PID: ${lockInfo.pid}），请稍后重试`
+            };
+          } catch {
+            // 进程不存在，清理过期锁
+            console.log(`[UpdateService] 清理过期锁文件（进程 ${lockInfo.pid} 已退出）`);
+            await fsPromises.unlink(this.LOCK_FILE);
+          }
+        } else {
+          // 锁超时，清理
+          console.log(`[UpdateService] 清理超时锁文件（超时 ${Math.floor((now - lockInfo.timestamp) / 1000)}s）`);
+          await fsPromises.unlink(this.LOCK_FILE);
+        }
+      }
+
+      // 创建新锁
+      const lockInfo: LockInfo = {
+        pid: process.pid,
+        timestamp: Date.now()
+      };
+      await fsPromises.writeFile(this.LOCK_FILE, JSON.stringify(lockInfo), { flag: 'wx' });
+      return { success: true };
+
+    } catch (err: any) {
+      if (err.code === 'EEXIST') {
+        // 并���写入冲突，锁已被其他进程获取
+        return { success: false, message: '更新锁被其他进程持有，请稍后重试' };
+      }
+      console.error('[UpdateService] 文件锁异常:', err);
+      return { success: false, message: `锁文件操作失败: ${err.message}` };
+    }
+  }
+
+  /**
+   * 🔒 释放文件锁
+   */
+  private async releaseFileLock(): Promise<void> {
+    try {
+      if (fs.existsSync(this.LOCK_FILE)) {
+        const lockContent = await fsPromises.readFile(this.LOCK_FILE, 'utf-8');
+        const lockInfo: LockInfo = JSON.parse(lockContent);
+
+        // 只释放自己持有的锁
+        if (lockInfo.pid === process.pid) {
+          await fsPromises.unlink(this.LOCK_FILE);
+        } else {
+          console.warn(`[UpdateService] 锁文件被其他进程持有（PID: ${lockInfo.pid}），跳过释放`);
+        }
+      }
+    } catch (err) {
+      console.error('[UpdateService] 释放文件锁失败:', err);
+    }
   }
 
   /**
@@ -391,23 +508,134 @@ export class UpdateService {
   }
 
   /**
+   * 🔒 验证 GPG 签名并检查指纹白名单
+   */
+  private async verifyGPGSignature(
+    onLog?: (msg: string) => void
+  ): Promise<{ valid: boolean; error?: string }> {
+    const log = (msg: string) => onLog?.(msg);
+
+    try {
+      // Step 1: 导入信任的公钥
+      const publicKeyPath = path.join(this.pluginPath, 'assets/trusted-keys/publisher.asc');
+
+      if (fs.existsSync(publicKeyPath)) {
+        log('正在导入发布者公钥...');
+        const importResult = await this.executeCommand(
+          'gpg',
+          ['--batch', '--yes', '--import', publicKeyPath],
+          this.pluginPath
+        );
+
+        if (importResult.code === 0) {
+          log('✓ 公钥导入完成');
+        } else {
+          log(`公钥导入警告: ${importResult.stderr}`);
+        }
+      } else {
+        log('⚠️  未找到发布者公钥文件，将使用系统密钥环验证');
+      }
+
+      // Step 2: 验证 commit 签名并获取指纹
+      const verifyResult = await this.executeCommand(
+        'gpg',
+        ['--status-fd', '1', 'verify-commit', 'HEAD'],
+        this.pluginPath
+      );
+
+      // Step 3: 检查验证结果
+      if (verifyResult.code !== 0) {
+        // 无签名或签名无效
+        if (verifyResult.stderr.includes('no signature found') ||
+            verifyResult.stderr.includes('no valid OpenPGP data found')) {
+          return {
+            valid: false,
+            error: '上游仓库未启用 GPG 签名。为确保代码来源可信，请要求插件作者启用 commit 签名。'
+          };
+        } else if (verifyResult.stderr.includes('BAD signature')) {
+          return {
+            valid: false,
+            error: 'GPG 签名无效（可能被篡改）。拒绝更新以保护系统安全。'
+          };
+        } else {
+          return {
+            valid: false,
+            error: `GPG 验证失败: ${verifyResult.stderr}`
+          };
+        }
+      }
+
+      // Step 4: 提取签名指纹
+      const fingerprintMatch = verifyResult.stdout.match(/VALIDSIG ([A-F0-9]{16})/);
+      if (!fingerprintMatch) {
+        return {
+          valid: false,
+          error: '无法从签名中提取指纹。可能是 GPG 输出格式不兼容。'
+        };
+      }
+
+      const fingerprint = fingerprintMatch[1];
+      log(`检测到签名指纹: ${fingerprint}`);
+
+      // Step 5: 检查指纹白名单
+      if (!this.TRUSTED_GPG_FINGERPRINTS.includes(fingerprint)) {
+        return {
+          valid: false,
+          error: `签名指纹 ${fingerprint} 不在信任列表中。这可能意味着代码不是由官方发布者签名。`
+        };
+      }
+
+      log(`✓ GPG 签名验证通过，代码来自可信发布者（${fingerprint}）`);
+      return { valid: true };
+
+    } catch (err) {
+      return {
+        valid: false,
+        error: `GPG 验证异常: ${err instanceof Error ? err.message : '未知错误'}`
+      };
+    }
+  }
+
+  /**
    * ��行命令并返回 Promise
    */
   private executeCommand(
     command: string,
     args: string[],
     cwd: string,
-    onOutput?: (line: string) => void
+    onOutput?: (line: string) => void,
+    timeout?: number  // 超时时间（毫秒）
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
-      const proc: ChildProcess = spawn(command, args, {
+      // 🔒 使用安全命令路径（防止 PATH 劫持）
+      const safeCommand = this.getSafeCommandPath(command);
+
+      const proc: ChildProcess = spawn(safeCommand, args, {
         cwd,
         shell: false,  // 🔒 禁用 shell：防止命令注入风险
-        env: { ...process.env, PATH: process.env.PATH }
+        env: {
+          ...process.env,
+          PATH: '/usr/bin:/usr/local/bin:/bin'  // 🔒 最小化 PATH
+        }
       });
 
       let stdout = '';
       let stderr = '';
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      let killed = false;
+
+      // 🔒 超时机制（防止进程挂起导致 DoS）
+      if (timeout && timeout > 0) {
+        timeoutHandle = setTimeout(() => {
+          if (!killed && proc.pid) {
+            killed = true;
+            proc.kill('SIGTERM');
+            setTimeout(() => {
+              if (proc.pid) proc.kill('SIGKILL');
+            }, 5000);  // 5秒后强制 KILL
+          }
+        }, timeout);
+      }
 
       proc.stdout?.on('data', (data: Buffer) => {
         const line = data.toString();
@@ -422,10 +650,16 @@ export class UpdateService {
       });
 
       proc.on('close', (code) => {
-        resolve({ code: code ?? 1, stdout, stderr });
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (killed) {
+          resolve({ code: 124, stdout, stderr: stderr + '\n命令执行超时被终止' });
+        } else {
+          resolve({ code: code ?? 1, stdout, stderr });
+        }
       });
 
       proc.on('error', (err) => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         stderr += err.message;
         resolve({ code: 1, stdout, stderr });
       });
@@ -436,19 +670,32 @@ export class UpdateService {
    * 执行完整更新流程
    */
   async performUpdate(onProgress?: UpdateProgressCallback): Promise<UpdateResult> {
-    // 🔒 检查更新锁：防止并发更新
+    // 🔒 检查进程内更新锁：快速拒绝并发请求
     if (UpdateService.updateLock) {
       return {
         success: false,
         step: 'failed',
-        message: '更新操作正在进行中，请等待当前更新完成后再试',
+        message: '更新操作正在进行中（进程内锁），请等待当前更新完成后再试',
         logs: [],
         pluginPath: this.pluginPath,
-        error: '并发更新被拒绝'
+        error: '并发更新被拒绝（进程内锁）'
       };
     }
 
-    // 设置更新锁
+    // 🔒 获取文件锁：支持 cluster 模式的跨进程锁
+    const fileLockResult = await this.acquireFileLock();
+    if (!fileLockResult.success) {
+      return {
+        success: false,
+        step: 'failed',
+        message: fileLockResult.message || '无法获取更新锁',
+        logs: [],
+        pluginPath: this.pluginPath,
+        error: '并发更新被拒绝（文件锁）'
+      };
+    }
+
+    // 设置进程内更新锁
     UpdateService.updateLock = true;
 
     const logs: string[] = [];
@@ -602,30 +849,16 @@ export class UpdateService {
         log('pulling', '代码拉取完成');
       }
 
-      // Step 2.5: GPG 签名验证（安全加固 - 强制验证）
+      // Step 2.5: GPG 签名验证（安全加固 - 强制验证 + 指纹白名单）
       log('pulling', '正在验证代码签名...');
-      const verifyResult = await this.executeCommand(
-        'git',
-        ['verify-commit', 'HEAD'],
-        this.pluginPath
-      );
+      const gpgVerifyResult = await this.verifyGPGSignature((msg) => log('pulling', msg));
 
-      if (verifyResult.code !== 0) {
-        // 🔒 强制 GPG 验证：拒绝所有未签名或签名无效的 commit
-        const errorMsg = '代码签名验证失败：拒绝未签名或签名无效的更新';
+      if (!gpgVerifyResult.valid) {
+        //🔒 强制 GPG 验证：拒绝所有未签名或签名无效的 commit
+        const errorMsg = `代码签名验证失败: ${gpgVerifyResult.error}`;
         log('failed', errorMsg);
-        log('failed', 'GPG 验证详情: ' + verifyResult.stderr);
 
-        // 检查是否是"没有签名"
-        if (verifyResult.stderr.includes('no signature found') ||
-            verifyResult.stderr.includes('gpg: no valid OpenPGP data found')) {
-          log('failed', '❌ 上游仓库未启用 GPG 签名，为安全起见拒绝更新');
-          log('failed', '请联系插件作者启用 commit 签名以确保代码来源可信');
-        } else {
-          log('failed', '❌ GPG 签名验证失败（签名无效或密钥不匹配）');
-        }
-
-        // 无条件回滚到备份版本
+        // 无条件回滚到备份版本（如果存在）
         if (backupCommit) {
           log('failed', `正在回滚到版本 ${backupCommit.substring(0, 8)}...`);
           await this.executeCommand(
@@ -636,34 +869,44 @@ export class UpdateService {
           );
           log('failed', '代码已回滚到更新前的版本');
 
-          // 🔒 完整回滚：清理并重装依赖（确保版本一致）
+          // 🔒 完整回滚：使用 fs.rm 清理并重装依赖（确保版本一致）
           log('failed', '正在清理依赖包...');
-          await this.executeCommand(
-            'rm',
-            ['-rf', 'node_modules'],
-            this.pluginPath
-          );
+          try {
+            const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
+            if (fs.existsSync(nodeModulesPath)) {
+              await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
+            }
+            log('failed', '依赖包已清理');
+          } catch (rmErr) {
+            log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
+          }
+
           log('failed', '正在重新安装依赖包...');
           const rollbackInstall = await this.executeCommand(
             'npm',
             ['install', '--production'],
             this.pluginPath,
-            (line) => log('failed', line.trim())
+            (line) => log('failed', line.trim()),
+            300000  // 5分钟超时
           );
           if (rollbackInstall.code === 0) {
             log('failed', '已完全回滚到更新前的状态');
           } else {
             log('failed', '⚠️  警告：依赖包重装失败，服务可能无法正常启动');
           }
+        } else {
+          // 🔒 备份缺失保护：无备份时也应该清除拉取的代码
+          log('failed', '⚠️  无法回滚：未找到备份 commit（可能是首次运行）');
+          log('failed', '建议手动检查代码完整性后再次尝试更新');
         }
 
         return {
           success: false,
           step: 'failed',
-          message: errorMsg + '。请要求插件作者启用 GPG commit 签名。',
+          message: errorMsg,
           logs,
           pluginPath: this.pluginPath,
-          error: verifyResult.stderr
+          error: gpgVerifyResult.error
         };
       }
 
@@ -694,17 +937,23 @@ export class UpdateService {
           log('failed', '代码已回滚到更新前的版本');
 
           log('failed', '正在清理依赖包...');
-          await this.executeCommand(
-            'rm',
-            ['-rf', 'node_modules'],
-            this.pluginPath
-          );
+          try {
+            const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
+            if (fs.existsSync(nodeModulesPath)) {
+              await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
+            }
+            log('failed', '依赖包已清理');
+          } catch (rmErr) {
+            log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
+          }
+
           log('failed', '正在重新安装依赖包...');
           const rollbackInstall = await this.executeCommand(
             'npm',
             ['install', '--production'],
             this.pluginPath,
-            (line) => log('failed', line.trim())
+            (line) => log('failed', line.trim()),
+            300000  // 5分钟超时
           );
           if (rollbackInstall.code === 0) {
             log('failed', '已完全回滚到更新前的状态');
@@ -749,17 +998,23 @@ export class UpdateService {
           log('failed', '代码已回滚到更新前的版本');
 
           log('failed', '正在清理依赖包...');
-          await this.executeCommand(
-            'rm',
-            ['-rf', 'node_modules'],
-            this.pluginPath
-          );
+          try {
+            const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
+            if (fs.existsSync(nodeModulesPath)) {
+              await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
+            }
+            log('failed', '依赖包已清理');
+          } catch (rmErr) {
+            log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
+          }
+
           log('failed', '正在重新安装依赖包...');
           const rollbackInstall = await this.executeCommand(
             'npm',
             ['install', '--production'],
             this.pluginPath,
-            (line) => log('failed', line.trim())
+            (line) => log('failed', line.trim()),
+            300000  // 5分钟超时
           );
           if (rollbackInstall.code === 0) {
             log('failed', '已完全回滚到更新前的状态');
@@ -827,6 +1082,7 @@ export class UpdateService {
     } finally {
       // 🔒 确保锁一定被释放（防御性编程）
       UpdateService.updateLock = false;
+      await this.releaseFileLock();
     }
   }
 
