@@ -3,7 +3,7 @@
  * 处理学生的 AI 对话请求
  */
 
-import { Handler, PRIV, ProblemModel, RecordModel, STATUS } from 'hydrooj';
+import { Handler, PRIV, ProblemModel, RecordModel, STATUS, db } from 'hydrooj';
 import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
@@ -105,10 +105,10 @@ export class ChatHandler extends Handler {
         throw new Error('无效的问题类型');
       }
 
-      // 服务端授权校验：optimize 类型需要用户已 AC 该题
+      // 服务端授权校验:optimize 类型需要用户已 AC 该题
       // 防止用户绕过前端直接发送 optimize 请求
       if (questionType === 'optimize') {
-        // 先获取题目文档，获取数字类型的 docId（RecordDoc.pid 是 number 类型）
+        // 先获取题目文档,获取数字类型的 docId(RecordDoc.pid 是 number 类型)
         const pdoc = await ProblemModel.get(domainId, problemId, ['docId']);
         if (!pdoc) {
           this.response.status = 404;
@@ -117,17 +117,17 @@ export class ChatHandler extends Handler {
           return;
         }
 
-        const acRecords = await RecordModel.getMulti(domainId, {
+        // 性能优化:使用 findOne 直接检查 AC 记录存在性(无需排序)
+        const dbStart = Date.now();
+        const acRecord = await db.collection('record').findOne({
+          domainId,
           uid: userId,
-          pid: pdoc.docId,  // 使用数字类型的 docId
+          pid: pdoc.docId,
           status: STATUS.STATUS_ACCEPTED
-        })
-        .sort({ _id: -1 })
-        .limit(1)
-        .project({ _id: 1 })
-        .toArray();
+        }, { projection: { _id: 1 } });
+        console.log(`[Perf] AC Check: ${Date.now() - dbStart}ms`);
 
-        if (acRecords.length === 0) {
+        if (!acRecord) {
           this.response.status = 403;
           this.response.body = {
             error: '代码优化功能仅对已通过该题的用户开放',
@@ -332,13 +332,15 @@ export class ChatHandler extends Handler {
         return;
       }
 
-      // 调用 AI 服务（支持多模型 fallback）
+      // 调用 AI 服务(支持多模型 fallback)
       let aiResponse: string;
 
       try {
+        const aiStart = Date.now();
         const result = await multiModelClient.chat(messages, systemPrompt);
+        console.log(`[Perf] AI Response: ${Date.now() - aiStart}ms`);
         aiResponse = result.content;
-        // 可选：记录使用的模型信息
+        // 可选:记录使用的模型信息
         console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       } catch (error) {
         // 记录错误日志
@@ -452,20 +454,22 @@ export class ProblemStatusHandler extends Handler {
       return;
     }
 
-    // 使用数字类型的 docId 查询 AC 记录
-    const acRecord = await RecordModel.getMulti(domainId, {
+    // 性能优化:使用 findOne 直接获取最新 AC 记录
+    const dbStart = Date.now();
+    const acRecordDoc = await db.collection('record').findOne({
+      domainId,
       uid: userId,
-      pid: pdoc.docId,  // 使用数字类型的 docId
+      pid: pdoc.docId,
       status: STATUS.STATUS_ACCEPTED
-    })
-    .sort({ _id: -1 })
-    .limit(1)
-    .project({ status: 1, code: 1, lang: 1 })
-    .toArray();
+    }, {
+      sort: { _id: -1 },  // 需要排序以获取最新代码
+      projection: { status: 1, code: 1, lang: 1 }
+    });
+    console.log(`[Perf] Status Check: ${Date.now() - dbStart}ms`);
 
-    const hasAccepted = acRecord.length > 0;
-    const acCode = hasAccepted ? acRecord[0].code : undefined;
-    const acLang = hasAccepted ? acRecord[0].lang : undefined;
+    const hasAccepted = !!acRecordDoc;
+    const acCode = acRecordDoc?.code;
+    const acLang = acRecordDoc?.lang;
 
     this.response.body = {
       hasAccepted,
