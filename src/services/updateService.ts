@@ -5,7 +5,7 @@
  * - 自动检测插件安装路径
  * - 自动选择最优仓库（优先 Gitee，备选 GitHub）
  * - 执行 git pull 获取最新代码
- * - 执行 npm run build 编译
+ * - 执行 npm run build:plugin 编译
  * - 执行 pm2 restart hydrooj 重启服务
  */
 
@@ -365,17 +365,17 @@ export class UpdateService {
         log('pulling', '代码拉取完成');
       }
 
-      // Step 3: npm run build
+      // Step 3: npm run build:plugin
       log('building', '正在编��项目...');
       const buildResult = await this.executeCommand(
         'npm',
-        ['run', 'build'],
+        ['run', 'build:plugin'],
         this.pluginPath,
         (line) => log('building', line.trim())
       );
 
       if (buildResult.code !== 0) {
-        const errorMsg = `npm run build 失败: ${buildResult.stderr}`;
+        const errorMsg = `npm run build:plugin 失败: ${buildResult.stderr}`;
         log('failed', errorMsg);
         return {
           success: false,
