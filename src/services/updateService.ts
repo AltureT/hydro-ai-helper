@@ -81,9 +81,9 @@ interface LockInfo {
 export class UpdateService {
   private pluginPath: string;
 
-  // 🔒 GPG 信任指纹白名单（插件发布者密钥）
+  // 🔒 GPG 信任指纹白名单（插件发布者密钥 - 完整 40 位指纹）
   private readonly TRUSTED_GPG_FINGERPRINTS = [
-    '45DACC0ECFE90852'  // AltureT <myalture@gmail.com>
+    'B6115AF3D271D12AB85E843E45DACC0ECFE90852'  // AltureT <myalture@gmail.com>
   ];
 
   // 🔒 安全命令路径映射（防止 PATH 劫持）
@@ -537,9 +537,10 @@ export class UpdateService {
       }
 
       // Step 2: 验证 commit 签名并获取指纹
+      // 🔒 使用 git verify-commit 而非 gpg（git 命令会调用 gpg）
       const verifyResult = await this.executeCommand(
-        'gpg',
-        ['--status-fd', '1', 'verify-commit', 'HEAD'],
+        'git',
+        ['verify-commit', '--raw', 'HEAD'],
         this.pluginPath
       );
 
@@ -565,16 +566,17 @@ export class UpdateService {
         }
       }
 
-      // Step 4: 提取签名指纹
-      const fingerprintMatch = verifyResult.stdout.match(/VALIDSIG ([A-F0-9]{16})/);
+      // Step 4: 提取签名指纹（完整 40 位，防止密钥 ID 碰撞）
+      const fingerprintMatch = verifyResult.stderr.match(/[0-9A-F]{40}/) ||
+                               verifyResult.stdout.match(/[0-9A-F]{40}/);
       if (!fingerprintMatch) {
         return {
           valid: false,
-          error: '无法从签名中提取指纹。可能是 GPG 输出格式不兼容。'
+          error: '无法从签名中提取完整指纹。GPG 输出: ' + verifyResult.stderr.substring(0, 200)
         };
       }
 
-      const fingerprint = fingerprintMatch[1];
+      const fingerprint = fingerprintMatch[0];
       log(`检测到签名指纹: ${fingerprint}`);
 
       // Step 5: 检查指纹白名单
@@ -825,13 +827,14 @@ export class UpdateService {
           log('pulling', `git reset 警告: ${resetResult.stderr}`);
         }
 
-        // Step 2c: Git pull
+        // Step 2c: Git pull（添加超时防止挂起）
         log('pulling', '正在拉取最新代码...');
         const pullResult = await this.executeCommand(
           'git',
           ['pull', '--ff-only', 'origin', 'main'],
           this.pluginPath,
-          (line) => log('pulling', line.trim())
+          (line) => log('pulling', line.trim()),
+          300000  // 🔒 5 分钟超时
         );
 
         if (pullResult.code !== 0) {
@@ -895,9 +898,43 @@ export class UpdateService {
             log('failed', '⚠️  警告：依赖包重装失败，服务可能无法正常启动');
           }
         } else {
-          // 🔒 备份缺失保护：无备份时也应该清除拉取的代码
-          log('failed', '⚠️  无法回滚：未找到备份 commit（可能是首次运行）');
-          log('failed', '建议手动检查代码完整性后再次尝试更新');
+          // 🔒 备份缺失保护：清除未验证的代码，恢复到上一个已知状态
+          log('failed', '⚠️  未找到备份 commit，正在清理未验证的代码...');
+
+          // 尝试恢复到 origin/main 的上一个 commit
+          const headResetResult = await this.executeCommand(
+            'git',
+            ['reset', '--hard', 'HEAD~1'],
+            this.pluginPath,
+            (line) => log('failed', line.trim())
+          );
+
+          if (headResetResult.code === 0) {
+            log('failed', '已回退到上一个 commit，未验证的代码已清除');
+
+            // 清理并重装依赖
+            log('failed', '正在清理依赖包...');
+            try {
+              const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
+              if (fs.existsSync(nodeModulesPath)) {
+                await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
+              }
+            } catch (rmErr) {
+              log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
+            }
+
+            log('failed', '正在重新安装依赖包...');
+            await this.executeCommand(
+              'npm',
+              ['install', '--production'],
+              this.pluginPath,
+              (line) => log('failed', line.trim()),
+              300000
+            );
+            log('failed', '已尝试恢复到安全状态，建议检查代码完整性');
+          } else {
+            log('failed', '❌ 无法回退 commit，请手动执行: git reset --hard HEAD~1');
+          }
         }
 
         return {
@@ -912,13 +949,14 @@ export class UpdateService {
 
       log('pulling', '✓ GPG 签名验证通过，代码来源可信');
 
-      // Step 3: npm install --production
+      // Step 3: npm install --production（添加超时防止挂起）
       log('building', '正在安装依赖包...');
       const installResult = await this.executeCommand(
         'npm',
         ['install', '--production'],
         this.pluginPath,
-        (line) => log('building', line.trim())
+        (line) => log('building', line.trim()),
+        300000  // 🔒 5 分钟超时
       );
 
       if (installResult.code !== 0) {
@@ -973,13 +1011,14 @@ export class UpdateService {
       }
       log('building', '依赖包安装完成');
 
-      // Step 4: npm run build:plugin
+      // Step 4: npm run build:plugin（添加超时防止挂起）
       log('building', '正在编译项目...');
       const buildResult = await this.executeCommand(
         'npm',
         ['run', 'build:plugin'],
         this.pluginPath,
-        (line) => log('building', line.trim())
+        (line) => log('building', line.trim()),
+        300000  // 🔒 5 分钟超时
       );
 
       if (buildResult.code !== 0) {
@@ -1034,18 +1073,40 @@ export class UpdateService {
       }
       log('building', '编译完成');
 
-      // Step 5: 延迟执行 pm2 reload hydrooj（阻塞式执行 + 健康检查）
+      // Step 5: 延迟执行 pm2 reload hydrooj（使用安全路径，零停机部署）
       log('restarting', '准备热重载 HydroOJ（零停机部署）...');
 
-      // 🔒 使用后台进程延迟重启，但记录重启命令供调试
+      // 🔒 使用安全路径的 pm2 命令（不使用 shell，防止 PATH 劫持）
       // pm2 reload 优先（零停机），失败时降级为 restart
       // 延迟 15 秒确保 HTTP 响应已发送
-      const reloadCommand = 'sleep 15 && (pm2 reload hydrooj 2>/dev/null || pm2 restart hydrooj)';
-      spawn('sh', ['-c', reloadCommand], {
-        cwd: this.pluginPath,
-        detached: true,
-        stdio: 'ignore'
-      }).unref();
+      setTimeout(async () => {
+        try {
+          const pm2Path = this.getSafeCommandPath('pm2');
+
+          // 尝试 pm2 reload（零停机）
+          const reloadResult = await this.executeCommand(
+            pm2Path,
+            ['reload', 'hydrooj'],
+            this.pluginPath,
+            undefined,
+            30000  // 30秒超时
+          );
+
+          if (reloadResult.code !== 0) {
+            // reload 失败，降级为 restart
+            console.log('[UpdateService] pm2 reload 失败，降级为 restart');
+            await this.executeCommand(
+              pm2Path,
+              ['restart', 'hydrooj'],
+              this.pluginPath,
+              undefined,
+              30000
+            );
+          }
+        } catch (err) {
+          console.error('[UpdateService] pm2 重启失败:', err);
+        }
+      }, 15000);
 
       log('restarting', '热重载命令已安排，服务将在 15 秒后平滑更新（零停机）');
       log('restarting', '如果更新后服务异常，请检查 pm2 日志: pm2 logs hydrooj');
