@@ -1,0 +1,71 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # 匹配 v1.0.0, v1.8.5 等格式的 tag
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # 需要写入权限以创建 Release
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建插件
+        run: npm run build:plugin
+
+      - name: 验证版本一致性
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          PKG_VERSION=$(node -p "require('./package.json').version")
+
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "❌ 错误：Tag 版本 ($TAG_VERSION) 与 package.json 版本 ($PKG_VERSION) 不一致"
+            exit 1
+          fi
+
+          echo "✅ 版本验证通过：$TAG_VERSION"
+
+      - name: 发布到 npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true  # 自动生成 Release Notes
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 发布成功通知
+        if: success()
+        run: |
+          echo "🎉 成功发布 ${{ github.ref_name }} 到 npm"
+          echo "📦 npm: https://www.npmjs.com/package/hydro-ai-helper"
+          echo "🏷️ GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+
+      - name: 发布失败通知
+        if: failure()
+        run: |
+          echo "❌ 发布失败，请检查日志"
+          echo "可能的原因："
+          echo "1. NPM_TOKEN 未配置或已过期"
+          echo "2. 版本号与 package.json 不一致"
+          echo "3. npm 包名已被占用"
