@@ -4,12 +4,13 @@
  * 提供插件在线更新功能：
  * - 自动检测插件安装路径
  * - 自动选择最优仓库（优先 Gitee，备选 GitHub）
- * - 执行 git pull 获取最新代码
+ * - 执行 git fetch + verify + reset 获取最新代码（防 TOCTOU）
  * - 执行 npm run build:plugin 编译
  * - 执行 pm2 restart hydrooj 重启服务
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
@@ -87,12 +88,13 @@ export class UpdateService {
   ];
 
   // 🔒 安全命令路径映射（防止 PATH 劫持）
-  private readonly SAFE_COMMANDS: { [key: string]: string } = {
-    git: '/usr/bin/git',
-    npm: '/usr/bin/npm',
-    pm2: '/usr/local/bin/pm2',
-    gpg: '/usr/bin/gpg',
-    sh: '/bin/sh'
+  // 说明：优先使用绝对路径；当不存在时，回退到当前 Node 的 bin 目录（适配 nvm/pm2/npm 全局安装）。
+  private readonly SAFE_COMMANDS: Record<string, string[]> = {
+    git: ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git'],
+    npm: ['/usr/bin/npm', '/usr/local/bin/npm', '/opt/homebrew/bin/npm'],
+    pm2: ['/usr/local/bin/pm2', '/usr/bin/pm2', '/opt/homebrew/bin/pm2'],
+    gpg: ['/usr/bin/gpg', '/usr/local/bin/gpg', '/opt/homebrew/bin/gpg'],
+    sh: ['/bin/sh', '/usr/bin/sh']
   };
 
   // 🔒 文件锁路径
@@ -105,10 +107,16 @@ export class UpdateService {
   // 注意：此锁仅在单进程内有效，cluster 模式下依赖文件锁
   private static updateLock = false;
 
-  constructor() {
+  constructor(pluginPath?: string) {
     // 通过 __dirname 自动检测插件安装路径
     // __dirname 指向 dist 目录，需要回退到插件根目录
-    this.pluginPath = path.resolve(__dirname, '../..');
+    const resolvedPath = pluginPath ? path.resolve(pluginPath) : path.resolve(__dirname, '../..');
+    // 🔒 解析真实路径（防止 symlink 路径混淆）
+    try {
+      this.pluginPath = fs.realpathSync(resolvedPath);
+    } catch {
+      this.pluginPath = resolvedPath;
+    }
     this.LOCK_FILE = path.join(this.pluginPath, '.update.lock');
   }
 
@@ -123,15 +131,68 @@ export class UpdateService {
    * 🔒 获取安全命令路径（防止 PATH 劫持）
    */
   private getSafeCommandPath(cmd: string): string {
-    const safePath = this.SAFE_COMMANDS[cmd];
-    if (safePath) {
-      // 验证命令存在且可执行
-      if (fs.existsSync(safePath)) {
-        return safePath;
+    // 已是绝对路径则直接使用
+    if (path.isAbsolute(cmd)) {
+      return cmd;
+    }
+
+    const candidates = this.SAFE_COMMANDS[cmd] || [];
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          fs.accessSync(candidate, fs.constants.X_OK);
+          return candidate;
+        }
+      } catch {
+        // ignore
       }
     }
-    // 降级：使用原始命令名（依赖最小化 PATH）
+
+    // 回退：优先使用当前 Node 的 bin 目录（适配 nvm / asdf / 自定义安装）；
+    // 也能覆盖 pm2/npm 通过 npm 全局安装到 node bin 的情况。
+    try {
+      const nodeBin = path.dirname(process.execPath);
+      if (nodeBin) {
+        const nodeCandidate = path.join(nodeBin, cmd);
+        if (fs.existsSync(nodeCandidate)) {
+          return nodeCandidate;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 最终回退：使用原始命令名（依赖最小化 PATH）
     return cmd;
+  }
+
+  /**
+   * 🔒 构造安全 PATH（最小化 + 兼容 nvm/Homebrew）
+   */
+  private getSafePathEnv(): string {
+    if (process.platform === 'win32') {
+      // Windows 环境不强行覆盖 PATH，避免破坏系统查找逻辑
+      return process.env.PATH || '';
+    }
+
+    const dirs: string[] = ['/usr/bin', '/usr/local/bin', '/bin'];
+
+    // macOS Homebrew（Apple Silicon）
+    if (fs.existsSync('/opt/homebrew/bin')) {
+      dirs.push('/opt/homebrew/bin');
+    }
+
+    // 运行时 Node 所在目录（常见于 nvm / asdf / 自定义安装）
+    try {
+      const nodeBin = path.dirname(process.execPath);
+      if (nodeBin) {
+        dirs.push(nodeBin);
+      }
+    } catch {
+      // ignore
+    }
+
+    return Array.from(new Set(dirs.filter(Boolean))).join(path.delimiter);
   }
 
   /**
@@ -142,27 +203,55 @@ export class UpdateService {
       // 检查锁文件是否存在
       if (fs.existsSync(this.LOCK_FILE)) {
         const lockContent = await fsPromises.readFile(this.LOCK_FILE, 'utf-8');
-        const lockInfo: LockInfo = JSON.parse(lockContent);
+        let lockInfo: LockInfo | null = null;
+        try {
+          lockInfo = JSON.parse(lockContent) as LockInfo;
+        } catch {
+          // 锁文件损坏：清理并继续（避免永久死锁）
+          console.warn('[UpdateService] 锁文件损坏，已自动清理');
+          await fsPromises.unlink(this.LOCK_FILE);
+        }
 
-        // 检查锁是否超时
-        const now = Date.now();
-        if (now - lockInfo.timestamp < this.LOCK_TIMEOUT_MS) {
-          // 检查持有锁的进程是否仍在运行
-          try {
-            process.kill(lockInfo.pid, 0);  // 检查进程存在性（不发送信号）
-            return {
-              success: false,
-              message: `更新正在进行中（PID: ${lockInfo.pid}），请稍后重试`
-            };
-          } catch {
-            // 进程不存在，清理过期锁
-            console.log(`[UpdateService] 清理过期锁文件（进程 ${lockInfo.pid} 已退出）`);
+        // 校验格式
+        if (lockInfo && (typeof lockInfo.pid !== 'number' || typeof lockInfo.timestamp !== 'number')) {
+          console.warn('[UpdateService] 锁文件格式非法，已自动清理');
+          await fsPromises.unlink(this.LOCK_FILE);
+          lockInfo = null;
+        }
+
+        if (lockInfo) {
+          // 检查锁是否超时
+          const now = Date.now();
+          if (now - lockInfo.timestamp < this.LOCK_TIMEOUT_MS) {
+            // 检查持有锁的进程是否仍在运行
+            try {
+              process.kill(lockInfo.pid, 0);  // 检查进程存在性（不发送信号）
+              return {
+                success: false,
+                message: `更新正在进行中（PID: ${lockInfo.pid}），请稍后重试`
+              };
+            } catch (e: any) {
+              // 🔒 fail-closed：仅在明确 ESRCH（进程不存在）时清理锁文件
+              if (e?.code === 'ESRCH') {
+                console.log(`[UpdateService] 清理过期锁文件（进程 ${lockInfo.pid} 已退出）`);
+                await fsPromises.unlink(this.LOCK_FILE);
+              } else if (e?.code === 'EPERM') {
+                return {
+                  success: false,
+                  message: `更新锁被其他用户进程持有（PID: ${lockInfo.pid}），当前进程无权限探测其状态，请稍后重试`
+                };
+              } else {
+                return {
+                  success: false,
+                  message: `更新锁状态未知（PID: ${lockInfo.pid}），为安全起见已拒绝并发更新，请稍后重试`
+                };
+              }
+            }
+          } else {
+            // 锁超时，清理
+            console.log(`[UpdateService] 清理超时锁文件（超时 ${Math.floor((now - lockInfo.timestamp) / 1000)}s）`);
             await fsPromises.unlink(this.LOCK_FILE);
           }
-        } else {
-          // 锁超时，清理
-          console.log(`[UpdateService] 清理超时锁文件（超时 ${Math.floor((now - lockInfo.timestamp) / 1000)}s）`);
-          await fsPromises.unlink(this.LOCK_FILE);
         }
       }
 
@@ -230,6 +319,43 @@ export class UpdateService {
   }
 
   /**
+   * 🔒 写权限预检（避免更新过程中途失败）
+   */
+  private async checkWritePermission(onLog?: (msg: string) => void): Promise<{ ok: boolean; message?: string }> {
+    const log = (msg: string) => onLog?.(msg);
+    try {
+      await fsPromises.access(this.pluginPath, fs.constants.W_OK);
+
+      // 额外探测：确保可创建/删除文件（覆盖部分挂载/ACL 场景）
+      const probeName = `.update.writecheck.${process.pid}.${Date.now()}`;
+      const probePath = path.join(this.pluginPath, probeName);
+      try {
+        const fh = await fsPromises.open(probePath, 'wx');
+        await fh.close();
+      } finally {
+        try {
+          if (fs.existsSync(probePath)) {
+            await fsPromises.unlink(probePath);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const gitDir = path.join(this.pluginPath, '.git');
+      if (fs.existsSync(gitDir)) {
+        await fsPromises.access(gitDir, fs.constants.W_OK);
+      }
+
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '未知错误';
+      log(`写权限检查失败: ${msg}`);
+      return { ok: false, message: `当前进程对插件目录缺少写入权限: ${msg}` };
+    }
+  }
+
+  /**
    * 初始化 git 仓库并拉取代码
    */
   private async initGitRepo(repoUrl: string, onLog?: (msg: string) => void): Promise<boolean> {
@@ -239,7 +365,7 @@ export class UpdateService {
 
     // git init
     log('执行 git init...');
-    const initResult = await this.executeCommand('git', ['init'], this.pluginPath);
+    const initResult = await this.executeCommand('git', ['init'], this.pluginPath, undefined, 300000);
     if (initResult.code !== 0) {
       log(`git init 失败: ${initResult.stderr}`);
       return false;
@@ -247,33 +373,31 @@ export class UpdateService {
 
     // git remote add origin
     log(`添加远程仓库: ${repoUrl}`);
-    const remoteResult = await this.executeCommand('git', ['remote', 'add', 'origin', repoUrl], this.pluginPath);
+    const remoteResult = await this.executeCommand('git', ['remote', 'add', 'origin', repoUrl], this.pluginPath, undefined, 300000);
     if (remoteResult.code !== 0) {
       // 如果 remote 已存在，尝试设置 URL
-      const setUrlResult = await this.executeCommand('git', ['remote', 'set-url', 'origin', repoUrl], this.pluginPath);
+      const setUrlResult = await this.executeCommand('git', ['remote', 'set-url', 'origin', repoUrl], this.pluginPath, undefined, 300000);
       if (setUrlResult.code !== 0) {
         log(`设置远程仓库失败: ${setUrlResult.stderr}`);
         return false;
       }
     }
 
-    // git fetch
+    // git fetch（避免 TOCTOU：仅获取对象，不切换工作区；待签名验证通过后再 checkout/reset）
     log('正在获取远程代码...');
-    const fetchResult = await this.executeCommand('git', ['fetch', 'origin'], this.pluginPath, (line) => log(line.trim()));
+    const fetchResult = await this.executeCommand(
+      'git',
+      ['fetch', '--prune', 'origin', 'main'],
+      this.pluginPath,
+      (line) => log(line.trim()),
+      300000  // 🔒 5 分钟超时
+    );
     if (fetchResult.code !== 0) {
       log(`git fetch 失败: ${fetchResult.stderr}`);
       return false;
     }
 
-    // git reset --hard origin/main
-    log('正在同步到最新版本...');
-    const resetResult = await this.executeCommand('git', ['reset', '--hard', 'origin/main'], this.pluginPath, (line) => log(line.trim()));
-    if (resetResult.code !== 0) {
-      log(`git reset 失败: ${resetResult.stderr}`);
-      return false;
-    }
-
-    log('git 仓库初始化完成');
+    log('git 仓库初始化完成（已获取远程对象，待签名验证通过后切换到 main）');
     return true;
   }
 
@@ -481,6 +605,139 @@ export class UpdateService {
   }
 
   /**
+   * 是否允许在一键更新中执行 npm install scripts
+   * - 默认禁用（更安全）：避免依赖包中的 install/postinstall 脚本在服务器上执行
+   * - 如确需启用：设置环境变量 AI_HELPER_UPDATE_ALLOW_NPM_SCRIPTS=1
+   */
+  private allowNpmScriptsOnUpdate(): boolean {
+    const raw = (process.env.AI_HELPER_UPDATE_ALLOW_NPM_SCRIPTS || '').trim();
+    return raw === '1' || raw.toLowerCase() === 'true';
+  }
+
+  /**
+   * 🔒 安装依赖（优先 npm ci，失败时回退 npm install；默认禁用 scripts）
+   */
+  private async installDependencies(
+    onOutput?: (line: string) => void,
+    timeoutMs: number = 300000
+  ): Promise<{ code: number; stdout: string; stderr: string; usedCi: boolean; ignoreScripts: boolean }> {
+    const ignoreScripts = !this.allowNpmScriptsOnUpdate();
+    const env: NodeJS.ProcessEnv = {
+      // 关键：即便服务进程 NODE_ENV=production，也要安装 devDependencies（tsc 需要）
+      NODE_ENV: 'development',
+      NPM_CONFIG_PRODUCTION: 'false',
+      // 降低噪音/外部请求
+      NPM_CONFIG_AUDIT: 'false',
+      NPM_CONFIG_FUND: 'false',
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+    };
+
+    const lockPath = path.join(this.pluginPath, 'package-lock.json');
+    const hasLock = fs.existsSync(lockPath);
+
+    const runNpm = async (args: string[], usedCi: boolean) => {
+      const finalArgs = ignoreScripts ? [...args, '--ignore-scripts'] : args;
+      const result = await this.executeCommand('npm', finalArgs, this.pluginPath, onOutput, timeoutMs, env);
+      return { ...result, usedCi };
+    };
+
+    // 优先使用 npm ci（更可复现）
+    if (hasLock) {
+      const ciResult = await runNpm(['ci'], true);
+      if (ciResult.code === 0) {
+        return { ...ciResult, ignoreScripts };
+      }
+
+      // 回退到 npm install（兼容 package-lock 不一致等情况）
+      onOutput?.('npm ci 失败，回退到 npm install...');
+      const installResult = await runNpm(['install'], false);
+      return { ...installResult, ignoreScripts };
+    }
+
+    // 没有 lock：清理旧依赖，避免残留导致运行时异常
+    try {
+      const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
+      if (fs.existsSync(nodeModulesPath)) {
+        onOutput?.('未找到 package-lock.json，正在清理旧依赖包...');
+        await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
+      }
+    } catch {
+      // ignore
+    }
+
+    const installResult = await runNpm(['install'], false);
+    return { ...installResult, ignoreScripts };
+  }
+
+  /**
+   * 🔒 原子化构建 dist：先构建到临时目录，再用 rename 原子替换
+   */
+  private async buildPluginAtomically(
+    onOutput?: (line: string) => void,
+    timeoutMs: number = 300000
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    const distDir = path.join(this.pluginPath, 'dist');
+    const tmpDir = path.join(this.pluginPath, `.dist.tmp.${process.pid}.${Date.now()}`);
+    const backupDir = path.join(this.pluginPath, `.dist.backup.${process.pid}.${Date.now()}`);
+
+    const safeRm = async (p: string) => {
+      try {
+        await fsPromises.rm(p, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    };
+
+    // 清理可能残留的临时目录
+    await safeRm(tmpDir);
+
+    const buildResult = await this.executeCommand(
+      'npm',
+      ['run', 'build:plugin', '--', '--outDir', tmpDir],
+      this.pluginPath,
+      onOutput,
+      timeoutMs
+    );
+
+    if (buildResult.code !== 0) {
+      await safeRm(tmpDir);
+      return buildResult;
+    }
+
+    let backupCreated = false;
+    try {
+      if (fs.existsSync(distDir)) {
+        await fsPromises.rename(distDir, backupDir);
+        backupCreated = true;
+      }
+
+      await fsPromises.rename(tmpDir, distDir);
+
+      if (backupCreated) {
+        await safeRm(backupDir);
+      }
+
+      return buildResult;
+    } catch (err) {
+      // 尝试恢复旧 dist（防御性：避免 dist 丢失）
+      try {
+        if (!fs.existsSync(distDir) && backupCreated && fs.existsSync(backupDir)) {
+          await fsPromises.rename(backupDir, distDir);
+        }
+      } catch {
+        // ignore
+      }
+
+      await safeRm(tmpDir);
+      return {
+        code: 1,
+        stdout: buildResult.stdout || '',
+        stderr: `原子化构建替换失败: ${err instanceof Error ? err.message : '未知错误'}`
+      };
+    }
+  }
+
+  /**
    * 设置 git remote origin 为指定 URL
    */
   private async setRemoteOrigin(url: string, onLog?: (msg: string) => void): Promise<boolean> {
@@ -511,11 +768,44 @@ export class UpdateService {
    * 🔒 验证 GPG 签名并检查指纹白名单
    */
   private async verifyGPGSignature(
+    ref: string,
     onLog?: (msg: string) => void
   ): Promise<{ valid: boolean; error?: string }> {
     const log = (msg: string) => onLog?.(msg);
 
+    // 🔒 使用隔离的 GNUPGHOME（避免污染系统密钥环；也避免服务用户无写入 ~/.gnupg 导致验证失败）
+    const gpgHomePrefix = path.join(os.tmpdir(), 'hydro-ai-helper-gpg-');
+    let gpgHome = '';
+
+    const safeRmDir = async (dir: string) => {
+      try {
+        if (dir) {
+          await fsPromises.rm(dir, { recursive: true, force: true });
+        }
+      } catch {
+        // ignore
+      }
+    };
+
     try {
+      gpgHome = await fsPromises.mkdtemp(gpgHomePrefix);
+      try {
+        await fsPromises.chmod(gpgHome, 0o700);
+      } catch {
+        // ignore
+      }
+
+      const env = { GNUPGHOME: gpgHome };
+
+      // Step 0: 确保 gpg 可用
+      const gpgVersion = await this.executeCommand('gpg', ['--version'], this.pluginPath, undefined, 15000, env);
+      if (gpgVersion.code !== 0) {
+        return {
+          valid: false,
+          error: '未检测到可用的 gpg（GnuPG）。为保证一键更新安全性（强制签名校验），请先安装 gpg 后重试。'
+        };
+      }
+
       // Step 1: 导入信任的公钥
       const publicKeyPath = path.join(this.pluginPath, 'assets/trusted-keys/publisher.asc');
 
@@ -524,60 +814,86 @@ export class UpdateService {
         const importResult = await this.executeCommand(
           'gpg',
           ['--batch', '--yes', '--import', publicKeyPath],
-          this.pluginPath
+          this.pluginPath,
+          undefined,
+          60000,
+          env
         );
 
         if (importResult.code === 0) {
           log('✓ 公钥导入完成');
         } else {
-          log(`公钥导入警告: ${importResult.stderr}`);
+          log(`公钥导入警告: ${(importResult.stderr || importResult.stdout || '').substring(0, 200)}`);
         }
       } else {
-        log('⚠️  未找到发布者公钥文件，将使用系统密钥环验证');
+        log('⚠️  未找到发布者公钥文件（assets/trusted-keys/publisher.asc）。当前使用隔离的 GNUPGHOME，无法从系统密钥环继承公钥，签名验证可能失败；请修复公钥文件后重试。');
       }
 
       // Step 2: 验证 commit 签名并获取指纹
       // 🔒 使用 git verify-commit 而非 gpg（git 命令会调用 gpg）
+      const gpgPath = this.getSafeCommandPath('gpg');
       const verifyResult = await this.executeCommand(
         'git',
-        ['verify-commit', '--raw', 'HEAD'],
-        this.pluginPath
+        ['-c', `gpg.program=${gpgPath}`, 'verify-commit', '--raw', ref],
+        this.pluginPath,
+        undefined,
+        60000,
+        env
       );
+
+      const combinedOutput = `${verifyResult.stdout || ''}\n${verifyResult.stderr || ''}`;
 
       // Step 3: 检查验证结果
       if (verifyResult.code !== 0) {
         // 无签名或签名无效
-        if (verifyResult.stderr.includes('no signature found') ||
-            verifyResult.stderr.includes('no valid OpenPGP data found')) {
+        if (
+          combinedOutput.includes('no signature found') ||
+          combinedOutput.includes('no valid OpenPGP data found') ||
+          combinedOutput.includes('[GNUPG:] NODATA')
+        ) {
           return {
             valid: false,
             error: '上游仓库未启用 GPG 签名。为确保代码来源可信，请要求插件作者启用 commit 签名。'
           };
-        } else if (verifyResult.stderr.includes('BAD signature')) {
+        }
+
+        if (combinedOutput.includes('BAD signature') || combinedOutput.includes('[GNUPG:] BADSIG')) {
           return {
             valid: false,
             error: 'GPG 签名无效（可能被篡改）。拒绝更新以保护系统安全。'
           };
-        } else {
+        }
+
+        if (combinedOutput.includes('NO_PUBKEY') || combinedOutput.includes('缺少公钥')) {
           return {
             valid: false,
-            error: `GPG 验证失败: ${verifyResult.stderr}`
+            error: '无法验证签名：缺少公钥。请确认服务器已安装 gpg，且插件内置发布者公钥文件未缺失/未损坏。'
           };
         }
-      }
 
-      // Step 4: 提取签名指纹（完整 40 位，防止密钥 ID 碰撞）
-      const fingerprintMatch = verifyResult.stderr.match(/[0-9A-F]{40}/) ||
-                               verifyResult.stdout.match(/[0-9A-F]{40}/);
-      if (!fingerprintMatch) {
         return {
           valid: false,
-          error: '无法从签名中提取完整指纹。GPG 输出: ' + verifyResult.stderr.substring(0, 200)
+          error: `GPG 验证失败: ${(verifyResult.stderr || verifyResult.stdout || '').substring(0, 400)}`
         };
       }
 
-      const fingerprint = fingerprintMatch[0];
-      log(`检测到签名指纹: ${fingerprint}`);
+      // Step 4: 提取签名指纹（优先 primary key fpr；完整 40 位，防止密钥 ID 碰撞）
+      const { signingFingerprint, primaryFingerprint } = this.extractGpgFingerprints(combinedOutput);
+      const fingerprint = primaryFingerprint || signingFingerprint;
+
+      if (!fingerprint) {
+        return {
+          valid: false,
+          error: '无法从签名中提取完整指纹。GPG 输出: ' + combinedOutput.substring(0, 200)
+        };
+      }
+
+      if (primaryFingerprint && signingFingerprint && primaryFingerprint !== signingFingerprint) {
+        log(`检测到签名指纹: ${signingFingerprint} (subkey)`);
+        log(`检测到主密钥指纹: ${primaryFingerprint} (primary)`);
+      } else {
+        log(`检测到签名指纹: ${fingerprint}`);
+      }
 
       // Step 5: 检查指纹白名单
       if (!this.TRUSTED_GPG_FINGERPRINTS.includes(fingerprint)) {
@@ -595,7 +911,55 @@ export class UpdateService {
         valid: false,
         error: `GPG 验证异常: ${err instanceof Error ? err.message : '未知错误'}`
       };
+    } finally {
+      await safeRmDir(gpgHome);
     }
+  }
+
+  /**
+   * 从 git verify-commit --raw 输出中提取指纹
+   * - signingFingerprint: 签名子密钥指纹（可能为 subkey）
+   * - primaryFingerprint: 主密钥指纹（若可解析到）
+   */
+  private extractGpgFingerprints(output: string): { signingFingerprint?: string; primaryFingerprint?: string } {
+    const lines = output.split(/\r?\n/);
+    let signingFingerprint: string | undefined;
+    let primaryFingerprint: string | undefined;
+
+    // 优先解析 PRIMARY_KEY_FPR
+    for (const line of lines) {
+      const match = line.match(/\[GNUPG:\]\s*PRIMARY_KEY_FPR\s+([0-9A-F]{40})/i);
+      if (match) {
+        primaryFingerprint = match[1].toUpperCase();
+        break;
+      }
+    }
+
+    // 解析 VALIDSIG（格式：VALIDSIG <signing_fpr> ... <primary_fpr>）
+    for (const line of lines) {
+      if (!line.includes('[GNUPG:]')) continue;
+      if (!line.includes('VALIDSIG')) continue;
+
+      const parts = line.trim().split(/\s+/);
+      const validSigIndex = parts.findIndex((p) => p === 'VALIDSIG');
+      if (validSigIndex < 0) continue;
+
+      const maybeSigning = parts[validSigIndex + 1];
+      if (maybeSigning && /^[0-9A-F]{40}$/i.test(maybeSigning)) {
+        signingFingerprint = maybeSigning.toUpperCase();
+      }
+
+      const last = parts[parts.length - 1];
+      if (last && /^[0-9A-F]{40}$/i.test(last)) {
+        primaryFingerprint = primaryFingerprint || last.toUpperCase();
+      }
+      break;
+    }
+
+    // 🔒 不再使用 fallback 匹配：防止从 commit message 等可控文本中提取指纹绕过白名单
+    // 仅信任 [GNUPG:] 状态行中的指纹
+
+    return { signingFingerprint, primaryFingerprint };
   }
 
   /**
@@ -606,19 +970,31 @@ export class UpdateService {
     args: string[],
     cwd: string,
     onOutput?: (line: string) => void,
-    timeout?: number  // 超时时间（毫秒）
+    timeout?: number,  // 超时时间（毫秒）
+    envOverrides?: NodeJS.ProcessEnv
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
       // 🔒 使用安全命令路径（防止 PATH 劫持）
       const safeCommand = this.getSafeCommandPath(command);
 
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        ...envOverrides,
+        PATH: this.getSafePathEnv()  // 🔒 最小化 PATH（并兼容 nvm/Homebrew）
+      };
+      // 🔒 清理 GIT_* 环境变量（防止 GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_* 劫持）
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('GIT_')) {
+          delete env[key];
+        }
+      }
+
       const proc: ChildProcess = spawn(safeCommand, args, {
         cwd,
         shell: false,  // 🔒 禁用 shell：防止命令注入风险
-        env: {
-          ...process.env,
-          PATH: '/usr/bin:/usr/local/bin:/bin'  // 🔒 最小化 PATH
-        }
+        env,
+        // 🔒 让子进程成为新的进程组 leader，便于超时后 kill 整个子进程树（POSIX）
+        detached: process.platform !== 'win32'
       });
 
       let stdout = '';
@@ -629,11 +1005,59 @@ export class UpdateService {
       // 🔒 超时机制（防止进程挂起导致 DoS）
       if (timeout && timeout > 0) {
         timeoutHandle = setTimeout(() => {
-          if (!killed && proc.pid) {
+          // 若进程已退出（exitCode 已有值），则不再执行超时杀进程逻辑
+          if (!killed && proc.pid && proc.exitCode === null) {
             killed = true;
-            proc.kill('SIGTERM');
+            const pid = proc.pid;
+
+            // 🔒 优先杀死整个进程组（包含子进程），避免 npm/git 等派生子进程在后台继续运行
+            if (process.platform !== 'win32') {
+              try {
+                process.kill(-pid, 'SIGTERM');
+              } catch {
+                try {
+                  proc.kill('SIGTERM');
+                } catch {
+                  // ignore
+                }
+              }
+            } else {
+              // Windows 无法通过负 PID 杀进程组：先尝试 taskkill /T，失败再退回 kill 单进程
+              try {
+                spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
+                  cwd,
+                  shell: false,
+                  env
+                });
+              } catch {
+                try {
+                  proc.kill('SIGTERM');
+                } catch {
+                  // ignore
+                }
+              }
+            }
+
             setTimeout(() => {
-              if (proc.pid) proc.kill('SIGKILL');
+              // SIGTERM 后 5 秒仍未退出：强制 KILL（仅在进程仍在运行时）
+              if (proc.exitCode !== null) return;
+              if (process.platform !== 'win32') {
+                try {
+                  process.kill(-pid, 'SIGKILL');
+                } catch {
+                  try {
+                    proc.kill('SIGKILL');
+                  } catch {
+                    // ignore
+                  }
+                }
+              } else {
+                try {
+                  proc.kill('SIGKILL');
+                } catch {
+                  // ignore
+                }
+              }
             }, 5000);  // 5秒后强制 KILL
           }
         }, timeout);
@@ -666,6 +1090,58 @@ export class UpdateService {
         resolve({ code: 1, stdout, stderr });
       });
     });
+  }
+
+  /**
+   * 🔒 完整回滚：代码 + 依赖 + dist（用于更新失败的安全兜底）
+   */
+  private async rollback(backupCommit: string, onLog: (msg: string) => void): Promise<void> {
+    const log = (msg: string) => onLog(msg);
+    if (!backupCommit) return;
+
+    log(`正在回滚到版本 ${backupCommit.substring(0, 8)}...`);
+    await this.executeCommand(
+      'git',
+      ['reset', '--hard', backupCommit],
+      this.pluginPath,
+      (line) => log(line.trim()),
+      300000  // 🔒 5 分钟超时
+    );
+    log('代码已回滚到更新前的版本');
+
+    // 🔒 完整回滚：清理并重装依赖（确保版本一致）
+    log('正在清理依赖包...');
+    try {
+      const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
+      if (fs.existsSync(nodeModulesPath)) {
+        await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
+      }
+      log('依赖包已清理');
+    } catch (rmErr) {
+      log(`清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
+    }
+
+    log('正在重新安装依赖包...');
+    const rollbackInstall = await this.installDependencies(
+      (line) => log(line.trim()),
+      300000  // 5分钟超时
+    );
+    if (rollbackInstall.code === 0) {
+      log('依赖包已恢复');
+    } else {
+      log('⚠️  警告：依赖包重装失败，服务可能无法正常启动');
+      return;
+    }
+
+    // 🔒 dist 回滚：确保产物与回滚后的代码一致
+    log('正在重建 dist（原子化构建）...');
+    const rebuild = await this.buildPluginAtomically((line) => log(line.trim()), 300000);
+    if (rebuild.code === 0) {
+      log('dist 重建完成');
+      log('已完全回滚到更新前的状态');
+    } else {
+      log('⚠️  警告：dist 重建失败，服务可能无法正常启动');
+    }
   }
 
   /**
@@ -708,6 +1184,8 @@ export class UpdateService {
 
     // 用于失败回滚的备份 commit（在函数作用域声明）
     let backupCommit = '';
+    // 🔒 成功更新时延后释放文件锁（等待 pm2 reload 完成，避免竞态窗口）
+    let deferFileLockRelease = false;
 
     try {
       // Step 1: 验证路径
@@ -726,6 +1204,22 @@ export class UpdateService {
       }
       log('detecting', validation.message);
 
+      // Step 1.1: 写权限预检（尽早失败）
+      log('detecting', '正在检查写入权限...');
+      const writeCheck = await this.checkWritePermission((msg) => log('detecting', msg));
+      if (!writeCheck.ok) {
+        const msg = writeCheck.message || '写入权限检查失败';
+        log('failed', msg);
+        return {
+          success: false,
+          step: 'failed',
+          message: msg,
+          logs,
+          pluginPath: this.pluginPath,
+          error: msg
+        };
+      }
+
       // Step 1.2: 检测网络环境
       log('detecting', '正在检测网络环境...');
       const region = await this.detectNetworkRegion((msg) => log('detecting', msg));
@@ -743,6 +1237,44 @@ export class UpdateService {
           pluginPath: this.pluginPath,
           error: msg
         };
+      }
+
+      // Step 1.4: 🔒 确认当前 cwd 为 git 仓库根目录（防止路径/环境劫持）
+      if (!validation.needsGitInit) {
+        log('detecting', '正在验证 Git 仓库根目录...');
+        const topLevelResult = await this.executeCommand('git', ['rev-parse', '--show-toplevel'], this.pluginPath);
+        if (topLevelResult.code !== 0) {
+          const msg = `Git 仓库检测失败: ${topLevelResult.stderr || topLevelResult.stdout}`;
+          log('failed', msg);
+          return {
+            success: false,
+            step: 'failed',
+            message: msg,
+            logs,
+            pluginPath: this.pluginPath,
+            error: msg
+          };
+        }
+
+        const rawTopLevel = topLevelResult.stdout.trim();
+        let realTopLevel = rawTopLevel;
+        try {
+          realTopLevel = fs.realpathSync(rawTopLevel);
+        } catch {
+          // ignore
+        }
+        if (realTopLevel !== this.pluginPath) {
+          const msg = `安全检查失败：插件路径不是 git 仓库根目录（toplevel: ${rawTopLevel}）`;
+          log('failed', msg);
+          return {
+            success: false,
+            step: 'failed',
+            message: msg,
+            logs,
+            pluginPath: this.pluginPath,
+            error: msg
+          };
+        }
       }
 
       // Step 1.5: 选择最优仓库
@@ -783,8 +1315,8 @@ export class UpdateService {
             error: 'git 仓库初始化失败'
           };
         }
-        // 初始化完成后跳过 pull，直接进入 build
-        log('pulling', '代码已通过初始化同步完成');
+        // 初始化完成后进入签名验证阶段（待验证通过后再切换工作区）
+        log('pulling', '远程对象已获取完成，待签名验证通过后切换到最新版本');
       } else {
         // 设置 remote origin
         const remoteSet = await this.setRemoteOrigin(selectedRepo.url, (msg) => log('detecting', msg));
@@ -812,7 +1344,17 @@ export class UpdateService {
           backupCommit = backupResult.stdout.trim();
           log('pulling', `当前版本: ${backupCommit.substring(0, 8)}`);
         } else {
-          log('pulling', `无法获取当前版本: ${backupResult.stderr}`);
+          const detail = (backupResult.stderr || backupResult.stdout || '未知错误').trim();
+          const msg = `无法获取当前版本（无法建立回滚点），已中止更新: ${detail}`;
+          log('failed', msg);
+          return {
+            success: false,
+            step: 'failed',
+            message: msg,
+            logs,
+            pluginPath: this.pluginPath,
+            error: msg
+          };
         }
 
         // Step 2b: 重置本地更改，避免 pull 冲突
@@ -821,24 +1363,25 @@ export class UpdateService {
           'git',
           ['reset', '--hard', 'HEAD'],
           this.pluginPath,
-          (line) => log('pulling', line.trim())
+          (line) => log('pulling', line.trim()),
+          300000  // 🔒 5 分钟超时
         );
         if (resetResult.code !== 0) {
           log('pulling', `git reset 警告: ${resetResult.stderr}`);
         }
 
-        // Step 2c: Git pull（添加超时防止挂起）
-        log('pulling', '正在拉取最新代码...');
-        const pullResult = await this.executeCommand(
+        // Step 2c: Git fetch（避免 TOCTOU：先拉取对象，不切换工作区）
+        log('pulling', '正在获取远程最新代码...');
+        const fetchResult = await this.executeCommand(
           'git',
-          ['pull', '--ff-only', 'origin', 'main'],
+          ['fetch', '--prune', 'origin', 'main'],
           this.pluginPath,
           (line) => log('pulling', line.trim()),
           300000  // 🔒 5 分钟超时
         );
 
-        if (pullResult.code !== 0) {
-          const errorMsg = `git pull 失败: ${pullResult.stderr}`;
+        if (fetchResult.code !== 0) {
+          const errorMsg = `git fetch 失败: ${fetchResult.stderr}`;
           log('failed', errorMsg);
           return {
             success: false,
@@ -846,15 +1389,40 @@ export class UpdateService {
             message: errorMsg,
             logs,
             pluginPath: this.pluginPath,
-            error: pullResult.stderr
+            error: fetchResult.stderr
           };
         }
-        log('pulling', '代码拉取完成');
+        log('pulling', '远程代码获取完成');
       }
+
+      // Step 2.4: 获取远程 main 的具体 commit hash（防止 TOCTOU：后续只对该 hash 做验证和切换）
+      log('pulling', '正在解析远程版本...');
+      const revParseResult = await this.executeCommand(
+        'git',
+        ['rev-parse', '--verify', 'origin/main'],
+        this.pluginPath,
+        undefined,
+        15000
+      );
+      if (revParseResult.code !== 0) {
+        const msg = `无法解析远程版本（origin/main）: ${revParseResult.stderr || revParseResult.stdout}`;
+        log('failed', msg);
+        return {
+          success: false,
+          step: 'failed',
+          message: msg,
+          logs,
+          pluginPath: this.pluginPath,
+          error: revParseResult.stderr || revParseResult.stdout || msg
+        };
+      }
+      const targetCommit = revParseResult.stdout.trim();
+      log('pulling', `远程版本: ${targetCommit.substring(0, 8)}`);
 
       // Step 2.5: GPG 签名验证（安全加固 - 强制验证 + 指纹白名单）
       log('pulling', '正在验证代码签名...');
-      const gpgVerifyResult = await this.verifyGPGSignature((msg) => log('pulling', msg));
+      const verifyRef = targetCommit;
+      const gpgVerifyResult = await this.verifyGPGSignature(verifyRef, (msg) => log('pulling', msg));
 
       if (!gpgVerifyResult.valid) {
         //🔒 强制 GPG 验证：拒绝所有未签名或签名无效的 commit
@@ -863,78 +1431,11 @@ export class UpdateService {
 
         // 无条件回滚到备份版本（如果存在）
         if (backupCommit) {
-          log('failed', `正在回滚到版本 ${backupCommit.substring(0, 8)}...`);
-          await this.executeCommand(
-            'git',
-            ['reset', '--hard', backupCommit],
-            this.pluginPath,
-            (line) => log('failed', line.trim())
-          );
-          log('failed', '代码已回滚到更新前的版本');
-
-          // 🔒 完整回滚：使用 fs.rm 清理并重装依赖（确保版本一致）
-          log('failed', '正在清理依赖包...');
-          try {
-            const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
-            if (fs.existsSync(nodeModulesPath)) {
-              await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
-            }
-            log('failed', '依赖包已清理');
-          } catch (rmErr) {
-            log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
-          }
-
-          log('failed', '正在重新安装依赖包...');
-          const rollbackInstall = await this.executeCommand(
-            'npm',
-            ['install', '--production'],
-            this.pluginPath,
-            (line) => log('failed', line.trim()),
-            300000  // 5分钟超时
-          );
-          if (rollbackInstall.code === 0) {
-            log('failed', '已完全回滚到更新前的状态');
-          } else {
-            log('failed', '⚠️  警告：依赖包重装失败，服务可能无法正常启动');
-          }
+          await this.rollback(backupCommit, (m) => log('failed', m));
         } else {
-          // 🔒 备份缺失保护：清除未验证的代码，恢复到上一个已知状态
-          log('failed', '⚠️  未找到备份 commit，正在清理未验证的代码...');
-
-          // 尝试恢复到 origin/main 的上一个 commit
-          const headResetResult = await this.executeCommand(
-            'git',
-            ['reset', '--hard', 'HEAD~1'],
-            this.pluginPath,
-            (line) => log('failed', line.trim())
-          );
-
-          if (headResetResult.code === 0) {
-            log('failed', '已回退到上一个 commit，未验证的代码已清除');
-
-            // 清理并重装依赖
-            log('failed', '正在清理依赖包...');
-            try {
-              const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
-              if (fs.existsSync(nodeModulesPath)) {
-                await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
-              }
-            } catch (rmErr) {
-              log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
-            }
-
-            log('failed', '正在重新安装依赖包...');
-            await this.executeCommand(
-              'npm',
-              ['install', '--production'],
-              this.pluginPath,
-              (line) => log('failed', line.trim()),
-              300000
-            );
-            log('failed', '已尝试恢复到安全状态，建议检查代码完整性');
-          } else {
-            log('failed', '❌ 无法回退 commit，请手动执行: git reset --hard HEAD~1');
-          }
+          // 🔒 无备份 commit：无法可靠回滚。为避免破坏当前运行版本，拒绝继续并保持工作区不变。
+          log('failed', '⚠️  未能获取更新前的备份 commit，无法安全回滚。为保护当前版本，已中止更新且不会修改本地代码。');
+          log('failed', '建议：检查 git 仓库状态（例如 git status / git rev-parse HEAD）后重试更新。');
         }
 
         return {
@@ -949,55 +1450,72 @@ export class UpdateService {
 
       log('pulling', '✓ GPG 签名验证通过，代码来源可信');
 
-      // Step 3: npm install --production（添加超时防止挂起）
-      log('building', '正在安装依赖包...');
-      const installResult = await this.executeCommand(
-        'npm',
-        ['install', '--production'],
+      // Step 2.6: 切换到已验证的远程版本（避免 TOCTOU）
+      log('pulling', '正在切换到最新版本...');
+      if (validation.needsGitInit) {
+        // ✅ 仅在签名验证通过后再创建/切换 main 分支，避免未验证代码落盘
+        const checkoutResult = await this.executeCommand(
+          'git',
+          ['checkout', '-B', 'main', targetCommit],
+          this.pluginPath,
+          (line) => log('pulling', line.trim()),
+          300000  // 🔒 5 分钟超时
+        );
+        if (checkoutResult.code !== 0) {
+          const errorMsg = `切换到 main 分支失败: ${checkoutResult.stderr}`;
+          log('failed', errorMsg);
+          return {
+            success: false,
+            step: 'failed',
+            message: errorMsg,
+            logs,
+            pluginPath: this.pluginPath,
+            error: checkoutResult.stderr
+          };
+        }
+      }
+
+      const resetToVerified = await this.executeCommand(
+        'git',
+        ['reset', '--hard', targetCommit],
         this.pluginPath,
+        (line) => log('pulling', line.trim()),
+        300000  // 🔒 5 分钟超时
+      );
+      if (resetToVerified.code !== 0) {
+        const errorMsg = `切换到最新版本失败: ${resetToVerified.stderr}`;
+        log('failed', errorMsg);
+        if (backupCommit) {
+          await this.rollback(backupCommit, (m) => log('failed', m));
+        }
+        return {
+          success: false,
+          step: 'failed',
+          message: errorMsg,
+          logs,
+          pluginPath: this.pluginPath,
+          error: resetToVerified.stderr
+        };
+      }
+      log('pulling', '代码拉取完成');
+
+      // Step 3: 安装依赖包（npm ci 优先；默认禁用 scripts）
+      log('building', '正在安装依赖包...');
+      const installResult = await this.installDependencies(
         (line) => log('building', line.trim()),
         300000  // 🔒 5 分钟超时
       );
 
       if (installResult.code !== 0) {
-        const errorMsg = `npm install 失败: ${installResult.stderr}`;
+        const hint = installResult.ignoreScripts
+          ? '（提示：默认禁用 npm scripts 以提高安全性；如确需启用，请设置 AI_HELPER_UPDATE_ALLOW_NPM_SCRIPTS=1）'
+          : '';
+        const errorMsg = `依赖安装失败${hint}: ${installResult.stderr}`;
         log('failed', errorMsg);
 
         // 🔒 完整回滚：代码 + 依赖
         if (backupCommit) {
-          log('failed', `正在回滚到版本 ${backupCommit.substring(0, 8)}...`);
-          await this.executeCommand(
-            'git',
-            ['reset', '--hard', backupCommit],
-            this.pluginPath,
-            (line) => log('failed', line.trim())
-          );
-          log('failed', '代码已回滚到更新前的版本');
-
-          log('failed', '正在清理依赖包...');
-          try {
-            const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
-            if (fs.existsSync(nodeModulesPath)) {
-              await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
-            }
-            log('failed', '依赖包已清理');
-          } catch (rmErr) {
-            log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
-          }
-
-          log('failed', '正在重新安装依赖包...');
-          const rollbackInstall = await this.executeCommand(
-            'npm',
-            ['install', '--production'],
-            this.pluginPath,
-            (line) => log('failed', line.trim()),
-            300000  // 5分钟超时
-          );
-          if (rollbackInstall.code === 0) {
-            log('failed', '已完全回滚到更新前的状态');
-          } else {
-            log('failed', '⚠️  警告：依赖包重装失败，服务可能无法正常启动');
-          }
+          await this.rollback(backupCommit, (m) => log('failed', m));
         }
 
         return {
@@ -1011,12 +1529,9 @@ export class UpdateService {
       }
       log('building', '依赖包安装完成');
 
-      // Step 4: npm run build:plugin（添加超时防止挂起）
-      log('building', '正在编译项目...');
-      const buildResult = await this.executeCommand(
-        'npm',
-        ['run', 'build:plugin'],
-        this.pluginPath,
+      // Step 4: 原子化构建 dist（添加超时防止挂起）
+      log('building', '正在编译项目（原子化构建）...');
+      const buildResult = await this.buildPluginAtomically(
         (line) => log('building', line.trim()),
         300000  // 🔒 5 分钟超时
       );
@@ -1027,39 +1542,7 @@ export class UpdateService {
 
         // 🔒 完整回滚：代码 + 依赖
         if (backupCommit) {
-          log('failed', `正在回滚到版本 ${backupCommit.substring(0, 8)}...`);
-          await this.executeCommand(
-            'git',
-            ['reset', '--hard', backupCommit],
-            this.pluginPath,
-            (line) => log('failed', line.trim())
-          );
-          log('failed', '代码已回滚到更新前的版本');
-
-          log('failed', '正在清理依赖包...');
-          try {
-            const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
-            if (fs.existsSync(nodeModulesPath)) {
-              await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
-            }
-            log('failed', '依赖包已清理');
-          } catch (rmErr) {
-            log('failed', `清理依赖包警告: ${rmErr instanceof Error ? rmErr.message : '未知错误'}`);
-          }
-
-          log('failed', '正在重新安装依赖包...');
-          const rollbackInstall = await this.executeCommand(
-            'npm',
-            ['install', '--production'],
-            this.pluginPath,
-            (line) => log('failed', line.trim()),
-            300000  // 5分钟超时
-          );
-          if (rollbackInstall.code === 0) {
-            log('failed', '已完全回滚到更新前的状态');
-          } else {
-            log('failed', '⚠️  警告：依赖包重装失败，服务可能无法正常启动');
-          }
+          await this.rollback(backupCommit, (m) => log('failed', m));
         }
 
         return {
@@ -1105,8 +1588,12 @@ export class UpdateService {
           }
         } catch (err) {
           console.error('[UpdateService] pm2 重启失败:', err);
+        } finally {
+          // 🔒 延后释放文件锁到 pm2 reload/restart 执行完成后（避免竞态窗口）
+          await this.releaseFileLock();
         }
       }, 15000);
+      deferFileLockRelease = true;
 
       log('restarting', '热重载命令已安排，服务将在 15 秒后平滑更新（零停机）');
       log('restarting', '如果更新后服务异常，请检查 pm2 日志: pm2 logs hydrooj');
@@ -1129,6 +1616,16 @@ export class UpdateService {
       const errorMsg = err instanceof Error ? err.message : '未知错误';
       log('failed', errorMsg);
 
+      // 🔒 异常兜底：若已建立回滚点，则尽最大努力回滚到更新前版本
+      if (backupCommit) {
+        try {
+          await this.rollback(backupCommit, (m) => log('failed', m));
+        } catch (rollbackErr) {
+          const detail = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
+          log('failed', `回滚异常: ${detail}`);
+        }
+      }
+
       // 🔒 释放更新锁
       UpdateService.updateLock = false;
 
@@ -1143,7 +1640,9 @@ export class UpdateService {
     } finally {
       // 🔒 确保锁一定被释放（防御性编程）
       UpdateService.updateLock = false;
-      await this.releaseFileLock();
+      if (!deferFileLockRelease) {
+        await this.releaseFileLock();
+      }
     }
   }
 
