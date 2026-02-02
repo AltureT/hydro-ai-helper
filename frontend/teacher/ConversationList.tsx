@@ -210,32 +210,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
           <div style={{ display: 'flex', gap: '12px' }}>
             <button
               type="button"
-              onClick={() => {
-                const params = new URLSearchParams();
-                if (filters.startDate) params.append('startDate', filters.startDate);
-                if (filters.endDate) params.append('endDate', filters.endDate);
-                if (filters.classId) params.append('classId', filters.classId);
-                if (filters.problemId) params.append('problemId', filters.problemId);
-                if (filters.userId) params.append('userId', filters.userId);
-                const queryString = params.toString();
-                window.location.href = buildPageUrl(`/ai-helper/analytics${queryString ? `?${queryString}` : ''}`);
-              }}
-              style={{
-                padding: '10px 20px',
-                fontSize: '14px',
-                fontWeight: 600,
-                color: '#ffffff',
-                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                boxShadow: '0 2px 8px rgba(102, 126, 234, 0.3)'
-              }}
-            >
-              📊 查看统计
-            </button>
-            <button
-              type="button"
               onClick={() => setExportDialogOpen(true)}
               style={{
                 padding: '10px 20px',

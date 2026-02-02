@@ -3,6 +3,8 @@
  * 在题目详情页显示一个最小提示，验证前端集成链路
  */
 
+import pkg from '../package.json';
+
 /**
  * 简易页面就绪逻辑：
  * HydroOJ 默认的 NamedPage 工具位于 ui-default 主题中，
@@ -21,11 +23,12 @@ const initAiHelperBanner = () => {
     position: fixed;
     bottom: 20px;
     right: 20px;
-    background: #4CAF50;
-    color: white;
+    background: #f5f3ff;
+    color: #5b21b6;
     padding: 15px 20px;
-    border-radius: 5px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    border-radius: 8px;
+    border: 1px solid #e0ddff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     z-index: 9999;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 14px;
@@ -36,8 +39,8 @@ const initAiHelperBanner = () => {
     <div style="font-weight: bold; margin-bottom: 5px;">
       ✓ AI 助手插件已加载
     </div>
-    <div style="font-size: 12px; opacity: 0.5;">
-      版本: 1.1.0
+    <div style="font-size: 12px; opacity: 0.7;">
+      版本: ${pkg.version}
     </div>
   `;
 
@@ -53,7 +56,7 @@ const initAiHelperBanner = () => {
       backendStatus.style.cssText = `
         margin-top: 8px;
         padding-top: 8px;
-        border-top: 1px solid rgba(255,255,255,0.3);
+        border-top: 1px solid #e0ddff;
         font-size: 12px;
       `;
       backendStatus.textContent = '✓ 后端连接正常';
@@ -65,9 +68,9 @@ const initAiHelperBanner = () => {
       errorStatus.style.cssText = `
         margin-top: 8px;
         padding-top: 8px;
-        border-top: 1px solid rgba(255,255,255,0.3);
+        border-top: 1px solid #e0ddff;
         font-size: 12px;
-        color: #ffeb3b;
+        color: #dc2626;
       `;
       errorStatus.textContent = '⚠ 后端连接失败';
       notification.appendChild(errorStatus);
