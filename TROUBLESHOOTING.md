@@ -317,6 +317,37 @@ pm2 logs hydrooj | grep TelemetryService
 
 ---
 
+## 一键更新（后台）故障排查
+
+### 1. 前置条件（必须）
+
+- `git`、`npm`、`gpg`、`pm2` 在服务器上可用（可执行且在 PATH 中）。
+- 插件目录包含 `assets/trusted-keys/publisher.asc`（用于校验发布者签名）。
+
+### 2. 常见失败原因
+
+1) **提示：未检测到可用的 gpg（GnuPG）**
+- 解决：安装 `gpg` 后重试（例如：Debian/Ubuntu `sudo apt-get install gnupg`；macOS `brew install gnupg`）。
+
+2) **提示：上游仓库未启用 GPG 签名 / 签名无效 / 指纹不在信任列表**
+- 说明：为保证更新代码来源可信，“一键更新”会强制校验最新 commit 的 GPG 签名，并核对发布者主密钥指纹白名单。
+- 解决：
+  - 确认上游 main 分支最新 commit 已签名；
+  - 确认签名主密钥指纹与插件内白名单一致；
+  - 若发布者更换密钥，需要更新 `assets/trusted-keys/publisher.asc` 与白名单指纹后再更新。
+
+3) **提示：依赖安装失败（默认禁用 npm scripts）**
+- 说明：为降低供应链风险，更新过程默认使用 `npm ci/install --ignore-scripts`，不会执行依赖包的 `install/postinstall` 脚本。
+- 解决（谨慎）：若确实需要执行 scripts 才能安装成功，可在运行 HydroOJ 的环境中设置：
+  - `AI_HELPER_UPDATE_ALLOW_NPM_SCRIPTS=1`
+  - 风险：启用后依赖包安装脚本可能在服务器上执行，请确认来源与变更可信。
+
+4) **页面提示 502 / 连接中断**
+- 说明：更新完成后会触发 `pm2 reload/restart hydrooj`，短时间内可能导致连接中断。
+- 解决：等待 15–20 秒刷新页面；必要时查看 `pm2 logs hydrooj`。
+
+---
+
 ## 常见问题汇总
 
 | 问题 | 原因 | 解决方案 |
