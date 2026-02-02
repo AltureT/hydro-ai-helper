@@ -44,12 +44,17 @@ jobs:
       - name: Check if release exists on Gitee
         id: check
         run: |
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+          # 获取 release 信息，如果不存在会返回错误信息
+          RESPONSE=$(curl -s \
             "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/tags/${{ steps.release.outputs.tag_name }}?access_token=${{ secrets.GITEE_ACCESS_TOKEN }}")
 
-          if [ "$RESPONSE" = "200" ]; then
+          # 检查返回的 JSON 是否包含 id 字段（存在）或 message 字段（不存在）
+          RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+
+          if [ -n "$RELEASE_ID" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Release already exists on Gitee, will update"
+            echo "release_id=${RELEASE_ID}" >> $GITHUB_OUTPUT
+            echo "Release already exists on Gitee (ID: ${RELEASE_ID}), will update"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "Release does not exist on Gitee, will create"
@@ -70,13 +75,10 @@ jobs:
           fi
 
           if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
-            # Get existing release ID
-            RELEASE_ID=$(curl -s \
-              "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/tags/${TAG_NAME}?access_token=${{ secrets.GITEE_ACCESS_TOKEN }}" \
-              | jq -r '.id')
+            # Update existing release using the ID from check step
+            RELEASE_ID="${{ steps.check.outputs.release_id }}"
 
-            # Update existing release
-            curl -X PATCH \
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH \
               "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/${RELEASE_ID}" \
               -H "Content-Type: application/json" \
               -d "$(jq -n \
@@ -91,12 +93,21 @@ jobs:
                   name: $name,
                   body: $body,
                   prerelease: $prerelease
-                }')"
+                }')")
 
-            echo "Release updated on Gitee"
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+              echo "✅ Release updated on Gitee successfully"
+            else
+              echo "❌ Failed to update release on Gitee (HTTP $HTTP_CODE)"
+              echo "Response: $BODY"
+              exit 1
+            fi
           else
             # Create new release
-            curl -X POST \
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
               "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases" \
               -H "Content-Type: application/json" \
               -d "$(jq -n \
@@ -113,7 +124,16 @@ jobs:
                   body: $body,
                   target_commitish: $branch,
                   prerelease: $prerelease
-                }')"
+                }')")
 
-            echo "Release created on Gitee"
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+
+            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Release created on Gitee successfully"
+            else
+              echo "❌ Failed to create release on Gitee (HTTP $HTTP_CODE)"
+              echo "Response: $BODY"
+              exit 1
+            fi
           fi
