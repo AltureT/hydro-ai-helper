@@ -10,8 +10,9 @@
 # Dependencies
 node_modules/
 
-# Build outputs（如你希望服务器自己 npm run build，建议忽略）
-dist/
+# Build outputs
+# dist/ 需要包含在 git 中，因为 npm 发布时需要编译后的代码
+# dist/
 frontend/dist/
 
 # Logs
