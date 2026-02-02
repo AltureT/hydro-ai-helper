@@ -1,6 +1,6 @@
 {
   "name": "hydro-ai-helper",
-  "version": "1.8.5",
+  "version": "1.9.0",
   "description": "HydroOJ AI Learning Assistant - 一个教学优先的 AI 辅助学习插件",
   "main": "dist/index.js",
   "author": "Alture",
