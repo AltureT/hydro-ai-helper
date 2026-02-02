@@ -121,7 +121,8 @@ export async function fetchAvailableModels(
       const id = model.id.toLowerCase();
 
       // 包含这些关键词的通常是聊天模型
-      const chatKeywords = ['gpt', 'chat', 'claude', 'gemini', 'llama', 'mistral', 'qwen', 'yi', 'deepseek', 'doubao', 'glm', 'kimi'];
+      // ep- 用于匹配火山引擎的 Endpoint ID 格式（如 ep-20241234567890-xxxxx）
+      const chatKeywords = ['gpt', 'chat', 'claude', 'gemini', 'llama', 'mistral', 'qwen', 'yi', 'deepseek', 'doubao', 'glm', 'kimi', 'ep-'];
       const hasMatch = chatKeywords.some(keyword => id.includes(keyword));
 
       // 排除明显的非聊天模型
