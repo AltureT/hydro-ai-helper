@@ -1184,7 +1184,7 @@ export class UpdateService {
 
     // 用于失败回滚的备份 commit（在函数作用域声明）
     let backupCommit = '';
-    // 🔒 成功更新时延后释放文件锁（等待 pm2 reload 完成，避免竞态窗口）
+    // 🔒 成功更新时延后释放文件锁（等待 pm2 restart 完成，避免竞态窗口）
     let deferFileLockRelease = false;
 
     try {
@@ -1556,46 +1556,39 @@ export class UpdateService {
       }
       log('building', '编译完成');
 
-      // Step 5: 延迟执行 pm2 reload hydrooj（使用安全路径，零停机部署）
-      log('restarting', '准备热重载 HydroOJ（零停机部署）...');
+      // Step 5: 延迟执行 pm2 restart hydrooj（使用安全路径，重启部署）
+      log('restarting', '准备重启 HydroOJ（重启部署）...');
 
       // 🔒 使用安全路径的 pm2 命令（不使用 shell，防止 PATH 劫持）
-      // pm2 reload 优先（零停机），失败时降级为 restart
-      // 延迟 15 秒确保 HTTP 响应已发送
+      // 延迟 15 秒确保 HTTP 响应已发送（避免前端请求中断）
+      const restartDelayMs = 15000;
       setTimeout(async () => {
         try {
           const pm2Path = this.getSafeCommandPath('pm2');
 
-          // 尝试 pm2 reload（零停机）
-          const reloadResult = await this.executeCommand(
+          const restartResult = await this.executeCommand(
             pm2Path,
-            ['reload', 'hydrooj'],
+            ['restart', 'hydrooj'],
             this.pluginPath,
             undefined,
             30000  // 30秒超时
           );
-
-          if (reloadResult.code !== 0) {
-            // reload 失败，降级为 restart
-            console.log('[UpdateService] pm2 reload 失败，降级为 restart');
-            await this.executeCommand(
-              pm2Path,
-              ['restart', 'hydrooj'],
-              this.pluginPath,
-              undefined,
-              30000
+          if (restartResult.code !== 0) {
+            console.error(
+              '[UpdateService] pm2 restart 失败:',
+              (restartResult.stderr || restartResult.stdout || '').trim()
             );
           }
         } catch (err) {
-          console.error('[UpdateService] pm2 重启失败:', err);
+          console.error('[UpdateService] pm2 restart 失败:', err);
         } finally {
-          // 🔒 延后释放文件锁到 pm2 reload/restart 执行完成后（避免竞态窗口）
+          // 🔒 延后释放文件锁到 pm2 restart 执行完成后（避免竞态窗口）
           await this.releaseFileLock();
         }
-      }, 15000);
+      }, restartDelayMs);
       deferFileLockRelease = true;
 
-      log('restarting', '热重载命令已安排，服务将在 15 秒后平滑更新（零停机）');
+      log('restarting', `重启命令已安排，服务将在 ${Math.round(restartDelayMs / 1000)} 秒后重启部署`);
       log('restarting', '如果更新后服务异常，请检查 pm2 日志: pm2 logs hydrooj');
 
       // 完成

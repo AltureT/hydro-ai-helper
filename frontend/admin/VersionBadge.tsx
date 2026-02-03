@@ -8,7 +8,7 @@
  * - 支持一键更新功能
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { buildApiUrl } from '../utils/domainUtils';
 
 /**
@@ -47,6 +47,20 @@ interface UpdateResultResponse {
 }
 
 /**
+ * 更新进度响应接口（前端轮询用）
+ */
+interface UpdateProgressResponse {
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  step: string;
+  message: string;
+  logs: string[];
+  pluginPath: string;
+  startedAt?: string;
+  updatedAt: string;
+  error?: string;
+}
+
+/**
  * 组件状态
  */
 type LoadingState = 'idle' | 'loading' | 'success' | 'error';
@@ -65,12 +79,23 @@ export const VersionBadge: React.FC = () => {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfoResponse | null>(null);
   const [updateLogs, setUpdateLogs] = useState<string[]>([]);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+
+  const stopPollingProgress = () => {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
 
   /**
    * T054: 组件挂载时获取版本信息
    */
   useEffect(() => {
     fetchVersionInfo();
+    return () => {
+      stopPollingProgress();
+    };
   }, []);
 
   /**
@@ -139,6 +164,7 @@ export const VersionBadge: React.FC = () => {
    * 取消更新
    */
   const handleCancelUpdate = () => {
+    stopPollingProgress();
     setUpdateState('idle');
     setUpdateInfo(null);
     setUpdateLogs([]);
@@ -146,11 +172,83 @@ export const VersionBadge: React.FC = () => {
   };
 
   /**
+   * 获取更新进度
+   */
+  const fetchUpdateProgress = async (): Promise<UpdateProgressResponse | null> => {
+    try {
+      const url = buildApiUrl('/ai-helper/admin/update');
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      return await response.json();
+    } catch (err) {
+      return null;
+    }
+  };
+
+  /**
    * 确认执行更新
    */
   const handleConfirmUpdate = async () => {
     setUpdateState('updating');
-    setUpdateLogs(['开始更新...']);
+    setUpdateLogs(['等待服务器输出...']);
+    setUpdateError(null);
+
+    const startedAtMs = Date.now();
+    let matchedThisRun = false;
+
+    // 启动进度轮询（每秒）
+    stopPollingProgress();
+    const pollOnce = async () => {
+      const progress = await fetchUpdateProgress();
+      if (!progress) return;
+
+      // 只处理本次更新启动后的进度，避免读到上一次更新的 completed/failed 而提前结束
+      const progressStartedAt = progress.startedAt ? Date.parse(progress.startedAt) : NaN;
+      if (!matchedThisRun && Number.isFinite(progressStartedAt)) {
+        matchedThisRun = progressStartedAt >= startedAtMs - 5000;
+      }
+
+      if (!matchedThisRun) {
+        if (progress.status === 'running') {
+          // running 视为本次任务（即便 startedAt 缺失/解析失败）
+          matchedThisRun = true;
+        } else {
+          return;
+        }
+      }
+
+      if (progress.logs && progress.logs.length > 0) {
+        setUpdateLogs(progress.logs);
+      } else if (progress.status === 'running') {
+        setUpdateLogs([`[${progress.step}] ${progress.message}`]);
+      }
+
+      if (progress.status === 'completed') {
+        stopPollingProgress();
+        setUpdateState('success');
+        setUpdateLogs(progress.logs || []);
+        // 服务将在稍后重启，等待后自动刷新页面
+        setTimeout(() => {
+          window.location.reload();
+        }, 20000);
+      } else if (progress.status === 'failed') {
+        stopPollingProgress();
+        setUpdateState('error');
+        setUpdateLogs(progress.logs || []);
+        setUpdateError(progress.error || progress.message || '更新失败');
+      }
+    };
+
+    // 先拉一次，尽快显示当前阶段
+    void pollOnce();
+    pollTimerRef.current = window.setInterval(pollOnce, 1000);
 
     try {
       const url = buildApiUrl('/ai-helper/admin/update');
@@ -166,32 +264,41 @@ export const VersionBadge: React.FC = () => {
       // 处理非 JSON 响应（如 502 错误）
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');
+        // 若更新已开始，优先继续轮询，避免因重启导致的短暂失败被误判为更新失败
+        const progress = await fetchUpdateProgress();
+        if (progress?.status === 'running') {
+          setUpdateLogs((prev) => [
+            ...prev,
+            `服务器响应异常（HTTP ${response.status}），但更新仍在进行，继续等待...`
+          ]);
+          return;
+        }
+
+        stopPollingProgress();
         setUpdateState('error');
         setUpdateLogs([`服务器错误: ${response.status} ${response.statusText}`]);
-        setUpdateError(
-          response.status === 502
-            ? '服务器连接中断（可能正在重启中），请稍等几秒后刷新页面。如仍有问题，请在服务器上执行: git pull && npm run build && pm2 restart hydrooj'
-            : errorText || `HTTP ${response.status}`
-        );
+        setUpdateError(errorText || `HTTP ${response.status}`);
         return;
       }
 
-      const result: UpdateResultResponse = await response.json();
-
-      if (result.success) {
-        setUpdateState('success');
-        setUpdateLogs(result.logs);
-        // 服务器将在 15 秒后重启，等待 20 秒后刷新页面
-        setTimeout(() => {
-          window.location.reload();
-        }, 20000);
-      } else {
+      // POST 返回值保留兼容：最终结果以轮询进度为准
+      const result: UpdateResultResponse = await response.json().catch(() => ({ success: true } as any));
+      if (result && result.success === false) {
+        stopPollingProgress();
         setUpdateState('error');
-        setUpdateLogs(result.logs);
-        setUpdateError(result.error || result.message);
+        setUpdateLogs(result.logs || []);
+        setUpdateError(result.error || result.message || '更新失败');
       }
     } catch (err) {
       console.error('[VersionBadge] Update failed:', err);
+      // 网络中断时（常见于服务重启），优先继续轮询一段时间
+      const progress = await fetchUpdateProgress();
+      if (progress?.status === 'running') {
+        setUpdateLogs((prev) => [...prev, '连接中断（可能正在重启中），继续等待...']);
+        return;
+      }
+
+      stopPollingProgress();
       setUpdateState('error');
       setUpdateError(err instanceof Error ? err.message : '更新请求失败');
     }
@@ -368,7 +475,7 @@ export const VersionBadge: React.FC = () => {
                 marginBottom: '16px'
               }}>
                 <div style={{ color: '#166534', fontWeight: '500' }}>
-                  更新完成！页面将在 5 秒后自动刷新...
+                  更新完成！页面将在 20 秒后自动刷新...
                 </div>
               </div>
               {renderLogs()}
