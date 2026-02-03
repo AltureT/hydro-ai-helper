@@ -55,8 +55,8 @@ export const UpdateInfoHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export class UpdateHandler extends Handler {
   async post() {
     try {
-      // 🔒 强制管理员权限检查（防御路由配置被绕过）
-      if (!this.user.hasPerm(PRIV.PRIV_EDIT_SYSTEM)) {
+      // 🔒 强制管理员权限检查（PRIV/hasPriv；防御路由配置被绕过）
+      if (!this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
         console.warn(`[UpdateHandler] 权限不足: 用户 ${this.user._id} 尝试执行更新操作`);
         return setErrorResponse(
           this,
