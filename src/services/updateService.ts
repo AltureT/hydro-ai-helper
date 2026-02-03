@@ -107,6 +107,14 @@ export class UpdateService {
   // 注意：此锁仅在单进程内有效，cluster 模式下依赖文件锁
   private static updateLock = false;
 
+  /**
+   * 是否运行在 PM2 托管环境中
+   * - pm2 会注入 pm_id 等环境变量
+   */
+  private isRunningUnderPM2(): boolean {
+    return typeof process.env.pm_id !== 'undefined' || typeof process.env.PM2_HOME !== 'undefined';
+  }
+
   constructor(pluginPath?: string) {
     // 通过 __dirname 自动检测插件安装路径
     // __dirname 指向 dist 目录，需要回退到插件根目录
@@ -1563,9 +1571,11 @@ export class UpdateService {
       // 延迟 15 秒确保 HTTP 响应已发送（避免前端请求中断）
       const restartDelayMs = 15000;
       setTimeout(async () => {
+        let shouldSelfExit = false;
         try {
           const pm2Path = this.getSafeCommandPath('pm2');
 
+          log('restarting', '正在执行: pm2 restart hydrooj');
           const restartResult = await this.executeCommand(
             pm2Path,
             ['restart', 'hydrooj'],
@@ -1574,16 +1584,39 @@ export class UpdateService {
             30000  // 30秒超时
           );
           if (restartResult.code !== 0) {
-            console.error(
-              '[UpdateService] pm2 restart 失败:',
-              (restartResult.stderr || restartResult.stdout || '').trim()
-            );
+            const detail = (restartResult.stderr || restartResult.stdout || '').trim();
+            log('restarting', `pm2 restart 执行失败: ${detail || '未知错误'}`);
+
+            // 🔒 兜底：如果当前进程由 PM2 托管，直接退出让 PM2 自动拉起
+            // 适用于：服务进程无法访问 pm2 CLI/PM2_HOME 不一致/进程名不匹配等场景
+            if (this.isRunningUnderPM2()) {
+              shouldSelfExit = true;
+              log('restarting', '检测到 PM2 托管环境，将改用进程退出触发自动重启');
+            } else {
+              log('restarting', '未检测到 PM2 托管环境，请手动重启服务以使更新生效（pm2 restart hydrooj）');
+            }
+          } else {
+            log('restarting', 'pm2 restart 已执行');
           }
         } catch (err) {
-          console.error('[UpdateService] pm2 restart 失败:', err);
+          const detail = err instanceof Error ? err.message : String(err);
+          log('restarting', `pm2 restart 执行异常: ${detail}`);
+
+          if (this.isRunningUnderPM2()) {
+            shouldSelfExit = true;
+            log('restarting', '检测到 PM2 托管环境，将改用进程退出触发自动重启');
+          } else {
+            log('restarting', '未检测到 PM2 托管环境，请手动重启服务以使更新生效（pm2 restart hydrooj）');
+          }
         } finally {
           // 🔒 延后释放文件锁到 pm2 restart 执行完成后（避免竞态窗口）
           await this.releaseFileLock();
+          if (shouldSelfExit) {
+            // 留出一点时间让日志/进度写入落盘
+            setTimeout(() => {
+              process.exit(0);
+            }, 500);
+          }
         }
       }, restartDelayMs);
       deferFileLockRelease = true;
