@@ -4,8 +4,10 @@
 
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/AltureT/hydro-ai-helper?label=版本)
 ![GitHub all releases](https://img.shields.io/github/downloads/AltureT/hydro-ai-helper/total?label=下载量&color=brightgreen)
-![Installations](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-installs)
-![Active Users (7d)](https://img.shields.io/endpoint?url=https://hydro-ai-helper.vercel.app/api/badge-active)
+![Installations](https://img.shields.io/endpoint?url=https://stats.how2learns.com/api/badge-installs)
+![Active Users (7d)](https://img.shields.io/endpoint?url=https://stats.how2learns.com/api/badge-active)
+![Conversations](https://img.shields.io/endpoint?url=https://stats.how2learns.com/api/badge-conversations)
+![Version (mode)](https://img.shields.io/endpoint?url=https://stats.how2learns.com/api/badge-version)
 ![GitHub stars](https://img.shields.io/github/stars/AltureT/hydro-ai-helper?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/AltureT/hydro-ai-helper?style=social)
 ![License](https://img.shields.io/github/license/AltureT/hydro-ai-helper)
@@ -255,7 +257,7 @@ db.ai_plugin_install.updateOne(
 ### 数据用途
 
 收集的数据仅用于：
-- 在 GitHub README 显示安装数和活跃用户数徽章
+- 在 GitHub README 显示安装数、活跃用户数、总对话数、版本分布徽章
 - 了解插件使用趋势，优先开发最需要的功能
 - 评估插件稳定性和性能
 

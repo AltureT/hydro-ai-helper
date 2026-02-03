@@ -21,6 +21,7 @@ export interface PluginInstall {
   domainsSeen: string[];    // 见过的 domainId 列表
   telemetryEnabled: boolean;// 是否允许远程上报（默认 true）
   lastReportAt?: Date;      // 最后一次上报时间
+  preferredTelemetryEndpoint?: string; // 最近成功上报的端点（用于自动选择可用端点）
 }
 
 /**
@@ -133,6 +134,17 @@ export class PluginInstallModel {
     await this.collection.updateOne(
       { _id: this.FIXED_ID },
       { $set: { telemetryEnabled: enabled } }
+    );
+  }
+
+  /**
+   * 更新最近成功上报的遥测端点
+   * @param endpoint 端点 URL
+   */
+  async updatePreferredTelemetryEndpoint(endpoint: string): Promise<void> {
+    await this.collection.updateOne(
+      { _id: this.FIXED_ID },
+      { $set: { preferredTelemetryEndpoint: endpoint } }
     );
   }
 }

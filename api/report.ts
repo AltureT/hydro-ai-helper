@@ -35,6 +35,21 @@ interface ParsedPayload {
   domainHash: string;
 }
 
+interface PluginStatsDocument {
+  _id: string;
+  installedAt: Date;
+  firstUsedAt?: Date;
+  lastReportAt: Date;
+  event: 'install' | 'heartbeat';
+  version: string;
+  stats: {
+    activeUsers7d: number;
+    totalConversations: number;
+    lastUsedAt?: Date;
+  };
+  domainHash: string;
+}
+
 class HttpError extends Error {
   status: number;
 
@@ -42,6 +57,21 @@ class HttpError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+function isAuthorized(req: VercelRequest): boolean {
+  const token = process.env.REPORT_TOKEN;
+  if (!token) {
+    return true;
+  }
+
+  const auth = req.headers.authorization;
+  if (!auth) {
+    return false;
+  }
+
+  const [type, value] = auth.split(' ');
+  return type === 'Bearer' && value === token;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -187,6 +217,11 @@ export default async function handler(
     return;
   }
 
+  if (!isAuthorized(req)) {
+    res.status(401).json({ success: false, error: 'Unauthorized' });
+    return;
+  }
+
   try {
     const body = await readJsonBody(req);
     const payload = parsePayload(body);
@@ -195,7 +230,7 @@ export default async function handler(
     // Ensure TTL index exists before writing new reports.
     await ensurePluginStatsIndexes(db);
 
-    const collection = db.collection(PLUGIN_STATS_COLLECTION);
+    const collection = db.collection<PluginStatsDocument>(PLUGIN_STATS_COLLECTION);
     const stats = payload.stats;
 
     const setFields: Record<string, unknown> = {

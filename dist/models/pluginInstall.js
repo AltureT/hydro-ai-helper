@@ -90,6 +90,13 @@ class PluginInstallModel {
     async updateTelemetryEnabled(enabled) {
         await this.collection.updateOne({ _id: this.FIXED_ID }, { $set: { telemetryEnabled: enabled } });
     }
+    /**
+     * 更新最近成功上报的遥测端点
+     * @param endpoint 端点 URL
+     */
+    async updatePreferredTelemetryEndpoint(endpoint) {
+        await this.collection.updateOne({ _id: this.FIXED_ID }, { $set: { preferredTelemetryEndpoint: endpoint } });
+    }
 }
 exports.PluginInstallModel = PluginInstallModel;
 //# sourceMappingURL=pluginInstall.js.map

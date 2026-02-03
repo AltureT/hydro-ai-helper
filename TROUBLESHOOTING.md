@@ -212,14 +212,16 @@ HydroOJ 日志显示：
 
 ### 解决方案
 
-1. **检查 REPORT_URL**
+1. **检查上报端点**
+   - 默认上报端点：`https://stats.how2learns.com/api/report`
+   - 如需自定义/镜像上报端点：设置 `AI_HELPER_TELEMETRY_ENDPOINTS`
    ```bash
-   grep REPORT_URL src/services/telemetryService.ts
+   echo "$AI_HELPER_TELEMETRY_ENDPOINTS"
    ```
 
 2. **测试端点**
    ```bash
-   curl -X POST https://your-vercel-app.vercel.app/api/report \
+   curl -X POST https://stats.how2learns.com/api/report \
      -H "Content-Type: application/json" \
      -d '{
        "instance_id": "test",
@@ -357,7 +359,7 @@ pm2 logs hydrooj | grep TelemetryService
 | 函数超时 | 集群暂停或连接慢 | 唤醒集群，优化连接池 |
 | 徽章 invalid | API 返回格式错误 | 检查 API 端点返回 |
 | 徽章 error | 数据库查询失败 | 检查数据库连接和数据 |
-| 上报失败 | URL 不正确 | 检查 REPORT_URL 配置 |
+| 上报失败 | 端点不可达/被阻断 | 检查 `AI_HELPER_TELEMETRY_ENDPOINTS` 与机房出网策略 |
 
 ---
 

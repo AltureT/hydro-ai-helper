@@ -6,6 +6,7 @@
  */
 
 import { createHash } from 'crypto';
+import axios from 'axios';
 import type { PluginInstallModel } from '../models/pluginInstall';
 import type { ConversationModel } from '../models/conversation';
 
@@ -40,8 +41,9 @@ interface ReportPayload {
  * Telemetry Service 类
  */
 export class TelemetryService {
-  private readonly REPORT_URL = 'https://hydro-ai-helper.vercel.app/api/report';
+  private readonly DEFAULT_ENDPOINTS = ['https://stats.how2learns.com/api/report'];
   private readonly HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
+  private readonly REQUEST_TIMEOUT = 8000; // 8 秒
   private timer?: NodeJS.Timeout;
 
   constructor(
@@ -184,25 +186,60 @@ export class TelemetryService {
         timestamp: new Date().toISOString()
       };
 
-      // 发送请求（使用 fetch，Node.js 18+ 原生支持）
-      const response = await fetch(this.REPORT_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
+      const endpoints = this.getTelemetryEndpoints(config.preferredTelemetryEndpoint);
+      const token = (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
 
-      if (response.ok) {
-        // 更新最后上报时间
-        await this.pluginInstallModel.updateLastReportTime();
-        console.log(`[TelemetryService] Report sent successfully (${eventType})`);
-      } else {
-        console.error(`[TelemetryService] Report failed: ${response.status} ${response.statusText}`);
+      let lastError: unknown;
+      for (const endpoint of endpoints) {
+        try {
+          await axios.post(endpoint, payload, {
+            timeout: this.REQUEST_TIMEOUT,
+            headers: {
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {})
+            }
+          });
+
+          await this.pluginInstallModel.updateLastReportTime();
+          await this.pluginInstallModel.updatePreferredTelemetryEndpoint(endpoint);
+          console.log(`[TelemetryService] Report sent successfully (${eventType}) -> ${endpoint}`);
+          return;
+        } catch (error) {
+          lastError = error;
+          const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+          const statusText = axios.isAxiosError(error) ? error.response?.statusText : undefined;
+          console.error('[TelemetryService] Report failed', {
+            endpoint,
+            status,
+            statusText,
+            message: axios.isAxiosError(error) ? error.message : String(error)
+          });
+        }
       }
+
+      console.error('[TelemetryService] All telemetry endpoints failed', {
+        endpoints,
+        error: axios.isAxiosError(lastError) ? lastError.message : String(lastError)
+      });
     } catch (error) {
       console.error('[TelemetryService] Report error:', error);
     }
+  }
+
+  private getTelemetryEndpoints(preferred?: string): string[] {
+    const raw = process.env.AI_HELPER_TELEMETRY_ENDPOINTS;
+    const parsed = parseTelemetryEndpoints(raw);
+    const endpoints = parsed.length > 0 ? parsed : this.DEFAULT_ENDPOINTS;
+    const normalizedPreferred = preferred ? normalizeTelemetryEndpoint(preferred) : undefined;
+
+    if (normalizedPreferred && endpoints.includes(normalizedPreferred)) {
+      return [
+        normalizedPreferred,
+        ...endpoints.filter((endpoint) => endpoint !== normalizedPreferred)
+      ];
+    }
+
+    return endpoints;
   }
 
   /**
@@ -215,4 +252,46 @@ export class TelemetryService {
       console.log('[TelemetryService] Stopped');
     }
   }
+}
+
+function parseTelemetryEndpoints(value?: string): string[] {
+  if (!value) {
+    return [];
+  }
+
+  const endpoints = value
+    .split(',')
+    .map((raw) => normalizeTelemetryEndpoint(raw))
+    .filter((item): item is string => Boolean(item));
+
+  return Array.from(new Set(endpoints));
+}
+
+function normalizeTelemetryEndpoint(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+
+  let url: URL;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return undefined;
+  }
+
+  url.hash = '';
+  url.search = '';
+
+  const basePath = url.pathname.replace(/\/+$/, '');
+  if (basePath.endsWith('/api/report')) {
+    url.pathname = basePath;
+    return url.toString();
+  }
+
+  const nextPath = basePath && basePath !== '/' ? `${basePath}/api/report` : '/api/report';
+  url.pathname = nextPath;
+  return url.toString();
 }
