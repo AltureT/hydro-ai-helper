@@ -706,13 +706,29 @@ export const VersionBadge: React.FC = () => {
                 padding: '10px 12px',
                 marginTop: '12px',
                 display: 'flex',
-                alignItems: 'center',
-                gap: '8px'
+                justifyContent: 'space-between',
+                alignItems: 'center'
               }}>
-                <span style={{ fontSize: '14px' }}>✓</span>
-                <span style={{ fontSize: '14px', color: '#166534' }}>
-                  已是最新版本
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '14px' }}>✓</span>
+                  <span style={{ fontSize: '14px', color: '#166534' }}>
+                    已是最新版本
+                  </span>
+                </div>
+                <button
+                  onClick={handleUpdateClick}
+                  style={{
+                    background: 'transparent',
+                    color: '#166534',
+                    padding: '4px 10px',
+                    borderRadius: '4px',
+                    border: '1px solid #22c55e',
+                    fontSize: '12px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  覆盖更新
+                </button>
               </div>
             )}
 
