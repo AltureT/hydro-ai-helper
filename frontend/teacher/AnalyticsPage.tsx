@@ -25,7 +25,45 @@ interface AnalyticsItem {
   avgConversationsPerStudent?: number;
   avgMessageCount?: number;
   lastUsedAt?: string;
+  // 问题类型统计（扁平化，与后端一致）
+  understand?: number;
+  think?: number;
+  debug?: number;
+  clarify?: number;
+  optimize?: number;
 }
+
+/**
+ * 列 key 类型（问题维度专用）
+ */
+type ProblemColumnKey = 'displayName' | 'totalConversations' | 'studentCount' | 'avgMessageCount'
+  | 'effectiveConversations' | 'effectiveRatio'
+  | 'understand' | 'think' | 'debug' | 'clarify' | 'optimize' | 'actions';
+
+/**
+ * 列配置
+ */
+interface ColumnConfig {
+  key: ProblemColumnKey;
+  label: string;
+  defaultVisible: boolean;
+  canHide: boolean;
+}
+
+const PROBLEM_COLUMNS: ColumnConfig[] = [
+  { key: 'displayName', label: '题目', defaultVisible: true, canHide: true },
+  { key: 'totalConversations', label: '对话总数', defaultVisible: true, canHide: true },
+  { key: 'studentCount', label: '使用学生', defaultVisible: true, canHide: true },
+  { key: 'avgMessageCount', label: '平均轮数', defaultVisible: true, canHide: true },
+  { key: 'effectiveConversations', label: '有效对话', defaultVisible: false, canHide: true },
+  { key: 'effectiveRatio', label: '有效率', defaultVisible: false, canHide: true },
+  { key: 'understand', label: '理解题意', defaultVisible: true, canHide: true },
+  { key: 'think', label: '理清思路', defaultVisible: true, canHide: true },
+  { key: 'debug', label: '分析错误', defaultVisible: true, canHide: true },
+  { key: 'clarify', label: '追问解释', defaultVisible: true, canHide: true },
+  { key: 'optimize', label: '代码优化', defaultVisible: true, canHide: true },
+  { key: 'actions', label: '操作', defaultVisible: true, canHide: false }
+];
 
 /**
  * 统计响应接口
@@ -126,6 +164,12 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
 
   const [sortField, setSortField] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  // 列显示控制状态
+  const [visibleColumns, setVisibleColumns] = useState<Set<ProblemColumnKey>>(() =>
+    new Set(PROBLEM_COLUMNS.filter(c => c.defaultVisible).map(c => c.key))
+  );
+  const [showColumnSelector, setShowColumnSelector] = useState(false);
 
   const hasInitialFilters = initialFilters.startDate || initialFilters.endDate ||
                            initialFilters.classId || initialFilters.problemId;
@@ -311,59 +355,157 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
 
     if (data.dimension === 'problem') {
       const sortedItems = getSortedItems(data.items);
+
+      const toggleColumn = (key: ProblemColumnKey) => {
+        const col = PROBLEM_COLUMNS.find(c => c.key === key);
+        if (!col || !col.canHide) return;
+        setVisibleColumns(prev => {
+          const next = new Set(prev);
+          if (next.has(key)) {
+            next.delete(key);
+          } else {
+            next.add(key);
+          }
+          return next;
+        });
+      };
+
+      const isVisible = (key: ProblemColumnKey) => visibleColumns.has(key);
+
       return (
-        <table style={tableStyle}>
-          <thead>
-            <tr>
-              <SortableHeader field="displayName" label="题目" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="studentCount" label="使用学生" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />
-              <th style={{ ...cellStyle, backgroundColor: '#f9fafb', fontWeight: 600, color: '#6b7280', textAlign: 'center', borderBottom: '2px solid #e5e7eb' }}>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedItems.map((item, idx) => (
-              <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
-                <td style={{ ...cellStyle, fontWeight: 500, color: '#1f2937' }}>
-                  <a
-                    href={buildPageUrl(`/p/${item.key}`)}
-                    style={{ color: '#4f46e5', textDecoration: 'none' }}
-                    onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
+        <div>
+          {/* 列选择器按钮 */}
+          <div style={{ marginBottom: '16px', position: 'relative' }}>
+            <button
+              onClick={() => setShowColumnSelector(!showColumnSelector)}
+              style={{
+                padding: '8px 16px',
+                backgroundColor: '#f3f4f6',
+                border: '1px solid #e5e7eb',
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontWeight: 500,
+                color: '#374151',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+            >
+              <span style={{ fontSize: '14px' }}>&#9776;</span>
+              列设置
+              <span style={{ fontSize: '10px', color: '#9ca3af' }}>({visibleColumns.size - 1}/{PROBLEM_COLUMNS.length - 1})</span>
+            </button>
+            {showColumnSelector && (
+              <div style={{
+                position: 'absolute',
+                top: '100%',
+                left: 0,
+                marginTop: '4px',
+                backgroundColor: '#ffffff',
+                border: '1px solid #e5e7eb',
+                borderRadius: '8px',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                padding: '12px',
+                zIndex: 100,
+                minWidth: '200px'
+              }}>
+                <div style={{ marginBottom: '8px', fontWeight: 600, fontSize: '13px', color: '#374151' }}>显示列</div>
+                {PROBLEM_COLUMNS.filter(c => c.canHide).map(col => (
+                  <label
+                    key={col.key}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      padding: '6px 4px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      color: '#4b5563'
+                    }}
                   >
-                    {item.displayName || item.key || '-'}
-                  </a>
-                </td>
-                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.totalConversations}</td>
-                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.studentCount ?? '-'}</td>
-                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>
-                  {item.avgMessageCount != null ? formatNumber(item.avgMessageCount) : '-'}
-                </td>
-                <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.effectiveConversations}</td>
-                <td style={{ ...cellStyle, textAlign: 'right' }}>
-                  <span style={{
-                    padding: '4px 8px',
-                    borderRadius: '4px',
-                    fontSize: '13px',
-                    fontWeight: 500,
-                    backgroundColor: item.effectiveRatio >= 0.7 ? '#dcfce7' : item.effectiveRatio >= 0.4 ? '#fef9c3' : '#fee2e2',
-                    color: item.effectiveRatio >= 0.7 ? '#166534' : item.effectiveRatio >= 0.4 ? '#854d0e' : '#991b1b'
-                  }}>
-                    {formatPercent(item.effectiveRatio)}
-                  </span>
-                </td>
-                <td style={{ ...cellStyle, textAlign: 'center' }}>
-                  <a href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)} style={linkStyle}>
-                    查看对话
-                  </a>
-                </td>
+                    <input
+                      type="checkbox"
+                      checked={isVisible(col.key)}
+                      onChange={() => toggleColumn(col.key)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    {col.label}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                {isVisible('displayName') && <SortableHeader field="displayName" label="题目" align="left" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('totalConversations') && <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('studentCount') && <SortableHeader field="studentCount" label="使用学生" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('avgMessageCount') && <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('effectiveConversations') && <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('effectiveRatio') && <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('understand') && <SortableHeader field="understand" label="理解题意" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('think') && <SortableHeader field="think" label="理清思路" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('debug') && <SortableHeader field="debug" label="分析错误" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('clarify') && <SortableHeader field="clarify" label="追问解释" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                {isVisible('optimize') && <SortableHeader field="optimize" label="代码优化" sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />}
+                <th style={{ ...cellStyle, backgroundColor: '#f9fafb', fontWeight: 600, color: '#6b7280', textAlign: 'center', borderBottom: '2px solid #e5e7eb' }}>操作</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {sortedItems.map((item, idx) => (
+                <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                  {isVisible('displayName') && (
+                    <td style={{ ...cellStyle, fontWeight: 500, color: '#1f2937' }}>
+                      <a
+                        href={buildPageUrl(`/p/${item.key}`)}
+                        style={{ color: '#4f46e5', textDecoration: 'none' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
+                      >
+                        {item.displayName || item.key || '-'}
+                      </a>
+                    </td>
+                  )}
+                  {isVisible('totalConversations') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.totalConversations}</td>}
+                  {isVisible('studentCount') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.studentCount ?? '-'}</td>}
+                  {isVisible('avgMessageCount') && (
+                    <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>
+                      {item.avgMessageCount != null ? formatNumber(item.avgMessageCount) : '-'}
+                    </td>
+                  )}
+                  {isVisible('effectiveConversations') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.effectiveConversations}</td>}
+                  {isVisible('effectiveRatio') && (
+                    <td style={{ ...cellStyle, textAlign: 'right' }}>
+                      <span style={{
+                        padding: '4px 8px',
+                        borderRadius: '4px',
+                        fontSize: '13px',
+                        fontWeight: 500,
+                        backgroundColor: item.effectiveRatio >= 0.7 ? '#dcfce7' : item.effectiveRatio >= 0.4 ? '#fef9c3' : '#fee2e2',
+                        color: item.effectiveRatio >= 0.7 ? '#166534' : item.effectiveRatio >= 0.4 ? '#854d0e' : '#991b1b'
+                      }}>
+                        {formatPercent(item.effectiveRatio)}
+                      </span>
+                    </td>
+                  )}
+                  {isVisible('understand') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.understand ?? 0}</td>}
+                  {isVisible('think') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.think ?? 0}</td>}
+                  {isVisible('debug') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.debug ?? 0}</td>}
+                  {isVisible('clarify') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.clarify ?? 0}</td>}
+                  {isVisible('optimize') && <td style={{ ...cellStyle, textAlign: 'right', color: '#4b5563' }}>{item.optimize ?? 0}</td>}
+                  <td style={{ ...cellStyle, textAlign: 'center' }}>
+                    <a href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)} style={linkStyle}>
+                      查看对话
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       );
     }
 

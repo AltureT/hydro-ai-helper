@@ -21,6 +21,12 @@ interface AnalyticsItem {
   avgConversationsPerStudent?: number;
   avgMessageCount?: number;
   lastUsedAt?: Date;
+  // 问题类型统计（扁平化，便于前端排序）
+  understand?: number;
+  think?: number;
+  debug?: number;
+  clarify?: number;
+  optimize?: number;
 }
 
 /**
@@ -359,8 +365,36 @@ export class AnalyticsHandler extends Handler {
       pipeline.push({ $match: match });
     }
 
-    // 2. 按 problemId + userId 汇总,用于 studentCount
-    // 同时保留 metadata.problemTitle（使用 $first 获取任意一条记录的标题）
+    // 2. Lookup ai_messages - 使用 pipeline 模式 + 条件求和统计问题类型
+    pipeline.push({
+      $lookup: {
+        from: 'ai_messages',
+        let: { cid: '$_id' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$conversationId', '$$cid'] } } },
+          {
+            $match: {
+              role: 'student',
+              questionType: { $in: ['understand', 'think', 'debug', 'clarify', 'optimize'] }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              understand: { $sum: { $cond: [{ $eq: ['$questionType', 'understand'] }, 1, 0] } },
+              think: { $sum: { $cond: [{ $eq: ['$questionType', 'think'] }, 1, 0] } },
+              debug: { $sum: { $cond: [{ $eq: ['$questionType', 'debug'] }, 1, 0] } },
+              clarify: { $sum: { $cond: [{ $eq: ['$questionType', 'clarify'] }, 1, 0] } },
+              optimize: { $sum: { $cond: [{ $eq: ['$questionType', 'optimize'] }, 1, 0] } }
+            }
+          }
+        ],
+        as: 'qt'
+      }
+    });
+
+    // 3. 按 problemId + userId 汇总,用于 studentCount
+    // 同时保留 metadata.problemTitle，使用 $first 提取 qt 数组首项
     pipeline.push({
       $group: {
         _id: { problemId: '$problemId', userId: '$userId' },
@@ -370,10 +404,15 @@ export class AnalyticsHandler extends Handler {
           $sum: { $cond: ['$isEffective', 1, 0] },
         },
         problemTitle: { $first: '$metadata.problemTitle' },
+        qt_understand: { $sum: { $ifNull: [{ $first: '$qt.understand' }, 0] } },
+        qt_think: { $sum: { $ifNull: [{ $first: '$qt.think' }, 0] } },
+        qt_debug: { $sum: { $ifNull: [{ $first: '$qt.debug' }, 0] } },
+        qt_clarify: { $sum: { $ifNull: [{ $first: '$qt.clarify' }, 0] } },
+        qt_optimize: { $sum: { $ifNull: [{ $first: '$qt.optimize' }, 0] } }
       },
     });
 
-    // 3. 再按 problemId 汇总
+    // 4. 再按 problemId 汇总
     pipeline.push({
       $group: {
         _id: '$_id.problemId',
@@ -382,10 +421,15 @@ export class AnalyticsHandler extends Handler {
         studentCount: { $sum: 1 },
         totalMessageCount: { $sum: '$totalMessageCount' },
         problemTitle: { $first: '$problemTitle' },
+        understand: { $sum: '$qt_understand' },
+        think: { $sum: '$qt_think' },
+        debug: { $sum: '$qt_debug' },
+        clarify: { $sum: '$qt_clarify' },
+        optimize: { $sum: '$qt_optimize' }
       },
     });
 
-    // 4. 派生字段
+    // 5. 派生字段（扁平化输出问题类型统计）
     pipeline.push({
       $project: {
         _id: 0,
@@ -410,6 +454,11 @@ export class AnalyticsHandler extends Handler {
             0,
           ],
         },
+        understand: 1,
+        think: 1,
+        debug: 1,
+        clarify: 1,
+        optimize: 1
       },
     });
 
