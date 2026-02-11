@@ -26,6 +26,7 @@ export interface Conversation {
   metadata?: {
     problemTitle?: string;    // 题目标题
     problemContent?: string;  // 题目描述摘要
+    offTopicStrike?: number;  // 连续偏题计数
   };
 }
 
@@ -279,6 +280,26 @@ export class ConversationModel {
         { $set: update }
       );
     }
+  }
+
+  async incrementOffTopicStrike(id: string | ObjectIdType): Promise<number> {
+    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const result = await this.collection.findOneAndUpdate(
+      { _id },
+      { $inc: { 'metadata.offTopicStrike': 1 } as any },
+      { returnDocument: 'after' }
+    );
+    return (result as any)?.metadata?.offTopicStrike
+      ?? (result as any)?.value?.metadata?.offTopicStrike
+      ?? 1;
+  }
+
+  async resetOffTopicStrike(id: string | ObjectIdType): Promise<void> {
+    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    await this.collection.updateOne(
+      { _id },
+      { $set: { 'metadata.offTopicStrike': 0 } }
+    );
   }
 
   /**

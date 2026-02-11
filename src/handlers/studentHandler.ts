@@ -8,10 +8,12 @@ import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiMod
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
 import { EffectivenessService } from '../services/effectivenessService';
+import { OutputSafetyService } from '../services/outputSafetyService';
+import { TopicGuardService } from '../services/topicGuardService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
-import { type ObjectIdType } from '../utils/mongo';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 
 /**
@@ -20,13 +22,17 @@ import { getDomainId } from '../utils/domainHelper';
 interface ChatRequest {
   conversationId?: string;
   problemId: string;
-  problemTitle?: string; // 题目标题,前端读取失败时手动填写
-  problemContent?: string; // 题目描述摘要,前端自动截取或手动填写
+  problemTitle?: string;
+  problemContent?: string;
   questionType: QuestionType;
   userThinking: string;
-  includeCode: boolean; // 是否附带代码,默认 false
+  includeCode: boolean;
   code?: string;
   attachErrorInfo?: boolean;
+  clarifyContext?: {
+    sourceAiMessageId: string;
+    selectedText: string;
+  };
 }
 
 /**
@@ -35,12 +41,13 @@ interface ChatRequest {
 interface ChatResponse {
   conversationId: string;
   message: {
+    id: string;
     role: 'ai';
     content: string;
     timestamp: string;
   };
   remainingRequests?: number;
-  codeWarning?: string; // 代码被截断时的警告信息
+  codeWarning?: string;
 }
 
 /**
@@ -96,7 +103,8 @@ export class ChatHandler extends Handler {
         userThinking,
         includeCode,
         code,
-        conversationId
+        conversationId,
+        clarifyContext
       } = this.request.body as ChatRequest;
 
       // 验证问题类型
@@ -235,7 +243,6 @@ export class ChatHandler extends Handler {
 
       if (conversationId) {
         // 验证 conversationId 格式
-        const { ObjectId } = await import('../utils/mongo');
         if (!ObjectId.isValid(conversationId)) {
           this.response.status = 400;
           this.response.body = {
@@ -274,17 +281,125 @@ export class ChatHandler extends Handler {
           domainId,
           userId,
           problemId,
-          classId: undefined, // TODO: 从用户信息获取班级 ID
+          classId: undefined,
           startTime: now,
           endTime: now,
           messageCount: 0,
-          isEffective: false, // 初始标记为无效,后续通过有效对话判定服务更新
+          isEffective: false,
           tags: [],
           metadata: {
             problemTitle: problemTitleStr,
-            problemContent: processedProblemContent
+            problemContent: processedProblemContent,
+            offTopicStrike: 0
           }
         });
+      }
+
+      // P0-1: Clarify 锚点校验
+      if (questionType === 'clarify') {
+        const selectedTextRaw = clarifyContext?.selectedText ?? '';
+        const normalizeText = (t: string) => t.replace(/\s+/g, ' ').trim();
+        const selectedTextNorm = normalizeText(selectedTextRaw);
+
+        if (!clarifyContext?.sourceAiMessageId || !selectedTextNorm) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '追问功能需要选中 AI 回复中的内容',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+        if (!ObjectId.isValid(clarifyContext.sourceAiMessageId)) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '无效的消息来源 ID',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+        const sourceMessage = await messageModel.findById(clarifyContext.sourceAiMessageId);
+        if (!sourceMessage || sourceMessage.role !== 'ai') {
+          this.response.status = 400;
+          this.response.body = {
+            error: '来源消息不存在或不是 AI 回复',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+        if (sourceMessage.conversationId.toHexString() !== currentConversationId.toHexString()) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '来源消息不属于当前会话',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+        // 内容包含校验（支持归一化匹配）
+        const sourceContentNorm = normalizeText(sourceMessage.content);
+        if (!sourceMessage.content.includes(selectedTextRaw)
+            && !sourceContentNorm.includes(selectedTextNorm)) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '选中文本不在来源消息内容中',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+      }
+
+      // P1-2: 偏题检测（在 LLM 调用前执行）
+      const topicGuardService = new TopicGuardService();
+      const topicResult = topicGuardService.evaluate(userThinking, processedCode);
+      if (topicResult.isOffTopic) {
+        const strikeCount = await conversationModel.incrementOffTopicStrike(currentConversationId);
+        if (strikeCount >= 2) {
+          // 连续偏题 >= 2 次，直接返回固定模板，不调 LLM
+          const fixedReply = '这个追问与当前编程题无关。请贴出你的代码片段、报错信息或你已尝试的思路，我再继续帮你。';
+          // 先保存学生消息，确保会话消息顺序与实际轮次一致
+          const studentMessageTimestamp = new Date();
+          await messageModel.create({
+            conversationId: currentConversationId,
+            role: 'student',
+            content: userThinking,
+            timestamp: studentMessageTimestamp,
+            questionType: questionType as QuestionType,
+            attachedCode: includeCode && !!processedCode,
+            attachedError: false
+          });
+          await conversationModel.incrementMessageCount(currentConversationId);
+
+          const aiMessageTimestamp = new Date();
+          const aiMessageId = await messageModel.create({
+            conversationId: currentConversationId,
+            role: 'ai',
+            content: fixedReply,
+            timestamp: aiMessageTimestamp,
+            metadata: { topicGuardBypassedLLM: true }
+          });
+          await conversationModel.incrementMessageCount(currentConversationId);
+          await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+
+          const response: ChatResponse = {
+            conversationId: currentConversationId.toHexString(),
+            message: {
+              id: aiMessageId.toHexString(),
+              role: 'ai',
+              content: fixedReply,
+              timestamp: aiMessageTimestamp.toISOString()
+            }
+          };
+          this.response.body = response;
+          this.response.type = 'application/json';
+          return;
+        }
+      } else {
+        // 正常对话，重置偏题计数
+        await conversationModel.resetOffTopicStrike(currentConversationId);
       }
 
       // 保存学生消息到数据库
@@ -305,22 +420,23 @@ export class ChatHandler extends Handler {
       // 增加会话的消息计数
       await conversationModel.incrementMessageCount(currentConversationId);
 
-      // 加载历史消息用于多轮对话（排除刚保存的当前消息）
-      // 使用 findRecentByConversationId 仅加载最近 7 条，避免长对话的内存压力
+      // P2: 历史上下文净化 - 过滤掉被标记为 off-topic 的消息
       const historyMessages = (await messageModel.findRecentByConversationId(currentConversationId, 7))
         .slice(0, -1)
+        .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM)
         .map((msg) => ({
           role: msg.role,
           content: msg.content
         }));
 
-      // 构造 user prompt（包含历史上下文）
+      // 构造 user prompt（包含历史上下文 + clarify 锚点信息）
       const userPrompt = promptService.buildUserPrompt(
         questionType as QuestionType,
         userThinking,
         processedCode,
         undefined, // errorInfo 暂不支持
-        historyMessages
+        historyMessages,
+        clarifyContext?.selectedText
       );
 
       // 准备消息数组
@@ -360,16 +476,23 @@ export class ChatHandler extends Handler {
         return;
       }
 
+      // P0-2: 输出安全后处理（AI 响应返回后、保存到数据库前）
+      const outputSafetyService = new OutputSafetyService();
+      const safetyResult = outputSafetyService.sanitize(aiResponse, {
+        questionType: questionType as QuestionType,
+        problemTitle: problemTitleStr,
+        problemContent: processedProblemContent
+      });
+      aiResponse = safetyResult.content;
+
       // 保存 AI 消息到数据库
       const aiMessageTimestamp = new Date();
-      await messageModel.create({
+      const aiMessageId = await messageModel.create({
         conversationId: currentConversationId,
         role: 'ai',
         content: aiResponse,
         timestamp: aiMessageTimestamp,
-        questionType: undefined, // AI 消息没有问题类型
-        attachedCode: false,
-        attachedError: false
+        metadata: safetyResult.rewritten ? { safetyRewritten: true } : undefined
       });
 
       // 增加会话的消息计数并更新结束时间
@@ -386,10 +509,11 @@ export class ChatHandler extends Handler {
         this.ctx.logger.error('Schedule effectiveness analyze failed', err);
       }
 
-      // 构造响应 (返回真实的 conversationId)
+      // 构造响应 (返回真实的 conversationId + AI 消息 ID)
       const response: ChatResponse = {
         conversationId: currentConversationId.toHexString(),
         message: {
+          id: aiMessageId.toHexString(),
           role: 'ai',
           content: aiResponse,
           timestamp: aiMessageTimestamp.toISOString()

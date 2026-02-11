@@ -33,6 +33,8 @@ export interface Message {
   metadata?: {
     codeLength?: number;      // 代码长度 (字符数)
     codeWarning?: string;     // 代码截断警告
+    safetyRewritten?: boolean;       // AI 回复被输出安全后处理改写
+    topicGuardBypassedLLM?: boolean; // 偏题计数短路，未调用 LLM
   };
 }
 

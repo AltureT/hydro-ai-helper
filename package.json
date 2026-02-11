@@ -21,7 +21,7 @@
   "dependencies": {
     "@types/highlight.js": "^9.12.4",
     "@types/markdown-it": "^14.1.2",
-    "axios": "^1.6.0",
+    "axios": "^1.13.5",
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.1.0",
     "mongodb": "^6.3.0",

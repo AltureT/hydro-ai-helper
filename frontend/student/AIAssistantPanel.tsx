@@ -84,11 +84,13 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     content: string;
     timestamp: Date;
     code?: string;  // 学生消息可能附带代码
+    id?: string;    // AI 消息 ID（用于 clarify 锚点校验）
   }>>([]);
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
   // 选中答疑状态
   const [selectedText, setSelectedText] = useState<string>('');
+  const [selectedSourceAiMessageId, setSelectedSourceAiMessageId] = useState<string>('');
   const [popupPosition, setPopupPosition] = useState<{x: number; y: number} | null>(null);
   const savedRangeRef = useRef<Range | null>(null);
 
@@ -586,7 +588,13 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             userThinking: savedUserThinking,
             includeCode,
             code: savedCode,
-            conversationId: activeConversationId || undefined
+            conversationId: activeConversationId || undefined,
+            ...(effectiveQuestionType === 'clarify' && selectedSourceAiMessageId ? {
+              clarifyContext: {
+                sourceAiMessageId: selectedSourceAiMessageId,
+                selectedText: selectedText
+              }
+            } : {})
           })
         });
 
@@ -622,7 +630,8 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       const aiMessage = {
         role: 'ai' as const,
         content: data.message.content,
-        timestamp: new Date()
+        timestamp: new Date(),
+        id: data.message.id
       };
       setConversationHistory(prev => [...prev, aiMessage]);
       setAiResponse(data.message.content);
@@ -693,9 +702,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     // 检查选中内容是否在 AI 消息容器内（使用 data-ai-message 属性标记）
     let node = selection.anchorNode;
     let isInAiMessage = false;
+    let aiMessageId = '';
     while (node) {
       if (node instanceof HTMLElement && node.dataset.aiMessage === 'true') {
         isInAiMessage = true;
+        aiMessageId = node.dataset.messageId || '';
         break;
       }
       node = node.parentNode;
@@ -706,6 +717,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       // 保存 Range 对象用于恢复选中状态
       savedRangeRef.current = range.cloneRange();
       setSelectedText(text);
+      setSelectedSourceAiMessageId(aiMessageId);
       setPopupPosition({ x: rect.left + rect.width / 2, y: rect.top - 40 });
     } else {
       setPopupPosition(null);
@@ -717,14 +729,19 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    * 处理"我不理解"按钮点击
    */
   const handleDontUnderstand = () => {
+    if (!selectedSourceAiMessageId) {
+      setError('请重新选中 AI 回复中的内容');
+      setPopupPosition(null);
+      savedRangeRef.current = null;
+      return;
+    }
     const truncated = selectedText.length > 100 ? selectedText.substring(0, 100) + '...' : selectedText;
     setQuestionType('clarify');
     setUserThinking(`我不太理解这部分："${truncated}"，能再解释一下吗？`);
     setAiResponse('');
     setPopupPosition(null);
     savedRangeRef.current = null;
-    setPendingAutoSubmit(true); // 标记需要自动提交
-    // conversationId 保持不变，实现追问
+    setPendingAutoSubmit(true);
   };
 
   /**
@@ -1082,6 +1099,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             >
               <div
                 data-ai-message={msg.role === 'ai' ? 'true' : undefined}
+                data-message-id={msg.role === 'ai' ? msg.id : undefined}
                 style={{
                   maxWidth: '85%',
                   padding: '10px 14px',
@@ -1397,6 +1415,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             <div
               key={idx}
               data-ai-message={msg.role === 'ai' ? 'true' : undefined}
+              data-message-id={msg.role === 'ai' ? msg.id : undefined}
               onMouseUp={msg.role === 'ai' ? handleTextSelection : undefined}
               style={{
                 background: msg.role === 'student' ? '#dbeafe' : '#f0fdf4',
