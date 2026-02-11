@@ -28,8 +28,14 @@ class MigrationService {
      */
     async migrateConversationDomainIds() {
         const collection = this.db.collection('ai_conversations');
-        // 查找所有没有 domainId 字段的记录
-        const result = await collection.updateMany({ domainId: { $exists: false } }, { $set: { domainId: exports.DEFAULT_DOMAIN_ID } });
+        // 兼容历史脏数据：domainId 缺失 / null / 空字符串都回填为 system
+        const result = await collection.updateMany({
+            $or: [
+                { domainId: { $exists: false } },
+                { domainId: null },
+                { domainId: '' }
+            ]
+        }, { $set: { domainId: exports.DEFAULT_DOMAIN_ID } });
         console.log(`[MigrationService] Migrated ${result.modifiedCount} conversation records with domainId`);
         return result.modifiedCount;
     }
@@ -42,8 +48,14 @@ class MigrationService {
      */
     async migrateRateLimitRecords() {
         const collection = this.db.collection('ai_rate_limit_records');
-        // 为所有没有 domainId 字段的记录添加默认值
-        const result = await collection.updateMany({ domainId: { $exists: false } }, { $set: { domainId: exports.DEFAULT_DOMAIN_ID } });
+        // 兼容历史脏数据：domainId 缺失 / null / 空字符串都回填为 system
+        const result = await collection.updateMany({
+            $or: [
+                { domainId: { $exists: false } },
+                { domainId: null },
+                { domainId: '' }
+            ]
+        }, { $set: { domainId: exports.DEFAULT_DOMAIN_ID } });
         console.log(`[MigrationService] Migrated ${result.modifiedCount} rate limit records with domainId`);
         return result.modifiedCount;
     }

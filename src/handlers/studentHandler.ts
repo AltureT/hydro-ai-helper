@@ -238,7 +238,10 @@ export class ChatHandler extends Handler {
         const { ObjectId } = await import('../utils/mongo');
         if (!ObjectId.isValid(conversationId)) {
           this.response.status = 400;
-          this.response.body = { error: '无效的会话 ID' };
+          this.response.body = {
+            error: '无效的会话 ID',
+            code: 'INVALID_CONVERSATION_ID'
+          };
           this.response.type = 'application/json';
           return;
         }
@@ -246,14 +249,20 @@ export class ChatHandler extends Handler {
         const conversation = await conversationModel.findById(conversationId);
         if (!conversation) {
           this.response.status = 404;
-          this.response.body = { error: '会话不存在' };
+          this.response.body = {
+            error: '会话不存在',
+            code: 'CONVERSATION_NOT_FOUND'
+          };
           this.response.type = 'application/json';
           return;
         }
         // 验证会话归属当前用户和当前域
         if (conversation.userId !== userId || conversation.domainId !== domainId) {
           this.response.status = 403;
-          this.response.body = { error: '无权访问此会话' };
+          this.response.body = {
+            error: '无权访问此会话',
+            code: 'CONVERSATION_ACCESS_DENIED'
+          };
           this.response.type = 'application/json';
           return;
         }

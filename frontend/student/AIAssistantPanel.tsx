@@ -9,6 +9,12 @@ import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
 import { buildApiUrl } from '../utils/domainUtils';
+import {
+  clearConversationId as clearStoredConversationId,
+  loadConversationId,
+  saveConversationId,
+  shouldResetConversation
+} from '../utils/conversationStorage';
 
 /**
  * 基础问题类型选项
@@ -26,6 +32,11 @@ interface ProblemInfo {
   title: string;
   problemId: string;
   content: string;
+}
+
+interface ChatApiErrorPayload {
+  error?: string;
+  code?: string;
 }
 
 /**
@@ -191,12 +202,12 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    */
   useEffect(() => {
     if (problemId) {
-      try {
-        const savedId = window.localStorage.getItem(`ai_conversation_${problemId}`);
-        if (savedId) setConversationId(savedId);
-      } catch (e) {
-        // ignore localStorage error
-      }
+      const savedId = loadConversationId(problemId);
+      setConversationId(savedId);
+      // 切题时清理页面态，避免沿用旧题消息导致串会话
+      setConversationHistory([]);
+      setAiResponse('');
+      setError('');
     }
   }, [problemId]);
 
@@ -561,26 +572,48 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       const finalProblemContent = problemInfo?.content || undefined;
 
       // T022: 调用后端 API（使用域前缀 URL）
-      const response = await fetch(buildApiUrl('/ai-helper/chat'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          problemId,
-          problemTitle: finalProblemTitle,
-          problemContent: finalProblemContent,
-          questionType: effectiveQuestionType,
-          userThinking: savedUserThinking,
-          includeCode,
-          code: savedCode,
-          conversationId // 多轮对话：携带已有会话 ID
-        })
-      });
+      const sendChatRequest = (activeConversationId: string | null) =>
+        fetch(buildApiUrl('/ai-helper/chat'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            problemId,
+            problemTitle: finalProblemTitle,
+            problemContent: finalProblemContent,
+            questionType: effectiveQuestionType,
+            userThinking: savedUserThinking,
+            includeCode,
+            code: savedCode,
+            conversationId: activeConversationId || undefined
+          })
+        });
 
+      const parseErrorPayload = async (response: Response): Promise<ChatApiErrorPayload> => {
+        try {
+          return await response.json() as ChatApiErrorPayload;
+        } catch {
+          return {};
+        }
+      };
+
+      let response = await sendChatRequest(conversationId);
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || '请求失败');
+        let errorData = await parseErrorPayload(response);
+
+        // 会话失效时自动清理并重试一次，避免用户手动点“新对话”
+        if (conversationId && shouldResetConversation(response.status, errorData.error, errorData.code)) {
+          clearStoredConversationId(problemId);
+          setConversationId(null);
+          response = await sendChatRequest(null);
+          if (!response.ok) {
+            errorData = await parseErrorPayload(response);
+            throw new Error(errorData.error || '请求失败');
+          }
+        } else {
+          throw new Error(errorData.error || '请求失败');
+        }
       }
 
       const data = await response.json();
@@ -598,11 +631,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       // 多轮对话：保存 conversationId
       if (data.conversationId) {
         setConversationId(data.conversationId);
-        try {
-          window.localStorage.setItem(`ai_conversation_${problemId}`, data.conversationId);
-        } catch (e) {
-          // ignore localStorage error
-        }
+        saveConversationId(problemId, data.conversationId);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '未知错误');
@@ -628,11 +657,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     setError('');
     setConversationId(null);
     setConversationHistory([]);
-    try {
-      window.localStorage.removeItem(`ai_conversation_${problemId}`);
-    } catch (e) {
-      // ignore
-    }
+    clearStoredConversationId(problemId);
   };
 
   /**

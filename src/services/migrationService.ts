@@ -33,9 +33,15 @@ export class MigrationService {
   async migrateConversationDomainIds(): Promise<number> {
     const collection = this.db.collection('ai_conversations');
 
-    // 查找所有没有 domainId 字段的记录
+    // 兼容历史脏数据：domainId 缺失 / null / 空字符串都回填为 system
     const result = await collection.updateMany(
-      { domainId: { $exists: false } },
+      {
+        $or: [
+          { domainId: { $exists: false } },
+          { domainId: null },
+          { domainId: '' }
+        ]
+      },
       { $set: { domainId: DEFAULT_DOMAIN_ID } }
     );
 
@@ -53,9 +59,15 @@ export class MigrationService {
   async migrateRateLimitRecords(): Promise<number> {
     const collection = this.db.collection('ai_rate_limit_records');
 
-    // 为所有没有 domainId 字段的记录添加默认值
+    // 兼容历史脏数据：domainId 缺失 / null / 空字符串都回填为 system
     const result = await collection.updateMany(
-      { domainId: { $exists: false } },
+      {
+        $or: [
+          { domainId: { $exists: false } },
+          { domainId: null },
+          { domainId: '' }
+        ]
+      },
       { $set: { domainId: DEFAULT_DOMAIN_ID } }
     );
 
