@@ -356,6 +356,16 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     if (newType === 'optimize' && acCode) {
       setShowLoadCodeConfirm(true);
     }
+    if (newType === 'debug' && !includeCode) {
+      setIncludeCode(true);
+      if (!code) {
+        const scratchpadCode = readFromScratchpad();
+        if (scratchpadCode) {
+          setCode(scratchpadCode);
+          setScratchpadAvailable(true);
+        }
+      }
+    }
   };
 
   /**
