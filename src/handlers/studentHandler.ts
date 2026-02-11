@@ -113,6 +113,46 @@ export class ChatHandler extends Handler {
         throw new Error('无效的问题类型');
       }
 
+      // Clarify 预校验：先拒绝无效请求，避免创建空会话
+      const normalizeText = (text: string) => text.replace(/\s+/g, ' ').trim();
+      let clarifySourceAiMessageId = '';
+      let clarifySelectedTextRaw = '';
+      let clarifySelectedTextNorm = '';
+
+      if (questionType === 'clarify') {
+        clarifySourceAiMessageId = clarifyContext?.sourceAiMessageId ?? '';
+        clarifySelectedTextRaw = clarifyContext?.selectedText ?? '';
+        clarifySelectedTextNorm = normalizeText(clarifySelectedTextRaw);
+
+        if (!conversationId) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '追问功能需要基于已有会话',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+        if (!clarifySourceAiMessageId || !clarifySelectedTextNorm) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '追问功能需要选中 AI 回复中的内容',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+        if (!ObjectId.isValid(clarifySourceAiMessageId)) {
+          this.response.status = 400;
+          this.response.body = {
+            error: '无效的消息来源 ID',
+            code: 'CLARIFY_ANCHOR_INVALID'
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+      }
+
       // 服务端授权校验:optimize 类型需要用户已 AC 该题
       // 防止用户绕过前端直接发送 optimize 请求
       if (questionType === 'optimize') {
@@ -297,29 +337,7 @@ export class ChatHandler extends Handler {
 
       // P0-1: Clarify 锚点校验
       if (questionType === 'clarify') {
-        const selectedTextRaw = clarifyContext?.selectedText ?? '';
-        const normalizeText = (t: string) => t.replace(/\s+/g, ' ').trim();
-        const selectedTextNorm = normalizeText(selectedTextRaw);
-
-        if (!clarifyContext?.sourceAiMessageId || !selectedTextNorm) {
-          this.response.status = 400;
-          this.response.body = {
-            error: '追问功能需要选中 AI 回复中的内容',
-            code: 'CLARIFY_ANCHOR_INVALID'
-          };
-          this.response.type = 'application/json';
-          return;
-        }
-        if (!ObjectId.isValid(clarifyContext.sourceAiMessageId)) {
-          this.response.status = 400;
-          this.response.body = {
-            error: '无效的消息来源 ID',
-            code: 'CLARIFY_ANCHOR_INVALID'
-          };
-          this.response.type = 'application/json';
-          return;
-        }
-        const sourceMessage = await messageModel.findById(clarifyContext.sourceAiMessageId);
+        const sourceMessage = await messageModel.findById(clarifySourceAiMessageId);
         if (!sourceMessage || sourceMessage.role !== 'ai') {
           this.response.status = 400;
           this.response.body = {
@@ -340,8 +358,8 @@ export class ChatHandler extends Handler {
         }
         // 内容包含校验（支持归一化匹配）
         const sourceContentNorm = normalizeText(sourceMessage.content);
-        if (!sourceMessage.content.includes(selectedTextRaw)
-            && !sourceContentNorm.includes(selectedTextNorm)) {
+        if (!sourceMessage.content.includes(clarifySelectedTextRaw)
+            && !sourceContentNorm.includes(clarifySelectedTextNorm)) {
           this.response.status = 400;
           this.response.body = {
             error: '选中文本不在来源消息内容中',
@@ -354,7 +372,11 @@ export class ChatHandler extends Handler {
 
       // P1-2: 偏题检测（在 LLM 调用前执行）
       const topicGuardService = new TopicGuardService();
-      const topicResult = topicGuardService.evaluate(userThinking, processedCode);
+      const topicResult = topicGuardService.evaluate(userThinking, {
+        code: processedCode,
+        problemTitle: problemTitleStr,
+        problemContent: processedProblemContent
+      });
       if (topicResult.isOffTopic) {
         const strikeCount = await conversationModel.incrementOffTopicStrike(currentConversationId);
         if (strikeCount >= 2) {
@@ -436,7 +458,7 @@ export class ChatHandler extends Handler {
         processedCode,
         undefined, // errorInfo 暂不支持
         historyMessages,
-        clarifyContext?.selectedText
+        clarifySelectedTextRaw || undefined
       );
 
       // 准备消息数组

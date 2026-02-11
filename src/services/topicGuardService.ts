@@ -9,15 +9,15 @@ const PROGRAMMING_KEYWORDS: string[] = [
   '算法', '排序', '递归', '栈', '队列', '二叉树', '图', '链表',
   'dp', 'dfs', 'bfs', '贪心', '二分', '搜索', '枚举', '模拟',
   '动态规划', '分治', '回溯', '字符串', '哈希', '前缀和',
-  'print', 'input', 'if', 'for', 'while', 'def', 'class', 'return',
-  'import', 'int', 'str', 'float', 'list', 'dict', 'range',
-  '报错', '错误', 'error', 'bug', '调试', 'debug', '运行',
+  '报错', '错误', 'error', 'bug', 'debug', '调试', '运行',
   '编译', '输出', '输入', '样例', '测试', 'AC', 'WA', 'TLE', 'RE', 'MLE',
   '题目', '题意', '思路', '做法', '解题', '提交', '通过',
   '复杂度', '时间', '空间', 'O(n)', 'O(1)', '优化',
   '冒泡', '选择', '插入', '快排', '归并', '堆', '树状数组',
   '线段树', '并查集', '拓扑排序', '最短路', '最小生成树',
-  'python', 'c++', 'java', 'cpp', '编程', '程序'
+  'python', 'c++', 'java', 'cpp', 'code', 'function', 'variable',
+  'array', 'loop', 'algorithm', 'recursion', 'complexity',
+  'binary search', 'prefix sum', '编程', '程序'
 ];
 
 // 跑题关键词（必须显式命中此表才标记偏题）
@@ -40,22 +40,36 @@ export interface TopicGuardResult {
   matchedKeyword?: string;
 }
 
+export interface TopicGuardOptions {
+  code?: string;
+  problemTitle?: string;
+  problemContent?: string;
+}
+
+const ASCII_TOKEN_REGEX = /^[a-z0-9_+\-.#]+$/i;
+
 export class TopicGuardService {
-  evaluate(userThinking: string, code?: string): TopicGuardResult {
+  evaluate(userThinking: string, options: TopicGuardOptions = {}): TopicGuardResult {
+    const { code, problemTitle, problemContent } = options;
+
     // 带代码的请求默认不判偏题
     if (code && code.trim().length > 0) {
       return { isOffTopic: false };
     }
 
-    const text = userThinking.toLowerCase();
+    const text = this.normalize(userThinking);
+    const whitelistSource = this.normalize(
+      [problemTitle, problemContent].filter(Boolean).join(' ')
+    );
 
     // 必须显式命中偏题关键词
     let matchedOffTopic: string | undefined;
     for (const keyword of OFF_TOPIC_KEYWORDS) {
-      if (text.includes(keyword.toLowerCase())) {
-        matchedOffTopic = keyword;
-        break;
-      }
+      if (!this.matchesKeyword(text, keyword)) continue;
+      // 题面/标题中已出现的关键词默认视为白名单，不计偏题
+      if (whitelistSource && this.matchesKeyword(whitelistSource, keyword)) continue;
+      matchedOffTopic = keyword;
+      break;
     }
 
     if (!matchedOffTopic) {
@@ -64,11 +78,35 @@ export class TopicGuardService {
 
     // 同时检查是否包含编程关键词（包含则不判偏题）
     for (const keyword of PROGRAMMING_KEYWORDS) {
-      if (text.includes(keyword.toLowerCase())) {
+      if (this.matchesKeyword(text, keyword)) {
         return { isOffTopic: false };
       }
     }
 
     return { isOffTopic: true, matchedKeyword: matchedOffTopic };
+  }
+
+  private normalize(text: string): string {
+    return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  private escapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private matchesKeyword(text: string, keyword: string): boolean {
+    const normalizedKeyword = this.normalize(keyword);
+    if (!normalizedKeyword) {
+      return false;
+    }
+
+    // ASCII 关键词使用单词边界，避免 "Fortnite" 命中 "for" 之类的子串绕过
+    if (ASCII_TOKEN_REGEX.test(normalizedKeyword)) {
+      const escaped = this.escapeRegExp(normalizedKeyword);
+      const pattern = new RegExp(`(?:^|[^a-z0-9_])${escaped}(?=$|[^a-z0-9_])`, 'i');
+      return pattern.test(text);
+    }
+
+    return text.includes(normalizedKeyword);
   }
 }
