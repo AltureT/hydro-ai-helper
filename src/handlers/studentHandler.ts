@@ -3,7 +3,8 @@
  * 处理学生的 AI 对话请求
  */
 
-import { Handler, PRIV, ProblemModel, RecordModel, STATUS, db } from 'hydrooj';
+import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
+import { formatJudgeInfo } from '../services/judgeInfoService';
 import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { RateLimitService } from '../services/rateLimitService';
@@ -15,6 +16,21 @@ import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
+
+function extractContestIdFromReferer(referer: unknown): string | undefined {
+  if (typeof referer !== 'string') return undefined;
+  const trimmed = referer.trim();
+  if (!trimmed) return undefined;
+  try {
+    // Referer header is usually absolute; provide a base URL for relative fallbacks.
+    const u = trimmed.startsWith('http://') || trimmed.startsWith('https://')
+      ? new URL(trimmed)
+      : new URL(trimmed, 'http://localhost');
+    return u.searchParams.get('tid') || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * 学生对话请求接口
@@ -29,6 +45,7 @@ interface ChatRequest {
   includeCode: boolean;
   code?: string;
   attachErrorInfo?: boolean;
+  contestId?: string;  // 比赛 ID（用于后端校验比赛模式）
   clarifyContext?: {
     sourceAiMessageId: string;
     selectedText: string;
@@ -48,6 +65,7 @@ interface ChatResponse {
   };
   remainingRequests?: number;
   codeWarning?: string;
+  hasJudgeInfo?: boolean;
 }
 
 /**
@@ -62,6 +80,31 @@ export class ChatHandler extends Handler {
 
       // 获取当前域 ID（用于域隔离）
       const domainId = getDomainId(this);
+
+      // 比赛模式校验：仅在比赛进行中禁用
+      // 优先使用请求体传入的 contestId，缺失时回退到 referer 中的 tid，降低绕过空间
+      const { contestId: requestContestId } = this.request.body as ChatRequest;
+      const refererContestId = extractContestIdFromReferer(this.request.headers?.referer);
+      const effectiveContestId =
+        [requestContestId, refererContestId].find((id): id is string => !!id && ObjectId.isValid(id));
+
+      if (effectiveContestId) {
+        try {
+          const tdoc = await ContestModel.get(domainId, new ObjectId(effectiveContestId));
+          if (tdoc && ContestModel.isOngoing(tdoc)) {
+            this.response.status = 403;
+            this.response.body = {
+              error: '比赛期间 AI 助手不可用，请独立完成作答',
+              code: 'CONTEST_MODE_RESTRICTED'
+            };
+            this.response.type = 'application/json';
+            return;
+          }
+        } catch (err) {
+          // 比赛不存在或查询失败，允许继续（避免误伤）
+          console.warn('[ChatHandler] 比赛校验失败:', err);
+        }
+      }
 
       // 获取 AI 配置（用于频率限制和其他设置）
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
@@ -213,10 +256,12 @@ export class ChatHandler extends Handler {
       // 安全考虑：不使用客户端传入的 problemContent 作为白名单，避免被利用绕过越狱检测
       let trustedProblemTitle: string | undefined;
       let trustedProblemContent: string | undefined;
+      let trustedProblemDocId: number | undefined;
       try {
-        const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content']);
+        const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content', 'docId']);
         if (pdoc) {
           trustedProblemTitle = pdoc.title;
+          trustedProblemDocId = pdoc.docId;
           // 题目内容可能是字符串或 JSON 对象（多语言支持）
           if (typeof pdoc.content === 'string') {
             trustedProblemContent = pdoc.content;
@@ -424,6 +469,78 @@ export class ChatHandler extends Handler {
         await conversationModel.resetOffTopicStrike(currentConversationId);
       }
 
+      // 查询评测数据（debug 类型时自动附带）
+      let judgeInfo: string | undefined;
+      if (questionType === 'debug') {
+        try {
+          const pidForRecord = trustedProblemDocId;
+          if (typeof pidForRecord === 'number') {
+            const pendingStatuses = [
+              STATUS.STATUS_WAITING, STATUS.STATUS_FETCHED,
+              STATUS.STATUS_COMPILING, STATUS.STATUS_JUDGING
+            ];
+            const failureStatuses = [
+              STATUS.STATUS_WRONG_ANSWER,
+              STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+              STATUS.STATUS_MEMORY_LIMIT_EXCEEDED,
+              STATUS.STATUS_OUTPUT_LIMIT_EXCEEDED,
+              STATUS.STATUS_RUNTIME_ERROR,
+              STATUS.STATUS_COMPILE_ERROR,
+              STATUS.STATUS_SYSTEM_ERROR,
+              STATUS.STATUS_ETC,
+              STATUS.STATUS_HACKED,
+              STATUS.STATUS_FORMAT_ERROR
+            ].filter((s): s is number => typeof s === 'number');
+            const statusFilter = failureStatuses.length
+              ? { $in: failureStatuses }
+              : { $nin: [STATUS.STATUS_ACCEPTED, ...pendingStatuses] };
+
+            const coll = db.collection('record');
+            const queryBase: any = {
+              domainId,
+              uid: userId,
+              pid: pidForRecord,
+              status: statusFilter
+            };
+            const findOptions: any = {
+              sort: { _id: -1 as const },
+              // 仅取调试提示所需字段，限制数组体积，避免把整条评测文档塞进 prompt
+              projection: {
+                status: 1,
+                score: 1,
+                testCases: { $slice: 80 },
+                compilerTexts: { $slice: -5 },
+                judgeTexts: { $slice: -5 },
+                lang: 1
+              }
+            };
+
+            // 仅取"最近一次失败且已出结果"的提交：
+            // - 若在题目页面带 tid，则优先找该比赛的提交；
+            // - 否则找非比赛提交（contest 字段缺失或 null）。
+            let recordDoc: any = null;
+            if (effectiveContestId) {
+              recordDoc = await coll.findOne({
+                ...queryBase,
+                contest: new ObjectId(effectiveContestId)
+              }, findOptions);
+            }
+            if (!recordDoc) {
+              recordDoc = await coll.findOne({
+                ...queryBase,
+                contest: null
+              }, findOptions);
+            }
+
+            if (recordDoc) {
+              judgeInfo = formatJudgeInfo(recordDoc);
+            }
+          }
+        } catch (err) {
+          console.warn('[ChatHandler] 获取评测数据失败:', err);
+        }
+      }
+
       // 保存学生消息到数据库
       await messageModel.create({
         conversationId: currentConversationId,
@@ -432,7 +549,7 @@ export class ChatHandler extends Handler {
         timestamp: new Date(),
         questionType: questionType as QuestionType,
         attachedCode: includeCode && !!processedCode,
-        attachedError: false, // TODO: 支持附带错误信息
+        attachedError: !!judgeInfo,
         metadata: processedCode ? {
           codeLength: processedCode.length,
           codeWarning
@@ -451,12 +568,12 @@ export class ChatHandler extends Handler {
           content: msg.content
         }));
 
-      // 构造 user prompt（包含历史上下文 + clarify 锚点信息）
+      // 构造 user prompt（包含历史上下文 + clarify 锚点信息 + 评测数据）
       const userPrompt = promptService.buildUserPrompt(
         questionType as QuestionType,
         userThinking,
         processedCode,
-        undefined, // errorInfo 暂不支持
+        judgeInfo,
         historyMessages,
         clarifySelectedTextRaw || undefined
       );
@@ -545,6 +662,10 @@ export class ChatHandler extends Handler {
       // 如果代码被截断,添加警告信息
       if (codeWarning) {
         response.codeWarning = codeWarning;
+      }
+
+      if (judgeInfo) {
+        response.hasJudgeInfo = true;
       }
 
       this.response.body = response;

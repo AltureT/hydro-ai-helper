@@ -76,6 +76,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   const [aiResponse, setAiResponse] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
+  const [isContestRestricted, setIsContestRestricted] = useState<boolean>(false);
 
   // 多轮对话状态
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -584,6 +585,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       const finalProblemContent = problemInfo?.content || undefined;
 
       // T022: 调用后端 API（使用域前缀 URL）
+      const currentTid = new URLSearchParams(window.location.search).get('tid') || undefined;
       const sendChatRequest = (activeConversationId: string | null) =>
         fetch(buildApiUrl('/ai-helper/chat'), {
           method: 'POST',
@@ -599,6 +601,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             includeCode,
             code: savedCode,
             conversationId: activeConversationId || undefined,
+            contestId: currentTid,
             ...(effectiveQuestionType === 'clarify' && selectedSourceAiMessageId ? {
               clarifyContext: {
                 sourceAiMessageId: selectedSourceAiMessageId,
@@ -619,6 +622,12 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       let response = await sendChatRequest(conversationId);
       if (!response.ok) {
         let errorData = await parseErrorPayload(response);
+
+        // 比赛进行中：后端返回明确限制码，前端切换到受限提示
+        if (response.status === 403 && errorData.code === 'CONTEST_MODE_RESTRICTED') {
+          setIsContestRestricted(true);
+          throw new Error(errorData.error || '比赛期间 AI 助手不可用，请独立完成作答');
+        }
 
         // 会话失效时自动清理并重试一次，避免用户手动点“新对话”
         if (conversationId && shouldResetConversation(response.status, errorData.error, errorData.code)) {
@@ -986,6 +995,73 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     }
   `;
 
+  // 比赛进行中：显示功能受限提示（由后端返回 403 + code=CONTEST_MODE_RESTRICTED 触发）
+  if (isContestRestricted) {
+    const restrictedContent = (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        justifyContent: 'center', height: '100%', padding: '32px',
+        textAlign: 'center', background: '#ffffff'
+      }}>
+        <div style={{ fontSize: '40px', marginBottom: '16px' }}>🔒</div>
+        <div style={{ fontSize: '16px', fontWeight: '600', color: '#374151', marginBottom: '8px' }}>
+          AI 助手功能受限
+        </div>
+        <div style={{ fontSize: '13px', color: '#6b7280', lineHeight: '1.6' }}>
+          比赛期间 AI 助手不可用，请独立完成作答。
+          <br />
+          比赛结束后可正常使用。
+        </div>
+      </div>
+    );
+
+    if (embedded) {
+      return restrictedContent;
+    }
+
+    // 浮动模式下也显示受限提示（保留折叠/展开能力）
+    return (
+      <>
+        <div
+          ref={panelRef}
+          style={panelStyle}
+          onClick={isCollapsed && !isMobile ? toggleCollapse : undefined}
+        >
+          {isMobile || !isCollapsed ? (
+            <div style={{
+              padding: '12px 16px', borderBottom: '1px solid #e5e7eb',
+              background: '#6b7280', color: 'white',
+              borderRadius: isMobile ? '0' : '12px 12px 0 0',
+              fontWeight: '600', fontSize: '15px',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              userSelect: 'none', height: isMobile ? '56px' : '48px', boxSizing: 'border-box'
+            }}>
+              <span>🔒 AI 学习助手</span>
+              <button
+                onClick={toggleCollapse}
+                style={{
+                  background: 'transparent', border: 'none', color: 'white',
+                  fontSize: '18px', cursor: 'pointer', padding: '4px 8px', lineHeight: '1'
+                }}
+              >
+                {isCollapsed ? '▲' : '▼'}
+              </button>
+            </div>
+          ) : (
+            <div style={{
+              width: '100%', height: '100%', display: 'flex',
+              alignItems: 'center', justifyContent: 'center',
+              fontSize: '28px', userSelect: 'none'
+            }}>
+              🔒
+            </div>
+          )}
+          {!isCollapsed && restrictedContent}
+        </div>
+      </>
+    );
+  }
+
   // 嵌入模式：直接渲染内容，不显示浮动外壳
   if (embedded) {
     return (
@@ -1181,6 +1257,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   {type.label}
                 </label>
               ))}
+              {questionType === 'debug' && (
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  将自动附带最近一次评测结果
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1586,6 +1667,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   );
                 })}
               </div>
+              {questionType === 'debug' && (
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  将自动附带最近一次评测结果
+                </div>
+              )}
             </div>
           )}
 

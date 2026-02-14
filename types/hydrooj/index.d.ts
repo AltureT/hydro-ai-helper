@@ -49,6 +49,12 @@ declare module 'hydrooj' {
 
   export const ProblemModel: any;
 
+  export const ContestModel: {
+    get(domainId: string, tid: any): Promise<any>;
+    isOngoing(tdoc: any, tsdoc?: any): boolean;
+    isDone(tdoc: any, tsdoc?: any): boolean;
+  };
+
   // STATUS enum from @hydrooj/common, re-exported via builtin
   export const STATUS: {
     STATUS_WAITING: number;
