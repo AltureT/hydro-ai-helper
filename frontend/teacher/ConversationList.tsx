@@ -7,6 +7,7 @@
 import React, { useState, useEffect } from 'react';
 import { ExportDialog } from './ExportDialog';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
+import { formatDateTime } from '../utils/formatDate';
 
 /**
  * 对话摘要接口
@@ -85,13 +86,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
 
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
-  const loadConversations = async () => {
+  const loadConversations = async (targetPage?: number) => {
     setLoading(true);
     setError(null);
 
+    const effectivePage = targetPage ?? page;
     try {
       const params = new URLSearchParams({
-        page: page.toString(),
+        page: effectivePage.toString(),
         limit: limit.toString()
       });
 
@@ -137,23 +139,15 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
 
   const handleFilterSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setPage(1);
-    loadConversations();
+    if (page !== 1) {
+      setPage(1);
+    } else {
+      loadConversations(1);
+    }
   };
 
   const handleFilterChange = (field: string, value: string) => {
     setFilters(prev => ({ ...prev, [field]: value }));
-  };
-
-  const formatDateTime = (isoString: string): string => {
-    const date = new Date(isoString);
-    return date.toLocaleString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
   };
 
   const inputStyle: React.CSSProperties = {

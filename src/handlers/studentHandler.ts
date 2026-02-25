@@ -5,8 +5,9 @@
 
 import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
 import { formatJudgeInfo } from '../services/judgeInfoService';
-import { OpenAIClient, ChatMessage, createOpenAIClientFromConfig, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
+import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
+import { PROMPT_LIMITS } from '../constants/limits';
 import { RateLimitService } from '../services/rateLimitService';
 import { EffectivenessService } from '../services/effectivenessService';
 import { OutputSafetyService } from '../services/outputSafetyService';
@@ -238,9 +239,9 @@ export class ChatHandler extends Handler {
 
       if (includeCode && code) {
         // 检查代码长度,超过 5000 字符则截断
-        if (code.length > 5000) {
-          processedCode = code.substring(0, 5000);
-          codeWarning = '代码已截断到 5000 字符';
+        if (code.length > PROMPT_LIMITS.MAX_CODE_LENGTH) {
+          processedCode = code.substring(0, PROMPT_LIMITS.MAX_CODE_LENGTH);
+          codeWarning = `代码已截断到 ${PROMPT_LIMITS.MAX_CODE_LENGTH} 字符`;
         } else {
           processedCode = code;
         }
@@ -279,8 +280,8 @@ export class ChatHandler extends Handler {
       // 题目内容截断(超过 500 字符) - 用于白名单和 System Prompt
       let processedProblemContent: string | undefined;
       if (trustedProblemContent) {
-        if (trustedProblemContent.length > 500) {
-          processedProblemContent = trustedProblemContent.substring(0, 500) + '...';
+        if (trustedProblemContent.length > PROMPT_LIMITS.MAX_PROBLEM_CONTENT_SUMMARY) {
+          processedProblemContent = trustedProblemContent.substring(0, PROMPT_LIMITS.MAX_PROBLEM_CONTENT_SUMMARY) + '...';
         } else {
           processedProblemContent = trustedProblemContent;
         }
@@ -496,15 +497,14 @@ export class ChatHandler extends Handler {
               : { $nin: [STATUS.STATUS_ACCEPTED, ...pendingStatuses] };
 
             const coll = db.collection('record');
-            const queryBase: any = {
+            const queryBase: Record<string, unknown> = {
               domainId,
               uid: userId,
               pid: pidForRecord,
               status: statusFilter
             };
-            const findOptions: any = {
+            const findOptions: Record<string, unknown> = {
               sort: { _id: -1 as const },
-              // 仅取调试提示所需字段，限制数组体积，避免把整条评测文档塞进 prompt
               projection: {
                 status: 1,
                 score: 1,
@@ -518,7 +518,7 @@ export class ChatHandler extends Handler {
             // 仅取"最近一次失败且已出结果"的提交：
             // - 若在题目页面带 tid，则优先找该比赛的提交；
             // - 否则找非比赛提交（contest 字段缺失或 null）。
-            let recordDoc: any = null;
+            let recordDoc: Record<string, unknown> | null = null;
             if (effectiveContestId) {
               recordDoc = await coll.findOne({
                 ...queryBase,

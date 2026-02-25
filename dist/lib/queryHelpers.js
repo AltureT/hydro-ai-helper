@@ -72,7 +72,6 @@ function buildFilters(params, allowedFields) {
     for (const field of allowedFields) {
         const value = params[field];
         if (value !== undefined && value !== null && value !== '') {
-            // @ts-expect-error - 动态字段赋值
             filters[field] = value;
         }
     }

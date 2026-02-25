@@ -201,7 +201,7 @@ export class VersionService {
           releaseNotes: cached.releaseNotes,
           checkedAt: cached.checkedAt,
           fromCache: true,
-          source: (cached as any).source
+          source: cached.source
         };
       }
     }
@@ -244,7 +244,7 @@ export class VersionService {
           releaseUrl: expiredCache.releaseUrl || REPO_CONFIGS[0].releasesUrl,
           checkedAt: expiredCache.checkedAt,
           fromCache: true,
-          source: (expiredCache as any).source
+          source: expiredCache.source
         };
       }
 
@@ -342,6 +342,7 @@ export class VersionService {
       hasUpdate: data.hasUpdate,
       releaseUrl: data.releaseUrl,
       releaseNotes: data.releaseNotes,
+      source: data.source,
       checkedAt: new Date()
     });
   }

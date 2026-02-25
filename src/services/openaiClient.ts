@@ -7,6 +7,7 @@ import axios, { AxiosError } from 'axios';
 import type { Context } from 'hydrooj';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { decrypt } from '../lib/crypto';
+import { API_DEFAULTS } from '../constants/limits';
 
 /**
  * AI 客户端配置接口
@@ -85,14 +86,14 @@ export interface FetchModelsResult {
 export async function fetchAvailableModels(
   apiBaseUrl: string,
   apiKey: string,
-  timeoutSeconds: number = 15
+  timeoutSeconds: number = API_DEFAULTS.FETCH_MODELS_TIMEOUT_MS / 1000
 ): Promise<FetchModelsResult> {
   // 标准化 URL（移除尾部斜杠）
   const baseUrl = apiBaseUrl.replace(/\/+$/, '');
 
   try {
     const response = await axios.get<OpenAIModelsResponse>(
-      `${baseUrl}/models`,
+      `${baseUrl}${API_DEFAULTS.MODELS_ENDPOINT}`,
       {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -197,14 +198,14 @@ export class OpenAIClient {
         { role: 'system', content: systemPrompt },
         ...messages
       ],
-      temperature: 0.7,
-      max_tokens: 1500
+      temperature: API_DEFAULTS.DEFAULT_TEMPERATURE,
+      max_tokens: API_DEFAULTS.MAX_COMPLETION_TOKENS
     };
 
     try {
       // 发送请求
       const response = await axios.post<OpenAIResponse>(
-        `${this.config.apiBaseUrl}/chat/completions`,
+        `${this.config.apiBaseUrl}${API_DEFAULTS.CHAT_ENDPOINT}`,
         payload,
         {
           headers: {

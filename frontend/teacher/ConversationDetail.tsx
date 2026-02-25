@@ -5,9 +5,8 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import MarkdownIt from 'markdown-it';
-import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
+import { createMarkdownRenderer } from '../utils/markdown';
 
 /**
  * 对话接口
@@ -60,27 +59,6 @@ interface ConversationDetailResponse {
  */
 interface ConversationDetailProps {
   conversationId: string;
-}
-
-/**
- * 创建 Markdown 渲染器
- */
-function createMarkdownRenderer(): MarkdownIt {
-  return new MarkdownIt({
-    html: false,
-    linkify: true,
-    typographer: true,
-    highlight: (str, lang) => {
-      if (lang && hljs.getLanguage(lang)) {
-        try {
-          return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
-        } catch (err) {
-          console.error('[AI Helper] Highlight.js error:', err);
-        }
-      }
-      return '';
-    }
-  });
 }
 
 /**

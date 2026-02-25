@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
+import { formatDateTime } from '../utils/formatDate';
 
 /**
  * 统计维度类型
@@ -106,6 +107,7 @@ interface SortableHeaderProps {
   sortField: string | null;
   sortOrder: 'asc' | 'desc';
   onSort: (field: string) => void;
+
 }
 
 const SortableHeader: React.FC<SortableHeaderProps> = ({
@@ -162,7 +164,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
 
-  const [sortField, setSortField] = useState<string | null>(null);
+  type SortField = keyof AnalyticsItem;
+  const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   // 列显示控制状态
@@ -220,27 +223,11 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
     return num.toFixed(2);
   };
 
-  const formatDateTime = (isoString: string | undefined): string => {
-    if (!isoString) return '-';
-    try {
-      const date = new Date(isoString);
-      return date.toLocaleString('zh-CN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    } catch (err) {
-      return '-';
-    }
-  };
-
   const handleSort = (field: string) => {
     if (sortField === field) {
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
-      setSortField(field);
+      setSortField(field as SortField);
       setSortOrder('desc');
     }
   };
@@ -248,8 +235,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const getSortedItems = (items: AnalyticsItem[]): AnalyticsItem[] => {
     if (!sortField) return items;
     return [...items].sort((a, b) => {
-      const aVal = (a as any)[sortField];
-      const bVal = (b as any)[sortField];
+      const aVal = a[sortField];
+      const bVal = b[sortField];
       if (aVal == null && bVal == null) return 0;
       if (aVal == null) return sortOrder === 'asc' ? -1 : 1;
       if (bVal == null) return sortOrder === 'asc' ? 1 : -1;

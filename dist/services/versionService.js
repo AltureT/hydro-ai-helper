@@ -149,10 +149,12 @@ class VersionService {
         if (!forceRefresh) {
             const cached = await this.getCachedVersion();
             if (cached) {
+                // 使用实时版本重新计算 hasUpdate，而非使用缓存中的静态值
+                const hasUpdate = this.isNewerVersion(cached.latestVersion, this.currentVersion);
                 return {
                     currentVersion: this.currentVersion,
                     latestVersion: cached.latestVersion,
-                    hasUpdate: cached.hasUpdate,
+                    hasUpdate,
                     releaseUrl: cached.releaseUrl || REPO_CONFIGS[0].releasesUrl,
                     releaseNotes: cached.releaseNotes,
                     checkedAt: cached.checkedAt,
@@ -188,10 +190,12 @@ class VersionService {
             // 如果请求失败，尝试返回过期的缓存数据
             const expiredCache = await this.versionCacheModel.get(VersionService.CACHE_KEY);
             if (expiredCache) {
+                // 使用实时版本重新计算 hasUpdate
+                const hasUpdate = this.isNewerVersion(expiredCache.latestVersion, this.currentVersion);
                 return {
                     currentVersion: this.currentVersion,
                     latestVersion: expiredCache.latestVersion,
-                    hasUpdate: expiredCache.hasUpdate,
+                    hasUpdate,
                     releaseUrl: expiredCache.releaseUrl || REPO_CONFIGS[0].releasesUrl,
                     checkedAt: expiredCache.checkedAt,
                     fromCache: true,
@@ -274,6 +278,7 @@ class VersionService {
             hasUpdate: data.hasUpdate,
             releaseUrl: data.releaseUrl,
             releaseNotes: data.releaseNotes,
+            source: data.source,
             checkedAt: new Date()
         });
     }

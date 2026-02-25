@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import * as ReactDOM from 'react-dom';
+import { renderComponent } from './utils/renderHelper';
 import { AIHelperDashboard } from './components/AIHelperDashboard';
 
 /**
@@ -31,17 +31,7 @@ const renderPage = () => {
     return;
   }
 
-  const reactDom = ReactDOM as unknown as {
-    createRoot?: (el: Element | DocumentFragment) => { render: (node: React.ReactNode) => void };
-    render?: (node: React.ReactNode, el: Element | DocumentFragment | null) => void;
-  };
-
-  if (typeof reactDom.createRoot === 'function') {
-    const root = reactDom.createRoot(container);
-    root.render(<AIHelperDashboard />);
-  } else if (typeof reactDom.render === 'function') {
-    reactDom.render(<AIHelperDashboard />, container);
-  }
+  renderComponent(<AIHelperDashboard />, container);
 };
 
 // 等待 DOM 加载完成后自动执行

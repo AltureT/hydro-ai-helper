@@ -19,6 +19,7 @@ export interface VersionCache {
   releaseUrl?: string;         // 发布页面 URL
   releaseNotes?: string;       // 版本更新说明
   hasUpdate: boolean;          // 是否有可用更新
+  source?: string;             // 版本来源（Gitee/GitHub）
   checkedAt: Date;             // 检查时间
   expireAt: Date;              // 缓存过期时间（用于 TTL）
 }

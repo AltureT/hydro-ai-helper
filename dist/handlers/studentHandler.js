@@ -3,47 +3,36 @@
  * 学生端对话 Handler
  * 处理学生的 AI 对话请求
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProblemStatusHandlerPriv = exports.ProblemStatusHandler = exports.ChatHandlerPriv = exports.ChatHandler = void 0;
 const hydrooj_1 = require("hydrooj");
+const judgeInfoService_1 = require("../services/judgeInfoService");
 const openaiClient_1 = require("../services/openaiClient");
 const promptService_1 = require("../services/promptService");
+const limits_1 = require("../constants/limits");
 const rateLimitService_1 = require("../services/rateLimitService");
 const effectivenessService_1 = require("../services/effectivenessService");
+const outputSafetyService_1 = require("../services/outputSafetyService");
+const topicGuardService_1 = require("../services/topicGuardService");
+const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
+function extractContestIdFromReferer(referer) {
+    if (typeof referer !== 'string')
+        return undefined;
+    const trimmed = referer.trim();
+    if (!trimmed)
+        return undefined;
+    try {
+        // Referer header is usually absolute; provide a base URL for relative fallbacks.
+        const u = trimmed.startsWith('http://') || trimmed.startsWith('https://')
+            ? new URL(trimmed)
+            : new URL(trimmed, 'http://localhost');
+        return u.searchParams.get('tid') || undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 /**
  * ChatHandler - 处理学生的 AI 对话请求
  * POST /ai-helper/chat
@@ -55,6 +44,29 @@ class ChatHandler extends hydrooj_1.Handler {
             const userId = this.user._id;
             // 获取当前域 ID（用于域隔离）
             const domainId = (0, domainHelper_1.getDomainId)(this);
+            // 比赛模式校验：仅在比赛进行中禁用
+            // 优先使用请求体传入的 contestId，缺失时回退到 referer 中的 tid，降低绕过空间
+            const { contestId: requestContestId } = this.request.body;
+            const refererContestId = extractContestIdFromReferer(this.request.headers?.referer);
+            const effectiveContestId = [requestContestId, refererContestId].find((id) => !!id && mongo_1.ObjectId.isValid(id));
+            if (effectiveContestId) {
+                try {
+                    const tdoc = await hydrooj_1.ContestModel.get(domainId, new mongo_1.ObjectId(effectiveContestId));
+                    if (tdoc && hydrooj_1.ContestModel.isOngoing(tdoc)) {
+                        this.response.status = 403;
+                        this.response.body = {
+                            error: '比赛期间 AI 助手不可用，请独立完成作答',
+                            code: 'CONTEST_MODE_RESTRICTED'
+                        };
+                        this.response.type = 'application/json';
+                        return;
+                    }
+                }
+                catch (err) {
+                    // 比赛不存在或查询失败，允许继续（避免误伤）
+                    console.warn('[ChatHandler] 比赛校验失败:', err);
+                }
+            }
             // 获取 AI 配置（用于频率限制和其他设置）
             const aiConfigModel = this.ctx.get('aiConfigModel');
             const aiConfig = await aiConfigModel.getConfig();
@@ -82,11 +94,48 @@ class ChatHandler extends hydrooj_1.Handler {
             const conversationModel = this.ctx.get('conversationModel');
             const messageModel = this.ctx.get('messageModel');
             // 从请求体获取参数
-            const { problemId, problemTitle, problemContent, questionType, userThinking, includeCode, code, conversationId } = this.request.body;
+            const { problemId, problemTitle, problemContent, questionType, userThinking, includeCode, code, conversationId, clarifyContext } = this.request.body;
             // 验证问题类型
             const validQuestionTypes = ['understand', 'think', 'debug', 'clarify', 'optimize'];
             if (!validQuestionTypes.includes(questionType)) {
                 throw new Error('无效的问题类型');
+            }
+            // Clarify 预校验：先拒绝无效请求，避免创建空会话
+            const normalizeText = (text) => text.replace(/\s+/g, ' ').trim();
+            let clarifySourceAiMessageId = '';
+            let clarifySelectedTextRaw = '';
+            let clarifySelectedTextNorm = '';
+            if (questionType === 'clarify') {
+                clarifySourceAiMessageId = clarifyContext?.sourceAiMessageId ?? '';
+                clarifySelectedTextRaw = clarifyContext?.selectedText ?? '';
+                clarifySelectedTextNorm = normalizeText(clarifySelectedTextRaw);
+                if (!conversationId) {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: '追问功能需要基于已有会话',
+                        code: 'CLARIFY_ANCHOR_INVALID'
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
+                if (!clarifySourceAiMessageId || !clarifySelectedTextNorm) {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: '追问功能需要选中 AI 回复中的内容',
+                        code: 'CLARIFY_ANCHOR_INVALID'
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
+                if (!mongo_1.ObjectId.isValid(clarifySourceAiMessageId)) {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: '无效的消息来源 ID',
+                        code: 'CLARIFY_ANCHOR_INVALID'
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
             }
             // 服务端授权校验:optimize 类型需要用户已 AC 该题
             // 防止用户绕过前端直接发送 optimize 请求
@@ -125,9 +174,9 @@ class ChatHandler extends hydrooj_1.Handler {
             let codeWarning;
             if (includeCode && code) {
                 // 检查代码长度,超过 5000 字符则截断
-                if (code.length > 5000) {
-                    processedCode = code.substring(0, 5000);
-                    codeWarning = '代码已截断到 5000 字符';
+                if (code.length > limits_1.PROMPT_LIMITS.MAX_CODE_LENGTH) {
+                    processedCode = code.substring(0, limits_1.PROMPT_LIMITS.MAX_CODE_LENGTH);
+                    codeWarning = `代码已截断到 ${limits_1.PROMPT_LIMITS.MAX_CODE_LENGTH} 字符`;
                 }
                 else {
                     processedCode = code;
@@ -143,10 +192,12 @@ class ChatHandler extends hydrooj_1.Handler {
             // 安全考虑：不使用客户端传入的 problemContent 作为白名单，避免被利用绕过越狱检测
             let trustedProblemTitle;
             let trustedProblemContent;
+            let trustedProblemDocId;
             try {
-                const pdoc = await hydrooj_1.ProblemModel.get(domainId, problemId, ['title', 'content']);
+                const pdoc = await hydrooj_1.ProblemModel.get(domainId, problemId, ['title', 'content', 'docId']);
                 if (pdoc) {
                     trustedProblemTitle = pdoc.title;
+                    trustedProblemDocId = pdoc.docId;
                     // 题目内容可能是字符串或 JSON 对象（多语言支持）
                     if (typeof pdoc.content === 'string') {
                         trustedProblemContent = pdoc.content;
@@ -165,8 +216,8 @@ class ChatHandler extends hydrooj_1.Handler {
             // 题目内容截断(超过 500 字符) - 用于白名单和 System Prompt
             let processedProblemContent;
             if (trustedProblemContent) {
-                if (trustedProblemContent.length > 500) {
-                    processedProblemContent = trustedProblemContent.substring(0, 500) + '...';
+                if (trustedProblemContent.length > limits_1.PROMPT_LIMITS.MAX_PROBLEM_CONTENT_SUMMARY) {
+                    processedProblemContent = trustedProblemContent.substring(0, limits_1.PROMPT_LIMITS.MAX_PROBLEM_CONTENT_SUMMARY) + '...';
                 }
                 else {
                     processedProblemContent = trustedProblemContent;
@@ -203,8 +254,7 @@ class ChatHandler extends hydrooj_1.Handler {
             let currentConversationId;
             if (conversationId) {
                 // 验证 conversationId 格式
-                const { ObjectId } = await Promise.resolve().then(() => __importStar(require('../utils/mongo')));
-                if (!ObjectId.isValid(conversationId)) {
+                if (!mongo_1.ObjectId.isValid(conversationId)) {
                     this.response.status = 400;
                     this.response.body = {
                         error: '无效的会话 ID',
@@ -243,17 +293,172 @@ class ChatHandler extends hydrooj_1.Handler {
                     domainId,
                     userId,
                     problemId,
-                    classId: undefined, // TODO: 从用户信息获取班级 ID
+                    classId: undefined,
                     startTime: now,
                     endTime: now,
                     messageCount: 0,
-                    isEffective: false, // 初始标记为无效,后续通过有效对话判定服务更新
+                    isEffective: false,
                     tags: [],
                     metadata: {
                         problemTitle: problemTitleStr,
-                        problemContent: processedProblemContent
+                        problemContent: processedProblemContent,
+                        offTopicStrike: 0
                     }
                 });
+            }
+            // P0-1: Clarify 锚点校验
+            if (questionType === 'clarify') {
+                const sourceMessage = await messageModel.findById(clarifySourceAiMessageId);
+                if (!sourceMessage || sourceMessage.role !== 'ai') {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: '来源消息不存在或不是 AI 回复',
+                        code: 'CLARIFY_ANCHOR_INVALID'
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
+                if (sourceMessage.conversationId.toHexString() !== currentConversationId.toHexString()) {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: '来源消息不属于当前会话',
+                        code: 'CLARIFY_ANCHOR_INVALID'
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
+                // 内容包含校验（支持归一化匹配）
+                const sourceContentNorm = normalizeText(sourceMessage.content);
+                if (!sourceMessage.content.includes(clarifySelectedTextRaw)
+                    && !sourceContentNorm.includes(clarifySelectedTextNorm)) {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: '选中文本不在来源消息内容中',
+                        code: 'CLARIFY_ANCHOR_INVALID'
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
+            }
+            // P1-2: 偏题检测（在 LLM 调用前执行）
+            const topicGuardService = new topicGuardService_1.TopicGuardService();
+            const topicResult = topicGuardService.evaluate(userThinking, {
+                code: processedCode,
+                problemTitle: problemTitleStr,
+                problemContent: processedProblemContent
+            });
+            if (topicResult.isOffTopic) {
+                const strikeCount = await conversationModel.incrementOffTopicStrike(currentConversationId);
+                if (strikeCount >= 2) {
+                    // 连续偏题 >= 2 次，直接返回固定模板，不调 LLM
+                    const fixedReply = '这个追问与当前编程题无关。请贴出你的代码片段、报错信息或你已尝试的思路，我再继续帮你。';
+                    // 先保存学生消息，确保会话消息顺序与实际轮次一致
+                    const studentMessageTimestamp = new Date();
+                    await messageModel.create({
+                        conversationId: currentConversationId,
+                        role: 'student',
+                        content: userThinking,
+                        timestamp: studentMessageTimestamp,
+                        questionType: questionType,
+                        attachedCode: includeCode && !!processedCode,
+                        attachedError: false
+                    });
+                    await conversationModel.incrementMessageCount(currentConversationId);
+                    const aiMessageTimestamp = new Date();
+                    const aiMessageId = await messageModel.create({
+                        conversationId: currentConversationId,
+                        role: 'ai',
+                        content: fixedReply,
+                        timestamp: aiMessageTimestamp,
+                        metadata: { topicGuardBypassedLLM: true }
+                    });
+                    await conversationModel.incrementMessageCount(currentConversationId);
+                    await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+                    const response = {
+                        conversationId: currentConversationId.toHexString(),
+                        message: {
+                            id: aiMessageId.toHexString(),
+                            role: 'ai',
+                            content: fixedReply,
+                            timestamp: aiMessageTimestamp.toISOString()
+                        }
+                    };
+                    this.response.body = response;
+                    this.response.type = 'application/json';
+                    return;
+                }
+            }
+            else {
+                // 正常对话，重置偏题计数
+                await conversationModel.resetOffTopicStrike(currentConversationId);
+            }
+            // 查询评测数据（debug 类型时自动附带）
+            let judgeInfo;
+            if (questionType === 'debug') {
+                try {
+                    const pidForRecord = trustedProblemDocId;
+                    if (typeof pidForRecord === 'number') {
+                        const pendingStatuses = [
+                            hydrooj_1.STATUS.STATUS_WAITING, hydrooj_1.STATUS.STATUS_FETCHED,
+                            hydrooj_1.STATUS.STATUS_COMPILING, hydrooj_1.STATUS.STATUS_JUDGING
+                        ];
+                        const failureStatuses = [
+                            hydrooj_1.STATUS.STATUS_WRONG_ANSWER,
+                            hydrooj_1.STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+                            hydrooj_1.STATUS.STATUS_MEMORY_LIMIT_EXCEEDED,
+                            hydrooj_1.STATUS.STATUS_OUTPUT_LIMIT_EXCEEDED,
+                            hydrooj_1.STATUS.STATUS_RUNTIME_ERROR,
+                            hydrooj_1.STATUS.STATUS_COMPILE_ERROR,
+                            hydrooj_1.STATUS.STATUS_SYSTEM_ERROR,
+                            hydrooj_1.STATUS.STATUS_ETC,
+                            hydrooj_1.STATUS.STATUS_HACKED,
+                            hydrooj_1.STATUS.STATUS_FORMAT_ERROR
+                        ].filter((s) => typeof s === 'number');
+                        const statusFilter = failureStatuses.length
+                            ? { $in: failureStatuses }
+                            : { $nin: [hydrooj_1.STATUS.STATUS_ACCEPTED, ...pendingStatuses] };
+                        const coll = hydrooj_1.db.collection('record');
+                        const queryBase = {
+                            domainId,
+                            uid: userId,
+                            pid: pidForRecord,
+                            status: statusFilter
+                        };
+                        const findOptions = {
+                            sort: { _id: -1 },
+                            projection: {
+                                status: 1,
+                                score: 1,
+                                testCases: { $slice: 80 },
+                                compilerTexts: { $slice: -5 },
+                                judgeTexts: { $slice: -5 },
+                                lang: 1
+                            }
+                        };
+                        // 仅取"最近一次失败且已出结果"的提交：
+                        // - 若在题目页面带 tid，则优先找该比赛的提交；
+                        // - 否则找非比赛提交（contest 字段缺失或 null）。
+                        let recordDoc = null;
+                        if (effectiveContestId) {
+                            recordDoc = await coll.findOne({
+                                ...queryBase,
+                                contest: new mongo_1.ObjectId(effectiveContestId)
+                            }, findOptions);
+                        }
+                        if (!recordDoc) {
+                            recordDoc = await coll.findOne({
+                                ...queryBase,
+                                contest: null
+                            }, findOptions);
+                        }
+                        if (recordDoc) {
+                            judgeInfo = (0, judgeInfoService_1.formatJudgeInfo)(recordDoc);
+                        }
+                    }
+                }
+                catch (err) {
+                    console.warn('[ChatHandler] 获取评测数据失败:', err);
+                }
             }
             // 保存学生消息到数据库
             await messageModel.create({
@@ -263,7 +468,7 @@ class ChatHandler extends hydrooj_1.Handler {
                 timestamp: new Date(),
                 questionType: questionType,
                 attachedCode: includeCode && !!processedCode,
-                attachedError: false, // TODO: 支持附带错误信息
+                attachedError: !!judgeInfo,
                 metadata: processedCode ? {
                     codeLength: processedCode.length,
                     codeWarning
@@ -271,17 +476,16 @@ class ChatHandler extends hydrooj_1.Handler {
             });
             // 增加会话的消息计数
             await conversationModel.incrementMessageCount(currentConversationId);
-            // 加载历史消息用于多轮对话（排除刚保存的当前消息）
-            // 使用 findRecentByConversationId 仅加载最近 7 条，避免长对话的内存压力
+            // P2: 历史上下文净化 - 过滤掉被标记为 off-topic 的消息
             const historyMessages = (await messageModel.findRecentByConversationId(currentConversationId, 7))
                 .slice(0, -1)
+                .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM)
                 .map((msg) => ({
                 role: msg.role,
                 content: msg.content
             }));
-            // 构造 user prompt（包含历史上下文）
-            const userPrompt = promptService.buildUserPrompt(questionType, userThinking, processedCode, undefined, // errorInfo 暂不支持
-            historyMessages);
+            // 构造 user prompt（包含历史上下文 + clarify 锚点信息 + 评测数据）
+            const userPrompt = promptService.buildUserPrompt(questionType, userThinking, processedCode, judgeInfo, historyMessages, clarifySelectedTextRaw || undefined);
             // 准备消息数组
             const messages = [
                 { role: 'user', content: userPrompt }
@@ -317,16 +521,22 @@ class ChatHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
+            // P0-2: 输出安全后处理（AI 响应返回后、保存到数据库前）
+            const outputSafetyService = new outputSafetyService_1.OutputSafetyService();
+            const safetyResult = outputSafetyService.sanitize(aiResponse, {
+                questionType: questionType,
+                problemTitle: problemTitleStr,
+                problemContent: processedProblemContent
+            });
+            aiResponse = safetyResult.content;
             // 保存 AI 消息到数据库
             const aiMessageTimestamp = new Date();
-            await messageModel.create({
+            const aiMessageId = await messageModel.create({
                 conversationId: currentConversationId,
                 role: 'ai',
                 content: aiResponse,
                 timestamp: aiMessageTimestamp,
-                questionType: undefined, // AI 消息没有问题类型
-                attachedCode: false,
-                attachedError: false
+                metadata: safetyResult.rewritten ? { safetyRewritten: true } : undefined
             });
             // 增加会话的消息计数并更新结束时间
             await conversationModel.incrementMessageCount(currentConversationId);
@@ -341,10 +551,11 @@ class ChatHandler extends hydrooj_1.Handler {
                 // 捕获同步错误（如构造函数异常），记录日志但不影响主流程
                 this.ctx.logger.error('Schedule effectiveness analyze failed', err);
             }
-            // 构造响应 (返回真实的 conversationId)
+            // 构造响应 (返回真实的 conversationId + AI 消息 ID)
             const response = {
                 conversationId: currentConversationId.toHexString(),
                 message: {
+                    id: aiMessageId.toHexString(),
                     role: 'ai',
                     content: aiResponse,
                     timestamp: aiMessageTimestamp.toISOString()
@@ -353,6 +564,9 @@ class ChatHandler extends hydrooj_1.Handler {
             // 如果代码被截断,添加警告信息
             if (codeWarning) {
                 response.codeWarning = codeWarning;
+            }
+            if (judgeInfo) {
+                response.hasJudgeInfo = true;
             }
             this.response.body = response;
             this.response.type = 'application/json';

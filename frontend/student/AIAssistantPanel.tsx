@@ -5,10 +5,9 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import MarkdownIt from 'markdown-it';
-import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
 import { buildApiUrl } from '../utils/domainUtils';
+import { createMarkdownRenderer } from '../utils/markdown';
 import {
   clearConversationId as clearStoredConversationId,
   loadConversationId,
@@ -52,6 +51,10 @@ declare global {
       getValue: (options?: { lineEnding?: string; preserveBOM?: boolean }) => string;
     };
     monaco?: unknown;
+    store?: {
+      subscribe: (listener: () => void) => () => void;
+      getState: () => Record<string, any>;
+    };
   }
 }
 
@@ -169,23 +172,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   /**
    * 初始化 Markdown 渲染器
    */
-  const md = useMemo(() => {
-    return new MarkdownIt({
-      html: false, // 禁用 HTML 标签(安全考虑)
-      linkify: true, // 自动将 URL 转为链接
-      typographer: true, // 启用排版优化
-      highlight: (str, lang) => {
-        if (lang && hljs.getLanguage(lang)) {
-          try {
-            return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
-          } catch (err) {
-            console.error('Highlight.js error:', err);
-          }
-        }
-        return ''; // 使用默认转义
-      }
-    });
-  }, []);
+  const md = useMemo(() => createMarkdownRenderer(), []);
 
   /**
    * T007A: 移动端检测
@@ -246,7 +233,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    */
   useEffect(() => {
     const STATUS_ACCEPTED = 1;
-    const store = (window as any).store;
+    const store = window.store;
     if (!store || isCollapsed || hasAccepted) return;
 
     let lastRecordsRef: any = null;
@@ -308,7 +295,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
         return true;
       }
 
-      const store = (window as any).store;
+      const store = window.store;
       if (store?.dispatch) {
         store.dispatch({ type: 'SCRATCHPAD_EDITOR_UPDATE_CODE', payload: codeToWrite });
         return true;
@@ -378,7 +365,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     if (scratchpadCode !== null) {
       setCode(scratchpadCode);
       setScratchpadAvailable(true);
-      setError(null);
+      setError('');
     } else {
       setError('无法读取 Scratchpad 代码，请确保 Scratchpad 编辑器已加载');
     }
@@ -425,7 +412,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       document.removeEventListener('mousemove', handleDragMove);
       document.removeEventListener('mouseup', handleDragEnd);
     };
-  }, [isDragging, position, size]);
+  }, [isDragging, size.width, size.height]);
 
   /**
    * T007A: 缩放功能 - 底部高度/左侧宽度手柄

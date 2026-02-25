@@ -13,7 +13,6 @@ exports.ExportService = void 0;
 class ExportService {
     constructor(ctx) {
         this.ctx = ctx;
-        this.conversationModel = ctx.get('conversationModel');
     }
     /**
      * 导出会话列表为 CSV 字符串

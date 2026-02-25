@@ -6,7 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MessageModel = void 0;
-const mongo_1 = require("../utils/mongo");
+const ensureObjectId_1 = require("../utils/ensureObjectId");
 /**
  * Message Model 操作类
  * 封装对话消息的 CRUD 操作
@@ -43,9 +43,7 @@ class MessageModel {
      * @returns 消息列表
      */
     async findByConversationId(conversationId) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         return this.collection
             .find({ conversationId: _conversationId })
             .sort({ timestamp: 1 }) // 按时间升序排序
@@ -58,9 +56,7 @@ class MessageModel {
      * @param limit 最大条数（上限 50）
      */
     async findRecentByConversationId(conversationId, limit) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
         const results = await this.collection
             .find({ conversationId: _conversationId })
@@ -75,7 +71,7 @@ class MessageModel {
      * @returns 消息对象或 null
      */
     async findById(id) {
-        const _id = typeof id === 'string' ? new mongo_1.ObjectId(id) : id;
+        const _id = (0, ensureObjectId_1.ensureObjectId)(id);
         return this.collection.findOne({ _id });
     }
     /**
@@ -84,9 +80,7 @@ class MessageModel {
      * @returns 删除的消息数量
      */
     async deleteByConversationId(conversationId) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         const result = await this.collection.deleteMany({ conversationId: _conversationId });
         return result.deletedCount;
     }
@@ -96,9 +90,7 @@ class MessageModel {
      * @returns 消息数量
      */
     async countByConversationId(conversationId) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         return this.collection.countDocuments({ conversationId: _conversationId });
     }
     /**
@@ -107,9 +99,7 @@ class MessageModel {
      * @returns 学生消息列表
      */
     async findStudentMessagesByConversationId(conversationId) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         return this.collection
             .find({ conversationId: _conversationId, role: 'student' })
             .sort({ timestamp: 1 })
@@ -121,9 +111,7 @@ class MessageModel {
      * @returns AI 消息列表
      */
     async findAiMessagesByConversationId(conversationId) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         return this.collection
             .find({ conversationId: _conversationId, role: 'ai' })
             .sort({ timestamp: 1 })
@@ -135,9 +123,7 @@ class MessageModel {
      * @returns 第一条学生消息或 null
      */
     async findFirstStudentMessage(conversationId) {
-        const _conversationId = typeof conversationId === 'string'
-            ? new mongo_1.ObjectId(conversationId)
-            : conversationId;
+        const _conversationId = (0, ensureObjectId_1.ensureObjectId)(conversationId);
         return this.collection.findOne({ conversationId: _conversationId, role: 'student' }, { sort: { timestamp: 1 } });
     }
     /**
@@ -149,7 +135,7 @@ class MessageModel {
         if (conversationIds.length === 0) {
             return new Map();
         }
-        const _ids = conversationIds.map(id => typeof id === 'string' ? new mongo_1.ObjectId(id) : id);
+        const _ids = conversationIds.map(ensureObjectId_1.ensureObjectId);
         // 使用聚合管道获取每个会话的第一条学生消息
         const pipeline = [
             { $match: { conversationId: { $in: _ids }, role: 'student' } },

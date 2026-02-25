@@ -5,7 +5,8 @@
  */
 
 import type { Db, Collection } from 'mongodb';
-import { ObjectId, type ObjectIdType } from '../utils/mongo';
+import { type ObjectIdType } from '../utils/mongo';
+import { ensureObjectId } from '../utils/ensureObjectId';
 
 /**
  * 消息角色类型
@@ -91,9 +92,7 @@ export class MessageModel {
    * @returns 消息列表
    */
   async findByConversationId(conversationId: string | ObjectIdType): Promise<Message[]> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     return this.collection
       .find({ conversationId: _conversationId })
@@ -108,9 +107,7 @@ export class MessageModel {
    * @param limit 最大条数（上限 50）
    */
   async findRecentByConversationId(conversationId: string | ObjectIdType, limit: number): Promise<Message[]> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
     const results = await this.collection
@@ -128,7 +125,7 @@ export class MessageModel {
    * @returns 消息对象或 null
    */
   async findById(id: string | ObjectIdType): Promise<Message | null> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     return this.collection.findOne({ _id });
   }
 
@@ -138,9 +135,7 @@ export class MessageModel {
    * @returns 删除的消息数量
    */
   async deleteByConversationId(conversationId: string | ObjectIdType): Promise<number> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     const result = await this.collection.deleteMany({ conversationId: _conversationId });
     return result.deletedCount;
@@ -152,9 +147,7 @@ export class MessageModel {
    * @returns 消息数量
    */
   async countByConversationId(conversationId: string | ObjectIdType): Promise<number> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     return this.collection.countDocuments({ conversationId: _conversationId });
   }
@@ -165,9 +158,7 @@ export class MessageModel {
    * @returns 学生消息列表
    */
   async findStudentMessagesByConversationId(conversationId: string | ObjectIdType): Promise<Message[]> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     return this.collection
       .find({ conversationId: _conversationId, role: 'student' })
@@ -181,9 +172,7 @@ export class MessageModel {
    * @returns AI 消息列表
    */
   async findAiMessagesByConversationId(conversationId: string | ObjectIdType): Promise<Message[]> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     return this.collection
       .find({ conversationId: _conversationId, role: 'ai' })
@@ -197,9 +186,7 @@ export class MessageModel {
    * @returns 第一条学生消息或 null
    */
   async findFirstStudentMessage(conversationId: string | ObjectIdType): Promise<Message | null> {
-    const _conversationId = typeof conversationId === 'string'
-      ? new ObjectId(conversationId)
-      : conversationId;
+    const _conversationId = ensureObjectId(conversationId);
 
     return this.collection.findOne(
       { conversationId: _conversationId, role: 'student' },
@@ -219,9 +206,7 @@ export class MessageModel {
       return new Map();
     }
 
-    const _ids = conversationIds.map(id =>
-      typeof id === 'string' ? new ObjectId(id) : id
-    );
+    const _ids = conversationIds.map(ensureObjectId);
 
     // 使用聚合管道获取每个会话的第一条学生消息
     const pipeline = [

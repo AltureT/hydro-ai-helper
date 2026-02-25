@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import * as ReactDOM from 'react-dom';
+import { renderComponent } from './utils/renderHelper';
 import { AIAssistantPanel } from './student/AIAssistantPanel';
 
 // 支持的题目详情页 URL 模式
@@ -373,18 +373,7 @@ const initAIAssistant = () => {
   container.id = 'ai-assistant-trigger-container';
   document.body.appendChild(container);
 
-  // 渲染 React 组件（兼容 React 17/18）
-  const reactDom = ReactDOM as unknown as {
-    createRoot?: (el: Element | DocumentFragment) => { render: (node: React.ReactNode) => void };
-    render?: (node: React.ReactNode, el: Element | DocumentFragment | null) => void;
-  };
-
-  if (typeof reactDom.createRoot === 'function') {
-    const root = reactDom.createRoot(container);
-    root.render(<AIAssistantTrigger problemId={problemId} />);
-  } else if (typeof reactDom.render === 'function') {
-    reactDom.render(<AIAssistantTrigger problemId={problemId} />, container);
-  }
+  renderComponent(<AIAssistantTrigger problemId={problemId} />, container);
 };
 
 // 等待 DOM 加载完成

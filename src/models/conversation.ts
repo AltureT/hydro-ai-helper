@@ -4,8 +4,9 @@
  * 管理学生与 AI 的对话会话,记录会话元数据
  */
 
-import type { Db, Collection, Filter } from 'mongodb';
-import { ObjectId, type ObjectIdType } from '../utils/mongo';
+import type { Db, Collection, Filter, UpdateFilter } from 'mongodb';
+import { type ObjectIdType } from '../utils/mongo';
+import { ensureObjectId } from '../utils/ensureObjectId';
 
 /**
  * 对话会话接口
@@ -131,7 +132,7 @@ export class ConversationModel {
    * @returns 会话对象或 null
    */
   async findById(id: string | ObjectIdType): Promise<Conversation | null> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     return this.collection.findOne({ _id });
   }
 
@@ -141,7 +142,7 @@ export class ConversationModel {
    * @param endTime 最后更新时间
    */
   async updateEndTime(id: string | ObjectIdType, endTime: Date): Promise<void> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     await this.collection.updateOne(
       { _id },
       { $set: { endTime } }
@@ -153,7 +154,7 @@ export class ConversationModel {
    * @param id 会话 ID
    */
   async incrementMessageCount(id: string | ObjectIdType): Promise<void> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     await this.collection.updateOne(
       { _id },
       { $inc: { messageCount: 1 } }
@@ -166,7 +167,7 @@ export class ConversationModel {
    * @param isEffective 是否有效
    */
   async updateEffectiveness(id: string | ObjectIdType, isEffective: boolean): Promise<void> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     await this.collection.updateOne(
       { _id },
       { $set: { isEffective } }
@@ -263,7 +264,7 @@ export class ConversationModel {
     teacherNote?: string,
     tags?: string[]
   ): Promise<void> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     const update: Partial<Pick<Conversation, 'teacherNote' | 'tags'>> = {};
 
     if (teacherNote !== undefined) {
@@ -283,19 +284,19 @@ export class ConversationModel {
   }
 
   async incrementOffTopicStrike(id: string | ObjectIdType): Promise<number> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     const result = await this.collection.findOneAndUpdate(
       { _id },
-      { $inc: { 'metadata.offTopicStrike': 1 } as any },
+      { $inc: { 'metadata.offTopicStrike': 1 } } as unknown as UpdateFilter<Conversation>,
       { returnDocument: 'after' }
     );
-    return (result as any)?.metadata?.offTopicStrike
+    return result?.metadata?.offTopicStrike
       ?? (result as any)?.value?.metadata?.offTopicStrike
       ?? 1;
   }
 
   async resetOffTopicStrike(id: string | ObjectIdType): Promise<void> {
-    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const _id = ensureObjectId(id);
     await this.collection.updateOne(
       { _id },
       { $set: { 'metadata.offTopicStrike': 0 } }
@@ -312,7 +313,7 @@ export class ConversationModel {
     const date = new Date();
     date.setDate(date.getDate() - days);
 
-    const filter: any = { startTime: { $gte: date } };
+    const filter: Filter<Conversation> = { startTime: { $gte: date } };
     if (domainId) {
       filter.domainId = domainId;
     }

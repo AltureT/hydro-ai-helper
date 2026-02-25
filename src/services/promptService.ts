@@ -4,6 +4,7 @@
  */
 
 import { getBuiltinJailbreakPatterns } from '../constants/jailbreakRules';
+import { PROMPT_LIMITS } from '../constants/limits';
 export { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 
 /**
@@ -382,17 +383,17 @@ ${(errorInfo ?? '').trim()}
     // userThinking 改为选填，不再强制要求
 
     // 检查思路长度是否过长（仅在有内容时检查）
-    if (userThinking && userThinking.length > 2000) {
-      return { valid: false, error: '描述过长(最多 2000 字)' };
+    if (userThinking && userThinking.length > PROMPT_LIMITS.MAX_THINKING_LENGTH) {
+      return { valid: false, error: `描述过长(最多 ${PROMPT_LIMITS.MAX_THINKING_LENGTH} 字)` };
     }
 
     // 检查代码长度
-    if (code && code.length > 5000) {
-      return { valid: false, error: '代码片段过长(最多 5000 字符)' };
+    if (code && code.length > PROMPT_LIMITS.MAX_CODE_LENGTH) {
+      return { valid: false, error: `代码片段过长(最多 ${PROMPT_LIMITS.MAX_CODE_LENGTH} 字符)` };
     }
 
     // 标准化白名单内容（用于匹配比对），设置长度上限避免性能问题
-    const MAX_WHITELIST_LENGTH = 2000;
+    const MAX_WHITELIST_LENGTH = PROMPT_LIMITS.MAX_WHITELIST_LENGTH;
     const normalizedWhitelist = problemContentWhitelist
       ? this.normalizeForComparison(problemContentWhitelist.slice(0, MAX_WHITELIST_LENGTH))
       : '';
@@ -539,7 +540,7 @@ ${languageAndStyleRule}
   }
 
   private buildMatchedSnippet(content: string, matchIndex: number, matchText: string): string {
-    const SNIPPET_RADIUS = 32;
+    const SNIPPET_RADIUS = PROMPT_LIMITS.SNIPPET_CONTEXT_RADIUS;
     const start = Math.max(0, matchIndex - SNIPPET_RADIUS);
     const end = Math.min(content.length, matchIndex + matchText.length + SNIPPET_RADIUS);
     const prefix = start > 0 ? '…' : '';

@@ -13,6 +13,7 @@ exports.createOpenAIClientFromConfig = createOpenAIClientFromConfig;
 exports.createMultiModelClientFromConfig = createMultiModelClientFromConfig;
 const axios_1 = __importDefault(require("axios"));
 const crypto_1 = require("../lib/crypto");
+const limits_1 = require("../constants/limits");
 /**
  * 获取可用模型列表
  * 调用 /models 端点获取 API 提供的模型列表
@@ -22,11 +23,11 @@ const crypto_1 = require("../lib/crypto");
  * @param timeoutSeconds 超时时间（秒），默认 15
  * @returns 模型列表或错误信息
  */
-async function fetchAvailableModels(apiBaseUrl, apiKey, timeoutSeconds = 15) {
+async function fetchAvailableModels(apiBaseUrl, apiKey, timeoutSeconds = limits_1.API_DEFAULTS.FETCH_MODELS_TIMEOUT_MS / 1000) {
     // 标准化 URL（移除尾部斜杠）
     const baseUrl = apiBaseUrl.replace(/\/+$/, '');
     try {
-        const response = await axios_1.default.get(`${baseUrl}/models`, {
+        const response = await axios_1.default.get(`${baseUrl}${limits_1.API_DEFAULTS.MODELS_ENDPOINT}`, {
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
@@ -125,12 +126,12 @@ class OpenAIClient {
                 { role: 'system', content: systemPrompt },
                 ...messages
             ],
-            temperature: 0.7,
-            max_tokens: 1500
+            temperature: limits_1.API_DEFAULTS.DEFAULT_TEMPERATURE,
+            max_tokens: limits_1.API_DEFAULTS.MAX_COMPLETION_TOKENS
         };
         try {
             // 发送请求
-            const response = await axios_1.default.post(`${this.config.apiBaseUrl}/chat/completions`, payload, {
+            const response = await axios_1.default.post(`${this.config.apiBaseUrl}${limits_1.API_DEFAULTS.CHAT_ENDPOINT}`, payload, {
                 headers: {
                     'Authorization': `Bearer ${this.config.apiKey}`,
                     'Content-Type': 'application/json'

@@ -4,7 +4,7 @@
  * 支持多 API 端点配置、模型自动获取、Fallback 机制
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { VersionBadge } from './VersionBadge';
 
 /**
@@ -116,6 +116,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     page: 1,
     totalPages: 0
   });
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showSuccess = (msg: string, durationMs = 3000) => {
+    if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    setSuccessMessage(msg);
+    successTimerRef.current = setTimeout(() => setSuccessMessage(null), durationMs);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    };
+  }, []);
 
   /**
    * 初始化：加载配置
@@ -275,8 +288,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
 
       setNewApiKey('');
-      setSuccessMessage('配置已保存');
-      setTimeout(() => setSuccessMessage(null), 3000);
+      showSuccess('配置已保存');
     } catch (err: any) {
       console.error('Save config error:', err);
       setError(err.message || '保存配置失败');
@@ -302,8 +314,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       const json = await res.json();
 
       if (json.success) {
-        setSuccessMessage('连接成功，AI 服务可用');
-        setTimeout(() => setSuccessMessage(null), 3000);
+        showSuccess('连接成功，AI 服务可用');
       } else {
         setError(json.message || '连接失败，AI 服务不可用');
       }
@@ -361,8 +372,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           modelsLastFetched: new Date().toISOString(),
         };
         setConfig({ ...config, endpoints: newEndpoints });
-        setSuccessMessage(`获取到 ${json.models?.length || 0} 个可用模型`);
-        setTimeout(() => setSuccessMessage(null), 3000);
+        showSuccess(`获取到 ${json.models?.length || 0} 个可用模型`);
       } else {
         setError(json.error || '获取模型列表失败');
       }
@@ -485,8 +495,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     try {
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
-        setSuccessMessage('已复制到剪贴板');
-        setTimeout(() => setSuccessMessage(null), 2000);
+        showSuccess('已复制到剪贴板', 2000);
       } else {
         window.prompt('请复制以下内容', text);
       }

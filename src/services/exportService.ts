@@ -6,7 +6,7 @@
 
 import type { Context } from 'hydrooj';
 import type { Collection, Filter } from 'mongodb';
-import { ConversationModel, Conversation } from '../models/conversation';
+import { Conversation } from '../models/conversation';
 
 /**
  * 导出筛选条件接口
@@ -32,11 +32,8 @@ export interface ConversationExportOptions {
  * 负责导出会话级数据为 CSV 字符串
  */
 export class ExportService {
-  private conversationModel: ConversationModel;
+  constructor(private ctx: Context) {}
 
-  constructor(private ctx: Context) {
-    this.conversationModel = ctx.get('conversationModel');
-  }
 
   /**
    * 导出会话列表为 CSV 字符串
@@ -93,7 +90,7 @@ export class ExportService {
     }
 
     // 2. 查询所有符合条件的会话记录(按开始时间升序排序)
-    const collection = this.ctx.db.collection('ai_conversations') as unknown as Collection<Conversation>;
+    const collection = this.ctx.db.collection('ai_conversations') as Collection<Conversation>;
     const cursor = collection
       .find(query, { projection })
       .sort({ startTime: 1 });

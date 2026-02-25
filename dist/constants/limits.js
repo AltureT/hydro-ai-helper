@@ -1,0 +1,22 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.QUERY_DEFAULTS = exports.API_DEFAULTS = exports.PROMPT_LIMITS = void 0;
+exports.PROMPT_LIMITS = {
+    MAX_THINKING_LENGTH: 2000,
+    MAX_CODE_LENGTH: 5000,
+    MAX_WHITELIST_LENGTH: 2000,
+    MAX_PROBLEM_CONTENT_SUMMARY: 500,
+    SNIPPET_CONTEXT_RADIUS: 32,
+};
+exports.API_DEFAULTS = {
+    DEFAULT_TEMPERATURE: 0.7,
+    MAX_COMPLETION_TOKENS: 1500,
+    FETCH_MODELS_TIMEOUT_MS: 15000,
+    CHAT_ENDPOINT: '/chat/completions',
+    MODELS_ENDPOINT: '/models',
+};
+exports.QUERY_DEFAULTS = {
+    DEFAULT_PAGE_LIMIT: 50,
+    MAX_PAGINATION_LIMIT: 100,
+};
+//# sourceMappingURL=limits.js.map

@@ -4,7 +4,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.JailbreakLogModel = void 0;
-const mongo_1 = require("../utils/mongo");
+const ensureObjectId_1 = require("../utils/ensureObjectId");
 class JailbreakLogModel {
     constructor(db) {
         this.collection = db.collection('ai_jailbreak_logs');
@@ -20,9 +20,7 @@ class JailbreakLogModel {
             problemId: data.problemId,
             conversationId: data.conversationId === undefined
                 ? undefined
-                : typeof data.conversationId === 'string'
-                    ? new mongo_1.ObjectId(data.conversationId)
-                    : data.conversationId,
+                : (0, ensureObjectId_1.ensureObjectId)(data.conversationId),
             questionType: data.questionType,
             matchedPattern: data.matchedPattern,
             matchedText: data.matchedText,

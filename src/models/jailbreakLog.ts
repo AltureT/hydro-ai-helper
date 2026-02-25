@@ -3,7 +3,8 @@
  */
 
 import type { Collection, Db } from 'mongodb';
-import { ObjectId, type ObjectIdType } from '../utils/mongo';
+import { type ObjectIdType } from '../utils/mongo';
+import { ensureObjectId } from '../utils/ensureObjectId';
 
 export type JailbreakQuestionType = 'understand' | 'think' | 'debug' | 'review' | 'clarify' | 'optimize';
 
@@ -48,9 +49,7 @@ export class JailbreakLogModel {
       conversationId:
         data.conversationId === undefined
           ? undefined
-          : typeof data.conversationId === 'string'
-            ? new ObjectId(data.conversationId)
-            : data.conversationId,
+          : ensureObjectId(data.conversationId),
       questionType: data.questionType,
       matchedPattern: data.matchedPattern,
       matchedText: data.matchedText,
