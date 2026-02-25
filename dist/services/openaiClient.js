@@ -7,13 +7,69 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MultiModelClient = exports.OpenAIClient = void 0;
+exports.MultiModelClient = exports.OpenAIClient = exports.AIServiceError = void 0;
 exports.fetchAvailableModels = fetchAvailableModels;
 exports.createOpenAIClientFromConfig = createOpenAIClientFromConfig;
 exports.createMultiModelClientFromConfig = createMultiModelClientFromConfig;
+const http_1 = __importDefault(require("http"));
+const https_1 = __importDefault(require("https"));
 const axios_1 = __importDefault(require("axios"));
 const crypto_1 = require("../lib/crypto");
 const limits_1 = require("../constants/limits");
+// ─── HTTP 连接池 ───────────────────────────────────────
+const HTTP_AGENT = new http_1.default.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 5, timeout: 60000 });
+const HTTPS_AGENT = new https_1.default.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 5, timeout: 60000 });
+const RETRYABLE_CATEGORIES = new Set(['rate_limit', 'server', 'timeout', 'network']);
+class AIServiceError extends Error {
+    constructor(message, category, httpStatus) {
+        super(message);
+        this.name = 'AIServiceError';
+        this.category = category;
+        this.httpStatus = httpStatus;
+        this.isRetryable = RETRYABLE_CATEGORIES.has(category);
+    }
+}
+exports.AIServiceError = AIServiceError;
+const USER_ERROR_MESSAGES = {
+    auth: 'AI 服务认证失败，请联系管理员检查配置',
+    rate_limit: 'AI 服务繁忙，请稍后再试',
+    server: 'AI 服务暂时不可用，请稍后再试',
+    client: 'AI 服务配置错误，请联系管理员',
+    timeout: 'AI 服务响应超时，请稍后再试',
+    network: '无法连接到 AI 服务，请稍后再试',
+    aborted: '请求已取消',
+    unknown: 'AI 服务异常，请稍后再试',
+};
+// ─── 重试 & 超时 ──────────────────────────────────────
+const RETRY = {
+    MAX_RETRIES: 2,
+    BASE_DELAY_MS: 1000,
+    MAX_DELAY_MS: 8000,
+    JITTER: 0.3,
+    TOTAL_TIMEOUT_MS: 60000,
+};
+function calculateBackoffMs(attempt) {
+    const base = Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS);
+    const jitter = base * RETRY.JITTER * (Math.random() * 2 - 1);
+    return Math.round(base + jitter);
+}
+function abortableDelay(ms, signal) {
+    if (signal?.aborted)
+        return Promise.reject(new AIServiceError('请求已取消', 'aborted'));
+    if (!signal)
+        return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(new AIServiceError('请求已取消', 'aborted'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
 /**
  * 获取可用模型列表
  * 调用 /models 端点获取 API 提供的模型列表
@@ -32,7 +88,9 @@ async function fetchAvailableModels(apiBaseUrl, apiKey, timeoutSeconds = limits_
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
             },
-            timeout: timeoutSeconds * 1000
+            timeout: timeoutSeconds * 1000,
+            httpAgent: HTTP_AGENT,
+            httpsAgent: HTTPS_AGENT,
         });
         if (!response.data?.data || !Array.isArray(response.data.data)) {
             return {
@@ -115,10 +173,11 @@ class OpenAIClient {
      *
      * @param messages 对话消息数组,包含用户和助手的历史消息
      * @param systemPrompt 系统提示词,用于定义 AI 的行为和角色
+     * @param options 可选配置,支持 AbortSignal 取消
      * @returns AI 回答的文本内容
-     * @throws {Error} 当 API Key 无效、调用频率超限、网络错误或 AI 服务不可用时抛出错误
+     * @throws {AIServiceError} 当 API Key 无效、调用频率超限、网络错误或 AI 服务不可用时抛出
      */
-    async chat(messages, systemPrompt) {
+    async chat(messages, systemPrompt, options) {
         // 构造 OpenAI 格式请求
         const payload = {
             model: this.config.modelName,
@@ -136,52 +195,58 @@ class OpenAIClient {
                     'Authorization': `Bearer ${this.config.apiKey}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: this.config.timeoutSeconds * 1000
+                timeout: this.config.timeoutSeconds * 1000,
+                signal: options?.signal,
+                httpAgent: HTTP_AGENT,
+                httpsAgent: HTTPS_AGENT,
             });
             // 提取 AI 回答
-            const aiMessage = response.data.choices[0]?.message?.content;
+            const aiMessage = response.data?.choices?.[0]?.message?.content;
             if (!aiMessage) {
-                throw new Error('AI 返回内容为空');
+                throw new AIServiceError('AI 返回内容为空', 'server');
             }
             return aiMessage;
         }
         catch (error) {
-            // 错误处理
+            // 已经是 AIServiceError 则直接抛出
+            if (error instanceof AIServiceError)
+                throw error;
+            // AbortController 取消
+            if (axios_1.default.isCancel(error)) {
+                throw new AIServiceError('请求已取消', 'aborted');
+            }
+            // Axios 错误处理
             if (axios_1.default.isAxiosError(error)) {
                 const axiosError = error;
-                // 处理不同类型的错误
                 if (axiosError.response) {
-                    // HTTP 错误响应 (4xx, 5xx)
                     const status = axiosError.response.status;
                     const data = axiosError.response.data;
-                    if (status === 401) {
-                        throw new Error('API Key 无效或已过期');
+                    if (status === 401 || status === 403) {
+                        throw new AIServiceError('API Key 无效或已过期', 'auth', status);
                     }
                     else if (status === 429) {
-                        throw new Error('API 调用频率超限,请稍后再试');
+                        throw new AIServiceError('API 调用频率超限', 'rate_limit', status);
                     }
                     else if (status >= 500) {
-                        throw new Error(`AI 服务暂时不可用 (HTTP ${status})`);
+                        throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
                     }
                     else {
                         const errorMsg = data?.error?.message || '未知错误';
-                        throw new Error(`AI API 错误 (HTTP ${status}): ${errorMsg}`);
+                        throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${errorMsg}`, 'client', status);
                     }
                 }
                 else if (axiosError.code === 'ECONNABORTED') {
-                    // 超时错误
-                    throw new Error(`请求超时 (超过 ${this.config.timeoutSeconds} 秒)`);
+                    throw new AIServiceError(`请求超时 (超过 ${this.config.timeoutSeconds} 秒)`, 'timeout');
                 }
                 else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
-                    // 网络错误
-                    throw new Error('无法连接到 AI 服务,请检查网络或 API Base URL');
+                    throw new AIServiceError('无法连接到 AI 服务', 'network');
                 }
                 else {
-                    throw new Error(`网络错误: ${axiosError.message}`);
+                    throw new AIServiceError(`网络错误: ${axiosError.message}`, 'network');
                 }
             }
             // 其他未知错误
-            throw new Error(`调用 AI 服务失败: ${error instanceof Error ? error.message : String(error)}`);
+            throw new AIServiceError(`调用 AI 服务失败: ${error instanceof Error ? error.message : String(error)}`, 'unknown');
         }
     }
     /**
@@ -245,7 +310,7 @@ async function createOpenAIClientFromConfig(ctx, existingConfig) {
 }
 /**
  * 多模型客户端类
- * 支持按 fallback 顺序尝试多个模型
+ * 支持按 fallback 顺序尝试多个模型，带重试和总超时
  */
 class MultiModelClient {
     constructor(models) {
@@ -263,92 +328,124 @@ class MultiModelClient {
         }));
     }
     /**
-     * 发送对话请求，支持 fallback
+     * 发送对话请求，支持 fallback + 重试 + 总超时
      */
-    async chat(messages, systemPrompt) {
+    async chat(messages, systemPrompt, options) {
+        // 外部 signal 已取消则立即抛出
+        if (options?.signal?.aborted) {
+            throw new AIServiceError('请求已取消', 'aborted');
+        }
         const errors = [];
-        const skippedEndpoints = new Set(); // 跳过的端点（401/403错误）
-        for (const { config, client } of this.clients) {
-            // 如果该端点已被跳过（因为认证错误），跳过该端点的所有模型
-            if (skippedEndpoints.has(config.endpointId)) {
-                continue;
-            }
-            try {
-                const content = await client.chat(messages, systemPrompt);
-                return {
-                    content,
-                    usedModel: {
-                        endpointId: config.endpointId,
-                        endpointName: config.endpointName,
-                        modelName: config.modelName
+        const skippedEndpoints = new Set();
+        // L3: 全 fallback 链总超时 (60s)
+        const totalAc = new AbortController();
+        let timedOut = false;
+        const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, RETRY.TOTAL_TIMEOUT_MS);
+        // 外部 signal 级联到内部 totalAc
+        const onExternalAbort = () => totalAc.abort();
+        options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
+        try {
+            for (const { config, client } of this.clients) {
+                if (skippedEndpoints.has(config.endpointId))
+                    continue;
+                for (let attempt = 0; attempt <= RETRY.MAX_RETRIES; attempt++) {
+                    // 每次迭代检查总超时
+                    if (totalAc.signal.aborted) {
+                        throw timedOut
+                            ? new AIServiceError('AI 服务总超时', 'timeout')
+                            : new AIServiceError('请求已取消', 'aborted');
                     }
-                };
+                    try {
+                        const content = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+                        return {
+                            content,
+                            usedModel: {
+                                endpointId: config.endpointId,
+                                endpointName: config.endpointName,
+                                modelName: config.modelName
+                            }
+                        };
+                    }
+                    catch (error) {
+                        const aiError = error instanceof AIServiceError
+                            ? error
+                            : new AIServiceError(error instanceof Error ? error.message : String(error), 'unknown');
+                        // aborted → 区分内部超时 vs 外部取消
+                        if (aiError.category === 'aborted') {
+                            throw timedOut
+                                ? new AIServiceError('AI 服务总超时', 'timeout')
+                                : aiError;
+                        }
+                        errors.push({
+                            model: `${config.endpointName}/${config.modelName}`,
+                            error: aiError.message,
+                            category: aiError.category
+                        });
+                        // auth → 跳过该端点的所有模型
+                        if (aiError.category === 'auth') {
+                            skippedEndpoints.add(config.endpointId);
+                            console.warn(`[MultiModelClient] 端点 "${config.endpointName}" 认证失败，跳过其所有模型`);
+                            break;
+                        }
+                        // client → 跳过该模型
+                        if (aiError.category === 'client') {
+                            console.warn(`[MultiModelClient] 模型 "${config.modelName}" 不可用，尝试下一个`);
+                            break;
+                        }
+                        // 可重试 + 尚有重试次数 → backoff 后重试
+                        if (aiError.isRetryable && attempt < RETRY.MAX_RETRIES) {
+                            const delay = calculateBackoffMs(attempt);
+                            console.warn(`[MultiModelClient] ${config.modelName} 失败 (${aiError.category})，${delay}ms 后重试 (${attempt + 1}/${RETRY.MAX_RETRIES})`);
+                            try {
+                                await abortableDelay(delay, totalAc.signal);
+                            }
+                            catch (delayErr) {
+                                // backoff 期间被 abort → 区分内部超时 vs 外部取消
+                                if (delayErr instanceof AIServiceError && delayErr.category === 'aborted') {
+                                    throw timedOut
+                                        ? new AIServiceError('AI 服务总超时', 'timeout')
+                                        : delayErr;
+                                }
+                                throw delayErr;
+                            }
+                            continue;
+                        }
+                        // 不可重试 或 重试次数耗尽 → 尝试下一个模型
+                        console.warn(`[MultiModelClient] ${config.modelName} 最终失败: ${aiError.message}`);
+                        break;
+                    }
+                }
             }
-            catch (error) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                const category = this.categorizeError(errorMessage);
-                errors.push({
-                    model: `${config.endpointName}/${config.modelName}`,
-                    error: errorMessage,
-                    category
-                });
-                // 根据错误类型决定是否继续尝试
-                if (category === 'auth') {
-                    // 认证错误：跳过该端点的所有模型
-                    skippedEndpoints.add(config.endpointId);
-                    console.warn(`[MultiModelClient] 端点 "${config.endpointName}" 认证失败，跳过其所有模型`);
-                }
-                else if (category === 'client') {
-                    // 客户端错误（400/404）：跳过该模型，继续尝试下一个
-                    console.warn(`[MultiModelClient] 模型 "${config.modelName}" 不可用，尝试下一个`);
-                }
-                else if (category === 'rate_limit') {
-                    // 限流：继续尝试下一个
-                    console.warn(`[MultiModelClient] 端点 "${config.endpointName}" 限流，尝试下一个`);
-                }
-                else {
-                    // 服务器错误、超时、网络错误：继续尝试
-                    console.warn(`[MultiModelClient] ${config.modelName} 失败: ${errorMessage}`);
+            // 所有模型均失败 — 结构化日志
+            const categoryCounts = new Map();
+            for (const e of errors) {
+                categoryCounts.set(e.category, (categoryCounts.get(e.category) || 0) + 1);
+            }
+            let dominantCategory = 'unknown';
+            let maxCount = 0;
+            for (const [cat, count] of categoryCounts) {
+                if (count > maxCount) {
+                    maxCount = count;
+                    dominantCategory = cat;
                 }
             }
+            console.error('[MultiModelClient] 所有模型均失败:', JSON.stringify({
+                timestamp: new Date().toISOString(),
+                totalAttempts: errors.length,
+                modelCount: this.clients.length,
+                skippedEndpoints: [...skippedEndpoints],
+                errors: errors.map(e => ({
+                    model: e.model,
+                    category: e.category,
+                    message: e.error.substring(0, 200)
+                })),
+            }));
+            throw new AIServiceError(USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
         }
-        // 所有模型都失败，抛出聚合错误
-        const errorSummary = errors
-            .map(e => `[${e.model}] ${e.error}`)
-            .join('; ');
-        throw new Error(`所有 AI 模型均不可用。详情: ${errorSummary}`);
-    }
-    /**
-     * 错误分类
-     */
-    categorizeError(message) {
-        const lowerMessage = message.toLowerCase();
-        if (lowerMessage.includes('401') || lowerMessage.includes('api key') ||
-            lowerMessage.includes('无效') || lowerMessage.includes('过期') ||
-            lowerMessage.includes('403') || lowerMessage.includes('无权')) {
-            return 'auth';
+        finally {
+            clearTimeout(totalTimer);
+            options?.signal?.removeEventListener('abort', onExternalAbort);
         }
-        if (lowerMessage.includes('429') || lowerMessage.includes('频率') ||
-            lowerMessage.includes('rate') || lowerMessage.includes('limit')) {
-            return 'rate_limit';
-        }
-        if (lowerMessage.includes('500') || lowerMessage.includes('502') ||
-            lowerMessage.includes('503') || lowerMessage.includes('504') ||
-            lowerMessage.includes('服务不可用')) {
-            return 'server';
-        }
-        if (lowerMessage.includes('400') || lowerMessage.includes('404') ||
-            lowerMessage.includes('不存在') || lowerMessage.includes('无效参数')) {
-            return 'client';
-        }
-        if (lowerMessage.includes('超时') || lowerMessage.includes('timeout')) {
-            return 'timeout';
-        }
-        if (lowerMessage.includes('网络') || lowerMessage.includes('连接') ||
-            lowerMessage.includes('econnrefused') || lowerMessage.includes('enotfound')) {
-            return 'network';
-        }
-        return 'unknown';
     }
 }
 exports.MultiModelClient = MultiModelClient;

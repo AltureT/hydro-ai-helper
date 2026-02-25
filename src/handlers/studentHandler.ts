@@ -5,7 +5,7 @@
 
 import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
 import { formatJudgeInfo } from '../services/judgeInfoService';
-import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient } from '../services/openaiClient';
+import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS } from '../constants/limits';
 import { RateLimitService } from '../services/rateLimitService';
@@ -596,23 +596,45 @@ export class ChatHandler extends Handler {
         return;
       }
 
-      // 调用 AI 服务(支持多模型 fallback)
+      // 调用 AI 服务(支持多模型 fallback + L4 请求级超时)
       let aiResponse: string;
+
+      // L4 请求级 AbortController
+      const requestAc = new AbortController();
+      const rawReq = (this.request as any)?.ctx?.req;
+
+      // 提前检查客户端是否已断开（close 事件可能在前序 DB 操作期间已触发）
+      if (rawReq?.destroyed || rawReq?.aborted) {
+        this.response.status = 499;
+        this.response.body = { error: '请求已取消' };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const onClose = () => requestAc.abort();
+      rawReq?.on?.('close', onClose);
+      const requestTimer = setTimeout(() => requestAc.abort(), 65_000);
 
       try {
         const aiStart = Date.now();
-        const result = await multiModelClient.chat(messages, systemPrompt);
+        const result = await multiModelClient.chat(messages, systemPrompt, { signal: requestAc.signal });
         console.log(`[Perf] AI Response: ${Date.now() - aiStart}ms`);
         aiResponse = result.content;
-        // 可选:记录使用的模型信息
         console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       } catch (error) {
-        // 记录错误日志
         console.error('[AI Helper] AI 调用失败:', error);
-        this.response.status = 500;
-        this.response.body = { error: error instanceof Error ? error.message : 'AI 服务调用失败' };
+        if (error instanceof AIServiceError && error.category === 'aborted') {
+          this.response.status = 499;
+          this.response.body = { error: '请求已取消' };
+        } else {
+          this.response.status = 500;
+          this.response.body = { error: error instanceof Error ? error.message : 'AI 服务调用失败' };
+        }
         this.response.type = 'application/json';
         return;
+      } finally {
+        clearTimeout(requestTimer);
+        rawReq?.removeListener?.('close', onClose);
       }
 
       // P0-2: 输出安全后处理（AI 响应返回后、保存到数据库前）
