@@ -9,6 +9,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.parsePaginationParams = parsePaginationParams;
 exports.parseDateRangeParams = parseDateRangeParams;
 exports.buildFilters = buildFilters;
+const limits_1 = require("../constants/limits");
 /**
  * 解析分页参数
  * 从查询参数中提取并验证分页参数
@@ -18,9 +19,9 @@ exports.buildFilters = buildFilters;
  * @param maxLimit 最大每页数量,默认 100
  * @returns 解析后的分页参数
  */
-function parsePaginationParams(pageStr = '1', limitStr = '50', maxLimit = 100) {
+function parsePaginationParams(pageStr = '1', limitStr = String(limits_1.QUERY_DEFAULTS.DEFAULT_PAGE_LIMIT), maxLimit = limits_1.QUERY_DEFAULTS.MAX_PAGINATION_LIMIT) {
     const page = Math.max(1, parseInt(pageStr, 10) || 1);
-    const limit = Math.min(maxLimit, Math.max(1, parseInt(limitStr, 10) || 50));
+    const limit = Math.min(maxLimit, Math.max(1, parseInt(limitStr, 10) || limits_1.QUERY_DEFAULTS.DEFAULT_PAGE_LIMIT));
     return { page, limit };
 }
 /**

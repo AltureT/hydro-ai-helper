@@ -2,6 +2,7 @@
 .claude/
 .specify/
 .chatgpt/
+CLAUDE.md
 
 # Ignore environment variable files
 .env

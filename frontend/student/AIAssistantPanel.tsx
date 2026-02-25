@@ -54,6 +54,7 @@ declare global {
     store?: {
       subscribe: (listener: () => void) => () => void;
       getState: () => Record<string, any>;
+      dispatch?: (action: { type: string; payload?: unknown }) => void;
     };
   }
 }

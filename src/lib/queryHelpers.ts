@@ -5,6 +5,8 @@
  * @module lib/queryHelpers
  */
 
+import { QUERY_DEFAULTS } from '../constants/limits';
+
 /**
  * 分页参数接口
  */
@@ -32,11 +34,11 @@ export interface DateRangeParams {
  */
 export function parsePaginationParams(
   pageStr: string = '1',
-  limitStr: string = '50',
-  maxLimit: number = 100
+  limitStr: string = String(QUERY_DEFAULTS.DEFAULT_PAGE_LIMIT),
+  maxLimit: number = QUERY_DEFAULTS.MAX_PAGINATION_LIMIT
 ): PaginationParams {
   const page = Math.max(1, parseInt(pageStr, 10) || 1);
-  const limit = Math.min(maxLimit, Math.max(1, parseInt(limitStr, 10) || 50));
+  const limit = Math.min(maxLimit, Math.max(1, parseInt(limitStr, 10) || QUERY_DEFAULTS.DEFAULT_PAGE_LIMIT));
 
   return { page, limit };
 }
