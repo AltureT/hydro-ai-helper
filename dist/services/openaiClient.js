@@ -7,7 +7,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MultiModelClient = exports.OpenAIClient = exports.AIServiceError = void 0;
+exports.MultiModelClient = exports.OpenAIClient = exports.USER_ERROR_MESSAGES = exports.AIServiceError = void 0;
+exports.getHttpStatusForCategory = getHttpStatusForCategory;
 exports.fetchAvailableModels = fetchAvailableModels;
 exports.createOpenAIClientFromConfig = createOpenAIClientFromConfig;
 exports.createMultiModelClientFromConfig = createMultiModelClientFromConfig;
@@ -30,7 +31,7 @@ class AIServiceError extends Error {
     }
 }
 exports.AIServiceError = AIServiceError;
-const USER_ERROR_MESSAGES = {
+exports.USER_ERROR_MESSAGES = {
     auth: 'AI 服务认证失败，请联系管理员检查配置',
     rate_limit: 'AI 服务繁忙，请稍后再试',
     server: 'AI 服务暂时不可用，请稍后再试',
@@ -40,6 +41,19 @@ const USER_ERROR_MESSAGES = {
     aborted: '请求已取消',
     unknown: 'AI 服务异常，请稍后再试',
 };
+function getHttpStatusForCategory(category) {
+    switch (category) {
+        case 'rate_limit': return 429;
+        case 'auth': return 503;
+        case 'timeout': return 504;
+        case 'network': return 502;
+        case 'server': return 502;
+        case 'client': return 500;
+        case 'aborted': return 499;
+        case 'unknown':
+        default: return 500;
+    }
+}
 // ─── 重试 & 超时 ──────────────────────────────────────
 const RETRY = {
     MAX_RETRIES: 2,
@@ -242,14 +256,17 @@ class OpenAIClient {
                         throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${errorMsg}`, 'client', status);
                     }
                 }
-                else if (axiosError.code === 'ECONNABORTED') {
+                else if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
                     throw new AIServiceError(`请求超时 (超过 ${this.config.timeoutSeconds} 秒)`, 'timeout');
                 }
                 else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
                     throw new AIServiceError('无法连接到 AI 服务', 'network');
                 }
+                else if (axiosError.code === 'ECONNRESET' || axiosError.code === 'EPIPE') {
+                    throw new AIServiceError('与 AI 服务的连接被中断', 'network');
+                }
                 else {
-                    throw new AIServiceError(`网络错误: ${axiosError.message}`, 'network');
+                    throw new AIServiceError('网络错误，请稍后重试', 'network');
                 }
             }
             // 其他未知错误
@@ -448,7 +465,7 @@ class MultiModelClient {
                     message: e.error.substring(0, 200)
                 })),
             }));
-            throw new AIServiceError(USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
+            throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
         }
         finally {
             clearTimeout(totalTimer);

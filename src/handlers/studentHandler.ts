@@ -5,7 +5,7 @@
 
 import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
 import { formatJudgeInfo } from '../services/judgeInfoService';
-import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult } from '../services/openaiClient';
+import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult, USER_ERROR_MESSAGES, getHttpStatusForCategory } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
@@ -655,12 +655,22 @@ export class ChatHandler extends Handler {
         console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       } catch (error) {
         console.error('[AI Helper] AI 调用失败:', error);
-        if (error instanceof AIServiceError && error.category === 'aborted') {
-          this.response.status = 499;
-          this.response.body = { error: '请求已取消' };
+        if (error instanceof AIServiceError) {
+          this.response.status = getHttpStatusForCategory(error.category);
+          this.response.body = {
+            error: USER_ERROR_MESSAGES[error.category],
+            code: `AI_${error.category.toUpperCase()}`,
+            category: error.category,
+            retryable: error.isRetryable,
+          };
         } else {
           this.response.status = 500;
-          this.response.body = { error: 'AI 服务调用失败，请稍后重试' };
+          this.response.body = {
+            error: 'AI 服务异常，请稍后再试',
+            code: 'AI_UNKNOWN',
+            category: 'unknown',
+            retryable: true,
+          };
         }
         this.response.type = 'application/json';
         return;
