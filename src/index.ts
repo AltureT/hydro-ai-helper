@@ -91,14 +91,21 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const versionCacheModel = new VersionCacheModel(db);
     const pluginInstallModel = new PluginInstallModel(db);
 
-    // 创建数据库索引
-    await conversationModel.ensureIndexes();
-    await messageModel.ensureIndexes();
-    await rateLimitRecordModel.ensureIndexes();
-    await aiConfigModel.ensureIndexes();
-    await jailbreakLogModel.ensureIndexes();
-    await versionCacheModel.ensureIndexes();
-    await pluginInstallModel.ensureIndexes();
+    // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
+    const safeEnsureIndexes = async (model: { ensureIndexes(): Promise<void> }, name: string) => {
+      try {
+        await model.ensureIndexes();
+      } catch (err) {
+        console.warn(`[AI-Helper] ${name} 索引创建失败，插件继续运行:`, err);
+      }
+    };
+    await safeEnsureIndexes(conversationModel, 'conversationModel');
+    await safeEnsureIndexes(messageModel, 'messageModel');
+    await safeEnsureIndexes(rateLimitRecordModel, 'rateLimitRecordModel');
+    await safeEnsureIndexes(aiConfigModel, 'aiConfigModel');
+    await safeEnsureIndexes(jailbreakLogModel, 'jailbreakLogModel');
+    await safeEnsureIndexes(versionCacheModel, 'versionCacheModel');
+    await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);

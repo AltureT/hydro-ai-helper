@@ -120,10 +120,10 @@ export class UpdateConfigHandler extends Handler {
 
       if (body.rateLimitPerMinute !== undefined) {
         const rate = parseInt(String(body.rateLimitPerMinute), 10);
-        if (rate <= 0) {
+        if (Number.isNaN(rate) || rate < 0) {
           this.response.status = 400;
           this.response.body = {
-            error: 'rateLimitPerMinute 必须大于 0'
+            error: 'rateLimitPerMinute 必须为非负整数'
           };
           this.response.type = 'application/json';
           return;

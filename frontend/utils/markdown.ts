@@ -1,5 +1,6 @@
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
+import DOMPurify from 'dompurify';
 
 export function createMarkdownRenderer(): MarkdownIt {
   return new MarkdownIt({
@@ -17,4 +18,10 @@ export function createMarkdownRenderer(): MarkdownIt {
       return '';
     }
   });
+}
+
+const sharedRenderer = createMarkdownRenderer();
+
+export function renderMarkdown(content: string): string {
+  return DOMPurify.sanitize(sharedRenderer.render(content));
 }

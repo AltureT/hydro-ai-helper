@@ -102,8 +102,11 @@ export class ChatHandler extends Handler {
             return;
           }
         } catch (err) {
-          // 比赛不存在或查询失败，允许继续（避免误伤）
           console.warn('[ChatHandler] 比赛校验失败:', err);
+          this.response.status = 503;
+          this.response.body = { error: '比赛状态校验失败，请稍后重试', code: 'CONTEST_CHECK_FAILED' };
+          this.response.type = 'application/json';
+          return;
         }
       }
 
@@ -591,7 +594,7 @@ export class ChatHandler extends Handler {
         // 配置不存在或不完整
         console.error('[AI Helper] 创建 AI 客户端失败:', error);
         this.response.status = 500;
-        this.response.body = { error: error instanceof Error ? error.message : 'AI 服务未配置' };
+        this.response.body = { error: 'AI 服务暂时不可用，请稍后重试' };
         this.response.type = 'application/json';
         return;
       }
@@ -628,7 +631,7 @@ export class ChatHandler extends Handler {
           this.response.body = { error: '请求已取消' };
         } else {
           this.response.status = 500;
-          this.response.body = { error: error instanceof Error ? error.message : 'AI 服务调用失败' };
+          this.response.body = { error: 'AI 服务调用失败，请稍后重试' };
         }
         this.response.type = 'application/json';
         return;
@@ -663,8 +666,9 @@ export class ChatHandler extends Handler {
       // 后台异步触发有效对话判定（不阻塞主流程）
       try {
         const effectivenessService = new EffectivenessService(this.ctx);
-        // 使用 void 丢弃 Promise，fire-and-forget
-        void effectivenessService.analyzeConversation(currentConversationId);
+        void effectivenessService.analyzeConversation(currentConversationId).catch(
+          (err: unknown) => this.ctx.logger.error('Effectiveness analyze failed', err)
+        );
       } catch (err) {
         // 捕获同步错误（如构造函数异常），记录日志但不影响主流程
         this.ctx.logger.error('Schedule effectiveness analyze failed', err);
@@ -695,7 +699,7 @@ export class ChatHandler extends Handler {
     } catch (err) {
       console.error('[AI Helper] ChatHandler error:', err);
       this.response.status = 500;
-      this.response.body = { error: err instanceof Error ? err.message : '服务器内部错误' };
+      this.response.body = { error: '服务器内部错误，请稍后重试' };
       this.response.type = 'application/json';
     }
   }

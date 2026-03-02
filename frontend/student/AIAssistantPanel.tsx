@@ -7,7 +7,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import 'highlight.js/styles/github.css';
 import { buildApiUrl } from '../utils/domainUtils';
-import { createMarkdownRenderer } from '../utils/markdown';
+import { createMarkdownRenderer, renderMarkdown as renderMarkdownSafe } from '../utils/markdown';
 import {
   clearConversationId as clearStoredConversationId,
   loadConversationId,
@@ -751,13 +751,16 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     setPendingAutoSubmit(true);
   };
 
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
+
   /**
    * 自动提交监听（用于"我不理解"功能）
    */
   useEffect(() => {
     if (pendingAutoSubmit && questionType && userThinking.trim()) {
       setPendingAutoSubmit(false);
-      handleSubmit();
+      handleSubmitRef.current();
     }
   }, [pendingAutoSubmit, questionType, userThinking]);
 
@@ -778,12 +781,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    * 渲染 Markdown 内容
    * 使用 markdown-it + highlight.js
    */
-  const renderMarkdown = (text: string) => {
-    const html = md.render(text);
+  const renderMarkdownContent = (text: string) => {
     return (
       <div
         className="markdown-body"
-        dangerouslySetInnerHTML={{ __html: html }}
+        dangerouslySetInnerHTML={{ __html: renderMarkdownSafe(text) }}
         style={{
           fontSize: '13px',
           lineHeight: '1.6'
@@ -1184,13 +1186,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                   lineHeight: '1.6'
                 }}
               >
-                {msg.role === 'ai' ? (
-                  <div
-                    className="markdown-body"
-                    style={{ fontSize: '13px' }}
-                    dangerouslySetInnerHTML={{ __html: md.render(msg.content) }}
-                  />
-                ) : (
+                {msg.role === 'ai' ? renderMarkdownContent(msg.content) : (
                   <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                 )}
               </div>
@@ -1516,7 +1512,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
                 fontSize: '13px',
                 color: msg.role === 'student' ? '#1e3a8a' : '#166534'
               }}>
-                {msg.role === 'ai' ? renderMarkdown(msg.content) : (
+                {msg.role === 'ai' ? renderMarkdownContent(msg.content) : (
                   <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                 )}
               </div>

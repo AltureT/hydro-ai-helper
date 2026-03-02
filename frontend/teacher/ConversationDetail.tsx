@@ -4,9 +4,9 @@
  * 现代简约风格设计
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import 'highlight.js/styles/github.css';
-import { createMarkdownRenderer } from '../utils/markdown';
+import { renderMarkdown } from '../utils/markdown';
 
 /**
  * 对话接口
@@ -65,14 +65,12 @@ interface ConversationDetailProps {
  * MarkdownContent 子组件
  */
 const MarkdownContent: React.FC<{ content: string; className?: string }> = ({ content, className }) => {
-  const md = useMemo(() => createMarkdownRenderer(), []);
-  const html = useMemo(() => md.render(content), [md, content]);
-
+  const safeHtml = renderMarkdown(content);
   return (
     <div
       className={`markdown-body ${className || ''}`}
       style={{ lineHeight: '1.6', color: '#1f2937' }}
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: safeHtml }}
     />
   );
 };

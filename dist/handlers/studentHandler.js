@@ -63,8 +63,11 @@ class ChatHandler extends hydrooj_1.Handler {
                     }
                 }
                 catch (err) {
-                    // 比赛不存在或查询失败，允许继续（避免误伤）
                     console.warn('[ChatHandler] 比赛校验失败:', err);
+                    this.response.status = 503;
+                    this.response.body = { error: '比赛状态校验失败，请稍后重试', code: 'CONTEST_CHECK_FAILED' };
+                    this.response.type = 'application/json';
+                    return;
                 }
             }
             // 获取 AI 配置（用于频率限制和其他设置）
@@ -499,7 +502,7 @@ class ChatHandler extends hydrooj_1.Handler {
                 // 配置不存在或不完整
                 console.error('[AI Helper] 创建 AI 客户端失败:', error);
                 this.response.status = 500;
-                this.response.body = { error: error instanceof Error ? error.message : 'AI 服务未配置' };
+                this.response.body = { error: 'AI 服务暂时不可用，请稍后重试' };
                 this.response.type = 'application/json';
                 return;
             }
@@ -533,7 +536,7 @@ class ChatHandler extends hydrooj_1.Handler {
                 }
                 else {
                     this.response.status = 500;
-                    this.response.body = { error: error instanceof Error ? error.message : 'AI 服务调用失败' };
+                    this.response.body = { error: 'AI 服务调用失败，请稍后重试' };
                 }
                 this.response.type = 'application/json';
                 return;
@@ -565,8 +568,7 @@ class ChatHandler extends hydrooj_1.Handler {
             // 后台异步触发有效对话判定（不阻塞主流程）
             try {
                 const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
-                // 使用 void 丢弃 Promise，fire-and-forget
-                void effectivenessService.analyzeConversation(currentConversationId);
+                void effectivenessService.analyzeConversation(currentConversationId).catch((err) => this.ctx.logger.error('Effectiveness analyze failed', err));
             }
             catch (err) {
                 // 捕获同步错误（如构造函数异常），记录日志但不影响主流程
@@ -595,7 +597,7 @@ class ChatHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[AI Helper] ChatHandler error:', err);
             this.response.status = 500;
-            this.response.body = { error: err instanceof Error ? err.message : '服务器内部错误' };
+            this.response.body = { error: '服务器内部错误，请稍后重试' };
             this.response.type = 'application/json';
         }
     }
