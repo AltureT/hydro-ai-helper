@@ -36,6 +36,11 @@ export interface Message {
     codeWarning?: string;     // 代码截断警告
     safetyRewritten?: boolean;       // AI 回复被输出安全后处理改写
     topicGuardBypassedLLM?: boolean; // 偏题计数短路，未调用 LLM
+    promptTokens?: number;    // API prompt token 用量
+    completionTokens?: number; // API completion token 用量
+    totalTokens?: number;      // API 总 token 用量
+    modelName?: string;        // 使用的模型名称
+    latencyMs?: number;        // AI 响应延迟 (毫秒)
   };
 }
 

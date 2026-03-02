@@ -28,6 +28,7 @@ export interface Conversation {
     problemTitle?: string;    // 题目标题
     problemContent?: string;  // 题目描述摘要
     offTopicStrike?: number;  // 连续偏题计数
+    totalTokens?: number;     // 会话累计 token 用量
   };
 }
 

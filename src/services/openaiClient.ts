@@ -79,6 +79,19 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+// ─── Token 用量接口 ─────────────────────────────────────
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface ChatResult {
+  content: string;
+  usage?: TokenUsage;
+}
+
 // ─── 接口定义 ─────────────────────────────────────────
 
 /**
@@ -265,7 +278,7 @@ export class OpenAIClient {
    * @returns AI 回答的文本内容
    * @throws {AIServiceError} 当 API Key 无效、调用频率超限、网络错误或 AI 服务不可用时抛出
    */
-  async chat(messages: ChatMessage[], systemPrompt: string, options?: { signal?: AbortSignal }): Promise<string> {
+  async chat(messages: ChatMessage[], systemPrompt: string, options?: { signal?: AbortSignal }): Promise<ChatResult> {
     // 构造 OpenAI 格式请求
     const payload = {
       model: this.config.modelName,
@@ -300,7 +313,15 @@ export class OpenAIClient {
         throw new AIServiceError('AI 返回内容为空', 'server');
       }
 
-      return aiMessage;
+      // 提取 token 用量
+      const rawUsage = response.data?.usage;
+      const usage: TokenUsage | undefined = rawUsage ? {
+        promptTokens: rawUsage.prompt_tokens ?? 0,
+        completionTokens: rawUsage.completion_tokens ?? 0,
+        totalTokens: rawUsage.total_tokens ?? 0,
+      } : undefined;
+
+      return { content: aiMessage, usage };
     } catch (error) {
       // 已经是 AIServiceError 则直接抛出
       if (error instanceof AIServiceError) throw error;
@@ -355,7 +376,7 @@ export class OpenAIClient {
     const startTime = Date.now();
 
     try {
-      await this.chat(
+      const result = await this.chat(
         [{ role: 'user', content: 'Hello' }],
         'You are a helpful assistant.'
       );
@@ -433,6 +454,7 @@ export interface ResolvedModelConfig {
  */
 export interface MultiModelChatResult {
   content: string;
+  usage?: TokenUsage;
   usedModel: {
     endpointId: string;
     endpointName: string;
@@ -500,9 +522,10 @@ export class MultiModelClient {
           }
 
           try {
-            const content = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+            const chatResult = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
             return {
-              content,
+              content: chatResult.content,
+              usage: chatResult.usage,
               usedModel: {
                 endpointId: config.endpointId,
                 endpointName: config.endpointName,

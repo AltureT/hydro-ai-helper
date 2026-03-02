@@ -4,7 +4,7 @@
  */
 
 import { Handler, PRIV } from 'hydrooj';
-import { AIConfig, AIConfigModel, APIEndpoint, SelectedModel } from '../models/aiConfig';
+import { AIConfig, AIConfigModel, APIEndpoint, SelectedModel, BudgetConfig } from '../models/aiConfig';
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
@@ -33,6 +33,7 @@ interface UpdateConfigRequest {
   timeoutSeconds?: number;
   systemPromptTemplate?: string;
   extraJailbreakPatternsText?: string;
+  budgetConfig?: BudgetConfig;
 }
 
 /**
@@ -130,6 +131,7 @@ export class AdminConfigHandler extends Handler {
           timeoutSeconds: config.timeoutSeconds,
           systemPromptTemplate: config.systemPromptTemplate,
           extraJailbreakPatternsText: config.extraJailbreakPatternsText || '',
+          budgetConfig: config.budgetConfig || {},
           apiKeyMasked,
           hasApiKey,
           updatedAt: config.updatedAt.toISOString()
@@ -247,6 +249,16 @@ export class AdminConfigHandler extends Handler {
         partial.extraJailbreakPatternsText = body.extraJailbreakPatternsText;
       }
 
+      if (body.budgetConfig !== undefined) {
+        const bc = body.budgetConfig;
+        partial.budgetConfig = {
+          dailyTokenLimitPerUser: Math.max(0, Math.floor(Number(bc.dailyTokenLimitPerUser) || 0)),
+          dailyTokenLimitPerDomain: Math.max(0, Math.floor(Number(bc.dailyTokenLimitPerDomain) || 0)),
+          monthlyTokenLimitPerDomain: Math.max(0, Math.floor(Number(bc.monthlyTokenLimitPerDomain) || 0)),
+          softLimitPercent: Math.min(100, Math.max(0, Math.floor(Number(bc.softLimitPercent) || 80))),
+        };
+      }
+
       // 旧版单 API Key（向后兼容）
       if (body.apiKey !== undefined && body.apiKey !== '') {
         try {
@@ -321,6 +333,7 @@ export class AdminConfigHandler extends Handler {
           timeoutSeconds: updatedConfig.timeoutSeconds,
           systemPromptTemplate: updatedConfig.systemPromptTemplate,
           extraJailbreakPatternsText: updatedConfig.extraJailbreakPatternsText || '',
+          budgetConfig: updatedConfig.budgetConfig || {},
           apiKeyMasked,
           hasApiKey,
           updatedAt: updatedConfig.updatedAt.toISOString()

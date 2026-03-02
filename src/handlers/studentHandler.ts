@@ -5,7 +5,7 @@
 
 import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
 import { formatJudgeInfo } from '../services/judgeInfoService';
-import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError } from '../services/openaiClient';
+import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
@@ -17,6 +17,8 @@ import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
+import { TokenUsageModel } from '../models/tokenUsage';
+import { BudgetService } from '../services/budgetService';
 
 function extractContestIdFromReferer(referer: unknown): string | undefined {
   if (typeof referer !== 'string') return undefined;
@@ -67,6 +69,12 @@ interface ChatResponse {
   remainingRequests?: number;
   codeWarning?: string;
   hasJudgeInfo?: boolean;
+  tokenUsage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  budgetWarning?: string;
 }
 
 /**
@@ -131,6 +139,27 @@ export class ChatHandler extends Handler {
           op: 'ai_chat_burst', periodSecs: 10, maxOps: burstMax,
           errorMessage: '提问太频繁了，请仔细思考后再提问',
         })) return;
+      }
+
+      // 预算控制检查（在 AI 调用之前执行）
+      let budgetWarning: string | undefined;
+      try {
+        const tokenUsageModel: TokenUsageModel = this.ctx.get('tokenUsageModel');
+        if (aiConfig?.budgetConfig) {
+          const budgetService = new BudgetService(tokenUsageModel);
+          const budgetCheck = await budgetService.checkBudget(domainId, userId, aiConfig.budgetConfig);
+          if (!budgetCheck.allowed) {
+            this.response.status = 429;
+            this.response.body = { error: budgetCheck.reason || '今天的 AI 额度已用完', code: 'BUDGET_EXCEEDED' };
+            this.response.type = 'application/json';
+            return;
+          }
+          if (budgetCheck.warning) {
+            budgetWarning = budgetCheck.warning;
+          }
+        }
+      } catch (err) {
+        console.warn('[ChatHandler] 预算检查失败，放行请求:', err);
       }
 
       // 获取数据库模型实例
@@ -597,6 +626,8 @@ export class ChatHandler extends Handler {
 
       // 调用 AI 服务(支持多模型 fallback + L4 请求级超时)
       let aiResponse: string;
+      let aiResult: MultiModelChatResult | null = null;
+      let aiLatencyMs = 0;
 
       // L4 请求级 AbortController
       const requestAc = new AbortController();
@@ -617,8 +648,10 @@ export class ChatHandler extends Handler {
       try {
         const aiStart = Date.now();
         const result = await multiModelClient.chat(messages, systemPrompt, { signal: requestAc.signal });
-        console.log(`[Perf] AI Response: ${Date.now() - aiStart}ms`);
+        aiLatencyMs = Date.now() - aiStart;
+        console.log(`[Perf] AI Response: ${aiLatencyMs}ms`);
         aiResponse = result.content;
+        aiResult = result;
         console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       } catch (error) {
         console.error('[AI Helper] AI 调用失败:', error);
@@ -645,19 +678,64 @@ export class ChatHandler extends Handler {
       });
       aiResponse = safetyResult.content;
 
-      // 保存 AI 消息到数据库
+      // 保存 AI 消息到数据库（含 token 用量元数据）
       const aiMessageTimestamp = new Date();
+      const aiMessageMetadata: Record<string, any> = {};
+      if (safetyResult.rewritten) aiMessageMetadata.safetyRewritten = true;
+      if (aiResult?.usage) {
+        aiMessageMetadata.promptTokens = aiResult.usage.promptTokens;
+        aiMessageMetadata.completionTokens = aiResult.usage.completionTokens;
+        aiMessageMetadata.totalTokens = aiResult.usage.totalTokens;
+      }
+      if (aiResult?.usedModel) {
+        aiMessageMetadata.modelName = aiResult.usedModel.modelName;
+      }
+      if (aiLatencyMs > 0) {
+        aiMessageMetadata.latencyMs = aiLatencyMs;
+      }
+
       const aiMessageId = await messageModel.create({
         conversationId: currentConversationId,
         role: 'ai',
         content: aiResponse,
         timestamp: aiMessageTimestamp,
-        metadata: safetyResult.rewritten ? { safetyRewritten: true } : undefined
+        metadata: Object.keys(aiMessageMetadata).length > 0 ? aiMessageMetadata : undefined
       });
 
       // 增加会话的消息计数并更新结束时间
       await conversationModel.incrementMessageCount(currentConversationId);
       await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+
+      // 异步记录 token 用量（不阻塞主流程）
+      if (aiResult?.usage && aiResult.usage.totalTokens > 0) {
+        void (async () => {
+          try {
+            const tokenUsageModel: TokenUsageModel = this.ctx.get('tokenUsageModel');
+            await tokenUsageModel.recordUsage({
+              domainId,
+              userId,
+              conversationId: currentConversationId,
+              messageId: aiMessageId,
+              endpointId: aiResult!.usedModel.endpointId,
+              endpointName: aiResult!.usedModel.endpointName,
+              modelName: aiResult!.usedModel.modelName,
+              promptTokens: aiResult!.usage!.promptTokens,
+              completionTokens: aiResult!.usage!.completionTokens,
+              totalTokens: aiResult!.usage!.totalTokens,
+              questionType: questionType as string,
+              latencyMs: aiLatencyMs,
+            });
+            // $inc conversation metadata.totalTokens
+            const convColl = this.ctx.db.collection('ai_conversations');
+            await convColl.updateOne(
+              { _id: currentConversationId },
+              { $inc: { 'metadata.totalTokens': aiResult!.usage!.totalTokens } }
+            );
+          } catch (err) {
+            console.error('[ChatHandler] 记录 token 用量失败:', err);
+          }
+        })();
+      }
 
       // 后台异步触发有效对话判定（不阻塞主流程）
       try {
@@ -688,6 +766,18 @@ export class ChatHandler extends Handler {
 
       if (judgeInfo) {
         response.hasJudgeInfo = true;
+      }
+
+      if (aiResult?.usage) {
+        response.tokenUsage = {
+          promptTokens: aiResult.usage.promptTokens,
+          completionTokens: aiResult.usage.completionTokens,
+          totalTokens: aiResult.usage.totalTokens,
+        };
+      }
+
+      if (budgetWarning) {
+        response.budgetWarning = budgetWarning;
       }
 
       this.response.body = response;

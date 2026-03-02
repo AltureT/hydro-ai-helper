@@ -140,7 +140,8 @@ describe('OpenAIClient', () => {
     it('should return AI response on success', async () => {
       mockSuccessResponse('Test response');
       const result = await client.chat([{ role: 'user', content: 'Hi' }], 'System');
-      expect(result).toBe('Test response');
+      expect(result.content).toBe('Test response');
+      expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
     });
 
     it('should pass signal to axios', async () => {

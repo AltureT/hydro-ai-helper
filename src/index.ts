@@ -44,6 +44,9 @@ console.log('[AI-Helper] adminHandler OK');
 import { VersionCheckHandler, VersionCheckHandlerPriv } from './handlers/versionHandler';
 console.log('[AI-Helper] versionHandler OK');
 
+import { CostAnalyticsHandler, CostAnalyticsHandlerPriv } from './handlers/costAnalyticsHandler';
+console.log('[AI-Helper] costAnalyticsHandler OK');
+
 import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerPriv } from './handlers/updateHandler';
 console.log('[AI-Helper] updateHandler OK');
 
@@ -54,6 +57,7 @@ import { AIConfigModel } from './models/aiConfig';
 import { JailbreakLogModel } from './models/jailbreakLog';
 import { VersionCacheModel } from './models/versionCache';
 import { PluginInstallModel } from './models/pluginInstall';
+import { TokenUsageModel } from './models/tokenUsage';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -92,6 +96,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const jailbreakLogModel = new JailbreakLogModel(db);
     const versionCacheModel = new VersionCacheModel(db);
     const pluginInstallModel = new PluginInstallModel(db);
+    const tokenUsageModel = new TokenUsageModel(db);
 
     // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
     const safeEnsureIndexes = async (model: { ensureIndexes(): Promise<void> }, name: string) => {
@@ -108,6 +113,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(jailbreakLogModel, 'jailbreakLogModel');
     await safeEnsureIndexes(versionCacheModel, 'versionCacheModel');
     await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
+    await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
@@ -140,6 +146,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('jailbreakLogModel', jailbreakLogModel);
     ctx.provide('versionCacheModel', versionCacheModel);
     ctx.provide('pluginInstallModel', pluginInstallModel);
+    ctx.provide('tokenUsageModel', tokenUsageModel);
 
     // 初始化版本服务
     const versionService = new VersionService(versionCacheModel);
@@ -213,6 +220,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_helper_update_info', '/ai-helper/admin/update/info', UpdateInfoHandler, UpdateInfoHandlerPriv);
     // POST /ai-helper/admin/update - 执行更新
     ctx.Route('ai_helper_update', '/ai-helper/admin/update', UpdateHandler, UpdateHandlerPriv);
+
+    // GET /ai-helper/analytics/cost - 成本分析 API
+    ctx.Route('ai_helper_cost_analytics', '/ai-helper/analytics/cost', CostAnalyticsHandler, CostAnalyticsHandlerPriv);
+    ctx.Route('ai_helper_cost_analytics_domain', '/d/:domainId/ai-helper/analytics/cost', CostAnalyticsHandler, CostAnalyticsHandlerPriv);
   }
 });
 

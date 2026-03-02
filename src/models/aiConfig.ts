@@ -36,6 +36,16 @@ export interface SelectedModel {
 }
 
 /**
+ * 预算配置
+ */
+export interface BudgetConfig {
+  dailyTokenLimitPerUser?: number;    // 每用户日 token 上限 (0=不限)
+  dailyTokenLimitPerDomain?: number;  // 每域日 token 上限
+  monthlyTokenLimitPerDomain?: number;// 每域月 token 上限
+  softLimitPercent?: number;          // 软限阈值百分比 (默认 80)
+}
+
+/**
  * AI 配置接口 (v2)
  */
 export interface AIConfig {
@@ -47,6 +57,7 @@ export interface AIConfig {
   timeoutSeconds: number;       // 超时时间(秒)
   systemPromptTemplate?: string; // 系统提示词模板(可选)
   extraJailbreakPatternsText?: string; // 自定义越狱规则(多行文本)
+  budgetConfig?: BudgetConfig;  // 预算控制配置
   updatedAt: Date;              // 最后更新时间
   // 保留旧字段用于向后兼容（迁移完成后可能为空）
   apiBaseUrl?: string;

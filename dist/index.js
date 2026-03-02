@@ -30,6 +30,8 @@ const adminHandler_1 = require("./handlers/adminHandler");
 console.log('[AI-Helper] adminHandler OK');
 const versionHandler_1 = require("./handlers/versionHandler");
 console.log('[AI-Helper] versionHandler OK');
+const costAnalyticsHandler_1 = require("./handlers/costAnalyticsHandler");
+console.log('[AI-Helper] costAnalyticsHandler OK');
 const updateHandler_1 = require("./handlers/updateHandler");
 console.log('[AI-Helper] updateHandler OK');
 const conversation_1 = require("./models/conversation");
@@ -39,6 +41,7 @@ const aiConfig_1 = require("./models/aiConfig");
 const jailbreakLog_1 = require("./models/jailbreakLog");
 const versionCache_1 = require("./models/versionCache");
 const pluginInstall_1 = require("./models/pluginInstall");
+const tokenUsage_1 = require("./models/tokenUsage");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -66,6 +69,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const jailbreakLogModel = new jailbreakLog_1.JailbreakLogModel(db);
         const versionCacheModel = new versionCache_1.VersionCacheModel(db);
         const pluginInstallModel = new pluginInstall_1.PluginInstallModel(db);
+        const tokenUsageModel = new tokenUsage_1.TokenUsageModel(db);
         // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
         const safeEnsureIndexes = async (model, name) => {
             try {
@@ -82,6 +86,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(jailbreakLogModel, 'jailbreakLogModel');
         await safeEnsureIndexes(versionCacheModel, 'versionCacheModel');
         await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
+        await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
         // 执行数据迁移（为历史数据添加 domainId）
         const migrationService = new migrationService_1.MigrationService(db);
         await migrationService.runAllMigrations();
@@ -112,6 +117,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('jailbreakLogModel', jailbreakLogModel);
         ctx.provide('versionCacheModel', versionCacheModel);
         ctx.provide('pluginInstallModel', pluginInstallModel);
+        ctx.provide('tokenUsageModel', tokenUsageModel);
         // 初始化版本服务
         const versionService = new versionService_1.VersionService(versionCacheModel);
         ctx.provide('versionService', versionService);
@@ -168,6 +174,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_update_info', '/ai-helper/admin/update/info', updateHandler_1.UpdateInfoHandler, updateHandler_1.UpdateInfoHandlerPriv);
         // POST /ai-helper/admin/update - 执行更新
         ctx.Route('ai_helper_update', '/ai-helper/admin/update', updateHandler_1.UpdateHandler, updateHandler_1.UpdateHandlerPriv);
+        // GET /ai-helper/analytics/cost - 成本分析 API
+        ctx.Route('ai_helper_cost_analytics', '/ai-helper/analytics/cost', costAnalyticsHandler_1.CostAnalyticsHandler, costAnalyticsHandler_1.CostAnalyticsHandlerPriv);
+        ctx.Route('ai_helper_cost_analytics_domain', '/d/:domainId/ai-helper/analytics/cost', costAnalyticsHandler_1.CostAnalyticsHandler, costAnalyticsHandler_1.CostAnalyticsHandlerPriv);
     }
 });
 exports.Config = configSchema;

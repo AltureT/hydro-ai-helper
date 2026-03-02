@@ -34,6 +34,13 @@ interface SelectedModel {
 /**
  * 配置状态接口
  */
+interface BudgetConfigState {
+  dailyTokenLimitPerUser: number | '';
+  dailyTokenLimitPerDomain: number | '';
+  monthlyTokenLimitPerDomain: number | '';
+  softLimitPercent: number | '';
+}
+
 interface ConfigState {
   endpoints: Endpoint[];
   selectedModels: SelectedModel[];
@@ -46,6 +53,7 @@ interface ConfigState {
   extraJailbreakPatternsText: string;
   apiKeyMasked: string;
   hasApiKey: boolean;
+  budgetConfig: BudgetConfigState;
 }
 
 interface JailbreakLogEntry {
@@ -79,6 +87,12 @@ interface APIConfigResponse {
     timeoutSeconds?: number;
     systemPromptTemplate?: string;
     extraJailbreakPatternsText?: string;
+    budgetConfig?: {
+      dailyTokenLimitPerUser?: number;
+      dailyTokenLimitPerDomain?: number;
+      monthlyTokenLimitPerDomain?: number;
+      softLimitPercent?: number;
+    };
     apiKeyMasked?: string;
     hasApiKey?: boolean;
   } | null;
@@ -185,6 +199,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           extraJailbreakPatternsText: '',
           apiKeyMasked: '',
           hasApiKey: false,
+          budgetConfig: {
+            dailyTokenLimitPerUser: '',
+            dailyTokenLimitPerDomain: '',
+            monthlyTokenLimitPerDomain: '',
+            softLimitPercent: 80,
+          },
         });
       } else {
         setConfig({
@@ -201,6 +221,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
           apiKeyMasked: json.config.apiKeyMasked || '',
           hasApiKey: Boolean(json.config.hasApiKey),
+          budgetConfig: {
+            dailyTokenLimitPerUser: json.config.budgetConfig?.dailyTokenLimitPerUser || '',
+            dailyTokenLimitPerDomain: json.config.budgetConfig?.dailyTokenLimitPerDomain || '',
+            monthlyTokenLimitPerDomain: json.config.budgetConfig?.monthlyTokenLimitPerDomain || '',
+            softLimitPercent: json.config.budgetConfig?.softLimitPercent ?? 80,
+          },
         });
       }
     } catch (err: any) {
@@ -228,6 +254,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         timeoutSeconds: Number(config.timeoutSeconds) || 30,
         systemPromptTemplate: config.systemPromptTemplate,
         extraJailbreakPatternsText: config.extraJailbreakPatternsText,
+        budgetConfig: {
+          dailyTokenLimitPerUser: Number(config.budgetConfig.dailyTokenLimitPerUser) || 0,
+          dailyTokenLimitPerDomain: Number(config.budgetConfig.dailyTokenLimitPerDomain) || 0,
+          monthlyTokenLimitPerDomain: Number(config.budgetConfig.monthlyTokenLimitPerDomain) || 0,
+          softLimitPercent: Number(config.budgetConfig.softLimitPercent) || 80,
+        },
       };
 
       // 新版多端点配置
@@ -280,6 +312,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
           apiKeyMasked: json.config.apiKeyMasked || '',
           hasApiKey: Boolean(json.config.hasApiKey),
+          budgetConfig: {
+            dailyTokenLimitPerUser: json.config.budgetConfig?.dailyTokenLimitPerUser || '',
+            dailyTokenLimitPerDomain: json.config.budgetConfig?.dailyTokenLimitPerDomain || '',
+            monthlyTokenLimitPerDomain: json.config.budgetConfig?.monthlyTokenLimitPerDomain || '',
+            softLimitPercent: json.config.budgetConfig?.softLimitPercent ?? 80,
+          },
         });
       }
 
@@ -1075,6 +1113,123 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
                 boxSizing: 'border-box'
               }}
             />
+          </div>
+        </div>
+      </div>
+
+      {/* 预算控制 */}
+      <div style={{
+        marginTop: '20px',
+        padding: '20px',
+        backgroundColor: '#f9fafb',
+        borderRadius: '8px',
+        border: '1px solid #e5e7eb'
+      }}>
+        <h2 style={{ marginTop: 0, marginBottom: '8px', fontSize: '18px' }}>Token 预算控制</h2>
+        <p style={{ margin: '0 0 16px', color: '#6b7280', fontSize: '13px' }}>
+          限制 AI 调用的 Token 用量，防止成本失控。设为 0 或留空表示不限制。
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+              每用户日 Token 上限
+            </label>
+            <input
+              type="number"
+              value={config.budgetConfig.dailyTokenLimitPerUser}
+              onChange={(e) => setConfig({
+                ...config,
+                budgetConfig: { ...config.budgetConfig, dailyTokenLimitPerUser: e.target.value === '' ? '' : Number(e.target.value) }
+              })}
+              placeholder="0 = 不限制"
+              min="0"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+              全站日 Token 上限
+            </label>
+            <input
+              type="number"
+              value={config.budgetConfig.dailyTokenLimitPerDomain}
+              onChange={(e) => setConfig({
+                ...config,
+                budgetConfig: { ...config.budgetConfig, dailyTokenLimitPerDomain: e.target.value === '' ? '' : Number(e.target.value) }
+              })}
+              placeholder="0 = 不限制"
+              min="0"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+              全站月 Token 上限
+            </label>
+            <input
+              type="number"
+              value={config.budgetConfig.monthlyTokenLimitPerDomain}
+              onChange={(e) => setConfig({
+                ...config,
+                budgetConfig: { ...config.budgetConfig, monthlyTokenLimitPerDomain: e.target.value === '' ? '' : Number(e.target.value) }
+              })}
+              placeholder="0 = 不限制"
+              min="0"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+              软限阈值 (%)
+            </label>
+            <input
+              type="number"
+              value={config.budgetConfig.softLimitPercent}
+              onChange={(e) => setConfig({
+                ...config,
+                budgetConfig: { ...config.budgetConfig, softLimitPercent: e.target.value === '' ? '' : Number(e.target.value) }
+              })}
+              placeholder="80"
+              min="0"
+              max="100"
+              disabled={saving || testing}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #d1d5db',
+                fontSize: '14px',
+                boxSizing: 'border-box'
+              }}
+            />
+            <span style={{ fontSize: '12px', color: '#9ca3af', marginTop: '4px', display: 'block' }}>
+              达到此百分比时显示警告，100% 时硬拒绝
+            </span>
           </div>
         </div>
       </div>

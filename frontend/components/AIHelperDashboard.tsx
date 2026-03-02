@@ -7,8 +7,9 @@ import React, { useState, useEffect } from 'react';
 import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';
+import { CostDashboard } from '../teacher/CostDashboard';
 
-type TabType = 'conversations' | 'analytics' | 'config';
+type TabType = 'conversations' | 'analytics' | 'cost' | 'config';
 
 export const AIHelperDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
@@ -17,7 +18,7 @@ export const AIHelperDashboard: React.FC = () => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
       const tab = params.get('tab') as TabType;
-      if (tab === 'analytics' || tab === 'config' || tab === 'conversations') {
+      if (tab === 'analytics' || tab === 'cost' || tab === 'config' || tab === 'conversations') {
         setActiveTab(tab);
       } else {
         setActiveTab('conversations');
@@ -42,6 +43,7 @@ export const AIHelperDashboard: React.FC = () => {
   const tabs: { id: TabType; label: string }[] = [
     { id: 'conversations', label: '对话记录' },
     { id: 'analytics', label: '使用统计' },
+    { id: 'cost', label: '成本分析' },
     { id: 'config', label: 'AI 配置' },
   ];
 
@@ -115,6 +117,7 @@ export const AIHelperDashboard: React.FC = () => {
         }}>
           {activeTab === 'conversations' && <ConversationList embedded />}
           {activeTab === 'analytics' && <AnalyticsPage embedded />}
+          {activeTab === 'cost' && <CostDashboard embedded />}
           {activeTab === 'config' && <ConfigPanel embedded />}
         </div>
       </div>

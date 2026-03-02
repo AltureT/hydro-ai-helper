@@ -16,6 +16,7 @@ const outputSafetyService_1 = require("../services/outputSafetyService");
 const topicGuardService_1 = require("../services/topicGuardService");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
+const budgetService_1 = require("../services/budgetService");
 function extractContestIdFromReferer(referer) {
     if (typeof referer !== 'string')
         return undefined;
@@ -90,6 +91,27 @@ class ChatHandler extends hydrooj_1.Handler {
                     errorMessage: '提问太频繁了，请仔细思考后再提问',
                 }))
                     return;
+            }
+            // 预算控制检查（在 AI 调用之前执行）
+            let budgetWarning;
+            try {
+                const tokenUsageModel = this.ctx.get('tokenUsageModel');
+                if (aiConfig?.budgetConfig) {
+                    const budgetService = new budgetService_1.BudgetService(tokenUsageModel);
+                    const budgetCheck = await budgetService.checkBudget(domainId, userId, aiConfig.budgetConfig);
+                    if (!budgetCheck.allowed) {
+                        this.response.status = 429;
+                        this.response.body = { error: budgetCheck.reason || '今天的 AI 额度已用完', code: 'BUDGET_EXCEEDED' };
+                        this.response.type = 'application/json';
+                        return;
+                    }
+                    if (budgetCheck.warning) {
+                        budgetWarning = budgetCheck.warning;
+                    }
+                }
+            }
+            catch (err) {
+                console.warn('[ChatHandler] 预算检查失败，放行请求:', err);
             }
             // 获取数据库模型实例
             const conversationModel = this.ctx.get('conversationModel');
@@ -506,6 +528,8 @@ class ChatHandler extends hydrooj_1.Handler {
             }
             // 调用 AI 服务(支持多模型 fallback + L4 请求级超时)
             let aiResponse;
+            let aiResult = null;
+            let aiLatencyMs = 0;
             // L4 请求级 AbortController
             const requestAc = new AbortController();
             const rawReq = this.request?.ctx?.req;
@@ -522,8 +546,10 @@ class ChatHandler extends hydrooj_1.Handler {
             try {
                 const aiStart = Date.now();
                 const result = await multiModelClient.chat(messages, systemPrompt, { signal: requestAc.signal });
-                console.log(`[Perf] AI Response: ${Date.now() - aiStart}ms`);
+                aiLatencyMs = Date.now() - aiStart;
+                console.log(`[Perf] AI Response: ${aiLatencyMs}ms`);
                 aiResponse = result.content;
+                aiResult = result;
                 console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
             }
             catch (error) {
@@ -551,18 +577,60 @@ class ChatHandler extends hydrooj_1.Handler {
                 problemContent: processedProblemContent
             });
             aiResponse = safetyResult.content;
-            // 保存 AI 消息到数据库
+            // 保存 AI 消息到数据库（含 token 用量元数据）
             const aiMessageTimestamp = new Date();
+            const aiMessageMetadata = {};
+            if (safetyResult.rewritten)
+                aiMessageMetadata.safetyRewritten = true;
+            if (aiResult?.usage) {
+                aiMessageMetadata.promptTokens = aiResult.usage.promptTokens;
+                aiMessageMetadata.completionTokens = aiResult.usage.completionTokens;
+                aiMessageMetadata.totalTokens = aiResult.usage.totalTokens;
+            }
+            if (aiResult?.usedModel) {
+                aiMessageMetadata.modelName = aiResult.usedModel.modelName;
+            }
+            if (aiLatencyMs > 0) {
+                aiMessageMetadata.latencyMs = aiLatencyMs;
+            }
             const aiMessageId = await messageModel.create({
                 conversationId: currentConversationId,
                 role: 'ai',
                 content: aiResponse,
                 timestamp: aiMessageTimestamp,
-                metadata: safetyResult.rewritten ? { safetyRewritten: true } : undefined
+                metadata: Object.keys(aiMessageMetadata).length > 0 ? aiMessageMetadata : undefined
             });
             // 增加会话的消息计数并更新结束时间
             await conversationModel.incrementMessageCount(currentConversationId);
             await conversationModel.updateEndTime(currentConversationId, aiMessageTimestamp);
+            // 异步记录 token 用量（不阻塞主流程）
+            if (aiResult?.usage && aiResult.usage.totalTokens > 0) {
+                void (async () => {
+                    try {
+                        const tokenUsageModel = this.ctx.get('tokenUsageModel');
+                        await tokenUsageModel.recordUsage({
+                            domainId,
+                            userId,
+                            conversationId: currentConversationId,
+                            messageId: aiMessageId,
+                            endpointId: aiResult.usedModel.endpointId,
+                            endpointName: aiResult.usedModel.endpointName,
+                            modelName: aiResult.usedModel.modelName,
+                            promptTokens: aiResult.usage.promptTokens,
+                            completionTokens: aiResult.usage.completionTokens,
+                            totalTokens: aiResult.usage.totalTokens,
+                            questionType: questionType,
+                            latencyMs: aiLatencyMs,
+                        });
+                        // $inc conversation metadata.totalTokens
+                        const convColl = this.ctx.db.collection('ai_conversations');
+                        await convColl.updateOne({ _id: currentConversationId }, { $inc: { 'metadata.totalTokens': aiResult.usage.totalTokens } });
+                    }
+                    catch (err) {
+                        console.error('[ChatHandler] 记录 token 用量失败:', err);
+                    }
+                })();
+            }
             // 后台异步触发有效对话判定（不阻塞主流程）
             try {
                 const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
@@ -588,6 +656,16 @@ class ChatHandler extends hydrooj_1.Handler {
             }
             if (judgeInfo) {
                 response.hasJudgeInfo = true;
+            }
+            if (aiResult?.usage) {
+                response.tokenUsage = {
+                    promptTokens: aiResult.usage.promptTokens,
+                    completionTokens: aiResult.usage.completionTokens,
+                    totalTokens: aiResult.usage.totalTokens,
+                };
+            }
+            if (budgetWarning) {
+                response.budgetWarning = budgetWarning;
             }
             this.response.body = response;
             this.response.type = 'application/json';

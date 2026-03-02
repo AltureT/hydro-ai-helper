@@ -205,7 +205,14 @@ class OpenAIClient {
             if (!aiMessage) {
                 throw new AIServiceError('AI 返回内容为空', 'server');
             }
-            return aiMessage;
+            // 提取 token 用量
+            const rawUsage = response.data?.usage;
+            const usage = rawUsage ? {
+                promptTokens: rawUsage.prompt_tokens ?? 0,
+                completionTokens: rawUsage.completion_tokens ?? 0,
+                totalTokens: rawUsage.total_tokens ?? 0,
+            } : undefined;
+            return { content: aiMessage, usage };
         }
         catch (error) {
             // 已经是 AIServiceError 则直接抛出
@@ -258,7 +265,7 @@ class OpenAIClient {
     async testConnection() {
         const startTime = Date.now();
         try {
-            await this.chat([{ role: 'user', content: 'Hello' }], 'You are a helpful assistant.');
+            const result = await this.chat([{ role: 'user', content: 'Hello' }], 'You are a helpful assistant.');
             const latency = Date.now() - startTime;
             return { success: true, latency };
         }
@@ -356,9 +363,10 @@ class MultiModelClient {
                             : new AIServiceError('请求已取消', 'aborted');
                     }
                     try {
-                        const content = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+                        const chatResult = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
                         return {
-                            content,
+                            content: chatResult.content,
+                            usage: chatResult.usage,
                             usedModel: {
                                 endpointId: config.endpointId,
                                 endpointName: config.endpointName,
