@@ -52,7 +52,7 @@ class ChatHandler extends hydrooj_1.Handler {
             if (effectiveContestId) {
                 try {
                     const tdoc = await hydrooj_1.ContestModel.get(domainId, new mongo_1.ObjectId(effectiveContestId));
-                    if (tdoc && hydrooj_1.ContestModel.isOngoing(tdoc)) {
+                    if (tdoc && tdoc.rule !== 'homework' && hydrooj_1.ContestModel.isOngoing(tdoc)) {
                         this.response.status = 403;
                         this.response.body = {
                             error: '比赛期间 AI 助手不可用，请独立完成作答',

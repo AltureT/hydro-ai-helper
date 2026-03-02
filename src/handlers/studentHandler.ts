@@ -92,7 +92,7 @@ export class ChatHandler extends Handler {
       if (effectiveContestId) {
         try {
           const tdoc = await ContestModel.get(domainId, new ObjectId(effectiveContestId));
-          if (tdoc && ContestModel.isOngoing(tdoc)) {
+          if (tdoc && tdoc.rule !== 'homework' && ContestModel.isOngoing(tdoc)) {
             this.response.status = 403;
             this.response.body = {
               error: '比赛期间 AI 助手不可用，请独立完成作答',
