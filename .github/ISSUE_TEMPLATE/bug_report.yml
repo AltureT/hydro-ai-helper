@@ -1,0 +1,68 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill in the details below.
+
+  - type: input
+    id: version
+    attributes:
+      label: Plugin Version
+      description: "Run `npm list hydro-ai-helper` or check the admin panel"
+      placeholder: "e.g. 1.13.0"
+    validations:
+      required: true
+
+  - type: input
+    id: hydrooj-version
+    attributes:
+      label: HydroOJ Version
+      placeholder: "e.g. 4.x.x"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this?
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: "Check `pm2 logs hydrooj` for error output"
+      render: shell
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      options:
+        - Student Chat Panel
+        - Teacher / Conversation List
+        - Admin Config
+        - Analytics
+        - API / Backend
+        - Installation / Update
+        - Other
+    validations:
+      required: true

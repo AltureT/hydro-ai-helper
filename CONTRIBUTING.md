@@ -14,7 +14,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-repo/hydro-ai-helper.git
+git clone https://github.com/AltureT/hydro-ai-helper.git
 cd hydro-ai-helper
 
 # 安装依赖

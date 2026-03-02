@@ -5,6 +5,16 @@
   "main": "dist/index.js",
   "author": "Alture",
   "license": "MIT",
+  "files": [
+    "dist/",
+    "frontend/",
+    "templates/",
+    "locales/",
+    "assets/trusted-keys/",
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
   "keywords": [
     "hydrooj",
     "plugin",
