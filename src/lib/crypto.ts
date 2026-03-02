@@ -20,13 +20,8 @@ function getEncryptionKey(): Buffer {
   const keyRaw = process.env.ENCRYPTION_KEY;
 
   if (!keyRaw) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error(
-        '[Crypto] ENCRYPTION_KEY 环境变量未设置。生产环境必须配置此变量，拒绝启动。'
-      );
-    }
-    console.warn('[Crypto] ⚠️  ENCRYPTION_KEY 环境变量未设置，使用默认密钥(仅开发环境)');
-    console.warn('[Crypto] ⚠️  生产环境请务必设置 ENCRYPTION_KEY 环境变量！');
+    console.error('[Crypto] ⚠️  ENCRYPTION_KEY 环境变量未设置，使用默认密钥');
+    console.error('[Crypto] ⚠️  请尽快在服务器环境中设置 ENCRYPTION_KEY 以保障 API Key 安全！');
     return deriveKey('dev-encryption-key-please-change-me-32');
   }
 
