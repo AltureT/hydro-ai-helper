@@ -87,6 +87,21 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const packageJson = require('../package.json');
         const currentVersion = packageJson.version || '1.8.0';
         await pluginInstallModel.createIfMissing(currentVersion);
+        // 密钥轮换：当 OLD_ENCRYPTION_KEY 存在时，自动重加密所有 API Key
+        if (process.env.OLD_ENCRYPTION_KEY) {
+            try {
+                const reEncryptedCount = await aiConfigModel.reEncryptAllKeys();
+                if (reEncryptedCount > 0) {
+                    console.log(`[AI-Helper] Key rotation: re-encrypted ${reEncryptedCount} key(s). You can now remove OLD_ENCRYPTION_KEY.`);
+                }
+                else {
+                    console.log('[AI-Helper] Key rotation: all keys already use current encryption key.');
+                }
+            }
+            catch (err) {
+                console.error('[AI-Helper] Key rotation failed:', err instanceof Error ? err.message : 'unknown error');
+            }
+        }
         // 将模型实例注入到 ctx 中,供 Handler 使用
         ctx.provide('conversationModel', conversationModel);
         ctx.provide('messageModel', messageModel);

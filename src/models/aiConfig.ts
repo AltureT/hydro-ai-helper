@@ -9,6 +9,7 @@
 
 import type { Db, Collection } from 'mongodb';
 import { randomUUID } from 'crypto';
+import { reEncrypt } from '../lib/crypto';
 
 /** 当前配置版本号 */
 export const CURRENT_CONFIG_VERSION = 2;
@@ -298,6 +299,58 @@ export class AIConfigModel {
       return null;
     }
     return config.endpoints.find(ep => ep.id === endpointId) || null;
+  }
+
+  /**
+   * 密钥轮换：重加密所有 API Key
+   * 遍历 endpoints[].apiKeyEncrypted 及旧版 apiKeyEncrypted，使用当前密钥重新加密
+   * @returns 重加密的密钥计数
+   */
+  async reEncryptAllKeys(): Promise<number> {
+    const config = await this.getConfig();
+    if (!config) return 0;
+
+    let count = 0;
+    let changed = false;
+
+    // 重加密端点的 API Key
+    if (config.endpoints?.length) {
+      for (const ep of config.endpoints) {
+        if (ep.apiKeyEncrypted) {
+          const newCipher = reEncrypt(ep.apiKeyEncrypted);
+          if (newCipher !== ep.apiKeyEncrypted) {
+            ep.apiKeyEncrypted = newCipher;
+            changed = true;
+            count++;
+          }
+        }
+      }
+    }
+
+    // 重加密旧版单 API Key
+    if (config.apiKeyEncrypted) {
+      const newCipher = reEncrypt(config.apiKeyEncrypted);
+      if (newCipher !== config.apiKeyEncrypted) {
+        config.apiKeyEncrypted = newCipher;
+        changed = true;
+        count++;
+      }
+    }
+
+    if (changed) {
+      const updateFields: Record<string, any> = {};
+      if (config.endpoints) updateFields.endpoints = config.endpoints;
+      if (config.apiKeyEncrypted) updateFields.apiKeyEncrypted = config.apiKeyEncrypted;
+      updateFields.updatedAt = new Date();
+
+      await this.collection.updateOne(
+        { _id: this.FIXED_ID },
+        { $set: updateFields }
+      );
+      console.log(`[AIConfigModel] Re-encrypted ${count} API key(s) with new encryption key`);
+    }
+
+    return count;
   }
 
   /**

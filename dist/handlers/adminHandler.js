@@ -43,7 +43,7 @@ class GetConfigHandler extends hydrooj_1.Handler {
             }
             catch (err) {
                 // 解密失败，视为无有效 API Key
-                console.error('[GetConfigHandler] API Key 解密失败:', err);
+                console.error('[GetConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
                 hasApiKey = false;
             }
             // 构造响应(不包含 apiKeyEncrypted 和明文 API Key)
@@ -65,10 +65,10 @@ class GetConfigHandler extends hydrooj_1.Handler {
             this.response.type = 'application/json';
         }
         catch (err) {
-            console.error('[GetConfigHandler] Error:', err);
+            console.error('[GetConfigHandler] Error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
-                error: err instanceof Error ? err.message : '获取配置失败'
+                error: '获取配置失败'
             };
             this.response.type = 'application/json';
         }
@@ -133,7 +133,7 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
                 catch (err) {
                     this.response.status = 500;
                     this.response.body = {
-                        error: `API Key 加密失败: ${err instanceof Error ? err.message : String(err)}`
+                        error: 'API Key 加密失败'
                     };
                     this.response.type = 'application/json';
                     return;
@@ -159,7 +159,7 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
                 }
             }
             catch (err) {
-                console.error('[UpdateConfigHandler] API Key 解密失败:', err);
+                console.error('[UpdateConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
                 hasApiKey = false;
             }
             // 返回更新后的配置
@@ -182,10 +182,10 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
             this.response.type = 'application/json';
         }
         catch (err) {
-            console.error('[UpdateConfigHandler] Error:', err);
+            console.error('[UpdateConfigHandler] Error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
-                error: err instanceof Error ? err.message : '更新配置失败'
+                error: '更新配置失败'
             };
             this.response.type = 'application/json';
         }
@@ -230,7 +230,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 this.response.status = 500;
                 this.response.body = {
                     success: false,
-                    message: `API Key 解密失败: ${err instanceof Error ? err.message : String(err)}`
+                    message: 'API Key 解密失败，请检查加密密钥配置'
                 };
                 this.response.type = 'application/json';
                 return;
@@ -262,11 +262,11 @@ class TestConnectionHandler extends hydrooj_1.Handler {
             }
         }
         catch (err) {
-            console.error('[TestConnectionHandler] Error:', err);
+            console.error('[TestConnectionHandler] Error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
                 success: false,
-                message: err instanceof Error ? err.message : '测试连接失败'
+                message: '测试连接失败'
             };
             this.response.type = 'application/json';
         }
@@ -282,6 +282,43 @@ exports.GetConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.UpdateConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.TestConnectionHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.FetchModelsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+/**
+ * 验证 URL 是否安全（防止 SSRF）
+ * 仅允许 https:（开发环境可放宽到 http:），禁止内网/link-local 地址
+ */
+function validateApiBaseUrl(url) {
+    let parsed;
+    try {
+        parsed = new URL(url);
+    }
+    catch {
+        return '无效的 URL 格式';
+    }
+    const allowHttp = process.env.NODE_ENV !== 'production';
+    if (parsed.protocol !== 'https:' && !(allowHttp && parsed.protocol === 'http:')) {
+        return '仅允许 HTTPS 协议';
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    // 禁止 localhost
+    if (hostname === 'localhost' || hostname === '[::1]') {
+        return '不允许访问本地地址';
+    }
+    // 检查 IPv4 内网/link-local 地址
+    const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+        const [, a, b] = ipv4Match.map(Number);
+        if (a === 127 || // 127.0.0.0/8
+            a === 10 || // 10.0.0.0/8
+            (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+            (a === 192 && b === 168) || // 192.168.0.0/16
+            (a === 169 && b === 254) || // 169.254.0.0/16 link-local
+            a === 0 // 0.0.0.0/8
+        ) {
+            return '不允许访问内网地址';
+        }
+    }
+    return null;
+}
 /**
  * FetchModelsHandler - 获取 API 端点的可用模型列表
  * POST /ai-helper/admin/fetch-models
@@ -327,6 +364,14 @@ class FetchModelsHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
+            // SSRF 防护：验证 URL 安全性
+            const urlError = validateApiBaseUrl(apiBaseUrl);
+            if (urlError) {
+                this.response.status = 400;
+                this.response.body = { success: false, error: `API Base URL 不合法: ${urlError}` };
+                this.response.type = 'application/json';
+                return;
+            }
             // 获取模型列表
             const result = await (0, openaiClient_1.fetchAvailableModels)(apiBaseUrl, apiKey);
             if (result.success) {
@@ -352,11 +397,11 @@ class FetchModelsHandler extends hydrooj_1.Handler {
             this.response.type = 'application/json';
         }
         catch (err) {
-            console.error('[FetchModelsHandler] Error:', err);
+            console.error('[FetchModelsHandler] Error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
                 success: false,
-                error: err instanceof Error ? err.message : '获取模型列表失败'
+                error: '获取模型列表失败'
             };
             this.response.type = 'application/json';
         }

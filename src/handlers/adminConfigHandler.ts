@@ -114,7 +114,7 @@ export class AdminConfigHandler extends Handler {
           hasApiKey = true;
         }
       } catch (err) {
-        console.error('[AdminConfigHandler] API Key 解密失败:', err);
+        console.error('[AdminConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
         hasApiKey = false;
       }
 
@@ -146,9 +146,9 @@ export class AdminConfigHandler extends Handler {
       };
       this.response.type = 'application/json';
     } catch (err) {
-      console.error('[AI Helper] AdminConfigHandler error:', err);
+      console.error('[AI Helper] AdminConfigHandler error:', err instanceof Error ? err.message : 'unknown');
       this.response.status = 500;
-      this.response.body = { error: err instanceof Error ? err.message : '服务器内部错误' };
+      this.response.body = { error: '服务器内部错误' };
       this.response.type = 'application/json';
     }
   }
@@ -180,7 +180,7 @@ export class AdminConfigHandler extends Handler {
           if (ep.apiKey && ep.apiKey.trim()) {
             try {
               apiKeyEncrypted = encrypt(ep.apiKey.trim());
-            } catch (err) {
+            } catch (_err) {
               this.response.status = 500;
               this.response.body = {
                 error: `端点 "${ep.name}" 的 API Key 加密失败`
@@ -251,10 +251,10 @@ export class AdminConfigHandler extends Handler {
       if (body.apiKey !== undefined && body.apiKey !== '') {
         try {
           partial.apiKeyEncrypted = encrypt(body.apiKey.trim());
-        } catch (err) {
+        } catch (_err) {
           this.response.status = 500;
           this.response.body = {
-            error: `API Key 加密失败: ${err instanceof Error ? err.message : String(err)}`
+            error: 'API Key 加密失败'
           };
           this.response.type = 'application/json';
           return;
@@ -305,7 +305,7 @@ export class AdminConfigHandler extends Handler {
           hasApiKey = true;
         }
       } catch (err) {
-        console.error('[AdminConfigHandler] API Key 解密失败:', err);
+        console.error('[AdminConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
         hasApiKey = false;
       }
 
@@ -336,10 +336,10 @@ export class AdminConfigHandler extends Handler {
       };
       this.response.type = 'application/json';
     } catch (err) {
-      console.error('[AdminConfigHandler] 更新配置失败:', err);
+      console.error('[AdminConfigHandler] 更新配置失败:', err instanceof Error ? err.message : 'unknown');
       this.response.status = 500;
       this.response.body = {
-        error: err instanceof Error ? err.message : '更新配置失败'
+        error: '更新配置失败'
       };
       this.response.type = 'application/json';
     }

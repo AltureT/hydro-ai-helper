@@ -6,32 +6,51 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
 
-/**
- * 加密密钥(32 字节)
- * 从环境变量读取，若不存在则使用默认值(仅开发环境)
- */
-function getEncryptionKey(): Buffer {
-  const keyRaw = process.env.ENCRYPTION_KEY || 'dev-encryption-key-please-change-me-32';
-
-  // 如果环境变量不存在，打印警告(但不打印密钥本身)
-  if (!process.env.ENCRYPTION_KEY) {
-    console.warn('[Crypto] ⚠️  ENCRYPTION_KEY 环境变量未设置，使用默认密钥(仅开发环境)');
-    console.warn('[Crypto] ⚠️  生产环境请务必设置 ENCRYPTION_KEY 环境变量！');
-  }
-
-  // 使用 SHA-256 哈希生成固定 32 字节密钥
-  return createHash('sha256').update(keyRaw).digest();
-}
-
-const ENCRYPTION_KEY = getEncryptionKey();
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;        // GCM 推荐 12 字节 IV
 const AUTH_TAG_LENGTH = 16;  // GCM 认证标签长度
+const CIPHER_VERSION_PREFIX = 'v1:';
+const MIN_KEY_LENGTH = 16;
+
+function deriveKey(raw: string): Buffer {
+  return createHash('sha256').update(raw).digest();
+}
+
+function getEncryptionKey(): Buffer {
+  const keyRaw = process.env.ENCRYPTION_KEY;
+
+  if (!keyRaw) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        '[Crypto] ENCRYPTION_KEY 环境变量未设置。生产环境必须配置此变量，拒绝启动。'
+      );
+    }
+    console.warn('[Crypto] ⚠️  ENCRYPTION_KEY 环境变量未设置，使用默认密钥(仅开发环境)');
+    console.warn('[Crypto] ⚠️  生产环境请务必设置 ENCRYPTION_KEY 环境变量！');
+    return deriveKey('dev-encryption-key-please-change-me-32');
+  }
+
+  if (keyRaw.length < MIN_KEY_LENGTH) {
+    throw new Error(
+      `[Crypto] ENCRYPTION_KEY 长度不足: 最少需要 ${MIN_KEY_LENGTH} 个字符，当前 ${keyRaw.length} 个字符`
+    );
+  }
+
+  return deriveKey(keyRaw);
+}
+
+function getOldEncryptionKey(): Buffer | null {
+  const oldKeyRaw = process.env.OLD_ENCRYPTION_KEY;
+  if (!oldKeyRaw) return null;
+  return deriveKey(oldKeyRaw);
+}
+
+const ENCRYPTION_KEY = getEncryptionKey();
 
 /**
  * 加密文本
  * @param text 明文
- * @returns Base64 编码的密文(包含 IV + AuthTag + Encrypted)
+ * @returns "v1:" + Base64 编码的密文(包含 IV + AuthTag + Encrypted)
  */
 export function encrypt(text: string): string {
   if (!text) {
@@ -39,34 +58,44 @@ export function encrypt(text: string): string {
   }
 
   try {
-    // 生成随机 IV
     const iv = randomBytes(IV_LENGTH);
-
-    // 创建加密器
     const cipher = createCipheriv(ALGORITHM, ENCRYPTION_KEY, iv);
 
-    // 加密数据
     const encrypted = Buffer.concat([
       cipher.update(text, 'utf8'),
       cipher.final()
     ]);
 
-    // 获取认证标签
     const authTag = cipher.getAuthTag();
-
-    // 拼接: IV(12) + AuthTag(16) + Encrypted(N)
     const combined = Buffer.concat([iv, authTag, encrypted]);
 
-    // 返回 Base64 编码
-    return combined.toString('base64');
-  } catch (error) {
-    throw new Error(`加密失败: ${error instanceof Error ? error.message : String(error)}`);
+    return CIPHER_VERSION_PREFIX + combined.toString('base64');
+  } catch (_error) {
+    throw new Error('加密失败：请检查加密配置');
   }
+}
+
+function decryptWithKey(payload: Buffer, key: Buffer): string {
+  const iv = payload.subarray(0, IV_LENGTH);
+  const authTag = payload.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+  const encrypted = payload.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+
+  const decipher = createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final()
+  ]);
+
+  return decrypted.toString('utf8');
 }
 
 /**
  * 解密文本
- * @param cipherText Base64 编码的密文
+ * 支持 v1: 前缀格式和旧版无前缀格式
+ * 依次尝试：当前密钥 → 旧密钥 (OLD_ENCRYPTION_KEY)
+ * @param cipherText 密文
  * @returns 解密后的明文
  */
 export function decrypt(cipherText: string): string {
@@ -74,30 +103,38 @@ export function decrypt(cipherText: string): string {
     throw new Error('解密失败：输入密文不能为空');
   }
 
-  try {
-    // 解码 Base64
-    const combined = Buffer.from(cipherText, 'base64');
+  const isV1 = cipherText.startsWith(CIPHER_VERSION_PREFIX);
+  const raw = isV1 ? cipherText.slice(CIPHER_VERSION_PREFIX.length) : cipherText;
+  const payload = Buffer.from(raw, 'base64');
 
-    // 分离 IV + AuthTag + Encrypted
-    const iv = combined.subarray(0, IV_LENGTH);
-    const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
-    const encrypted = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+  const oldKey = getOldEncryptionKey();
+  const keysToTry: Buffer[] = [ENCRYPTION_KEY];
+  if (oldKey) keysToTry.push(oldKey);
 
-    // 创建解密器
-    const decipher = createDecipheriv(ALGORITHM, ENCRYPTION_KEY, iv);
-    decipher.setAuthTag(authTag);
-
-    // 解密数据
-    const decrypted = Buffer.concat([
-      decipher.update(encrypted),
-      decipher.final()
-    ]);
-
-    return decrypted.toString('utf8');
-  } catch (error) {
-    // 解密失败可能是密钥错误或数据损坏
-    throw new Error(`解密失败: ${error instanceof Error ? error.message : String(error)}`);
+  for (const key of keysToTry) {
+    try {
+      return decryptWithKey(payload, key);
+    } catch {
+      // 当前密钥失败，尝试下一个
+    }
   }
+
+  throw new Error('解密失败：密钥不匹配或数据已损坏');
+}
+
+/**
+ * 使用旧密钥解密后用当前密钥重新加密
+ * 用于密钥轮换迁移
+ * @param cipherText 旧密文
+ * @returns 新密文（v1: 格式），如果已是当前密钥加密则原样返回
+ */
+export function reEncrypt(cipherText: string): string {
+  if (!cipherText) return cipherText;
+
+  const plaintext = decrypt(cipherText);
+  const newCipherText = encrypt(plaintext);
+
+  return newCipherText;
 }
 
 /**
@@ -112,12 +149,10 @@ export function maskApiKey(apiKeyPlain: string): string {
 
   const len = apiKeyPlain.length;
 
-  // 如果长度 <= 8，简单返回 ****
   if (len <= 8) {
     return '****';
   }
 
-  // 保留前 4 和后 4 位，中间用 **** 替换
   const start = apiKeyPlain.slice(0, 4);
   const end = apiKeyPlain.slice(-4);
 

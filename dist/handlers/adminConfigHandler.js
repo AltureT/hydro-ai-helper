@@ -115,7 +115,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 }
             }
             catch (err) {
-                console.error('[AdminConfigHandler] API Key 解密失败:', err);
+                console.error('[AdminConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
                 hasApiKey = false;
             }
             this.response.body = {
@@ -147,9 +147,9 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             this.response.type = 'application/json';
         }
         catch (err) {
-            console.error('[AI Helper] AdminConfigHandler error:', err);
+            console.error('[AI Helper] AdminConfigHandler error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
-            this.response.body = { error: err instanceof Error ? err.message : '服务器内部错误' };
+            this.response.body = { error: '服务器内部错误' };
             this.response.type = 'application/json';
         }
     }
@@ -176,7 +176,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                         try {
                             apiKeyEncrypted = (0, crypto_1.encrypt)(ep.apiKey.trim());
                         }
-                        catch (err) {
+                        catch (_err) {
                             this.response.status = 500;
                             this.response.body = {
                                 error: `端点 "${ep.name}" 的 API Key 加密失败`
@@ -239,10 +239,10 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 try {
                     partial.apiKeyEncrypted = (0, crypto_1.encrypt)(body.apiKey.trim());
                 }
-                catch (err) {
+                catch (_err) {
                     this.response.status = 500;
                     this.response.body = {
-                        error: `API Key 加密失败: ${err instanceof Error ? err.message : String(err)}`
+                        error: 'API Key 加密失败'
                     };
                     this.response.type = 'application/json';
                     return;
@@ -290,7 +290,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 }
             }
             catch (err) {
-                console.error('[AdminConfigHandler] API Key 解密失败:', err);
+                console.error('[AdminConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
                 hasApiKey = false;
             }
             const logResult = await jailbreakLogModel.listWithPagination(1, 20);
@@ -320,10 +320,10 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             this.response.type = 'application/json';
         }
         catch (err) {
-            console.error('[AdminConfigHandler] 更新配置失败:', err);
+            console.error('[AdminConfigHandler] 更新配置失败:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
-                error: err instanceof Error ? err.message : '更新配置失败'
+                error: '更新配置失败'
             };
             this.response.type = 'application/json';
         }
