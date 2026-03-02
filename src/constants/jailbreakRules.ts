@@ -19,7 +19,25 @@ const BUILTIN_PATTERNS: RegExp[] = [
   /(treat|treated)\s+as\s+(reference|background)(\s+only)?/gi,
   /(this|the following).*(takes?|take)\s+precedence/gi,
   /in\s+case\s+of\s+conflict.*(follow|use)\s+(this|the following)/gi,
-  /user('?s)?\s+latest\s+(request|instruction).*(highest\s+priority)/gi
+  /user('?s)?\s+latest\s+(request|instruction).*(highest\s+priority)/gi,
+  // 直接索要答案
+  /直接给[我出]?.*?(答案|代码|solution)/gi,
+  /给我完整.*?代码/gi,
+  /不要.*?教学模式/gi,
+  /把(完整|全部).*?(代码|答案|solution).*?(给|发|写|输出)/gi,
+  // DAN / 越狱
+  /\bDAN\b/g,
+  /\bdo anything now\b/gi,
+  /developer mode/gi,
+  /\bjailbreak\b/gi,
+  // 角色标签伪造
+  /\[(AI导师|系统|assistant)\]\s*[:：]/gi,
+  // 编码绕过
+  /(base64|decode|eval)\s*[:：(（]/gi,
+  /解码.*?以下/gi,
+  // System prompt 泄露
+  /输出.*?系统.*?提示词/gi,
+  /(show|print|output|reveal).*?system.*?prompt/gi,
 ];
 
 export const builtinJailbreakPatternSources = BUILTIN_PATTERNS.map((pattern) => pattern.source);

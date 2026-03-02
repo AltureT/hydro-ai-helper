@@ -31,7 +31,13 @@ export interface SanitizeOptions {
 export interface SanitizeResult {
   content: string;
   rewritten: boolean;
+  codeLeakDetected?: boolean;
 }
+
+const CODE_BLOCK_REGEX = /```\w*\n([\s\S]*?)```/g;
+const CODE_LINE_PATTERN = /^\s*(def\s|for\s|if\s|elif\s|else\s*:|while\s|return\b|print\s*\(|import\s|from\s|class\s|try\s*:|except\b|raise\s|with\s|yield\b|assert\b|break\b|continue\b|pass\b|\w+\s*=[^=])/;
+const CODE_LEAK_THRESHOLD = 5;
+const CODE_LEAK_KEEP_LINES = 2;
 
 export class OutputSafetyService {
   sanitize(aiResponse: string, options: SanitizeOptions): SanitizeResult {
@@ -65,6 +71,50 @@ export class OutputSafetyService {
       }
     }
 
-    return { content: result, rewritten };
+    // 代码泄露检测（optimize 类型豁免）
+    const codeLeakResult = this.detectCodeLeak(result, options.questionType);
+    if (codeLeakResult.detected) {
+      result = codeLeakResult.content;
+      rewritten = true;
+    }
+
+    return { content: result, rewritten, codeLeakDetected: codeLeakResult.detected };
+  }
+
+  private detectCodeLeak(
+    content: string,
+    questionType: QuestionType
+  ): { content: string; detected: boolean } {
+    if (questionType === 'optimize') {
+      return { content, detected: false };
+    }
+
+    let detected = false;
+
+    const result = content.replace(
+      CODE_BLOCK_REGEX,
+      (match, codeContent: string) => {
+        const lines = codeContent.split('\n');
+        const realCodeLines = lines.filter((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return false;
+          if (trimmed.startsWith('#')) return false;
+          if (trimmed.startsWith('//')) return false;
+          return CODE_LINE_PATTERN.test(line);
+        });
+
+        if (realCodeLines.length > CODE_LEAK_THRESHOLD) {
+          detected = true;
+          const kept = realCodeLines.slice(0, CODE_LEAK_KEEP_LINES).join('\n');
+          const langMatch = match.match(/^```(\w*)/);
+          const lang = langMatch ? langMatch[1] : '';
+          return `\`\`\`${lang}\n${kept}\n# ... 代码已被截断（教学模式不展示完整实现）...\n\`\`\``;
+        }
+
+        return match;
+      }
+    );
+
+    return { content: result, detected };
   }
 }
