@@ -9,6 +9,7 @@ const hydrooj_1 = require("hydrooj");
 const crypto_1 = require("../lib/crypto");
 const openaiClient_1 = require("../services/openaiClient");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
+const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 /**
  * GetConfigHandler - 获取当前配置
  * GET /ai-helper/admin/config
@@ -199,6 +200,12 @@ exports.UpdateConfigHandler = UpdateConfigHandler;
 class TestConnectionHandler extends hydrooj_1.Handler {
     async post() {
         try {
+            // 限流：5 次/60秒，fail-closed（触发外部 API）
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_admin_test', periodSecs: 60, maxOps: 5,
+                errorMessage: '测试连接请求太频繁，请稍后再试',
+            }))
+                return;
             const aiConfigModel = this.ctx.get('aiConfigModel');
             // 读取当前配置
             const config = await aiConfigModel.getConfig();
@@ -326,6 +333,12 @@ function validateApiBaseUrl(url) {
 class FetchModelsHandler extends hydrooj_1.Handler {
     async post() {
         try {
+            // 限流：10 次/60秒，fail-closed（触发外部 API）
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_admin_models', periodSecs: 60, maxOps: 10,
+                errorMessage: '获取模型列表请求太频繁，请稍后再试',
+            }))
+                return;
             const body = this.request.body;
             let apiBaseUrl;
             let apiKey;

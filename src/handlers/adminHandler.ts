@@ -10,6 +10,7 @@ import { OpenAIClient, fetchAvailableModels } from '../services/openaiClient';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
+import { applyRateLimit } from '../lib/rateLimitHelper';
 
 /**
  * 更新配置请求接口
@@ -233,6 +234,12 @@ export class UpdateConfigHandler extends Handler {
 export class TestConnectionHandler extends Handler {
   async post() {
     try {
+      // 限流：5 次/60秒，fail-closed（触发外部 API）
+      if (await applyRateLimit(this, {
+        op: 'ai_admin_test', periodSecs: 60, maxOps: 5,
+        errorMessage: '测试连接请求太频繁，请稍后再试',
+      })) return;
+
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
 
       // 读取当前配置
@@ -376,6 +383,12 @@ function validateApiBaseUrl(url: string): string | null {
 export class FetchModelsHandler extends Handler {
   async post() {
     try {
+      // 限流：10 次/60秒，fail-closed（触发外部 API）
+      if (await applyRateLimit(this, {
+        op: 'ai_admin_models', periodSecs: 60, maxOps: 10,
+        errorMessage: '获取模型列表请求太频繁，请稍后再试',
+      })) return;
+
       const body = this.request.body as {
         endpointId?: string;
         apiBaseUrl?: string;

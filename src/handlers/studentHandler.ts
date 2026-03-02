@@ -8,7 +8,7 @@ import { formatJudgeInfo } from '../services/judgeInfoService';
 import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS } from '../constants/limits';
-import { RateLimitService } from '../services/rateLimitService';
+import { applyRateLimit } from '../lib/rateLimitHelper';
 import { EffectivenessService } from '../services/effectivenessService';
 import { OutputSafetyService } from '../services/outputSafetyService';
 import { TopicGuardService } from '../services/topicGuardService';
@@ -115,26 +115,22 @@ export class ChatHandler extends Handler {
       const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
 
       // 频率限制检查（在任何 AI 请求调用之前执行）
-      // 优先使用配置中的限制，如果没有配置则使用默认值 5
-      // 注意：使用 ?? 而非 || 以支持 0 值（0 表示禁用限流）
+      // 使用 HydroOJ 内置 limitRate (opcount)，fail-closed 策略
       const rateLimitPerMinute = aiConfig?.rateLimitPerMinute ?? 5;
 
-      // 仅当限制值 > 0 时才执行频率限制检查（0 表示禁用限流）
       if (rateLimitPerMinute > 0) {
-        const rateLimitService = new RateLimitService(this.ctx);
-        const allowed = await rateLimitService.checkAndIncrement(domainId, userId, rateLimitPerMinute);
+        // 主限流：N 次/60秒
+        if (await applyRateLimit(this, {
+          op: 'ai_chat', periodSecs: 60, maxOps: rateLimitPerMinute,
+          errorMessage: '提问太频繁了，请仔细思考后再提问',
+        })) return;
 
-        if (!allowed) {
-          // 返回 429 + JSON 提示
-          const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
-          this.response.status = 429;
-          this.response.body = {
-            error: rateLimitMessage,
-            code: 'RATE_LIMIT_EXCEEDED'
-          };
-          this.response.type = 'application/json';
-          return;
-        }
+        // 突发限流：防止固定窗口边界攻击
+        const burstMax = Math.max(1, Math.ceil(rateLimitPerMinute / 3));
+        if (await applyRateLimit(this, {
+          op: 'ai_chat_burst', periodSecs: 10, maxOps: burstMax,
+          errorMessage: '提问太频繁了，请仔细思考后再提问',
+        })) return;
       }
 
       // 获取数据库模型实例
@@ -736,6 +732,13 @@ function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
  */
 export class ProblemStatusHandler extends Handler {
   async get({ problemId }: { problemId: string }) {
+    // 限流：30 次/60秒，fail-open（只读端点）
+    if (await applyRateLimit(this, {
+      op: 'ai_problem_status', periodSecs: 60, maxOps: 30,
+      failOpen: true,
+      errorMessage: '请求太频繁，请稍后再试',
+    })) return;
+
     // 输入验证：problemId 不能为空且长度合理
     if (!problemId || typeof problemId !== 'string' || problemId.length > 50) {
       this.response.status = 400;

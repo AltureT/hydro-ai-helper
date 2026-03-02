@@ -7,6 +7,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AnalyticsHandlerPriv = exports.AnalyticsHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const domainHelper_1 = require("../utils/domainHelper");
+const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 /**
  * T026: 批量获取题目标题映射
  * @param domainId 域 ID
@@ -103,6 +104,13 @@ async function getUserNameMap(userIds) {
 class AnalyticsHandler extends hydrooj_1.Handler {
     async get() {
         try {
+            // 限流：10 次/60秒，fail-open（只读端点）
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_analytics', periodSecs: 60, maxOps: 10,
+                failOpen: true,
+                errorMessage: '统计请求太频繁，请稍后再试',
+            }))
+                return;
             // 获取当前域 ID（用于域隔离）
             const domainId = (0, domainHelper_1.getDomainId)(this);
             // 区分 HTML 页面访问与 JSON API 请求

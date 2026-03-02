@@ -8,6 +8,7 @@
 import { Handler, PRIV } from 'hydrooj';
 import { ExportService, ConversationExportFilters, ConversationExportOptions } from '../services/exportService';
 import { getDomainId } from '../utils/domainHelper';
+import { applyRateLimit } from '../lib/rateLimitHelper';
 
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
@@ -17,6 +18,13 @@ import { getDomainId } from '../utils/domainHelper';
 export class ExportHandler extends Handler {
   async get() {
     try {
+      // 限流：5 次/60秒，fail-open（只读端点）
+      if (await applyRateLimit(this, {
+        op: 'ai_export', periodSecs: 60, maxOps: 5,
+        failOpen: true,
+        errorMessage: '导出请求太频繁，请稍后再试',
+      })) return;
+
       // 获取当前域 ID（用于域隔离）
       const domainId = getDomainId(this);
 

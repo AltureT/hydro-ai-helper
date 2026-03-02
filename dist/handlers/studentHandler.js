@@ -10,7 +10,7 @@ const judgeInfoService_1 = require("../services/judgeInfoService");
 const openaiClient_1 = require("../services/openaiClient");
 const promptService_1 = require("../services/promptService");
 const limits_1 = require("../constants/limits");
-const rateLimitService_1 = require("../services/rateLimitService");
+const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const effectivenessService_1 = require("../services/effectivenessService");
 const outputSafetyService_1 = require("../services/outputSafetyService");
 const topicGuardService_1 = require("../services/topicGuardService");
@@ -74,24 +74,22 @@ class ChatHandler extends hydrooj_1.Handler {
             const aiConfigModel = this.ctx.get('aiConfigModel');
             const aiConfig = await aiConfigModel.getConfig();
             // 频率限制检查（在任何 AI 请求调用之前执行）
-            // 优先使用配置中的限制，如果没有配置则使用默认值 5
-            // 注意：使用 ?? 而非 || 以支持 0 值（0 表示禁用限流）
+            // 使用 HydroOJ 内置 limitRate (opcount)，fail-closed 策略
             const rateLimitPerMinute = aiConfig?.rateLimitPerMinute ?? 5;
-            // 仅当限制值 > 0 时才执行频率限制检查（0 表示禁用限流）
             if (rateLimitPerMinute > 0) {
-                const rateLimitService = new rateLimitService_1.RateLimitService(this.ctx);
-                const allowed = await rateLimitService.checkAndIncrement(domainId, userId, rateLimitPerMinute);
-                if (!allowed) {
-                    // 返回 429 + JSON 提示
-                    const rateLimitMessage = '提问太频繁了，请仔细思考后再提问';
-                    this.response.status = 429;
-                    this.response.body = {
-                        error: rateLimitMessage,
-                        code: 'RATE_LIMIT_EXCEEDED'
-                    };
-                    this.response.type = 'application/json';
+                // 主限流：N 次/60秒
+                if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                    op: 'ai_chat', periodSecs: 60, maxOps: rateLimitPerMinute,
+                    errorMessage: '提问太频繁了，请仔细思考后再提问',
+                }))
                     return;
-                }
+                // 突发限流：防止固定窗口边界攻击
+                const burstMax = Math.max(1, Math.ceil(rateLimitPerMinute / 3));
+                if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                    op: 'ai_chat_burst', periodSecs: 10, maxOps: burstMax,
+                    errorMessage: '提问太频繁了，请仔细思考后再提问',
+                }))
+                    return;
             }
             // 获取数据库模型实例
             const conversationModel = this.ctx.get('conversationModel');
@@ -631,6 +629,13 @@ function parseExtraJailbreakPatterns(raw) {
  */
 class ProblemStatusHandler extends hydrooj_1.Handler {
     async get({ problemId }) {
+        // 限流：30 次/60秒，fail-open（只读端点）
+        if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+            op: 'ai_problem_status', periodSecs: 60, maxOps: 30,
+            failOpen: true,
+            errorMessage: '请求太频繁，请稍后再试',
+        }))
+            return;
         // 输入验证：problemId 不能为空且长度合理
         if (!problemId || typeof problemId !== 'string' || problemId.length > 50) {
             this.response.status = 400;

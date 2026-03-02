@@ -10,6 +10,7 @@ exports.ExportHandlerPriv = exports.ExportHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const exportService_1 = require("../services/exportService");
 const domainHelper_1 = require("../utils/domainHelper");
+const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
  * GET /ai-helper/export?format=csv&startDate=...&endDate=...&classId=...&problemId=...&userId=...&includeSensitive=false
@@ -18,6 +19,13 @@ const domainHelper_1 = require("../utils/domainHelper");
 class ExportHandler extends hydrooj_1.Handler {
     async get() {
         try {
+            // 限流：5 次/60秒，fail-open（只读端点）
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_export', periodSecs: 60, maxOps: 5,
+                failOpen: true,
+                errorMessage: '导出请求太频繁，请稍后再试',
+            }))
+                return;
             // 获取当前域 ID（用于域隔离）
             const domainId = (0, domainHelper_1.getDomainId)(this);
             // 1. 解析查询参数

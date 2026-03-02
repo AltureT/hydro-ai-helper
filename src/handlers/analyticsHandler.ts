@@ -7,6 +7,7 @@ import { Handler, PRIV, db } from 'hydrooj';
 import type { Document } from 'mongodb';
 import { getDomainId } from '../utils/domainHelper';
 import type { ProblemDocument, UserDocument } from '../types/hydrooj';
+import { applyRateLimit } from '../lib/rateLimitHelper';
 
 /**
  * 统计项接口（包含可选的 displayName）
@@ -148,6 +149,13 @@ interface AnalyticsFilters {
 export class AnalyticsHandler extends Handler {
   async get() {
     try {
+      // 限流：10 次/60秒，fail-open（只读端点）
+      if (await applyRateLimit(this, {
+        op: 'ai_analytics', periodSecs: 60, maxOps: 10,
+        failOpen: true,
+        errorMessage: '统计请求太频繁，请稍后再试',
+      })) return;
+
       // 获取当前域 ID（用于域隔离）
       const domainId = getDomainId(this);
 

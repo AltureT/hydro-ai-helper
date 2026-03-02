@@ -85,6 +85,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const db = ctx.db;
     const conversationModel = new ConversationModel(db);
     const messageModel = new MessageModel(db);
+    // @deprecated — 限流已迁移到 HydroOJ 内置 limitRate (opcount)，
+    // rateLimitRecordModel 仅保留以防止引用断裂，ai_rate_limit_records 集合通过 TTL 自动清空。
     const rateLimitRecordModel = new RateLimitRecordModel(db);
     const aiConfigModel = new AIConfigModel(db);
     const jailbreakLogModel = new JailbreakLogModel(db);

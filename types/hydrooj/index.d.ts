@@ -12,6 +12,7 @@ declare module 'hydrooj' {
     response: any;
     user?: any;
     args?: any;
+    limitRate(op: string, periodSecs: number, maxOperations: number, defaultKey?: string): Promise<void>;
   }
 
   export const PRIV: Record<string, any>;

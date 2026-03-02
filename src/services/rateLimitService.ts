@@ -1,122 +1,50 @@
 /**
- * RateLimitService - 频率限制服务
+ * Rate Limit 辅助查询模块
  *
- * 提供基于用户和时间窗口的请求频率限制功能
+ * 限流逻辑已迁移到 HydroOJ 内置 limitRate (opcount 模型)。
+ * 本文件仅保留 getRemainingRequests() 供前端剩余配额展示使用。
+ *
+ * @deprecated RateLimitService 类已移除，请使用 src/lib/rateLimitHelper.ts 中的 applyRateLimit()
  */
 
-import type { Context } from 'hydrooj';
-import { getRateLimitCollection } from '../models/rateLimitRecord';
+import type { Db } from 'mongodb';
 
 /**
- * RateLimitService 类
- * 提供频率限制检查和计数功能
+ * 查询用户当前分钟内在 ai_chat 操作上的剩余请求次数。
+ * 通过读取 HydroOJ 的 opcount 集合实现。
+ *
+ * @param db MongoDB Database 对象
+ * @param userId 用户 ID
+ * @param maxPerMinute 每分钟最大请求次数
+ * @returns 剩余请求次数，如果获取失败则返回 null
  */
-export class RateLimitService {
-  private ctx: Context;
+export async function getRemainingRequests(
+  db: Db,
+  userId: number,
+  maxPerMinute: number
+): Promise<number | null> {
+  try {
+    const coll = db.collection('opcount');
+    const now = new Date();
 
-  constructor(ctx: Context) {
-    this.ctx = ctx;
-  }
+    // opcount 记录的 key 格式取决于 HydroOJ 版本，
+    // 通常包含 op 名称和用户标识。查找最近 60 秒内的记录。
+    const cutoff = new Date(now.getTime() - 60 * 1000);
 
-  /**
-   * 检查用户是否超过频率限制，并原子性地增加计数
-   * @param domainId 域 ID (用于多租户隔离)
-   * @param userId 用户 ID
-   * @param limitPerMinute 每分钟最大请求次数
-   * @returns 返回 true 表示允许通过，false 表示已超限
-   */
-  async checkAndIncrement(domainId: string, userId: number, limitPerMinute: number): Promise<boolean> {
-    try {
-      // 1. 获取当前时间并生成分钟粒度的时间键
-      const now = new Date();
-      const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:mm"
+    const record = await coll.findOne({
+      op: 'ai_chat',
+      ident: String(userId),
+      expireAt: { $gt: now },
+    });
 
-      // 2. 计算过期时间（当前时间 + 2 分钟）
-      const expireAt = new Date(now.getTime() + 2 * 60 * 1000);
-
-      // 3. 获取频率限制记录集合
-      const collection = getRateLimitCollection(this.ctx.db);
-
-      // 4. 使用 findOneAndUpdate 原子性地增加计数
-      // - 如果记录不存在，则创建新记录（upsert: true）
-      // - 如果记录存在，则增加计数（$inc: { count: 1 }）
-      // - 返回更新后的文档（returnDocument: 'after'）
-      const result = await collection.findOneAndUpdate(
-        {
-          domainId,
-          userId,
-          minuteKey
-        },
-        {
-          $setOnInsert: {
-            domainId,
-            expireAt
-          },
-          $inc: {
-            count: 1
-          }
-        },
-        {
-          upsert: true,
-          // `returnOriginal` 兼容老版本 MongoDB 驱动,`returnDocument` 兼容新版本
-          returnDocument: 'after',
-          // @ts-expect-error - 老版本驱动使用 returnOriginal,忽略即可
-          returnOriginal: false
-        }
-      );
-
-      // 兼容处理：部分环境下 findOneAndUpdate 可能不返回 value（老驱动忽略 returnDocument）
-      let updatedRecord = result?.value;
-      if (!updatedRecord) {
-        updatedRecord = await collection.findOne({ domainId, userId, minuteKey });
-        if (!updatedRecord) {
-          this.ctx.logger.warn('RateLimitService: findOneAndUpdate returned null and fallback findOne failed, allowing request');
-          return true;
-        }
-      }
-
-      // 5. 检查更新后的计数是否超过限制
-      const allowed = updatedRecord.count <= limitPerMinute;
-
-      return allowed;
-    } catch (err) {
-      // 7. 错误处理：出错时默认放行（回退策略）
-      // 防止因限流系统故障导致业务完全瘫痪
-      this.ctx.logger.error('RateLimitService error:', err);
-      return true;
+    if (!record) {
+      return maxPerMinute;
     }
-  }
 
-  /**
-   * 获取用户当前分钟的剩余请求次数（可选功能，供前端显示）
-   * @param domainId 域 ID (用于多租户隔离)
-   * @param userId 用户 ID
-   * @param limitPerMinute 每分钟最大请求次数
-   * @returns 剩余请求次数，如果获取失败则返回 null
-   */
-  async getRemainingRequests(domainId: string, userId: number, limitPerMinute: number): Promise<number | null> {
-    try {
-      const now = new Date();
-      const minuteKey = now.toISOString().slice(0, 16);
-
-      const collection = getRateLimitCollection(this.ctx.db);
-
-      const record = await collection.findOne({
-        domainId,
-        userId,
-        minuteKey
-      });
-
-      if (!record) {
-        // 没有记录，说明本分钟还未请求过
-        return limitPerMinute;
-      }
-
-      const remaining = limitPerMinute - record.count;
-      return remaining > 0 ? remaining : 0;
-    } catch (err) {
-      this.ctx.logger.error('RateLimitService getRemainingRequests error:', err);
-      return null;
-    }
+    const remaining = maxPerMinute - (record.opcount || 0);
+    return remaining > 0 ? remaining : 0;
+  } catch (err) {
+    console.error('[RateLimit] getRemainingRequests error:', err);
+    return null;
   }
 }
