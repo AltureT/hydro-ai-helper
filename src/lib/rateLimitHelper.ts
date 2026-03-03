@@ -48,6 +48,8 @@ export async function applyRateLimit(
       handler.response.body = {
         error: errorMessage,
         code: 'RATE_LIMIT_EXCEEDED',
+        category: 'rate_limit',
+        retryable: true,
       };
       handler.response.type = 'application/json';
       return true;

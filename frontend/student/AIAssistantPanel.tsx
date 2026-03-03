@@ -586,9 +586,11 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     const savedCode = includeCode ? code : undefined;
     setUserThinking('');
 
-    // 创建 AbortController 用于请求取消
+    // 创建 AbortController 用于请求取消 + 客户端超时
     const ac = new AbortController();
     abortControllerRef.current = ac;
+    let clientTimedOut = false;
+    const clientTimeout = setTimeout(() => { clientTimedOut = true; ac.abort(); }, 70_000);
 
     try {
       // 准备题目信息
@@ -662,7 +664,15 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
         }
       }
 
-      const data = await response.json();
+      let data: any;
+      try {
+        data = await response.json();
+      } catch {
+        throw createCategorizedError('服务器返回格式异常，请稍后重试', 'server', true);
+      }
+      if (!data?.message?.content) {
+        throw createCategorizedError('AI 返回内容为空，请重试', 'server', true);
+      }
 
       // 添加 AI 消息到历史
       const aiMessage = {
@@ -681,11 +691,17 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
         saveConversationId(problemId, data.conversationId);
       }
     } catch (err) {
-      // AbortError: 用户主动取消
+      // AbortError: 区分用户取消 vs 客户端超时
       if (err instanceof DOMException && err.name === 'AbortError') {
-        setError('请求已取消');
-        setErrorCategory('aborted');
-        setErrorRetryable(false);
+        if (clientTimedOut) {
+          setError('AI 服务响应超时，请稍后再试');
+          setErrorCategory('timeout');
+          setErrorRetryable(true);
+        } else {
+          setError('请求已取消');
+          setErrorCategory('aborted');
+          setErrorRetryable(false);
+        }
       } else {
         const errObj = err as Error & { _category?: string; _retryable?: boolean };
         setError(errObj.message || '未知错误');
@@ -698,6 +714,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       // 移除刚添加的学生消息
       setConversationHistory(prev => prev.slice(0, -1));
     } finally {
+      clearTimeout(clientTimeout);
       abortControllerRef.current = null;
       setIsLoading(false);
     }
@@ -1251,51 +1268,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             </div>
           )}
 
-          {/* 错误提示（带分类图标和重试） */}
-          {error && (
-            <div style={{
-              background: errorCategory === 'rate_limit' ? '#fffbeb' :
-                          errorCategory === 'timeout' ? '#eff6ff' :
-                          errorCategory === 'network' ? '#f0fdf4' :
-                          errorCategory === 'auth' ? '#fdf4ff' :
-                          '#fef2f2',
-              border: `1px solid ${
-                errorCategory === 'rate_limit' ? '#fde68a' :
-                errorCategory === 'timeout' ? '#bfdbfe' :
-                errorCategory === 'network' ? '#bbf7d0' :
-                errorCategory === 'auth' ? '#e9d5ff' :
-                '#fecaca'
-              }`,
-              padding: '12px', borderRadius: '8px',
-              color: errorCategory === 'rate_limit' ? '#92400e' :
-                     errorCategory === 'timeout' ? '#1e40af' :
-                     errorCategory === 'network' ? '#166534' :
-                     errorCategory === 'auth' ? '#6b21a8' :
-                     '#991b1b',
-              fontSize: '13px',
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px'
-            }}>
-              <span>
-                {errorCategory === 'timeout' ? '⏱️' :
-                 errorCategory === 'network' ? '🔌' :
-                 errorCategory === 'rate_limit' ? '⏳' :
-                 errorCategory === 'auth' ? '🔑' :
-                 '⚠️'}{' '}{error}
-              </span>
-              {errorRetryable && (
-                <button
-                  onClick={handleSubmit}
-                  style={{
-                    padding: '4px 12px', fontSize: '12px', fontWeight: '500',
-                    background: 'white', border: '1px solid #d1d5db', borderRadius: '6px',
-                    cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0
-                  }}
-                >
-                  重试
-                </button>
-              )}
-            </div>
-          )}
+          {renderErrorBanner(false)}
 
           {/* 首次对话：问题类型选择 */}
           {conversationHistory.length === 0 && (
@@ -1414,6 +1387,49 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       </div>
     );
   }
+
+  const ERROR_STYLE_MAP: Record<string, { bg: string; border: string; color: string; icon: string }> = {
+    rate_limit: { bg: '#fffbeb', border: '#fde68a', color: '#92400e', icon: '⏳' },
+    timeout:    { bg: '#eff6ff', border: '#bfdbfe', color: '#1e40af', icon: '⏱️' },
+    network:    { bg: '#f0fdf4', border: '#bbf7d0', color: '#166534', icon: '🔌' },
+    auth:       { bg: '#fdf4ff', border: '#e9d5ff', color: '#6b21a8', icon: '🔑' },
+  };
+  const DEFAULT_ERROR_STYLE = { bg: '#fef2f2', border: '#fecaca', color: '#991b1b', icon: '⚠️' };
+
+  const renderErrorBanner = (compact: boolean) => {
+    if (!error) return null;
+    const s = ERROR_STYLE_MAP[errorCategory] || DEFAULT_ERROR_STYLE;
+    return (
+      <div style={{
+        background: s.bg,
+        border: `1px solid ${s.border}`,
+        padding: compact ? '8px 12px' : '12px',
+        borderRadius: compact ? '6px' : '8px',
+        color: s.color,
+        fontSize: compact ? '12px' : '13px',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        gap: compact ? '6px' : '8px',
+        ...(compact ? { marginBottom: '10px' } : {}),
+      }}>
+        <span>{s.icon}{' '}{error}</span>
+        {errorRetryable && (
+          <button
+            onClick={handleSubmit}
+            style={{
+              padding: compact ? '3px 10px' : '4px 12px',
+              fontSize: compact ? '11px' : '12px',
+              fontWeight: '500',
+              background: 'white', border: '1px solid #d1d5db',
+              borderRadius: compact ? '4px' : '6px',
+              cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+            }}
+          >
+            重试
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -1670,50 +1686,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
           padding: '12px 16px 40px 16px',  // 底部留出空间避免被 resize 把手覆盖
           background: '#fafafa'
         }}>
-          {/* 错误提示（带分类图标和重试） */}
-          {error && (
-            <div style={{
-              padding: '8px 12px',
-              background: errorCategory === 'rate_limit' ? '#fffbeb' :
-                          errorCategory === 'timeout' ? '#eff6ff' :
-                          errorCategory === 'network' ? '#f0fdf4' :
-                          '#fee2e2',
-              color: errorCategory === 'rate_limit' ? '#92400e' :
-                     errorCategory === 'timeout' ? '#1e40af' :
-                     errorCategory === 'network' ? '#166534' :
-                     '#dc2626',
-              borderRadius: '6px',
-              marginBottom: '10px',
-              fontSize: '12px',
-              border: `1px solid ${
-                errorCategory === 'rate_limit' ? '#fde68a' :
-                errorCategory === 'timeout' ? '#bfdbfe' :
-                errorCategory === 'network' ? '#bbf7d0' :
-                '#fecaca'
-              }`,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px'
-            }}>
-              <span>
-                {errorCategory === 'timeout' ? '⏱️' :
-                 errorCategory === 'network' ? '🔌' :
-                 errorCategory === 'rate_limit' ? '⏳' :
-                 errorCategory === 'auth' ? '🔑' :
-                 '⚠️'}{' '}{error}
-              </span>
-              {errorRetryable && (
-                <button
-                  onClick={handleSubmit}
-                  style={{
-                    padding: '3px 10px', fontSize: '11px', fontWeight: '500',
-                    background: 'white', border: '1px solid #d1d5db', borderRadius: '4px',
-                    cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0
-                  }}
-                >
-                  重试
-                </button>
-              )}
-            </div>
-          )}
+          {renderErrorBanner(true)}
 
           {/* 首次提问：显示问题类型选择 */}
           {conversationHistory.length === 0 && (
