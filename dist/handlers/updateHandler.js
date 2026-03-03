@@ -45,6 +45,7 @@ exports.UpdateHandlerPriv = exports.UpdateHandler = exports.UpdateInfoHandlerPri
 const hydrooj_1 = require("hydrooj");
 const updateService_1 = require("../services/updateService");
 const httpHelpers_1 = require("../lib/httpHelpers");
+const csrfHelper_1 = require("../lib/csrfHelper");
 const fsPromises = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const UPDATE_PROGRESS_FILENAME = '.update.progress.json';
@@ -156,6 +157,8 @@ class UpdateHandler extends hydrooj_1.Handler {
         }
     }
     async post() {
+        if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+            return;
         const startedAt = new Date().toISOString();
         try {
             // 🔒 强制管理员权限检查（PRIV/hasPriv；防御路由配置被绕过）

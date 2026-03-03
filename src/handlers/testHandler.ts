@@ -22,4 +22,4 @@ export class HelloHandler extends Handler {
 }
 
 // 导出路由权限配置（最低权限 - 任何人可访问）
-export const HelloHandlerPriv = PRIV.PRIV_NONE;
+export const HelloHandlerPriv = PRIV.PRIV_USER_PROFILE;

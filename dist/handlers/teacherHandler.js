@@ -183,7 +183,7 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
             // 1. 对话的 domainId 为 'system'（历史数据迁移默认值）时，允许任何域访问
             // 2. 当前访问域为 'system'（主站访问）时，允许访问所有域的对话
             const conversationDomain = conversation.domainId || 'system';
-            if (conversationDomain !== domainId && conversationDomain !== 'system' && domainId !== 'system') {
+            if (conversationDomain !== domainId && conversationDomain !== 'system') {
                 (0, httpHelpers_1.setErrorResponse)(this, 'FORBIDDEN', '无权访问此对话', 403);
                 return;
             }

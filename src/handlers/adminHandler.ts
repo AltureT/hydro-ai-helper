@@ -11,6 +11,7 @@ import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
 import { applyRateLimit } from '../lib/rateLimitHelper';
+import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 
 /**
  * 更新配置请求接口
@@ -234,6 +235,7 @@ export class UpdateConfigHandler extends Handler {
 export class TestConnectionHandler extends Handler {
   async post() {
     try {
+      if (rejectIfCsrfInvalid(this)) return;
       // 限流：5 次/60秒，fail-closed（触发外部 API）
       if (await applyRateLimit(this, {
         op: 'ai_admin_test', periodSecs: 60, maxOps: 5,
@@ -383,6 +385,7 @@ function validateApiBaseUrl(url: string): string | null {
 export class FetchModelsHandler extends Handler {
   async post() {
     try {
+      if (rejectIfCsrfInvalid(this)) return;
       // 限流：10 次/60秒，fail-closed（触发外部 API）
       if (await applyRateLimit(this, {
         op: 'ai_admin_models', periodSecs: 60, maxOps: 10,

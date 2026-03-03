@@ -612,8 +612,10 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
             ...(supportsStream ? { 'Accept': 'text/event-stream, application/json' } : {}),
           },
+          credentials: 'include',
           signal: ac.signal,
           body: JSON.stringify({
             problemId,

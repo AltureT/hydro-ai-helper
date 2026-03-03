@@ -10,6 +10,7 @@ import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServ
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS, API_DEFAULTS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
+import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { EffectivenessService } from '../services/effectivenessService';
 import { OutputSafetyService } from '../services/outputSafetyService';
 import { TopicGuardService } from '../services/topicGuardService';
@@ -109,6 +110,7 @@ interface PrepareChatResult {
 export class ChatHandler extends Handler {
   async post() {
     try {
+      if (rejectIfCsrfInvalid(this)) return;
       const prepared = await this.prepareChat();
       if (!prepared) return; // Early exit (response already set)
 

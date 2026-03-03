@@ -23,5 +23,5 @@ class HelloHandler extends hydrooj_1.Handler {
 }
 exports.HelloHandler = HelloHandler;
 // 导出路由权限配置（最低权限 - 任何人可访问）
-exports.HelloHandlerPriv = hydrooj_1.PRIV.PRIV_NONE;
+exports.HelloHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 //# sourceMappingURL=testHandler.js.map

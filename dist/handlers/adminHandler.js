@@ -10,6 +10,7 @@ const crypto_1 = require("../lib/crypto");
 const openaiClient_1 = require("../services/openaiClient");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
+const csrfHelper_1 = require("../lib/csrfHelper");
 /**
  * GetConfigHandler - 获取当前配置
  * GET /ai-helper/admin/config
@@ -200,6 +201,8 @@ exports.UpdateConfigHandler = UpdateConfigHandler;
 class TestConnectionHandler extends hydrooj_1.Handler {
     async post() {
         try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
             // 限流：5 次/60秒，fail-closed（触发外部 API）
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_admin_test', periodSecs: 60, maxOps: 5,
@@ -333,6 +336,8 @@ function validateApiBaseUrl(url) {
 class FetchModelsHandler extends hydrooj_1.Handler {
     async post() {
         try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
             // 限流：10 次/60秒，fail-closed（触发外部 API）
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_admin_models', periodSecs: 60, maxOps: 10,

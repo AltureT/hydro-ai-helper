@@ -256,7 +256,8 @@ export const VersionBadge: React.FC = () => {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
         },
         credentials: 'include'
       });

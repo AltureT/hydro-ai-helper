@@ -10,6 +10,7 @@
 import { Handler, PRIV } from 'hydrooj';
 import { UpdateService } from '../services/updateService';
 import { setJsonResponse, setErrorResponse } from '../lib/httpHelpers';
+import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 
@@ -143,6 +144,7 @@ export class UpdateHandler extends Handler {
   }
 
   async post() {
+    if (rejectIfCsrfInvalid(this)) return;
     const startedAt = new Date().toISOString();
     try {
       // 🔒 强制管理员权限检查（PRIV/hasPriv；防御路由配置被绕过）

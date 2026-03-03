@@ -41,6 +41,7 @@ exports.AdminConfigHandlerPriv = exports.AdminConfigHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
+const csrfHelper_1 = require("../lib/csrfHelper");
 /**
  * AdminConfigHandler - AI 配置页面
  * GET /ai-helper/admin/config
@@ -160,6 +161,8 @@ class AdminConfigHandler extends hydrooj_1.Handler {
      */
     async put() {
         try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
             const aiConfigModel = this.ctx.get('aiConfigModel');
             const body = this.request.body;
             const partial = {};

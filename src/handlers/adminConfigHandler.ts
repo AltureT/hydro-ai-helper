@@ -9,6 +9,7 @@ import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
+import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 
 /**
  * 更新配置请求接口（兼容旧版 + 新版多端点）
@@ -161,6 +162,7 @@ export class AdminConfigHandler extends Handler {
    */
   async put() {
     try {
+      if (rejectIfCsrfInvalid(this)) return;
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
       const body = this.request.body as UpdateConfigRequest;
 

@@ -11,6 +11,7 @@ const openaiClient_1 = require("../services/openaiClient");
 const promptService_1 = require("../services/promptService");
 const limits_1 = require("../constants/limits");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
+const csrfHelper_1 = require("../lib/csrfHelper");
 const effectivenessService_1 = require("../services/effectivenessService");
 const outputSafetyService_1 = require("../services/outputSafetyService");
 const topicGuardService_1 = require("../services/topicGuardService");
@@ -42,6 +43,8 @@ function extractContestIdFromReferer(referer) {
 class ChatHandler extends hydrooj_1.Handler {
     async post() {
         try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
             const prepared = await this.prepareChat();
             if (!prepared)
                 return; // Early exit (response already set)
