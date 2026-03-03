@@ -11,6 +11,14 @@ module.exports = {
     '!src/index.ts'
   ],
   coverageDirectory: 'coverage',
+  coverageThreshold: {
+    global: {
+      statements: 45,
+      branches: 38,
+      functions: 45,
+      lines: 45,
+    },
+  },
   moduleNameMapper: {
     '^hydrooj$': '<rootDir>/src/__tests__/__mocks__/hydrooj.ts'
   }

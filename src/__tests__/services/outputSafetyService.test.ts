@@ -17,6 +17,22 @@ describe('OutputSafetyService', () => {
       expect(result.rewritten).toBe(true);
     });
 
+    it('should replace clarify response with safe template when no programming content', () => {
+      const result = service.sanitize('来聊聊原神的角色培养吧', {
+        questionType: 'clarify',
+      });
+      expect(result.rewritten).toBe(true);
+      expect(result.content).toContain('与编程学习无关');
+    });
+
+    it('should keep clarify response if programming content exists after rewrite', () => {
+      const result = service.sanitize('原神里面也有循环机制', {
+        questionType: 'clarify',
+      });
+      expect(result.rewritten).toBe(true);
+      expect(result.content).not.toContain('与编程学习无关');
+    });
+
     it('should whitelist keywords from problem content', () => {
       const result = service.sanitize('这道题涉及到Minecraft的红石电路', {
         questionType: 'understand',

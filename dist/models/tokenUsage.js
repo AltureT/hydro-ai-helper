@@ -29,7 +29,7 @@ class TokenUsageModel {
         const now = new Date();
         const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
         const expireAt = new Date(now.getTime() + TTL_DAYS * 24 * 60 * 60 * 1000);
-        const estimatedCostUSD = this.estimateCost(params.modelName, params.promptTokens, params.completionTokens);
+        const estimatedCostUSD = TokenUsageModel.estimateCost(params.modelName, params.promptTokens, params.completionTokens);
         // 写细粒度记录
         await this.usageCollection.insertOne({
             domainId: params.domainId,
@@ -176,7 +176,7 @@ class TokenUsageModel {
         ];
         return this.usageCollection.aggregate(pipeline).toArray();
     }
-    estimateCost(modelName, promptTokens, completionTokens) {
+    static estimateCost(modelName, promptTokens, completionTokens) {
         const model = modelName.toLowerCase();
         let promptPrice;
         let completionPrice;

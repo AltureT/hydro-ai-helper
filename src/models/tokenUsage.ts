@@ -106,7 +106,7 @@ export class TokenUsageModel {
     const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
     const expireAt = new Date(now.getTime() + TTL_DAYS * 24 * 60 * 60 * 1000);
 
-    const estimatedCostUSD = this.estimateCost(params.modelName, params.promptTokens, params.completionTokens);
+    const estimatedCostUSD = TokenUsageModel.estimateCost(params.modelName, params.promptTokens, params.completionTokens);
 
     // 写细粒度记录
     await this.usageCollection.insertOne({
@@ -289,7 +289,7 @@ export class TokenUsageModel {
     return this.usageCollection.aggregate(pipeline).toArray() as any;
   }
 
-  private estimateCost(modelName: string, promptTokens: number, completionTokens: number): number {
+  static estimateCost(modelName: string, promptTokens: number, completionTokens: number): number {
     const model = modelName.toLowerCase();
     let promptPrice: number;
     let completionPrice: number;

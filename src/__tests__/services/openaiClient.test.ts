@@ -1,4 +1,7 @@
 jest.mock('axios');
+jest.mock('../../lib/crypto', () => ({
+  decrypt: jest.fn((c: string) => c.replace('enc_', 'dec_')),
+}));
 
 import axios from 'axios';
 import {
@@ -8,6 +11,11 @@ import {
   AIClientConfig,
   ResolvedModelConfig,
   ErrorCategory,
+  StreamCallbacks,
+  fetchAvailableModels,
+  createMultiModelClientFromConfig,
+  createOpenAIClientFromConfig,
+  getHttpStatusForCategory,
 } from '../../services/openaiClient';
 
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -536,5 +544,439 @@ describe('MultiModelClient', () => {
     it('should throw if no models provided', () => {
       expect(() => new MultiModelClient([])).toThrow('至少需要配置一个模型');
     });
+  });
+
+  // ─── chatStream ───────────────────────────────────
+
+  describe('chatStream', () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('should return usedModel on first model success', async () => {
+      jest.spyOn(OpenAIClient.prototype, 'chatStream').mockResolvedValueOnce(undefined as any);
+
+      const client = new MultiModelClient([makeResolvedConfig()]);
+      const callbacks: StreamCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+      const result = await client.chatStream([], 'System', { callbacks });
+
+      expect(result.usedModel.modelName).toBe('test-model');
+      expect(result.usedModel.endpointName).toBe('TestEndpoint');
+    });
+
+    it('should skip endpoint on auth error and succeed with next', async () => {
+      const spy = jest.spyOn(OpenAIClient.prototype, 'chatStream')
+        .mockRejectedValueOnce(new AIServiceError('auth fail', 'auth', 401))
+        .mockResolvedValueOnce(undefined as any);
+
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-b' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-c' }),
+      ]);
+      const callbacks: StreamCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+      const result = await client.chatStream([], 'System', { callbacks });
+
+      expect(result.usedModel.modelName).toBe('model-c');
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should skip model on client error and try next', async () => {
+      jest.spyOn(OpenAIClient.prototype, 'chatStream')
+        .mockRejectedValueOnce(new AIServiceError('not supported', 'client', 400))
+        .mockResolvedValueOnce(undefined as any);
+
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+      ]);
+      const callbacks: StreamCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+      const result = await client.chatStream([], 'System', { callbacks });
+
+      expect(result.usedModel.modelName).toBe('model-b');
+    });
+
+    it('should throw immediately on aborted error', async () => {
+      jest.spyOn(OpenAIClient.prototype, 'chatStream')
+        .mockRejectedValueOnce(new AIServiceError('canceled', 'aborted'));
+
+      const client = new MultiModelClient([
+        makeResolvedConfig(),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+      ]);
+      const callbacks: StreamCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+
+      await expect(client.chatStream([], 'System', { callbacks }))
+        .rejects.toMatchObject({ category: 'aborted' });
+    });
+
+    it('should throw dominant category when all models fail', async () => {
+      jest.spyOn(OpenAIClient.prototype, 'chatStream')
+        .mockRejectedValueOnce(new AIServiceError('server error', 'server', 503))
+        .mockRejectedValueOnce(new AIServiceError('server error', 'server', 503));
+
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+      ]);
+      const callbacks: StreamCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+
+      await expect(client.chatStream([], 'System', { callbacks }))
+        .rejects.toMatchObject({ category: 'server' });
+    });
+
+    it('should throw immediately if signal already aborted', async () => {
+      const client = new MultiModelClient([makeResolvedConfig()]);
+      const ac = new AbortController();
+      ac.abort();
+
+      const callbacks: StreamCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+
+      await expect(client.chatStream([], 'System', { signal: ac.signal, callbacks }))
+        .rejects.toMatchObject({ category: 'aborted' });
+    });
+  });
+});
+
+// ─── fetchAvailableModels ─────────────────────────────
+
+describe('fetchAvailableModels', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedAxios.isAxiosError.mockImplementation((error: any) => !!error?.isAxiosError);
+  });
+
+  it('should return filtered and sorted chat models', async () => {
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: 'gpt-4o', object: 'model' },
+          { id: 'gpt-3.5-turbo', object: 'model' },
+          { id: 'text-embedding-ada-002', object: 'model' },
+          { id: 'whisper-1', object: 'model' },
+          { id: 'dall-e-3', object: 'model' },
+        ],
+      },
+    });
+
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(true);
+    expect(result.models).toEqual(['gpt-3.5-turbo', 'gpt-4o']);
+  });
+
+  it('should include models with chat capability', async () => {
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: 'custom-model', object: 'model', capabilities: { chat: true } },
+          { id: 'custom-embed', object: 'model', capabilities: { chat: false } },
+        ],
+      },
+    });
+
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.models).toEqual(['custom-model']);
+  });
+
+  it('should exclude embedding/whisper/tts/audio models', async () => {
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: 'gpt-4o', object: 'model' },
+          { id: 'gpt-4o-audio-preview', object: 'model' },
+          { id: 'text-embedding-3-large', object: 'model' },
+        ],
+      },
+    });
+
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.models).toEqual(['gpt-4o']);
+  });
+
+  it('should match ep- keyword for Volcengine endpoints', async () => {
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: 'ep-20241234567890-xxxxx', object: 'model' },
+          { id: 'some-random-model', object: 'model' },
+        ],
+      },
+    });
+
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.models).toEqual(['ep-20241234567890-xxxxx']);
+  });
+
+  it('should strip trailing slashes from URL', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: { data: [] } });
+    await fetchAvailableModels('https://api.test.com/v1/', 'key');
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'https://api.test.com/v1/models',
+      expect.any(Object),
+    );
+  });
+
+  it('should return error for invalid response format', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: {} });
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('缺少 data 字段');
+  });
+
+  it('should return error on 401', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createAxiosError(401));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('无效或已过期');
+  });
+
+  it('should return error on 403', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createAxiosError(403));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('无权访问');
+  });
+
+  it('should return error on 404', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createAxiosError(404));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('不支持获取模型列表');
+  });
+
+  it('should return error on 5xx', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createAxiosError(500));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('获取模型列表失败');
+  });
+
+  it('should return error on timeout', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createTimeoutError());
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('请求超时');
+  });
+
+  it('should return error on ENOTFOUND', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createNetworkError('ENOTFOUND'));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('无法连接');
+  });
+
+  it('should return generic network error for unknown axios code', async () => {
+    mockedAxios.get.mockRejectedValueOnce(createNetworkError('EPIPE'));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('网络错误');
+  });
+
+  it('should return error on non-axios error', async () => {
+    mockedAxios.get.mockRejectedValueOnce(new Error('unexpected'));
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('unexpected');
+  });
+});
+
+// ─── createMultiModelClientFromConfig ─────────────────
+
+describe('createMultiModelClientFromConfig', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(console, 'warn').mockImplementation();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function makeCtx(config: any) {
+    return {
+      get: jest.fn().mockReturnValue({
+        getConfig: jest.fn().mockResolvedValue(config),
+      }),
+    } as any;
+  }
+
+  it('should create client from v2 multi-endpoint config', async () => {
+    const config = {
+      endpoints: [
+        { id: 'ep-1', name: 'Primary', apiBaseUrl: 'https://api.test.com/v1', apiKeyEncrypted: 'enc_key1', models: ['gpt-4o'], enabled: true },
+      ],
+      selectedModels: [{ endpointId: 'ep-1', modelName: 'gpt-4o' }],
+      timeoutSeconds: 45,
+    };
+
+    const client = await createMultiModelClientFromConfig(makeCtx(config));
+    expect(client).toBeInstanceOf(MultiModelClient);
+  });
+
+  it('should skip disabled endpoints in v2 config', async () => {
+    const config = {
+      endpoints: [
+        { id: 'ep-1', name: 'Disabled', apiBaseUrl: 'https://d.com', apiKeyEncrypted: 'enc_k1', models: ['m1'], enabled: false },
+        { id: 'ep-2', name: 'Enabled', apiBaseUrl: 'https://e.com', apiKeyEncrypted: 'enc_k2', models: ['m2'], enabled: true },
+      ],
+      selectedModels: [
+        { endpointId: 'ep-1', modelName: 'm1' },
+        { endpointId: 'ep-2', modelName: 'm2' },
+      ],
+      timeoutSeconds: 30,
+    };
+
+    const client = await createMultiModelClientFromConfig(makeCtx(config));
+    expect(client).toBeInstanceOf(MultiModelClient);
+  });
+
+  it('should skip endpoints with decrypt failure and warn', async () => {
+    const { decrypt } = require('../../lib/crypto');
+    decrypt
+      .mockImplementationOnce(() => { throw new Error('decrypt failed'); })
+      .mockReturnValueOnce('dec_k2');
+
+    const config = {
+      endpoints: [
+        { id: 'ep-1', name: 'Bad Key', apiBaseUrl: 'https://bad.com', apiKeyEncrypted: 'bad_key', models: ['m1'], enabled: true },
+        { id: 'ep-2', name: 'Good Key', apiBaseUrl: 'https://good.com', apiKeyEncrypted: 'enc_k2', models: ['m2'], enabled: true },
+      ],
+      selectedModels: [
+        { endpointId: 'ep-1', modelName: 'm1' },
+        { endpointId: 'ep-2', modelName: 'm2' },
+      ],
+      timeoutSeconds: 30,
+    };
+
+    const client = await createMultiModelClientFromConfig(makeCtx(config));
+    expect(client).toBeInstanceOf(MultiModelClient);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('解密失败'));
+  });
+
+  it('should fallback to legacy single-endpoint config', async () => {
+    const config = {
+      apiBaseUrl: 'https://api.test.com/v1',
+      modelName: 'gpt-4o',
+      apiKeyEncrypted: 'enc_key1',
+      timeoutSeconds: 30,
+    };
+
+    const client = await createMultiModelClientFromConfig(makeCtx(config));
+    expect(client).toBeInstanceOf(MultiModelClient);
+  });
+
+  it('should throw when config is null', async () => {
+    await expect(createMultiModelClientFromConfig(makeCtx(null)))
+      .rejects.toThrow('AI 服务尚未配置');
+  });
+
+  it('should throw when legacy config is incomplete', async () => {
+    const config = {
+      apiBaseUrl: '',
+      modelName: '',
+      apiKeyEncrypted: '',
+      timeoutSeconds: 30,
+    };
+
+    await expect(createMultiModelClientFromConfig(makeCtx(config)))
+      .rejects.toThrow('配置不完整');
+  });
+
+  it('should throw when legacy decrypt fails', async () => {
+    const { decrypt } = require('../../lib/crypto');
+    decrypt.mockImplementationOnce(() => { throw new Error('bad key'); });
+
+    const config = {
+      apiBaseUrl: 'https://api.test.com/v1',
+      modelName: 'gpt-4o',
+      apiKeyEncrypted: 'bad_enc',
+      timeoutSeconds: 30,
+    };
+
+    await expect(createMultiModelClientFromConfig(makeCtx(config)))
+      .rejects.toThrow('API Key 解密失败');
+  });
+});
+
+// ─── getHttpStatusForCategory ─────────────────────────
+
+describe('getHttpStatusForCategory', () => {
+  it.each<[ErrorCategory, number]>([
+    ['rate_limit', 429],
+    ['auth', 503],
+    ['timeout', 504],
+    ['network', 502],
+    ['server', 502],
+    ['client', 500],
+    ['aborted', 499],
+    ['unknown', 500],
+  ])('should return %i for category "%s"', (category, expected) => {
+    expect(getHttpStatusForCategory(category)).toBe(expected);
+  });
+});
+
+// ─── createOpenAIClientFromConfig ─────────────────────
+
+describe('createOpenAIClientFromConfig', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  function makeCtx(config: any) {
+    return {
+      get: jest.fn().mockReturnValue({
+        getConfig: jest.fn().mockResolvedValue(config),
+      }),
+    } as any;
+  }
+
+  it('should create client from valid legacy config', async () => {
+    const config = {
+      apiBaseUrl: 'https://api.test.com/v1',
+      modelName: 'gpt-4o',
+      apiKeyEncrypted: 'enc_key1',
+      timeoutSeconds: 45,
+    };
+
+    const client = await createOpenAIClientFromConfig(makeCtx(config));
+    expect(client).toBeInstanceOf(OpenAIClient);
+  });
+
+  it('should use existingConfig when provided', async () => {
+    const config = {
+      apiBaseUrl: 'https://api.test.com/v1',
+      modelName: 'gpt-4o',
+      apiKeyEncrypted: 'enc_key1',
+      timeoutSeconds: 30,
+    };
+
+    const ctx = makeCtx(null);
+    const client = await createOpenAIClientFromConfig(ctx, config as any);
+    expect(client).toBeInstanceOf(OpenAIClient);
+  });
+
+  it('should throw when config is null', async () => {
+    await expect(createOpenAIClientFromConfig(makeCtx(null)))
+      .rejects.toThrow('AI 服务尚未配置');
+  });
+
+  it('should throw when config is incomplete', async () => {
+    await expect(createOpenAIClientFromConfig(makeCtx({ apiBaseUrl: '', modelName: '', apiKeyEncrypted: '' })))
+      .rejects.toThrow('配置不完整');
+  });
+
+  it('should throw when decrypt fails', async () => {
+    const { decrypt } = require('../../lib/crypto');
+    decrypt.mockImplementationOnce(() => { throw new Error('bad key'); });
+
+    const config = {
+      apiBaseUrl: 'https://api.test.com/v1',
+      modelName: 'gpt-4o',
+      apiKeyEncrypted: 'bad_enc',
+      timeoutSeconds: 30,
+    };
+
+    await expect(createOpenAIClientFromConfig(makeCtx(config)))
+      .rejects.toThrow('API Key 解密失败');
   });
 });
