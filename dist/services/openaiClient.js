@@ -273,6 +273,142 @@ class OpenAIClient {
             throw new AIServiceError(`调用 AI 服务失败: ${error instanceof Error ? error.message : String(error)}`, 'unknown');
         }
     }
+    async chatStream(messages, systemPrompt, options) {
+        const payload = {
+            model: this.config.modelName,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                ...messages,
+            ],
+            temperature: limits_1.API_DEFAULTS.DEFAULT_TEMPERATURE,
+            max_tokens: limits_1.API_DEFAULTS.MAX_COMPLETION_TOKENS,
+            stream: true,
+            stream_options: { include_usage: true },
+        };
+        let response;
+        try {
+            response = await axios_1.default.post(`${this.config.apiBaseUrl}${limits_1.API_DEFAULTS.CHAT_ENDPOINT}`, payload, {
+                headers: {
+                    Authorization: `Bearer ${this.config.apiKey}`,
+                    'Content-Type': 'application/json',
+                },
+                timeout: this.config.timeoutSeconds * 1000,
+                signal: options.signal,
+                responseType: 'stream',
+                httpAgent: HTTP_AGENT,
+                httpsAgent: HTTPS_AGENT,
+            });
+        }
+        catch (error) {
+            if (error instanceof AIServiceError)
+                throw error;
+            if (axios_1.default.isCancel(error))
+                throw new AIServiceError('请求已取消', 'aborted');
+            if (axios_1.default.isAxiosError(error)) {
+                const ae = error;
+                if (ae.response) {
+                    const status = ae.response.status;
+                    if (status === 401 || status === 403)
+                        throw new AIServiceError('API Key 无效或已过期', 'auth', status);
+                    if (status === 429)
+                        throw new AIServiceError('API 调用频率超限', 'rate_limit', status);
+                    if (status >= 500)
+                        throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
+                    throw new AIServiceError(`AI API 错误 (HTTP ${status})`, 'client', status);
+                }
+                if (ae.code === 'ECONNABORTED' || ae.code === 'ETIMEDOUT')
+                    throw new AIServiceError('请求超时', 'timeout');
+                if (ae.code === 'ENOTFOUND' || ae.code === 'ECONNREFUSED')
+                    throw new AIServiceError('无法连接到 AI 服务', 'network');
+                throw new AIServiceError('网络错误', 'network');
+            }
+            throw new AIServiceError(error instanceof Error ? error.message : String(error), 'unknown');
+        }
+        // Verify streaming response
+        const contentType = response.headers?.['content-type'] || '';
+        if (!contentType.includes('text/event-stream') && !contentType.includes('application/octet-stream')) {
+            response.data?.destroy?.();
+            throw new AIServiceError('端点不支持流式响应', 'client');
+        }
+        const stream = response.data;
+        await this.parseSSEStream(stream, options.callbacks, options.signal);
+    }
+    parseSSEStream(stream, callbacks, signal) {
+        return new Promise((resolve, reject) => {
+            let buffer = '';
+            let fullContent = '';
+            let usage;
+            let chunkTimer = null;
+            const resetChunkTimer = () => {
+                if (chunkTimer)
+                    clearTimeout(chunkTimer);
+                chunkTimer = setTimeout(() => {
+                    stream.destroy();
+                    reject(new AIServiceError('流式响应 chunk 超时', 'timeout'));
+                }, limits_1.API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS);
+            };
+            const cleanup = () => {
+                if (chunkTimer)
+                    clearTimeout(chunkTimer);
+                signal?.removeEventListener('abort', onAbort);
+            };
+            const onAbort = () => {
+                cleanup();
+                stream.destroy();
+                reject(new AIServiceError('请求已取消', 'aborted'));
+            };
+            signal?.addEventListener('abort', onAbort, { once: true });
+            resetChunkTimer();
+            stream.on('data', (chunk) => {
+                resetChunkTimer();
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith(':'))
+                        continue;
+                    if (!trimmed.startsWith('data: '))
+                        continue;
+                    const payload = trimmed.slice(6);
+                    if (payload === '[DONE]')
+                        continue;
+                    try {
+                        const parsed = JSON.parse(payload);
+                        // Extract usage from final chunk
+                        if (parsed.usage) {
+                            usage = {
+                                promptTokens: parsed.usage.prompt_tokens ?? 0,
+                                completionTokens: parsed.usage.completion_tokens ?? 0,
+                                totalTokens: parsed.usage.total_tokens ?? 0,
+                            };
+                        }
+                        const delta = parsed.choices?.[0]?.delta?.content;
+                        if (delta) {
+                            fullContent += delta;
+                            callbacks.onChunk(delta);
+                        }
+                    }
+                    catch {
+                        // Skip malformed JSON lines
+                    }
+                }
+            });
+            stream.on('end', () => {
+                cleanup();
+                if (!fullContent) {
+                    reject(new AIServiceError('AI 返回内容为空', 'server'));
+                    return;
+                }
+                callbacks.onDone({ content: fullContent, usage });
+                resolve();
+            });
+            stream.on('error', (err) => {
+                cleanup();
+                reject(new AIServiceError(err.message || '流式传输错误', 'network'));
+            });
+        });
+    }
     /**
      * 测试连接是否正常
      * 发送一个简单的测试请求以验证 API 配置是否正确
@@ -471,6 +607,68 @@ class MultiModelClient {
             clearTimeout(totalTimer);
             options?.signal?.removeEventListener('abort', onExternalAbort);
         }
+    }
+    async chatStream(messages, systemPrompt, options) {
+        if (options.signal?.aborted) {
+            throw new AIServiceError('请求已取消', 'aborted');
+        }
+        const errors = [];
+        const skippedEndpoints = new Set();
+        for (const { config, client } of this.clients) {
+            if (skippedEndpoints.has(config.endpointId))
+                continue;
+            try {
+                await client.chatStream(messages, systemPrompt, {
+                    signal: options.signal,
+                    callbacks: options.callbacks,
+                });
+                return {
+                    usedModel: {
+                        endpointId: config.endpointId,
+                        endpointName: config.endpointName,
+                        modelName: config.modelName,
+                    },
+                };
+            }
+            catch (error) {
+                const aiError = error instanceof AIServiceError
+                    ? error
+                    : new AIServiceError(error instanceof Error ? error.message : String(error), 'unknown');
+                if (aiError.category === 'aborted')
+                    throw aiError;
+                errors.push({
+                    model: `${config.endpointName}/${config.modelName}`,
+                    error: aiError.message,
+                    category: aiError.category,
+                });
+                if (aiError.category === 'auth') {
+                    skippedEndpoints.add(config.endpointId);
+                    console.warn(`[MultiModelClient] Stream: 端点 "${config.endpointName}" 认证失败，跳过`);
+                    continue;
+                }
+                if (aiError.category === 'client') {
+                    console.warn(`[MultiModelClient] Stream: 模型 "${config.modelName}" 不支持流式，尝试下一个`);
+                    continue;
+                }
+                // Non-retryable or only one endpoint — no retry for streaming
+                console.warn(`[MultiModelClient] Stream: ${config.modelName} 失败: ${aiError.message}`);
+                continue;
+            }
+        }
+        // All failed
+        let dominantCategory = 'unknown';
+        let maxCount = 0;
+        const categoryCounts = new Map();
+        for (const e of errors) {
+            categoryCounts.set(e.category, (categoryCounts.get(e.category) || 0) + 1);
+        }
+        for (const [cat, count] of categoryCounts) {
+            if (count > maxCount) {
+                maxCount = count;
+                dominantCategory = cat;
+            }
+        }
+        throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
     }
 }
 exports.MultiModelClient = MultiModelClient;

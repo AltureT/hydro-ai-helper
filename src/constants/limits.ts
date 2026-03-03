@@ -12,6 +12,8 @@ export const API_DEFAULTS = {
   FETCH_MODELS_TIMEOUT_MS: 15000,
   CHAT_ENDPOINT: '/chat/completions',
   MODELS_ENDPOINT: '/models',
+  STREAM_CHUNK_TIMEOUT_MS: 30000,
+  SSE_KEEPALIVE_INTERVAL_MS: 15000,
 } as const;
 
 export const QUERY_DEFAULTS = {

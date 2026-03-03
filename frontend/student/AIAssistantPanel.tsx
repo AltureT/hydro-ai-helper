@@ -7,13 +7,14 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import 'highlight.js/styles/github.css';
 import { buildApiUrl } from '../utils/domainUtils';
-import { createMarkdownRenderer, renderMarkdown as renderMarkdownSafe } from '../utils/markdown';
+import { createMarkdownRenderer, renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
 import {
   clearConversationId as clearStoredConversationId,
   loadConversationId,
   saveConversationId,
   shouldResetConversation
 } from '../utils/conversationStorage';
+import { consumeSSEStream, type SSEHandlers } from '../utils/sseParser';
 
 /**
  * 基础问题类型选项
@@ -97,6 +98,12 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
   const abortControllerRef = useRef<AbortController | null>(null);
   const [errorCategory, setErrorCategory] = useState<string>('');
   const [errorRetryable, setErrorRetryable] = useState<boolean>(false);
+
+  // 流式状态
+  const [streamingContent, setStreamingContent] = useState<string>('');
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const streamingContentRef = useRef<string>('');
+  const rafRef = useRef<number | null>(null);
 
   // 选中答疑状态
   const [selectedText, setSelectedText] = useState<string>('');
@@ -599,11 +606,13 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
 
       // T022: 调用后端 API（使用域前缀 URL）
       const currentTid = new URLSearchParams(window.location.search).get('tid') || undefined;
+      const supportsStream = typeof ReadableStream !== 'undefined';
       const sendChatRequest = (activeConversationId: string | null) =>
         fetch(buildApiUrl('/ai-helper/chat'), {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            ...(supportsStream ? { 'Accept': 'text/event-stream, application/json' } : {}),
           },
           signal: ac.signal,
           body: JSON.stringify({
@@ -616,6 +625,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             code: savedCode,
             conversationId: activeConversationId || undefined,
             contestId: currentTid,
+            stream: supportsStream ? true : undefined,
             ...(effectiveQuestionType === 'clarify' && selectedSourceAiMessageId ? {
               clarifyContext: {
                 sourceAiMessageId: selectedSourceAiMessageId,
@@ -664,31 +674,105 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
         }
       }
 
-      let data: any;
-      try {
-        data = await response.json();
-      } catch {
-        throw createCategorizedError('服务器返回格式异常，请稍后重试', 'server', true);
-      }
-      if (!data?.message?.content) {
-        throw createCategorizedError('AI 返回内容为空，请重试', 'server', true);
-      }
+      const contentType = response.headers.get('content-type') || '';
+      const isSSE = contentType.includes('text/event-stream');
 
-      // 添加 AI 消息到历史
-      const aiMessage = {
-        role: 'ai' as const,
-        content: data.message.content,
-        timestamp: new Date(),
-        id: data.message.id
-      };
-      setConversationHistory(prev => [...prev, aiMessage]);
-      setAiResponse(data.message.content);
-      scrollToBottom();
+      if (isSSE && response.body) {
+        // SSE streaming path
+        setIsStreaming(true);
+        streamingContentRef.current = '';
+        setStreamingContent('');
 
-      // 多轮对话：保存 conversationId
-      if (data.conversationId) {
-        setConversationId(data.conversationId);
-        saveConversationId(problemId, data.conversationId);
+        const reader = response.body.getReader();
+        const handlers: SSEHandlers = {
+          onMeta: (data) => {
+            if (data.conversationId) {
+              setConversationId(data.conversationId);
+              saveConversationId(problemId, data.conversationId);
+            }
+          },
+          onChunk: (data) => {
+            streamingContentRef.current += data.content;
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(() => {
+                setStreamingContent(streamingContentRef.current);
+                scrollToBottom();
+                rafRef.current = null;
+              });
+            }
+          },
+          onReplace: (data) => {
+            streamingContentRef.current = data.content;
+            setStreamingContent(data.content);
+          },
+          onDone: (data) => {
+            const finalContent = streamingContentRef.current;
+            // Convert streaming content to a proper history message
+            const aiMessage = {
+              role: 'ai' as const,
+              content: finalContent,
+              timestamp: new Date(),
+              id: data.messageId,
+            };
+            setConversationHistory(prev => [...prev, aiMessage]);
+            setAiResponse(finalContent);
+            setStreamingContent('');
+            streamingContentRef.current = '';
+            setIsStreaming(false);
+            scrollToBottom();
+          },
+          onError: (data) => {
+            setIsStreaming(false);
+            setStreamingContent('');
+            streamingContentRef.current = '';
+            throw createCategorizedError(data.error || 'AI 服务异常', data.category, data.retryable);
+          },
+        };
+
+        await consumeSSEStream(reader, handlers, ac.signal);
+
+        // If stream ended without a done event but we have content, finalize it
+        if (isStreaming && streamingContentRef.current) {
+          const finalContent = streamingContentRef.current;
+          const aiMessage = {
+            role: 'ai' as const,
+            content: finalContent,
+            timestamp: new Date(),
+          };
+          setConversationHistory(prev => [...prev, aiMessage]);
+          setAiResponse(finalContent);
+          setStreamingContent('');
+          streamingContentRef.current = '';
+          setIsStreaming(false);
+        }
+      } else {
+        // JSON response path (fallback)
+        let data: any;
+        try {
+          data = await response.json();
+        } catch {
+          throw createCategorizedError('服务器返回格式异常，请稍后重试', 'server', true);
+        }
+        if (!data?.message?.content) {
+          throw createCategorizedError('AI 返回内容为空，请重试', 'server', true);
+        }
+
+        // 添加 AI 消息到历史
+        const aiMessage = {
+          role: 'ai' as const,
+          content: data.message.content,
+          timestamp: new Date(),
+          id: data.message.id
+        };
+        setConversationHistory(prev => [...prev, aiMessage]);
+        setAiResponse(data.message.content);
+        scrollToBottom();
+
+        // 多轮对话：保存 conversationId
+        if (data.conversationId) {
+          setConversationId(data.conversationId);
+          saveConversationId(problemId, data.conversationId);
+        }
       }
     } catch (err) {
       // AbortError: 区分用户取消 vs 客户端超时
@@ -715,8 +799,15 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
       setConversationHistory(prev => prev.slice(0, -1));
     } finally {
       clearTimeout(clientTimeout);
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
       abortControllerRef.current = null;
       setIsLoading(false);
+      setIsStreaming(false);
+      setStreamingContent('');
+      streamingContentRef.current = '';
     }
   };
 
@@ -735,6 +826,9 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     setErrorRetryable(false);
     setConversationId(null);
     setConversationHistory([]);
+    setStreamingContent('');
+    setIsStreaming(false);
+    streamingContentRef.current = '';
     clearStoredConversationId(problemId);
   };
 
@@ -843,15 +937,13 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
    * 渲染 Markdown 内容
    * 使用 markdown-it + highlight.js
    */
-  const renderMarkdownContent = (text: string) => {
+  const renderMarkdownContent = (text: string, streaming?: boolean) => {
+    const html = streaming ? renderStreamingMarkdown(text) : renderMarkdownSafe(text);
     return (
       <div
         className="markdown-body"
-        dangerouslySetInnerHTML={{ __html: renderMarkdownSafe(text) }}
-        style={{
-          fontSize: '13px',
-          lineHeight: '1.6'
-        }}
+        dangerouslySetInnerHTML={{ __html: html }}
+        style={{ fontSize: '13px', lineHeight: '1.6' }}
       />
     );
   };
@@ -1044,6 +1136,10 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
     }
     .markdown-body p {
       margin: 8px 0;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
     }
   `;
 
@@ -1255,8 +1351,27 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             </div>
           ))}
 
-          {/* 加载指示器 */}
-          {isLoading && (
+          {/* 流式输出 */}
+          {isStreaming && streamingContent && (
+            <div style={{ display: 'flex', flexDirection: 'row', gap: '8px' }}>
+              <div style={{
+                maxWidth: '85%', padding: '10px 14px',
+                borderRadius: '12px 12px 12px 0',
+                background: '#f3f4f6', color: '#1f2937',
+                fontSize: '13px', lineHeight: '1.6'
+              }}>
+                {renderMarkdownContent(streamingContent, true)}
+                <span style={{
+                  display: 'inline-block', width: '6px', height: '14px',
+                  background: '#6366f1', marginLeft: '2px',
+                  animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom'
+                }} />
+              </div>
+            </div>
+          )}
+
+          {/* 加载指示器 - 仅非流式时显示 */}
+          {isLoading && !isStreaming && (
             <div style={{ display: 'flex', gap: '8px' }}>
               <div style={{
                 padding: '10px 14px', borderRadius: '12px 12px 12px 0',
@@ -1632,8 +1747,34 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({
             </div>
           ))}
 
-          {/* 加载中提示 */}
-          {isLoading && (
+          {/* 流式输出 */}
+          {isStreaming && streamingContent && (
+            <div style={{
+              background: '#f0fdf4',
+              border: '1px solid #86efac',
+              padding: '12px',
+              borderRadius: '10px',
+              position: 'relative'
+            }}>
+              <div style={{
+                fontWeight: '600', fontSize: '13px',
+                marginBottom: '6px', color: '#15803d'
+              }}>
+                🤖 AI 导师
+              </div>
+              <div style={{ fontSize: '13px', color: '#166534' }}>
+                {renderMarkdownContent(streamingContent, true)}
+                <span style={{
+                  display: 'inline-block', width: '6px', height: '14px',
+                  background: '#15803d', marginLeft: '2px',
+                  animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom'
+                }} />
+              </div>
+            </div>
+          )}
+
+          {/* 加载中提示 - 仅非流式时显示 */}
+          {isLoading && !isStreaming && (
             <div style={{
               background: '#f0fdf4',
               border: '1px solid #86efac',

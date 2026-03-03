@@ -25,3 +25,18 @@ const sharedRenderer = createMarkdownRenderer();
 export function renderMarkdown(content: string): string {
   return DOMPurify.sanitize(sharedRenderer.render(content));
 }
+
+export function renderStreamingMarkdown(content: string): string {
+  let patched = content;
+  // Auto-close unclosed fenced code blocks (odd number of ```)
+  const fenceCount = (patched.match(/^```/gm) || []).length;
+  if (fenceCount % 2 !== 0) {
+    patched += '\n```';
+  }
+  // Auto-close unclosed inline code
+  const backtickCount = (patched.match(/`/g) || []).length;
+  if (backtickCount % 2 !== 0) {
+    patched += '`';
+  }
+  return DOMPurify.sanitize(sharedRenderer.render(patched));
+}
