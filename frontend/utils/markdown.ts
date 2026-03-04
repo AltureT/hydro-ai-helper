@@ -3,7 +3,15 @@ import hljs from 'highlight.js';
 import DOMPurify from 'dompurify';
 import texmath from 'markdown-it-texmath';
 import katex from 'katex';
-import 'katex/dist/katex.min.css';
+
+// Load KaTeX CSS from CDN at runtime (esbuild cannot handle .woff/.ttf font files in katex's CSS)
+if (typeof document !== 'undefined' && !document.getElementById('katex-css')) {
+  const link = document.createElement('link');
+  link.id = 'katex-css';
+  link.rel = 'stylesheet';
+  link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.33/dist/katex.min.css';
+  document.head.appendChild(link);
+}
 
 export const PURIFY_CONFIG: DOMPurify.Config = {
   ALLOWED_TAGS: [
