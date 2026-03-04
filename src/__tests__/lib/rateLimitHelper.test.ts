@@ -61,6 +61,8 @@ describe('applyRateLimit', () => {
     expect(mockHandler.response.body).toEqual({
       error: '太频繁了',
       code: 'RATE_LIMIT_EXCEEDED',
+      category: 'rate_limit',
+      retryable: true,
     });
     expect(mockHandler.response.type).toBe('application/json');
   });
