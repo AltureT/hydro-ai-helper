@@ -6,6 +6,7 @@
 import React from 'react';
 import { renderComponent } from './utils/renderHelper';
 import { AIHelperDashboard } from './components/AIHelperDashboard';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /**
  * 检查是否为 AI 助手统一入口页面
@@ -31,7 +32,7 @@ const renderPage = () => {
     return;
   }
 
-  renderComponent(<AIHelperDashboard />, container);
+  renderComponent(<ErrorBoundary><AIHelperDashboard /></ErrorBoundary>, container);
 };
 
 // 等待 DOM 加载完成后自动执行

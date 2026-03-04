@@ -10,6 +10,7 @@
 import React from 'react';
 import { renderComponent } from './utils/renderHelper';
 import ConversationList from './teacher/ConversationList';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /**
  * T024: 检查是否为对话列表页
@@ -35,7 +36,7 @@ const renderTeacherConversationsPage = () => {
     return;
   }
 
-  renderComponent(<ConversationList />, container);
+  renderComponent(<ErrorBoundary><ConversationList /></ErrorBoundary>, container);
 };
 
 // 等待 DOM 加载完成后自动执行

@@ -6,6 +6,7 @@
 import React from 'react';
 import { renderComponent } from './utils/renderHelper';
 import AnalyticsPage from './teacher/AnalyticsPage';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /**
  * T025: 检查是否为 AI 使用统计页面
@@ -31,7 +32,7 @@ const renderAnalyticsPage = () => {
     return;
   }
 
-  renderComponent(<AnalyticsPage />, container);
+  renderComponent(<ErrorBoundary><AnalyticsPage /></ErrorBoundary>, container);
 };
 
 // 等待 DOM 加载完成后自动执行

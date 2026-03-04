@@ -354,6 +354,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                 border: '1px solid #e5e7eb',
                 overflow: 'hidden'
               }}>
+                <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                   <thead>
                     <tr style={{ backgroundColor: '#f9fafb' }}>
@@ -454,6 +455,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
             </>
           )}

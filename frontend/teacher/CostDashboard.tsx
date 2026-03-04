@@ -172,7 +172,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       </div>
 
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px', marginBottom: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
         <div style={cardStyle}>
           <div style={labelStyle}>今日 Tokens</div>
           <div style={valueStyle}>{formatTokens(data.today.totalTokens)}</div>
@@ -258,7 +258,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       </div>
 
       {/* Two Column Layout: Top Users + Model Breakdown */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px' }}>
         {/* Top Users */}
         <div style={cardStyle}>
           <h3 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>

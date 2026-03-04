@@ -10,6 +10,7 @@
 import React from 'react';
 import { renderComponent } from './utils/renderHelper';
 import ConversationDetail from './teacher/ConversationDetail';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /**
  * 从 URL 中提取 conversationId
@@ -34,7 +35,7 @@ const renderTeacherConversationDetailPage = () => {
     return;
   }
 
-  renderComponent(<ConversationDetail conversationId={conversationId} />, container);
+  renderComponent(<ErrorBoundary><ConversationDetail conversationId={conversationId} /></ErrorBoundary>, container);
 };
 
 // 等待 DOM 加载完成后自动执行

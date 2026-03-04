@@ -6,6 +6,7 @@
 import React from 'react';
 import { renderComponent } from './utils/renderHelper';
 import ConfigPanel from './admin/ConfigPanel';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /**
  * 检查是否为 AI 配置页面
@@ -26,7 +27,7 @@ const renderAdminConfigPage = () => {
     return;
   }
 
-  renderComponent(<ConfigPanel />, container);
+  renderComponent(<ErrorBoundary><ConfigPanel /></ErrorBoundary>, container);
 };
 
 // 等待 DOM 加载完成后自动执行

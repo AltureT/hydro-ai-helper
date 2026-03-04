@@ -7,6 +7,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { renderComponent } from './utils/renderHelper';
 import { AIAssistantPanel } from './student/AIAssistantPanel';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 // 支持的题目详情页 URL 模式
 const PROBLEM_DETAIL_PATTERNS: RegExp[] = [
@@ -373,7 +374,7 @@ const initAIAssistant = () => {
   container.id = 'ai-assistant-trigger-container';
   document.body.appendChild(container);
 
-  renderComponent(<AIAssistantTrigger problemId={problemId} />, container);
+  renderComponent(<ErrorBoundary><AIAssistantTrigger problemId={problemId} /></ErrorBoundary>, container);
 };
 
 // 等待 DOM 加载完成
