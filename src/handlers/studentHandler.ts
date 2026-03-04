@@ -696,15 +696,21 @@ export class ChatHandler extends Handler {
   }
 
   private async handleStreamResponse(p: PrepareChatResult): Promise<void> {
-    const koaCtx = (this.request as any)?.ctx;
+    // Access Koa context via HandlerCommon.context (NOT this.request.ctx — HydroRequest is a plain object)
+    const koaCtx = (this as any).context;
     const rawRes: ServerResponse | undefined = koaCtx?.res;
     if (!rawRes) {
-      // Fallback to JSON if raw response not accessible
       return this.handleJsonResponse(p);
     }
 
-    // Prevent Koa from auto-responding
-    if (koaCtx) koaCtx.respond = false;
+    // Prevent Koa from auto-responding and disable compression for SSE
+    koaCtx.respond = false;
+    if ('compress' in koaCtx) koaCtx.compress = false;
+
+    // Optimise socket for streaming: disable Nagle, remove timeout
+    const rawReq = koaCtx.req;
+    rawReq?.socket?.setNoDelay?.(true);
+    rawReq?.socket?.setTimeout?.(0);
 
     const sse = createSSEWriter(rawRes);
 
@@ -718,7 +724,6 @@ export class ChatHandler extends Handler {
 
     // AbortController for client disconnect
     const requestAc = new AbortController();
-    const rawReq = koaCtx?.req;
     const onClose = () => requestAc.abort();
     rawReq?.on?.('close', onClose);
 
@@ -872,7 +877,7 @@ export class ChatHandler extends Handler {
 
     // L4 请求级 AbortController
     const requestAc = new AbortController();
-    const rawReq = (this.request as any)?.ctx?.req;
+    const rawReq = (this as any).context?.req;
 
     // 提前检查客户端是否已断开（close 事件可能在前序 DB 操作期间已触发）
     if (rawReq?.destroyed || rawReq?.aborted) {
