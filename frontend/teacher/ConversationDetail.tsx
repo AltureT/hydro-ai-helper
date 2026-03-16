@@ -7,6 +7,7 @@
 import React, { useState, useEffect } from 'react';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
+import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
 
 /**
  * 对话接口
@@ -89,7 +90,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
     setError(null);
 
     try {
-      const response = await fetch(`/ai-helper/conversations/${conversationId}`, {
+      const response = await fetch(buildApiUrl(`/ai-helper/conversations/${conversationId}`), {
         headers: {
           'Accept': 'application/json',
         },
@@ -161,7 +162,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
     }}>
       {/* 返回按钮 */}
       <a
-        href="/ai-helper/conversations"
+        href={buildPageUrl('/ai-helper/conversations')}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
