@@ -214,8 +214,12 @@ class OpenAIClient {
                 httpAgent: HTTP_AGENT,
                 httpsAgent: HTTPS_AGENT,
             });
-            // 提取 AI 回答
-            const aiMessage = response.data?.choices?.[0]?.message?.content;
+            // 提取 AI 回答（支持 reasoning_content 字段）
+            const message = response.data?.choices?.[0]?.message;
+            const msgAny = message;
+            const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning);
+            const content = message?.content;
+            const aiMessage = reasoning ? `<think>${reasoning}</think>${content || ''}` : content;
             if (!aiMessage) {
                 throw new AIServiceError('AI 返回内容为空', 'server');
             }
@@ -346,6 +350,7 @@ class OpenAIClient {
             let fullContent = '';
             let usage;
             let chunkTimer = null;
+            let inThinking = false;
             const resetChunkTimer = () => {
                 if (chunkTimer)
                     clearTimeout(chunkTimer);
@@ -390,10 +395,28 @@ class OpenAIClient {
                                 totalTokens: parsed.usage.total_tokens ?? 0,
                             };
                         }
-                        const delta = parsed.choices?.[0]?.delta?.content;
-                        if (delta) {
-                            fullContent += delta;
-                            callbacks.onChunk(delta);
+                        const choiceDelta = parsed.choices?.[0]?.delta;
+                        const reasoningDelta = (choiceDelta?.reasoning_content ?? choiceDelta?.reasoning);
+                        const contentDelta = choiceDelta?.content;
+                        if (reasoningDelta) {
+                            if (!inThinking) {
+                                inThinking = true;
+                                const tag = '<think>';
+                                fullContent += tag;
+                                callbacks.onChunk(tag);
+                            }
+                            fullContent += reasoningDelta;
+                            callbacks.onChunk(reasoningDelta);
+                        }
+                        if (contentDelta) {
+                            if (inThinking) {
+                                inThinking = false;
+                                const tag = '</think>';
+                                fullContent += tag;
+                                callbacks.onChunk(tag);
+                            }
+                            fullContent += contentDelta;
+                            callbacks.onChunk(contentDelta);
                         }
                     }
                     catch {
@@ -403,6 +426,12 @@ class OpenAIClient {
             });
             stream.on('end', () => {
                 cleanup();
+                if (inThinking) {
+                    const tag = '</think>';
+                    fullContent += tag;
+                    callbacks.onChunk(tag);
+                    inThinking = false;
+                }
                 if (!fullContent) {
                     reject(new AIServiceError('AI 返回内容为空', 'server'));
                     return;
