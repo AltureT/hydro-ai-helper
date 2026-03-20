@@ -232,7 +232,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const addEndpoint = useCallback(() => {
     setConfig(prev => {
       if (!prev) return prev;
-      return { ...prev, endpoints: [...prev.endpoints, { name: `端点 ${prev.endpoints.length + 1}`, apiBaseUrl: '', models: [], enabled: true, isNew: true, newApiKey: '' }] };
+      return { ...prev, endpoints: [...prev.endpoints, { id: `temp-${Date.now()}`, name: `端点 ${prev.endpoints.length + 1}`, apiBaseUrl: '', models: [], enabled: true, isNew: true, newApiKey: '' }] };
     });
   }, []);
 

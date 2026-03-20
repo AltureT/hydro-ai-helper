@@ -221,8 +221,29 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
-            // 检查配置完整性
-            if (!config.apiBaseUrl || !config.modelName || !config.apiKeyEncrypted) {
+            // 确定测试目标：优先使用 v2 endpoints，回退到 legacy 字段
+            let apiBaseUrl;
+            let modelName;
+            let apiKeyEncrypted;
+            if (config.endpoints?.length > 0 && config.selectedModels?.length > 0) {
+                // v2 多端点配置：找到第一个启用的选中模型对应的端点
+                for (const sm of config.selectedModels) {
+                    const ep = config.endpoints.find(e => e.id === sm.endpointId && e.enabled);
+                    if (ep) {
+                        apiBaseUrl = ep.apiBaseUrl;
+                        apiKeyEncrypted = ep.apiKeyEncrypted;
+                        modelName = sm.modelName;
+                        break;
+                    }
+                }
+            }
+            // 回退到 legacy 字段
+            if (!apiBaseUrl || !modelName || !apiKeyEncrypted) {
+                apiBaseUrl = apiBaseUrl || config.apiBaseUrl;
+                modelName = modelName || config.modelName;
+                apiKeyEncrypted = apiKeyEncrypted || config.apiKeyEncrypted;
+            }
+            if (!apiBaseUrl || !modelName || !apiKeyEncrypted) {
                 this.response.status = 400;
                 this.response.body = {
                     success: false,
@@ -234,7 +255,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
             // 解密 API Key
             let apiKey;
             try {
-                apiKey = (0, crypto_1.decrypt)(config.apiKeyEncrypted);
+                apiKey = (0, crypto_1.decrypt)(apiKeyEncrypted);
             }
             catch (err) {
                 this.response.status = 500;
@@ -247,8 +268,8 @@ class TestConnectionHandler extends hydrooj_1.Handler {
             }
             // 创建临时 OpenAI 客户端
             const client = new openaiClient_1.OpenAIClient({
-                apiBaseUrl: config.apiBaseUrl,
-                modelName: config.modelName,
+                apiBaseUrl,
+                modelName,
                 apiKey,
                 timeoutSeconds: config.timeoutSeconds || 30
             });
