@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { Endpoint, SelectedModel } from './configTypes';
 
 interface LegacyConfig {
@@ -50,6 +50,8 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
   disabled, legacy,
 }) => {
   const isUsingNewConfig = endpoints.length > 0;
+  const hasLegacyData = Boolean(legacy.apiBaseUrl || legacy.hasApiKey);
+  const [legacyExpanded, setLegacyExpanded] = useState(hasLegacyData);
 
   return (
     <>
@@ -57,25 +59,146 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
       <div style={{ ...sectionStyle, marginTop: '30px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
           <h2 style={{ margin: 0, fontSize: '18px' }}>API 端点配置</h2>
-          <button
-            onClick={onAddEndpoint}
-            disabled={disabled}
-            style={{
-              padding: '8px 16px', backgroundColor: '#3b82f6', color: 'white',
-              border: 'none', borderRadius: '6px', fontSize: '14px',
-              cursor: disabled ? 'not-allowed' : 'pointer',
-            }}
-          >
-            + 添加端点
-          </button>
+          {isUsingNewConfig && (
+            <button
+              onClick={onAddEndpoint}
+              disabled={disabled}
+              style={{
+                padding: '8px 16px', backgroundColor: '#3b82f6', color: 'white',
+                border: 'none', borderRadius: '6px', fontSize: '14px',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+              }}
+            >
+              + 添加端点
+            </button>
+          )}
         </div>
 
         {endpoints.length === 0 ? (
           <div style={{
-            padding: '20px', backgroundColor: '#fff', borderRadius: '6px',
-            border: '1px dashed #d1d5db', color: '#6b7280', textAlign: 'center',
+            padding: '24px', backgroundColor: '#fff', borderRadius: '8px',
+            border: '1px solid #e5e7eb',
           }}>
-            暂无 API 端点配置。点击"添加端点"开始配置，或使用下方的单端点兼容模式。
+            <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+              <h3 style={{ margin: '0 0 8px', fontSize: '16px', color: '#111827' }}>开始配置 AI 服务</h3>
+              <p style={{ margin: 0, fontSize: '14px', color: '#6b7280' }}>配置 API 端点以启用 AI 学习助手功能</p>
+            </div>
+
+            {/* Recommended: Multi-endpoint */}
+            <div style={{
+              padding: '16px', borderRadius: '8px',
+              border: '2px solid #6366f1', backgroundColor: '#f5f3ff', marginBottom: '16px',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <span style={{
+                  fontSize: '11px', fontWeight: 600, color: '#4f46e5',
+                  backgroundColor: '#e0e7ff', padding: '2px 8px', borderRadius: '4px',
+                }}>推荐</span>
+                <span style={{ fontSize: '14px', fontWeight: 600, color: '#111827' }}>多端点配置</span>
+              </div>
+              <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#6b7280' }}>
+                支持多端点、自动故障转移、模型选择
+              </p>
+              <button
+                onClick={onAddEndpoint}
+                disabled={disabled}
+                style={{
+                  padding: '8px 20px', backgroundColor: '#6366f1', color: 'white',
+                  border: 'none', borderRadius: '6px', fontSize: '14px', fontWeight: 500,
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                }}
+              >
+                添加第一个端点
+              </button>
+            </div>
+
+            {/* Collapsible: Legacy single endpoint */}
+            <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: '12px' }}>
+              <button
+                onClick={() => setLegacyExpanded(!legacyExpanded)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  background: 'none', border: 'none', padding: '4px 0',
+                  fontSize: '14px', color: '#374151', cursor: 'pointer', fontWeight: 500,
+                }}
+              >
+                <span style={{
+                  display: 'inline-block', transition: 'transform 0.2s',
+                  transform: legacyExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                }}>&#9654;</span>
+                快速配置（单端点）
+              </button>
+
+              {legacyExpanded && (
+                <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+                      API Base URL <span style={{ color: '#ef4444' }}>*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={legacy.apiBaseUrl}
+                      onChange={(e) => legacy.onApiBaseUrlChange(e.target.value)}
+                      placeholder="https://api.openai.com/v1"
+                      disabled={disabled}
+                      style={legacyInputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+                      模型名称 <span style={{ color: '#ef4444' }}>*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={legacy.modelName}
+                      onChange={(e) => legacy.onModelNameChange(e.target.value)}
+                      placeholder="gpt-4o-mini"
+                      disabled={disabled}
+                      style={legacyInputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+                      API Key 状态
+                    </label>
+                    <div style={{
+                      padding: '12px',
+                      backgroundColor: legacy.hasApiKey ? '#d1fae5' : '#fee2e2',
+                      borderRadius: '6px', fontSize: '14px',
+                      color: legacy.hasApiKey ? '#065f46' : '#991b1b',
+                    }}>
+                      {legacy.hasApiKey ? `已配置：${legacy.apiKeyMasked}` : '尚未配置 API Key'}
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500, fontSize: '14px' }}>
+                      新的 API Key（留空则不修改）
+                    </label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <input
+                        type={legacy.showApiKey ? 'text' : 'password'}
+                        value={legacy.newApiKey}
+                        onChange={(e) => legacy.onNewApiKeyChange(e.target.value)}
+                        placeholder="sk-..."
+                        disabled={disabled}
+                        style={{ ...legacyInputStyle, flex: 1, fontFamily: 'monospace' }}
+                      />
+                      <button
+                        onClick={legacy.onShowApiKeyToggle}
+                        disabled={disabled}
+                        style={{
+                          padding: '10px 16px', backgroundColor: '#f3f4f6',
+                          border: '1px solid #d1d5db', borderRadius: '6px',
+                          fontSize: '14px', cursor: 'pointer', whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {legacy.showApiKey ? '隐藏' : '显示'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
@@ -301,89 +424,6 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
         </div>
       )}
 
-      {/* Legacy Single Endpoint */}
-      {!isUsingNewConfig && (
-        <div style={{
-          marginTop: '20px', padding: '20px', backgroundColor: '#fef3c7',
-          borderRadius: '8px', border: '1px solid #f59e0b',
-        }}>
-          <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>
-            兼容模式（单端点配置）
-          </h2>
-          <p style={{ fontSize: '13px', color: '#92400e', marginBottom: '15px' }}>
-            推荐使用上方的多端点配置。此处的单端点模式仅用于向后兼容。
-          </p>
-
-          <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-              API Base URL <span style={{ color: '#ef4444' }}>*</span>
-            </label>
-            <input
-              type="text"
-              value={legacy.apiBaseUrl}
-              onChange={(e) => legacy.onApiBaseUrlChange(e.target.value)}
-              placeholder="https://api.openai.com/v1"
-              disabled={disabled}
-              style={legacyInputStyle}
-            />
-          </div>
-
-          <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-              模型名称 <span style={{ color: '#ef4444' }}>*</span>
-            </label>
-            <input
-              type="text"
-              value={legacy.modelName}
-              onChange={(e) => legacy.onModelNameChange(e.target.value)}
-              placeholder="gpt-4o-mini"
-              disabled={disabled}
-              style={legacyInputStyle}
-            />
-          </div>
-
-          <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-              API Key 状态
-            </label>
-            <div style={{
-              padding: '12px',
-              backgroundColor: legacy.hasApiKey ? '#d1fae5' : '#fee2e2',
-              borderRadius: '6px', fontSize: '14px',
-              color: legacy.hasApiKey ? '#065f46' : '#991b1b',
-            }}>
-              {legacy.hasApiKey ? `已配置：${legacy.apiKeyMasked}` : '尚未配置 API Key'}
-            </div>
-          </div>
-
-          <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>
-              新的 API Key（留空则不修改）
-            </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <input
-                type={legacy.showApiKey ? 'text' : 'password'}
-                value={legacy.newApiKey}
-                onChange={(e) => legacy.onNewApiKeyChange(e.target.value)}
-                placeholder="sk-..."
-                disabled={disabled}
-                style={{ ...legacyInputStyle, flex: 1, fontFamily: 'monospace' }}
-              />
-              <button
-                onClick={legacy.onShowApiKeyToggle}
-                disabled={disabled}
-                style={{
-                  padding: '10px 16px', backgroundColor: '#f3f4f6',
-                  border: '1px solid #d1d5db', borderRadius: '6px',
-                  fontSize: '14px', cursor: 'pointer', whiteSpace: 'nowrap',
-                }}
-              >
-                {legacy.showApiKey ? '隐藏' : '显示'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 };

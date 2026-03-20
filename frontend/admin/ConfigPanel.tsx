@@ -459,8 +459,25 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         onAppendPattern={appendPatternToCustomRules}
       />
 
-      {/* Bottom Buttons */}
-      <div style={{ marginTop: '30px', display: 'flex', justifyContent: 'space-between', gap: '15px' }}>
+      {/* Spacer so sticky bar doesn't overlap last content */}
+      <div style={{ height: '70px' }} />
+
+      {/* Sticky Bottom Action Bar */}
+      <div style={{
+        position: 'sticky',
+        bottom: 0,
+        padding: '16px 20px',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        backgroundColor: '#ffffff',
+        borderTop: '1px solid #e5e7eb',
+        boxShadow: '0 -2px 8px rgba(0, 0, 0, 0.06)',
+        zIndex: 10,
+        marginLeft: '-20px',
+        marginRight: '-20px',
+        marginBottom: '-20px',
+      }}>
         <button
           onClick={testConnection}
           disabled={isBusy || loading}
@@ -475,6 +492,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         >
           {testing ? '测试中...' : '测试连接'}
         </button>
+
+        {/* Inline status message */}
+        <div style={{ fontSize: '14px', flex: 1, textAlign: 'center' }}>
+          {successMessage && (
+            <span style={{ color: '#059669' }}>&#10003; {successMessage}</span>
+          )}
+          {error && (
+            <span style={{ color: '#dc2626' }}>&#10007; {error}</span>
+          )}
+        </div>
+
         <button
           onClick={saveConfig}
           disabled={isBusy || loading}
