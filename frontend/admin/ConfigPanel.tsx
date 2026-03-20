@@ -117,7 +117,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       };
       if (config.endpoints.length > 0) {
         body.endpoints = config.endpoints.map(ep => ({
-          id: ep.isNew ? undefined : ep.id,
+          id: ep.id,
           name: ep.name, apiBaseUrl: ep.apiBaseUrl,
           apiKey: ep.newApiKey || undefined, models: ep.models, enabled: ep.enabled,
         }));

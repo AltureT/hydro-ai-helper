@@ -174,9 +174,12 @@ export class AdminConfigHandler extends Handler {
         const existingEndpoints = existingConfig?.endpoints || [];
 
         const newEndpoints: APIEndpoint[] = [];
+        const idMapping: Record<string, string> = {}; // 临时 ID → 真实 UUID
         for (const ep of body.endpoints) {
+          // 检查是否为临时 ID（前端为未保存端点生成 temp-xxx）
+          const isTemp = ep.id && ep.id.startsWith('temp-');
           // 查找是否有现有端点
-          const existing = ep.id ? existingEndpoints.find(e => e.id === ep.id) : null;
+          const existing = (ep.id && !isTemp) ? existingEndpoints.find(e => e.id === ep.id) : null;
 
           let apiKeyEncrypted = existing?.apiKeyEncrypted || '';
 
@@ -194,8 +197,13 @@ export class AdminConfigHandler extends Handler {
             }
           }
 
+          const realId = existing ? ep.id : (await import('crypto')).randomUUID();
+          if (isTemp && ep.id) {
+            idMapping[ep.id] = realId;
+          }
+
           newEndpoints.push({
-            id: ep.id || (await import('crypto')).randomUUID(),
+            id: realId,
             name: ep.name,
             apiBaseUrl: ep.apiBaseUrl,
             apiKeyEncrypted,
@@ -205,6 +213,14 @@ export class AdminConfigHandler extends Handler {
           });
         }
         partial.endpoints = newEndpoints;
+
+        // 重映射 selectedModels 中的临时 ID
+        if (body.selectedModels !== undefined && Object.keys(idMapping).length > 0) {
+          body.selectedModels = body.selectedModels.map(sm => ({
+            ...sm,
+            endpointId: idMapping[sm.endpointId] || sm.endpointId,
+          }));
+        }
       }
 
       // 处理选中的模型
