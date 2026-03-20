@@ -65,6 +65,8 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
                 periodCost += d.totalCost;
                 periodRequests += d.requestCount;
             }
+            // 补全日期范围内缺失的日期（填零值）
+            const filledTrend = this.fillMissingDates(dailyTrend, startDate, endDate);
             this.response.body = {
                 summary: {
                     totalTokens: periodTokens,
@@ -83,7 +85,7 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
                     totalCost: Math.round(monthlyUsage.totalCost * 10000) / 10000,
                     requestCount: monthlyUsage.requestCount,
                 },
-                dailyTrend: dailyTrend.map(d => ({
+                dailyTrend: filledTrend.map(d => ({
                     ...d,
                     totalCost: Math.round(d.totalCost * 10000) / 10000,
                 })),
@@ -123,6 +125,18 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
             startDate = monthAgo.toISOString().slice(0, 10);
         }
         return { startDate, endDate };
+    }
+    fillMissingDates(trend, startDate, endDate) {
+        const dataMap = new Map(trend.map(d => [d.date, d]));
+        const result = [];
+        const current = new Date(startDate + 'T00:00:00');
+        const end = new Date(endDate + 'T00:00:00');
+        while (current <= end) {
+            const dateStr = current.toISOString().slice(0, 10);
+            result.push(dataMap.get(dateStr) || { date: dateStr, totalTokens: 0, totalCost: 0, requestCount: 0 });
+            current.setDate(current.getDate() + 1);
+        }
+        return result;
     }
     async getUserNameMap(userIds) {
         const nameMap = new Map();

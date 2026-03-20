@@ -88,6 +88,9 @@ export class CostAnalyticsHandler extends Handler {
         periodRequests += d.requestCount;
       }
 
+      // 补全日期范围内缺失的日期（填零值）
+      const filledTrend = this.fillMissingDates(dailyTrend, startDate, endDate);
+
       this.response.body = {
         summary: {
           totalTokens: periodTokens,
@@ -106,7 +109,7 @@ export class CostAnalyticsHandler extends Handler {
           totalCost: Math.round(monthlyUsage.totalCost * 10000) / 10000,
           requestCount: monthlyUsage.requestCount,
         },
-        dailyTrend: dailyTrend.map(d => ({
+        dailyTrend: filledTrend.map(d => ({
           ...d,
           totalCost: Math.round(d.totalCost * 10000) / 10000,
         })),
@@ -146,6 +149,23 @@ export class CostAnalyticsHandler extends Handler {
     }
 
     return { startDate, endDate };
+  }
+
+  private fillMissingDates(
+    trend: Array<{ date: string; totalTokens: number; totalCost: number; requestCount: number }>,
+    startDate: string,
+    endDate: string,
+  ): Array<{ date: string; totalTokens: number; totalCost: number; requestCount: number }> {
+    const dataMap = new Map(trend.map(d => [d.date, d]));
+    const result: Array<{ date: string; totalTokens: number; totalCost: number; requestCount: number }> = [];
+    const current = new Date(startDate + 'T00:00:00');
+    const end = new Date(endDate + 'T00:00:00');
+    while (current <= end) {
+      const dateStr = current.toISOString().slice(0, 10);
+      result.push(dataMap.get(dateStr) || { date: dateStr, totalTokens: 0, totalCost: 0, requestCount: 0 });
+      current.setDate(current.getDate() + 1);
+    }
+    return result;
   }
 
   private async getUserNameMap(userIds: number[]): Promise<Map<number, string>> {
