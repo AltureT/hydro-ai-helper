@@ -336,8 +336,8 @@ export const TestConnectionHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const FetchModelsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 
 /**
- * 验证 URL 是否安全（防止 SSRF）
- * 仅允许 https:（开发环境可放宽到 http:），禁止内网/link-local 地址
+ * 验证 API Base URL 格式
+ * 允许 http: 和 https:，支持内网/本地模型部署
  */
 function validateApiBaseUrl(url: string): string | null {
   let parsed: URL;
@@ -347,32 +347,8 @@ function validateApiBaseUrl(url: string): string | null {
     return '无效的 URL 格式';
   }
 
-  const allowHttp = process.env.NODE_ENV !== 'production';
-  if (parsed.protocol !== 'https:' && !(allowHttp && parsed.protocol === 'http:')) {
-    return '仅允许 HTTPS 协议';
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-
-  // 禁止 localhost
-  if (hostname === 'localhost' || hostname === '[::1]') {
-    return '不允许访问本地地址';
-  }
-
-  // 检查 IPv4 内网/link-local 地址
-  const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4Match) {
-    const [, a, b] = ipv4Match.map(Number);
-    if (
-      a === 127 ||                          // 127.0.0.0/8
-      a === 10 ||                           // 10.0.0.0/8
-      (a === 172 && b >= 16 && b <= 31) ||  // 172.16.0.0/12
-      (a === 192 && b === 168) ||           // 192.168.0.0/16
-      (a === 169 && b === 254) ||           // 169.254.0.0/16 link-local
-      a === 0                               // 0.0.0.0/8
-    ) {
-      return '不允许访问内网地址';
-    }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return '仅允许 HTTP 或 HTTPS 协议';
   }
 
   return null;
