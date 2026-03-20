@@ -60,7 +60,7 @@ const readProgressFile = async (progressFilePath) => {
         return parsed;
     }
     catch (err) {
-        if (err?.code === 'ENOENT')
+        if (err instanceof Error && err.code === 'ENOENT')
             return null;
         console.warn('[UpdateHandler] 读取更新进度文件失败:', err);
         return null;

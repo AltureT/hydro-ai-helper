@@ -21,10 +21,11 @@ async function applyRateLimit(handler, options) {
         // HydroOJ throws an error with name 'OpcountExceededError' or
         // an error whose constructor name matches when opcount is exceeded.
         // The error may also be identified by its status code (429) or code property.
-        if (err?.name === 'OpcountExceededError'
-            || err?.constructor?.name === 'OpcountExceededError'
-            || err?.code === 'OpcountExceededError'
-            || (err?.status === 429)) {
+        const e = err;
+        if (e?.name === 'OpcountExceededError'
+            || e?.constructor?.name === 'OpcountExceededError'
+            || e?.code === 'OpcountExceededError'
+            || (e?.status === 429)) {
             handler.response.status = 429;
             handler.response.body = {
                 error: errorMessage,

@@ -3,6 +3,7 @@
  * 防止 prompt injection：转义边界标记、XML 标签、角色标签、代码围栏
  */
 
+// eslint-disable-next-line no-misleading-character-class
 const ZERO_WIDTH_CHARS = /[\u200B\u200C\u200D\u200E\u200F\uFEFF\u2060\u2061\u2062\u2063\u2064\u180E]/g;
 
 const SAFETY_TAGS = ['student_input', 'student_code', 'conversation_history', 'judge_info', 'clarify_anchor'];

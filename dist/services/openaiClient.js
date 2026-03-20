@@ -285,6 +285,7 @@ class OpenAIClient {
             stream: true,
             stream_options: { include_usage: true },
         };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let response;
         try {
             response = await axios_1.default.post(`${this.config.apiBaseUrl}${limits_1.API_DEFAULTS.CHAT_ENDPOINT}`, payload, {
@@ -424,7 +425,7 @@ class OpenAIClient {
     async testConnection() {
         const startTime = Date.now();
         try {
-            const result = await this.chat([{ role: 'user', content: 'Hello' }], 'You are a helpful assistant.');
+            const _result = await this.chat([{ role: 'user', content: 'Hello' }], 'You are a helpful assistant.');
             const latency = Date.now() - startTime;
             return { success: true, latency };
         }

@@ -131,6 +131,7 @@ export class TokenUsageModel {
     // $inc upsert 日聚合
     const aggId = `${params.domainId}:${params.userId}:${dateStr}`;
     await this.dailyAggCollection.updateOne(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       { _id: aggId } as any,
       {
         $inc: {
@@ -146,6 +147,7 @@ export class TokenUsageModel {
           date: dateStr,
           updatedAt: now,
         },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any,
       { upsert: true }
     );
@@ -153,6 +155,7 @@ export class TokenUsageModel {
 
   async getUserDailyUsage(domainId: string, userId: number, date: string): Promise<DailyUsageAggregate | null> {
     const aggId = `${domainId}:${userId}:${date}`;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this.dailyAggCollection.findOne({ _id: aggId } as any);
   }
 
@@ -221,6 +224,7 @@ export class TokenUsageModel {
       .sort({ totalTokens: -1 })
       .limit(limit)
       .project({ _id: 0, userId: 1, totalTokens: 1, requestCount: 1, estimatedCostUSD: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .toArray() as any;
   }
 
@@ -251,6 +255,7 @@ export class TokenUsageModel {
         },
       },
     ];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this.dailyAggCollection.aggregate(pipeline).toArray() as any;
   }
 
@@ -286,6 +291,7 @@ export class TokenUsageModel {
         },
       },
     ];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this.usageCollection.aggregate(pipeline).toArray() as any;
   }
 

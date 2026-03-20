@@ -38,8 +38,8 @@ const readProgressFile = async (progressFilePath: string): Promise<UpdateProgres
     const parsed = JSON.parse(raw) as UpdateProgressData;
     if (!parsed || typeof parsed !== 'object') return null;
     return parsed;
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') return null;
+  } catch (err: unknown) {
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     console.warn('[UpdateHandler] 读取更新进度文件失败:', err);
     return null;
   }

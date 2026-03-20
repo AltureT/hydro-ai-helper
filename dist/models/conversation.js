@@ -169,6 +169,7 @@ class ConversationModel {
         const _id = (0, ensureObjectId_1.ensureObjectId)(id);
         const result = await this.collection.findOneAndUpdate({ _id }, { $inc: { 'metadata.offTopicStrike': 1 } }, { returnDocument: 'after' });
         return result?.metadata?.offTopicStrike
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ?? result?.value?.metadata?.offTopicStrike
             ?? 1;
     }

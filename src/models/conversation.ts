@@ -292,6 +292,7 @@ export class ConversationModel {
       { returnDocument: 'after' }
     );
     return result?.metadata?.offTopicStrike
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ?? (result as any)?.value?.metadata?.offTopicStrike
       ?? 1;
   }

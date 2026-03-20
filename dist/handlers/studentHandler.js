@@ -146,7 +146,7 @@ class ChatHandler extends hydrooj_1.Handler {
         const conversationModel = this.ctx.get('conversationModel');
         const messageModel = this.ctx.get('messageModel');
         // 从请求体获取参数
-        const { problemId, problemTitle, problemContent, questionType, userThinking, includeCode, code, conversationId, clarifyContext } = this.request.body;
+        const { problemId, problemTitle, problemContent: _problemContent, questionType, userThinking, includeCode, code, conversationId, clarifyContext } = this.request.body;
         // 验证问题类型
         const validQuestionTypes = ['understand', 'think', 'debug', 'clarify', 'optimize'];
         if (!validQuestionTypes.includes(questionType)) {
@@ -576,6 +576,7 @@ class ChatHandler extends hydrooj_1.Handler {
     }
     async handleStreamResponse(p) {
         // Access Koa context via HandlerCommon.context (NOT this.request.ctx — HydroRequest is a plain object)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const koaCtx = this.context;
         const rawRes = koaCtx?.res;
         if (!rawRes) {
@@ -742,6 +743,7 @@ class ChatHandler extends hydrooj_1.Handler {
         let aiLatencyMs = 0;
         // L4 请求级 AbortController
         const requestAc = new AbortController();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const rawReq = this.context?.req;
         // 提前检查客户端是否已断开（close 事件可能在前序 DB 操作期间已触发）
         if (rawReq?.destroyed || rawReq?.aborted) {
@@ -826,7 +828,8 @@ class ChatHandler extends hydrooj_1.Handler {
         await p.conversationModel.incrementMessageCount(p.currentConversationId);
         await p.conversationModel.updateEndTime(p.currentConversationId, aiMessageTimestamp);
         // 异步记录 token 用量（不阻塞主流程）
-        if (aiResult?.usage && aiResult.usage.totalTokens > 0) {
+        if (aiResult?.usage && aiResult.usedModel && aiResult.usage.totalTokens > 0) {
+            const { usedModel: um, usage: usg } = aiResult;
             void (async () => {
                 try {
                     const tokenUsageModel = this.ctx.get('tokenUsageModel');
@@ -835,18 +838,18 @@ class ChatHandler extends hydrooj_1.Handler {
                         userId: p.userId,
                         conversationId: p.currentConversationId,
                         messageId: aiMessageId,
-                        endpointId: aiResult.usedModel.endpointId,
-                        endpointName: aiResult.usedModel.endpointName,
-                        modelName: aiResult.usedModel.modelName,
-                        promptTokens: aiResult.usage.promptTokens,
-                        completionTokens: aiResult.usage.completionTokens,
-                        totalTokens: aiResult.usage.totalTokens,
+                        endpointId: um.endpointId,
+                        endpointName: um.endpointName,
+                        modelName: um.modelName,
+                        promptTokens: usg.promptTokens,
+                        completionTokens: usg.completionTokens,
+                        totalTokens: usg.totalTokens,
                         questionType: p.questionType,
                         latencyMs: aiLatencyMs,
                     });
                     // $inc conversation metadata.totalTokens
                     const convColl = this.ctx.db.collection('ai_conversations');
-                    await convColl.updateOne({ _id: p.currentConversationId }, { $inc: { 'metadata.totalTokens': aiResult.usage.totalTokens } });
+                    await convColl.updateOne({ _id: p.currentConversationId }, { $inc: { 'metadata.totalTokens': usg.totalTokens } });
                 }
                 catch (err) {
                     console.error('[ChatHandler] 记录 token 用量失败:', err);

@@ -6,6 +6,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sanitizeForPrompt = sanitizeForPrompt;
 exports.normalizeUnicode = normalizeUnicode;
+// eslint-disable-next-line no-misleading-character-class
 const ZERO_WIDTH_CHARS = /[\u200B\u200C\u200D\u200E\u200F\uFEFF\u2060\u2061\u2062\u2063\u2064\u180E]/g;
 const SAFETY_TAGS = ['student_input', 'student_code', 'conversation_history', 'judge_info', 'clarify_anchor'];
 const SAFETY_TAG_PATTERN = new RegExp(`<\\/?(${SAFETY_TAGS.join('|')})\\s*>`, 'gi');

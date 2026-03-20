@@ -349,7 +349,7 @@ export class AIConfigModel {
     }
 
     if (changed) {
-      const updateFields: Record<string, any> = {};
+      const updateFields: Record<string, unknown> = {};
       if (config.endpoints) updateFields.endpoints = config.endpoints;
       if (config.apiKeyEncrypted) updateFields.apiKeyEncrypted = config.apiKeyEncrypted;
       updateFields.updatedAt = new Date();

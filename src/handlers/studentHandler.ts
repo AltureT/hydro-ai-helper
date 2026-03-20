@@ -21,7 +21,7 @@ import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
-import { createSSEWriter, type SSEWriter } from '../lib/sseHelper';
+import { createSSEWriter } from '../lib/sseHelper';
 
 function extractContestIdFromReferer(referer: unknown): string | undefined {
   if (typeof referer !== 'string') return undefined;
@@ -221,7 +221,7 @@ export class ChatHandler extends Handler {
     const {
       problemId,
       problemTitle,
-      problemContent,
+      problemContent: _problemContent,
       questionType,
       userThinking,
       includeCode,
@@ -697,6 +697,7 @@ export class ChatHandler extends Handler {
 
   private async handleStreamResponse(p: PrepareChatResult): Promise<void> {
     // Access Koa context via HandlerCommon.context (NOT this.request.ctx — HydroRequest is a plain object)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const koaCtx = (this as any).context;
     const rawRes: ServerResponse | undefined = koaCtx?.res;
     if (!rawRes) {
@@ -773,7 +774,7 @@ export class ChatHandler extends Handler {
 
       // Save AI message to DB
       const aiMessageTimestamp = new Date();
-      const aiMessageMetadata: Record<string, any> = {};
+      const aiMessageMetadata: Record<string, string | number | boolean> = {};
       if (safetyResult.rewritten) aiMessageMetadata.safetyRewritten = true;
       if (streamUsage) {
         aiMessageMetadata.promptTokens = streamUsage.promptTokens;
@@ -877,6 +878,7 @@ export class ChatHandler extends Handler {
 
     // L4 请求级 AbortController
     const requestAc = new AbortController();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rawReq = (this as any).context?.req;
 
     // 提前检查客户端是否已断开（close 事件可能在前序 DB 操作期间已触发）
@@ -938,7 +940,7 @@ export class ChatHandler extends Handler {
 
     // 保存 AI 消息到数据库（含 token 用量元数据）
     const aiMessageTimestamp = new Date();
-    const aiMessageMetadata: Record<string, any> = {};
+    const aiMessageMetadata: Record<string, string | number | boolean> = {};
     if (safetyResult.rewritten) aiMessageMetadata.safetyRewritten = true;
     if (aiResult?.usage) {
       aiMessageMetadata.promptTokens = aiResult.usage.promptTokens;
@@ -965,7 +967,8 @@ export class ChatHandler extends Handler {
     await p.conversationModel.updateEndTime(p.currentConversationId, aiMessageTimestamp);
 
     // 异步记录 token 用量（不阻塞主流程）
-    if (aiResult?.usage && aiResult.usage.totalTokens > 0) {
+    if (aiResult?.usage && aiResult.usedModel && aiResult.usage.totalTokens > 0) {
+      const { usedModel: um, usage: usg } = aiResult;
       void (async () => {
         try {
           const tokenUsageModel: TokenUsageModel = this.ctx.get('tokenUsageModel');
@@ -974,12 +977,12 @@ export class ChatHandler extends Handler {
             userId: p.userId,
             conversationId: p.currentConversationId,
             messageId: aiMessageId,
-            endpointId: aiResult!.usedModel.endpointId,
-            endpointName: aiResult!.usedModel.endpointName,
-            modelName: aiResult!.usedModel.modelName,
-            promptTokens: aiResult!.usage!.promptTokens,
-            completionTokens: aiResult!.usage!.completionTokens,
-            totalTokens: aiResult!.usage!.totalTokens,
+            endpointId: um.endpointId,
+            endpointName: um.endpointName,
+            modelName: um.modelName,
+            promptTokens: usg.promptTokens,
+            completionTokens: usg.completionTokens,
+            totalTokens: usg.totalTokens,
             questionType: p.questionType as string,
             latencyMs: aiLatencyMs,
           });
@@ -987,7 +990,7 @@ export class ChatHandler extends Handler {
           const convColl = this.ctx.db.collection('ai_conversations');
           await convColl.updateOne(
             { _id: p.currentConversationId },
-            { $inc: { 'metadata.totalTokens': aiResult!.usage!.totalTokens } }
+            { $inc: { 'metadata.totalTokens': usg.totalTokens } }
           );
         } catch (err) {
           console.error('[ChatHandler] 记录 token 用量失败:', err);

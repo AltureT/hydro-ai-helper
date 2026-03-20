@@ -156,7 +156,7 @@ export class CostAnalyticsHandler extends Handler {
       const userColl = db.collection('user');
       const users = await userColl.find({ _id: { $in: userIds } }).toArray();
       for (const user of users) {
-        nameMap.set(user._id as number, (user as any).uname || `用户 ${user._id}`);
+        nameMap.set(user._id as number, (user as Record<string, unknown>).uname as string || `用户 ${user._id}`);
       }
     } catch (err) {
       console.error('[CostAnalyticsHandler] Failed to fetch user names:', err);

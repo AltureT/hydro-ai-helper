@@ -91,6 +91,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const migrationService = new migrationService_1.MigrationService(db);
         await migrationService.runAllMigrations();
         // 初始化插件安装记录
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const packageJson = require('../package.json');
         const currentVersion = packageJson.version || '1.8.0';
         await pluginInstallModel.createIfMissing(currentVersion);

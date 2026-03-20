@@ -51,7 +51,9 @@ class TokenUsageModel {
         });
         // $inc upsert 日聚合
         const aggId = `${params.domainId}:${params.userId}:${dateStr}`;
-        await this.dailyAggCollection.updateOne({ _id: aggId }, {
+        await this.dailyAggCollection.updateOne(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { _id: aggId }, {
             $inc: {
                 totalPromptTokens: params.promptTokens,
                 totalCompletionTokens: params.completionTokens,
@@ -65,10 +67,12 @@ class TokenUsageModel {
                 date: dateStr,
                 updatedAt: now,
             },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
         }, { upsert: true });
     }
     async getUserDailyUsage(domainId, userId, date) {
         const aggId = `${domainId}:${userId}:${date}`;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return this.dailyAggCollection.findOne({ _id: aggId });
     }
     async getDomainDailyUsage(domainId, date) {
@@ -121,6 +125,7 @@ class TokenUsageModel {
             .sort({ totalTokens: -1 })
             .limit(limit)
             .project({ _id: 0, userId: 1, totalTokens: 1, requestCount: 1, estimatedCostUSD: 1 })
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             .toArray();
     }
     async getDailyTrend(domainId, startDate, endDate) {
@@ -145,6 +150,7 @@ class TokenUsageModel {
                 },
             },
         ];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return this.dailyAggCollection.aggregate(pipeline).toArray();
     }
     async getModelBreakdown(domainId, startDate, endDate) {
@@ -174,6 +180,7 @@ class TokenUsageModel {
                 },
             },
         ];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return this.usageCollection.aggregate(pipeline).toArray();
     }
     static estimateCost(modelName, promptTokens, completionTokens) {

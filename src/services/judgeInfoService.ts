@@ -45,8 +45,10 @@ function stripAnsi(text: string): string {
   // This keeps judge/compiler output prompt-safe and avoids noise.
   return text
     // OSC: ESC ] ... BEL or ESC \
+    // eslint-disable-next-line no-control-regex
     .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, '')
     // CSI: ESC [ ... cmd
+    // eslint-disable-next-line no-control-regex
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
 }
 

@@ -212,12 +212,12 @@ class UpdateService {
                             };
                         }
                         catch (e) {
-                            // 🔒 fail-closed：仅在明确 ESRCH（进程不存在）时清理锁文件
-                            if (e?.code === 'ESRCH') {
+                            const nodeErr = e;
+                            if (nodeErr?.code === 'ESRCH') {
                                 console.log(`[UpdateService] 清理过期锁文件（进程 ${lockInfo.pid} 已退出）`);
                                 await fsPromises.unlink(this.LOCK_FILE);
                             }
-                            else if (e?.code === 'EPERM') {
+                            else if (nodeErr?.code === 'EPERM') {
                                 return {
                                     success: false,
                                     message: `更新锁被其他用户进程持有（PID: ${lockInfo.pid}），当前进程无权限探测其状态，请稍后重试`
@@ -247,12 +247,13 @@ class UpdateService {
             return { success: true };
         }
         catch (err) {
-            if (err.code === 'EEXIST') {
+            const nodeErr = err;
+            if (nodeErr.code === 'EEXIST') {
                 // 并���写入冲突，锁已被其他进程获取
                 return { success: false, message: '更新锁被其他进程持有，请稍后重试' };
             }
             console.error('[UpdateService] 文件锁异常:', err);
-            return { success: false, message: `锁文件操作失败: ${err.message}` };
+            return { success: false, message: `锁文件操作失败: ${nodeErr.message}` };
         }
     }
     /**

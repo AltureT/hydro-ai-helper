@@ -406,6 +406,7 @@ export class OpenAIClient {
       stream_options: { include_usage: true },
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let response: any;
     try {
       response = await axios.post(
@@ -551,7 +552,7 @@ export class OpenAIClient {
     const startTime = Date.now();
 
     try {
-      const result = await this.chat(
+      const _result = await this.chat(
         [{ role: 'user', content: 'Hello' }],
         'You are a helpful assistant.'
       );

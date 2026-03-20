@@ -24,7 +24,7 @@ async function getRemainingRequests(db, userId, maxPerMinute) {
         const now = new Date();
         // opcount 记录的 key 格式取决于 HydroOJ 版本，
         // 通常包含 op 名称和用户标识。查找最近 60 秒内的记录。
-        const cutoff = new Date(now.getTime() - 60 * 1000);
+        const _cutoff = new Date(now.getTime() - 60 * 1000);
         const record = await coll.findOne({
             op: 'ai_chat',
             ident: String(userId),
