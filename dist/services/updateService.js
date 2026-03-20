@@ -1264,8 +1264,11 @@ class UpdateService {
             // Step 2.6: 切换到已验证的远程版本（避免 TOCTOU）
             log('pulling', '正在切换到最新版本...');
             if (validation.needsGitInit) {
-                // ✅ 仅在签名验证通过后再创建/切换 main 分支，避免未验证代码落盘
-                const checkoutResult = await this.executeCommand('git', ['checkout', '-B', 'main', targetCommit], this.pluginPath, (line) => log('pulling', line.trim()), 300000 // 🔒 5 分钟超时
+                // 新初始化的仓库中，yarn 安装的文件是 untracked 状态
+                // 使用 git clean + checkout -f 强制切换，避免 untracked 文件冲突
+                // 这是安全的：签名已验证通过，且 reset --hard 紧随其后会确保最终状态正确
+                await this.executeCommand('git', ['clean', '-fd'], this.pluginPath, undefined, 60000);
+                const checkoutResult = await this.executeCommand('git', ['checkout', '-f', '-B', 'main', targetCommit], this.pluginPath, (line) => log('pulling', line.trim()), 300000 // 🔒 5 分钟超时
                 );
                 if (checkoutResult.code !== 0) {
                     const errorMsg = `切换到 main 分支失败: ${checkoutResult.stderr}`;
