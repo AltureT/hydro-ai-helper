@@ -1,6 +1,30 @@
 import React from 'react';
 import { renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
+import { ThinkingBlock } from './ThinkingBlock';
 import type { Message, ProblemInfo } from './types';
+
+interface ParsedContent {
+  content: string;
+  thinking: string | null;
+  isThinkingStreaming: boolean;
+}
+
+function parseMessageContent(text: string): ParsedContent {
+  const thinkStart = text.indexOf('<think>');
+  if (thinkStart === -1) return { content: text, thinking: null, isThinkingStreaming: false };
+
+  const thinkEnd = text.indexOf('</think>');
+  if (thinkEnd === -1) {
+    // Think tag opened but not closed — still streaming thinking
+    const thinking = text.substring(thinkStart + 7);
+    const content = text.substring(0, thinkStart);
+    return { content, thinking, isThinkingStreaming: true };
+  }
+
+  const thinking = text.substring(thinkStart + 7, thinkEnd);
+  const content = text.substring(0, thinkStart) + text.substring(thinkEnd + 8);
+  return { content: content.trim(), thinking, isThinkingStreaming: false };
+}
 
 interface ChatMessageListProps {
   messages: Message[];
@@ -81,53 +105,73 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
     return isEmbedded ? <div style={{ flex: 1 }} /> : null;
   };
 
-  const renderEmbeddedMessage = (msg: Message, idx: number) => (
-    <div key={idx} style={{ display: 'flex', flexDirection: msg.role === 'student' ? 'row-reverse' : 'row', gap: '8px' }}>
+  const renderEmbeddedMessage = (msg: Message, idx: number) => {
+    const parsed = msg.role === 'ai' ? parseMessageContent(msg.content) : null;
+    return (
+      <div key={idx} style={{ display: 'flex', flexDirection: msg.role === 'student' ? 'row-reverse' : 'row', gap: '8px' }}>
+        <div
+          data-ai-message={msg.role === 'ai' ? 'true' : undefined}
+          data-message-id={msg.role === 'ai' ? msg.id : undefined}
+          style={{
+            maxWidth: '85%', padding: '10px 14px',
+            borderRadius: msg.role === 'student' ? '12px 12px 0 12px' : '12px 12px 12px 0',
+            background: msg.role === 'student' ? '#6366f1' : '#f3f4f6',
+            color: msg.role === 'student' ? 'white' : '#1f2937',
+            fontSize: '13px', lineHeight: '1.6'
+          }}
+        >
+          {msg.role === 'ai' && parsed ? (
+            <>
+              {parsed.thinking && <ThinkingBlock content={parsed.thinking} isStreaming={false} variant="embedded" />}
+              {renderMarkdown(parsed.content)}
+            </>
+          ) : (
+            <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderFloatingMessage = (msg: Message, idx: number) => {
+    const parsed = msg.role === 'ai' ? parseMessageContent(msg.content) : null;
+    return (
       <div
+        key={idx}
         data-ai-message={msg.role === 'ai' ? 'true' : undefined}
         data-message-id={msg.role === 'ai' ? msg.id : undefined}
+        onMouseUp={msg.role === 'ai' ? onTextSelection : undefined}
         style={{
-          maxWidth: '85%', padding: '10px 14px',
-          borderRadius: msg.role === 'student' ? '12px 12px 0 12px' : '12px 12px 12px 0',
-          background: msg.role === 'student' ? '#6366f1' : '#f3f4f6',
-          color: msg.role === 'student' ? 'white' : '#1f2937',
-          fontSize: '13px', lineHeight: '1.6'
+          background: msg.role === 'student' ? '#dbeafe' : '#f0fdf4',
+          border: `1px solid ${msg.role === 'student' ? '#93c5fd' : '#86efac'}`,
+          padding: '12px', borderRadius: '10px', position: 'relative'
         }}
       >
-        {msg.role === 'ai' ? renderMarkdown(msg.content) : <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}
+        <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px', color: msg.role === 'student' ? '#1e40af' : '#15803d' }}>
+          {msg.role === 'student' ? '💬 我' : '🤖 AI 导师'}
+        </div>
+        <div style={{ fontSize: '13px', color: msg.role === 'student' ? '#1e3a8a' : '#166534' }}>
+          {msg.role === 'ai' && parsed ? (
+            <>
+              {parsed.thinking && <ThinkingBlock content={parsed.thinking} isStreaming={false} variant="floating" />}
+              {renderMarkdown(parsed.content)}
+            </>
+          ) : (
+            <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+          )}
+        </div>
+        {msg.code && (
+          <pre style={{
+            background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px',
+            borderRadius: '6px', marginTop: '8px', fontSize: '11px', overflow: 'auto',
+            maxHeight: '100px', fontFamily: 'Consolas, Monaco, "Courier New", monospace'
+          }}>
+            <code>{msg.code.length > 300 ? msg.code.substring(0, 300) + '...' : msg.code}</code>
+          </pre>
+        )}
       </div>
-    </div>
-  );
-
-  const renderFloatingMessage = (msg: Message, idx: number) => (
-    <div
-      key={idx}
-      data-ai-message={msg.role === 'ai' ? 'true' : undefined}
-      data-message-id={msg.role === 'ai' ? msg.id : undefined}
-      onMouseUp={msg.role === 'ai' ? onTextSelection : undefined}
-      style={{
-        background: msg.role === 'student' ? '#dbeafe' : '#f0fdf4',
-        border: `1px solid ${msg.role === 'student' ? '#93c5fd' : '#86efac'}`,
-        padding: '12px', borderRadius: '10px', position: 'relative'
-      }}
-    >
-      <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px', color: msg.role === 'student' ? '#1e40af' : '#15803d' }}>
-        {msg.role === 'student' ? '💬 我' : '🤖 AI 导师'}
-      </div>
-      <div style={{ fontSize: '13px', color: msg.role === 'student' ? '#1e3a8a' : '#166534' }}>
-        {msg.role === 'ai' ? renderMarkdown(msg.content) : <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}
-      </div>
-      {msg.code && (
-        <pre style={{
-          background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px',
-          borderRadius: '6px', marginTop: '8px', fontSize: '11px', overflow: 'auto',
-          maxHeight: '100px', fontFamily: 'Consolas, Monaco, "Courier New", monospace'
-        }}>
-          <code>{msg.code.length > 300 ? msg.code.substring(0, 300) + '...' : msg.code}</code>
-        </pre>
-      )}
-    </div>
-  );
+    );
+  };
 
   return (
     <div
@@ -164,18 +208,24 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
       ))}
 
       {/* Streaming output */}
-      {isStreaming && streamingContent && (
-        isEmbedded ? (
+      {isStreaming && streamingContent && (() => {
+        const parsed = parseMessageContent(streamingContent);
+        return isEmbedded ? (
           <div style={{ display: 'flex', flexDirection: 'row', gap: '8px' }}>
             <div style={{
               maxWidth: '85%', padding: '10px 14px', borderRadius: '12px 12px 12px 0',
               background: '#f3f4f6', color: '#1f2937', fontSize: '13px', lineHeight: '1.6'
             }}>
-              {renderMarkdown(streamingContent, true)}
-              <span style={{
-                display: 'inline-block', width: '6px', height: '14px', background: '#6366f1',
-                marginLeft: '2px', animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom'
-              }} />
+              {parsed.thinking && (
+                <ThinkingBlock content={parsed.thinking} isStreaming={parsed.isThinkingStreaming} variant="embedded" />
+              )}
+              {(!parsed.isThinkingStreaming && parsed.content) && renderMarkdown(parsed.content, true)}
+              {!parsed.isThinkingStreaming && (
+                <span style={{
+                  display: 'inline-block', width: '6px', height: '14px', background: '#6366f1',
+                  marginLeft: '2px', animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom'
+                }} />
+              )}
             </div>
           </div>
         ) : (
@@ -187,15 +237,20 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               🤖 AI 导师
             </div>
             <div style={{ fontSize: '13px', color: '#166534' }}>
-              {renderMarkdown(streamingContent, true)}
-              <span style={{
-                display: 'inline-block', width: '6px', height: '14px', background: '#15803d',
-                marginLeft: '2px', animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom'
-              }} />
+              {parsed.thinking && (
+                <ThinkingBlock content={parsed.thinking} isStreaming={parsed.isThinkingStreaming} variant="floating" />
+              )}
+              {(!parsed.isThinkingStreaming && parsed.content) && renderMarkdown(parsed.content, true)}
+              {!parsed.isThinkingStreaming && (
+                <span style={{
+                  display: 'inline-block', width: '6px', height: '14px', background: '#15803d',
+                  marginLeft: '2px', animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom'
+                }} />
+              )}
             </div>
           </div>
-        )
-      )}
+        );
+      })()}
 
       {/* Loading indicator */}
       {isLoading && !isStreaming && (
