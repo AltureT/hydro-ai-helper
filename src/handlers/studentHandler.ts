@@ -889,7 +889,9 @@ export class ChatHandler extends Handler {
 
     const onClose = () => requestAc.abort();
     rawReq?.on?.('close', onClose);
-    const requestTimer = setTimeout(() => requestAc.abort(), 65_000);
+    // L4: 请求级超时 — 基于配置值 + 10s buffer，确保比 L3 晚触发
+    const configTimeoutMs = (p.aiConfig?.timeoutSeconds || 30) * 1000;
+    const requestTimer = setTimeout(() => requestAc.abort(), configTimeoutMs + 10_000);
 
     try {
       const aiStart = Date.now();

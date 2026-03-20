@@ -450,10 +450,18 @@ export class OpenAIClient {
     }
 
     const stream: Readable = response.data;
-    await this.parseSSEStream(stream, options.callbacks, options.signal);
+
+    // Extend socket timeout for long-running streaming connections (e.g. thinking models)
+    const socketTimeoutMs = this.config.timeoutSeconds * 1000 + 10_000;
+    response.data?.socket?.setTimeout?.(socketTimeoutMs);
+
+    // Use configured timeout as chunk timeout (minimum: default 30s for fast models)
+    const chunkTimeoutMs = Math.max(API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS, this.config.timeoutSeconds * 1000);
+    await this.parseSSEStream(stream, options.callbacks, options.signal, chunkTimeoutMs);
   }
 
-  private parseSSEStream(stream: Readable, callbacks: StreamCallbacks, signal?: AbortSignal): Promise<void> {
+  private parseSSEStream(stream: Readable, callbacks: StreamCallbacks, signal?: AbortSignal, chunkTimeoutMs?: number): Promise<void> {
+    const effectiveChunkTimeout = chunkTimeoutMs ?? API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS;
     return new Promise<void>((resolve, reject) => {
       let buffer = '';
       let fullContent = '';
@@ -465,7 +473,7 @@ export class OpenAIClient {
         chunkTimer = setTimeout(() => {
           stream.destroy();
           reject(new AIServiceError('流式响应 chunk 超时', 'timeout'));
-        }, API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS);
+        }, effectiveChunkTimeout);
       };
 
       const cleanup = () => {
@@ -667,10 +675,11 @@ export class MultiModelClient {
     const errors: Array<{ model: string; error: string; category: ErrorCategory }> = [];
     const skippedEndpoints = new Set<string>();
 
-    // L3: 全 fallback 链总超时 (60s)
+    // L3: 全 fallback 链总超时 — 取配置值与默认值中的较大者
+    const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, this.clients[0].config.timeoutSeconds * 1000);
     const totalAc = new AbortController();
     let timedOut = false;
-    const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, RETRY.TOTAL_TIMEOUT_MS);
+    const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);
 
     // 外部 signal 级联到内部 totalAc
     const onExternalAbort = () => totalAc.abort();

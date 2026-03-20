@@ -202,7 +202,8 @@ export function useChatSession({ problemId, isCollapsed }: UseChatSessionOptions
     const ac = new AbortController();
     abortControllerRef.current = ac;
     let clientTimedOut = false;
-    const clientTimeout = setTimeout(() => { clientTimedOut = true; ac.abort(); }, 70_000);
+    // 前端超时作为最终兜底（10分钟），实际超时由后端控制
+    const clientTimeout = setTimeout(() => { clientTimedOut = true; ac.abort(); }, 600_000);
 
     try {
       const finalProblemTitle = state.problemInfo?.title || state.manualTitle || undefined;

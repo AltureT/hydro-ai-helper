@@ -331,9 +331,15 @@ class OpenAIClient {
             throw new AIServiceError('端点不支持流式响应', 'client');
         }
         const stream = response.data;
-        await this.parseSSEStream(stream, options.callbacks, options.signal);
+        // Extend socket timeout for long-running streaming connections (e.g. thinking models)
+        const socketTimeoutMs = this.config.timeoutSeconds * 1000 + 10000;
+        response.data?.socket?.setTimeout?.(socketTimeoutMs);
+        // Use configured timeout as chunk timeout (minimum: default 30s for fast models)
+        const chunkTimeoutMs = Math.max(limits_1.API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS, this.config.timeoutSeconds * 1000);
+        await this.parseSSEStream(stream, options.callbacks, options.signal, chunkTimeoutMs);
     }
-    parseSSEStream(stream, callbacks, signal) {
+    parseSSEStream(stream, callbacks, signal, chunkTimeoutMs) {
+        const effectiveChunkTimeout = chunkTimeoutMs ?? limits_1.API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS;
         return new Promise((resolve, reject) => {
             let buffer = '';
             let fullContent = '';
@@ -345,7 +351,7 @@ class OpenAIClient {
                 chunkTimer = setTimeout(() => {
                     stream.destroy();
                     reject(new AIServiceError('流式响应 chunk 超时', 'timeout'));
-                }, limits_1.API_DEFAULTS.STREAM_CHUNK_TIMEOUT_MS);
+                }, effectiveChunkTimeout);
             };
             const cleanup = () => {
                 if (chunkTimer)
@@ -497,10 +503,11 @@ class MultiModelClient {
         }
         const errors = [];
         const skippedEndpoints = new Set();
-        // L3: 全 fallback 链总超时 (60s)
+        // L3: 全 fallback 链总超时 — 取配置值与默认值中的较大者
+        const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, this.clients[0].config.timeoutSeconds * 1000);
         const totalAc = new AbortController();
         let timedOut = false;
-        const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, RETRY.TOTAL_TIMEOUT_MS);
+        const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);
         // 外部 signal 级联到内部 totalAc
         const onExternalAbort = () => totalAc.abort();
         options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
