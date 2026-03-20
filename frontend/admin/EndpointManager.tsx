@@ -204,6 +204,25 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
             {endpoints.map((endpoint, index) => {
               const endpointKey = endpoint.id || `new-${index}`;
+              const hasCredentials = Boolean(endpoint.apiBaseUrl && (endpoint.newApiKey || endpoint.hasApiKey));
+              const hasModels = endpoint.models.length > 0;
+              const hasSelectedModels = selectedModels.some(sm => sm.endpointId === endpoint.id);
+
+              const stepCircle = (step: number, completed: boolean, active: boolean): React.CSSProperties => ({
+                width: '28px', height: '28px', borderRadius: '50%',
+                backgroundColor: completed ? '#10b981' : active ? '#6366f1' : '#e5e7eb',
+                color: (completed || active) ? '#ffffff' : '#9ca3af',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontWeight: 600, fontSize: '14px', flexShrink: 0,
+              });
+
+              const step1Done = hasCredentials;
+              const step2Done = hasModels;
+              const step3Done = hasSelectedModels;
+              const step1Active = !step1Done;
+              const step2Active = step1Done && !step2Done;
+              const step3Active = step1Done && step2Done && !step3Done;
+
               return (
                 <div
                   key={endpointKey}
@@ -249,89 +268,153 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                     </div>
                   </div>
 
-                  {/* URL + API Key */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '5px', fontSize: '13px', fontWeight: 500 }}>
-                        API Base URL
-                      </label>
-                      <input
-                        type="text"
-                        value={endpoint.apiBaseUrl}
-                        onChange={(e) => onUpdateEndpoint(index, { apiBaseUrl: e.target.value })}
-                        placeholder="https://api.openai.com/v1"
-                        style={inputStyle}
-                      />
+                  {/* Step 1: URL + API Key */}
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '4px' }}>
+                      <div style={stepCircle(1, step1Done, step1Active)}>
+                        {step1Done ? '\u2713' : '1'}
+                      </div>
+                      <div style={{ width: '2px', height: '100%', minHeight: '20px', backgroundColor: step1Done ? '#10b981' : '#e5e7eb', marginTop: '4px' }} />
                     </div>
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '5px', fontSize: '13px', fontWeight: 500 }}>
-                        API Key {endpoint.hasApiKey && <span style={{ color: '#10b981' }}>(已配置: {endpoint.apiKeyMasked})</span>}
-                      </label>
-                      <input
-                        type="password"
-                        value={endpoint.newApiKey || ''}
-                        onChange={(e) => onUpdateEndpoint(index, { newApiKey: e.target.value })}
-                        placeholder={endpoint.hasApiKey ? '留空保持不变' : 'sk-...'}
-                        style={inputStyle}
-                      />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600, color: step1Active ? '#6366f1' : '#374151', marginBottom: '8px' }}>
+                        填写端点信息
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+                        <div>
+                          <label style={{ display: 'block', marginBottom: '5px', fontSize: '13px', fontWeight: 500 }}>
+                            API Base URL
+                          </label>
+                          <input
+                            type="text"
+                            value={endpoint.apiBaseUrl}
+                            onChange={(e) => onUpdateEndpoint(index, { apiBaseUrl: e.target.value })}
+                            placeholder="https://api.openai.com/v1"
+                            style={inputStyle}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', marginBottom: '5px', fontSize: '13px', fontWeight: 500 }}>
+                            API Key {endpoint.hasApiKey && <span style={{ color: '#10b981' }}>(已配置: {endpoint.apiKeyMasked})</span>}
+                          </label>
+                          <input
+                            type="password"
+                            value={endpoint.newApiKey || ''}
+                            onChange={(e) => onUpdateEndpoint(index, { newApiKey: e.target.value })}
+                            placeholder={endpoint.hasApiKey ? '留空保持不变' : 'sk-...'}
+                            style={inputStyle}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
 
-                  {/* Available models */}
-                  <div style={{ marginTop: '15px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
-                      <label style={{ fontSize: '13px', fontWeight: 500 }}>
-                        可用模型 ({endpoint.models.length})
+                  {/* Step 2: Fetch models */}
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: '12px', opacity: hasCredentials ? 1 : 0.5 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '4px' }}>
+                      <div style={stepCircle(2, step2Done, step2Active)}>
+                        {step2Done ? '\u2713' : '2'}
+                      </div>
+                      <div style={{ width: '2px', height: '100%', minHeight: '20px', backgroundColor: step2Done ? '#10b981' : '#e5e7eb', marginTop: '4px' }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600, color: step2Active ? '#6366f1' : '#374151', marginBottom: '8px' }}>
+                        获取可用模型
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '5px' }}>
+                        <button
+                          onClick={() => onFetchModels(index)}
+                          disabled={fetchingModels !== null || !hasCredentials}
+                          style={{
+                            padding: '6px 16px',
+                            backgroundColor: fetchingModels === endpointKey ? '#9ca3af' : step2Active ? '#6366f1' : '#e0e7ff',
+                            color: step2Active ? '#ffffff' : '#4338ca',
+                            border: 'none', borderRadius: '4px',
+                            fontSize: '13px', fontWeight: 500,
+                            cursor: (fetchingModels !== null || !hasCredentials) ? 'not-allowed' : 'pointer',
+                            boxShadow: step2Active ? '0 0 0 3px rgba(99, 102, 241, 0.2)' : 'none',
+                          }}
+                        >
+                          {fetchingModels === endpointKey ? '获取中...' : '获取模型列表'}
+                        </button>
+                        {step2Active && (
+                          <span style={{ fontSize: '13px', color: '#6366f1', fontWeight: 500 }}>
+                            ← 点击获取 API 支持的模型
+                          </span>
+                        )}
                         {endpoint.modelsLastFetched && (
-                          <span style={{ fontSize: '12px', color: '#6b7280', marginLeft: '8px' }}>
+                          <span style={{ fontSize: '12px', color: '#6b7280' }}>
                             上次获取: {new Date(endpoint.modelsLastFetched).toLocaleString()}
                           </span>
                         )}
-                      </label>
-                      <button
-                        onClick={() => onFetchModels(index)}
-                        disabled={fetchingModels !== null}
-                        style={{
-                          padding: '4px 12px',
-                          backgroundColor: fetchingModels === endpointKey ? '#9ca3af' : '#e0e7ff',
-                          color: '#4338ca', border: 'none', borderRadius: '4px',
-                          fontSize: '12px', cursor: fetchingModels !== null ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        {fetchingModels === endpointKey ? '获取中...' : '获取模型'}
-                      </button>
+                      </div>
                     </div>
-                    {endpoint.models.length > 0 ? (
-                      <div style={{
-                        maxHeight: '120px', overflowY: 'auto', padding: '8px',
-                        backgroundColor: '#f9fafb', borderRadius: '4px', border: '1px solid #e5e7eb',
-                      }}>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                          {endpoint.models.map((model) => (
-                            <button
-                              key={model}
-                              onClick={() => endpoint.id && onAddSelectedModel(endpoint.id, model)}
-                              disabled={!endpoint.id}
-                              style={{
-                                padding: '4px 8px', backgroundColor: '#fff',
-                                border: '1px solid #d1d5db', borderRadius: '4px',
-                                fontSize: '12px', cursor: endpoint.id ? 'pointer' : 'not-allowed',
-                              }}
-                              title={endpoint.id ? '点击添加到选中模型' : '请先保存端点'}
-                            >
-                              {model}
-                            </button>
-                          ))}
+                  </div>
+
+                  {/* Step 3: Select models */}
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: '12px', opacity: hasModels ? 1 : 0.5 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '4px' }}>
+                      <div style={stepCircle(3, step3Done, step3Active)}>
+                        {step3Done ? '\u2713' : '3'}
+                      </div>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600, color: step3Active ? '#6366f1' : '#374151', marginBottom: '8px' }}>
+                        选择启用的模型
+                        <span style={{ fontSize: '12px', fontWeight: 400, color: '#6b7280', marginLeft: '8px' }}>
+                          ({endpoint.models.length} 个可用)
+                        </span>
+                      </div>
+                      {hasModels ? (
+                        <>
+                          {step3Active && !hasSelectedModels && (
+                            <div style={{
+                              padding: '8px 12px', marginBottom: '8px',
+                              backgroundColor: '#fef3c7', borderRadius: '4px',
+                              fontSize: '13px', color: '#92400e',
+                            }}>
+                              请至少点击一个模型以供学生使用
+                            </div>
+                          )}
+                          <div style={{
+                            maxHeight: '120px', overflowY: 'auto', padding: '8px',
+                            backgroundColor: '#f9fafb', borderRadius: '4px', border: '1px solid #e5e7eb',
+                          }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                              {endpoint.models.map((model) => {
+                                const isSelected = selectedModels.some(sm => sm.endpointId === endpoint.id && sm.modelName === model);
+                                return (
+                                  <button
+                                    key={model}
+                                    onClick={() => endpoint.id && onAddSelectedModel(endpoint.id, model)}
+                                    disabled={!endpoint.id}
+                                    style={{
+                                      padding: '4px 8px',
+                                      backgroundColor: isSelected ? '#e0e7ff' : '#fff',
+                                      border: isSelected ? '1px solid #6366f1' : '1px solid #d1d5db',
+                                      color: isSelected ? '#4338ca' : undefined,
+                                      borderRadius: '4px',
+                                      fontSize: '12px', fontWeight: isSelected ? 500 : 400,
+                                      cursor: endpoint.id ? 'pointer' : 'not-allowed',
+                                    }}
+                                    title={endpoint.id ? (isSelected ? '已选中' : '点击添加到选中模型') : '请先保存端点'}
+                                  >
+                                    {model}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{
+                          padding: '12px', backgroundColor: '#f9fafb', borderRadius: '4px',
+                          border: '1px dashed #d1d5db', color: '#9ca3af', fontSize: '13px', textAlign: 'center',
+                        }}>
+                          请先完成第 2 步
                         </div>
-                      </div>
-                    ) : (
-                      <div style={{
-                        padding: '12px', backgroundColor: '#f9fafb', borderRadius: '4px',
-                        border: '1px dashed #d1d5db', color: '#6b7280', fontSize: '13px', textAlign: 'center',
-                      }}>
-                        点击"获取模型"自动加载，或手动在下方添加
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 </div>
               );

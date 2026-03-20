@@ -459,24 +459,26 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         onAppendPattern={appendPatternToCustomRules}
       />
 
-      {/* Spacer so sticky bar doesn't overlap last content */}
-      <div style={{ height: '70px' }} />
+      {/* Spacer so fixed bar doesn't overlap last content */}
+      <div style={{ height: '80px' }} />
 
-      {/* Sticky Bottom Action Bar */}
+      {/* Fixed Bottom Action Bar */}
       <div style={{
-        position: 'sticky',
+        position: 'fixed',
         bottom: 0,
-        padding: '16px 20px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        width: '100%',
+        maxWidth: '900px',
+        padding: '16px 24px',
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
         backgroundColor: '#ffffff',
         borderTop: '1px solid #e5e7eb',
-        boxShadow: '0 -2px 8px rgba(0, 0, 0, 0.06)',
-        zIndex: 10,
-        marginLeft: '-20px',
-        marginRight: '-20px',
-        marginBottom: '-20px',
+        boxShadow: '0 -4px 12px rgba(0, 0, 0, 0.08)',
+        zIndex: 100,
+        boxSizing: 'border-box',
       }}>
         <button
           onClick={testConnection}
