@@ -35,7 +35,7 @@ const inputStyle: React.CSSProperties = {
 };
 
 const sectionStyle: React.CSSProperties = {
-  padding: '20px', backgroundColor: '#f9fafb', borderRadius: '8px', border: '1px solid #e5e7eb',
+  padding: '0', backgroundColor: 'transparent', borderRadius: '0', border: 'none',
 };
 
 const legacyInputStyle: React.CSSProperties = {
@@ -321,7 +321,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                       <div style={{ fontSize: '13px', fontWeight: 600, color: step2Active ? '#6366f1' : '#374151', marginBottom: '8px' }}>
                         获取可用模型
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '5px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '5px', flexWrap: 'wrap' }}>
                         <button
                           onClick={() => onFetchModels(index)}
                           disabled={fetchingModels !== null || !hasCredentials}
@@ -335,15 +335,24 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                             boxShadow: step2Active ? '0 0 0 3px rgba(99, 102, 241, 0.2)' : 'none',
                           }}
                         >
-                          {fetchingModels === endpointKey ? '获取中...' : '获取模型列表'}
+                          {fetchingModels === endpointKey ? '获取中...' : hasModels ? '重新获取' : '获取模型列表'}
                         </button>
-                        {step2Active && (
+                        {step2Active && !hasModels && (
                           <span style={{ fontSize: '13px', color: '#6366f1', fontWeight: 500 }}>
                             ← 点击获取 API 支持的模型
                           </span>
                         )}
+                        {hasModels && (
+                          <span style={{
+                            fontSize: '13px', fontWeight: 500, color: '#065f46',
+                            backgroundColor: '#d1fae5', padding: '4px 10px', borderRadius: '6px',
+                            border: '1px solid #10b981', display: 'inline-flex', alignItems: 'center', gap: '4px',
+                          }}>
+                            ✓ 已获取 {endpoint.models.length} 个模型
+                          </span>
+                        )}
                         {endpoint.modelsLastFetched && (
-                          <span style={{ fontSize: '12px', color: '#6b7280' }}>
+                          <span style={{ fontSize: '12px', color: '#9ca3af', marginLeft: 'auto' }}>
                             上次获取: {new Date(endpoint.modelsLastFetched).toLocaleString()}
                           </span>
                         )}

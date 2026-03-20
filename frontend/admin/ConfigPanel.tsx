@@ -318,16 +318,30 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     width: '100%', padding: '10px', borderRadius: '6px',
     border: '1px solid #d1d5db', fontSize: '14px', boxSizing: 'border-box',
   };
-  const sectionStyle: React.CSSProperties = {
-    marginTop: '20px', padding: '20px', backgroundColor: '#f9fafb',
-    borderRadius: '8px', border: '1px solid #e5e7eb',
+  const cardStyle: React.CSSProperties = {
+    backgroundColor: '#ffffff', borderRadius: '12px',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)',
+    padding: '24px', border: '1px solid #e5e7eb',
+  };
+  const cardTitleStyle: React.CSSProperties = {
+    fontSize: '18px', fontWeight: 600, color: '#111827',
+    marginTop: 0, marginBottom: '16px',
+    borderBottom: '1px solid #f3f4f6', paddingBottom: '12px',
+  };
+
+  const outerStyle: React.CSSProperties = {
+    padding: embedded ? '24px' : '32px',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    maxWidth: embedded ? 'none' : '960px',
+    margin: embedded ? '0' : '40px auto',
+    boxSizing: 'border-box',
   };
 
   if (loading) {
     return (
-      <div style={{ padding: embedded ? '24px' : '20px', fontFamily: 'sans-serif', maxWidth: embedded ? 'none' : '900px', margin: embedded ? '0' : '40px auto 20px' }}>
-        {!embedded && <h1>AI 学习助手配置</h1>}
-        <div style={{ marginTop: embedded ? '0' : '20px', padding: '20px', textAlign: 'center', color: '#6b7280', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
+      <div style={outerStyle}>
+        {!embedded && <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#111827', letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>}
+        <div style={{ ...cardStyle, marginTop: '20px', textAlign: 'center', color: '#6b7280' }}>
           正在加载配置...
         </div>
       </div>
@@ -337,187 +351,200 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   if (!config) return null;
 
   return (
-    <div style={{ padding: embedded ? '24px' : '20px', fontFamily: 'sans-serif', maxWidth: embedded ? 'none' : '900px', margin: embedded ? '0' : '40px auto 20px' }}>
-      {!embedded && <h1>AI 学习助手配置</h1>}
-      <VersionBadge />
-
-      {error && (
-        <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fee2e2', border: '1px solid #ef4444', borderRadius: '8px', color: '#991b1b' }}>
-          <strong>错误：</strong> {error}
-        </div>
-      )}
-      {successMessage && (
-        <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#d1fae5', border: '1px solid #10b981', borderRadius: '8px', color: '#065f46' }}>
-          <strong>成功：</strong> {successMessage}
+    <div style={outerStyle}>
+      {!embedded && (
+        <div style={{ marginBottom: '32px' }}>
+          <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#111827', marginBottom: '8px', letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>
+          <p style={{ fontSize: '15px', color: '#6b7280', margin: 0 }}>管理 API 端点、模型选择与安全策略</p>
         </div>
       )}
 
-      {/* Endpoint Manager (multi-endpoint + legacy single endpoint) */}
-      <EndpointManager
-        endpoints={config.endpoints}
-        selectedModels={config.selectedModels}
-        onUpdateEndpoint={updateEndpoint}
-        onRemoveEndpoint={removeEndpoint}
-        onAddEndpoint={addEndpoint}
-        onFetchModels={fetchModelsForEndpoint}
-        fetchingModels={fetchingModels}
-        onAddSelectedModel={addSelectedModel}
-        onRemoveSelectedModel={removeSelectedModel}
-        onMoveSelectedModel={moveSelectedModel}
-        disabled={isBusy}
-        legacy={{
-          apiBaseUrl: config.apiBaseUrl,
-          modelName: config.modelName,
-          apiKeyMasked: config.apiKeyMasked,
-          hasApiKey: config.hasApiKey,
-          newApiKey,
-          showApiKey,
-          onApiBaseUrlChange: (v) => setConfig({ ...config, apiBaseUrl: v }),
-          onModelNameChange: (v) => setConfig({ ...config, modelName: v }),
-          onNewApiKeyChange: setNewApiKey,
-          onShowApiKeyToggle: () => setShowApiKey(prev => !prev),
-        }}
-      />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        {/* Version Badge */}
+        <VersionBadge />
 
-      {/* General Settings */}
-      <div style={sectionStyle}>
-        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>通用设置</h2>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
-          <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>超时时间（秒）</label>
-            <input
-              type="number"
-              value={config.timeoutSeconds}
-              onChange={(e) => setConfig({ ...config, timeoutSeconds: e.target.value === '' ? '' : Number(e.target.value) })}
-              placeholder="30" min="1" disabled={isBusy} style={inputStyle}
-            />
-          </div>
-          <div>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>每分钟最大请求数</label>
-            <input
-              type="number"
-              value={config.rateLimitPerMinute}
-              onChange={(e) => setConfig({ ...config, rateLimitPerMinute: e.target.value === '' ? '' : Number(e.target.value) })}
-              placeholder="5" min="1" disabled={isBusy} style={inputStyle}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Budget Config */}
-      <BudgetConfigForm
-        budgetConfig={config.budgetConfig}
-        onChange={(updates) => setConfig({ ...config, budgetConfig: { ...config.budgetConfig, ...updates } })}
-        disabled={isBusy}
-      />
-
-      {/* Advanced Settings */}
-      <div style={sectionStyle}>
-        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>高级设置</h2>
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>System Prompt 模板</label>
-          <textarea
-            value={config.systemPromptTemplate}
-            onChange={(e) => setConfig({ ...config, systemPromptTemplate: e.target.value })}
-            placeholder="你是一位耐心的算法学习导师..."
-            disabled={isBusy} rows={6}
-            style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+        {/* Endpoint Manager */}
+        <div style={cardStyle}>
+          <EndpointManager
+            endpoints={config.endpoints}
+            selectedModels={config.selectedModels}
+            onUpdateEndpoint={updateEndpoint}
+            onRemoveEndpoint={removeEndpoint}
+            onAddEndpoint={addEndpoint}
+            onFetchModels={fetchModelsForEndpoint}
+            fetchingModels={fetchingModels}
+            onAddSelectedModel={addSelectedModel}
+            onRemoveSelectedModel={removeSelectedModel}
+            onMoveSelectedModel={moveSelectedModel}
+            disabled={isBusy}
+            legacy={{
+              apiBaseUrl: config.apiBaseUrl,
+              modelName: config.modelName,
+              apiKeyMasked: config.apiKeyMasked,
+              hasApiKey: config.hasApiKey,
+              newApiKey,
+              showApiKey,
+              onApiBaseUrlChange: (v) => setConfig({ ...config, apiBaseUrl: v }),
+              onModelNameChange: (v) => setConfig({ ...config, modelName: v }),
+              onNewApiKeyChange: setNewApiKey,
+              onShowApiKeyToggle: () => setShowApiKey(prev => !prev),
+            }}
           />
         </div>
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>内置越狱规则（只读）</label>
-          <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '12px', borderRadius: '6px', border: '1px solid #d1d5db', backgroundColor: '#fff' }}>
-            {builtinJailbreakPatterns.length === 0 ? (
-              <div style={{ color: '#6b7280', fontSize: '13px' }}>暂无内置规则</div>
-            ) : (
-              <ul style={{ margin: 0, paddingLeft: '20px' }}>
-                {builtinJailbreakPatterns.map((pattern, index) => (
-                  <li key={`${pattern}-${index}`} style={{ marginBottom: '6px', fontFamily: 'monospace', fontSize: '13px' }}>{pattern}</li>
-                ))}
-              </ul>
-            )}
+
+        {/* General Settings */}
+        <div style={cardStyle}>
+          <h2 style={cardTitleStyle}>通用设置</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>超时时间（秒）</label>
+              <input
+                type="number"
+                value={config.timeoutSeconds}
+                onChange={(e) => setConfig({ ...config, timeoutSeconds: e.target.value === '' ? '' : Number(e.target.value) })}
+                placeholder="30" min="1" disabled={isBusy} style={inputStyle}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>每分钟最大请求数</label>
+              <input
+                type="number"
+                value={config.rateLimitPerMinute}
+                onChange={(e) => setConfig({ ...config, rateLimitPerMinute: e.target.value === '' ? '' : Number(e.target.value) })}
+                placeholder="5" min="1" disabled={isBusy} style={inputStyle}
+              />
+            </div>
           </div>
         </div>
-        <div style={{ marginBottom: '15px' }}>
-          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>自定义越狱规则（每行一个正则表达式）</label>
-          <textarea
-            value={config.extraJailbreakPatternsText}
-            onChange={(e) => setConfig({ ...config, extraJailbreakPatternsText: e.target.value })}
-            placeholder="忽略.*提示词"
-            disabled={isBusy} rows={5}
-            style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
-          />
+
+        {/* Budget Config */}
+        <BudgetConfigForm
+          budgetConfig={config.budgetConfig}
+          onChange={(updates) => setConfig({ ...config, budgetConfig: { ...config.budgetConfig, ...updates } })}
+          disabled={isBusy}
+        />
+
+        {/* Advanced Settings */}
+        <div style={cardStyle}>
+          <h2 style={cardTitleStyle}>高级设置</h2>
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>System Prompt 模板</label>
+            <textarea
+              value={config.systemPromptTemplate}
+              onChange={(e) => setConfig({ ...config, systemPromptTemplate: e.target.value })}
+              placeholder="你是一位耐心的算法学习导师..."
+              disabled={isBusy} rows={6}
+              style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+            />
+          </div>
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>内置越狱规则（只读）</label>
+            <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '12px', borderRadius: '6px', border: '1px solid #d1d5db', backgroundColor: '#f9fafb' }}>
+              {builtinJailbreakPatterns.length === 0 ? (
+                <div style={{ color: '#6b7280', fontSize: '13px' }}>暂无内置规则</div>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                  {builtinJailbreakPatterns.map((pattern, index) => (
+                    <li key={`${pattern}-${index}`} style={{ marginBottom: '6px', fontFamily: 'monospace', fontSize: '13px' }}>{pattern}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>自定义越狱规则（每行一个正则表达式）</label>
+            <textarea
+              value={config.extraJailbreakPatternsText}
+              onChange={(e) => setConfig({ ...config, extraJailbreakPatternsText: e.target.value })}
+              placeholder="忽略.*提示词"
+              disabled={isBusy} rows={5}
+              style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+            />
+          </div>
         </div>
+
+        {/* Jailbreak Logs */}
+        <JailbreakLogsViewer
+          logPagination={logPagination}
+          loading={loading}
+          onChangePage={changePage}
+          onCopyToClipboard={copyToClipboard}
+          onAppendPattern={appendPatternToCustomRules}
+        />
       </div>
 
-      {/* Jailbreak Logs */}
-      <JailbreakLogsViewer
-        logPagination={logPagination}
-        loading={loading}
-        onChangePage={changePage}
-        onCopyToClipboard={copyToClipboard}
-        onAppendPattern={appendPatternToCustomRules}
-      />
+      {/* Spacer for floating buttons */}
+      <div style={{ height: '60px' }} />
 
-      {/* Spacer so fixed bar doesn't overlap last content */}
-      <div style={{ height: '80px' }} />
-
-      {/* Fixed Bottom Action Bar */}
+      {/* Floating Action Buttons - bottom right */}
       <div style={{
         position: 'fixed',
-        bottom: 0,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        width: '100%',
-        maxWidth: '900px',
-        padding: '16px 24px',
+        bottom: '32px',
+        right: '32px',
         display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        backgroundColor: '#ffffff',
-        borderTop: '1px solid #e5e7eb',
-        boxShadow: '0 -4px 12px rgba(0, 0, 0, 0.08)',
-        zIndex: 100,
-        boxSizing: 'border-box',
+        flexDirection: 'column',
+        alignItems: 'flex-end',
+        gap: '12px',
+        zIndex: 1000,
       }}>
-        <button
-          onClick={testConnection}
-          disabled={isBusy || loading}
-          style={{
-            padding: '12px 24px',
-            backgroundColor: isBusy || loading ? '#9ca3af' : '#f3f4f6',
-            color: isBusy || loading ? '#ffffff' : '#374151',
-            border: '1px solid #d1d5db', borderRadius: '6px',
-            fontSize: '14px', fontWeight: 500,
-            cursor: isBusy || loading ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {testing ? '测试中...' : '测试连接'}
-        </button>
+        {/* Toast notifications */}
+        {error && (
+          <div style={{
+            padding: '12px 16px', backgroundColor: '#fee2e2',
+            borderLeft: '4px solid #ef4444', borderRadius: '8px', color: '#991b1b',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
+            fontSize: '14px', maxWidth: '350px', wordBreak: 'break-word',
+          }}>
+            <strong>错误：</strong>{error}
+          </div>
+        )}
+        {successMessage && (
+          <div style={{
+            padding: '12px 16px', backgroundColor: '#d1fae5',
+            borderLeft: '4px solid #10b981', borderRadius: '8px', color: '#065f46',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
+            fontSize: '14px', maxWidth: '350px', wordBreak: 'break-word',
+          }}>
+            <strong>成功：</strong>{successMessage}
+          </div>
+        )}
 
-        {/* Inline status message */}
-        <div style={{ fontSize: '14px', flex: 1, textAlign: 'center' }}>
-          {successMessage && (
-            <span style={{ color: '#059669' }}>&#10003; {successMessage}</span>
-          )}
-          {error && (
-            <span style={{ color: '#dc2626' }}>&#10007; {error}</span>
-          )}
+        {/* Button group */}
+        <div style={{
+          display: 'flex', gap: '10px', padding: '10px',
+          backgroundColor: '#ffffff', borderRadius: '12px',
+          boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+          border: '1px solid #f3f4f6',
+        }}>
+          <button
+            onClick={testConnection}
+            disabled={isBusy || loading}
+            style={{
+              padding: '10px 20px',
+              backgroundColor: isBusy || loading ? '#f3f4f6' : '#ffffff',
+              color: isBusy || loading ? '#9ca3af' : '#374151',
+              border: '1px solid #d1d5db', borderRadius: '8px',
+              fontSize: '14px', fontWeight: 500,
+              cursor: isBusy || loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {testing ? '测试中...' : '测试连接'}
+          </button>
+          <button
+            onClick={saveConfig}
+            disabled={isBusy || loading}
+            style={{
+              padding: '10px 24px',
+              backgroundColor: isBusy || loading ? '#9ca3af' : '#6366f1',
+              color: '#ffffff', border: 'none', borderRadius: '8px',
+              fontSize: '14px', fontWeight: 500,
+              boxShadow: isBusy || loading ? 'none' : '0 1px 3px rgba(99, 102, 241, 0.3)',
+              cursor: isBusy || loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {saving ? '保存中...' : '保存配置'}
+          </button>
         </div>
-
-        <button
-          onClick={saveConfig}
-          disabled={isBusy || loading}
-          style={{
-            padding: '12px 32px',
-            backgroundColor: isBusy || loading ? '#9ca3af' : '#6366f1',
-            color: 'white', border: 'none', borderRadius: '6px',
-            fontSize: '14px', fontWeight: 500,
-            cursor: isBusy || loading ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {saving ? '保存中...' : '保存配置'}
-        </button>
       </div>
     </div>
   );
