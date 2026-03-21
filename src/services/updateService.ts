@@ -368,7 +368,7 @@ export class UpdateService {
   /**
    * 初始化 git 仓库并拉取代码
    */
-  private async initGitRepo(repoUrl: string, onLog?: (msg: string) => void): Promise<boolean> {
+  private async initGitRepo(repoUrl: string, onLog?: (msg: string) => void, fallbackRepoUrls?: Array<{ name: string; url: string }>): Promise<boolean> {
     const log = (msg: string) => onLog?.(msg);
 
     log('目录不是 git 仓库，正在初始化...');
@@ -395,15 +395,38 @@ export class UpdateService {
 
     // git fetch（避免 TOCTOU：仅获取对象，不切换工作区；待签名验证通过后再 checkout/reset）
     log('正在获取远程代码...');
-    const fetchResult = await this.executeCommand(
+    let fetchResult = await this.executeCommand(
       'git',
       ['fetch', '--prune', 'origin', 'main'],
       this.pluginPath,
       (line) => log(line.trim()),
       300000  // 🔒 5 分钟超时
     );
+
+    // 🔒 fetch 失败时尝试回退到备选仓库
+    if (fetchResult.code !== 0 && fallbackRepoUrls && fallbackRepoUrls.length > 0) {
+      log(`当前仓库 fetch 失败: ${fetchResult.stderr}`);
+      for (const repo of fallbackRepoUrls) {
+        if (repo.url === repoUrl) continue;
+        log(`尝试回退到 ${repo.name} (${repo.url})...`);
+        await this.executeCommand('git', ['remote', 'set-url', 'origin', repo.url], this.pluginPath, undefined, 300000);
+        fetchResult = await this.executeCommand(
+          'git',
+          ['fetch', '--prune', 'origin', 'main'],
+          this.pluginPath,
+          (line) => log(line.trim()),
+          300000
+        );
+        if (fetchResult.code === 0) {
+          log(`回退到 ${repo.name} 成功`);
+          break;
+        }
+        log(`${repo.name} fetch 也失败: ${fetchResult.stderr}`);
+      }
+    }
+
     if (fetchResult.code !== 0) {
-      log(`git fetch 失败: ${fetchResult.stderr}`);
+      log(`所有仓库 git fetch 均失败: ${fetchResult.stderr}`);
       return false;
     }
 
@@ -998,6 +1021,8 @@ export class UpdateService {
           delete env[key];
         }
       }
+      // 🔒 禁止 git 弹出凭据提示（非交互环境下防止阻塞）
+      env.GIT_TERMINAL_PROMPT = '0';
 
       const proc: ChildProcess = spawn(safeCommand, args, {
         cwd,
@@ -1313,7 +1338,7 @@ export class UpdateService {
 
       // Step 1.6: 如果需要初始化 git 仓库
       if (validation.needsGitInit) {
-        const initSuccess = await this.initGitRepo(selectedRepo.url, (msg) => log('detecting', msg));
+        const initSuccess = await this.initGitRepo(selectedRepo.url, (msg) => log('detecting', msg), orderedRepos);
         if (!initSuccess) {
           log('failed', 'git 仓库初始化失败');
           return {
@@ -1382,7 +1407,7 @@ export class UpdateService {
 
         // Step 2c: Git fetch（避免 TOCTOU：先拉取对象，不切换工作区）
         log('pulling', '正在获取远程最新代码...');
-        const fetchResult = await this.executeCommand(
+        let fetchResult = await this.executeCommand(
           'git',
           ['fetch', '--prune', 'origin', 'main'],
           this.pluginPath,
@@ -1390,17 +1415,41 @@ export class UpdateService {
           300000  // 🔒 5 分钟超时
         );
 
+        // 🔒 fetch 失败时尝试回退到备选仓库
         if (fetchResult.code !== 0) {
-          const errorMsg = `git fetch 失败: ${fetchResult.stderr}`;
-          log('failed', errorMsg);
-          return {
-            success: false,
-            step: 'failed',
-            message: errorMsg,
-            logs,
-            pluginPath: this.pluginPath,
-            error: fetchResult.stderr
-          };
+          log('pulling', `当前仓库 fetch 失败: ${fetchResult.stderr}`);
+          let fallbackSuccess = false;
+          for (const repo of orderedRepos) {
+            if (repo.url === selectedRepo.url) continue;
+            log('pulling', `尝试回退到 ${repo.name} (${repo.url})...`);
+            const setResult = await this.setRemoteOrigin(repo.url, (msg) => log('pulling', msg));
+            if (!setResult) continue;
+            fetchResult = await this.executeCommand(
+              'git',
+              ['fetch', '--prune', 'origin', 'main'],
+              this.pluginPath,
+              (line) => log('pulling', line.trim()),
+              300000
+            );
+            if (fetchResult.code === 0) {
+              log('pulling', `回退到 ${repo.name} 成功`);
+              fallbackSuccess = true;
+              break;
+            }
+            log('pulling', `${repo.name} fetch 也失败: ${fetchResult.stderr}`);
+          }
+          if (!fallbackSuccess) {
+            const errorMsg = `所有仓库 git fetch 均失败: ${fetchResult.stderr}`;
+            log('failed', errorMsg);
+            return {
+              success: false,
+              step: 'failed',
+              message: errorMsg,
+              logs,
+              pluginPath: this.pluginPath,
+              error: fetchResult.stderr
+            };
+          }
         }
         log('pulling', '远程代码获取完成');
       }
