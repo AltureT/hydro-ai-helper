@@ -5,25 +5,23 @@ import type { Message, ProblemInfo } from './types';
 
 interface ParsedContent {
   content: string;
-  thinking: string | null;
   isThinkingStreaming: boolean;
 }
 
 function parseMessageContent(text: string): ParsedContent {
   const thinkStart = text.indexOf('<think>');
-  if (thinkStart === -1) return { content: text, thinking: null, isThinkingStreaming: false };
+  if (thinkStart === -1) return { content: text, isThinkingStreaming: false };
 
   const thinkEnd = text.indexOf('</think>');
   if (thinkEnd === -1) {
     // Think tag opened but not closed — still streaming thinking
-    const thinking = text.substring(thinkStart + 7);
     const content = text.substring(0, thinkStart);
-    return { content, thinking, isThinkingStreaming: true };
+    return { content, isThinkingStreaming: true };
   }
 
-  const thinking = text.substring(thinkStart + 7, thinkEnd);
+  // Strip the entire <think>...</think> block (content is just a placeholder)
   const content = text.substring(0, thinkStart) + text.substring(thinkEnd + 8);
-  return { content: content.trim(), thinking, isThinkingStreaming: false };
+  return { content: content.trim(), isThinkingStreaming: false };
 }
 
 interface ChatMessageListProps {
@@ -121,10 +119,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
           }}
         >
           {msg.role === 'ai' && parsed ? (
-            <>
-              {parsed.thinking && <ThinkingBlock content={parsed.thinking} isStreaming={false} variant="embedded" />}
-              {renderMarkdown(parsed.content)}
-            </>
+            renderMarkdown(parsed.content)
           ) : (
             <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
           )}
@@ -152,10 +147,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
         </div>
         <div style={{ fontSize: '13px', color: msg.role === 'student' ? '#1e3a8a' : '#166534' }}>
           {msg.role === 'ai' && parsed ? (
-            <>
-              {parsed.thinking && <ThinkingBlock content={parsed.thinking} isStreaming={false} variant="floating" />}
-              {renderMarkdown(parsed.content)}
-            </>
+            renderMarkdown(parsed.content)
           ) : (
             <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
           )}
@@ -216,9 +208,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               maxWidth: '85%', padding: '10px 14px', borderRadius: '12px 12px 12px 0',
               background: '#f3f4f6', color: '#1f2937', fontSize: '13px', lineHeight: '1.6'
             }}>
-              {parsed.thinking && (
-                <ThinkingBlock content={parsed.thinking} isStreaming={parsed.isThinkingStreaming} variant="embedded" />
-              )}
+              <ThinkingBlock isStreaming={parsed.isThinkingStreaming} variant="embedded" />
               {(!parsed.isThinkingStreaming && parsed.content) && renderMarkdown(parsed.content, true)}
               {!parsed.isThinkingStreaming && (
                 <span style={{
@@ -237,9 +227,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               🤖 AI 导师
             </div>
             <div style={{ fontSize: '13px', color: '#166534' }}>
-              {parsed.thinking && (
-                <ThinkingBlock content={parsed.thinking} isStreaming={parsed.isThinkingStreaming} variant="floating" />
-              )}
+              <ThinkingBlock isStreaming={parsed.isThinkingStreaming} variant="floating" />
               {(!parsed.isThinkingStreaming && parsed.content) && renderMarkdown(parsed.content, true)}
               {!parsed.isThinkingStreaming && (
                 <span style={{
