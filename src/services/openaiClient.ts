@@ -333,7 +333,9 @@ export class OpenAIClient {
       const msgAny = message as Record<string, unknown> | undefined;
       const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning) as string | undefined;
       const content = message?.content;
-      const aiMessage = reasoning ? `<think>${reasoning}</think>${content || ''}` : content;
+      const aiMessage = reasoning
+        ? `<think>（思考中）</think>${content || ''}`
+        : content;
       if (!aiMessage) {
         throw new AIServiceError('AI 返回内容为空', 'server');
       }
@@ -526,12 +528,11 @@ export class OpenAIClient {
             if (reasoningDelta) {
               if (!inThinking) {
                 inThinking = true;
-                const tag = '<think>';
-                fullContent += tag;
-                callbacks.onChunk(tag);
+                const openTag = '<think>（思考中）';
+                fullContent += openTag;
+                callbacks.onChunk(openTag);
               }
-              fullContent += reasoningDelta;
-              callbacks.onChunk(reasoningDelta);
+              // reasoning 内容不发送给客户端
             }
 
             if (contentDelta) {

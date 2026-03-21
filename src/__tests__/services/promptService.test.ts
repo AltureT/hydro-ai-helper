@@ -82,7 +82,7 @@ describe('PromptService', () => {
     it('should use detailed strategy for understand type', () => {
       const result = service.buildUserPrompt('understand', '不理解题目');
       expect(result).toContain('理解题意');
-      expect(result).toContain('耐心循序渐进');
+      expect(result).toContain('有经验的老师');
     });
   });
 
