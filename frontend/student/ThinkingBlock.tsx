@@ -1,14 +1,11 @@
 import React from 'react';
+import { COLORS, ANIMATIONS } from '../utils/styles';
 
 interface ThinkingBlockProps {
   isStreaming: boolean;
-  variant: 'embedded' | 'floating';
 }
 
-export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ isStreaming, variant }) => {
-  const isEmbedded = variant === 'embedded';
-  const textColor = isEmbedded ? '#6b7280' : '#15803d';
-
+export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ isStreaming }) => {
   if (!isStreaming) return null;
 
   return (
@@ -18,12 +15,12 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ isStreaming, varia
       gap: '6px',
       padding: '6px 0',
       fontSize: '12px',
-      color: textColor,
+      color: COLORS.primary,
     }}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
-        <circle cx="12" cy="12" r="10" stroke={textColor} strokeWidth="2" strokeDasharray="31.4" strokeDashoffset="10" style={{ animation: 'spin 1s linear infinite' }} />
+        <circle cx="12" cy="12" r="10" stroke={COLORS.primary} strokeWidth="2" strokeDasharray="31.4" strokeDashoffset="10" style={{ animation: ANIMATIONS.spin }} />
       </svg>
-      <span>思考中...</span>
+      <span>{'\u601d\u8003\u4e2d...'}</span>
     </div>
   );
 };

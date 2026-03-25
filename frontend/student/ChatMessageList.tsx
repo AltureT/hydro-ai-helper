@@ -208,7 +208,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               maxWidth: '85%', padding: '10px 14px', borderRadius: '12px 12px 12px 0',
               background: '#f3f4f6', color: '#1f2937', fontSize: '13px', lineHeight: '1.6'
             }}>
-              <ThinkingBlock isStreaming={parsed.isThinkingStreaming} variant="embedded" />
+              <ThinkingBlock isStreaming={parsed.isThinkingStreaming} />
               {(!parsed.isThinkingStreaming && parsed.content) && renderMarkdown(parsed.content, true)}
               {!parsed.isThinkingStreaming && (
                 <span style={{
@@ -227,7 +227,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               🤖 AI 导师
             </div>
             <div style={{ fontSize: '13px', color: '#166534' }}>
-              <ThinkingBlock isStreaming={parsed.isThinkingStreaming} variant="floating" />
+              <ThinkingBlock isStreaming={parsed.isThinkingStreaming} />
               {(!parsed.isThinkingStreaming && parsed.content) && renderMarkdown(parsed.content, true)}
               {!parsed.isThinkingStreaming && (
                 <span style={{
