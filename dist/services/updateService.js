@@ -83,7 +83,8 @@ class UpdateService {
     constructor(pluginPath) {
         // 🔒 GPG 信任指纹白名单（插件发布者密钥 - 完整 40 位指纹）
         this.TRUSTED_GPG_FINGERPRINTS = [
-            'B6115AF3D271D12AB85E843E45DACC0ECFE90852' // AltureT <myalture@gmail.com>
+            'B6115AF3D271D12AB85E843E45DACC0ECFE90852', // AltureT <myalture@gmail.com>
+            '968479A1AFF927E37D1A566BB5690EEEBB952194' // GitHub <noreply@github.com> (web-flow merge commits)
         ];
         // 🔒 安全命令路径映射（防止 PATH 劫持）
         // 说明：优先使用绝对路径；当不存在时，回退到当前 Node 的 bin 目录（适配 nvm/pm2/npm 全局安装）。

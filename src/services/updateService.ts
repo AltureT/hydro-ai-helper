@@ -84,7 +84,8 @@ export class UpdateService {
 
   // 🔒 GPG 信任指纹白名单（插件发布者密钥 - 完整 40 位指纹）
   private readonly TRUSTED_GPG_FINGERPRINTS = [
-    'B6115AF3D271D12AB85E843E45DACC0ECFE90852'  // AltureT <myalture@gmail.com>
+    'B6115AF3D271D12AB85E843E45DACC0ECFE90852',  // AltureT <myalture@gmail.com>
+    '968479A1AFF927E37D1A566BB5690EEEBB952194'   // GitHub <noreply@github.com> (web-flow merge commits)
   ];
 
   // 🔒 安全命令路径映射（防止 PATH 劫持）
