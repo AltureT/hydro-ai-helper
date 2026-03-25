@@ -299,6 +299,8 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
 
   if (!data) return null;
 
+  const periodLabel = period === 'day' ? '今日' : period === 'week' ? '本周' : '本月';
+
   const budgetPercent = data.summary.budgetUsagePercent;
   const budgetColor = budgetPercent === null
     ? COLORS.textMuted
@@ -328,15 +330,15 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       {/* Summary Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.base, marginBottom: SPACING.lg }}>
         <div style={statCard.container}>
-          <div style={statCard.label}>今日 Tokens</div>
-          <div style={statCard.value}>{formatTokens(data.today.totalTokens)}</div>
+          <div style={statCard.label}>{periodLabel} Tokens</div>
+          <div style={statCard.value}>{formatTokens(data.summary.totalTokens)}</div>
           <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
-            {data.today.requestCount} 次请求
+            {data.summary.requestCount} 次请求
           </div>
         </div>
         <div style={statCard.container}>
-          <div style={statCard.label}>今日成本</div>
-          <div style={statCard.value}>{formatCost(data.today.totalCost)}</div>
+          <div style={statCard.label}>{periodLabel}成本</div>
+          <div style={statCard.value}>{formatCost(data.summary.totalCost)}</div>
         </div>
         <div style={statCard.container}>
           <div style={statCard.label}>本月累计</div>
@@ -379,7 +381,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: SPACING.base }}>
         {/* Top Users */}
         <div style={cardStyle}>
-          <h3 style={sectionTitleStyle}>{period === 'day' ? '今日' : period === 'week' ? '本周' : '本月'} Top 10 用户</h3>
+          <h3 style={sectionTitleStyle}>{periodLabel} Top 10 用户</h3>
           {data.topUsers.length === 0 ? (
             <div style={emptyStateStyle}>暂无数据</div>
           ) : (

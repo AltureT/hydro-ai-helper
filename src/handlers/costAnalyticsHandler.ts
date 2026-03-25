@@ -59,7 +59,7 @@ export class CostAnalyticsHandler extends Handler {
         tokenUsageModel.getDomainDailyUsage(domainId, today),
         tokenUsageModel.getDomainMonthlyUsage(domainId, yearMonth),
         tokenUsageModel.getDailyTrend(domainId, startDate, endDate),
-        tokenUsageModel.getTopUsers(domainId, today, 10),
+        tokenUsageModel.getTopUsersByDateRange(domainId, startDate, endDate, 10),
         tokenUsageModel.getModelBreakdown(domainId, startDate, endDate),
       ]);
 
