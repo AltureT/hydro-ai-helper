@@ -302,20 +302,6 @@ export const statCard = {
   change: (positive: boolean) => ({ ...TYPOGRAPHY.xs, color: positive ? COLORS.success : COLORS.error }) as React.CSSProperties,
 };
 
-// ─── Legacy Aliases (backward-compatible) ────────────────────────────────────
-
-export const colors = COLORS;
-export const fontFamily = FONT_FAMILY;
-export const tableStyle: React.CSSProperties = tableRootStyle;
-export const cellStyle: React.CSSProperties = getTableCellStyle();
-export const buttonPrimary = getButtonStyle('primary');
-export const modalOverlay = modalOverlayStyle;
-export const linkStyle: React.CSSProperties = {
-  color: COLORS.primary,
-  textDecoration: 'none',
-  cursor: 'pointer',
-};
-
 // ─── Shared Markdown Theme ───────────────────────────────────────────────────
 
 export const markdownTheme = `
