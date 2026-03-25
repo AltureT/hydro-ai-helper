@@ -302,6 +302,12 @@ export const statCard = {
   change: (positive: boolean) => ({ ...TYPOGRAPHY.xs, color: positive ? COLORS.success : COLORS.error }) as React.CSSProperties,
 };
 
+export const linkStyle: React.CSSProperties = {
+  color: COLORS.primary,
+  textDecoration: 'none',
+  cursor: 'pointer',
+};
+
 // ─── Shared Markdown Theme ───────────────────────────────────────────────────
 
 export const markdownTheme = `
