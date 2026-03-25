@@ -1,4 +1,8 @@
 import React from 'react';
+import {
+  COLORS, SPACING, RADIUS, TRANSITIONS, FONT_FAMILY,
+  getButtonStyle, getPillStyle, getInputStyle,
+} from '../utils/styles';
 
 interface QuestionType {
   value: string;
@@ -6,7 +10,6 @@ interface QuestionType {
 }
 
 interface ChatInputProps {
-  variant: 'embedded' | 'floating';
   userThinking: string;
   onUserThinkingChange: (value: string) => void;
   questionType: string;
@@ -26,7 +29,7 @@ interface ChatInputProps {
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
-  variant, userThinking, onUserThinkingChange,
+  userThinking, onUserThinkingChange,
   questionType, onQuestionTypeChange, questionTypes,
   includeCode, onIncludeCodeChange, code, onCodeClear,
   isLoading, conversationHistoryLength,
@@ -42,19 +45,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       style={{
         display: 'flex', alignItems: 'center',
         cursor: questionType === 'optimize' ? 'not-allowed' : 'pointer',
-        fontSize: '12px', color: questionType === 'optimize' ? '#9ca3af' : '#6b7280',
-        whiteSpace: 'nowrap', alignSelf: 'center'
+        fontSize: '12px', color: questionType === 'optimize' ? COLORS.textDisabled : COLORS.textSecondary,
+        whiteSpace: 'nowrap', alignSelf: 'center',
       }}
       title={questionType === 'optimize' ? '代码优化必须附带代码' : undefined}
     >
       <input
         type="checkbox" checked={includeCode} disabled={questionType === 'optimize'}
         onChange={(e) => onIncludeCodeChange(e.target.checked)}
-        style={{ marginRight: '6px', accentColor: '#7c3aed' }}
+        style={{ marginRight: '6px', accentColor: COLORS.primary }}
       />
       {labelText}
-      {questionType === 'optimize' && <span style={{ marginLeft: '4px', color: '#f59e0b', fontSize: '11px' }}>(必需)</span>}
-      {includeCode && code && questionType !== 'optimize' && <span style={{ marginLeft: '4px', color: '#10b981', fontSize: '11px' }}>✓</span>}
+      {questionType === 'optimize' && <span style={{ marginLeft: '4px', color: COLORS.warning, fontSize: '11px' }}>(必需)</span>}
+      {includeCode && code && questionType !== 'optimize' && <span style={{ marginLeft: '4px', color: COLORS.success, fontSize: '11px' }}>&#10003;</span>}
     </label>
   );
 
@@ -62,69 +65,47 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     <textarea
       value={userThinking}
       onChange={(e) => onUserThinkingChange(e.target.value)}
-      placeholder={isFirstConversation ? "描述你的问题或疑惑..." : "继续追问..."}
+      placeholder={isFirstConversation ? '描述你的问题或疑惑...' : '继续追问...'}
       style={{
-        flex: 1, minHeight, maxHeight, padding: '10px 12px',
-        border: '1px solid #d4d4d8', borderRadius: '8px', fontSize: '13px',
-        lineHeight: '1.5', resize: 'none', boxSizing: 'border-box', outline: 'none',
-        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+        ...getInputStyle(),
+        flex: 1, minHeight, maxHeight,
+        resize: 'none' as const, boxSizing: 'border-box' as const,
       }}
-      onFocus={(e) => { e.target.style.borderColor = '#6366f1'; }}
-      onBlur={(e) => { e.target.style.borderColor = '#d4d4d8'; }}
+      onFocus={(e) => {
+        e.target.style.borderColor = COLORS.borderFocus;
+        e.target.style.boxShadow = `0 0 0 3px ${COLORS.shadowFocus}`;
+      }}
+      onBlur={(e) => {
+        e.target.style.borderColor = COLORS.border;
+        e.target.style.boxShadow = 'none';
+      }}
       onKeyDown={(e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onSubmit(); }
       }}
     />
   );
 
-  // Embedded variant: simple layout
-  if (variant === 'embedded') {
-    return (
-      <div style={{ borderTop: '1px solid #e5e7eb', padding: '12px 16px', background: '#fafafa', flexShrink: 0 }}>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
-          {renderTextarea(isFirstConversation ? '60px' : '40px', '100px')}
-          {isFirstConversation && renderIncludeCodeCheckbox('📎 附带代码')}
-          <button
-            onClick={onSubmit}
-            disabled={isLoading || !canSubmit}
-            style={{
-              padding: '10px 16px',
-              background: (isLoading || !canSubmit) ? '#d1d5db' : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-              color: 'white', border: 'none', borderRadius: '8px',
-              fontSize: '14px', fontWeight: '600',
-              cursor: (isLoading || !canSubmit) ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap'
-            }}
-          >
-            {isLoading ? '⏳' : '发送'}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const disabledSubmit = isLoading || !canSubmit;
+  const submitStyle: React.CSSProperties = disabledSubmit
+    ? { ...getButtonStyle('secondary'), cursor: 'not-allowed', opacity: 0.6, whiteSpace: 'nowrap' }
+    : { ...getButtonStyle('primary'), background: COLORS.gradient, whiteSpace: 'nowrap' };
 
-  // Floating variant
   return (
-    <div style={{ borderTop: '1px solid #e5e7eb', padding: '12px 16px 40px 16px', background: '#fafafa' }}>
+    <div style={{ borderTop: `1px solid ${COLORS.border}`, padding: `${SPACING.md} ${SPACING.base}`, background: COLORS.bgPage, flexShrink: 0 }}>
       {errorBanner}
 
-      {/* Question type selector - first conversation */}
       {isFirstConversation && (
-        <div style={{ marginBottom: '10px' }}>
-          <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '6px' }}>选择问题类型：</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+        <div style={{ marginBottom: SPACING.sm }}>
+          <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginBottom: SPACING.xs }}>选择问题类型：</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.xs }}>
             {questionTypes.map(type => {
               const isSelected = questionType === type.value;
               return (
                 <label
                   key={type.value}
                   style={{
-                    display: 'inline-flex', alignItems: 'center', padding: '6px 10px',
-                    borderRadius: '999px',
-                    border: `1.5px solid ${isSelected ? '#7c3aed' : '#d1d5db'}`,
-                    background: isSelected ? '#ede9fe' : '#ffffff',
-                    color: isSelected ? '#5b21b6' : '#4b5563',
-                    fontSize: '12px', fontWeight: isSelected ? '600' : '500',
-                    cursor: 'pointer', transition: 'all 0.2s ease', userSelect: 'none'
+                    ...getPillStyle(isSelected),
+                    userSelect: 'none' as const,
                   }}
                 >
                   <input
@@ -138,84 +119,73 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             })}
           </div>
           {questionType === 'debug' && (
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>将自动附带最近一次评测结果</div>
+            <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginTop: SPACING.xs }}>将自动附带最近一次评测结果</div>
           )}
         </div>
       )}
 
-      {/* Follow-up action buttons */}
       {isFollowUp && (
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+        <div style={{ display: 'flex', gap: SPACING.sm, marginBottom: SPACING.sm }}>
           <button
             type="button" onClick={onRefreshCode}
             style={{
-              padding: '6px 12px', background: '#f3f4f6', color: '#374151',
-              border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '12px',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px'
+              ...getButtonStyle('secondary'),
+              fontSize: '12px', padding: `${SPACING.xs} ${SPACING.md}`,
+              display: 'flex', alignItems: 'center', gap: SPACING.xs,
             }}
           >
-            📎 {includeCode ? '已附带代码' : '附带代码'}
+            &#128206; {includeCode ? '已附带代码' : '附带代码'}
           </button>
           <button
             type="button" onClick={onNewConversation}
             style={{
-              padding: '6px 12px', background: '#f3f4f6', color: '#6b7280',
-              border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '12px', cursor: 'pointer'
+              ...getButtonStyle('ghost'),
+              fontSize: '12px', padding: `${SPACING.xs} ${SPACING.md}`,
+              border: `1px solid ${COLORS.border}`,
             }}
           >
-            🔄 新对话
+            &#128260; 新对话
           </button>
         </div>
       )}
 
-      {/* Code preview (follow-up with attached code) */}
       {isFollowUp && includeCode && code && (
         <div style={{
-          background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '6px',
-          padding: '8px', marginBottom: '10px', fontSize: '11px'
+          background: COLORS.bgPage, border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
+          padding: SPACING.sm, marginBottom: SPACING.sm, fontSize: '11px',
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-            <span style={{ color: '#6b7280' }}>📝 已附带代码 ({code.length} 字符)</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.xs }}>
+            <span style={{ color: COLORS.textSecondary }}>&#128221; 已附带代码 ({code.length} 字符)</span>
             <button
               type="button" onClick={onCodeClear}
-              style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '11px', padding: '2px 4px' }}
+              style={{ background: 'none', border: 'none', color: COLORS.error, cursor: 'pointer', fontSize: '11px', padding: '2px 4px' }}
             >
-              ✕ 移除
+              &#10005; 移除
             </button>
           </div>
           <pre style={{
             margin: 0, fontFamily: 'Consolas, Monaco, "Courier New", monospace',
-            whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: '#374151', maxHeight: '60px', overflow: 'auto'
+            whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: COLORS.textPrimary, maxHeight: '60px', overflow: 'auto',
           }}>
             {code.length > 200 ? code.substring(0, 200) + '...' : code}
           </pre>
         </div>
       )}
 
-      {/* Input row */}
-      <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+      <div style={{ display: 'flex', gap: SPACING.sm, alignItems: 'flex-end' }}>
         {renderTextarea(isFirstConversation ? '80px' : '40px', '120px')}
-        {isFirstConversation && renderIncludeCodeCheckbox('📎 附带当前代码')}
+        {isFirstConversation && renderIncludeCodeCheckbox('&#128206; 附带当前代码')}
         {isLoading ? (
           <button
             onClick={onCancel}
-            style={{
-              padding: '10px 16px', background: '#ef4444', color: 'white', border: 'none',
-              borderRadius: '8px', fontSize: '14px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap'
-            }}
+            style={{ ...getButtonStyle('danger'), whiteSpace: 'nowrap' }}
           >
             取消
           </button>
         ) : (
           <button
-            onClick={onSubmit} disabled={!canSubmit}
-            style={{
-              padding: '10px 16px',
-              background: !canSubmit ? '#d1d5db' : 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-              color: 'white', border: 'none', borderRadius: '8px',
-              fontSize: '14px', fontWeight: '600',
-              cursor: !canSubmit ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap'
-            }}
+            onClick={onSubmit} disabled={disabledSubmit}
+            style={submitStyle}
           >
             发送
           </button>

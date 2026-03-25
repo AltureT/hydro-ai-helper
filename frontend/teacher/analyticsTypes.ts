@@ -1,4 +1,5 @@
 import React from 'react';
+import { tableRootStyle, getTableCellStyle, COLORS, getBadgeStyle } from '../utils/styles';
 
 export type Dimension = 'class' | 'problem' | 'student';
 
@@ -54,29 +55,17 @@ export interface SortableHeaderProps {
   onSort: (field: string) => void;
 }
 
-export const tableStyle: React.CSSProperties = {
-  width: '100%',
-  borderCollapse: 'separate' as const,
-  borderSpacing: 0,
-  borderRadius: '12px',
-  overflow: 'hidden',
-  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-  border: '1px solid #e5e7eb'
-};
+export const tableStyle: React.CSSProperties = tableRootStyle;
 
-export const cellStyle: React.CSSProperties = {
-  padding: '14px 16px',
-  borderBottom: '1px solid #f3f4f6',
-  fontSize: '14px'
-};
+export const cellStyle: React.CSSProperties = getTableCellStyle();
 
 export const linkStyle: React.CSSProperties = {
-  color: '#6366f1',
+  color: COLORS.primary,
   textDecoration: 'none',
   fontWeight: 500,
   padding: '6px 12px',
   borderRadius: '6px',
-  backgroundColor: '#eef2ff',
+  backgroundColor: COLORS.primaryLight,
   transition: 'all 0.2s',
   display: 'inline-block'
 };
@@ -84,11 +73,7 @@ export const linkStyle: React.CSSProperties = {
 export const formatPercent = (ratio: number): string => (ratio * 100).toFixed(1) + '%';
 export const formatNumber = (num: number): string => num.toFixed(2);
 
-export const renderEffectiveRatio = (ratio: number) => ({
-  padding: '4px 8px',
-  borderRadius: '4px',
-  fontSize: '13px',
-  fontWeight: 500 as const,
-  backgroundColor: ratio >= 0.7 ? '#dcfce7' : ratio >= 0.4 ? '#fef9c3' : '#fee2e2',
-  color: ratio >= 0.7 ? '#166534' : ratio >= 0.4 ? '#854d0e' : '#991b1b'
-});
+export const renderEffectiveRatio = (ratio: number): React.CSSProperties => {
+  const variant = ratio >= 0.7 ? 'success' : ratio >= 0.4 ? 'warning' : 'error';
+  return getBadgeStyle(variant);
+};

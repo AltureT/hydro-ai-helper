@@ -1,4 +1,5 @@
 import React from 'react';
+import { COLORS } from '../utils/styles';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -46,7 +47,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
             onClick={this.handleRetry}
             style={{
               padding: '10px 24px',
-              background: '#6366f1',
+              background: COLORS.primary,
               color: 'white',
               border: 'none',
               borderRadius: '8px',

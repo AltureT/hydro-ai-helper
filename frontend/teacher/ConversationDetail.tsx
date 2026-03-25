@@ -1,13 +1,16 @@
 /**
  * 教师端对话详情组件
  * 显示单个会话的完整对话内容,支持 Markdown 渲染 (只读)
- * 现代简约风格设计
  */
 
 import React, { useState, useEffect } from 'react';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
+import {
+  COLORS, FONT_FAMILY, TYPOGRAPHY, SPACING, RADIUS, SHADOWS,
+  cardStyle, getAlertStyle, markdownTheme,
+} from '../utils/styles';
 
 /**
  * 对话接口
@@ -70,7 +73,7 @@ const MarkdownContent: React.FC<{ content: string; className?: string }> = ({ co
   return (
     <div
       className={`markdown-body ${className || ''}`}
-      style={{ lineHeight: '1.6', color: '#1f2937' }}
+      style={{ lineHeight: '1.6', color: COLORS.textPrimary }}
       dangerouslySetInnerHTML={{ __html: safeHtml }}
     />
   );
@@ -153,9 +156,9 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
 
   return (
     <div style={{
-      padding: '32px',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      backgroundColor: '#f8fafc',
+      padding: SPACING.xl,
+      fontFamily: FONT_FAMILY,
+      backgroundColor: COLORS.bgPage,
       minHeight: '100vh',
       maxWidth: '1200px',
       margin: '0 auto'
@@ -167,14 +170,14 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           display: 'inline-flex',
           alignItems: 'center',
           gap: '6px',
-          color: '#6366f1',
+          color: COLORS.primary,
           textDecoration: 'none',
-          marginBottom: '24px',
+          marginBottom: SPACING.lg,
           fontSize: '14px',
           fontWeight: 500,
-          padding: '8px 16px',
-          backgroundColor: '#eef2ff',
-          borderRadius: '8px',
+          padding: `${SPACING.sm} ${SPACING.base}`,
+          backgroundColor: COLORS.primaryLight,
+          borderRadius: RADIUS.md,
           transition: 'all 0.2s'
         }}
       >
@@ -183,15 +186,15 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
 
       {/* 页面标题 */}
       <div style={{
-        marginBottom: '32px',
-        padding: '24px 32px',
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        borderRadius: '16px',
+        marginBottom: SPACING.xl,
+        padding: `${SPACING.lg} ${SPACING.xl}`,
+        background: COLORS.gradient,
+        borderRadius: RADIUS.xl,
         color: 'white',
-        boxShadow: '0 4px 20px rgba(102, 126, 234, 0.3)'
+        boxShadow: `0 4px 20px ${COLORS.shadowFocus}`
       }}>
-        <h1 style={{ margin: 0, fontSize: '28px', fontWeight: 700 }}>📝 对话详情</h1>
-        <p style={{ margin: '8px 0 0', opacity: 0.9, fontSize: '15px' }}>查看完整的学生与 AI 对话内容</p>
+        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl }}>对话详情</h1>
+        <p style={{ margin: '8px 0 0', opacity: 0.9, ...TYPOGRAPHY.sm }}>查看完整的学生与 AI 对话内容</p>
       </div>
 
       {/* 加载状态 */}
@@ -199,25 +202,24 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
         <div style={{
           padding: '60px 20px',
           textAlign: 'center',
-          color: '#6b7280',
-          backgroundColor: '#ffffff',
-          borderRadius: '12px',
-          border: '1px solid #e5e7eb'
+          color: COLORS.textMuted,
+          backgroundColor: COLORS.bgCard,
+          borderRadius: RADIUS.lg,
+          border: `1px solid ${COLORS.border}`
         }}>
-          <div style={{ fontSize: '32px', marginBottom: '16px' }}>⏳</div>
-          <div style={{ fontSize: '15px' }}>加载中...</div>
+          <div style={{ fontSize: '32px', marginBottom: SPACING.base }}>⏳</div>
+          <div style={{ ...TYPOGRAPHY.sm }}>加载中...</div>
         </div>
       )}
 
       {/* 错误提示 */}
       {error && (
         <div style={{
-          padding: '16px 20px',
-          backgroundColor: '#fef2f2',
-          border: '1px solid #fecaca',
-          borderRadius: '12px',
-          color: '#991b1b',
-          marginBottom: '24px'
+          ...getAlertStyle('error'),
+          marginBottom: SPACING.lg,
+          borderRadius: RADIUS.lg,
+          borderLeft: 'none',
+          border: `1px solid ${COLORS.errorBorder}`,
         }}>
           ⚠️ 错误: {error}
         </div>
@@ -227,69 +229,65 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
       {!loading && !error && conversation && (
         <>
           <div style={{
-            marginBottom: '32px',
-            padding: '24px',
-            backgroundColor: '#ffffff',
-            borderRadius: '12px',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-            border: '1px solid #e5e7eb'
+            ...cardStyle,
+            marginBottom: SPACING.xl,
           }}>
-            <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 600, color: '#1f2937' }}>会话信息</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>学生</div>
-                <div style={{ fontSize: '15px', fontWeight: 500, color: '#1f2937' }}>
+            <h2 style={{ margin: `0 0 ${SPACING.lg}`, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>会话信息</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.lg }}>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>学生</div>
+                <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>
                   {conversation.userName ? `${conversation.userName} (${conversation.userId})` : `#${conversation.userId}`}
                 </div>
               </div>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>班级</div>
-                <div style={{ fontSize: '15px', fontWeight: 500, color: '#1f2937' }}>{conversation.classId || '-'}</div>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>班级</div>
+                <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>{conversation.classId || '-'}</div>
               </div>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>题目</div>
-                <div style={{ fontSize: '15px', fontWeight: 500, color: '#1f2937' }}>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>题目</div>
+                <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>
                   {conversation.metadata?.problemTitle || conversation.problemId}
                 </div>
               </div>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>消息数</div>
-                <div style={{ fontSize: '15px', fontWeight: 500, color: '#1f2937' }}>{conversation.messageCount}</div>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>消息数</div>
+                <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>{conversation.messageCount}</div>
               </div>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>开始时间</div>
-                <div style={{ fontSize: '14px', color: '#4b5563' }}>{formatDateTime(conversation.startTime)}</div>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>开始时间</div>
+                <div style={{ fontSize: '14px', color: COLORS.textSecondary }}>{formatDateTime(conversation.startTime)}</div>
               </div>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>结束时间</div>
-                <div style={{ fontSize: '14px', color: '#4b5563' }}>{formatDateTime(conversation.endTime)}</div>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>结束时间</div>
+                <div style={{ fontSize: '14px', color: COLORS.textSecondary }}>{formatDateTime(conversation.endTime)}</div>
               </div>
-              <div style={{ padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>有效对话</div>
+              <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>有效对话</div>
                 <div>
                   <span style={{
                     display: 'inline-block',
-                    padding: '4px 12px',
-                    borderRadius: '20px',
+                    padding: `${SPACING.xs} ${SPACING.md}`,
+                    borderRadius: RADIUS.full,
                     fontSize: '13px',
                     fontWeight: 600,
-                    backgroundColor: conversation.isEffective ? '#dcfce7' : '#fee2e2',
-                    color: conversation.isEffective ? '#166534' : '#991b1b'
+                    backgroundColor: conversation.isEffective ? COLORS.successBg : COLORS.errorBg,
+                    color: conversation.isEffective ? COLORS.successText : COLORS.errorText
                   }}>
                     {conversation.isEffective ? '是' : '否'}
                   </span>
                 </div>
               </div>
               {conversation.tags.length > 0 && (
-                <div style={{ gridColumn: '1 / -1', padding: '12px 16px', backgroundColor: '#f9fafb', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px' }}>标签</div>
-                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <div style={{ gridColumn: '1 / -1', padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
+                  <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.sm }}>标签</div>
+                  <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
                     {conversation.tags.map((tag, idx) => (
                       <span key={idx} style={{
-                        padding: '4px 12px',
-                        backgroundColor: '#eef2ff',
-                        color: '#4f46e5',
-                        borderRadius: '20px',
+                        padding: `${SPACING.xs} ${SPACING.md}`,
+                        backgroundColor: COLORS.primaryLight,
+                        color: COLORS.primary,
+                        borderRadius: RADIUS.full,
                         fontSize: '13px',
                         fontWeight: 500
                       }}>
@@ -300,9 +298,9 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                 </div>
               )}
               {conversation.teacherNote && (
-                <div style={{ gridColumn: '1 / -1', padding: '12px 16px', backgroundColor: '#fefce8', borderRadius: '8px', border: '1px solid #fef08a' }}>
-                  <div style={{ fontSize: '12px', color: '#854d0e', marginBottom: '4px' }}>教师备注</div>
-                  <div style={{ fontSize: '14px', color: '#713f12' }}>{conversation.teacherNote}</div>
+                <div style={{ gridColumn: '1 / -1', padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.warningBg, borderRadius: RADIUS.md, border: `1px solid ${COLORS.warningBorder}` }}>
+                  <div style={{ ...TYPOGRAPHY.xs, color: COLORS.warningText, marginBottom: SPACING.xs }}>教师备注</div>
+                  <div style={{ fontSize: '14px', color: COLORS.warningText }}>{conversation.teacherNote}</div>
                 </div>
               )}
             </div>
@@ -310,14 +308,10 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
 
           {/* 对话消息列表 */}
           <div style={{
-            backgroundColor: '#ffffff',
-            borderRadius: '12px',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-            border: '1px solid #e5e7eb',
-            padding: '24px'
+            ...cardStyle,
           }}>
-            <h2 style={{ margin: '0 0 24px', fontSize: '18px', fontWeight: 600, color: '#1f2937' }}>对话内容</h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <h2 style={{ margin: `0 0 ${SPACING.lg}`, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>对话内容</h2>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.lg }}>
               {messages.map((msg) => (
                 <div
                   key={msg._id}
@@ -329,28 +323,28 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                   <div
                     style={{
                       maxWidth: '75%',
-                      padding: '16px 20px',
-                      borderRadius: '16px',
-                      backgroundColor: msg.role === 'student' ? '#e0f2fe' : '#f3f4f6',
-                      border: msg.role === 'student' ? '1px solid #7dd3fc' : '1px solid #e5e7eb',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                      padding: `${SPACING.base} ${SPACING.lg}`,
+                      borderRadius: RADIUS.xl,
+                      backgroundColor: msg.role === 'student' ? COLORS.primaryLight : COLORS.bgHover,
+                      border: `1px solid ${msg.role === 'student' ? COLORS.infoBorder : COLORS.border}`,
+                      boxShadow: SHADOWS.sm
                     }}
                   >
                     {/* 消息头部 */}
-                    <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <div style={{ marginBottom: SPACING.md, display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                       <span style={{
                         fontWeight: 600,
                         fontSize: '14px',
-                        color: msg.role === 'student' ? '#0369a1' : '#374151'
+                        color: msg.role === 'student' ? COLORS.infoText : COLORS.textSecondary
                       }}>
-                        {msg.role === 'student' ? '👤 学生' : '🤖 AI 助手'}
+                        {msg.role === 'student' ? '学生' : 'AI 助手'}
                       </span>
                       {msg.questionType && (
                         <span style={{
-                          padding: '3px 10px',
-                          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                          padding: `3px 10px`,
+                          background: COLORS.gradient,
                           color: 'white',
-                          borderRadius: '20px',
+                          borderRadius: RADIUS.full,
                           fontSize: '12px',
                           fontWeight: 500
                         }}>
@@ -359,17 +353,17 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                       )}
                       {msg.attachedCode && (
                         <span style={{
-                          padding: '3px 10px',
-                          backgroundColor: '#f3e8ff',
-                          color: '#7c3aed',
-                          borderRadius: '20px',
+                          padding: `3px 10px`,
+                          backgroundColor: COLORS.infoBg,
+                          color: COLORS.info,
+                          borderRadius: RADIUS.full,
                           fontSize: '12px',
                           fontWeight: 500
                         }}>
-                          📎 附带代码
+                          附带代码
                         </span>
                       )}
-                      <span style={{ fontSize: '12px', color: '#9ca3af' }}>
+                      <span style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted }}>
                         {formatDateTime(msg.timestamp)}
                       </span>
                     </div>
@@ -380,13 +374,13 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                     {/* 代码警告 */}
                     {msg.metadata?.codeWarning && (
                       <div style={{
-                        marginTop: '12px',
-                        padding: '10px 14px',
-                        backgroundColor: '#fef3c7',
-                        border: '1px solid #fcd34d',
-                        borderRadius: '8px',
+                        marginTop: SPACING.md,
+                        padding: `10px 14px`,
+                        backgroundColor: COLORS.warningBg,
+                        border: `1px solid ${COLORS.warningBorder}`,
+                        borderRadius: RADIUS.md,
                         fontSize: '13px',
-                        color: '#92400e'
+                        color: COLORS.warningText
                       }}>
                         ⚠️ {msg.metadata.codeWarning}
                       </div>
@@ -398,80 +392,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           </div>
 
           {/* Markdown 样式 */}
-          <style>{`
-            .markdown-body pre {
-              background-color: #f8fafc;
-              border: 1px solid #e2e8f0;
-              border-radius: 8px;
-              padding: 16px;
-              overflow-x: auto;
-              font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-              font-size: 13px;
-              line-height: 1.6;
-              margin: 12px 0;
-            }
-
-            .markdown-body code {
-              background-color: #f1f5f9;
-              padding: 2px 6px;
-              border-radius: 4px;
-              font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-              font-size: 13px;
-            }
-
-            .markdown-body pre code {
-              background-color: transparent;
-              padding: 0;
-            }
-
-            .markdown-body h1, .markdown-body h2, .markdown-body h3 {
-              font-weight: 600;
-              margin-top: 1em;
-              margin-bottom: 0.5em;
-              color: #1f2937;
-            }
-
-            .markdown-body h1 { font-size: 1.5em; }
-            .markdown-body h2 { font-size: 1.25em; }
-            .markdown-body h3 { font-size: 1.1em; }
-
-            .markdown-body ul, .markdown-body ol {
-              padding-left: 20px;
-              margin: 8px 0;
-            }
-
-            .markdown-body li {
-              margin: 4px 0;
-            }
-
-            .markdown-body blockquote {
-              border-left: 4px solid #6366f1;
-              padding-left: 16px;
-              color: #6b7280;
-              background-color: #f9fafb;
-              margin: 12px 0;
-              padding: 12px 16px;
-              border-radius: 0 8px 8px 0;
-            }
-
-            .markdown-body a {
-              color: #6366f1;
-              text-decoration: none;
-            }
-
-            .markdown-body a:hover {
-              text-decoration: underline;
-            }
-
-            .markdown-body p {
-              margin: 8px 0;
-            }
-
-            .markdown-body strong {
-              font-weight: 600;
-              color: #1f2937;
-            }
-          `}</style>
+          <style>{markdownTheme}</style>
         </>
       )}
     </div>

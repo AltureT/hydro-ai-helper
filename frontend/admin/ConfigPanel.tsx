@@ -1,8 +1,13 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { BudgetConfigForm } from './BudgetConfigForm';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
+import { useToast, Toast } from '../components/Toast';
+import {
+  COLORS, FONT_FAMILY, TYPOGRAPHY, SPACING, RADIUS, SHADOWS, TRANSITIONS,
+  cardStyle as dsCardStyle, getInputStyle, getButtonStyle,
+} from '../utils/styles';
 import type {
   Endpoint, ConfigState, JailbreakLogPagination, APIConfigResponse,
 } from './configTypes';
@@ -17,8 +22,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [fetchingModels, setFetchingModels] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const [newApiKey, setNewApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -26,23 +29,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [logPagination, setLogPagination] = useState<JailbreakLogPagination>({
     logs: [], total: 0, page: 1, totalPages: 0,
   });
-  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showSuccess = (msg: string, durationMs = 3000) => {
-    if (successTimerRef.current) clearTimeout(successTimerRef.current);
-    setSuccessMessage(msg);
-    successTimerRef.current = setTimeout(() => setSuccessMessage(null), durationMs);
-  };
-
-  useEffect(() => {
-    return () => { if (successTimerRef.current) clearTimeout(successTimerRef.current); };
-  }, []);
+  const { toasts, showToast, dismissToast } = useToast();
 
   useEffect(() => { loadConfig(); }, []);
 
   const loadConfig = useCallback(async (page: number = 1) => {
     setLoading(true);
-    setError(null);
     try {
       const res = await fetch(`/ai-helper/admin/config?page=${page}&limit=20`, {
         method: 'GET', credentials: 'include',
@@ -91,7 +84,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
     } catch (err: any) {
       console.error('Load config error:', err);
-      setError(err.message || '加载配置失败');
+      showToast(err.message || '加载配置失败', 'error');
     } finally {
       setLoading(false);
     }
@@ -99,8 +92,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const saveConfig = async () => {
     if (!config) return;
-    setError(null);
-    setSuccessMessage(null);
     setSaving(true);
     try {
       const body: any = {
@@ -161,18 +152,16 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
       if (json.jailbreakLogs) setLogPagination(json.jailbreakLogs);
       setNewApiKey('');
-      showSuccess('配置已保存');
+      showToast('配置已保存', 'success');
     } catch (err: any) {
       console.error('Save config error:', err);
-      setError(err.message || '保存配置失败');
+      showToast(err.message || '保存配置失败', 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const testConnection = async () => {
-    setError(null);
-    setSuccessMessage(null);
     setTesting(true);
     try {
       const res = await fetch('/ai-helper/admin/test-connection', {
@@ -181,11 +170,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         credentials: 'include',
       });
       const json = await res.json();
-      if (json.success) showSuccess('连接成功，AI 服务可用');
-      else setError(json.message || '连接失败，AI 服务不可用');
+      if (json.success) showToast('连接成功，AI 服务可用', 'success');
+      else showToast(json.message || '连接失败，AI 服务不可用', 'error');
     } catch (err: any) {
       console.error('Test connection error:', err);
-      setError(err.message || '连接测试失败');
+      showToast(err.message || '连接测试失败', 'error');
     } finally {
       setTesting(false);
     }
@@ -197,7 +186,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     if (!endpoint) return;
     const endpointId = endpoint.id || `new-${endpointIndex}`;
     setFetchingModels(endpointId);
-    setError(null);
     try {
       let body: any;
       if (endpoint.id && !endpoint.isNew) {
@@ -217,13 +205,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         const newEndpoints = [...config.endpoints];
         newEndpoints[endpointIndex] = { ...newEndpoints[endpointIndex], models: json.models || [], modelsLastFetched: new Date().toISOString() };
         setConfig({ ...config, endpoints: newEndpoints });
-        showSuccess(`获取到 ${json.models?.length || 0} 个可用模型`);
+        showToast(`获取到 ${json.models?.length || 0} 个可用模型`, 'success');
       } else {
-        setError(json.error || '获取模型列表失败');
+        showToast(json.error || '获取模型列表失败', 'error');
       }
     } catch (err: any) {
       console.error('Fetch models error:', err);
-      setError(err.message || '获取模型列表失败');
+      showToast(err.message || '获取模型列表失败', 'error');
     } finally {
       setFetchingModels(null);
     }
@@ -292,7 +280,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     try {
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
-        showSuccess('已复制到剪贴板', 2000);
+        showToast('已复制到剪贴板', 'success');
       } else {
         window.prompt('请复制以下内容', text);
       }
@@ -314,24 +302,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   };
 
   const isBusy = saving || testing;
-  const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '10px', borderRadius: '6px',
-    border: '1px solid #d1d5db', fontSize: '14px', boxSizing: 'border-box',
-  };
-  const cardStyle: React.CSSProperties = {
-    backgroundColor: '#ffffff', borderRadius: '12px',
-    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)',
-    padding: '24px', border: '1px solid #e5e7eb',
-  };
+
   const cardTitleStyle: React.CSSProperties = {
-    fontSize: '18px', fontWeight: 600, color: '#111827',
-    marginTop: 0, marginBottom: '16px',
-    borderBottom: '1px solid #f3f4f6', paddingBottom: '12px',
+    ...TYPOGRAPHY.md,
+    color: COLORS.textPrimary,
+    marginTop: 0, marginBottom: SPACING.base,
+    borderBottom: `1px solid ${COLORS.border}`, paddingBottom: SPACING.md,
   };
 
   const outerStyle: React.CSSProperties = {
-    padding: embedded ? '24px' : '32px',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    padding: embedded ? SPACING.lg : SPACING.xl,
+    fontFamily: FONT_FAMILY,
     maxWidth: embedded ? 'none' : '960px',
     margin: embedded ? '0' : '40px auto',
     boxSizing: 'border-box',
@@ -340,8 +321,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   if (loading) {
     return (
       <div style={outerStyle}>
-        {!embedded && <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#111827', letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>}
-        <div style={{ ...cardStyle, marginTop: '20px', textAlign: 'center', color: '#6b7280' }}>
+        {!embedded && <h1 style={{ ...TYPOGRAPHY.xl, color: COLORS.textPrimary, letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>}
+        <div style={{ ...dsCardStyle, marginTop: '20px', textAlign: 'center', color: COLORS.textMuted }}>
           正在加载配置...
         </div>
       </div>
@@ -352,19 +333,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   return (
     <div style={outerStyle}>
+      <Toast messages={toasts} onDismiss={dismissToast} />
+
       {!embedded && (
-        <div style={{ marginBottom: '32px' }}>
-          <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#111827', marginBottom: '8px', letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>
-          <p style={{ fontSize: '15px', color: '#6b7280', margin: 0 }}>管理 API 端点、模型选择与安全策略</p>
+        <div style={{ marginBottom: SPACING.xl }}>
+          <h1 style={{ ...TYPOGRAPHY.xl, color: COLORS.textPrimary, marginBottom: SPACING.sm, letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>
+          <p style={{ fontSize: '15px', color: COLORS.textMuted, margin: 0 }}>管理 API 端点、模型选择与安全策略</p>
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-        {/* Version Badge */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.lg }}>
         <VersionBadge />
 
-        {/* Endpoint Manager */}
-        <div style={cardStyle}>
+        <div style={dsCardStyle}>
           <EndpointManager
             endpoints={config.endpoints}
             selectedModels={config.selectedModels}
@@ -392,56 +373,53 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           />
         </div>
 
-        {/* General Settings */}
-        <div style={cardStyle}>
+        <div style={dsCardStyle}>
           <h2 style={cardTitleStyle}>通用设置</h2>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
             <div>
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>超时时间（秒）</label>
+              <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>超时时间（秒）</label>
               <input
                 type="number"
                 value={config.timeoutSeconds}
                 onChange={(e) => setConfig({ ...config, timeoutSeconds: e.target.value === '' ? '' : Number(e.target.value) })}
-                placeholder="30" min="1" disabled={isBusy} style={inputStyle}
+                placeholder="30" min="1" disabled={isBusy} style={getInputStyle()}
               />
             </div>
             <div>
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>每分钟最大请求数</label>
+              <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>每分钟最大请求数</label>
               <input
                 type="number"
                 value={config.rateLimitPerMinute}
                 onChange={(e) => setConfig({ ...config, rateLimitPerMinute: e.target.value === '' ? '' : Number(e.target.value) })}
-                placeholder="5" min="1" disabled={isBusy} style={inputStyle}
+                placeholder="5" min="1" disabled={isBusy} style={getInputStyle()}
               />
             </div>
           </div>
         </div>
 
-        {/* Budget Config */}
         <BudgetConfigForm
           budgetConfig={config.budgetConfig}
           onChange={(updates) => setConfig({ ...config, budgetConfig: { ...config.budgetConfig, ...updates } })}
           disabled={isBusy}
         />
 
-        {/* Advanced Settings */}
-        <div style={cardStyle}>
+        <div style={dsCardStyle}>
           <h2 style={cardTitleStyle}>高级设置</h2>
           <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>System Prompt 模板</label>
+            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>System Prompt 模板</label>
             <textarea
               value={config.systemPromptTemplate}
               onChange={(e) => setConfig({ ...config, systemPromptTemplate: e.target.value })}
               placeholder="你是一位耐心的算法学习导师..."
               disabled={isBusy} rows={6}
-              style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+              style={{ ...getInputStyle(), fontFamily: 'monospace', resize: 'vertical' }}
             />
           </div>
           <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>内置越狱规则（只读）</label>
-            <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '12px', borderRadius: '6px', border: '1px solid #d1d5db', backgroundColor: '#f9fafb' }}>
+            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>内置越狱规则（只读）</label>
+            <div style={{ maxHeight: '200px', overflowY: 'auto', padding: SPACING.md, borderRadius: RADIUS.md, border: `1px solid ${COLORS.border}`, backgroundColor: COLORS.bgPage }}>
               {builtinJailbreakPatterns.length === 0 ? (
-                <div style={{ color: '#6b7280', fontSize: '13px' }}>暂无内置规则</div>
+                <div style={{ color: COLORS.textMuted, fontSize: '13px' }}>暂无内置规则</div>
               ) : (
                 <ul style={{ margin: 0, paddingLeft: '20px' }}>
                   {builtinJailbreakPatterns.map((pattern, index) => (
@@ -452,18 +430,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             </div>
           </div>
           <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>自定义越狱规则（每行一个正则表达式）</label>
+            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>自定义越狱规则（每行一个正则表达式）</label>
             <textarea
               value={config.extraJailbreakPatternsText}
               onChange={(e) => setConfig({ ...config, extraJailbreakPatternsText: e.target.value })}
               placeholder="忽略.*提示词"
               disabled={isBusy} rows={5}
-              style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }}
+              style={{ ...getInputStyle(), fontFamily: 'monospace', resize: 'vertical' }}
             />
           </div>
         </div>
 
-        {/* Jailbreak Logs */}
         <JailbreakLogsViewer
           logPagination={logPagination}
           loading={loading}
@@ -473,58 +450,31 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         />
       </div>
 
-      {/* Spacer for floating buttons */}
       <div style={{ height: '60px' }} />
 
-      {/* Floating Action Buttons - bottom right */}
       <div style={{
         position: 'fixed',
-        bottom: '32px',
-        right: '32px',
+        bottom: SPACING.xl,
+        right: SPACING.xl,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'flex-end',
-        gap: '12px',
+        gap: SPACING.md,
         zIndex: 1000,
       }}>
-        {/* Toast notifications */}
-        {error && (
-          <div style={{
-            padding: '12px 16px', backgroundColor: '#fee2e2',
-            borderLeft: '4px solid #ef4444', borderRadius: '8px', color: '#991b1b',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
-            fontSize: '14px', maxWidth: '350px', wordBreak: 'break-word',
-          }}>
-            <strong>错误：</strong>{error}
-          </div>
-        )}
-        {successMessage && (
-          <div style={{
-            padding: '12px 16px', backgroundColor: '#d1fae5',
-            borderLeft: '4px solid #10b981', borderRadius: '8px', color: '#065f46',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
-            fontSize: '14px', maxWidth: '350px', wordBreak: 'break-word',
-          }}>
-            <strong>成功：</strong>{successMessage}
-          </div>
-        )}
-
-        {/* Button group */}
         <div style={{
           display: 'flex', gap: '10px', padding: '10px',
-          backgroundColor: '#ffffff', borderRadius: '12px',
-          boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
-          border: '1px solid #f3f4f6',
+          backgroundColor: COLORS.bgCard, borderRadius: RADIUS.lg,
+          boxShadow: SHADOWS.lg,
+          border: `1px solid ${COLORS.border}`,
         }}>
           <button
             onClick={testConnection}
             disabled={isBusy || loading}
             style={{
+              ...getButtonStyle('secondary'),
               padding: '10px 20px',
-              backgroundColor: isBusy || loading ? '#f3f4f6' : '#ffffff',
-              color: isBusy || loading ? '#9ca3af' : '#374151',
-              border: '1px solid #d1d5db', borderRadius: '8px',
-              fontSize: '14px', fontWeight: 500,
+              opacity: isBusy || loading ? 0.5 : 1,
               cursor: isBusy || loading ? 'not-allowed' : 'pointer',
             }}
           >
@@ -534,11 +484,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             onClick={saveConfig}
             disabled={isBusy || loading}
             style={{
+              ...getButtonStyle('primary'),
               padding: '10px 24px',
-              backgroundColor: isBusy || loading ? '#9ca3af' : '#6366f1',
-              color: '#ffffff', border: 'none', borderRadius: '8px',
-              fontSize: '14px', fontWeight: 500,
-              boxShadow: isBusy || loading ? 'none' : '0 1px 3px rgba(99, 102, 241, 0.3)',
+              opacity: isBusy || loading ? 0.5 : 1,
               cursor: isBusy || loading ? 'not-allowed' : 'pointer',
             }}
           >

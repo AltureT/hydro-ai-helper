@@ -20,10 +20,9 @@ import {
 
 interface UseChatSessionOptions {
   problemId: string;
-  isCollapsed: boolean;
 }
 
-export function useChatSession({ problemId, isCollapsed }: UseChatSessionOptions) {
+export function useChatSession({ problemId }: UseChatSessionOptions) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
   const {
     questionType,
@@ -418,7 +417,7 @@ export function useChatSession({ problemId, isCollapsed }: UseChatSessionOptions
   useEffect(() => {
     const STATUS_ACCEPTED = 1;
     const store = window.store;
-    if (!store || isCollapsed || hasAccepted) return;
+    if (!store || hasAccepted) return;
 
     let lastRecordsRef: any = null;
     let lastCheckedRecordId = '';
@@ -445,7 +444,7 @@ export function useChatSession({ problemId, isCollapsed }: UseChatSessionOptions
     });
 
     return () => unsubscribe();
-  }, [isCollapsed, hasAccepted, fetchSubmissionStatus]);
+  }, [hasAccepted, fetchSubmissionStatus]);
 
   // Auto-read scratchpad when includeCode toggled on and no code
   useEffect(() => {
