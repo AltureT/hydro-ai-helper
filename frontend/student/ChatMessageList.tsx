@@ -149,7 +149,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               maxWidth: '100%', overflow: 'hidden',
             }}>
               <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.xs, display: 'flex', alignItems: 'center', gap: SPACING.xs }}>
-                &#128221; 附带代码
+                📝 附带代码
               </div>
               <div className="markdown-body" dangerouslySetInnerHTML={{
                 __html: renderMarkdownSafe(`\`\`\`\n${msg.code.length > 500 ? msg.code.substring(0, 500) + '\n// ... 代码已截断' : msg.code}\n\`\`\``).innerHTML

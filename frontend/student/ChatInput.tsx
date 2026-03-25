@@ -134,7 +134,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               display: 'flex', alignItems: 'center', gap: SPACING.xs,
             }}
           >
-            &#128206; {includeCode ? '已附带代码' : '附带代码'}
+            📎 {includeCode ? '已附带代码' : '附带代码'}
           </button>
           <button
             type="button" onClick={onNewConversation}
@@ -144,7 +144,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               border: `1px solid ${COLORS.border}`,
             }}
           >
-            &#128260; 新对话
+            🔄 新对话
           </button>
         </div>
       )}
@@ -155,12 +155,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           padding: SPACING.sm, marginBottom: SPACING.sm, fontSize: '11px',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.xs }}>
-            <span style={{ color: COLORS.textSecondary }}>&#128221; 已附带代码 ({code.length} 字符)</span>
+            <span style={{ color: COLORS.textSecondary }}>📝 已附带代码 ({code.length} 字符)</span>
             <button
               type="button" onClick={onCodeClear}
               style={{ background: 'none', border: 'none', color: COLORS.error, cursor: 'pointer', fontSize: '11px', padding: '2px 4px' }}
             >
-              &#10005; 移除
+              ✕ 移除
             </button>
           </div>
           <pre style={{
@@ -174,7 +174,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       <div style={{ display: 'flex', gap: SPACING.sm, alignItems: 'flex-end' }}>
         {renderTextarea(isFirstConversation ? '80px' : '40px', '120px')}
-        {isFirstConversation && renderIncludeCodeCheckbox('&#128206; 附带当前代码')}
+        {isFirstConversation && renderIncludeCodeCheckbox('📎 附带当前代码')}
         {isLoading ? (
           <button
             onClick={onCancel}

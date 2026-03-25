@@ -188,28 +188,6 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: COLORS.bgCard }}>
       <style>{markdownTheme}{keyframeStyles}</style>
-      {/* Gradient header */}
-      <div style={{
-        background: COLORS.gradient, padding: `${SPACING.md} ${SPACING.base}`,
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
-          <span style={{ fontSize: '18px' }}>&#x1F916;</span>
-          <span style={{ color: '#ffffff', fontWeight: 600, fontSize: '14px' }}>AI 学习助手</span>
-        </div>
-        {state.conversationHistory.length > 0 && (
-          <button
-            onClick={chat.startNewConversation}
-            style={{
-              background: 'rgba(255,255,255,0.2)', border: '1px solid rgba(255,255,255,0.3)',
-              color: '#ffffff', borderRadius: RADIUS.md, padding: `${SPACING.xs} ${SPACING.md}`,
-              fontSize: '12px', cursor: 'pointer', transition: `all ${TRANSITIONS.fast}`,
-            }}
-          >
-            + 新对话
-          </button>
-        )}
-      </div>
       <ChatMessageList {...messageListProps}>
         {renderErrorBanner(false)}
       </ChatMessageList>
