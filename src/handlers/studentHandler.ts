@@ -628,7 +628,8 @@ export class ChatHandler extends Handler {
       attachedError: !!judgeInfo,
       metadata: processedCode ? {
         codeLength: processedCode.length,
-        codeWarning
+        codeWarning,
+        codeContent: processedCode
       } : undefined
     });
 

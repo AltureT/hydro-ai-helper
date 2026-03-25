@@ -520,7 +520,8 @@ class ChatHandler extends hydrooj_1.Handler {
             attachedError: !!judgeInfo,
             metadata: processedCode ? {
                 codeLength: processedCode.length,
-                codeWarning
+                codeWarning,
+                codeContent: processedCode
             } : undefined
         });
         // 增加会话的消息计数

@@ -34,6 +34,7 @@ export interface Message {
   metadata?: {
     codeLength?: number;      // 代码长度 (字符数)
     codeWarning?: string;     // 代码截断警告
+    codeContent?: string;     // 学生提交的代码内容
     safetyRewritten?: boolean;       // AI 回复被输出安全后处理改写
     topicGuardBypassedLLM?: boolean; // 偏题计数短路，未调用 LLM
     promptTokens?: number;    // API prompt token 用量
