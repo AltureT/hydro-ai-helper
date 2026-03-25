@@ -219,7 +219,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
           </div>
         )}
       </ChatMessageList>
-      <ChatInput {...inputProps} variant="embedded" />
+      <ChatInput {...inputProps} />
       {renderLoadCodeConfirmModal()}
     </div>
   );
