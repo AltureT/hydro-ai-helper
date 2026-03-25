@@ -1,9 +1,29 @@
 /**
- * 成本分析 Dashboard
- * 展示 Token 用量、成本趋势、Top 用户、模型消耗分布
+ * Cost Analytics Dashboard
+ * Token usage, cost trends, top users, model distribution with Chart.js visualizations
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Chart, registerables } from 'chart.js';
+import {
+  COLORS,
+  FONT_FAMILY,
+  TYPOGRAPHY,
+  SPACING,
+  RADIUS,
+  SHADOWS,
+  TRANSITIONS,
+  cardStyle,
+  statCard,
+  progressBarTrackStyle,
+  getProgressBarFillStyle,
+  tableRootStyle,
+  getTableHeaderStyle,
+  getTableCellStyle,
+  emptyStateStyle,
+} from '../utils/styles';
+
+Chart.register(...registerables);
 
 interface CostSummary {
   totalTokens: number;
@@ -56,25 +76,6 @@ interface CostDashboardProps {
   embedded?: boolean;
 }
 
-const cardStyle: React.CSSProperties = {
-  padding: '20px',
-  backgroundColor: '#ffffff',
-  borderRadius: '8px',
-  border: '1px solid #e5e7eb',
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: '13px',
-  color: '#6b7280',
-  marginBottom: '4px',
-};
-
-const valueStyle: React.CSSProperties = {
-  fontSize: '24px',
-  fontWeight: 700,
-  color: '#1f2937',
-};
-
 const formatTokens = (n: number): string => {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -86,11 +87,56 @@ const formatCost = (n: number): string => {
   return `$${n.toFixed(2)}`;
 };
 
+const getPeriodPillStyle = (isActive: boolean): React.CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: `${SPACING.xs} ${SPACING.md}`,
+  fontSize: '13px',
+  fontWeight: isActive ? 500 : 400,
+  color: isActive ? '#ffffff' : COLORS.textSecondary,
+  backgroundColor: isActive ? COLORS.primary : COLORS.bgHover,
+  border: 'none',
+  borderRadius: RADIUS.full,
+  cursor: 'pointer',
+  transition: `all ${TRANSITIONS.fast}`,
+});
+
+const sectionTitleStyle: React.CSSProperties = {
+  ...TYPOGRAPHY.md,
+  margin: `0 0 ${SPACING.base}`,
+  color: COLORS.textPrimary,
+};
+
+const thStyle: React.CSSProperties = {
+  ...getTableHeaderStyle(),
+  textAlign: 'left',
+};
+
+const thRightStyle: React.CSSProperties = {
+  ...getTableHeaderStyle(),
+  textAlign: 'right',
+};
+
+const tdStyle: React.CSSProperties = {
+  ...getTableCellStyle(),
+};
+
+const tdRightStyle: React.CSSProperties = {
+  ...getTableCellStyle(),
+  textAlign: 'right',
+  fontVariantNumeric: 'tabular-nums',
+};
+
 export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }) => {
   const [data, setData] = useState<CostData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('day');
+
+  const trendChartRef = useRef<HTMLCanvasElement>(null);
+  const trendChartInstanceRef = useRef<Chart | null>(null);
+  const modelChartRef = useRef<HTMLCanvasElement>(null);
+  const modelChartInstanceRef = useRef<Chart | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -117,9 +163,112 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
     fetchData();
   }, [fetchData]);
 
+  // Daily trend line chart
+  useEffect(() => {
+    if (!trendChartRef.current || !data?.dailyTrend.length) return;
+    if (trendChartInstanceRef.current) trendChartInstanceRef.current.destroy();
+
+    const dailyData = data.dailyTrend;
+    trendChartInstanceRef.current = new Chart(trendChartRef.current, {
+      type: 'line',
+      data: {
+        labels: dailyData.map(d => d.date),
+        datasets: [{
+          label: 'Tokens',
+          data: dailyData.map(d => d.totalTokens),
+          borderColor: COLORS.primary,
+          backgroundColor: 'rgba(37, 99, 235, 0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: {
+            grid: { color: COLORS.border },
+            ticks: { color: COLORS.textMuted, font: { family: FONT_FAMILY } },
+          },
+          y: {
+            grid: { color: COLORS.border },
+            ticks: { color: COLORS.textMuted, font: { family: FONT_FAMILY } },
+          },
+        },
+      },
+    });
+
+    return () => { trendChartInstanceRef.current?.destroy(); };
+  }, [data?.dailyTrend]);
+
+  // Model distribution doughnut chart
+  useEffect(() => {
+    if (!modelChartRef.current || !data?.modelBreakdown.length) return;
+    if (modelChartInstanceRef.current) modelChartInstanceRef.current.destroy();
+
+    const models = data.modelBreakdown;
+    const totalTokens = models.reduce((sum, m) => sum + m.totalTokens, 0);
+
+    const centerTextPlugin = {
+      id: 'centerText',
+      afterDraw(chart: any) {
+        const { ctx, chartArea } = chart;
+        const centerX = (chartArea.left + chartArea.right) / 2;
+        const centerY = (chartArea.top + chartArea.bottom) / 2;
+        ctx.save();
+        ctx.font = `700 16px ${FONT_FAMILY}`;
+        ctx.fillStyle = COLORS.textPrimary;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(formatTokens(totalTokens), centerX, centerY - 8);
+        ctx.font = `400 11px ${FONT_FAMILY}`;
+        ctx.fillStyle = COLORS.textMuted;
+        ctx.fillText('Total', centerX, centerY + 10);
+        ctx.restore();
+      },
+    };
+
+    const colors = COLORS.chartScale.slice(0, models.length);
+    while (colors.length < models.length) {
+      colors.push(COLORS.textMuted);
+    }
+
+    modelChartInstanceRef.current = new Chart(modelChartRef.current, {
+      type: 'doughnut',
+      data: {
+        labels: models.map(m => m.modelName),
+        datasets: [{
+          data: models.map(m => m.totalTokens),
+          backgroundColor: colors,
+          borderWidth: 0,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '60%',
+        plugins: {
+          legend: {
+            position: 'right',
+            labels: {
+              color: COLORS.textSecondary,
+              font: { family: FONT_FAMILY, size: 12 },
+              padding: 12,
+            },
+          },
+        },
+      },
+      plugins: [centerTextPlugin],
+    });
+
+    return () => { modelChartInstanceRef.current?.destroy(); };
+  }, [data?.modelBreakdown]);
+
   if (loading) {
     return (
-      <div style={{ padding: embedded ? '24px' : '32px', textAlign: 'center', color: '#6b7280' }}>
+      <div style={{ padding: embedded ? SPACING.lg : SPACING.xl, textAlign: 'center', color: COLORS.textMuted }}>
         加载中...
       </div>
     );
@@ -127,10 +276,21 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
 
   if (error) {
     return (
-      <div style={{ padding: embedded ? '24px' : '32px', textAlign: 'center', color: '#ef4444' }}>
+      <div style={{ padding: embedded ? SPACING.lg : SPACING.xl, textAlign: 'center', color: COLORS.error }}>
         {error}
         <br />
-        <button onClick={fetchData} style={{ marginTop: '8px', cursor: 'pointer', color: '#4f46e5', background: 'none', border: 'none', fontSize: '14px' }}>
+        <button
+          onClick={fetchData}
+          style={{
+            marginTop: SPACING.sm,
+            cursor: 'pointer',
+            color: COLORS.primary,
+            background: 'none',
+            border: 'none',
+            fontSize: '14px',
+            fontFamily: FONT_FAMILY,
+          }}
+        >
           重试
         </button>
       </div>
@@ -139,159 +299,109 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
 
   if (!data) return null;
 
-  const maxTrendTokens = Math.max(...data.dailyTrend.map(d => d.totalTokens), 1);
+  const budgetPercent = data.summary.budgetUsagePercent;
+  const budgetColor = budgetPercent === null
+    ? COLORS.textMuted
+    : budgetPercent >= 90
+      ? COLORS.error
+      : budgetPercent >= 70
+        ? COLORS.warning
+        : COLORS.success;
 
   return (
-    <div style={{ padding: embedded ? '24px' : '32px' }}>
+    <div style={{ padding: embedded ? SPACING.lg : SPACING.xl, fontFamily: FONT_FAMILY }}>
       {!embedded && (
-        <h1 style={{ margin: '0 0 24px', fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>
+        <h1 style={{ ...TYPOGRAPHY.xl, margin: `0 0 ${SPACING.lg}`, color: COLORS.textPrimary }}>
           成本分析
         </h1>
       )}
 
       {/* Period Selector */}
-      <div style={{ marginBottom: '20px', display: 'flex', gap: '8px' }}>
+      <div style={{ marginBottom: SPACING.lg, display: 'flex', gap: SPACING.sm }}>
         {(['day', 'week', 'month'] as const).map((p) => (
-          <button
-            key={p}
-            onClick={() => setPeriod(p)}
-            style={{
-              padding: '6px 16px',
-              fontSize: '13px',
-              fontWeight: period === p ? 600 : 400,
-              color: period === p ? '#ffffff' : '#6b7280',
-              backgroundColor: period === p ? '#4f46e5' : '#f3f4f6',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-            }}
-          >
+          <button key={p} onClick={() => setPeriod(p)} style={getPeriodPillStyle(period === p)}>
             {p === 'day' ? '近30天' : p === 'week' ? '本周' : '本月'}
           </button>
         ))}
       </div>
 
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-        <div style={cardStyle}>
-          <div style={labelStyle}>今日 Tokens</div>
-          <div style={valueStyle}>{formatTokens(data.today.totalTokens)}</div>
-          <div style={{ fontSize: '12px', color: '#9ca3af', marginTop: '4px' }}>{data.today.requestCount} 次请求</div>
-        </div>
-        <div style={cardStyle}>
-          <div style={labelStyle}>今日成本</div>
-          <div style={valueStyle}>{formatCost(data.today.totalCost)}</div>
-        </div>
-        <div style={cardStyle}>
-          <div style={labelStyle}>本月累计</div>
-          <div style={valueStyle}>{formatTokens(data.monthly.totalTokens)}</div>
-          <div style={{ fontSize: '12px', color: '#9ca3af', marginTop: '4px' }}>{formatCost(data.monthly.totalCost)}</div>
-        </div>
-        <div style={cardStyle}>
-          <div style={labelStyle}>预算使用率</div>
-          <div style={{
-            ...valueStyle,
-            color: data.summary.budgetUsagePercent === null ? '#9ca3af' :
-                   data.summary.budgetUsagePercent >= 90 ? '#ef4444' :
-                   data.summary.budgetUsagePercent >= 70 ? '#f59e0b' : '#10b981'
-          }}>
-            {data.summary.budgetUsagePercent !== null ? `${data.summary.budgetUsagePercent}%` : '未设置'}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.base, marginBottom: SPACING.lg }}>
+        <div style={statCard.container}>
+          <div style={statCard.label}>今日 Tokens</div>
+          <div style={statCard.value}>{formatTokens(data.today.totalTokens)}</div>
+          <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+            {data.today.requestCount} 次请求
           </div>
-          {data.summary.budgetUsagePercent !== null && (
-            <div style={{
-              marginTop: '8px',
-              height: '6px',
-              backgroundColor: '#e5e7eb',
-              borderRadius: '3px',
-              overflow: 'hidden',
-            }}>
+        </div>
+        <div style={statCard.container}>
+          <div style={statCard.label}>今日成本</div>
+          <div style={statCard.value}>{formatCost(data.today.totalCost)}</div>
+        </div>
+        <div style={statCard.container}>
+          <div style={statCard.label}>本月累计</div>
+          <div style={statCard.value}>{formatTokens(data.monthly.totalTokens)}</div>
+          <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+            {formatCost(data.monthly.totalCost)}
+          </div>
+        </div>
+        <div style={statCard.container}>
+          <div style={statCard.label}>预算使用率</div>
+          <div style={{ ...statCard.value, color: budgetColor }}>
+            {budgetPercent !== null ? `${budgetPercent}%` : '未设置'}
+          </div>
+          {budgetPercent !== null && (
+            <div style={{ ...progressBarTrackStyle, marginTop: SPACING.sm }}>
               <div style={{
-                height: '100%',
-                width: `${Math.min(100, data.summary.budgetUsagePercent)}%`,
-                backgroundColor: data.summary.budgetUsagePercent >= 90 ? '#ef4444' :
-                                 data.summary.budgetUsagePercent >= 70 ? '#f59e0b' : '#10b981',
-                borderRadius: '3px',
-                transition: 'width 0.3s',
+                ...getProgressBarFillStyle(budgetPercent),
+                backgroundColor: budgetColor,
               }} />
             </div>
           )}
         </div>
       </div>
 
-      {/* Daily Trend Chart (CSS bar chart) */}
-      <div style={{ ...cardStyle, marginBottom: '24px' }}>
-        <h3 style={{ margin: '0 0 16px', fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>
+      {/* Daily Trend Chart (Chart.js line) */}
+      <div style={{ ...cardStyle, marginBottom: SPACING.lg }}>
+        <h3 style={sectionTitleStyle}>
           日趋势（{data.dateRange.startDate} ~ {data.dateRange.endDate}）
         </h3>
         {data.dailyTrend.length === 0 ? (
-          <div style={{ textAlign: 'center', color: '#9ca3af', padding: '20px' }}>暂无数据</div>
+          <div style={emptyStateStyle}>暂无数据</div>
         ) : (
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '2px', height: '120px' }}>
-            {data.dailyTrend.map((d) => {
-              const heightPercent = (d.totalTokens / maxTrendTokens) * 100;
-              return (
-                <div
-                  key={d.date}
-                  title={`${d.date}\n${formatTokens(d.totalTokens)} tokens\n${formatCost(d.totalCost)}\n${d.requestCount} 次`}
-                  style={{
-                    flex: 1,
-                    minWidth: '4px',
-                    height: `${Math.max(2, heightPercent)}%`,
-                    backgroundColor: '#6366f1',
-                    borderRadius: '2px 2px 0 0',
-                    cursor: 'default',
-                    transition: 'opacity 0.2s',
-                  }}
-                  onMouseOver={(e) => (e.currentTarget.style.opacity = '0.7')}
-                  onMouseOut={(e) => (e.currentTarget.style.opacity = '1')}
-                />
-              );
-            })}
-          </div>
-        )}
-        {data.dailyTrend.length > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '8px', fontSize: '11px', color: '#9ca3af' }}>
-            <span>{data.dailyTrend[0]?.date.slice(5)}</span>
-            <span>{data.dailyTrend[data.dailyTrend.length - 1]?.date.slice(5)}</span>
+          <div style={{ position: 'relative', height: '240px' }}>
+            <canvas ref={trendChartRef} />
           </div>
         )}
       </div>
 
       {/* Two Column Layout: Top Users + Model Breakdown */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: SPACING.base }}>
         {/* Top Users */}
         <div style={cardStyle}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>
-            今日 Top 10 用户
-          </h3>
+          <h3 style={sectionTitleStyle}>今日 Top 10 用户</h3>
           {data.topUsers.length === 0 ? (
-            <div style={{ textAlign: 'center', color: '#9ca3af', padding: '20px' }}>暂无数据</div>
+            <div style={emptyStateStyle}>暂无数据</div>
           ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <table style={tableRootStyle}>
               <thead>
-                <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
-                  <th style={{ textAlign: 'left', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>用户</th>
-                  <th style={{ textAlign: 'right', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>Tokens</th>
-                  <th style={{ textAlign: 'right', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>请求数</th>
-                  <th style={{ textAlign: 'right', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>成本</th>
+                <tr>
+                  <th style={thStyle}>用户</th>
+                  <th style={thRightStyle}>Tokens</th>
+                  <th style={thRightStyle}>请求数</th>
+                  <th style={thRightStyle}>成本</th>
                 </tr>
               </thead>
               <tbody>
                 {data.topUsers.map((u, i) => (
-                  <tr key={u.userId} style={{ borderBottom: '1px solid #f3f4f6' }}>
-                    <td style={{ padding: '8px 4px' }}>
-                      <span style={{ color: '#9ca3af', marginRight: '6px' }}>#{i + 1}</span>
+                  <tr key={u.userId}>
+                    <td style={tdStyle}>
+                      <span style={{ color: COLORS.textMuted, marginRight: SPACING.xs }}>#{i + 1}</span>
                       {u.userName}
                     </td>
-                    <td style={{ textAlign: 'right', padding: '8px 4px', fontVariantNumeric: 'tabular-nums' }}>
-                      {formatTokens(u.totalTokens)}
-                    </td>
-                    <td style={{ textAlign: 'right', padding: '8px 4px', fontVariantNumeric: 'tabular-nums' }}>
-                      {u.requestCount}
-                    </td>
-                    <td style={{ textAlign: 'right', padding: '8px 4px', fontVariantNumeric: 'tabular-nums' }}>
-                      {formatCost(u.estimatedCostUSD)}
-                    </td>
+                    <td style={tdRightStyle}>{formatTokens(u.totalTokens)}</td>
+                    <td style={tdRightStyle}>{u.requestCount}</td>
+                    <td style={tdRightStyle}>{formatCost(u.estimatedCostUSD)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -299,52 +409,50 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
           )}
         </div>
 
-        {/* Model Breakdown */}
+        {/* Model Breakdown (Chart.js doughnut + table) */}
         <div style={cardStyle}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>
-            模型消耗分布
-          </h3>
+          <h3 style={sectionTitleStyle}>模型消耗分布</h3>
           {data.modelBreakdown.length === 0 ? (
-            <div style={{ textAlign: 'center', color: '#9ca3af', padding: '20px' }}>暂无数据</div>
+            <div style={emptyStateStyle}>暂无数据</div>
           ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
-                  <th style={{ textAlign: 'left', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>模型</th>
-                  <th style={{ textAlign: 'right', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>Tokens</th>
-                  <th style={{ textAlign: 'right', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>请求数</th>
-                  <th style={{ textAlign: 'right', padding: '8px 4px', color: '#6b7280', fontWeight: 500 }}>成本</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.modelBreakdown.map((m) => (
-                  <tr key={m.modelName} style={{ borderBottom: '1px solid #f3f4f6' }}>
-                    <td style={{ padding: '8px 4px', fontFamily: 'monospace', fontSize: '12px' }}>{m.modelName}</td>
-                    <td style={{ textAlign: 'right', padding: '8px 4px', fontVariantNumeric: 'tabular-nums' }}>
-                      {formatTokens(m.totalTokens)}
-                    </td>
-                    <td style={{ textAlign: 'right', padding: '8px 4px', fontVariantNumeric: 'tabular-nums' }}>
-                      {m.requestCount}
-                    </td>
-                    <td style={{ textAlign: 'right', padding: '8px 4px', fontVariantNumeric: 'tabular-nums' }}>
-                      {formatCost(m.estimatedCostUSD)}
-                    </td>
+            <>
+              <div style={{ position: 'relative', height: '200px', marginBottom: SPACING.base }}>
+                <canvas ref={modelChartRef} />
+              </div>
+              <table style={tableRootStyle}>
+                <thead>
+                  <tr>
+                    <th style={thStyle}>模型</th>
+                    <th style={thRightStyle}>Tokens</th>
+                    <th style={thRightStyle}>请求数</th>
+                    <th style={thRightStyle}>成本</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.modelBreakdown.map((m) => (
+                    <tr key={m.modelName}>
+                      <td style={{ ...tdStyle, fontFamily: 'monospace', fontSize: '12px' }}>{m.modelName}</td>
+                      <td style={tdRightStyle}>{formatTokens(m.totalTokens)}</td>
+                      <td style={tdRightStyle}>{m.requestCount}</td>
+                      <td style={tdRightStyle}>{formatCost(m.estimatedCostUSD)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
           )}
         </div>
       </div>
 
       {/* Period Summary Footer */}
       <div style={{
-        marginTop: '16px',
-        padding: '12px 16px',
-        backgroundColor: '#f9fafb',
-        borderRadius: '8px',
+        marginTop: SPACING.base,
+        padding: `${SPACING.md} ${SPACING.base}`,
+        backgroundColor: COLORS.bgPage,
+        borderRadius: RADIUS.md,
         fontSize: '13px',
-        color: '#6b7280',
+        fontFamily: FONT_FAMILY,
+        color: COLORS.textSecondary,
         display: 'flex',
         justifyContent: 'space-between',
       }}>
