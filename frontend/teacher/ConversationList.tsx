@@ -5,7 +5,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { ExportDialog } from './ExportDialog';
-import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
+import { ConversationDetailModal } from './ConversationDetailModal';
+import { buildApiUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
 import {
   COLORS,
@@ -50,6 +51,7 @@ interface ConversationSummary {
     problemContent?: string;
   };
   firstMessageSummary?: string;
+  questionType?: string;
 }
 
 /**
@@ -87,6 +89,12 @@ interface ConversationListProps {
 /**
  * ConversationList 组件
  */
+const questionTypeBadgeMap: Record<string, { bg: string; color: string; label: string }> = {
+  understand: { bg: '#dbeafe', color: '#1e40af', label: '理解题意' },
+  think: { bg: '#f3e8ff', color: '#6b21a8', label: '理清思路' },
+  debug: { bg: '#fee2e2', color: '#991b1b', label: '分析错误' },
+};
+
 export const ConversationList: React.FC<ConversationListProps> = ({ embedded = false }) => {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -94,6 +102,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
   const [limit] = useState(50);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
 
   const initialFilters = getInitialFiltersFromUrl();
   const [filters, setFilters] = useState({
@@ -381,6 +391,19 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                         }}
                           title={conv.firstMessageSummary || ''}
                         >
+                          {conv.questionType && questionTypeBadgeMap[conv.questionType] && (
+                            <span style={{
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              backgroundColor: questionTypeBadgeMap[conv.questionType].bg,
+                              color: questionTypeBadgeMap[conv.questionType].color,
+                              marginRight: '6px',
+                            }}>
+                              {questionTypeBadgeMap[conv.questionType].label}
+                            </span>
+                          )}
                           {conv.firstMessageSummary || <span style={{ color: COLORS.textDisabled }}>-</span>}
                         </td>
                         <td style={{ ...getTableCellStyle(), fontSize: '13px', color: COLORS.textSecondary }}>
@@ -404,19 +427,24 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                           </span>
                         </td>
                         <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
-                          <a
-                            href={buildPageUrl(`/ai-helper/conversations/${conv._id}`)}
+                          <button
+                            onClick={() => {
+                              setSelectedConversationId(conv._id);
+                              setDetailModalOpen(true);
+                            }}
                             style={{
                               ...linkStyle,
-                              fontWeight: 500,
                               padding: `${SPACING.xs} ${SPACING.md}`,
                               borderRadius: RADIUS.sm,
                               backgroundColor: COLORS.primaryLight,
-                              display: 'inline-block'
+                              border: 'none',
+                              cursor: 'pointer',
+                              fontWeight: 500,
+                              fontSize: '13px',
                             }}
                           >
                             查看详情
-                          </a>
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -467,6 +495,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
           problemId: filters.problemId || undefined,
           userId: filters.userId || undefined,
         }}
+      />
+
+      <ConversationDetailModal
+        isOpen={detailModalOpen}
+        onClose={() => setDetailModalOpen(false)}
+        conversationId={selectedConversationId}
+        conversationIds={conversations.map(c => c._id)}
+        onNavigate={(id) => setSelectedConversationId(id)}
       />
     </div>
   );
