@@ -377,8 +377,37 @@ export class AdminConfigHandler extends Handler {
   }
 }
 
+/**
+ * JailbreakLogsHandler - 独立的越狱日志分页端点
+ * GET /ai-helper/admin/jailbreak-logs?page=1&limit=20
+ */
+export class JailbreakLogsHandler extends Handler {
+  async get() {
+    try {
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
+      const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
+      const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+
+      this.response.body = {
+        logs: logResult.logs.map(formatJailbreakLog),
+        total: logResult.total,
+        page: logResult.page,
+        totalPages: logResult.totalPages,
+      };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[AI Helper] JailbreakLogsHandler error:', err instanceof Error ? err.message : 'unknown');
+      this.response.status = 500;
+      this.response.body = { error: '获取越狱日志失败' };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
 // 导出路由权限配置（使用系统管理员权限）
 export const AdminConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const JailbreakLogsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 
 function formatJailbreakLog(log: JailbreakLog) {
   return {

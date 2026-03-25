@@ -37,7 +37,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AdminConfigHandlerPriv = exports.AdminConfigHandler = void 0;
+exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
@@ -358,8 +358,37 @@ class AdminConfigHandler extends hydrooj_1.Handler {
     }
 }
 exports.AdminConfigHandler = AdminConfigHandler;
+/**
+ * JailbreakLogsHandler - 独立的越狱日志分页端点
+ * GET /ai-helper/admin/jailbreak-logs?page=1&limit=20
+ */
+class JailbreakLogsHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
+            const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
+            const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+            this.response.body = {
+                logs: logResult.logs.map(formatJailbreakLog),
+                total: logResult.total,
+                page: logResult.page,
+                totalPages: logResult.totalPages,
+            };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] JailbreakLogsHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = { error: '获取越狱日志失败' };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.JailbreakLogsHandler = JailbreakLogsHandler;
 // 导出路由权限配置（使用系统管理员权限）
 exports.AdminConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.JailbreakLogsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 function formatJailbreakLog(log) {
     return {
         id: log._id.toHexString(),

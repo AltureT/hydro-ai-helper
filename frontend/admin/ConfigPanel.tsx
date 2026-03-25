@@ -32,12 +32,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const { toasts, showToast, dismissToast } = useToast();
 
-  useEffect(() => { loadConfig(); }, []);
+  const [logsLoading, setLogsLoading] = useState(false);
 
-  const loadConfig = useCallback(async (page: number = 1) => {
+  useEffect(() => { loadConfig(); loadJailbreakLogs(1); }, []);
+
+  const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/ai-helper/admin/config?page=${page}&limit=20`, {
+      const res = await fetch(`/ai-helper/admin/config`, {
         method: 'GET', credentials: 'include',
       });
       if (!res.ok) {
@@ -46,12 +48,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
       const json: APIConfigResponse = await res.json();
       setBuiltinJailbreakPatterns(json.builtinJailbreakPatterns || []);
-
-      if (json.jailbreakLogs) {
-        setLogPagination(json.jailbreakLogs);
-      } else if (json.recentJailbreakLogs) {
-        setLogPagination({ logs: json.recentJailbreakLogs, total: json.recentJailbreakLogs.length, page: 1, totalPages: 1 });
-      }
 
       if (json.config == null) {
         setConfig({
@@ -87,6 +83,23 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       showToast(err.message || '加载配置失败', 'error');
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const loadJailbreakLogs = useCallback(async (page: number = 1) => {
+    setLogsLoading(true);
+    try {
+      const res = await fetch(`/ai-helper/admin/jailbreak-logs?page=${page}&limit=20`, {
+        method: 'GET', credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`加载日志失败: ${res.status}`);
+      const json: JailbreakLogPagination = await res.json();
+      setLogPagination(json);
+    } catch (err: any) {
+      console.error('Load jailbreak logs error:', err);
+      showToast(err.message || '加载越狱日志失败', 'error');
+    } finally {
+      setLogsLoading(false);
     }
   }, []);
 
@@ -150,7 +163,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           },
         });
       }
-      if (json.jailbreakLogs) setLogPagination(json.jailbreakLogs);
       setNewApiKey('');
       showToast('配置已保存', 'success');
     } catch (err: any) {
@@ -273,7 +285,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const changePage = (newPage: number) => {
     if (newPage < 1 || newPage > logPagination.totalPages) return;
-    loadConfig(newPage);
+    loadJailbreakLogs(newPage);
   };
 
   const copyToClipboard = async (text: string) => {
@@ -443,7 +455,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
         <JailbreakLogsViewer
           logPagination={logPagination}
-          loading={loading}
+          loading={logsLoading}
           onChangePage={changePage}
           onCopyToClipboard={copyToClipboard}
           onAppendPattern={appendPatternToCustomRules}

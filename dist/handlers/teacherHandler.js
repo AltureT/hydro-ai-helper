@@ -130,7 +130,8 @@ class ConversationListHandler extends hydrooj_1.Handler {
                     tags: conv.tags,
                     teacherNote: conv.teacherNote,
                     metadata: conv.metadata,
-                    firstMessageSummary // T048: 学生问题摘要
+                    firstMessageSummary, // T048: 学生问题摘要
+                    questionType: firstMsg?.questionType,
                 };
             });
             if (wantJson) {

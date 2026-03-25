@@ -71,6 +71,7 @@ interface ConversationSummary {
     problemContent?: string;
   };
   firstMessageSummary?: string;  // T048: 学生首条消息摘要（前100字）
+  questionType?: string;
 }
 
 /**
@@ -191,7 +192,8 @@ export class ConversationListHandler extends Handler {
           tags: conv.tags,
           teacherNote: conv.teacherNote,
           metadata: conv.metadata,
-          firstMessageSummary  // T048: 学生问题摘要
+          firstMessageSummary,  // T048: 学生问题摘要
+          questionType: firstMsg?.questionType,
         };
       });
 

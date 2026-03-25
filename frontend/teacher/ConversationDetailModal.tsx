@@ -294,6 +294,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
           )}
           {!loading && !error && messages.map((msg) => {
             const isStudent = msg.role === 'student';
+            const hasCode = isStudent && msg.attachedCode && msg.metadata?.codeContent;
             return (
               <div key={msg._id} style={{ alignSelf: isStudent ? 'flex-end' : 'flex-start', maxWidth: '85%' }}>
                 <div style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -301,6 +302,14 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                     {isStudent ? '学生' : 'AI 助手'}
                   </span>
                   {isStudent && msg.questionType && <QuestionTypeBadge type={msg.questionType} />}
+                  {hasCode && (
+                    <span style={{
+                      padding: '1px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 600,
+                      backgroundColor: '#fef3c7', color: '#92400e',
+                    }}>
+                      附带代码
+                    </span>
+                  )}
                   <span style={{ fontSize: '11px', color: COLORS.textMuted }}>{formatDateTime(msg.timestamp)}</span>
                 </div>
                 <div style={{
@@ -318,6 +327,21 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                     <MarkdownContent content={msg.content} />
                   )}
                 </div>
+                {hasCode && (
+                  <div style={{ marginTop: '6px' }}>
+                    {msg.metadata?.codeWarning && (
+                      <div style={{
+                        padding: '6px 12px', marginBottom: '4px',
+                        fontSize: '12px', color: '#92400e', backgroundColor: '#fffbeb',
+                        borderRadius: `${RADIUS.md} ${RADIUS.md} 0 0`,
+                        border: '1px solid #fde68a', borderBottom: 'none',
+                      }}>
+                        {msg.metadata.codeWarning}
+                      </div>
+                    )}
+                    <MarkdownContent content={'```\n' + (msg.metadata?.codeContent || '') + '\n```'} />
+                  </div>
+                )}
               </div>
             );
           })}

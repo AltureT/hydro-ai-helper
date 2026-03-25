@@ -29,7 +29,7 @@ console.log('[AI-Helper] teacherHandler OK');
 import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
 console.log('[AI-Helper] analyticsHandler OK');
 
-import { AdminConfigHandler, AdminConfigHandlerPriv } from './handlers/adminConfigHandler';
+import { AdminConfigHandler, AdminConfigHandlerPriv, JailbreakLogsHandler, JailbreakLogsHandlerPriv } from './handlers/adminConfigHandler';
 console.log('[AI-Helper] adminConfigHandler OK');
 
 import { AIHelperDashboardHandler, AIHelperDashboardHandlerPriv } from './handlers/dashboardHandler';
@@ -201,6 +201,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
 
     // GET /ai-helper/admin/config - AI 配置页面 & JSON API（通过 Accept 头区分）
     ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', AdminConfigHandler, AdminConfigHandlerPriv);
+
+    // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
+    ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
 
     // GET /ai-helper/export - 数据导出 API
     ctx.Route('ai_helper_export', '/ai-helper/export', ExportHandler, ExportHandlerPriv);

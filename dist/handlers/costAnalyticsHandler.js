@@ -41,7 +41,7 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
                 tokenUsageModel.getDomainDailyUsage(domainId, today),
                 tokenUsageModel.getDomainMonthlyUsage(domainId, yearMonth),
                 tokenUsageModel.getDailyTrend(domainId, startDate, endDate),
-                tokenUsageModel.getTopUsers(domainId, today, 10),
+                tokenUsageModel.getTopUsersByDateRange(domainId, startDate, endDate, 10),
                 tokenUsageModel.getModelBreakdown(domainId, startDate, endDate),
             ]);
             // 计算预算使用百分比

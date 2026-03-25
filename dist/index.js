@@ -160,6 +160,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_analytics_domain', '/d/:domainId/ai-helper/analytics', analyticsHandler_1.AnalyticsHandler, analyticsHandler_1.AnalyticsHandlerPriv);
         // GET /ai-helper/admin/config - AI 配置页面 & JSON API（通过 Accept 头区分）
         ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', adminConfigHandler_1.AdminConfigHandler, adminConfigHandler_1.AdminConfigHandlerPriv);
+        // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
+        ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
         // GET /ai-helper/export - 数据导出 API
         ctx.Route('ai_helper_export', '/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
         ctx.Route('ai_helper_export_domain', '/d/:domainId/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);

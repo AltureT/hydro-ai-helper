@@ -119,6 +119,22 @@ class TokenUsageModel {
             requestCount: result[0].requestCount,
         };
     }
+    async getTopUsersByDateRange(domainId, startDate, endDate, limit = 10) {
+        return this.dailyAggCollection.aggregate([
+            { $match: { domainId, date: { $gte: startDate, $lte: endDate } } },
+            { $group: {
+                    _id: '$userId',
+                    userId: { $first: '$userId' },
+                    totalTokens: { $sum: '$totalTokens' },
+                    requestCount: { $sum: '$requestCount' },
+                    estimatedCostUSD: { $sum: '$estimatedCostUSD' },
+                } },
+            { $sort: { totalTokens: -1 } },
+            { $limit: limit },
+            { $project: { _id: 0, userId: 1, totalTokens: 1, requestCount: 1, estimatedCostUSD: 1 } },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ]).toArray();
+    }
     async getTopUsers(domainId, date, limit = 10) {
         return this.dailyAggCollection
             .find({ domainId, date })
