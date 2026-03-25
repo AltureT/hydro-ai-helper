@@ -1,13 +1,33 @@
 /**
  * 教师端对话列表组件
  * 显示所有学生的对话记录,支持筛选和分页
- * 现代简约风格设计
  */
 
 import React, { useState, useEffect } from 'react';
 import { ExportDialog } from './ExportDialog';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
+import {
+  COLORS,
+  SPACING,
+  RADIUS,
+  SHADOWS,
+  TRANSITIONS,
+  FONT_FAMILY,
+  TYPOGRAPHY,
+  getInputStyle,
+  getButtonStyle,
+  getTableHeaderStyle,
+  getTableCellStyle,
+  getTableRowStyle,
+  tableRootStyle,
+  getPaginationButtonStyle,
+  cardStyle,
+  getBadgeStyle,
+  linkStyle,
+  emptyStateStyle,
+  getAlertStyle,
+} from '../utils/styles';
 
 /**
  * 对话摘要接口
@@ -150,85 +170,63 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
     setFilters(prev => ({ ...prev, [field]: value }));
   };
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%',
-    padding: '10px 12px',
-    borderRadius: '8px',
-    border: '1px solid #e5e7eb',
-    fontSize: '14px',
-    backgroundColor: '#f9fafb',
-    color: '#1f2937'
-  };
-
   const labelStyle: React.CSSProperties = {
     display: 'block',
-    marginBottom: '8px',
+    marginBottom: SPACING.sm,
     fontWeight: 500,
     fontSize: '14px',
-    color: '#374151'
+    color: COLORS.textSecondary
   };
+
+  const prevDisabled = page === 1;
+  const nextDisabled = page * limit >= total;
 
   return (
     <div style={{
-      padding: embedded ? '24px' : '32px',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      backgroundColor: embedded ? 'transparent' : '#f8fafc',
+      padding: embedded ? SPACING.lg : SPACING.xl,
+      fontFamily: FONT_FAMILY,
+      backgroundColor: embedded ? 'transparent' : COLORS.bgPage,
       minHeight: embedded ? 'auto' : '100vh'
     }}>
-      {/* 页面标题 - 仅在非嵌入模式显示 */}
       {!embedded && (
       <div style={{
-        marginBottom: '32px',
-        padding: '24px 32px',
-        background: '#ffffff',
-        borderRadius: '12px',
-        border: '1px solid #e5e7eb',
-        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
+        ...cardStyle,
+        marginBottom: SPACING.xl,
+        padding: `${SPACING.lg} ${SPACING.xl}`,
       }}>
-        <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>对话记录</h1>
-        <p style={{ margin: '8px 0 0', color: '#6b7280', fontSize: '14px' }}>查看和管理学生与 AI 助手的对话记录</p>
+        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl, color: COLORS.textPrimary }}>对话记录</h1>
+        <p style={{ margin: `${SPACING.sm} 0 0`, color: COLORS.textMuted, fontSize: '14px' }}>查看和管理学生与 AI 助手的对话记录</p>
       </div>
       )}
 
-      {/* 筛选表单 */}
       <form onSubmit={handleFilterSubmit} style={{
-        marginBottom: '24px',
-        padding: '24px',
-        backgroundColor: '#ffffff',
-        borderRadius: '12px',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-        border: '1px solid #e5e7eb'
+        ...cardStyle,
+        marginBottom: SPACING.lg,
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: '#1f2937' }}>筛选条件</h3>
-          <div style={{ display: 'flex', gap: '12px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.lg }}>
+          <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>筛选条件</h3>
+          <div style={{ display: 'flex', gap: SPACING.md }}>
             <button
               type="button"
               onClick={() => setExportDialogOpen(true)}
               style={{
-                padding: '10px 20px',
-                fontSize: '14px',
-                fontWeight: 600,
-                color: '#ffffff',
-                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                boxShadow: '0 2px 8px rgba(16, 185, 129, 0.3)'
+                ...getButtonStyle('primary'),
+                backgroundColor: COLORS.success,
+                boxShadow: SHADOWS.sm,
               }}
             >
-              📥 导出数据
+              导出数据
             </button>
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.lg }}>
           <div>
             <label style={labelStyle}>开始日期</label>
             <input
               type="date"
               value={filters.startDate}
               onChange={(e) => handleFilterChange('startDate', e.target.value)}
-              style={inputStyle}
+              style={getInputStyle()}
             />
           </div>
           <div>
@@ -237,7 +235,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               type="date"
               value={filters.endDate}
               onChange={(e) => handleFilterChange('endDate', e.target.value)}
-              style={inputStyle}
+              style={getInputStyle()}
             />
           </div>
           <div>
@@ -247,7 +245,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               value={filters.problemId}
               onChange={(e) => handleFilterChange('problemId', e.target.value)}
               placeholder="如: P1000"
-              style={inputStyle}
+              style={getInputStyle()}
             />
           </div>
           <div>
@@ -257,7 +255,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               value={filters.classId}
               onChange={(e) => handleFilterChange('classId', e.target.value)}
               placeholder="班级 ID"
-              style={inputStyle}
+              style={getInputStyle()}
             />
           </div>
           <div>
@@ -267,137 +265,115 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               value={filters.userId}
               onChange={(e) => handleFilterChange('userId', e.target.value)}
               placeholder="学生用户 ID"
-              style={inputStyle}
+              style={getInputStyle()}
             />
           </div>
         </div>
         <button
           type="submit"
           style={{
-            marginTop: '20px',
-            padding: '12px 28px',
-            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-            color: 'white',
-            border: 'none',
-            borderRadius: '8px',
+            ...getButtonStyle('primary'),
+            marginTop: SPACING.lg,
+            padding: `${SPACING.md} 28px`,
             fontSize: '15px',
             fontWeight: 600,
-            cursor: 'pointer',
-            boxShadow: '0 2px 8px rgba(102, 126, 234, 0.3)'
           }}
         >
           搜索
         </button>
       </form>
 
-      {/* 加载状态 */}
       {loading && (
         <div style={{
+          ...cardStyle,
           padding: '40px',
           textAlign: 'center',
-          color: '#6b7280',
-          backgroundColor: '#ffffff',
-          borderRadius: '12px',
-          border: '1px solid #e5e7eb'
+          color: COLORS.textMuted,
         }}>
-          <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
+          <div style={{ fontSize: '24px', marginBottom: SPACING.md }}>...</div>
           正在加载对话列表...
         </div>
       )}
 
-      {/* 错误提示 */}
       {error && (
         <div style={{
-          padding: '16px 20px',
-          backgroundColor: '#fef2f2',
-          border: '1px solid #fecaca',
-          borderRadius: '12px',
-          color: '#991b1b',
-          marginBottom: '24px'
+          ...getAlertStyle('error'),
+          marginBottom: SPACING.lg,
         }}>
-          ⚠️ {error}
+          {error}
         </div>
       )}
 
-      {/* 对话列表表格 */}
       {!loading && !error && (
         <>
           {conversations.length === 0 ? (
-            <div style={{
-              padding: '60px 20px',
-              textAlign: 'center',
-              color: '#9ca3af',
-              backgroundColor: '#f9fafb',
-              borderRadius: '12px',
-              border: '1px dashed #e5e7eb'
-            }}>
-              <div style={{ fontSize: '48px', marginBottom: '16px' }}>💬</div>
+            <div style={emptyStateStyle}>
+              <div style={{ fontSize: '48px', marginBottom: SPACING.base }}>--</div>
               <div style={{ fontSize: '15px' }}>暂无对话记录</div>
             </div>
           ) : (
             <>
               <div style={{
-                marginBottom: '16px',
-                padding: '12px 16px',
-                backgroundColor: '#ffffff',
-                borderRadius: '8px',
-                border: '1px solid #e5e7eb',
+                marginBottom: SPACING.base,
+                padding: `${SPACING.md} ${SPACING.base}`,
+                backgroundColor: COLORS.bgCard,
+                borderRadius: RADIUS.md,
+                border: `1px solid ${COLORS.border}`,
                 fontSize: '14px',
-                color: '#4b5563'
+                color: COLORS.textSecondary
               }}>
-                共 <strong style={{ color: '#1f2937' }}>{total}</strong> 条记录，当前第 <strong style={{ color: '#1f2937' }}>{page}</strong> 页
+                共 <strong style={{ color: COLORS.textPrimary }}>{total}</strong> 条记录，当前第 <strong style={{ color: COLORS.textPrimary }}>{page}</strong> 页
               </div>
               <div style={{
-                backgroundColor: '#ffffff',
-                borderRadius: '12px',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-                border: '1px solid #e5e7eb',
+                backgroundColor: COLORS.bgCard,
+                borderRadius: RADIUS.lg,
+                boxShadow: SHADOWS.sm,
+                border: `1px solid ${COLORS.border}`,
                 overflow: 'hidden'
               }}>
                 <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <table style={tableRootStyle}>
                   <thead>
-                    <tr style={{ backgroundColor: '#f9fafb' }}>
-                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>学生</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>班级</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>题目</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb', minWidth: '200px' }}>问题摘要</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'left', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>开始时间</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>消息数</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>有效</th>
-                      <th style={{ padding: '14px 16px', textAlign: 'center', fontWeight: 600, fontSize: '13px', color: '#6b7280', borderBottom: '2px solid #e5e7eb' }}>操作</th>
+                    <tr>
+                      <th style={getTableHeaderStyle()}>学生</th>
+                      <th style={getTableHeaderStyle()}>班级</th>
+                      <th style={getTableHeaderStyle()}>题目</th>
+                      <th style={{ ...getTableHeaderStyle(), minWidth: '200px' }}>问题摘要</th>
+                      <th style={getTableHeaderStyle()}>开始时间</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>消息数</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>有效</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>操作</th>
                     </tr>
                   </thead>
                   <tbody>
                     {conversations.map((conv, idx) => (
-                      <tr key={conv._id} style={{ backgroundColor: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px', fontWeight: 500, color: '#1f2937' }}>
+                      <tr key={conv._id} style={getTableRowStyle(false, idx % 2 === 1)}>
+                        <td style={{ ...getTableCellStyle(), fontWeight: 500 }}>
                           {conv.userName ? `${conv.userName}` : `#${conv.userId}`}
-                          {conv.userName && <span style={{ color: '#9ca3af', fontSize: '12px', marginLeft: '4px' }}>({conv.userId})</span>}
+                          {conv.userName && <span style={{ color: COLORS.textMuted, fontSize: '12px', marginLeft: SPACING.xs }}>({conv.userId})</span>}
                         </td>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px', color: '#4b5563' }}>
-                          {conv.classId || <span style={{ color: '#9ca3af' }}>-</span>}
+                        <td style={{ ...getTableCellStyle(), color: COLORS.textSecondary }}>
+                          {conv.classId || <span style={{ color: COLORS.textMuted }}>-</span>}
                         </td>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px' }}>
+                        <td style={getTableCellStyle()}>
                           {conv.problemUrl ? (
                             <a
                               href={conv.problemUrl}
-                              style={{ color: '#6366f1', textDecoration: 'none', fontWeight: 500 }}
+                              style={{ ...linkStyle, fontWeight: 500 }}
                               title={`查看题目 ${conv.problemId}`}
                             >
                               {conv.metadata?.problemTitle || conv.problemId}
                             </a>
                           ) : (
-                            <span style={{ color: '#9ca3af' }}>
+                            <span style={{ color: COLORS.textMuted }}>
                               {conv.metadata?.problemTitle || conv.problemId || '-'}
                             </span>
                           )}
                         </td>
                         <td style={{
-                          padding: '14px 16px',
-                          borderBottom: '1px solid #f3f4f6',
+                          ...getTableCellStyle(),
                           fontSize: '13px',
-                          color: '#6b7280',
+                          color: COLORS.textSecondary,
                           maxWidth: '300px',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
@@ -405,46 +381,37 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                         }}
                           title={conv.firstMessageSummary || ''}
                         >
-                          {conv.firstMessageSummary || <span style={{ color: '#d1d5db' }}>-</span>}
+                          {conv.firstMessageSummary || <span style={{ color: COLORS.textDisabled }}>-</span>}
                         </td>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '13px', color: '#6b7280' }}>
+                        <td style={{ ...getTableCellStyle(), fontSize: '13px', color: COLORS.textSecondary }}>
                           {formatDateTime(conv.startTime)}
                         </td>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', fontSize: '14px', color: '#4b5563', textAlign: 'center' }}>
+                        <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
                           <span style={{
                             display: 'inline-block',
                             minWidth: '28px',
-                            padding: '4px 8px',
-                            backgroundColor: '#f3f4f6',
-                            borderRadius: '6px',
+                            padding: `${SPACING.xs} ${SPACING.sm}`,
+                            backgroundColor: COLORS.bgHover,
+                            borderRadius: RADIUS.sm,
                             fontWeight: 500
                           }}>
                             {conv.messageCount}
                           </span>
                         </td>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', textAlign: 'center' }}>
-                          <span style={{
-                            display: 'inline-block',
-                            padding: '4px 10px',
-                            borderRadius: '20px',
-                            fontSize: '12px',
-                            fontWeight: 600,
-                            backgroundColor: conv.isEffective ? '#dcfce7' : '#fee2e2',
-                            color: conv.isEffective ? '#166534' : '#991b1b'
-                          }}>
+                        <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
+                          <span style={getBadgeStyle(conv.isEffective ? 'success' : 'error')}>
                             {conv.isEffective ? '有效' : '无效'}
                           </span>
                         </td>
-                        <td style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6', textAlign: 'center' }}>
+                        <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
                           <a
                             href={buildPageUrl(`/ai-helper/conversations/${conv._id}`)}
                             style={{
-                              color: '#6366f1',
-                              textDecoration: 'none',
+                              ...linkStyle,
                               fontWeight: 500,
-                              padding: '6px 12px',
-                              borderRadius: '6px',
-                              backgroundColor: '#eef2ff',
+                              padding: `${SPACING.xs} ${SPACING.md}`,
+                              borderRadius: RADIUS.sm,
+                              backgroundColor: COLORS.primaryLight,
                               display: 'inline-block'
                             }}
                           >
@@ -460,66 +427,36 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
             </>
           )}
 
-          {/* 分页控件 */}
           {conversations.length > 0 && (
             <div style={{
               display: 'flex',
-              gap: '12px',
+              gap: SPACING.md,
               alignItems: 'center',
               justifyContent: 'center',
-              marginTop: '24px'
+              marginTop: SPACING.lg
             }}>
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
-                disabled={page === 1}
-                style={{
-                  padding: '10px 20px',
-                  background: page === 1 ? '#e5e7eb' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                  color: page === 1 ? '#9ca3af' : 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  cursor: page === 1 ? 'not-allowed' : 'pointer',
-                  boxShadow: page === 1 ? 'none' : '0 2px 8px rgba(102, 126, 234, 0.3)'
-                }}
+                disabled={prevDisabled}
+                style={getPaginationButtonStyle(false, prevDisabled)}
               >
-                ← 上一页
+                上一页
               </button>
-              <span style={{
-                padding: '10px 20px',
-                backgroundColor: '#ffffff',
-                borderRadius: '8px',
-                border: '1px solid #e5e7eb',
-                fontSize: '14px',
-                fontWeight: 500,
-                color: '#4b5563'
-              }}>
+              <span style={getPaginationButtonStyle(true, false)}>
                 第 {page} 页
               </span>
               <button
                 onClick={() => setPage(p => p + 1)}
-                disabled={page * limit >= total}
-                style={{
-                  padding: '10px 20px',
-                  background: page * limit >= total ? '#e5e7eb' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                  color: page * limit >= total ? '#9ca3af' : 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  cursor: page * limit >= total ? 'not-allowed' : 'pointer',
-                  boxShadow: page * limit >= total ? 'none' : '0 2px 8px rgba(102, 126, 234, 0.3)'
-                }}
+                disabled={nextDisabled}
+                style={getPaginationButtonStyle(false, nextDisabled)}
               >
-                下一页 →
+                下一页
               </button>
             </div>
           )}
         </>
       )}
 
-      {/* 导出对话框 */}
       <ExportDialog
         isOpen={exportDialogOpen}
         onClose={() => setExportDialogOpen(false)}
