@@ -103,23 +103,58 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
   const renderMessage = (msg: Message, idx: number) => {
     const parsed = msg.role === 'ai' ? parseMessageContent(msg.content) : null;
+    const isStudent = msg.role === 'student';
     return (
-      <div key={idx} style={{ display: 'flex', flexDirection: msg.role === 'student' ? 'row-reverse' : 'row', gap: SPACING.sm }}>
-        <div
-          data-ai-message={msg.role === 'ai' ? 'true' : undefined}
-          data-message-id={msg.role === 'ai' ? msg.id : undefined}
-          style={{
-            maxWidth: '85%', padding: '10px 14px',
-            borderRadius: msg.role === 'student' ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
-            background: msg.role === 'student' ? COLORS.primary : COLORS.primaryLight,
-            color: msg.role === 'student' ? '#ffffff' : COLORS.textPrimary,
-            fontSize: '13px', lineHeight: '1.6'
-          }}
-        >
-          {msg.role === 'ai' && parsed ? (
-            renderMarkdown(parsed.content)
-          ) : (
-            <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+      <div key={idx} style={{ display: 'flex', flexDirection: isStudent ? 'row-reverse' : 'row', gap: SPACING.sm, alignItems: 'flex-start' }}>
+        {/* Avatar indicator */}
+        <div style={{
+          width: '28px', height: '28px', borderRadius: RADIUS.full, flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px',
+          background: isStudent ? COLORS.primary : COLORS.primaryLight,
+          color: isStudent ? '#ffffff' : COLORS.primary,
+          border: isStudent ? 'none' : `1px solid ${COLORS.border}`,
+        }}>
+          {isStudent ? '\u{1F464}' : '\u{1F916}'}
+        </div>
+        <div style={{ maxWidth: '80%', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          {/* Speaker label */}
+          <div style={{ fontSize: '11px', color: COLORS.textMuted, textAlign: isStudent ? 'right' : 'left' }}>
+            {isStudent ? '我' : 'AI 助手'}
+          </div>
+          {/* Bubble */}
+          <div
+            data-ai-message={msg.role === 'ai' ? 'true' : undefined}
+            data-message-id={msg.role === 'ai' ? msg.id : undefined}
+            style={{
+              padding: `${SPACING.sm} ${SPACING.md}`,
+              borderRadius: isStudent ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
+              background: isStudent ? COLORS.primary : COLORS.bgCard,
+              color: isStudent ? '#ffffff' : COLORS.textPrimary,
+              fontSize: '13px', lineHeight: '1.6',
+              border: isStudent ? 'none' : `1px solid ${COLORS.border}`,
+              boxShadow: SHADOWS.sm,
+            }}
+          >
+            {msg.role === 'ai' && parsed ? (
+              renderMarkdown(parsed.content)
+            ) : (
+              <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+            )}
+          </div>
+          {/* Attached code block for student messages */}
+          {isStudent && msg.code && (
+            <div style={{
+              background: COLORS.bgPage, border: `1px solid ${COLORS.border}`,
+              borderRadius: RADIUS.md, padding: SPACING.sm, fontSize: '12px',
+              maxWidth: '100%', overflow: 'hidden',
+            }}>
+              <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.xs, display: 'flex', alignItems: 'center', gap: SPACING.xs }}>
+                &#128221; 附带代码
+              </div>
+              <div className="markdown-body" dangerouslySetInnerHTML={{
+                __html: renderMarkdownSafe(`\`\`\`\n${msg.code.length > 500 ? msg.code.substring(0, 500) + '\n// ... 代码已截断' : msg.code}\n\`\`\``).innerHTML
+              }} />
+            </div>
           )}
         </div>
       </div>

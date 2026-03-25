@@ -320,7 +320,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       <div style={{ marginBottom: SPACING.lg, display: 'flex', gap: SPACING.sm }}>
         {(['day', 'week', 'month'] as const).map((p) => (
           <button key={p} onClick={() => setPeriod(p)} style={getPeriodPillStyle(period === p)}>
-            {p === 'day' ? '近30天' : p === 'week' ? '本周' : '本月'}
+            {p === 'day' ? '今日' : p === 'week' ? '本周' : '本月'}
           </button>
         ))}
       </div>
@@ -379,7 +379,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: SPACING.base }}>
         {/* Top Users */}
         <div style={cardStyle}>
-          <h3 style={sectionTitleStyle}>今日 Top 10 用户</h3>
+          <h3 style={sectionTitleStyle}>{period === 'day' ? '今日' : period === 'week' ? '本周' : '本月'} Top 10 用户</h3>
           {data.topUsers.length === 0 ? (
             <div style={emptyStateStyle}>暂无数据</div>
           ) : (

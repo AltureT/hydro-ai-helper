@@ -188,13 +188,12 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
       <div style={{
         marginBottom: SPACING.xl,
         padding: `${SPACING.lg} ${SPACING.xl}`,
-        background: COLORS.gradient,
-        borderRadius: RADIUS.xl,
-        color: 'white',
-        boxShadow: `0 4px 20px ${COLORS.shadowFocus}`
+        background: COLORS.primaryLight,
+        borderRadius: RADIUS.lg,
+        borderLeft: `4px solid ${COLORS.primary}`,
       }}>
-        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl }}>对话详情</h1>
-        <p style={{ margin: '8px 0 0', opacity: 0.9, ...TYPOGRAPHY.sm }}>查看完整的学生与 AI 对话内容</p>
+        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl, color: COLORS.primary }}>对话详情</h1>
+        <p style={{ margin: '8px 0 0', ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>查看完整的学生与 AI 对话内容</p>
       </div>
 
       {/* 加载状态 */}
@@ -370,6 +369,21 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
 
                     {/* 消息内容 */}
                     <MarkdownContent content={msg.content} className="markdown-body" />
+
+                    {/* 附带代码内容 */}
+                    {msg.attachedCode && msg.metadata?.codeContent && (
+                      <div style={{
+                        marginTop: SPACING.md,
+                        background: COLORS.bgPage,
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: RADIUS.md,
+                        padding: SPACING.md,
+                        fontSize: '12px',
+                      }}>
+                        <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.sm }}>&#128221; 学生代码</div>
+                        <MarkdownContent content={`\`\`\`\n${msg.metadata.codeContent}\n\`\`\``} className="markdown-body" />
+                      </div>
+                    )}
 
                     {/* 代码警告 */}
                     {msg.metadata?.codeWarning && (
