@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  COLORS, SPACING, RADIUS, TRANSITIONS, FONT_FAMILY,
+  COLORS, SPACING, RADIUS, SHADOWS, TRANSITIONS, FONT_FAMILY,
   getButtonStyle, getPillStyle, getInputStyle,
 } from '../utils/styles';
 
@@ -68,17 +68,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       placeholder={isFirstConversation ? '描述你的问题或疑惑...' : '继续追问...'}
       style={{
         ...getInputStyle(),
+        border: 'none', outline: 'none', boxShadow: 'none',
         flex: 1, minHeight, maxHeight,
         resize: 'none' as const, boxSizing: 'border-box' as const,
       }}
-      onFocus={(e) => {
-        e.target.style.borderColor = COLORS.borderFocus;
-        e.target.style.boxShadow = `0 0 0 3px ${COLORS.shadowFocus}`;
-      }}
-      onBlur={(e) => {
-        e.target.style.borderColor = COLORS.border;
-        e.target.style.boxShadow = 'none';
-      }}
+      onFocus={() => {}}
+      onBlur={() => {}}
       onKeyDown={(e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onSubmit(); }
       }}
@@ -91,11 +86,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     : { ...getButtonStyle('primary'), background: COLORS.gradient, whiteSpace: 'nowrap' };
 
   return (
-    <div style={{ borderTop: `1px solid ${COLORS.border}`, padding: `${SPACING.md} ${SPACING.base}`, background: COLORS.bgPage, flexShrink: 0 }}>
+    <div style={{ background: COLORS.bgPage, flexShrink: 0 }}>
       {errorBanner}
 
+      {/* Question type pills - above the card */}
       {isFirstConversation && (
-        <div style={{ marginBottom: SPACING.sm }}>
+        <div style={{ padding: `${SPACING.sm} ${SPACING.base} 0` }}>
           <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginBottom: SPACING.xs }}>选择问题类型：</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.xs }}>
             {questionTypes.map(type => {
@@ -124,8 +120,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
       )}
 
+      {/* Follow-up action buttons - above the card */}
       {isFollowUp && (
-        <div style={{ display: 'flex', gap: SPACING.sm, marginBottom: SPACING.sm }}>
+        <div style={{ display: 'flex', gap: SPACING.sm, padding: `${SPACING.sm} ${SPACING.base} 0` }}>
           <button
             type="button" onClick={onRefreshCode}
             style={{
@@ -152,7 +149,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       {isFollowUp && includeCode && code && (
         <div style={{
           background: COLORS.bgPage, border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
-          padding: SPACING.sm, marginBottom: SPACING.sm, fontSize: '11px',
+          padding: SPACING.sm, margin: `${SPACING.sm} ${SPACING.base} 0`, fontSize: '11px',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.xs }}>
             <span style={{ color: COLORS.textSecondary }}>📝 已附带代码 ({code.length} 字符)</span>
@@ -172,24 +169,27 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: SPACING.sm, alignItems: 'flex-end' }}>
+      {/* Unified input card */}
+      <div style={{ margin: '12px', padding: '8px', borderRadius: '12px', border: `1px solid ${COLORS.border}`, backgroundColor: '#ffffff', boxShadow: SHADOWS.sm }}>
         {renderTextarea(isFirstConversation ? '80px' : '40px', '120px')}
-        {isFirstConversation && renderIncludeCodeCheckbox('📎 附带当前代码')}
-        {isLoading ? (
-          <button
-            onClick={onCancel}
-            style={{ ...getButtonStyle('danger'), whiteSpace: 'nowrap' }}
-          >
-            取消
-          </button>
-        ) : (
-          <button
-            onClick={onSubmit} disabled={disabledSubmit}
-            style={submitStyle}
-          >
-            发送
-          </button>
-        )}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '8px', borderTop: `1px solid ${COLORS.bgPage}` }}>
+          {isFirstConversation ? renderIncludeCodeCheckbox('📎 附带当前代码') : <div />}
+          {isLoading ? (
+            <button
+              onClick={onCancel}
+              style={{ ...getButtonStyle('danger'), whiteSpace: 'nowrap' }}
+            >
+              取消
+            </button>
+          ) : (
+            <button
+              onClick={onSubmit} disabled={disabledSubmit}
+              style={submitStyle}
+            >
+              发送
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

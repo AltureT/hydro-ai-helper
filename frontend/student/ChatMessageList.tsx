@@ -62,44 +62,45 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const renderProblemInfoCard = () => {
     if (problemInfo) {
       return (
-        <div style={{ flex: 1, background: COLORS.primaryLight, border: `1px solid ${COLORS.border}`, padding: '10px 12px', borderRadius: RADIUS.md }}>
-          <div style={{ fontSize: '12px', color: COLORS.primary, marginBottom: SPACING.xs, fontWeight: '500' }}>
-            题目 {problemInfo.problemId}
-          </div>
-          <div style={{
-            fontWeight: '600', fontSize: '14px', color: COLORS.textPrimary, lineHeight: '1.4',
-            overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box',
-            WebkitLineClamp: 2, WebkitBoxOrient: 'vertical'
-          }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: 'rgba(248,250,252,0.8)', borderBottom: `1px solid ${COLORS.border}` }}>
+          <span style={{ fontSize: '11px', fontWeight: 'bold', padding: '2px 6px', background: COLORS.primaryLight, color: COLORS.primary, borderRadius: '4px' }}>
+            {problemInfo.problemId}
+          </span>
+          <span style={{ fontSize: '13px', color: COLORS.textSecondary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>
             {problemInfo.title}
-          </div>
+          </span>
         </div>
       );
     }
     if (problemInfoError) {
       return (
         <div style={{
-          flex: 1, background: COLORS.warningBg, border: `1px solid ${COLORS.warningBorder}`,
-          padding: SPACING.md, borderRadius: RADIUS.md
+          display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: COLORS.warningBg, borderBottom: `1px solid ${COLORS.warningBorder}`
         }}>
-          <div style={{ fontSize: '13px', color: COLORS.warningText, marginBottom: SPACING.sm }}>
-            ⚠️ 无法自动获取题目信息
-          </div>
+          <span style={{ fontSize: '12px', color: COLORS.warningText, whiteSpace: 'nowrap' }}>⚠️ 无法获取题目</span>
           <input
             type="text"
             placeholder="请手动输入题目标题"
             value={manualTitle}
             onChange={(e) => onManualTitleChange(e.target.value)}
             style={{
-              width: '100%', padding: SPACING.sm, border: `1px solid ${COLORS.warningBorder}`,
-              borderRadius: RADIUS.sm, fontSize: '13px', boxSizing: 'border-box'
+              flex: 1, padding: SPACING.xs, border: `1px solid ${COLORS.warningBorder}`,
+              borderRadius: RADIUS.sm, fontSize: '12px', boxSizing: 'border-box'
             }}
           />
         </div>
       );
     }
-    return <div style={{ flex: 1 }} />;
+    return null;
   };
+
+  const renderEmptyState = () => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '40px 24px', textAlign: 'center' }}>
+      <div style={{ fontSize: '48px', marginBottom: '16px', background: 'linear-gradient(135deg, #eff6ff, #dbeafe)', borderRadius: '50%', padding: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>🤖</div>
+      <div style={{ fontSize: '18px', fontWeight: 600, color: COLORS.textPrimary, marginBottom: '8px' }}>你好！我是 AI 学习助手</div>
+      <div style={{ fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.6' }}>选择问题类型，描述你的疑惑<br/>我来帮你理清思路</div>
+    </div>
+  );
 
   const renderMessage = (msg: Message, idx: number) => {
     const parsed = msg.role === 'ai' ? parseMessageContent(msg.content) : null;
@@ -128,10 +129,10 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
             style={{
               padding: `${SPACING.sm} ${SPACING.md}`,
               borderRadius: isStudent ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
-              background: isStudent ? COLORS.primary : COLORS.bgCard,
+              background: isStudent ? COLORS.primary : '#f0f7ff',
               color: isStudent ? '#ffffff' : COLORS.textPrimary,
               fontSize: '13px', lineHeight: '1.6',
-              border: isStudent ? 'none' : `1px solid ${COLORS.border}`,
+              border: isStudent ? 'none' : '1px solid #dbeafe',
               boxShadow: SHADOWS.sm,
             }}
           >
@@ -167,26 +168,11 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
       onMouseUp={onTextSelection}
       style={{ flex: 1, overflowY: 'auto', padding: SPACING.base, display: 'flex', flexDirection: 'column', gap: SPACING.md }}
     >
-      {/* Problem info + new conversation button */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: SPACING.sm }}>
-        {renderProblemInfoCard()}
-        {messages.length > 0 && (
-          <button
-            onClick={onNewConversation}
-            style={{
-              padding: `${SPACING.sm} ${SPACING.md}`, background: COLORS.bgHover, border: `1px solid ${COLORS.border}`,
-              borderRadius: RADIUS.md, fontSize: '12px', color: COLORS.textSecondary, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: SPACING.xs, whiteSpace: 'nowrap', flexShrink: 0,
-            }}
-            title="开始新对话"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" fill={COLORS.textSecondary} />
-            </svg>
-            新对话
-          </button>
-        )}
-      </div>
+      {/* Problem info breadcrumb */}
+      {renderProblemInfoCard()}
+
+      {/* Empty state */}
+      {messages.length === 0 && !isStreaming && !isLoading && renderEmptyState()}
 
       {/* Messages */}
       {messages.map((msg, idx) => renderMessage(msg, idx))}
