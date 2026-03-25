@@ -8,6 +8,7 @@ import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';
 import { CostDashboard } from '../teacher/CostDashboard';
+import { COLORS, FONT_FAMILY, SHADOWS, RADIUS, SPACING, getTabStyle } from '../utils/styles';
 
 type TabType = 'conversations' | 'analytics' | 'cost' | 'config';
 
@@ -49,35 +50,35 @@ export const AIHelperDashboard: React.FC = () => {
 
   return (
     <div style={{
-      padding: '32px',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      backgroundColor: '#f8fafc',
+      padding: SPACING.xl,
+      fontFamily: FONT_FAMILY,
+      backgroundColor: COLORS.bgPage,
       minHeight: '100vh',
     }}>
       <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
         {/* Dashboard Header */}
         <div style={{
-          marginBottom: '24px',
-          padding: '24px 32px',
-          background: '#ffffff',
-          borderRadius: '12px',
-          border: '1px solid #e5e7eb',
-          boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
+          marginBottom: SPACING.lg,
+          padding: `${SPACING.lg} ${SPACING.xl}`,
+          background: COLORS.bgCard,
+          borderRadius: RADIUS.lg,
+          border: `1px solid ${COLORS.border}`,
+          boxShadow: SHADOWS.sm,
         }}>
-          <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: '#1f2937' }}>
+          <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: COLORS.textPrimary }}>
             AI 助手
           </h1>
-          <p style={{ margin: '8px 0 0', color: '#6b7280', fontSize: '14px' }}>
+          <p style={{ margin: '8px 0 0', color: COLORS.textSecondary, fontSize: '14px' }}>
             管理 AI 助手对话、查看统计数据及系统配置
           </p>
         </div>
 
         {/* Tab Navigation Bar */}
         <div style={{
-          marginBottom: '24px',
+          marginBottom: SPACING.lg,
           display: 'flex',
-          gap: '8px',
-          borderBottom: '1px solid #e5e7eb',
+          gap: SPACING.sm,
+          borderBottom: `2px solid ${COLORS.border}`,
         }}>
           {tabs.map((tab) => {
             const isActive = activeTab === tab.id;
@@ -86,18 +87,7 @@ export const AIHelperDashboard: React.FC = () => {
                 key={tab.id}
                 onClick={() => handleTabChange(tab.id)}
                 style={{
-                  padding: '12px 24px',
-                  fontSize: '15px',
-                  fontWeight: isActive ? 600 : 500,
-                  color: isActive ? '#4f46e5' : '#6b7280',
-                  backgroundColor: isActive ? '#ffffff' : 'transparent',
-                  border: '1px solid',
-                  borderColor: isActive ? '#e5e7eb' : 'transparent',
-                  borderBottomColor: isActive ? '#ffffff' : 'transparent',
-                  borderRadius: '8px 8px 0 0',
-                  marginBottom: '-1px',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
+                  ...getTabStyle(isActive),
                   outline: 'none',
                 }}
               >
@@ -109,10 +99,10 @@ export const AIHelperDashboard: React.FC = () => {
 
         {/* Tab Content Container */}
         <div style={{
-          backgroundColor: '#ffffff',
-          borderRadius: '12px',
-          border: '1px solid #e5e7eb',
-          boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
+          backgroundColor: COLORS.bgCard,
+          borderRadius: RADIUS.lg,
+          border: `1px solid ${COLORS.border}`,
+          boxShadow: SHADOWS.sm,
           overflow: 'hidden',
         }}>
           {activeTab === 'conversations' && <ConversationList embedded />}
