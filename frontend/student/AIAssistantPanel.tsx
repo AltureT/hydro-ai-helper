@@ -188,7 +188,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: COLORS.bgCard }}>
       <style>{markdownTheme}{keyframeStyles}</style>
-      <ChatMessageList {...messageListProps} variant="embedded">
+      <ChatMessageList {...messageListProps}>
         {renderErrorBanner(false)}
         {state.conversationHistory.length === 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.sm }}>
