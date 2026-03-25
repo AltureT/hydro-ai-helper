@@ -23,11 +23,11 @@ const initAiHelperBanner = () => {
     position: fixed;
     bottom: 20px;
     right: 20px;
-    background: #f5f3ff;
-    color: #5b21b6;
+    background: #dbeafe;
+    color: #2563eb;
     padding: 15px 20px;
     border-radius: 8px;
-    border: 1px solid #e0ddff;
+    border: 1px solid #dbeafe;
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     z-index: 9999;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -56,7 +56,7 @@ const initAiHelperBanner = () => {
       backendStatus.style.cssText = `
         margin-top: 8px;
         padding-top: 8px;
-        border-top: 1px solid #e0ddff;
+        border-top: 1px solid #dbeafe;
         font-size: 12px;
       `;
       backendStatus.textContent = '✓ 后端连接正常';
@@ -68,7 +68,7 @@ const initAiHelperBanner = () => {
       errorStatus.style.cssText = `
         margin-top: 8px;
         padding-top: 8px;
-        border-top: 1px solid #e0ddff;
+        border-top: 1px solid #dbeafe;
         font-size: 12px;
         color: #dc2626;
       `;
