@@ -112,8 +112,10 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 ## Installation
 
 ```bash
-# Clone and build
-git clone https://github.com/AltureT/hydro-ai-helper.git
+# Clone and build (choose one)
+git clone https://github.com/AltureT/hydro-ai-helper.git   # GitHub
+git clone https://gitee.com/alture/hydro-ai-helper.git      # Gitee (mirror)
+
 cd hydro-ai-helper
 npm install
 npm run build

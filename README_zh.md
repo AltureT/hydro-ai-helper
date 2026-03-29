@@ -112,8 +112,10 @@
 ## 安装
 
 ```bash
-# 克隆并构建
-git clone https://github.com/AltureT/hydro-ai-helper.git
+# 克隆并构建（二选一）
+git clone https://github.com/AltureT/hydro-ai-helper.git   # GitHub
+git clone https://gitee.com/alture/hydro-ai-helper.git      # Gitee（镜像）
+
 cd hydro-ai-helper
 npm install
 npm run build
