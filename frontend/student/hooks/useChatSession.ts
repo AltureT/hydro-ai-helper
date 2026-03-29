@@ -116,6 +116,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
   };
 
   const handleQuestionTypeChange = (newType: string) => {
+    const prevType = questionType;
     dispatch({ type: 'SET_QUESTION_TYPE', payload: newType });
     if (newType === 'optimize' && acCode) {
       dispatch({ type: 'SET_SHOW_LOAD_CODE_CONFIRM', payload: true });
@@ -129,6 +130,9 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           dispatch({ type: 'SET_SCRATCHPAD_AVAILABLE', payload: true });
         }
       }
+    }
+    if ((prevType === 'debug' || prevType === 'optimize') && newType !== 'debug' && newType !== 'optimize') {
+      dispatch({ type: 'SET_INCLUDE_CODE', payload: false });
     }
   };
 

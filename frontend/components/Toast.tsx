@@ -23,7 +23,7 @@ const typeColorMap = {
 
 const containerStyle: React.CSSProperties = {
   position: 'fixed',
-  top: SPACING.lg,
+  top: '60px',
   right: SPACING.lg,
   zIndex: ZINDEX.toast,
   display: 'flex',
