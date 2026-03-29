@@ -69,6 +69,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       style={{
         ...getInputStyle(),
         border: 'none', outline: 'none', boxShadow: 'none',
+        backgroundColor: 'transparent',
         flex: 1, minHeight, maxHeight,
         resize: 'none' as const, boxSizing: 'border-box' as const,
       }}
@@ -81,9 +82,23 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   );
 
   const disabledSubmit = isLoading || !canSubmit;
-  const submitStyle: React.CSSProperties = disabledSubmit
-    ? { ...getButtonStyle('secondary'), cursor: 'not-allowed', opacity: 0.6, whiteSpace: 'nowrap' }
-    : { ...getButtonStyle('primary'), background: COLORS.gradient, whiteSpace: 'nowrap' };
+  const submitStyle: React.CSSProperties = {
+    width: '36px',
+    height: '36px',
+    borderRadius: '50%',
+    background: disabledSubmit ? COLORS.bgDisabled : COLORS.gradient,
+    color: disabledSubmit ? COLORS.textDisabled : '#ffffff',
+    border: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: disabledSubmit ? 'not-allowed' : 'pointer',
+    transition: 'all 150ms ease',
+    boxShadow: disabledSubmit ? 'none' : '0 2px 6px rgba(37, 99, 235, 0.3)',
+    flexShrink: 0,
+    fontSize: '16px',
+    padding: 0,
+  };
 
   return (
     <div style={{ background: COLORS.bgPage, flexShrink: 0 }}>
@@ -93,7 +108,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       {isFirstConversation && (
         <div style={{ padding: `${SPACING.sm} ${SPACING.base} 0` }}>
           <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginBottom: SPACING.xs }}>选择问题类型：</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.xs }}>
+          <div className="hide-scrollbar" style={{ display: 'flex', overflowX: 'auto', gap: SPACING.sm }}>
             {questionTypes.map(type => {
               const isSelected = questionType === type.value;
               return (
@@ -114,9 +129,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               );
             })}
           </div>
-          {questionType === 'debug' && (
-            <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginTop: SPACING.xs }}>将自动附带最近一次评测结果</div>
-          )}
+          {questionType && (() => {
+            const selected = questionTypes.find(t => t.value === questionType);
+            const desc = selected?.label.split(' - ')[1];
+            return desc ? (
+              <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginTop: SPACING.xs }}>
+                {desc}
+                {questionType === 'debug' && '，将自动附带最近一次评测结果'}
+              </div>
+            ) : null;
+          })()}
         </div>
       )}
 
@@ -170,14 +192,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       )}
 
       {/* Unified input card */}
-      <div style={{ margin: '12px', padding: '8px', borderRadius: '12px', border: `1px solid ${COLORS.border}`, backgroundColor: '#ffffff', boxShadow: SHADOWS.sm }}>
-        {renderTextarea(isFirstConversation ? '80px' : '40px', '120px')}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '8px', borderTop: `1px solid ${COLORS.bgPage}` }}>
+      <div className="chat-input-card" style={{
+        margin: '12px', padding: '10px 12px 10px 16px', borderRadius: '24px',
+        border: `1px solid ${COLORS.border}`, backgroundColor: '#f8fafc',
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.04)', transition: 'all 200ms ease',
+      }}>
+        {renderTextarea(isFirstConversation ? '48px' : '24px', '120px')}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
           {isFirstConversation ? renderIncludeCodeCheckbox('📎 附带当前代码') : <div />}
           {isLoading ? (
             <button
               onClick={onCancel}
-              style={{ ...getButtonStyle('danger'), whiteSpace: 'nowrap' }}
+              style={{ ...getButtonStyle('danger'), whiteSpace: 'nowrap', borderRadius: RADIUS.full, padding: '6px 16px', fontSize: '13px' }}
             >
               取消
             </button>
@@ -185,8 +211,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <button
               onClick={onSubmit} disabled={disabledSubmit}
               style={submitStyle}
+              title="发送 (Ctrl+Enter)"
             >
-              发送
+              &#x27A4;
             </button>
           )}
         </div>

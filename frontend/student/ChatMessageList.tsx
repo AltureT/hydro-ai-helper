@@ -96,9 +96,18 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
   const renderEmptyState = () => (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '40px 24px', textAlign: 'center' }}>
-      <div style={{ fontSize: '48px', marginBottom: '16px', background: 'linear-gradient(135deg, #eff6ff, #dbeafe)', borderRadius: '50%', padding: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>🤖</div>
+      <div style={{
+        width: '72px', height: '72px', borderRadius: '50%',
+        background: 'linear-gradient(135deg, #2563eb, #3b82f6)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: '36px', marginBottom: '24px',
+        boxShadow: '0 8px 24px rgba(37, 99, 235, 0.2)',
+        animation: 'float 3s ease-in-out infinite',
+      }}>🤖</div>
       <div style={{ fontSize: '18px', fontWeight: 600, color: COLORS.textPrimary, marginBottom: '8px' }}>你好！我是 AI 学习助手</div>
-      <div style={{ fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.6' }}>选择问题类型，描述你的疑惑<br/>我来帮你理清思路</div>
+      <div style={{ fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.8' }}>
+        选择下方的问题类型，描述你的疑惑<br/>我来帮你理清思路
+      </div>
     </div>
   );
 

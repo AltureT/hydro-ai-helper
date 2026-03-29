@@ -197,15 +197,18 @@ export const getBadgeStyle = (variant: 'success' | 'warning' | 'error' | 'info')
 export const getPillStyle = (isActive: boolean): React.CSSProperties => ({
   display: 'inline-flex',
   alignItems: 'center',
-  padding: `${SPACING.xs} ${SPACING.md}`,
+  padding: `6px ${SPACING.base}`,
   fontSize: '13px',
-  fontWeight: isActive ? 500 : 400,
-  color: isActive ? COLORS.primary : COLORS.textSecondary,
-  backgroundColor: isActive ? COLORS.primaryLight : 'transparent',
-  border: `1px solid ${isActive ? COLORS.primary : COLORS.border}`,
+  fontWeight: isActive ? 600 : 500,
+  color: isActive ? '#ffffff' : COLORS.textSecondary,
+  background: isActive ? COLORS.gradient : COLORS.bgPage,
+  border: isActive ? 'none' : `1px solid ${COLORS.border}`,
   borderRadius: RADIUS.full,
   cursor: 'pointer',
-  transition: `all ${TRANSITIONS.fast}`,
+  whiteSpace: 'nowrap',
+  boxShadow: isActive ? '0 2px 8px rgba(37, 99, 235, 0.25)' : 'none',
+  transform: isActive ? 'scale(1.02)' : 'scale(1)',
+  transition: 'all 200ms cubic-bezier(0.4, 0, 0.2, 1)',
 });
 
 export const modalOverlayStyle: React.CSSProperties = {
@@ -340,4 +343,11 @@ export const keyframeStyles = `
   @keyframes fadeIn { from{opacity:0} to{opacity:1} }
   @keyframes slideInRight { from{transform:translateX(100%)} to{transform:translateX(0)} }
   @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+  @keyframes float { 0%{transform:translateY(0)} 50%{transform:translateY(-8px)} 100%{transform:translateY(0)} }
+  .chat-input-card:focus-within {
+    border-color: ${COLORS.borderFocus} !important;
+    box-shadow: 0 0 0 3px ${COLORS.shadowFocus} !important;
+  }
+  .hide-scrollbar::-webkit-scrollbar { display: none; }
+  .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 `;
