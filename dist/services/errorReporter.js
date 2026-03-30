@@ -5,9 +5,11 @@ const crypto_1 = require("crypto");
 const telemetryService_1 = require("./telemetryService");
 const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 const BUFFER_THRESHOLD = 50;
+const MAX_BUFFER_SIZE = 1000;
 const MAX_ENTRIES_PER_BATCH = 100;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const SUPPRESSION_WINDOW_MS = 60 * 60 * 1000;
+const STALE_ENTRY_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT = 8000;
 class ErrorReporter {
     constructor(pluginInstallModel) {
@@ -59,6 +61,24 @@ class ErrorReporter {
         }
         // Sanitize message: truncate, strip potential PII
         const sanitized = this.sanitizeMessage(message);
+        // Evict oldest entries if buffer is full
+        if (this.buffer.size >= MAX_BUFFER_SIZE) {
+            const staleThreshold = now.getTime() - STALE_ENTRY_MS;
+            for (const [k, e] of this.buffer) {
+                if (e.lastSeen.getTime() < staleThreshold)
+                    this.buffer.delete(k);
+                if (this.buffer.size < MAX_BUFFER_SIZE)
+                    break;
+            }
+            // If still full, drop oldest entry
+            if (this.buffer.size >= MAX_BUFFER_SIZE) {
+                const oldest = this.buffer.keys().next().value;
+                if (oldest) {
+                    this.buffer.delete(oldest);
+                    this.droppedCount += 1;
+                }
+            }
+        }
         this.buffer.set(key, {
             key,
             error_type: errorType,

@@ -187,77 +187,46 @@ export class TelemetryService {
    * @returns 遥测数据
    */
   private async collect(): Promise<TelemetryData> {
-    const activeUsers7d = await this.conversationModel.countActiveUsers(7);
-    const totalConversations = await this.conversationModel.getTotalConversations();
-    const lastUsedAt = await this.conversationModel.getLastConversationTime();
+    // Parallelize independent queries
+    const [activeUsers7d, totalConversations, lastUsedAt, requestStats, aiConfig] = await Promise.all([
+      this.conversationModel.countActiveUsers(7),
+      this.conversationModel.getTotalConversations(),
+      this.conversationModel.getLastConversationTime(),
+      this.requestStatsModel?.getStats24h().catch(() => null),
+      this.aiConfigModel?.getConfig().catch(() => null),
+    ]);
 
-    let apiSuccessCount24h = 0;
-    let apiFailureCount24h = 0;
-    let avgLatencyMs24h = 0;
-    if (this.requestStatsModel) {
-      try {
-        const stats = await this.requestStatsModel.getStats24h();
-        apiSuccessCount24h = stats.successCount;
-        apiFailureCount24h = stats.failureCount;
-        avgLatencyMs24h = stats.avgLatencyMs;
-      } catch { /* non-critical */ }
-    }
-
-    let errorCount24h = 0;
-    let suppressedErrorCount = 0;
-    let droppedErrorCount = 0;
-    if (this.errorReporter) {
-      const selfStats = this.errorReporter.getSelfStats();
-      errorCount24h = apiFailureCount24h;
-      suppressedErrorCount = selfStats.suppressedCount;
-      droppedErrorCount = selfStats.droppedCount;
-    }
-
-    let activeEndpointCount = 0;
-    if (this.aiConfigModel) {
-      try {
-        const config = await this.aiConfigModel.getConfig();
-        if (config) {
-          activeEndpointCount = config.endpoints.filter(e => e.enabled).length;
-        }
-      } catch { /* non-critical */ }
-    }
+    const selfStats = this.errorReporter?.getSelfStats();
 
     return {
       activeUsers7d,
       totalConversations,
       lastUsedAt,
-      apiSuccessCount24h,
-      apiFailureCount24h,
-      avgLatencyMs24h,
-      errorCount24h,
-      suppressedErrorCount,
-      droppedErrorCount,
-      activeEndpointCount,
+      apiSuccessCount24h: requestStats?.successCount ?? 0,
+      apiFailureCount24h: requestStats?.failureCount ?? 0,
+      avgLatencyMs24h: requestStats?.avgLatencyMs ?? 0,
+      errorCount24h: requestStats?.failureCount ?? 0,
+      suppressedErrorCount: selfStats?.suppressedCount ?? 0,
+      droppedErrorCount: selfStats?.droppedCount ?? 0,
+      activeEndpointCount: aiConfig?.endpoints.filter(e => e.enabled).length ?? 0,
     };
   }
 
+  private static readonly DEFAULT_FEATURES: FeatureFlags = {
+    budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false,
+  };
+
   /**
-   * 收集功能标志
+   * 从已加载的 config 中提取功能标志（避免重复 getConfig 调用）
    */
-  private async collectFeatureFlags(): Promise<FeatureFlags> {
-    if (!this.aiConfigModel) {
-      return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
-    }
-    try {
-      const config = await this.aiConfigModel.getConfig();
-      if (!config) {
-        return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
-      }
-      const bc = config.budgetConfig;
-      return {
-        budget_limits: !!(bc && (bc.dailyTokenLimitPerUser || bc.dailyTokenLimitPerDomain || bc.monthlyTokenLimitPerDomain)),
-        custom_jailbreak_patterns: !!(config.extraJailbreakPatternsText && config.extraJailbreakPatternsText.trim()),
-        multi_endpoint: config.endpoints.filter(e => e.enabled).length > 1,
-      };
-    } catch {
-      return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
-    }
+  private extractFeatureFlags(config: Awaited<ReturnType<AIConfigModel['getConfig']>>): FeatureFlags {
+    if (!config) return TelemetryService.DEFAULT_FEATURES;
+    const bc = config.budgetConfig;
+    return {
+      budget_limits: !!(bc && (bc.dailyTokenLimitPerUser || bc.dailyTokenLimitPerDomain || bc.monthlyTokenLimitPerDomain)),
+      custom_jailbreak_patterns: !!(config.extraJailbreakPatternsText && config.extraJailbreakPatternsText.trim()),
+      multi_endpoint: config.endpoints.filter(e => e.enabled).length > 1,
+    };
   }
 
   /**
@@ -278,7 +247,9 @@ export class TelemetryService {
         .digest('hex')
         .substring(0, 16);
 
-      const features = await this.collectFeatureFlags();
+      let aiConfig = null;
+      try { aiConfig = await this.aiConfigModel?.getConfig() ?? null; } catch { /* */ }
+      const features = this.extractFeatureFlags(aiConfig);
 
       const payload: ReportPayload = {
         instance_id: config.instanceId,

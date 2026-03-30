@@ -442,18 +442,22 @@ async function handleDashboardOverview(request, env) {
     return json({ success: false, error: 'Unauthorized' }, { status: 401 });
   }
 
-  const instances = await env.DB.prepare('SELECT COUNT(*) AS count FROM plugin_stats').first();
-  const activeUsers = await env.DB.prepare('SELECT COALESCE(SUM(active_users_7d), 0) AS total FROM plugin_stats').first();
-  const conversations = await env.DB.prepare('SELECT COALESCE(SUM(total_conversations), 0) AS total FROM plugin_stats').first();
-  const errors = await env.DB.prepare('SELECT COALESCE(SUM(api_failure_count_24h), 0) AS failures, COALESCE(SUM(api_success_count_24h), 0) AS successes FROM plugin_stats').first();
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS instance_count,
+            COALESCE(SUM(active_users_7d), 0) AS active_users_7d,
+            COALESCE(SUM(total_conversations), 0) AS total_conversations,
+            COALESCE(SUM(api_failure_count_24h), 0) AS failures,
+            COALESCE(SUM(api_success_count_24h), 0) AS successes
+     FROM plugin_stats`,
+  ).first();
 
-  const totalRequests = (errors?.successes || 0) + (errors?.failures || 0);
-  const errorRate = totalRequests > 0 ? ((errors?.failures || 0) / totalRequests * 100).toFixed(2) : '0.00';
+  const totalRequests = (row?.successes || 0) + (row?.failures || 0);
+  const errorRate = totalRequests > 0 ? ((row?.failures || 0) / totalRequests * 100).toFixed(2) : '0.00';
 
   return json({
-    instances: instances?.count || 0,
-    active_users_7d: activeUsers?.total || 0,
-    total_conversations: conversations?.total || 0,
+    instances: row?.instance_count || 0,
+    active_users_7d: row?.active_users_7d || 0,
+    total_conversations: row?.total_conversations || 0,
     error_rate_percent: parseFloat(errorRate),
   });
 }
@@ -485,16 +489,18 @@ async function handleDashboardErrors(request, env) {
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
+  const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
     `SELECT stack_fingerprint, error_type, category, message,
             COUNT(DISTINCT instance_id) AS affected_instances,
             SUM(count) AS total_count,
             MAX(last_seen) AS last_seen
      FROM plugin_errors
+     WHERE received_at >= ?
      GROUP BY stack_fingerprint
      ORDER BY last_seen DESC
      LIMIT ? OFFSET ?`,
-  ).bind(limit, offset).all();
+  ).bind(cutoff30d, limit, offset).all();
 
   return json({ errors: rows?.results || [] });
 }
