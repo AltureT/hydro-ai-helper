@@ -167,19 +167,25 @@ async function handleReport(request, env) {
     );
     const lastUsedAt = parseDate(body.stats.last_used_at, 'stats.last_used_at', false);
 
+    // Enhanced heartbeat fields (optional, backward compatible)
+    const stats = body.stats || {};
+    const env_info = body.environment || {};
+    const errorCount24h = typeof stats.error_count_24h === 'number' ? stats.error_count_24h : 0;
+    const apiSuccessCount24h = typeof stats.api_success_count_24h === 'number' ? stats.api_success_count_24h : 0;
+    const apiFailureCount24h = typeof stats.api_failure_count_24h === 'number' ? stats.api_failure_count_24h : 0;
+    const avgLatencyMs24h = typeof stats.avg_latency_ms_24h === 'number' ? stats.avg_latency_ms_24h : 0;
+    const activeEndpointCount = typeof stats.active_endpoint_count === 'number' ? stats.active_endpoint_count : 0;
+    const nodeVersion = typeof env_info.node_version === 'string' ? env_info.node_version : null;
+    const osPlatform = typeof env_info.os_platform === 'string' ? env_info.os_platform : null;
+    const features = body.features ? JSON.stringify(body.features) : null;
+
     await env.DB.prepare(
       `INSERT INTO plugin_stats (
-        instance_id,
-        event,
-        version,
-        installed_at,
-        first_used_at,
-        last_report_at,
-        active_users_7d,
-        total_conversations,
-        last_used_at,
-        domain_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        instance_id, event, version, installed_at, first_used_at,
+        last_report_at, active_users_7d, total_conversations, last_used_at, domain_hash,
+        error_count_24h, api_success_count_24h, api_failure_count_24h,
+        avg_latency_ms_24h, active_endpoint_count, node_version, os_platform, features
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(instance_id) DO UPDATE SET
         event = excluded.event,
         version = excluded.version,
@@ -188,19 +194,26 @@ async function handleReport(request, env) {
         active_users_7d = excluded.active_users_7d,
         total_conversations = excluded.total_conversations,
         last_used_at = excluded.last_used_at,
-        domain_hash = excluded.domain_hash`,
+        domain_hash = excluded.domain_hash,
+        error_count_24h = excluded.error_count_24h,
+        api_success_count_24h = excluded.api_success_count_24h,
+        api_failure_count_24h = excluded.api_failure_count_24h,
+        avg_latency_ms_24h = excluded.avg_latency_ms_24h,
+        active_endpoint_count = excluded.active_endpoint_count,
+        node_version = excluded.node_version,
+        os_platform = excluded.os_platform,
+        features = excluded.features`,
     )
       .bind(
-        instanceId,
-        eventRaw,
-        version,
+        instanceId, eventRaw, version,
         installedAt.toISOString(),
         firstUsedAt ? firstUsedAt.toISOString() : null,
         lastReportAt.toISOString(),
-        activeUsers7d,
-        totalConversations,
+        activeUsers7d, totalConversations,
         lastUsedAt ? lastUsedAt.toISOString() : null,
         domainHash,
+        errorCount24h, apiSuccessCount24h, apiFailureCount24h,
+        avgLatencyMs24h, activeEndpointCount, nodeVersion, osPlatform, features,
       )
       .run();
 
@@ -253,6 +266,256 @@ async function handleBadgeVersion(env) {
   });
 }
 
+// ─── Error Reports Handler ──────────────────────────────
+
+async function handleErrors(request, env) {
+  if (request.method === 'OPTIONS') {
+    const headers = new Headers();
+    applyCorsHeaders(headers);
+    return new Response(null, { status: 204, headers });
+  }
+
+  if (request.method !== 'POST') {
+    return json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  if (!isAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  if (!isRecord(body)) {
+    return json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  try {
+    const instanceId = requireString(body.instance_id, 'instance_id');
+    const version = typeof body.version === 'string' ? body.version : null;
+    const domainHash = typeof body.domain_hash === 'string' ? body.domain_hash : null;
+
+    if (!Array.isArray(body.errors) || body.errors.length === 0) {
+      throw new HttpError(400, 'errors array is required');
+    }
+
+    // Rate limit: max 500 error records per instance per day
+    const today = new Date().toISOString().slice(0, 10);
+    const countRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM plugin_errors
+       WHERE instance_id = ? AND received_at >= ?`,
+    ).bind(instanceId, today).first();
+    const currentCount = countRow ? readFiniteNumber(countRow.cnt) : 0;
+    if (currentCount >= 500) {
+      return json({ success: false, error: 'Daily error limit reached' }, { status: 429 });
+    }
+
+    const maxToInsert = Math.min(body.errors.length, 100, 500 - currentCount);
+    const stmts = [];
+    for (let i = 0; i < maxToInsert; i++) {
+      const e = body.errors[i];
+      if (!isRecord(e)) continue;
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO plugin_errors (
+            instance_id, version, domain_hash, error_type, category,
+            message, http_status, count, first_seen, last_seen, stack_fingerprint
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          instanceId,
+          version,
+          domainHash,
+          typeof e.error_type === 'string' ? e.error_type : 'unknown',
+          typeof e.category === 'string' ? e.category : 'unknown',
+          typeof e.message === 'string' ? e.message.slice(0, 1000) : null,
+          typeof e.http_status === 'number' ? e.http_status : null,
+          typeof e.count === 'number' ? e.count : 1,
+          typeof e.first_seen === 'string' ? e.first_seen : new Date().toISOString(),
+          typeof e.last_seen === 'string' ? e.last_seen : new Date().toISOString(),
+          typeof e.stack_fingerprint === 'string' ? e.stack_fingerprint.slice(0, 16) : null,
+        ),
+      );
+    }
+
+    if (stmts.length > 0) {
+      await env.DB.batch(stmts);
+    }
+
+    return json({ success: true, inserted: stmts.length }, { status: 200 });
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 500;
+    const message = error instanceof HttpError ? error.message : 'Internal Server Error';
+    console.error('[errors] error', error);
+    return json({ success: false, error: message }, { status });
+  }
+}
+
+// ─── Feedback Handler ──────────────────────────────────
+
+async function handleFeedback(request, env) {
+  if (request.method === 'OPTIONS') {
+    const headers = new Headers();
+    applyCorsHeaders(headers);
+    return new Response(null, { status: 204, headers });
+  }
+
+  if (request.method !== 'POST') {
+    return json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  if (!isAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  if (!isRecord(body)) {
+    return json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  try {
+    const instanceId = requireString(body.instance_id, 'instance_id');
+    const version = typeof body.version === 'string' ? body.version : null;
+    const domainHash = typeof body.domain_hash === 'string' ? body.domain_hash : null;
+
+    if (!isRecord(body.feedback)) {
+      throw new HttpError(400, 'feedback object is required');
+    }
+
+    const fb = body.feedback;
+    const fbType = requireString(fb.type, 'feedback.type');
+    if (!['bug', 'feature', 'other'].includes(fbType)) {
+      throw new HttpError(400, 'feedback.type must be bug, feature, or other');
+    }
+    const subject = requireString(fb.subject, 'feedback.subject').slice(0, 200);
+    const fbBody = typeof fb.body === 'string' ? fb.body.slice(0, 2000) : null;
+    const contactEmail = typeof fb.contact_email === 'string' ? fb.contact_email.slice(0, 200) : null;
+    const envInfo = isRecord(fb.environment) ? JSON.stringify(fb.environment) : null;
+
+    // Rate limit: max 10 feedbacks per instance per day
+    const today = new Date().toISOString().slice(0, 10);
+    const countRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM plugin_feedback
+       WHERE instance_id = ? AND received_at >= ?`,
+    ).bind(instanceId, today).first();
+    const currentCount = countRow ? readFiniteNumber(countRow.cnt) : 0;
+    if (currentCount >= 10) {
+      return json({ success: false, error: 'Daily feedback limit reached' }, { status: 429 });
+    }
+
+    await env.DB.prepare(
+      `INSERT INTO plugin_feedback (
+        instance_id, version, domain_hash, type, subject, body, contact_email, environment_info
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(instanceId, version, domainHash, fbType, subject, fbBody, contactEmail, envInfo).run();
+
+    return json({ success: true }, { status: 200 });
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 500;
+    const message = error instanceof HttpError ? error.message : 'Internal Server Error';
+    console.error('[feedback] error', error);
+    return json({ success: false, error: message }, { status });
+  }
+}
+
+// ─── Dashboard API ─────────────────────────────────────
+
+function isDashboardAuthorized(request, env) {
+  const token = (env.DASHBOARD_TOKEN || '').trim();
+  if (!token) return true;
+  const header = request.headers.get('Authorization') || '';
+  const [type, value] = header.split(' ');
+  return type === 'Bearer' && value === token;
+}
+
+async function handleDashboardOverview(request, env) {
+  if (!isDashboardAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const instances = await env.DB.prepare('SELECT COUNT(*) AS count FROM plugin_stats').first();
+  const activeUsers = await env.DB.prepare('SELECT COALESCE(SUM(active_users_7d), 0) AS total FROM plugin_stats').first();
+  const conversations = await env.DB.prepare('SELECT COALESCE(SUM(total_conversations), 0) AS total FROM plugin_stats').first();
+  const errors = await env.DB.prepare('SELECT COALESCE(SUM(api_failure_count_24h), 0) AS failures, COALESCE(SUM(api_success_count_24h), 0) AS successes FROM plugin_stats').first();
+
+  const totalRequests = (errors?.successes || 0) + (errors?.failures || 0);
+  const errorRate = totalRequests > 0 ? ((errors?.failures || 0) / totalRequests * 100).toFixed(2) : '0.00';
+
+  return json({
+    instances: instances?.count || 0,
+    active_users_7d: activeUsers?.total || 0,
+    total_conversations: conversations?.total || 0,
+    error_rate_percent: parseFloat(errorRate),
+  });
+}
+
+async function handleDashboardInstances(request, env) {
+  if (!isDashboardAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  const rows = await env.DB.prepare(
+    `SELECT instance_id, version, active_users_7d, total_conversations,
+            error_count_24h, api_failure_count_24h, last_report_at, node_version, os_platform
+     FROM plugin_stats ORDER BY last_report_at DESC LIMIT ? OFFSET ?`,
+  ).bind(limit, offset).all();
+
+  return json({ instances: rows?.results || [] });
+}
+
+async function handleDashboardErrors(request, env) {
+  if (!isDashboardAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  const rows = await env.DB.prepare(
+    `SELECT stack_fingerprint, error_type, category, message,
+            COUNT(DISTINCT instance_id) AS affected_instances,
+            SUM(count) AS total_count,
+            MAX(last_seen) AS last_seen
+     FROM plugin_errors
+     GROUP BY stack_fingerprint
+     ORDER BY last_seen DESC
+     LIMIT ? OFFSET ?`,
+  ).bind(limit, offset).all();
+
+  return json({ errors: rows?.results || [] });
+}
+
+async function handleDashboardFeedback(request, env) {
+  if (!isDashboardAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  const rows = await env.DB.prepare(
+    `SELECT id, instance_id, version, type, subject, body, contact_email, received_at
+     FROM plugin_feedback ORDER BY received_at DESC LIMIT ? OFFSET ?`,
+  ).bind(limit, offset).all();
+
+  return json({ feedback: rows?.results || [] });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -279,6 +542,18 @@ export default {
     switch (pathname) {
       case '/api/report':
         return handleReport(request, env);
+      case '/api/errors':
+        return handleErrors(request, env);
+      case '/api/feedback':
+        return handleFeedback(request, env);
+      case '/api/dashboard/overview':
+        return handleDashboardOverview(request, env);
+      case '/api/dashboard/instances':
+        return handleDashboardInstances(request, env);
+      case '/api/dashboard/errors':
+        return handleDashboardErrors(request, env);
+      case '/api/dashboard/feedback':
+        return handleDashboardFeedback(request, env);
       case '/api/badge-installs':
         return handleBadgeInstalls(env);
       case '/api/badge-active':
@@ -299,15 +574,33 @@ export default {
         return;
       }
 
-      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
+      // Clean up stale plugin stats (90 days)
       await env.DB.prepare(
         `DELETE FROM plugin_stats
          WHERE last_report_at IS NOT NULL
            AND last_report_at < ?`,
-      ).bind(cutoff).run();
+      ).bind(cutoff90d).run();
 
-      console.log('[cron] cleanup done, cutoff =', cutoff);
+      // Clean up old errors (30 days)
+      await env.DB.prepare(
+        `DELETE FROM plugin_errors WHERE received_at < ?`,
+      ).bind(cutoff30d).run();
+
+      // Clean up old feedback (90 days)
+      await env.DB.prepare(
+        `DELETE FROM plugin_feedback WHERE received_at < ?`,
+      ).bind(cutoff90d).run();
+
+      // Nullify contact_email after 90 days (privacy)
+      await env.DB.prepare(
+        `UPDATE plugin_feedback SET contact_email = NULL
+         WHERE contact_email IS NOT NULL AND received_at < ?`,
+      ).bind(cutoff90d).run();
+
+      console.log('[cron] cleanup done, 90d =', cutoff90d, ', 30d =', cutoff30d);
     })());
   },
 };
