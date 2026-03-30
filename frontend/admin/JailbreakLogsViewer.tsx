@@ -15,13 +15,22 @@ interface JailbreakLogsViewerProps {
 
 export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern,
-}) => (
+}) => {
+  const [collapsed, setCollapsed] = React.useState(true);
+
+  return (
   <div style={{
     ...cardStyle,
     marginTop: '20px',
   }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-      <h2 style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>越狱尝试记录</h2>
+    <div
+      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', userSelect: 'none' }}
+      onClick={() => setCollapsed(!collapsed)}
+    >
+      <h2 style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
+        <span style={{ display: 'inline-block', transition: 'transform 0.2s', transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)', marginRight: '8px' }}>▼</span>
+        越狱尝试记录
+      </h2>
       {logPagination.total > 0 && (
         <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
           共 {logPagination.total} 条记录
@@ -29,7 +38,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
       )}
     </div>
 
-    {logPagination.logs.length === 0 ? (
+    {collapsed ? null : logPagination.logs.length === 0 ? (
       <div style={{
         padding: SPACING.base, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md,
         border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, fontSize: '14px',
@@ -122,4 +131,5 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
       </>
     )}
   </div>
-);
+  );
+};
