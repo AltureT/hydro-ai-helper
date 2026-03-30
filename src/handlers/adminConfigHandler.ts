@@ -10,6 +10,7 @@ import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
+import type { PluginInstallModel } from '../models/pluginInstall';
 
 /**
  * 更新配置请求接口（兼容旧版 + 新版多端点）
@@ -35,6 +36,7 @@ interface UpdateConfigRequest {
   systemPromptTemplate?: string;
   extraJailbreakPatternsText?: string;
   budgetConfig?: BudgetConfig;
+  telemetryEnabled?: boolean;
 }
 
 /**
@@ -56,6 +58,21 @@ export class AdminConfigHandler extends Handler {
 
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      const pluginInstallModel: PluginInstallModel = this.ctx.get('pluginInstallModel');
+
+      // 获取遥测状态
+      let telemetry: { enabled: boolean; instanceId: string; lastReportAt?: string; version: string } | null = null;
+      try {
+        const install = await pluginInstallModel.getInstall();
+        if (install) {
+          telemetry = {
+            enabled: install.telemetryEnabled,
+            instanceId: install.instanceId.slice(-8),
+            lastReportAt: install.lastReportAt?.toISOString(),
+            version: install.lastVersion,
+          };
+        }
+      } catch { /* non-critical */ }
 
       // 解析分页参数
       const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
@@ -67,6 +84,7 @@ export class AdminConfigHandler extends Handler {
       if (!config) {
         this.response.body = {
           config: null,
+          telemetry,
           builtinJailbreakPatterns: builtinJailbreakPatternSources,
           jailbreakLogs: {
             logs: logResult.logs.map(formatJailbreakLog),
@@ -74,7 +92,6 @@ export class AdminConfigHandler extends Handler {
             page: logResult.page,
             totalPages: logResult.totalPages
           },
-          // 兼容旧前端
           recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
         };
         this.response.type = 'application/json';
@@ -122,10 +139,8 @@ export class AdminConfigHandler extends Handler {
 
       this.response.body = {
         config: {
-          // 新版多端点字段
           endpoints: endpointsWithMaskedKeys,
           selectedModels: config.selectedModels || [],
-          // 旧版字段（向后兼容）
           apiBaseUrl: config.apiBaseUrl,
           modelName: config.modelName,
           rateLimitPerMinute: config.rateLimitPerMinute,
@@ -137,6 +152,7 @@ export class AdminConfigHandler extends Handler {
           hasApiKey,
           updatedAt: config.updatedAt.toISOString()
         },
+        telemetry,
         builtinJailbreakPatterns: builtinJailbreakPatternSources,
         jailbreakLogs: {
           logs: logResult.logs.map(formatJailbreakLog),
@@ -144,7 +160,6 @@ export class AdminConfigHandler extends Handler {
           page: logResult.page,
           totalPages: logResult.totalPages
         },
-        // 兼容旧前端
         recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
@@ -275,6 +290,16 @@ export class AdminConfigHandler extends Handler {
           monthlyTokenLimitPerDomain: Math.max(0, Math.floor(Number(bc.monthlyTokenLimitPerDomain) || 0)),
           softLimitPercent: Math.min(100, Math.max(0, Math.floor(Number(bc.softLimitPercent) || 80))),
         };
+      }
+
+      // 遥测开关
+      if (body.telemetryEnabled !== undefined) {
+        try {
+          const pim: PluginInstallModel = this.ctx.get('pluginInstallModel');
+          await pim.updateTelemetryEnabled(!!body.telemetryEnabled);
+        } catch (err) {
+          console.error('[AdminConfigHandler] Update telemetry failed:', err);
+        }
       }
 
       // 旧版单 API Key（向后兼容）

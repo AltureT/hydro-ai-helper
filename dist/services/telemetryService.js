@@ -10,16 +10,23 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TelemetryService = void 0;
+exports.getTelemetryToken = getTelemetryToken;
+exports.sendToEndpoint = sendToEndpoint;
+exports.getTelemetryBases = getTelemetryBases;
+exports.buildTelemetryUrl = buildTelemetryUrl;
+exports.normalizeTelemetryBase = normalizeTelemetryBase;
 const crypto_1 = require("crypto");
 const axios_1 = __importDefault(require("axios"));
 /**
  * Telemetry Service 类
  */
 class TelemetryService {
-    constructor(pluginInstallModel, conversationModel) {
+    constructor(pluginInstallModel, conversationModel, aiConfigModel, requestStatsModel, errorReporter) {
         this.pluginInstallModel = pluginInstallModel;
         this.conversationModel = conversationModel;
-        this.DEFAULT_ENDPOINTS = ['https://stats.how2learns.com/api/report'];
+        this.aiConfigModel = aiConfigModel;
+        this.requestStatsModel = requestStatsModel;
+        this.errorReporter = errorReporter;
         this.HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
         this.REQUEST_TIMEOUT = 8000; // 8 秒
     }
@@ -97,17 +104,75 @@ class TelemetryService {
      * @returns 遥测数据
      */
     async collect() {
-        // 统计最近 7 天活跃用户数
         const activeUsers7d = await this.conversationModel.countActiveUsers(7);
-        // 统计总对话数
         const totalConversations = await this.conversationModel.getTotalConversations();
-        // 查询最近对话时间
         const lastUsedAt = await this.conversationModel.getLastConversationTime();
+        let apiSuccessCount24h = 0;
+        let apiFailureCount24h = 0;
+        let avgLatencyMs24h = 0;
+        if (this.requestStatsModel) {
+            try {
+                const stats = await this.requestStatsModel.getStats24h();
+                apiSuccessCount24h = stats.successCount;
+                apiFailureCount24h = stats.failureCount;
+                avgLatencyMs24h = stats.avgLatencyMs;
+            }
+            catch { /* non-critical */ }
+        }
+        let errorCount24h = 0;
+        let suppressedErrorCount = 0;
+        let droppedErrorCount = 0;
+        if (this.errorReporter) {
+            const selfStats = this.errorReporter.getSelfStats();
+            errorCount24h = apiFailureCount24h;
+            suppressedErrorCount = selfStats.suppressedCount;
+            droppedErrorCount = selfStats.droppedCount;
+        }
+        let activeEndpointCount = 0;
+        if (this.aiConfigModel) {
+            try {
+                const config = await this.aiConfigModel.getConfig();
+                if (config) {
+                    activeEndpointCount = config.endpoints.filter(e => e.enabled).length;
+                }
+            }
+            catch { /* non-critical */ }
+        }
         return {
             activeUsers7d,
             totalConversations,
-            lastUsedAt
+            lastUsedAt,
+            apiSuccessCount24h,
+            apiFailureCount24h,
+            avgLatencyMs24h,
+            errorCount24h,
+            suppressedErrorCount,
+            droppedErrorCount,
+            activeEndpointCount,
         };
+    }
+    /**
+     * 收集功能标志
+     */
+    async collectFeatureFlags() {
+        if (!this.aiConfigModel) {
+            return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
+        }
+        try {
+            const config = await this.aiConfigModel.getConfig();
+            if (!config) {
+                return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
+            }
+            const bc = config.budgetConfig;
+            return {
+                budget_limits: !!(bc && (bc.dailyTokenLimitPerUser || bc.dailyTokenLimitPerDomain || bc.monthlyTokenLimitPerDomain)),
+                custom_jailbreak_patterns: !!(config.extraJailbreakPatternsText && config.extraJailbreakPatternsText.trim()),
+                multi_endpoint: config.endpoints.filter(e => e.enabled).length > 1,
+            };
+        }
+        catch {
+            return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
+        }
     }
     /**
      * 上报数据到远程服务器
@@ -120,14 +185,12 @@ class TelemetryService {
                 console.error('[TelemetryService] Install record not found');
                 return;
             }
-            // 收集数据
             const stats = await this.collect();
-            // 计算 domain hash（隐私保护）
             const domainHash = (0, crypto_1.createHash)('sha256')
                 .update(config.domainsSeen.sort().join(','))
                 .digest('hex')
                 .substring(0, 16);
-            // 构造上报负载
+            const features = await this.collectFeatureFlags();
             const payload = {
                 instance_id: config.instanceId,
                 event: eventType,
@@ -137,61 +200,97 @@ class TelemetryService {
                 stats: {
                     active_users_7d: stats.activeUsers7d,
                     total_conversations: stats.totalConversations,
-                    last_used_at: stats.lastUsedAt?.toISOString()
+                    last_used_at: stats.lastUsedAt?.toISOString(),
+                    api_success_count_24h: stats.apiSuccessCount24h,
+                    api_failure_count_24h: stats.apiFailureCount24h,
+                    avg_latency_ms_24h: stats.avgLatencyMs24h,
+                    error_count_24h: stats.errorCount24h,
+                    suppressed_error_count: stats.suppressedErrorCount,
+                    dropped_error_count: stats.droppedErrorCount,
+                    active_endpoint_count: stats.activeEndpointCount,
                 },
+                environment: {
+                    node_version: process.version,
+                    os_platform: process.platform,
+                    os_arch: process.arch,
+                },
+                features,
                 domain_hash: domainHash,
                 timestamp: new Date().toISOString()
             };
-            const endpoints = this.getTelemetryEndpoints(config.preferredTelemetryEndpoint);
-            const token = (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
-            let lastError;
-            for (const endpoint of endpoints) {
-                try {
-                    await axios_1.default.post(endpoint, payload, {
-                        timeout: this.REQUEST_TIMEOUT,
-                        headers: {
-                            'Content-Type': 'application/json',
-                            ...(token ? { Authorization: `Bearer ${token}` } : {})
-                        }
-                    });
-                    await this.pluginInstallModel.updateLastReportTime();
-                    await this.pluginInstallModel.updatePreferredTelemetryEndpoint(endpoint);
-                    console.log(`[TelemetryService] Report sent successfully (${eventType}) -> ${endpoint}`);
-                    return;
-                }
-                catch (error) {
-                    lastError = error;
-                    const status = axios_1.default.isAxiosError(error) ? error.response?.status : undefined;
-                    const statusText = axios_1.default.isAxiosError(error) ? error.response?.statusText : undefined;
-                    console.error('[TelemetryService] Report failed', {
-                        endpoint,
-                        status,
-                        statusText,
-                        message: axios_1.default.isAxiosError(error) ? error.message : String(error)
-                    });
-                }
+            const bases = getTelemetryBases(config.preferredTelemetryEndpoint);
+            const urls = bases.map(b => buildTelemetryUrl(b, '/api/report'));
+            await this.sendToFirstAvailable(urls, payload);
+            await this.pluginInstallModel.updateLastReportTime();
+            if (bases.length > 0) {
+                await this.pluginInstallModel.updatePreferredTelemetryEndpoint(bases[0]);
             }
-            console.error('[TelemetryService] All telemetry endpoints failed', {
-                endpoints,
-                error: axios_1.default.isAxiosError(lastError) ? lastError.message : String(lastError)
-            });
+            console.log(`[TelemetryService] Report sent successfully (${eventType})`);
         }
         catch (error) {
             console.error('[TelemetryService] Report error:', error);
         }
     }
-    getTelemetryEndpoints(preferred) {
-        const raw = process.env.AI_HELPER_TELEMETRY_ENDPOINTS;
-        const parsed = parseTelemetryEndpoints(raw);
-        const endpoints = parsed.length > 0 ? parsed : this.DEFAULT_ENDPOINTS;
-        const normalizedPreferred = preferred ? normalizeTelemetryEndpoint(preferred) : undefined;
-        if (normalizedPreferred && endpoints.includes(normalizedPreferred)) {
-            return [
-                normalizedPreferred,
-                ...endpoints.filter((endpoint) => endpoint !== normalizedPreferred)
-            ];
+    /**
+     * 上报反馈到远程服务器（不受 telemetryEnabled 控制）
+     */
+    async reportFeedback(feedback) {
+        try {
+            const config = await this.pluginInstallModel.getInstall();
+            if (!config) {
+                return false;
+            }
+            const domainHash = (0, crypto_1.createHash)('sha256')
+                .update(config.domainsSeen.sort().join(','))
+                .digest('hex')
+                .substring(0, 16);
+            const payload = {
+                instance_id: config.instanceId,
+                event: 'feedback',
+                version: config.lastVersion,
+                domain_hash: domainHash,
+                timestamp: new Date().toISOString(),
+                feedback: {
+                    ...feedback,
+                    environment: {
+                        node_version: process.version,
+                        os_platform: process.platform,
+                        os_arch: process.arch,
+                    },
+                },
+            };
+            const bases = getTelemetryBases();
+            const urls = bases.map(b => buildTelemetryUrl(b, '/api/feedback'));
+            await this.sendToFirstAvailable(urls, payload);
+            return true;
         }
-        return endpoints;
+        catch (error) {
+            console.error('[TelemetryService] Feedback report error:', error);
+            return false;
+        }
+    }
+    /**
+     * 尝试向第一个可用的端点发送数据
+     */
+    async sendToFirstAvailable(urls, payload) {
+        const token = getTelemetryToken();
+        let lastError;
+        for (const url of urls) {
+            try {
+                await sendToEndpoint(url, payload, token, this.REQUEST_TIMEOUT);
+                return;
+            }
+            catch (error) {
+                lastError = error;
+                const status = axios_1.default.isAxiosError(error) ? error.response?.status : undefined;
+                console.error('[TelemetryService] Send failed', {
+                    url,
+                    status,
+                    message: axios_1.default.isAxiosError(error) ? error.message : String(error)
+                });
+            }
+        }
+        throw lastError || new Error('All telemetry endpoints failed');
     }
     /**
      * 停止遥测服务
@@ -205,17 +304,66 @@ class TelemetryService {
     }
 }
 exports.TelemetryService = TelemetryService;
-function parseTelemetryEndpoints(value) {
+// ─── 导出的共享工具函数 ─────────────────────────────
+const DEFAULT_BASE = 'https://stats.how2learns.com';
+/**
+ * 获取遥测 token
+ */
+function getTelemetryToken() {
+    return (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
+}
+/**
+ * 发送数据到指定端点
+ */
+async function sendToEndpoint(url, payload, token, timeout = 8000) {
+    await axios_1.default.post(url, payload, {
+        timeout,
+        headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+    });
+}
+/**
+ * 获取遥测基础 URL 列表（优先使用 preferred）
+ */
+function getTelemetryBases(preferred) {
+    const raw = process.env.AI_HELPER_TELEMETRY_ENDPOINTS;
+    const parsed = parseTelemetryBases(raw);
+    const bases = parsed.length > 0 ? parsed : [DEFAULT_BASE];
+    const normalizedPreferred = preferred ? normalizeTelemetryBase(preferred) : undefined;
+    if (normalizedPreferred && bases.includes(normalizedPreferred)) {
+        return [
+            normalizedPreferred,
+            ...bases.filter((b) => b !== normalizedPreferred),
+        ];
+    }
+    return bases;
+}
+/**
+ * 构建遥测端点完整 URL
+ * @param base 基础 URL (如 https://stats.how2learns.com)
+ * @param apiPath API 路径 (如 /api/report, /api/errors, /api/feedback)
+ */
+function buildTelemetryUrl(base, apiPath) {
+    const trimmedBase = base.replace(/\/+$/, '');
+    const trimmedPath = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+    return `${trimmedBase}${trimmedPath}`;
+}
+function parseTelemetryBases(value) {
     if (!value) {
         return [];
     }
-    const endpoints = value
+    const bases = value
         .split(',')
-        .map((raw) => normalizeTelemetryEndpoint(raw))
+        .map((raw) => normalizeTelemetryBase(raw))
         .filter((item) => Boolean(item));
-    return Array.from(new Set(endpoints));
+    return Array.from(new Set(bases));
 }
-function normalizeTelemetryEndpoint(value) {
+/**
+ * 归一化遥测基础 URL（不追加路径）
+ */
+function normalizeTelemetryBase(value) {
     const trimmed = value.trim();
     if (!trimmed) {
         return undefined;
@@ -230,13 +378,18 @@ function normalizeTelemetryEndpoint(value) {
     }
     url.hash = '';
     url.search = '';
-    const basePath = url.pathname.replace(/\/+$/, '');
+    // 去除尾部 /api/report 或其他 api 路径，只保留 base
+    let basePath = url.pathname.replace(/\/+$/, '');
     if (basePath.endsWith('/api/report')) {
-        url.pathname = basePath;
-        return url.toString();
+        basePath = basePath.slice(0, -'/api/report'.length);
     }
-    const nextPath = basePath && basePath !== '/' ? `${basePath}/api/report` : '/api/report';
-    url.pathname = nextPath;
-    return url.toString();
+    else if (basePath.endsWith('/api/errors')) {
+        basePath = basePath.slice(0, -'/api/errors'.length);
+    }
+    else if (basePath.endsWith('/api/feedback')) {
+        basePath = basePath.slice(0, -'/api/feedback'.length);
+    }
+    url.pathname = basePath || '/';
+    return url.toString().replace(/\/+$/, '');
 }
 //# sourceMappingURL=telemetryService.js.map

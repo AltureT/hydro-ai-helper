@@ -47,6 +47,9 @@ console.log('[AI-Helper] versionHandler OK');
 import { CostAnalyticsHandler, CostAnalyticsHandlerPriv } from './handlers/costAnalyticsHandler';
 console.log('[AI-Helper] costAnalyticsHandler OK');
 
+import { FeedbackHandler, FeedbackHandlerPriv } from './handlers/feedbackHandler';
+console.log('[AI-Helper] feedbackHandler OK');
+
 import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerPriv } from './handlers/updateHandler';
 console.log('[AI-Helper] updateHandler OK');
 
@@ -63,6 +66,8 @@ console.log('[AI-Helper] models OK');
 import { MigrationService } from './services/migrationService';
 import { VersionService } from './services/versionService';
 import { TelemetryService } from './services/telemetryService';
+import { ErrorReporter } from './services/errorReporter';
+import { RequestStatsModel } from './models/requestStats';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -97,6 +102,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const versionCacheModel = new VersionCacheModel(db);
     const pluginInstallModel = new PluginInstallModel(db);
     const tokenUsageModel = new TokenUsageModel(db);
+    const requestStatsModel = new RequestStatsModel(db);
+
+    // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
+    const errorReporter = new ErrorReporter(pluginInstallModel);
 
     // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
     const safeEnsureIndexes = async (model: { ensureIndexes(): Promise<void> }, name: string) => {
@@ -104,6 +113,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
         await model.ensureIndexes();
       } catch (err) {
         console.warn(`[AI-Helper] ${name} 索引创建失败，插件继续运行:`, err);
+        errorReporter.capture('startup_failure', 'db', `Index creation failed: ${name}`, undefined, err instanceof Error ? err.stack : undefined);
       }
     };
     await safeEnsureIndexes(conversationModel, 'conversationModel');
@@ -114,6 +124,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(versionCacheModel, 'versionCacheModel');
     await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
     await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
+    await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
@@ -136,6 +147,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
         }
       } catch (err) {
         console.error('[AI-Helper] Key rotation failed:', err instanceof Error ? err.message : 'unknown error');
+        errorReporter.capture('startup_failure', 'config', `Key rotation failed: ${err instanceof Error ? err.message : 'unknown'}`, undefined, err instanceof Error ? err.stack : undefined);
       }
     }
 
@@ -148,17 +160,24 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('versionCacheModel', versionCacheModel);
     ctx.provide('pluginInstallModel', pluginInstallModel);
     ctx.provide('tokenUsageModel', tokenUsageModel);
+    ctx.provide('requestStatsModel', requestStatsModel);
+    ctx.provide('errorReporter', errorReporter);
 
     // 初始化版本服务
     const versionService = new VersionService(versionCacheModel);
     ctx.provide('versionService', versionService);
 
     // 初始化遥测服务（延迟 5 秒启动，避免阻塞插件加载）
-    const telemetryService = new TelemetryService(pluginInstallModel, conversationModel);
+    const telemetryService = new TelemetryService(
+      pluginInstallModel, conversationModel,
+      aiConfigModel, requestStatsModel, errorReporter,
+    );
+    ctx.provide('telemetryService', telemetryService);
     setTimeout(() => {
       telemetryService.init().catch(err => {
         console.error('[AI-Helper] Telemetry service initialization failed:', err);
       });
+      errorReporter.start();
     }, 5000);
 
     // 注册测试路由
@@ -224,6 +243,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_helper_update_info', '/ai-helper/admin/update/info', UpdateInfoHandler, UpdateInfoHandlerPriv);
     // POST /ai-helper/admin/update - 执行更新
     ctx.Route('ai_helper_update', '/ai-helper/admin/update', UpdateHandler, UpdateHandlerPriv);
+
+    // POST /ai-helper/admin/feedback - 管理员反馈提交
+    ctx.Route('ai_helper_admin_feedback', '/ai-helper/admin/feedback', FeedbackHandler, FeedbackHandlerPriv);
 
     // GET /ai-helper/analytics/cost - 成本分析 API
     ctx.Route('ai_helper_cost_analytics', '/ai-helper/analytics/cost', CostAnalyticsHandler, CostAnalyticsHandlerPriv);

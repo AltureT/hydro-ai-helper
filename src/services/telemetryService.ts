@@ -9,14 +9,47 @@ import { createHash } from 'crypto';
 import axios from 'axios';
 import type { PluginInstallModel } from '../models/pluginInstall';
 import type { ConversationModel } from '../models/conversation';
+import type { AIConfigModel } from '../models/aiConfig';
+import type { RequestStatsModel } from '../models/requestStats';
+import type { ErrorReporter } from './errorReporter';
+
+/**
+ * 遥测事件类型
+ */
+export type TelemetryEvent = 'install' | 'heartbeat' | 'error' | 'feedback';
 
 /**
  * 遥测数据接口
  */
 interface TelemetryData {
-  activeUsers7d: number;      // 最近 7 天活跃用户数
-  totalConversations: number; // 总对话数
-  lastUsedAt: Date | null;    // 最近使用时间
+  activeUsers7d: number;
+  totalConversations: number;
+  lastUsedAt: Date | null;
+  apiSuccessCount24h: number;
+  apiFailureCount24h: number;
+  avgLatencyMs24h: number;
+  errorCount24h: number;
+  suppressedErrorCount: number;
+  droppedErrorCount: number;
+  activeEndpointCount: number;
+}
+
+/**
+ * 环境信息
+ */
+interface EnvironmentInfo {
+  node_version: string;
+  os_platform: string;
+  os_arch: string;
+}
+
+/**
+ * 功能标志
+ */
+interface FeatureFlags {
+  budget_limits: boolean;
+  custom_jailbreak_patterns: boolean;
+  multi_endpoint: boolean;
 }
 
 /**
@@ -24,7 +57,7 @@ interface TelemetryData {
  */
 interface ReportPayload {
   instance_id: string;
-  event: 'install' | 'heartbeat';
+  event: TelemetryEvent;
   version: string;
   installed_at: string;
   first_used_at?: string;
@@ -32,23 +65,44 @@ interface ReportPayload {
     active_users_7d: number;
     total_conversations: number;
     last_used_at?: string;
+    api_success_count_24h?: number;
+    api_failure_count_24h?: number;
+    avg_latency_ms_24h?: number;
+    error_count_24h?: number;
+    suppressed_error_count?: number;
+    dropped_error_count?: number;
+    active_endpoint_count?: number;
   };
+  environment?: EnvironmentInfo;
+  features?: FeatureFlags;
   domain_hash: string;
   timestamp: string;
+}
+
+/**
+ * 反馈负载接口
+ */
+export interface FeedbackPayload {
+  type: 'bug' | 'feature' | 'other';
+  subject: string;
+  body: string;
+  contact_email?: string;
 }
 
 /**
  * Telemetry Service 类
  */
 export class TelemetryService {
-  private readonly DEFAULT_ENDPOINTS = ['https://stats.how2learns.com/api/report'];
   private readonly HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
   private readonly REQUEST_TIMEOUT = 8000; // 8 秒
   private timer?: NodeJS.Timeout;
 
   constructor(
     private pluginInstallModel: PluginInstallModel,
-    private conversationModel: ConversationModel
+    private conversationModel: ConversationModel,
+    private aiConfigModel?: AIConfigModel,
+    private requestStatsModel?: RequestStatsModel,
+    private errorReporter?: ErrorReporter,
   ) { }
 
   /**
@@ -133,20 +187,77 @@ export class TelemetryService {
    * @returns 遥测数据
    */
   private async collect(): Promise<TelemetryData> {
-    // 统计最近 7 天活跃用户数
     const activeUsers7d = await this.conversationModel.countActiveUsers(7);
-
-    // 统计总对话数
     const totalConversations = await this.conversationModel.getTotalConversations();
-
-    // 查询最近对话时间
     const lastUsedAt = await this.conversationModel.getLastConversationTime();
+
+    let apiSuccessCount24h = 0;
+    let apiFailureCount24h = 0;
+    let avgLatencyMs24h = 0;
+    if (this.requestStatsModel) {
+      try {
+        const stats = await this.requestStatsModel.getStats24h();
+        apiSuccessCount24h = stats.successCount;
+        apiFailureCount24h = stats.failureCount;
+        avgLatencyMs24h = stats.avgLatencyMs;
+      } catch { /* non-critical */ }
+    }
+
+    let errorCount24h = 0;
+    let suppressedErrorCount = 0;
+    let droppedErrorCount = 0;
+    if (this.errorReporter) {
+      const selfStats = this.errorReporter.getSelfStats();
+      errorCount24h = apiFailureCount24h;
+      suppressedErrorCount = selfStats.suppressedCount;
+      droppedErrorCount = selfStats.droppedCount;
+    }
+
+    let activeEndpointCount = 0;
+    if (this.aiConfigModel) {
+      try {
+        const config = await this.aiConfigModel.getConfig();
+        if (config) {
+          activeEndpointCount = config.endpoints.filter(e => e.enabled).length;
+        }
+      } catch { /* non-critical */ }
+    }
 
     return {
       activeUsers7d,
       totalConversations,
-      lastUsedAt
+      lastUsedAt,
+      apiSuccessCount24h,
+      apiFailureCount24h,
+      avgLatencyMs24h,
+      errorCount24h,
+      suppressedErrorCount,
+      droppedErrorCount,
+      activeEndpointCount,
     };
+  }
+
+  /**
+   * 收集功能标志
+   */
+  private async collectFeatureFlags(): Promise<FeatureFlags> {
+    if (!this.aiConfigModel) {
+      return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
+    }
+    try {
+      const config = await this.aiConfigModel.getConfig();
+      if (!config) {
+        return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
+      }
+      const bc = config.budgetConfig;
+      return {
+        budget_limits: !!(bc && (bc.dailyTokenLimitPerUser || bc.dailyTokenLimitPerDomain || bc.monthlyTokenLimitPerDomain)),
+        custom_jailbreak_patterns: !!(config.extraJailbreakPatternsText && config.extraJailbreakPatternsText.trim()),
+        multi_endpoint: config.endpoints.filter(e => e.enabled).length > 1,
+      };
+    } catch {
+      return { budget_limits: false, custom_jailbreak_patterns: false, multi_endpoint: false };
+    }
   }
 
   /**
@@ -161,16 +272,14 @@ export class TelemetryService {
         return;
       }
 
-      // 收集数据
       const stats = await this.collect();
-
-      // 计算 domain hash（隐私保护）
       const domainHash = createHash('sha256')
         .update(config.domainsSeen.sort().join(','))
         .digest('hex')
         .substring(0, 16);
 
-      // 构造上报负载
+      const features = await this.collectFeatureFlags();
+
       const payload: ReportPayload = {
         instance_id: config.instanceId,
         event: eventType,
@@ -180,66 +289,103 @@ export class TelemetryService {
         stats: {
           active_users_7d: stats.activeUsers7d,
           total_conversations: stats.totalConversations,
-          last_used_at: stats.lastUsedAt?.toISOString()
+          last_used_at: stats.lastUsedAt?.toISOString(),
+          api_success_count_24h: stats.apiSuccessCount24h,
+          api_failure_count_24h: stats.apiFailureCount24h,
+          avg_latency_ms_24h: stats.avgLatencyMs24h,
+          error_count_24h: stats.errorCount24h,
+          suppressed_error_count: stats.suppressedErrorCount,
+          dropped_error_count: stats.droppedErrorCount,
+          active_endpoint_count: stats.activeEndpointCount,
         },
+        environment: {
+          node_version: process.version,
+          os_platform: process.platform,
+          os_arch: process.arch,
+        },
+        features,
         domain_hash: domainHash,
         timestamp: new Date().toISOString()
       };
 
-      const endpoints = this.getTelemetryEndpoints(config.preferredTelemetryEndpoint);
-      const token = (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
+      const bases = getTelemetryBases(config.preferredTelemetryEndpoint);
+      const urls = bases.map(b => buildTelemetryUrl(b, '/api/report'));
+      await this.sendToFirstAvailable(urls, payload);
 
-      let lastError: unknown;
-      for (const endpoint of endpoints) {
-        try {
-          await axios.post(endpoint, payload, {
-            timeout: this.REQUEST_TIMEOUT,
-            headers: {
-              'Content-Type': 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {})
-            }
-          });
-
-          await this.pluginInstallModel.updateLastReportTime();
-          await this.pluginInstallModel.updatePreferredTelemetryEndpoint(endpoint);
-          console.log(`[TelemetryService] Report sent successfully (${eventType}) -> ${endpoint}`);
-          return;
-        } catch (error) {
-          lastError = error;
-          const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-          const statusText = axios.isAxiosError(error) ? error.response?.statusText : undefined;
-          console.error('[TelemetryService] Report failed', {
-            endpoint,
-            status,
-            statusText,
-            message: axios.isAxiosError(error) ? error.message : String(error)
-          });
-        }
+      await this.pluginInstallModel.updateLastReportTime();
+      if (bases.length > 0) {
+        await this.pluginInstallModel.updatePreferredTelemetryEndpoint(bases[0]);
       }
-
-      console.error('[TelemetryService] All telemetry endpoints failed', {
-        endpoints,
-        error: axios.isAxiosError(lastError) ? lastError.message : String(lastError)
-      });
+      console.log(`[TelemetryService] Report sent successfully (${eventType})`);
     } catch (error) {
       console.error('[TelemetryService] Report error:', error);
     }
   }
 
-  private getTelemetryEndpoints(preferred?: string): string[] {
-    const raw = process.env.AI_HELPER_TELEMETRY_ENDPOINTS;
-    const parsed = parseTelemetryEndpoints(raw);
-    const endpoints = parsed.length > 0 ? parsed : this.DEFAULT_ENDPOINTS;
-    const normalizedPreferred = preferred ? normalizeTelemetryEndpoint(preferred) : undefined;
+  /**
+   * 上报反馈到远程服务器（不受 telemetryEnabled 控制）
+   */
+  async reportFeedback(feedback: FeedbackPayload): Promise<boolean> {
+    try {
+      const config = await this.pluginInstallModel.getInstall();
+      if (!config) {
+        return false;
+      }
 
-    if (normalizedPreferred && endpoints.includes(normalizedPreferred)) {
-      return [
-        normalizedPreferred,
-        ...endpoints.filter((endpoint) => endpoint !== normalizedPreferred)
-      ];
+      const domainHash = createHash('sha256')
+        .update(config.domainsSeen.sort().join(','))
+        .digest('hex')
+        .substring(0, 16);
+
+      const payload = {
+        instance_id: config.instanceId,
+        event: 'feedback' as const,
+        version: config.lastVersion,
+        domain_hash: domainHash,
+        timestamp: new Date().toISOString(),
+        feedback: {
+          ...feedback,
+          environment: {
+            node_version: process.version,
+            os_platform: process.platform,
+            os_arch: process.arch,
+          },
+        },
+      };
+
+      const bases = getTelemetryBases();
+      const urls = bases.map(b => buildTelemetryUrl(b, '/api/feedback'));
+      await this.sendToFirstAvailable(urls, payload);
+      return true;
+    } catch (error) {
+      console.error('[TelemetryService] Feedback report error:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 尝试向第一个可用的端点发送数据
+   */
+  private async sendToFirstAvailable(urls: string[], payload: unknown): Promise<void> {
+    const token = getTelemetryToken();
+    let lastError: unknown;
+
+    for (const url of urls) {
+      try {
+        await sendToEndpoint(url, payload, token, this.REQUEST_TIMEOUT);
+        return;
+      } catch (error) {
+        lastError = error;
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        console.error('[TelemetryService] Send failed', {
+          url,
+          status,
+          message: axios.isAxiosError(error) ? error.message : String(error)
+        });
+      }
     }
 
-    return endpoints;
+    throw lastError || new Error('All telemetry endpoints failed');
   }
 
   /**
@@ -254,20 +400,82 @@ export class TelemetryService {
   }
 }
 
-function parseTelemetryEndpoints(value?: string): string[] {
+// ─── 导出的共享工具函数 ─────────────────────────────
+
+const DEFAULT_BASE = 'https://stats.how2learns.com';
+
+/**
+ * 获取遥测 token
+ */
+export function getTelemetryToken(): string {
+  return (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
+}
+
+/**
+ * 发送数据到指定端点
+ */
+export async function sendToEndpoint(
+  url: string,
+  payload: unknown,
+  token: string,
+  timeout = 8000,
+): Promise<void> {
+  await axios.post(url, payload, {
+    timeout,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+}
+
+/**
+ * 获取遥测基础 URL 列表（优先使用 preferred）
+ */
+export function getTelemetryBases(preferred?: string): string[] {
+  const raw = process.env.AI_HELPER_TELEMETRY_ENDPOINTS;
+  const parsed = parseTelemetryBases(raw);
+  const bases = parsed.length > 0 ? parsed : [DEFAULT_BASE];
+
+  const normalizedPreferred = preferred ? normalizeTelemetryBase(preferred) : undefined;
+  if (normalizedPreferred && bases.includes(normalizedPreferred)) {
+    return [
+      normalizedPreferred,
+      ...bases.filter((b) => b !== normalizedPreferred),
+    ];
+  }
+
+  return bases;
+}
+
+/**
+ * 构建遥测端点完整 URL
+ * @param base 基础 URL (如 https://stats.how2learns.com)
+ * @param apiPath API 路径 (如 /api/report, /api/errors, /api/feedback)
+ */
+export function buildTelemetryUrl(base: string, apiPath: string): string {
+  const trimmedBase = base.replace(/\/+$/, '');
+  const trimmedPath = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+  return `${trimmedBase}${trimmedPath}`;
+}
+
+function parseTelemetryBases(value?: string): string[] {
   if (!value) {
     return [];
   }
 
-  const endpoints = value
+  const bases = value
     .split(',')
-    .map((raw) => normalizeTelemetryEndpoint(raw))
+    .map((raw) => normalizeTelemetryBase(raw))
     .filter((item): item is string => Boolean(item));
 
-  return Array.from(new Set(endpoints));
+  return Array.from(new Set(bases));
 }
 
-function normalizeTelemetryEndpoint(value: string): string | undefined {
+/**
+ * 归一化遥测基础 URL（不追加路径）
+ */
+export function normalizeTelemetryBase(value: string): string | undefined {
   const trimmed = value.trim();
   if (!trimmed) {
     return undefined;
@@ -285,13 +493,16 @@ function normalizeTelemetryEndpoint(value: string): string | undefined {
   url.hash = '';
   url.search = '';
 
-  const basePath = url.pathname.replace(/\/+$/, '');
+  // 去除尾部 /api/report 或其他 api 路径，只保留 base
+  let basePath = url.pathname.replace(/\/+$/, '');
   if (basePath.endsWith('/api/report')) {
-    url.pathname = basePath;
-    return url.toString();
+    basePath = basePath.slice(0, -'/api/report'.length);
+  } else if (basePath.endsWith('/api/errors')) {
+    basePath = basePath.slice(0, -'/api/errors'.length);
+  } else if (basePath.endsWith('/api/feedback')) {
+    basePath = basePath.slice(0, -'/api/feedback'.length);
   }
 
-  const nextPath = basePath && basePath !== '/' ? `${basePath}/api/report` : '/api/report';
-  url.pathname = nextPath;
-  return url.toString();
+  url.pathname = basePath || '/';
+  return url.toString().replace(/\/+$/, '');
 }

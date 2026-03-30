@@ -32,6 +32,8 @@ const versionHandler_1 = require("./handlers/versionHandler");
 console.log('[AI-Helper] versionHandler OK');
 const costAnalyticsHandler_1 = require("./handlers/costAnalyticsHandler");
 console.log('[AI-Helper] costAnalyticsHandler OK');
+const feedbackHandler_1 = require("./handlers/feedbackHandler");
+console.log('[AI-Helper] feedbackHandler OK');
 const updateHandler_1 = require("./handlers/updateHandler");
 console.log('[AI-Helper] updateHandler OK');
 const conversation_1 = require("./models/conversation");
@@ -46,6 +48,8 @@ console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
 const telemetryService_1 = require("./services/telemetryService");
+const errorReporter_1 = require("./services/errorReporter");
+const requestStats_1 = require("./models/requestStats");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
 /**
@@ -70,6 +74,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const versionCacheModel = new versionCache_1.VersionCacheModel(db);
         const pluginInstallModel = new pluginInstall_1.PluginInstallModel(db);
         const tokenUsageModel = new tokenUsage_1.TokenUsageModel(db);
+        const requestStatsModel = new requestStats_1.RequestStatsModel(db);
+        // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
+        const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
         const safeEnsureIndexes = async (model, name) => {
             try {
@@ -77,6 +84,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
             }
             catch (err) {
                 console.warn(`[AI-Helper] ${name} 索引创建失败，插件继续运行:`, err);
+                errorReporter.capture('startup_failure', 'db', `Index creation failed: ${name}`, undefined, err instanceof Error ? err.stack : undefined);
             }
         };
         await safeEnsureIndexes(conversationModel, 'conversationModel');
@@ -87,6 +95,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(versionCacheModel, 'versionCacheModel');
         await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
         await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
+        await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
         // 执行数据迁移（为历史数据添加 domainId）
         const migrationService = new migrationService_1.MigrationService(db);
         await migrationService.runAllMigrations();
@@ -108,6 +117,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
             }
             catch (err) {
                 console.error('[AI-Helper] Key rotation failed:', err instanceof Error ? err.message : 'unknown error');
+                errorReporter.capture('startup_failure', 'config', `Key rotation failed: ${err instanceof Error ? err.message : 'unknown'}`, undefined, err instanceof Error ? err.stack : undefined);
             }
         }
         // 将模型实例注入到 ctx 中,供 Handler 使用
@@ -119,15 +129,19 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('versionCacheModel', versionCacheModel);
         ctx.provide('pluginInstallModel', pluginInstallModel);
         ctx.provide('tokenUsageModel', tokenUsageModel);
+        ctx.provide('requestStatsModel', requestStatsModel);
+        ctx.provide('errorReporter', errorReporter);
         // 初始化版本服务
         const versionService = new versionService_1.VersionService(versionCacheModel);
         ctx.provide('versionService', versionService);
         // 初始化遥测服务（延迟 5 秒启动，避免阻塞插件加载）
-        const telemetryService = new telemetryService_1.TelemetryService(pluginInstallModel, conversationModel);
+        const telemetryService = new telemetryService_1.TelemetryService(pluginInstallModel, conversationModel, aiConfigModel, requestStatsModel, errorReporter);
+        ctx.provide('telemetryService', telemetryService);
         setTimeout(() => {
             telemetryService.init().catch(err => {
                 console.error('[AI-Helper] Telemetry service initialization failed:', err);
             });
+            errorReporter.start();
         }, 5000);
         // 注册测试路由
         // GET /ai-helper/hello - 返回插件状态
@@ -177,6 +191,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_update_info', '/ai-helper/admin/update/info', updateHandler_1.UpdateInfoHandler, updateHandler_1.UpdateInfoHandlerPriv);
         // POST /ai-helper/admin/update - 执行更新
         ctx.Route('ai_helper_update', '/ai-helper/admin/update', updateHandler_1.UpdateHandler, updateHandler_1.UpdateHandlerPriv);
+        // POST /ai-helper/admin/feedback - 管理员反馈提交
+        ctx.Route('ai_helper_admin_feedback', '/ai-helper/admin/feedback', feedbackHandler_1.FeedbackHandler, feedbackHandler_1.FeedbackHandlerPriv);
         // GET /ai-helper/analytics/cost - 成本分析 API
         ctx.Route('ai_helper_cost_analytics', '/ai-helper/analytics/cost', costAnalyticsHandler_1.CostAnalyticsHandler, costAnalyticsHandler_1.CostAnalyticsHandlerPriv);
         ctx.Route('ai_helper_cost_analytics_domain', '/d/:domainId/ai-helper/analytics/cost', costAnalyticsHandler_1.CostAnalyticsHandler, costAnalyticsHandler_1.CostAnalyticsHandlerPriv);

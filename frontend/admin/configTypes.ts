@@ -55,6 +55,20 @@ export interface JailbreakLogPagination {
   totalPages: number;
 }
 
+export interface TelemetryStatus {
+  enabled: boolean;
+  instanceId: string;
+  lastReportAt?: string;
+  version: string;
+}
+
+export interface FeedbackPayload {
+  type: 'bug' | 'feature' | 'other';
+  subject: string;
+  body: string;
+  contactEmail?: string;
+}
+
 export interface APIConfigResponse {
   config: {
     endpoints?: Array<Omit<Endpoint, 'newApiKey' | 'isNew'> & { apiKeyMasked?: string; hasApiKey?: boolean }>;
@@ -74,6 +88,7 @@ export interface APIConfigResponse {
     apiKeyMasked?: string;
     hasApiKey?: boolean;
   } | null;
+  telemetry?: TelemetryStatus | null;
   builtinJailbreakPatterns?: string[];
   jailbreakLogs?: JailbreakLogPagination;
   recentJailbreakLogs?: JailbreakLogEntry[];

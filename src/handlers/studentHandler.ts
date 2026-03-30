@@ -752,6 +752,10 @@ export class ChatHandler extends Handler {
               category: error.category,
               retryable: error.isRetryable,
             });
+            try {
+              this.ctx.get('errorReporter')?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack);
+              this.ctx.get('requestStatsModel')?.recordFailure(error.category);
+            } catch { /* non-critical */ }
           },
         },
       });
@@ -759,6 +763,7 @@ export class ChatHandler extends Handler {
       const aiLatencyMs = Date.now() - aiStart;
       console.log(`[Perf] AI Stream Response: ${aiLatencyMs}ms`);
       console.log(`[AI Helper] 使用模型 (stream): ${usedModel.endpointName}/${usedModel.modelName}`);
+      try { this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs); } catch { /* non-critical */ }
 
       // Safety filter on complete content
       const outputSafetyService = new OutputSafetyService();
@@ -849,6 +854,18 @@ export class ChatHandler extends Handler {
         this.ctx.logger.error('Schedule effectiveness analyze failed', err);
       }
     } catch (error) {
+      try {
+        const er = this.ctx.get('errorReporter');
+        const rsm = this.ctx.get('requestStatsModel');
+        if (error instanceof AIServiceError) {
+          er?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack);
+          rsm?.recordFailure(error.category);
+        } else {
+          er?.capture('api_failure', 'unknown', error instanceof Error ? error.message : String(error));
+          rsm?.recordFailure('unknown');
+        }
+      } catch { /* non-critical */ }
+
       if (!sse.closed) {
         if (error instanceof AIServiceError) {
           sse.writeEvent('error', {
@@ -904,8 +921,23 @@ export class ChatHandler extends Handler {
       aiResponse = result.content;
       aiResult = result;
       console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
+      // 记录成功请求
+      try { this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs); } catch { /* non-critical */ }
     } catch (error) {
       console.error('[AI Helper] AI 调用失败:', error);
+      // 上报错误到遥测
+      try {
+        const er = this.ctx.get('errorReporter');
+        const rsm = this.ctx.get('requestStatsModel');
+        if (error instanceof AIServiceError) {
+          er?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack);
+          rsm?.recordFailure(error.category);
+        } else {
+          er?.capture('api_failure', 'unknown', error instanceof Error ? error.message : String(error));
+          rsm?.recordFailure('unknown');
+        }
+      } catch { /* non-critical */ }
+
       if (error instanceof AIServiceError) {
         this.response.status = getHttpStatusForCategory(error.category);
         this.response.body = {

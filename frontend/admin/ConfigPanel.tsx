@@ -3,13 +3,15 @@ import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { BudgetConfigForm } from './BudgetConfigForm';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
+import { TelemetrySettings } from './TelemetrySettings';
+import { FeedbackForm } from './FeedbackForm';
 import { useToast, Toast } from '../components/Toast';
 import {
   COLORS, FONT_FAMILY, TYPOGRAPHY, SPACING, RADIUS, SHADOWS, TRANSITIONS,
   cardStyle as dsCardStyle, getInputStyle, getButtonStyle,
 } from '../utils/styles';
 import type {
-  Endpoint, ConfigState, JailbreakLogPagination, APIConfigResponse,
+  Endpoint, ConfigState, JailbreakLogPagination, APIConfigResponse, TelemetryStatus,
 } from './configTypes';
 
 interface ConfigPanelProps {
@@ -33,6 +35,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const { toasts, showToast, dismissToast } = useToast();
 
   const [logsLoading, setLogsLoading] = useState(false);
+  const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
 
   useEffect(() => { loadConfig(); loadJailbreakLogs(1); }, []);
 
@@ -48,6 +51,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
       const json: APIConfigResponse = await res.json();
       setBuiltinJailbreakPatterns(json.builtinJailbreakPatterns || []);
+      if (json.telemetry) setTelemetry(json.telemetry);
 
       if (json.config == null) {
         setConfig({
@@ -460,6 +464,24 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           onCopyToClipboard={copyToClipboard}
           onAppendPattern={appendPatternToCustomRules}
         />
+
+        <TelemetrySettings
+          telemetry={telemetry}
+          onToggle={async (enabled) => {
+            try {
+              await fetch('/ai-helper/admin/config', {
+                method: 'PUT', credentials: 'include',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ telemetryEnabled: enabled }),
+              });
+              setTelemetry(prev => prev ? { ...prev, enabled } : null);
+              showToast(enabled ? '遥测已启用' : '遥测已禁用', 'success');
+            } catch { showToast('更新遥测设置失败', 'error'); }
+          }}
+          disabled={saving}
+        />
+
+        <FeedbackForm showToast={showToast} />
       </div>
 
       <div style={{ height: '60px' }} />

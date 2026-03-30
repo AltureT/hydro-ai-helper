@@ -59,6 +59,21 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             }
             const aiConfigModel = this.ctx.get('aiConfigModel');
             const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const pluginInstallModel = this.ctx.get('pluginInstallModel');
+            // 获取遥测状态
+            let telemetry = null;
+            try {
+                const install = await pluginInstallModel.getInstall();
+                if (install) {
+                    telemetry = {
+                        enabled: install.telemetryEnabled,
+                        instanceId: install.instanceId.slice(-8),
+                        lastReportAt: install.lastReportAt?.toISOString(),
+                        version: install.lastVersion,
+                    };
+                }
+            }
+            catch { /* non-critical */ }
             // 解析分页参数
             const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
             const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
@@ -67,6 +82,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             if (!config) {
                 this.response.body = {
                     config: null,
+                    telemetry,
                     builtinJailbreakPatterns: jailbreakRules_1.builtinJailbreakPatternSources,
                     jailbreakLogs: {
                         logs: logResult.logs.map(formatJailbreakLog),
@@ -74,7 +90,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                         page: logResult.page,
                         totalPages: logResult.totalPages
                     },
-                    // 兼容旧前端
                     recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
                 };
                 this.response.type = 'application/json';
@@ -121,10 +136,8 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             }
             this.response.body = {
                 config: {
-                    // 新版多端点字段
                     endpoints: endpointsWithMaskedKeys,
                     selectedModels: config.selectedModels || [],
-                    // 旧版字段（向后兼容）
                     apiBaseUrl: config.apiBaseUrl,
                     modelName: config.modelName,
                     rateLimitPerMinute: config.rateLimitPerMinute,
@@ -136,6 +149,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     hasApiKey,
                     updatedAt: config.updatedAt.toISOString()
                 },
+                telemetry,
                 builtinJailbreakPatterns: jailbreakRules_1.builtinJailbreakPatternSources,
                 jailbreakLogs: {
                     logs: logResult.logs.map(formatJailbreakLog),
@@ -143,7 +157,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     page: logResult.page,
                     totalPages: logResult.totalPages
                 },
-                // 兼容旧前端
                 recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
             };
             this.response.type = 'application/json';
@@ -260,6 +273,16 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     monthlyTokenLimitPerDomain: Math.max(0, Math.floor(Number(bc.monthlyTokenLimitPerDomain) || 0)),
                     softLimitPercent: Math.min(100, Math.max(0, Math.floor(Number(bc.softLimitPercent) || 80))),
                 };
+            }
+            // 遥测开关
+            if (body.telemetryEnabled !== undefined) {
+                try {
+                    const pim = this.ctx.get('pluginInstallModel');
+                    await pim.updateTelemetryEnabled(!!body.telemetryEnabled);
+                }
+                catch (err) {
+                    console.error('[AdminConfigHandler] Update telemetry failed:', err);
+                }
             }
             // 旧版单 API Key（向后兼容）
             if (body.apiKey !== undefined && body.apiKey !== '') {
