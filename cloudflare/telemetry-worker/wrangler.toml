@@ -1,0 +1,23 @@
+name = "hydro-ai-stats"
+main = "worker.js"
+compatibility_date = "2026-02-03"
+preview_urls = false
+
+routes = [
+  { pattern = "stats.how2learns.com", zone_name = "how2learns.com", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hydro_ai_stats"
+database_id = "cf64e9c6-31d3-4d0b-b7b2-57bb606b66a5"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["0 19 * * *"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
