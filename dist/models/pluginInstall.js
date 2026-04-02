@@ -7,7 +7,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PluginInstallModel = void 0;
 const crypto_1 = require("crypto");
-const os_1 = require("os");
 /**
  * PluginInstall Model 操作类
  * 封装插件安装记录的 CRUD 操作
@@ -20,7 +19,7 @@ class PluginInstallModel {
     }
     /**
      * 基于 MongoDB 连接信息生成确定性 instanceId
-     * 同一 MongoDB + 同一数据库 + 同一主机 = 同一 instanceId
+     * 同一 MongoDB + 同一数据库 = 同一 instanceId（不含 hostname 以兼容 Docker 重建）
      */
     async generateStableInstanceId() {
         try {
@@ -28,17 +27,14 @@ class PluginInstallModel {
             const serverStatus = await admin.serverInfo();
             const mongoHost = serverStatus.host || 'unknown';
             const dbName = this.db.databaseName;
-            const host = (0, os_1.hostname)();
             return (0, crypto_1.createHash)('sha256')
-                .update(`${mongoHost}:${dbName}:${host}`)
+                .update(`${mongoHost}:${dbName}`)
                 .digest('hex');
         }
         catch {
-            // fallback: use db name + hostname
             const dbName = this.db.databaseName;
-            const host = (0, os_1.hostname)();
             return (0, crypto_1.createHash)('sha256')
-                .update(`${dbName}:${host}`)
+                .update(`fallback:${dbName}`)
                 .digest('hex');
         }
     }

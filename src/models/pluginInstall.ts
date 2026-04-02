@@ -6,7 +6,6 @@
 
 import type { Db, Collection } from 'mongodb';
 import { createHash } from 'crypto';
-import { hostname } from 'os';
 
 /**
  * 插件安装记录接口
@@ -41,7 +40,7 @@ export class PluginInstallModel {
 
   /**
    * 基于 MongoDB 连接信息生成确定性 instanceId
-   * 同一 MongoDB + 同一数据库 + 同一主机 = 同一 instanceId
+   * 同一 MongoDB + 同一数据库 = 同一 instanceId（不含 hostname 以兼容 Docker 重建）
    */
   private async generateStableInstanceId(): Promise<string> {
     try {
@@ -49,16 +48,13 @@ export class PluginInstallModel {
       const serverStatus = await admin.serverInfo();
       const mongoHost = serverStatus.host || 'unknown';
       const dbName = this.db.databaseName;
-      const host = hostname();
       return createHash('sha256')
-        .update(`${mongoHost}:${dbName}:${host}`)
+        .update(`${mongoHost}:${dbName}`)
         .digest('hex');
     } catch {
-      // fallback: use db name + hostname
       const dbName = this.db.databaseName;
-      const host = hostname();
       return createHash('sha256')
-        .update(`${dbName}:${host}`)
+        .update(`fallback:${dbName}`)
         .digest('hex');
     }
   }
