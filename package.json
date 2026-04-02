@@ -1,6 +1,6 @@
 {
   "name": "hydro-ai-helper",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "description": "HydroOJ AI Learning Assistant - 一个教学优先的 AI 辅助学习插件",
   "main": "dist/index.js",
   "author": "Alture",
@@ -54,7 +54,8 @@
     "hydrooj": "^4.0.0",
     "jest": "^30.2.0",
     "ts-jest": "^29.4.6",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "wrangler": "^4.79.0"
   },
   "peerDependencies": {
     "hydrooj": "^4.0.0"
