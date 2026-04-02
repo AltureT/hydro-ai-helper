@@ -7,7 +7,7 @@ import {
   sendToEndpoint,
 } from './telemetryService';
 
-export type TelemetryErrorType = 'api_failure' | 'startup_failure' | 'config' | 'db' | 'background_job';
+export type TelemetryErrorType = 'api_failure' | 'api_degraded' | 'startup_failure' | 'config' | 'db' | 'background_job';
 
 export interface ErrorEntry {
   error_type: TelemetryErrorType;
@@ -19,6 +19,7 @@ export interface ErrorEntry {
   last_seen: string;
   stack_fingerprint?: string;
   suppressed_count?: number;
+  metadata?: Record<string, unknown>;
 }
 
 interface BufferedError {
@@ -31,6 +32,7 @@ interface BufferedError {
   firstSeen: Date;
   lastSeen: Date;
   stackFingerprint?: string;
+  metadata?: Record<string, unknown>;
   suppressedCount: number;
   lastEmittedAt?: Date;
 }
@@ -93,10 +95,12 @@ export class ErrorReporter {
     message: string,
     httpStatus?: number,
     stack?: string,
+    metadata?: Record<string, unknown>,
   ): void {
     // Check telemetry asynchronously — but capture is sync/fire-and-forget
     // We check lazily on flush instead of on every capture for performance
-    const fingerprint = this.computeFingerprint(errorType, category, stack);
+    const discriminator = metadata?.endpointId as string | undefined;
+    const fingerprint = this.computeFingerprint(errorType, category, stack, discriminator);
     const key = `${errorType}:${category}:${fingerprint}`;
     const now = new Date();
 
@@ -139,6 +143,7 @@ export class ErrorReporter {
       firstSeen: now,
       lastSeen: now,
       stackFingerprint: fingerprint,
+      metadata: metadata ? this.sanitizeMetadata(metadata) : undefined,
       suppressedCount: 0,
     });
 
@@ -253,6 +258,7 @@ export class ErrorReporter {
         last_seen: entry.lastSeen.toISOString(),
         stack_fingerprint: entry.stackFingerprint,
         suppressed_count: entry.suppressedCount > 0 ? entry.suppressedCount : undefined,
+        metadata: entry.metadata,
       };
 
       const entrySize = JSON.stringify(errorEntry).length;
@@ -270,12 +276,38 @@ export class ErrorReporter {
     return entries;
   }
 
-  private computeFingerprint(errorType: string, category: string, stack?: string): string {
-    const source = stack || `${errorType}:${category}`;
+  private computeFingerprint(errorType: string, category: string, stack?: string, discriminator?: string): string {
+    let source = stack || `${errorType}:${category}`;
+    if (discriminator) source += `:${discriminator}`;
     return createHash('sha256')
       .update(source)
       .digest('hex')
       .substring(0, 16);
+  }
+
+  private sanitizeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+    const sanitized: Record<string, unknown> = {};
+    const keys = Object.keys(metadata).slice(0, 10);
+    for (const key of keys) {
+      const val = metadata[key];
+      if (typeof val === 'string') {
+        sanitized[key] = val.substring(0, 200);
+      } else if (typeof val === 'number' || typeof val === 'boolean') {
+        sanitized[key] = val;
+      } else if (Array.isArray(val)) {
+        sanitized[key] = val.slice(0, 5).map(item => {
+          if (typeof item === 'object' && item !== null) {
+            const trimmed: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(item)) {
+              trimmed[k] = typeof v === 'string' ? v.substring(0, 100) : v;
+            }
+            return trimmed;
+          }
+          return item;
+        });
+      }
+    }
+    return sanitized;
   }
 
   private sanitizeMessage(message: string): string {

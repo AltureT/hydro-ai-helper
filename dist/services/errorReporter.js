@@ -43,10 +43,11 @@ class ErrorReporter {
         this.suppressedCount = 0;
         this.droppedCount = 0;
     }
-    capture(errorType, category, message, httpStatus, stack) {
+    capture(errorType, category, message, httpStatus, stack, metadata) {
         // Check telemetry asynchronously — but capture is sync/fire-and-forget
         // We check lazily on flush instead of on every capture for performance
-        const fingerprint = this.computeFingerprint(errorType, category, stack);
+        const discriminator = metadata?.endpointId;
+        const fingerprint = this.computeFingerprint(errorType, category, stack, discriminator);
         const key = `${errorType}:${category}:${fingerprint}`;
         const now = new Date();
         const existing = this.buffer.get(key);
@@ -89,6 +90,7 @@ class ErrorReporter {
             firstSeen: now,
             lastSeen: now,
             stackFingerprint: fingerprint,
+            metadata: metadata ? this.sanitizeMetadata(metadata) : undefined,
             suppressedCount: 0,
         });
         if (this.buffer.size >= BUFFER_THRESHOLD) {
@@ -193,6 +195,7 @@ class ErrorReporter {
                 last_seen: entry.lastSeen.toISOString(),
                 stack_fingerprint: entry.stackFingerprint,
                 suppressed_count: entry.suppressedCount > 0 ? entry.suppressedCount : undefined,
+                metadata: entry.metadata,
             };
             const entrySize = JSON.stringify(errorEntry).length;
             if (serializedSize + entrySize > MAX_PAYLOAD_BYTES) {
@@ -206,12 +209,40 @@ class ErrorReporter {
         }
         return entries;
     }
-    computeFingerprint(errorType, category, stack) {
-        const source = stack || `${errorType}:${category}`;
+    computeFingerprint(errorType, category, stack, discriminator) {
+        let source = stack || `${errorType}:${category}`;
+        if (discriminator)
+            source += `:${discriminator}`;
         return (0, crypto_1.createHash)('sha256')
             .update(source)
             .digest('hex')
             .substring(0, 16);
+    }
+    sanitizeMetadata(metadata) {
+        const sanitized = {};
+        const keys = Object.keys(metadata).slice(0, 10);
+        for (const key of keys) {
+            const val = metadata[key];
+            if (typeof val === 'string') {
+                sanitized[key] = val.substring(0, 200);
+            }
+            else if (typeof val === 'number' || typeof val === 'boolean') {
+                sanitized[key] = val;
+            }
+            else if (Array.isArray(val)) {
+                sanitized[key] = val.slice(0, 5).map(item => {
+                    if (typeof item === 'object' && item !== null) {
+                        const trimmed = {};
+                        for (const [k, v] of Object.entries(item)) {
+                            trimmed[k] = typeof v === 'string' ? v.substring(0, 100) : v;
+                        }
+                        return trimmed;
+                    }
+                    return item;
+                });
+            }
+        }
+        return sanitized;
     }
     sanitizeMessage(message) {
         let sanitized = message;

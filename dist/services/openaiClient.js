@@ -22,12 +22,13 @@ const HTTP_AGENT = new http_1.default.Agent({ keepAlive: true, maxSockets: 20, m
 const HTTPS_AGENT = new https_1.default.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 5, timeout: 60000 });
 const RETRYABLE_CATEGORIES = new Set(['rate_limit', 'server', 'timeout', 'network']);
 class AIServiceError extends Error {
-    constructor(message, category, httpStatus) {
+    constructor(message, category, httpStatus, context) {
         super(message);
         this.name = 'AIServiceError';
         this.category = category;
         this.httpStatus = httpStatus;
         this.isRetryable = RETRYABLE_CATEGORIES.has(category);
+        this.context = context;
     }
 }
 exports.AIServiceError = AIServiceError;
@@ -252,7 +253,11 @@ class OpenAIClient {
                         throw new AIServiceError('API Key 无效或已过期', 'auth', status);
                     }
                     else if (status === 429) {
-                        throw new AIServiceError('API 调用频率超限', 'rate_limit', status);
+                        const retryAfterRaw = axiosError.response.headers['retry-after'];
+                        const retryAfterSec = retryAfterRaw ? parseFloat(String(retryAfterRaw)) : undefined;
+                        throw new AIServiceError('API 调用频率超限', 'rate_limit', status, {
+                            retryAfterSec: Number.isFinite(retryAfterSec) ? retryAfterSec : undefined,
+                        });
                     }
                     else if (status >= 500) {
                         throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
@@ -317,8 +322,13 @@ class OpenAIClient {
                     const status = ae.response.status;
                     if (status === 401 || status === 403)
                         throw new AIServiceError('API Key 无效或已过期', 'auth', status);
-                    if (status === 429)
-                        throw new AIServiceError('API 调用频率超限', 'rate_limit', status);
+                    if (status === 429) {
+                        const retryAfterRaw = ae.response.headers['retry-after'];
+                        const retryAfterSec = retryAfterRaw ? parseFloat(String(retryAfterRaw)) : undefined;
+                        throw new AIServiceError('API 调用频率超限', 'rate_limit', status, {
+                            retryAfterSec: Number.isFinite(retryAfterSec) ? retryAfterSec : undefined,
+                        });
+                    }
                     if (status >= 500)
                         throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
                     throw new AIServiceError(`AI API 错误 (HTTP ${status})`, 'client', status);
@@ -555,6 +565,11 @@ class MultiModelClient {
                     }
                     try {
                         const chatResult = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+                        const fallbackErrors = errors.length > 0 ? errors.map(e => ({
+                            endpoint: e.endpointId, model: e.modelName,
+                            category: e.category, message: e.error.substring(0, 200),
+                            httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+                        })) : undefined;
                         return {
                             content: chatResult.content,
                             usage: chatResult.usage,
@@ -562,7 +577,8 @@ class MultiModelClient {
                                 endpointId: config.endpointId,
                                 endpointName: config.endpointName,
                                 modelName: config.modelName
-                            }
+                            },
+                            fallbackErrors,
                         };
                     }
                     catch (error) {
@@ -578,7 +594,12 @@ class MultiModelClient {
                         errors.push({
                             model: `${config.endpointName}/${config.modelName}`,
                             error: aiError.message,
-                            category: aiError.category
+                            category: aiError.category,
+                            httpStatus: aiError.httpStatus,
+                            retryAfterSec: aiError.context?.retryAfterSec,
+                            endpointId: config.endpointId,
+                            endpointName: config.endpointName,
+                            modelName: config.modelName,
                         });
                         // auth → 跳过该端点的所有模型
                         if (aiError.category === 'auth') {
@@ -639,7 +660,15 @@ class MultiModelClient {
                     message: e.error.substring(0, 200)
                 })),
             }));
-            throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
+            throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory, undefined, {
+                totalAttempts: errors.length,
+                skippedEndpoints: [...skippedEndpoints],
+                attempts: errors.map(e => ({
+                    endpoint: e.endpointId, model: e.modelName,
+                    category: e.category, message: e.error.substring(0, 200),
+                    httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+                })),
+            });
         }
         finally {
             clearTimeout(totalTimer);
@@ -660,12 +689,18 @@ class MultiModelClient {
                     signal: options.signal,
                     callbacks: options.callbacks,
                 });
+                const fallbackErrors = errors.length > 0 ? errors.map(e => ({
+                    endpoint: e.endpointId, model: e.modelName,
+                    category: e.category, message: e.error.substring(0, 200),
+                    httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+                })) : undefined;
                 return {
                     usedModel: {
                         endpointId: config.endpointId,
                         endpointName: config.endpointName,
                         modelName: config.modelName,
                     },
+                    fallbackErrors,
                 };
             }
             catch (error) {
@@ -678,6 +713,11 @@ class MultiModelClient {
                     model: `${config.endpointName}/${config.modelName}`,
                     error: aiError.message,
                     category: aiError.category,
+                    httpStatus: aiError.httpStatus,
+                    retryAfterSec: aiError.context?.retryAfterSec,
+                    endpointId: config.endpointId,
+                    endpointName: config.endpointName,
+                    modelName: config.modelName,
                 });
                 if (aiError.category === 'auth') {
                     skippedEndpoints.add(config.endpointId);
@@ -706,7 +746,15 @@ class MultiModelClient {
                 dominantCategory = cat;
             }
         }
-        throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
+        throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory, undefined, {
+            totalAttempts: errors.length,
+            skippedEndpoints: [...skippedEndpoints],
+            attempts: errors.map(e => ({
+                endpoint: e.endpointId, model: e.modelName,
+                category: e.category, message: e.error.substring(0, 200),
+                httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+            })),
+        });
     }
 }
 exports.MultiModelClient = MultiModelClient;

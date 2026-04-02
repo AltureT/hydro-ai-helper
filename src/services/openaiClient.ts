@@ -21,19 +21,38 @@ const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 20, maxFreeSo
 
 export type ErrorCategory = 'auth' | 'rate_limit' | 'server' | 'client' | 'timeout' | 'network' | 'aborted' | 'unknown';
 
+export interface ErrorContext {
+  endpointId?: string;
+  endpointName?: string;
+  modelName?: string;
+  retryAfterSec?: number;
+  attempts?: Array<{
+    endpoint: string;
+    model: string;
+    category: ErrorCategory;
+    message: string;
+    httpStatus?: number;
+    retryAfterSec?: number;
+  }>;
+  totalAttempts?: number;
+  skippedEndpoints?: string[];
+}
+
 const RETRYABLE_CATEGORIES = new Set<ErrorCategory>(['rate_limit', 'server', 'timeout', 'network']);
 
 export class AIServiceError extends Error {
   readonly category: ErrorCategory;
   readonly httpStatus?: number;
   readonly isRetryable: boolean;
+  readonly context?: ErrorContext;
 
-  constructor(message: string, category: ErrorCategory, httpStatus?: number) {
+  constructor(message: string, category: ErrorCategory, httpStatus?: number, context?: ErrorContext) {
     super(message);
     this.name = 'AIServiceError';
     this.category = category;
     this.httpStatus = httpStatus;
     this.isRetryable = RETRYABLE_CATEGORIES.has(category);
+    this.context = context;
   }
 }
 
@@ -369,7 +388,11 @@ export class OpenAIClient {
           if (status === 401 || status === 403) {
             throw new AIServiceError('API Key 无效或已过期', 'auth', status);
           } else if (status === 429) {
-            throw new AIServiceError('API 调用频率超限', 'rate_limit', status);
+            const retryAfterRaw = axiosError.response.headers['retry-after'];
+            const retryAfterSec = retryAfterRaw ? parseFloat(String(retryAfterRaw)) : undefined;
+            throw new AIServiceError('API 调用频率超限', 'rate_limit', status, {
+              retryAfterSec: Number.isFinite(retryAfterSec) ? retryAfterSec : undefined,
+            });
           } else if (status >= 500) {
             throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
           } else {
@@ -438,7 +461,13 @@ export class OpenAIClient {
         if (ae.response) {
           const status = ae.response.status;
           if (status === 401 || status === 403) throw new AIServiceError('API Key 无效或已过期', 'auth', status);
-          if (status === 429) throw new AIServiceError('API 调用频率超限', 'rate_limit', status);
+          if (status === 429) {
+            const retryAfterRaw = ae.response.headers['retry-after'];
+            const retryAfterSec = retryAfterRaw ? parseFloat(String(retryAfterRaw)) : undefined;
+            throw new AIServiceError('API 调用频率超限', 'rate_limit', status, {
+              retryAfterSec: Number.isFinite(retryAfterSec) ? retryAfterSec : undefined,
+            });
+          }
           if (status >= 500) throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
           throw new AIServiceError(`AI API 错误 (HTTP ${status})`, 'client', status);
         }
@@ -668,6 +697,7 @@ export interface MultiModelChatResult {
     endpointName: string;
     modelName: string;
   };
+  fallbackErrors?: ErrorContext['attempts'];
 }
 
 /**
@@ -705,7 +735,11 @@ export class MultiModelClient {
       throw new AIServiceError('请求已取消', 'aborted');
     }
 
-    const errors: Array<{ model: string; error: string; category: ErrorCategory }> = [];
+    const errors: Array<{
+      model: string; error: string; category: ErrorCategory;
+      httpStatus?: number; retryAfterSec?: number;
+      endpointId: string; endpointName: string; modelName: string;
+    }> = [];
     const skippedEndpoints = new Set<string>();
 
     // L3: 全 fallback 链总超时 — 取配置值与默认值中的较大者
@@ -732,6 +766,11 @@ export class MultiModelClient {
 
           try {
             const chatResult = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+            const fallbackErrors = errors.length > 0 ? errors.map(e => ({
+              endpoint: e.endpointId, model: e.modelName,
+              category: e.category, message: e.error.substring(0, 200),
+              httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+            })) : undefined;
             return {
               content: chatResult.content,
               usage: chatResult.usage,
@@ -739,7 +778,8 @@ export class MultiModelClient {
                 endpointId: config.endpointId,
                 endpointName: config.endpointName,
                 modelName: config.modelName
-              }
+              },
+              fallbackErrors,
             };
           } catch (error) {
             const aiError = error instanceof AIServiceError
@@ -756,7 +796,12 @@ export class MultiModelClient {
             errors.push({
               model: `${config.endpointName}/${config.modelName}`,
               error: aiError.message,
-              category: aiError.category
+              category: aiError.category,
+              httpStatus: aiError.httpStatus,
+              retryAfterSec: aiError.context?.retryAfterSec,
+              endpointId: config.endpointId,
+              endpointName: config.endpointName,
+              modelName: config.modelName,
             });
 
             // auth → 跳过该端点的所有模型
@@ -820,7 +865,15 @@ export class MultiModelClient {
         })),
       }));
 
-      throw new AIServiceError(USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
+      throw new AIServiceError(USER_ERROR_MESSAGES[dominantCategory], dominantCategory, undefined, {
+        totalAttempts: errors.length,
+        skippedEndpoints: [...skippedEndpoints],
+        attempts: errors.map(e => ({
+          endpoint: e.endpointId, model: e.modelName,
+          category: e.category, message: e.error.substring(0, 200),
+          httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+        })),
+      });
     } finally {
       clearTimeout(totalTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
@@ -831,12 +884,16 @@ export class MultiModelClient {
     messages: ChatMessage[],
     systemPrompt: string,
     options: { signal?: AbortSignal; callbacks: StreamCallbacks },
-  ): Promise<{ usedModel: MultiModelChatResult['usedModel'] }> {
+  ): Promise<{ usedModel: MultiModelChatResult['usedModel']; fallbackErrors?: ErrorContext['attempts'] }> {
     if (options.signal?.aborted) {
       throw new AIServiceError('请求已取消', 'aborted');
     }
 
-    const errors: Array<{ model: string; error: string; category: ErrorCategory }> = [];
+    const errors: Array<{
+      model: string; error: string; category: ErrorCategory;
+      httpStatus?: number; retryAfterSec?: number;
+      endpointId: string; endpointName: string; modelName: string;
+    }> = [];
     const skippedEndpoints = new Set<string>();
 
     for (const { config, client } of this.clients) {
@@ -847,12 +904,18 @@ export class MultiModelClient {
           signal: options.signal,
           callbacks: options.callbacks,
         });
+        const fallbackErrors = errors.length > 0 ? errors.map(e => ({
+          endpoint: e.endpointId, model: e.modelName,
+          category: e.category, message: e.error.substring(0, 200),
+          httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+        })) : undefined;
         return {
           usedModel: {
             endpointId: config.endpointId,
             endpointName: config.endpointName,
             modelName: config.modelName,
           },
+          fallbackErrors,
         };
       } catch (error) {
         const aiError = error instanceof AIServiceError
@@ -865,6 +928,11 @@ export class MultiModelClient {
           model: `${config.endpointName}/${config.modelName}`,
           error: aiError.message,
           category: aiError.category,
+          httpStatus: aiError.httpStatus,
+          retryAfterSec: aiError.context?.retryAfterSec,
+          endpointId: config.endpointId,
+          endpointName: config.endpointName,
+          modelName: config.modelName,
         });
 
         if (aiError.category === 'auth') {
@@ -894,7 +962,15 @@ export class MultiModelClient {
       if (count > maxCount) { maxCount = count; dominantCategory = cat; }
     }
 
-    throw new AIServiceError(USER_ERROR_MESSAGES[dominantCategory], dominantCategory);
+    throw new AIServiceError(USER_ERROR_MESSAGES[dominantCategory], dominantCategory, undefined, {
+      totalAttempts: errors.length,
+      skippedEndpoints: [...skippedEndpoints],
+      attempts: errors.map(e => ({
+        endpoint: e.endpointId, model: e.modelName,
+        category: e.category, message: e.error.substring(0, 200),
+        httpStatus: e.httpStatus, retryAfterSec: e.retryAfterSec,
+      })),
+    });
   }
 }
 

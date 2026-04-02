@@ -753,7 +753,7 @@ export class ChatHandler extends Handler {
               retryable: error.isRetryable,
             });
             try {
-              this.ctx.get('errorReporter')?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack);
+              this.ctx.get('errorReporter')?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack, error.context as Record<string, unknown>);
               this.ctx.get('requestStatsModel')?.recordFailure(error.category);
             } catch { /* non-critical */ }
           },
@@ -764,6 +764,17 @@ export class ChatHandler extends Handler {
       console.log(`[Perf] AI Stream Response: ${aiLatencyMs}ms`);
       console.log(`[AI Helper] 使用模型 (stream): ${usedModel.endpointName}/${usedModel.modelName}`);
       try { this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs); } catch { /* non-critical */ }
+      // 降级成功上报
+      if (streamResult.fallbackErrors?.length) {
+        try {
+          this.ctx.get('errorReporter')?.capture(
+            'api_degraded', streamResult.fallbackErrors[0].category,
+            `Primary failed, succeeded on ${usedModel.endpointName}/${usedModel.modelName}`,
+            undefined, undefined,
+            { endpointId: usedModel.endpointId, succeededOn: `${usedModel.endpointName}/${usedModel.modelName}`, attempts: streamResult.fallbackErrors, totalAttempts: streamResult.fallbackErrors.length + 1 },
+          );
+        } catch { /* non-critical */ }
+      }
 
       // Safety filter on complete content
       const outputSafetyService = new OutputSafetyService();
@@ -858,7 +869,7 @@ export class ChatHandler extends Handler {
         const er = this.ctx.get('errorReporter');
         const rsm = this.ctx.get('requestStatsModel');
         if (error instanceof AIServiceError) {
-          er?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack);
+          er?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack, error.context as Record<string, unknown>);
           rsm?.recordFailure(error.category);
         } else {
           er?.capture('api_failure', 'unknown', error instanceof Error ? error.message : String(error));
@@ -923,6 +934,17 @@ export class ChatHandler extends Handler {
       console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       // 记录成功请求
       try { this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs); } catch { /* non-critical */ }
+      // 降级成功上报
+      if (result.fallbackErrors?.length) {
+        try {
+          this.ctx.get('errorReporter')?.capture(
+            'api_degraded', result.fallbackErrors[0].category,
+            `Primary failed, succeeded on ${result.usedModel.endpointName}/${result.usedModel.modelName}`,
+            undefined, undefined,
+            { endpointId: result.usedModel.endpointId, succeededOn: `${result.usedModel.endpointName}/${result.usedModel.modelName}`, attempts: result.fallbackErrors, totalAttempts: result.fallbackErrors.length + 1 },
+          );
+        } catch { /* non-critical */ }
+      }
     } catch (error) {
       console.error('[AI Helper] AI 调用失败:', error);
       // 上报错误到遥测
@@ -930,7 +952,7 @@ export class ChatHandler extends Handler {
         const er = this.ctx.get('errorReporter');
         const rsm = this.ctx.get('requestStatsModel');
         if (error instanceof AIServiceError) {
-          er?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack);
+          er?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack, error.context as Record<string, unknown>);
           rsm?.recordFailure(error.category);
         } else {
           er?.capture('api_failure', 'unknown', error instanceof Error ? error.message : String(error));
