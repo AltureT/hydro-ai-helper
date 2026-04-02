@@ -323,8 +323,8 @@ async function handleErrors(request, env) {
         env.DB.prepare(
           `INSERT INTO plugin_errors (
             instance_id, version, domain_hash, error_type, category,
-            message, http_status, count, first_seen, last_seen, stack_fingerprint
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            message, http_status, count, first_seen, last_seen, stack_fingerprint, metadata
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           instanceId,
           version,
@@ -337,6 +337,7 @@ async function handleErrors(request, env) {
           typeof e.first_seen === 'string' ? e.first_seen : new Date().toISOString(),
           typeof e.last_seen === 'string' ? e.last_seen : new Date().toISOString(),
           typeof e.stack_fingerprint === 'string' ? e.stack_fingerprint.slice(0, 16) : null,
+          isRecord(e.metadata) ? JSON.stringify(e.metadata).slice(0, 4000) : null,
         ),
       );
     }
@@ -491,7 +492,7 @@ async function handleDashboardErrors(request, env) {
 
   const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
-    `SELECT stack_fingerprint, error_type, category, message,
+    `SELECT stack_fingerprint, error_type, category, message, metadata,
             COUNT(DISTINCT instance_id) AS affected_instances,
             SUM(count) AS total_count,
             MAX(last_seen) AS last_seen

@@ -20,11 +20,13 @@ export function App() {
   const [token, setToken] = useState(localStorage.getItem('dashboard_token') || '');
 
   useEffect(() => {
-    if (apiBase) {
-      configure(apiBase, token);
+    const savedBase = localStorage.getItem('dashboard_api_base');
+    if (savedBase) {
+      configure(savedBase, token);
       setConfigured(true);
     }
-  }, [apiBase, token]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!configured) {
     return (

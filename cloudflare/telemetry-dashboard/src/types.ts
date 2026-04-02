@@ -25,6 +25,7 @@ export interface ErrorGroup {
   affected_instances: number;
   total_count: number;
   last_seen: string;
+  metadata?: string;
 }
 
 export interface FeedbackItem {
