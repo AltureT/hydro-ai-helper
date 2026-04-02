@@ -443,14 +443,16 @@ async function handleDashboardOverview(request, env) {
     return json({ success: false, error: 'Unauthorized' }, { status: 401 });
   }
 
+  const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS instance_count,
             COALESCE(SUM(active_users_7d), 0) AS active_users_7d,
             COALESCE(SUM(total_conversations), 0) AS total_conversations,
             COALESCE(SUM(api_failure_count_24h), 0) AS failures,
             COALESCE(SUM(api_success_count_24h), 0) AS successes
-     FROM plugin_stats`,
-  ).first();
+     FROM plugin_stats
+     WHERE last_report_at >= ?`,
+  ).bind(cutoff90d).first();
 
   const totalRequests = (row?.successes || 0) + (row?.failures || 0);
   const errorRate = totalRequests > 0 ? ((row?.failures || 0) / totalRequests * 100).toFixed(2) : '0.00';
@@ -472,11 +474,14 @@ async function handleDashboardInstances(request, env) {
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
+  const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
     `SELECT instance_id, version, active_users_7d, total_conversations,
             error_count_24h, api_failure_count_24h, last_report_at, node_version, os_platform
-     FROM plugin_stats ORDER BY last_report_at DESC LIMIT ? OFFSET ?`,
-  ).bind(limit, offset).all();
+     FROM plugin_stats
+     WHERE last_report_at >= ?
+     ORDER BY last_report_at DESC LIMIT ? OFFSET ?`,
+  ).bind(cutoff90d, limit, offset).all();
 
   return json({ instances: rows?.results || [] });
 }

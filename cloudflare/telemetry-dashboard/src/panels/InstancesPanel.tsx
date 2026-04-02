@@ -11,8 +11,9 @@ function timeAgo(iso: string): string {
 }
 
 function healthBadge(instance: Instance): { text: string; bg: string; color: string } {
-  const hoursSinceReport = (Date.now() - new Date(instance.last_report_at).getTime()) / 3600000;
-  if (hoursSinceReport > 48) return { text: '离线', bg: '#fef2f2', color: '#ef4444' };
+  const daysSinceReport = (Date.now() - new Date(instance.last_report_at).getTime()) / 86400000;
+  if (daysSinceReport > 7) return { text: '空闲', bg: '#f3f4f6', color: '#6b7280' };
+  if (daysSinceReport > 2) return { text: '离线', bg: '#fef2f2', color: '#ef4444' };
   if (instance.api_failure_count_24h > 10) return { text: '异常', bg: '#fffbeb', color: '#d97706' };
   return { text: '健康', bg: '#f0fdf4', color: '#16a34a' };
 }

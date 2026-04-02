@@ -9,7 +9,13 @@ function createMockCollection() {
 }
 
 function createMockDb(collection: any) {
-  return { collection: jest.fn().mockReturnValue(collection) } as any;
+  return {
+    collection: jest.fn().mockReturnValue(collection),
+    databaseName: 'test_db',
+    admin: jest.fn().mockReturnValue({
+      serverInfo: jest.fn().mockResolvedValue({ host: 'localhost:27017' }),
+    }),
+  } as any;
 }
 
 describe('PluginInstallModel', () => {
@@ -67,15 +73,18 @@ describe('PluginInstallModel', () => {
     });
 
     it('should update version when record already exists', async () => {
-      mockColl.findOne.mockResolvedValue({ _id: 'install' });
+      mockColl.findOne.mockResolvedValue({ _id: 'install', instanceId: 'old-uuid' });
 
       await model.createIfMissing('2.0.0');
 
       expect(mockColl.insertOne).not.toHaveBeenCalled();
-      expect(mockColl.updateOne).toHaveBeenCalledWith(
-        { _id: 'install' },
-        { $set: { lastVersion: '2.0.0' } },
-      );
+      expect(mockColl.updateOne).toHaveBeenCalledTimes(1);
+      const updateArgs = mockColl.updateOne.mock.calls[0];
+      expect(updateArgs[0]).toEqual({ _id: 'install' });
+      expect(updateArgs[1].$set.lastVersion).toBe('2.0.0');
+      // Should migrate from old UUID to stable hash
+      expect(updateArgs[1].$set.instanceId).toBeTruthy();
+      expect(updateArgs[1].$set.instanceId).not.toBe('old-uuid');
     });
   });
 

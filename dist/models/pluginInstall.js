@@ -7,6 +7,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PluginInstallModel = void 0;
 const crypto_1 = require("crypto");
+const os_1 = require("os");
 /**
  * PluginInstall Model 操作类
  * 封装插件安装记录的 CRUD 操作
@@ -15,6 +16,31 @@ class PluginInstallModel {
     constructor(db) {
         this.FIXED_ID = 'install'; // 固定记录 ID
         this.collection = db.collection('ai_plugin_install');
+        this.db = db;
+    }
+    /**
+     * 基于 MongoDB 连接信息生成确定性 instanceId
+     * 同一 MongoDB + 同一数据库 + 同一主机 = 同一 instanceId
+     */
+    async generateStableInstanceId() {
+        try {
+            const admin = this.db.admin();
+            const serverStatus = await admin.serverInfo();
+            const mongoHost = serverStatus.host || 'unknown';
+            const dbName = this.db.databaseName;
+            const host = (0, os_1.hostname)();
+            return (0, crypto_1.createHash)('sha256')
+                .update(`${mongoHost}:${dbName}:${host}`)
+                .digest('hex');
+        }
+        catch {
+            // fallback: use db name + hostname
+            const dbName = this.db.databaseName;
+            const host = (0, os_1.hostname)();
+            return (0, crypto_1.createHash)('sha256')
+                .update(`${dbName}:${host}`)
+                .digest('hex');
+        }
     }
     /**
      * 确保索引已创建
@@ -36,23 +62,29 @@ class PluginInstallModel {
      */
     async createIfMissing(version) {
         const existing = await this.getInstall();
+        const stableId = await this.generateStableInstanceId();
         if (!existing) {
             const now = new Date();
             await this.collection.insertOne({
                 _id: this.FIXED_ID,
-                instanceId: (0, crypto_1.randomUUID)(),
+                instanceId: stableId,
                 installedAt: now,
                 installedVersion: version,
                 lastVersion: version,
                 domainsSeen: [],
                 telemetryEnabled: true
             });
-            console.log('[PluginInstallModel] Install record created');
+            console.log('[PluginInstallModel] Install record created with stable instanceId');
         }
         else {
-            // 更新版本号
-            await this.collection.updateOne({ _id: this.FIXED_ID }, { $set: { lastVersion: version } });
-            console.log('[PluginInstallModel] Install record already exists, version updated');
+            const updates = { lastVersion: version };
+            // Migrate from random UUID to stable ID
+            if (existing.instanceId !== stableId) {
+                updates.instanceId = stableId;
+                console.log('[PluginInstallModel] Migrated instanceId to stable hash');
+            }
+            await this.collection.updateOne({ _id: this.FIXED_ID }, { $set: updates });
+            console.log('[PluginInstallModel] Install record updated, version:', version);
         }
     }
     /**
