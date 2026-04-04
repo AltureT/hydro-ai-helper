@@ -11,6 +11,7 @@ import { Handler, PRIV } from 'hydrooj';
 import { UpdateService } from '../services/updateService';
 import { setJsonResponse, setErrorResponse } from '../lib/httpHelpers';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 
@@ -206,7 +207,9 @@ export class UpdateHandler extends Handler {
       };
 
       const translateKey = (key: string, ...args: string[]): string => {
-        const translated = this.translate(key, ...args);
+        const translated = args.length > 0
+          ? translateWithParams(this, key, ...args)
+          : this.translate(key);
         return translated !== key ? translated : key;
       };
 

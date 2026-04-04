@@ -338,7 +338,7 @@ export class TestConnectionHandler extends Handler {
         this.response.status = 200;
         this.response.body = {
           success: false,
-          message: err instanceof Error ? err.message : this.translate('ai_helper_admin_test_call_failed')
+          message: this.translate('ai_helper_admin_test_call_failed')
         };
         this.response.type = 'application/json';
       }

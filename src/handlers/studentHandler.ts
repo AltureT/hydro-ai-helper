@@ -205,7 +205,7 @@ export class ChatHandler extends Handler {
           this.response.body = {
             error: budgetCheck.reasonKey
               ? translateWithParams(this, budgetCheck.reasonKey, ...(budgetCheck.reasonParams || []))
-              : this.translate('ai_helper_budget_user_daily_exceeded'),
+              : this.translate('ai_helper_err_budget_exceeded'),
             code: 'BUDGET_EXCEEDED'
           };
           this.response.type = 'application/json';
@@ -987,7 +987,7 @@ export class ChatHandler extends Handler {
       } else {
         this.response.status = 500;
         this.response.body = {
-          error: 'AI 服务异常，请稍后再试',
+          error: this.translate('ai_helper_err_ai_unknown'),
           code: 'AI_UNKNOWN',
           category: 'unknown',
           retryable: true,
