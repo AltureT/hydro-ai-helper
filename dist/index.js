@@ -7,9 +7,15 @@
  * - 对话记录可追踪
  * - 符合教学研究需求
  */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.apply = exports.Config = void 0;
 console.log('[AI-Helper] Loading plugin...');
+const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
+const js_yaml_1 = __importDefault(require("js-yaml"));
 const hydrooj_1 = require("hydrooj");
 console.log('[AI-Helper] hydrooj imports OK');
 const testHandler_1 = require("./handlers/testHandler");
@@ -62,6 +68,25 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
     name: 'hydro-ai-helper',
     schema: configSchema,
     async apply(ctx) {
+        // 加载 locale 文件（确保插件翻译注册到 HydroOJ i18n 系统）
+        const localesDir = path_1.default.resolve(__dirname, '..', 'locales');
+        if (fs_1.default.existsSync(localesDir)) {
+            for (const file of fs_1.default.readdirSync(localesDir)) {
+                if (!file.endsWith('.yaml') && !file.endsWith('.yml'))
+                    continue;
+                try {
+                    const content = fs_1.default.readFileSync(path_1.default.join(localesDir, file), 'utf-8');
+                    const dict = js_yaml_1.default.load(content);
+                    if (dict && typeof dict === 'object') {
+                        ctx.i18n.load(file.split('.')[0], dict);
+                    }
+                }
+                catch (e) {
+                    console.warn(`[AI-Helper] Failed to load locale ${file}:`, e);
+                }
+            }
+            console.log('[AI-Helper] Locales loaded');
+        }
         // 初始化数据库模型
         const db = ctx.db;
         const conversationModel = new conversation_1.ConversationModel(db);

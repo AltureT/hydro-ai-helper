@@ -49,7 +49,7 @@ class VersionCheckHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[VersionCheckHandler] Error:', err);
-            (0, httpHelpers_1.setErrorResponse)(this, 'VERSION_CHECK_FAILED', err instanceof Error ? err.message : '版本检查失败', 500);
+            (0, httpHelpers_1.setErrorResponse)(this, 'VERSION_CHECK_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_version_check_failed'), 500);
         }
     }
 }

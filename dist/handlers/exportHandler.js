@@ -11,6 +11,7 @@ const hydrooj_1 = require("hydrooj");
 const exportService_1 = require("../services/exportService");
 const domainHelper_1 = require("../utils/domainHelper");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
+const i18nHelper_1 = require("../utils/i18nHelper");
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
  * GET /ai-helper/export?format=csv&startDate=...&endDate=...&classId=...&problemId=...&userId=...&includeSensitive=false
@@ -23,7 +24,7 @@ class ExportHandler extends hydrooj_1.Handler {
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_export', periodSecs: 60, maxOps: 5,
                 failOpen: true,
-                errorMessage: '导出请求太频繁，请稍后再试',
+                errorMessage: 'ai_helper_export_rate_limited',
             }))
                 return;
             // 获取当前域 ID（用于域隔离）
@@ -36,7 +37,7 @@ class ExportHandler extends hydrooj_1.Handler {
                 this.response.body = {
                     error: {
                         code: 'UNSUPPORTED_FORMAT',
-                        message: '当前仅支持 CSV 导出(format=csv)'
+                        message: this.translate('ai_helper_export_unsupported_format')
                     }
                 };
                 this.response.type = 'application/json';
@@ -55,7 +56,7 @@ class ExportHandler extends hydrooj_1.Handler {
                     this.response.body = {
                         error: {
                             code: 'INVALID_DATE',
-                            message: `无效的开始日期: ${startDate}`
+                            message: (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_export_invalid_start_date', startDate)
                         }
                     };
                     this.response.type = 'application/json';
@@ -71,7 +72,7 @@ class ExportHandler extends hydrooj_1.Handler {
                     this.response.body = {
                         error: {
                             code: 'INVALID_DATE',
-                            message: `无效的结束日期: ${endDate}`
+                            message: (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_export_invalid_end_date', endDate)
                         }
                     };
                     this.response.type = 'application/json';
@@ -109,7 +110,7 @@ class ExportHandler extends hydrooj_1.Handler {
             this.response.body = {
                 error: {
                     code: 'EXPORT_ERROR',
-                    message: err instanceof Error ? err.message : '数据导出失败'
+                    message: err instanceof Error ? err.message : this.translate('ai_helper_export_failed')
                 }
             };
             this.response.type = 'application/json';

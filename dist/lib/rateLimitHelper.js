@@ -7,7 +7,7 @@ exports.applyRateLimit = applyRateLimit;
  * Returns false if the request is allowed to proceed.
  */
 async function applyRateLimit(handler, options) {
-    const { op, periodSecs, maxOps, key, failOpen = false, errorMessage = '请求太频繁，请稍后再试', } = options;
+    const { op, periodSecs, maxOps, key, failOpen = false, errorMessage = 'ai_helper_err_rate_limited', } = options;
     try {
         if (key) {
             await handler.limitRate(op, periodSecs, maxOps, key);
@@ -28,7 +28,7 @@ async function applyRateLimit(handler, options) {
             || (e?.status === 429)) {
             handler.response.status = 429;
             handler.response.body = {
-                error: errorMessage,
+                error: handler.translate(errorMessage),
                 code: 'RATE_LIMIT_EXCEEDED',
                 category: 'rate_limit',
                 retryable: true,

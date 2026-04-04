@@ -42,6 +42,7 @@ const hydrooj_1 = require("hydrooj");
 const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const csrfHelper_1 = require("../lib/csrfHelper");
+const i18nHelper_1 = require("../utils/i18nHelper");
 /**
  * AdminConfigHandler - AI 配置页面
  * GET /ai-helper/admin/config
@@ -164,7 +165,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[AI Helper] AdminConfigHandler error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
-            this.response.body = { error: '服务器内部错误' };
+            this.response.body = { error: this.translate('ai_helper_err_internal'), code: 'INTERNAL_ERROR' };
             this.response.type = 'application/json';
         }
     }
@@ -199,7 +200,8 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                         catch (_err) {
                             this.response.status = 500;
                             this.response.body = {
-                                error: `端点 "${ep.name}" 的 API Key 加密失败`
+                                error: (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_config_endpoint_encrypt_failed', ep.name),
+                                code: 'ENCRYPT_FAILED',
                             };
                             this.response.type = 'application/json';
                             return;
@@ -243,7 +245,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 const rate = parseInt(String(body.rateLimitPerMinute), 10);
                 if (Number.isNaN(rate) || rate < 0) {
                     this.response.status = 400;
-                    this.response.body = { error: 'rateLimitPerMinute 必须为非负整数' };
+                    this.response.body = { error: this.translate('ai_helper_config_rate_limit_invalid'), code: 'INVALID_RATE_LIMIT' };
                     this.response.type = 'application/json';
                     return;
                 }
@@ -253,7 +255,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 const timeout = parseInt(String(body.timeoutSeconds), 10);
                 if (timeout <= 0) {
                     this.response.status = 400;
-                    this.response.body = { error: 'timeoutSeconds 必须大于 0' };
+                    this.response.body = { error: this.translate('ai_helper_config_timeout_invalid'), code: 'INVALID_TIMEOUT' };
                     this.response.type = 'application/json';
                     return;
                 }
@@ -292,7 +294,8 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 catch (_err) {
                     this.response.status = 500;
                     this.response.body = {
-                        error: 'API Key 加密失败'
+                        error: this.translate('ai_helper_config_apikey_encrypt_failed'),
+                        code: 'ENCRYPT_FAILED',
                     };
                     this.response.type = 'application/json';
                     return;
@@ -374,7 +377,8 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             console.error('[AdminConfigHandler] 更新配置失败:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
-                error: '更新配置失败'
+                error: this.translate('ai_helper_config_update_failed'),
+                code: 'CONFIG_UPDATE_FAILED',
             };
             this.response.type = 'application/json';
         }
@@ -403,7 +407,7 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[AI Helper] JailbreakLogsHandler error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
-            this.response.body = { error: '获取越狱日志失败' };
+            this.response.body = { error: this.translate('ai_helper_config_jailbreak_logs_failed'), code: 'JAILBREAK_LOGS_FAILED' };
             this.response.type = 'application/json';
         }
     }

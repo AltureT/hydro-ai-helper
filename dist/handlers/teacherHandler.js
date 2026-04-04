@@ -15,32 +15,29 @@ const domainHelper_1 = require("../utils/domainHelper");
  * @param uids 用户 ID 数组
  * @returns uid -> uname 映射表
  */
-async function getUserNameMap(uids) {
+async function getUserNameMap(uids, deletedUserFallback) {
     const uniqueUids = [...new Set(uids)];
     const userMap = new Map();
     if (uniqueUids.length === 0) {
         return userMap;
     }
     try {
-        // 直接使用 HydroOJ db 访问 user 集合
         const userColl = hydrooj_1.db.collection('user');
         const users = await userColl.find({ _id: { $in: uniqueUids } }).toArray();
         for (const user of users) {
             const u = user;
-            userMap.set(u._id, u.uname || '已删除用户');
+            userMap.set(u._id, u.uname || deletedUserFallback);
         }
-        // 对于不存在的用户，设置默认值
         for (const uid of uniqueUids) {
             if (!userMap.has(uid)) {
-                userMap.set(uid, '已删除用户');
+                userMap.set(uid, deletedUserFallback);
             }
         }
     }
     catch (err) {
         console.error('[AI Helper] Failed to fetch user names:', err);
-        // 出错时全部使用默认值
         for (const uid of uniqueUids) {
-            userMap.set(uid, '已删除用户');
+            userMap.set(uid, deletedUserFallback);
         }
     }
     return userMap;
@@ -100,7 +97,8 @@ class ConversationListHandler extends hydrooj_1.Handler {
             const { conversations, total } = await conversationModel.findByFilters(filters, pageNum, limitNum);
             // 批量获取用户名（避免 N+1 查询）
             const uids = conversations.map(conv => conv.userId);
-            const userNameMap = await getUserNameMap(uids);
+            const deletedUserLabel = this.translate('ai_helper_teacher_deleted_user');
+            const userNameMap = await getUserNameMap(uids, deletedUserLabel);
             // T048: 批量获取每个会话的第一条学生消息
             const messageModel = this.ctx.get('messageModel');
             const conversationIds = conversations.map(conv => conv._id);
@@ -119,7 +117,7 @@ class ConversationListHandler extends hydrooj_1.Handler {
                 return {
                     _id: convIdStr,
                     userId: conv.userId,
-                    userName: userNameMap.get(conv.userId) || '已删除用户',
+                    userName: userNameMap.get(conv.userId) || deletedUserLabel,
                     classId: conv.classId,
                     problemId: conv.problemId,
                     problemUrl: buildProblemUrl(domainId, conv.problemId), // T031: 题目链接
@@ -151,7 +149,7 @@ class ConversationListHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[AI Helper] ConversationListHandler error:', err);
-            (0, httpHelpers_1.setErrorResponse)(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : '服务器内部错误', 500);
+            (0, httpHelpers_1.setErrorResponse)(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : this.translate('ai_helper_err_internal'), 500);
         }
     }
 }
@@ -170,13 +168,13 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
             // 获取当前域 ID（用于域隔离验证）
             const domainId = (0, domainHelper_1.getDomainId)(this);
             if (!mongo_1.ObjectId.isValid(id)) {
-                (0, httpHelpers_1.setErrorResponse)(this, 'INVALID_ID', '无效的会话 ID');
+                (0, httpHelpers_1.setErrorResponse)(this, 'INVALID_ID', this.translate('ai_helper_teacher_invalid_conversation_id'));
                 return;
             }
             // 查询会话详情
             const conversation = await conversationModel.findById(id);
             if (!conversation) {
-                (0, httpHelpers_1.setErrorResponse)(this, 'NOT_FOUND', '会话不存在', 404);
+                (0, httpHelpers_1.setErrorResponse)(this, 'NOT_FOUND', this.translate('ai_helper_teacher_conversation_not_found'), 404);
                 return;
             }
             // 域隔离验证：确保对话属于当前域
@@ -185,7 +183,7 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
             // 2. 当前访问域为 'system'（主站访问）时，允许访问所有域的对话
             const conversationDomain = conversation.domainId || 'system';
             if (conversationDomain !== domainId && conversationDomain !== 'system' && domainId !== 'system') {
-                (0, httpHelpers_1.setErrorResponse)(this, 'FORBIDDEN', '无权访问此对话', 403);
+                (0, httpHelpers_1.setErrorResponse)(this, 'FORBIDDEN', this.translate('ai_helper_teacher_conversation_forbidden'), 403);
                 return;
             }
             // 查询会话的所有消息 (按时间升序)
@@ -201,9 +199,9 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
                 attachedError: msg.attachedError,
                 metadata: msg.metadata
             }));
-            // 获取用户名
-            const userNameMap = await getUserNameMap([conversation.userId]);
-            const userName = userNameMap.get(conversation.userId) || '已删除用户';
+            const deletedLabel = this.translate('ai_helper_teacher_deleted_user');
+            const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
+            const userName = userNameMap.get(conversation.userId) || deletedLabel;
             // T032: 对话详情响应（包含 problemUrl）
             const conversationData = {
                 _id: conversation._id.toString(),
@@ -234,7 +232,7 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[AI Helper] ConversationDetailHandler error:', err);
-            (0, httpHelpers_1.setErrorResponse)(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : '服务器内部错误', 500);
+            (0, httpHelpers_1.setErrorResponse)(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : this.translate('ai_helper_err_internal'), 500);
         }
     }
 }

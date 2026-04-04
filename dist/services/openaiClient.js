@@ -7,7 +7,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MultiModelClient = exports.OpenAIClient = exports.USER_ERROR_MESSAGES = exports.AIServiceError = void 0;
+exports.MultiModelClient = exports.OpenAIClient = exports.USER_ERROR_MESSAGE_KEYS = exports.AIServiceError = void 0;
 exports.getHttpStatusForCategory = getHttpStatusForCategory;
 exports.fetchAvailableModels = fetchAvailableModels;
 exports.createOpenAIClientFromConfig = createOpenAIClientFromConfig;
@@ -32,15 +32,15 @@ class AIServiceError extends Error {
     }
 }
 exports.AIServiceError = AIServiceError;
-exports.USER_ERROR_MESSAGES = {
-    auth: 'AI 服务认证失败，请联系管理员检查配置',
-    rate_limit: 'AI 服务繁忙，请稍后再试',
-    server: 'AI 服务暂时不可用，请稍后再试',
-    client: 'AI 服务配置错误，请联系管理员',
-    timeout: 'AI 服务响应超时，请稍后再试',
-    network: '无法连接到 AI 服务，请稍后再试',
-    aborted: '请求已取消',
-    unknown: 'AI 服务异常，请稍后再试',
+exports.USER_ERROR_MESSAGE_KEYS = {
+    auth: 'ai_helper_err_ai_auth',
+    rate_limit: 'ai_helper_err_ai_rate_limit',
+    server: 'ai_helper_err_ai_server',
+    client: 'ai_helper_err_ai_client',
+    timeout: 'ai_helper_err_ai_timeout',
+    network: 'ai_helper_err_ai_network',
+    aborted: 'ai_helper_err_ai_aborted',
+    unknown: 'ai_helper_err_ai_unknown',
 };
 function getHttpStatusForCategory(category) {
     switch (category) {
@@ -110,7 +110,8 @@ async function fetchAvailableModels(apiBaseUrl, apiKey, timeoutSeconds = limits_
         if (!response.data?.data || !Array.isArray(response.data.data)) {
             return {
                 success: false,
-                error: 'API 返回格式无效：缺少 data 字段'
+                error: 'Invalid API response: missing data field',
+                errorKey: 'ai_helper_admin_models_invalid_response',
             };
         }
         // 过滤聊天类模型
@@ -145,33 +146,35 @@ async function fetchAvailableModels(apiBaseUrl, apiKey, timeoutSeconds = limits_
                 const status = axiosError.response.status;
                 const data = axiosError.response.data;
                 if (status === 401) {
-                    return { success: false, error: 'API Key 无效或已过期' };
+                    return { success: false, error: 'API Key invalid or expired', errorKey: 'ai_helper_admin_models_invalid_key' };
                 }
                 else if (status === 403) {
-                    return { success: false, error: '无权访问模型列表' };
+                    return { success: false, error: 'Forbidden: no access to models list', errorKey: 'ai_helper_admin_models_forbidden' };
                 }
                 else if (status === 404) {
-                    // 某些 API（如 Azure）可能不支持 /models 端点
-                    return { success: false, error: '该 API 不支持获取模型列表，请手动输入模型名称' };
+                    return { success: false, error: 'API does not support /models endpoint', errorKey: 'ai_helper_admin_models_not_supported' };
                 }
                 else {
                     const errorMsg = data?.error?.message || `HTTP ${status}`;
-                    return { success: false, error: `获取模型列表失败: ${errorMsg}` };
+                    return { success: false, error: `Fetch models failed: ${errorMsg}`, errorKey: 'ai_helper_admin_models_http_error', errorParams: [errorMsg] };
                 }
             }
             else if (axiosError.code === 'ECONNABORTED') {
-                return { success: false, error: `请求超时 (${timeoutSeconds} 秒)` };
+                return { success: false, error: `Request timeout (${timeoutSeconds}s)`, errorKey: 'ai_helper_admin_models_timeout', errorParams: [timeoutSeconds] };
             }
             else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
-                return { success: false, error: '无法连接到 API 服务器，请检查 URL' };
+                return { success: false, error: 'Cannot connect to API server', errorKey: 'ai_helper_admin_models_connection' };
             }
             else {
-                return { success: false, error: `网络错误: ${axiosError.message}` };
+                return { success: false, error: `Network error: ${axiosError.message}`, errorKey: 'ai_helper_admin_models_network_error', errorParams: [axiosError.message] };
             }
         }
+        const msg = error instanceof Error ? error.message : String(error);
         return {
             success: false,
-            error: `获取模型列表失败: ${error instanceof Error ? error.message : String(error)}`
+            error: `Fetch models failed: ${msg}`,
+            errorKey: 'ai_helper_admin_models_unknown_error',
+            errorParams: [msg],
         };
     }
 }
@@ -221,7 +224,7 @@ class OpenAIClient {
             const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning);
             const content = message?.content;
             const aiMessage = reasoning
-                ? `<think>（思考中）</think>${content || ''}`
+                ? `<think>(thinking...)</think>${content || ''}`
                 : content;
             if (!aiMessage) {
                 throw new AIServiceError('AI 返回内容为空', 'server');
@@ -413,7 +416,7 @@ class OpenAIClient {
                         if (reasoningDelta) {
                             if (!inThinking) {
                                 inThinking = true;
-                                const openTag = '<think>（思考中）';
+                                const openTag = '<think>(thinking...)';
                                 fullContent += openTag;
                                 callbacks.onChunk(openTag);
                             }
@@ -660,7 +663,7 @@ class MultiModelClient {
                     message: e.error.substring(0, 200)
                 })),
             }));
-            throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory, undefined, {
+            throw new AIServiceError(`All models failed (dominant: ${dominantCategory})`, dominantCategory, undefined, {
                 totalAttempts: errors.length,
                 skippedEndpoints: [...skippedEndpoints],
                 attempts: errors.map(e => ({
@@ -746,7 +749,7 @@ class MultiModelClient {
                 dominantCategory = cat;
             }
         }
-        throw new AIServiceError(exports.USER_ERROR_MESSAGES[dominantCategory], dominantCategory, undefined, {
+        throw new AIServiceError(`All models failed (dominant: ${dominantCategory})`, dominantCategory, undefined, {
             totalAttempts: errors.length,
             skippedEndpoints: [...skippedEndpoints],
             attempts: errors.map(e => ({
@@ -810,7 +813,7 @@ async function createMultiModelClientFromConfig(ctx, existingConfig) {
     }
     return new MultiModelClient([{
             endpointId: 'legacy',
-            endpointName: '默认端点',
+            endpointName: 'Default Endpoint',
             apiBaseUrl: config.apiBaseUrl,
             apiKey,
             modelName: config.modelName,

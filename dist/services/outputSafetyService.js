@@ -40,7 +40,7 @@ class OutputSafetyService {
             }
             // 检测 AI 回复中是否包含跑题关键词
             if (result.includes(keyword)) {
-                result = result.split(keyword).join('该话题');
+                result = result.split(keyword).join(options.offTopicReplacement || '该话题');
                 rewritten = true;
             }
         }
@@ -50,17 +50,18 @@ class OutputSafetyService {
             if (!hasProgrammingContent) {
                 result = '这个内容与编程学习无关，我无法解释。请选中 AI 回复中与代码或算法相关的部分来追问。';
                 rewritten = true;
+                return { content: result, rewritten, replacementKey: 'ai_helper_err_clarify_off_topic' };
             }
         }
         // 代码泄露检测（optimize 类型豁免）
-        const codeLeakResult = this.detectCodeLeak(result, options.questionType);
+        const codeLeakResult = this.detectCodeLeak(result, options.questionType, options.codeTruncatedComment);
         if (codeLeakResult.detected) {
             result = codeLeakResult.content;
             rewritten = true;
         }
         return { content: result, rewritten, codeLeakDetected: codeLeakResult.detected };
     }
-    detectCodeLeak(content, questionType) {
+    detectCodeLeak(content, questionType, truncatedComment) {
         if (questionType === 'optimize') {
             return { content, detected: false };
         }
@@ -82,7 +83,8 @@ class OutputSafetyService {
                 const kept = realCodeLines.slice(0, CODE_LEAK_KEEP_LINES).join('\n');
                 const langMatch = match.match(/^```(\w*)/);
                 const lang = langMatch ? langMatch[1] : '';
-                return `\`\`\`${lang}\n${kept}\n# ... 代码已被截断（教学模式不展示完整实现）...\n\`\`\``;
+                const comment = truncatedComment || '代码已被截断（教学模式不展示完整实现）';
+                return `\`\`\`${lang}\n${kept}\n# ... ${comment} ...\n\`\`\``;
             }
             return match;
         });

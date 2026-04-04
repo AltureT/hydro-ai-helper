@@ -14,17 +14,14 @@ const rateLimitHelper_1 = require("../lib/rateLimitHelper");
  * @param problemIds 题目 ID 数组（字符串格式，如 "P1000"）
  * @returns problemId -> title 映射表
  */
-async function _getProblemTitleMap(domainId, problemIds) {
+async function _getProblemTitleMap(domainId, problemIds, problemFallbackPrefix) {
     const uniqueIds = [...new Set(problemIds)];
     const titleMap = new Map();
     if (uniqueIds.length === 0) {
         return titleMap;
     }
     try {
-        // HydroOJ 的 problem 集合使用 domainId + docId 作为复合键
-        // 题目 ID 格式可能是 "P1000" 或纯数字 "1000"
         const problemColl = hydrooj_1.db.collection('document');
-        // 解析题目 ID（去掉可能的 "P" 前缀）
         const docIds = [];
         for (const pid of uniqueIds) {
             const numericId = parseInt(pid.replace(/^[Pp]/, ''), 10);
@@ -32,7 +29,6 @@ async function _getProblemTitleMap(domainId, problemIds) {
                 docIds.push(numericId);
             }
         }
-        // 查询题目（docType: 10 表示 problem）
         const problems = await problemColl.find({
             domainId,
             docType: 10,
@@ -41,23 +37,20 @@ async function _getProblemTitleMap(domainId, problemIds) {
         for (const prob of problems) {
             const p = prob;
             const docId = p.docId;
-            const title = p.title || `题目 ${docId}`;
-            // 存储两种格式的映射
+            const title = p.title || `${problemFallbackPrefix} ${docId}`;
             titleMap.set(String(docId), title);
             titleMap.set(`P${docId}`, title);
         }
-        // 对于未找到的题目，设置默认值
         for (const pid of uniqueIds) {
             if (!titleMap.has(pid)) {
-                titleMap.set(pid, `题目 ${pid}`);
+                titleMap.set(pid, `${problemFallbackPrefix} ${pid}`);
             }
         }
     }
     catch (err) {
         console.error('[AI Helper] Failed to fetch problem titles:', err);
-        // 出错时全部使用默认值
         for (const pid of uniqueIds) {
-            titleMap.set(pid, `题目 ${pid}`);
+            titleMap.set(pid, `${problemFallbackPrefix} ${pid}`);
         }
     }
     return titleMap;
@@ -67,7 +60,7 @@ async function _getProblemTitleMap(domainId, problemIds) {
  * @param userIds 用户 ID 数组（数字格式）
  * @returns userId -> uname 映射表
  */
-async function getUserNameMap(userIds) {
+async function getUserNameMap(userIds, deletedUserFallback) {
     const uniqueIds = [...new Set(userIds)];
     const nameMap = new Map();
     if (uniqueIds.length === 0) {
@@ -78,20 +71,18 @@ async function getUserNameMap(userIds) {
         const users = await userColl.find({ _id: { $in: uniqueIds } }).toArray();
         for (const user of users) {
             const u = user;
-            nameMap.set(u._id, u.uname || '已删除用户');
+            nameMap.set(u._id, u.uname || deletedUserFallback);
         }
-        // 对于不存在的用户，设置默认值
         for (const uid of uniqueIds) {
             if (!nameMap.has(uid)) {
-                nameMap.set(uid, '已删除用户');
+                nameMap.set(uid, deletedUserFallback);
             }
         }
     }
     catch (err) {
         console.error('[AI Helper] Failed to fetch user names:', err);
-        // 出错时全部使用默认值
         for (const uid of uniqueIds) {
-            nameMap.set(uid, '已删除用户');
+            nameMap.set(uid, deletedUserFallback);
         }
     }
     return nameMap;
@@ -108,7 +99,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_analytics', periodSecs: 60, maxOps: 10,
                 failOpen: true,
-                errorMessage: '统计请求太频繁，请稍后再试',
+                errorMessage: 'ai_helper_analytics_rate_limited',
             }))
                 return;
             // 获取当前域 ID（用于域隔离）
@@ -130,7 +121,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                 this.response.body = {
                     error: {
                         code: 'INVALID_DIMENSION',
-                        message: 'dimension 参数必须为 class / problem / student 之一',
+                        message: this.translate('ai_helper_analytics_invalid_dimension'),
                     },
                 };
                 this.response.type = 'application/json';
@@ -182,7 +173,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
             this.response.body = {
                 error: {
                     code: 'INTERNAL_ERROR',
-                    message: err instanceof Error ? err.message : '服务器内部错误',
+                    message: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 },
             };
             this.response.type = 'application/json';
@@ -365,7 +356,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                 _id: 0,
                 key: '$_id',
                 displayName: {
-                    $ifNull: ['$problemTitle', { $concat: ['题目 ', { $toString: '$_id' }] }]
+                    $ifNull: ['$problemTitle', { $concat: [this.translate('ai_helper_problem_fallback_prefix'), ' ', { $toString: '$_id' }] }]
                 },
                 totalConversations: 1,
                 effectiveConversations: 1,
@@ -465,7 +456,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         const items = await col.aggregate(pipeline).toArray();
         // T028: 获取用户名并添加 displayName
         const userIds = items.map(item => Number(item.key)).filter(id => !isNaN(id));
-        const nameMap = await getUserNameMap(userIds);
+        const nameMap = await getUserNameMap(userIds, this.translate('ai_helper_teacher_deleted_user'));
         const enrichedItems = items.map(item => {
             const key = Number(item.key);
             const name = nameMap.get(key);

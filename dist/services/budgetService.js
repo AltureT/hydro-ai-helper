@@ -24,6 +24,8 @@ class BudgetService {
                 return {
                     allowed: false,
                     reason: `今天的 AI 额度已用完（已使用 ${used.toLocaleString()} / ${limit.toLocaleString()} tokens）`,
+                    reasonKey: 'ai_helper_budget_user_daily_exceeded',
+                    reasonParams: [used.toLocaleString(), limit.toLocaleString()],
                     remaining: 0,
                 };
             }
@@ -33,6 +35,8 @@ class BudgetService {
                 return {
                     allowed: true,
                     warning: `AI 额度即将用尽（剩余约 ${remaining.toLocaleString()} tokens）`,
+                    warningKey: 'ai_helper_budget_user_daily_warning',
+                    warningParams: [remaining.toLocaleString()],
                     remaining,
                 };
             }
@@ -46,6 +50,7 @@ class BudgetService {
                 return {
                     allowed: false,
                     reason: '今日全站 AI 额度已用完，请明天再试',
+                    reasonKey: 'ai_helper_budget_domain_daily_exceeded',
                     remaining: 0,
                 };
             }
@@ -54,6 +59,7 @@ class BudgetService {
                 return {
                     allowed: true,
                     warning: '全站 AI 额度即将用尽，请节约使用',
+                    warningKey: 'ai_helper_budget_domain_daily_warning',
                 };
             }
         }
@@ -67,6 +73,7 @@ class BudgetService {
                 return {
                     allowed: false,
                     reason: '本月全站 AI 额度已用完，请联系管理员',
+                    reasonKey: 'ai_helper_budget_domain_monthly_exceeded',
                     remaining: 0,
                 };
             }
@@ -75,6 +82,7 @@ class BudgetService {
                 return {
                     allowed: true,
                     warning: '本月全站 AI 额度即将用尽',
+                    warningKey: 'ai_helper_budget_domain_monthly_warning',
                 };
             }
         }

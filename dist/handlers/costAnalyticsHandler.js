@@ -8,13 +8,14 @@ exports.CostAnalyticsHandlerPriv = exports.CostAnalyticsHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const domainHelper_1 = require("../utils/domainHelper");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
+const i18nHelper_1 = require("../utils/i18nHelper");
 class CostAnalyticsHandler extends hydrooj_1.Handler {
     async get() {
         try {
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_cost_analytics', periodSecs: 60, maxOps: 10,
                 failOpen: true,
-                errorMessage: '请求太频繁，请稍后再试',
+                errorMessage: 'ai_helper_cost_rate_limited',
             }))
                 return;
             const domainId = (0, domainHelper_1.getDomainId)(this);
@@ -54,7 +55,7 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
             const userNameMap = await this.getUserNameMap(userIds);
             const enrichedTopUsers = topUsers.map(u => ({
                 ...u,
-                userName: userNameMap.get(u.userId) || `用户 ${u.userId}`,
+                userName: userNameMap.get(u.userId) || (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_cost_user_fallback', u.userId),
             }));
             // 计算 period 汇总
             let periodTokens = 0;
@@ -102,7 +103,7 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[CostAnalyticsHandler] error:', err);
             this.response.status = 500;
-            this.response.body = { error: '服务器内部错误' };
+            this.response.body = { error: this.translate('ai_helper_err_internal'), code: 'INTERNAL_ERROR' };
             this.response.type = 'application/json';
         }
     }
@@ -146,7 +147,7 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
             const userColl = hydrooj_1.db.collection('user');
             const users = await userColl.find({ _id: { $in: userIds } }).toArray();
             for (const user of users) {
-                nameMap.set(user._id, user.uname || `用户 ${user._id}`);
+                nameMap.set(user._id, user.uname || (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_cost_user_fallback', user._id));
             }
         }
         catch (err) {

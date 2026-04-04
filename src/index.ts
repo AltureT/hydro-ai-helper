@@ -9,6 +9,9 @@
 
 console.log('[AI-Helper] Loading plugin...');
 
+import path from 'path';
+import fs from 'fs';
+import yaml from 'js-yaml';
 import { Context, definePlugin, Schema } from 'hydrooj';
 console.log('[AI-Helper] hydrooj imports OK');
 
@@ -90,6 +93,24 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
   name: 'hydro-ai-helper',
   schema: configSchema,
   async apply(ctx: Context) {
+    // 加载 locale 文件（确保插件翻译注册到 HydroOJ i18n 系统）
+    const localesDir = path.resolve(__dirname, '..', 'locales');
+    if (fs.existsSync(localesDir)) {
+      for (const file of fs.readdirSync(localesDir)) {
+        if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue;
+        try {
+          const content = fs.readFileSync(path.join(localesDir, file), 'utf-8');
+          const dict = yaml.load(content) as Record<string, string>;
+          if (dict && typeof dict === 'object') {
+            ctx.i18n.load(file.split('.')[0], dict);
+          }
+        } catch (e) {
+          console.warn(`[AI-Helper] Failed to load locale ${file}:`, e);
+        }
+      }
+      console.log('[AI-Helper] Locales loaded');
+    }
+
     // 初始化数据库模型
     const db = ctx.db;
     const conversationModel = new ConversationModel(db);

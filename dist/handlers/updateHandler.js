@@ -46,6 +46,7 @@ const hydrooj_1 = require("hydrooj");
 const updateService_1 = require("../services/updateService");
 const httpHelpers_1 = require("../lib/httpHelpers");
 const csrfHelper_1 = require("../lib/csrfHelper");
+const i18nHelper_1 = require("../utils/i18nHelper");
 const fsPromises = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const UPDATE_PROGRESS_FILENAME = '.update.progress.json';
@@ -102,7 +103,7 @@ class UpdateInfoHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[UpdateInfoHandler] Error:', err);
-            (0, httpHelpers_1.setErrorResponse)(this, 'UPDATE_INFO_FAILED', err instanceof Error ? err.message : '获取更新信息失败', 500);
+            (0, httpHelpers_1.setErrorResponse)(this, 'UPDATE_INFO_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_update_info_failed'), 500);
         }
     }
 }
@@ -133,7 +134,7 @@ class UpdateHandler extends hydrooj_1.Handler {
             // 🔒 强制管理员权限检查（PRIV/hasPriv；防御路由配置被绕过）
             if (!this.user.hasPriv(hydrooj_1.PRIV.PRIV_EDIT_SYSTEM)) {
                 console.warn(`[UpdateHandler] 权限不足: 用户 ${this.user._id} 尝试读取更新进度`);
-                return (0, httpHelpers_1.setErrorResponse)(this, 'PERMISSION_DENIED', '读取更新进度需要管理员权限。', 403);
+                return (0, httpHelpers_1.setErrorResponse)(this, 'PERMISSION_DENIED', this.translate('ai_helper_update_permission_read'), 403);
             }
             const updateService = new updateService_1.UpdateService();
             const pluginPath = updateService.getPluginPath();
@@ -145,7 +146,7 @@ class UpdateHandler extends hydrooj_1.Handler {
             return (0, httpHelpers_1.setJsonResponse)(this, {
                 status: 'idle',
                 step: 'detecting',
-                message: '暂无更新任务',
+                message: this.translate('ai_helper_update_no_task'),
                 logs: [],
                 pluginPath,
                 updatedAt: new Date().toISOString()
@@ -153,7 +154,7 @@ class UpdateHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[UpdateHandler] Error:', err);
-            (0, httpHelpers_1.setErrorResponse)(this, 'UPDATE_PROGRESS_FAILED', err instanceof Error ? err.message : '获取更新进度失败', 500);
+            (0, httpHelpers_1.setErrorResponse)(this, 'UPDATE_PROGRESS_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_update_progress_failed'), 500);
         }
     }
     async post() {
@@ -164,7 +165,7 @@ class UpdateHandler extends hydrooj_1.Handler {
             // 🔒 强制管理员权限检查（PRIV/hasPriv；防御路由配置被绕过）
             if (!this.user.hasPriv(hydrooj_1.PRIV.PRIV_EDIT_SYSTEM)) {
                 console.warn(`[UpdateHandler] 权限不足: 用户 ${this.user._id} 尝试执行更新操作`);
-                return (0, httpHelpers_1.setErrorResponse)(this, 'PERMISSION_DENIED', '执行插件更新需要管理员权限。更新操作会修改代码并重启服务，仅允许管理员执行。', 403);
+                return (0, httpHelpers_1.setErrorResponse)(this, 'PERMISSION_DENIED', this.translate('ai_helper_update_permission_execute'), 403);
             }
             const updateService = new updateService_1.UpdateService();
             const pluginPath = updateService.getPluginPath();
@@ -173,7 +174,7 @@ class UpdateHandler extends hydrooj_1.Handler {
             const progress = {
                 status: 'running',
                 step: 'detecting',
-                message: '更新任务已开始',
+                message: this.translate('ai_helper_update_started'),
                 logs: [],
                 pluginPath,
                 startedAt,
@@ -209,34 +210,49 @@ class UpdateHandler extends hydrooj_1.Handler {
                     void flush();
                 }, 200);
             };
-            // 执行更新
-            const result = await updateService.performUpdate((step, log) => {
-                const entry = `[${step}] ${log}`;
+            const translateKey = (key, ...args) => {
+                const translated = args.length > 0
+                    ? (0, i18nHelper_1.translateWithParams)(this, key, ...args)
+                    : this.translate(key);
+                return translated !== key ? translated : key;
+            };
+            const result = await updateService.performUpdate((step, messageKey, ...messageArgs) => {
+                const translatedMsg = translateKey(messageKey, ...messageArgs);
+                const entry = `[${step}] ${translatedMsg}`;
                 progress.step = step;
-                progress.message = log;
+                progress.message = translatedMsg;
                 progress.logs.push(entry);
                 if (progress.logs.length > UPDATE_PROGRESS_MAX_LOGS) {
                     progress.logs = progress.logs.slice(-UPDATE_PROGRESS_MAX_LOGS);
                 }
                 progress.updatedAt = new Date().toISOString();
                 scheduleFlush();
-                console.log(`[UpdateHandler] ${step}: ${log}`);
+                console.log(`[UpdateHandler] ${step}: ${translatedMsg}`);
             });
-            // 写入最终状态
+            const translatedMessage = result.messageKey
+                ? translateKey(result.messageKey, ...(result.messageArgs || []))
+                : result.message;
+            const translatedError = result.errorKey
+                ? translateKey(result.errorKey, ...(result.errorArgs || []))
+                : result.error;
             progress.status = result.success ? 'completed' : 'failed';
             progress.step = result.step;
-            progress.message = result.message;
-            progress.logs = (result.logs || []).slice(-UPDATE_PROGRESS_MAX_LOGS);
-            progress.error = result.error;
+            progress.message = translatedMessage;
+            // progress.logs already has translated entries from the callback;
+            // trim to max size for the final write
+            if (progress.logs.length > UPDATE_PROGRESS_MAX_LOGS) {
+                progress.logs = progress.logs.slice(-UPDATE_PROGRESS_MAX_LOGS);
+            }
+            progress.error = translatedError;
             progress.updatedAt = new Date().toISOString();
             await flush();
             (0, httpHelpers_1.setJsonResponse)(this, {
                 success: result.success,
                 step: result.step,
-                message: result.message,
-                logs: result.logs,
+                message: translatedMessage,
+                logs: progress.logs,
                 pluginPath: result.pluginPath,
-                error: result.error
+                error: translatedError
             });
         }
         catch (err) {
@@ -247,7 +263,7 @@ class UpdateHandler extends hydrooj_1.Handler {
                 const pluginPath = updateService.getPluginPath();
                 const progressFilePath = getProgressFilePath(pluginPath);
                 const failedAt = new Date().toISOString();
-                const msg = err instanceof Error ? err.message : '更新失败';
+                const msg = err instanceof Error ? err.message : this.translate('ai_helper_update_failed');
                 const progress = {
                     status: 'failed',
                     step: 'failed',
@@ -263,7 +279,7 @@ class UpdateHandler extends hydrooj_1.Handler {
             catch {
                 // ignore
             }
-            (0, httpHelpers_1.setErrorResponse)(this, 'UPDATE_FAILED', err instanceof Error ? err.message : '更新失败', 500);
+            (0, httpHelpers_1.setErrorResponse)(this, 'UPDATE_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_update_failed'), 500);
         }
     }
 }

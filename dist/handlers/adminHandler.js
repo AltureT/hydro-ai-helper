@@ -11,6 +11,7 @@ const openaiClient_1 = require("../services/openaiClient");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const csrfHelper_1 = require("../lib/csrfHelper");
+const i18nHelper_1 = require("../utils/i18nHelper");
 /**
  * GetConfigHandler - 获取当前配置
  * GET /ai-helper/admin/config
@@ -70,7 +71,8 @@ class GetConfigHandler extends hydrooj_1.Handler {
             console.error('[GetConfigHandler] Error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
-                error: '获取配置失败'
+                error: this.translate('ai_helper_config_get_failed'),
+                code: 'CONFIG_GET_FAILED',
             };
             this.response.type = 'application/json';
         }
@@ -101,7 +103,8 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
                 if (Number.isNaN(rate) || rate < 0) {
                     this.response.status = 400;
                     this.response.body = {
-                        error: 'rateLimitPerMinute 必须为非负整数'
+                        error: this.translate('ai_helper_config_rate_limit_invalid'),
+                        code: 'INVALID_RATE_LIMIT',
                     };
                     this.response.type = 'application/json';
                     return;
@@ -113,7 +116,8 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
                 if (timeout <= 0) {
                     this.response.status = 400;
                     this.response.body = {
-                        error: 'timeoutSeconds 必须大于 0'
+                        error: this.translate('ai_helper_config_timeout_invalid'),
+                        code: 'INVALID_TIMEOUT',
                     };
                     this.response.type = 'application/json';
                     return;
@@ -135,7 +139,8 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
                 catch (err) {
                     this.response.status = 500;
                     this.response.body = {
-                        error: 'API Key 加密失败'
+                        error: this.translate('ai_helper_config_apikey_encrypt_failed'),
+                        code: 'ENCRYPT_FAILED',
                     };
                     this.response.type = 'application/json';
                     return;
@@ -187,7 +192,8 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
             console.error('[UpdateConfigHandler] Error:', err instanceof Error ? err.message : 'unknown');
             this.response.status = 500;
             this.response.body = {
-                error: '更新配置失败'
+                error: this.translate('ai_helper_config_update_failed'),
+                code: 'CONFIG_UPDATE_FAILED',
             };
             this.response.type = 'application/json';
         }
@@ -206,7 +212,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
             // 限流：5 次/60秒，fail-closed（触发外部 API）
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_admin_test', periodSecs: 60, maxOps: 5,
-                errorMessage: '测试连接请求太频繁，请稍后再试',
+                errorMessage: 'ai_helper_admin_test_rate_limited',
             }))
                 return;
             const aiConfigModel = this.ctx.get('aiConfigModel');
@@ -216,7 +222,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 this.response.status = 400;
                 this.response.body = {
                     success: false,
-                    message: 'AI 服务配置不存在，请先设置配置。'
+                    message: this.translate('ai_helper_admin_config_not_exist'),
                 };
                 this.response.type = 'application/json';
                 return;
@@ -247,7 +253,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 this.response.status = 400;
                 this.response.body = {
                     success: false,
-                    message: 'AI 服务配置不完整，请先设置 API Base URL、模型名称和 API Key。'
+                    message: this.translate('ai_helper_admin_config_incomplete'),
                 };
                 this.response.type = 'application/json';
                 return;
@@ -261,7 +267,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 this.response.status = 500;
                 this.response.body = {
                     success: false,
-                    message: 'API Key 解密失败，请检查加密密钥配置'
+                    message: this.translate('ai_helper_admin_apikey_decrypt_failed'),
                 };
                 this.response.type = 'application/json';
                 return;
@@ -278,7 +284,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 await client.chat([{ role: 'user', content: 'ping' }], 'You are a health check assistant for AI Helper.');
                 this.response.body = {
                     success: true,
-                    message: '连接成功！AI 服务配置正确。'
+                    message: this.translate('ai_helper_admin_test_success'),
                 };
                 this.response.type = 'application/json';
             }
@@ -287,7 +293,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
                 this.response.status = 200;
                 this.response.body = {
                     success: false,
-                    message: err instanceof Error ? err.message : '调用 AI 服务失败'
+                    message: this.translate('ai_helper_admin_test_call_failed')
                 };
                 this.response.type = 'application/json';
             }
@@ -297,7 +303,7 @@ class TestConnectionHandler extends hydrooj_1.Handler {
             this.response.status = 500;
             this.response.body = {
                 success: false,
-                message: '测试连接失败'
+                message: this.translate('ai_helper_admin_test_failed')
             };
             this.response.type = 'application/json';
         }
@@ -323,10 +329,10 @@ function validateApiBaseUrl(url) {
         parsed = new URL(url);
     }
     catch {
-        return '无效的 URL 格式';
+        return 'INVALID_URL_FORMAT';
     }
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-        return '仅允许 HTTP 或 HTTPS 协议';
+        return 'INVALID_URL_PROTOCOL';
     }
     return null;
 }
@@ -342,7 +348,7 @@ class FetchModelsHandler extends hydrooj_1.Handler {
             // 限流：10 次/60秒，fail-closed（触发外部 API）
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_admin_models', periodSecs: 60, maxOps: 10,
-                errorMessage: '获取模型列表请求太频繁，请稍后再试',
+                errorMessage: 'ai_helper_admin_models_rate_limited',
             }))
                 return;
             const body = this.request.body;
@@ -354,7 +360,7 @@ class FetchModelsHandler extends hydrooj_1.Handler {
                 const endpoint = await aiConfigModel.getEndpointById(body.endpointId);
                 if (!endpoint) {
                     this.response.status = 404;
-                    this.response.body = { success: false, error: '端点不存在' };
+                    this.response.body = { success: false, error: this.translate('ai_helper_admin_endpoint_not_found') };
                     this.response.type = 'application/json';
                     return;
                 }
@@ -364,7 +370,7 @@ class FetchModelsHandler extends hydrooj_1.Handler {
                 }
                 catch {
                     this.response.status = 400;
-                    this.response.body = { success: false, error: 'API Key 解密失败' };
+                    this.response.body = { success: false, error: this.translate('ai_helper_admin_apikey_decrypt_failed') };
                     this.response.type = 'application/json';
                     return;
                 }
@@ -378,7 +384,7 @@ class FetchModelsHandler extends hydrooj_1.Handler {
                 this.response.status = 400;
                 this.response.body = {
                     success: false,
-                    error: '请提供 endpointId 或者 apiBaseUrl + apiKey'
+                    error: this.translate('ai_helper_admin_fetch_models_params_missing')
                 };
                 this.response.type = 'application/json';
                 return;
@@ -387,7 +393,7 @@ class FetchModelsHandler extends hydrooj_1.Handler {
             const urlError = validateApiBaseUrl(apiBaseUrl);
             if (urlError) {
                 this.response.status = 400;
-                this.response.body = { success: false, error: `API Base URL 不合法: ${urlError}` };
+                this.response.body = { success: false, error: (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_admin_url_invalid', urlError) };
                 this.response.type = 'application/json';
                 return;
             }
@@ -408,9 +414,15 @@ class FetchModelsHandler extends hydrooj_1.Handler {
                 };
             }
             else {
+                let errorMessage = result.error || '';
+                if (result.errorKey) {
+                    errorMessage = result.errorParams?.length
+                        ? (0, i18nHelper_1.translateWithParams)(this, result.errorKey, ...result.errorParams)
+                        : this.translate(result.errorKey);
+                }
                 this.response.body = {
                     success: false,
-                    error: result.error
+                    error: errorMessage
                 };
             }
             this.response.type = 'application/json';
@@ -420,7 +432,7 @@ class FetchModelsHandler extends hydrooj_1.Handler {
             this.response.status = 500;
             this.response.body = {
                 success: false,
-                error: '获取模型列表失败'
+                error: this.translate('ai_helper_admin_fetch_models_failed')
             };
             this.response.type = 'application/json';
         }
