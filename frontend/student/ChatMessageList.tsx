@@ -1,5 +1,5 @@
 import React from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
 import { COLORS, SPACING, RADIUS, SHADOWS, ZINDEX, FONT_FAMILY } from '../utils/styles';
 import { ThinkingBlock } from './ThinkingBlock';

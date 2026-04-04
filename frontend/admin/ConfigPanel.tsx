@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { BudgetConfigForm } from './BudgetConfigForm';

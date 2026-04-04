@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { ExportDialog } from './ExportDialog';
 import { ConversationDetailModal } from './ConversationDetailModal';
 import { buildApiUrl } from '../utils/domainUtils';

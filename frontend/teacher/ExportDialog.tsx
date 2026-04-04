@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { buildApiUrl } from '../utils/domainUtils';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,

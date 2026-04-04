@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';

@@ -1,5 +1,5 @@
 import React, { useEffect, useCallback } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import 'highlight.js/styles/github.css';
 import { useChatSession } from './hooks/useChatSession';
 import { useTextSelection } from './hooks/useTextSelection';

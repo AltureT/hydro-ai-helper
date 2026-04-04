@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';

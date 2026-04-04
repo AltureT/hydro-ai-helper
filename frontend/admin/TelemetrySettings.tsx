@@ -1,5 +1,5 @@
 import React from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
 } from '../utils/styles';

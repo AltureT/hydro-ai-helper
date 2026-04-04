@@ -1,5 +1,5 @@
 import React from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { tableRootStyle, getTableCellStyle, COLORS, getBadgeStyle } from '../utils/styles';
 
 export type Dimension = 'class' | 'problem' | 'student';

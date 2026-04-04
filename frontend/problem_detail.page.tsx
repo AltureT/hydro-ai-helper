@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { renderComponent } from './utils/renderHelper';
 import { AIAssistantPanel } from './student/AIAssistantPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';

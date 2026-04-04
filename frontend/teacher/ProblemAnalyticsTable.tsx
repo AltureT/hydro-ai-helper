@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { i18n } from 'vj/utils';
+import { i18n } from '@hydrooj/ui-default';
 import { buildPageUrl } from '../utils/domainUtils';
 import { COLORS, RADIUS, SHADOWS, SPACING, TRANSITIONS, ZINDEX, getTableHeaderStyle, getTableRowStyle } from '../utils/styles';
 import {
