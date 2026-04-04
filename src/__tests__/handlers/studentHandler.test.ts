@@ -94,6 +94,11 @@ function createMockHandler(): ChatHandler {
     headers: { 'x-requested-with': 'XMLHttpRequest' },
   };
   handler.response = { body: undefined, status: undefined, type: undefined };
+  handler.translate = jest.fn((...args: any[]) => {
+    let str = args[0] || '';
+    for (let i = 1; i < args.length; i++) str = str.replace(`{${i - 1}}`, String(args[i]));
+    return str;
+  });
   handler.limitRate = jest.fn();
 
   const conversationOid = new ObjectId();
@@ -239,7 +244,7 @@ describe('ChatHandler', () => {
     await handler.post();
 
     expect(handler.response.status).toBe(500);
-    expect(handler.response.body.error).toContain('内部错误');
+    expect(handler.response.body.error).toContain('ai_helper_err');
   });
 
   it('should truncate long code', async () => {
@@ -251,7 +256,7 @@ describe('ChatHandler', () => {
 
     await handler.post();
 
-    expect(handler.response.body.codeWarning).toContain('截断');
+    expect(handler.response.body.codeWarning).toContain('ai_helper_err_code_truncated');
   });
 
   it('should handle clarify type requiring conversationId', async () => {
@@ -397,7 +402,7 @@ describe('ChatHandler', () => {
 
     await handler.post();
 
-    expect(handler.response.body.message.content).toContain('与当前编程题无关');
+    expect(handler.response.body.message.content).toContain('ai_helper_err_off_topic_reply');
     // Should NOT call AI service
     expect(createMultiModelClientFromConfig).not.toHaveBeenCalled();
   });
@@ -420,7 +425,7 @@ describe('ChatHandler', () => {
     });
 
     (BudgetService as jest.Mock).mockImplementation(() => ({
-      checkBudget: jest.fn().mockResolvedValue({ allowed: false, reason: '额度已用完' }),
+      checkBudget: jest.fn().mockResolvedValue({ allowed: false, reasonKey: 'ai_helper_budget_user_daily_exceeded', reasonParams: ['1000', '1000'] }),
     }));
 
     await handler.post();
@@ -447,12 +452,12 @@ describe('ChatHandler', () => {
     });
 
     (BudgetService as jest.Mock).mockImplementation(() => ({
-      checkBudget: jest.fn().mockResolvedValue({ allowed: true, warning: '已用 80% 额度' }),
+      checkBudget: jest.fn().mockResolvedValue({ allowed: true, warningKey: 'ai_helper_budget_user_daily_warning', warningParams: ['2000'] }),
     }));
 
     await handler.post();
 
-    expect(handler.response.body.budgetWarning).toBe('已用 80% 额度');
+    expect(handler.response.body.budgetWarning).toContain('ai_helper_budget_user_daily_warning');
   });
 
   it('should include tokenUsage in response', async () => {
@@ -480,7 +485,7 @@ describe('ChatHandler', () => {
     await handler.post();
 
     expect(handler.response.status).toBe(404);
-    expect(handler.response.body.error).toContain('题目不存在');
+    expect(handler.response.body.error).toContain('ai_helper_err_problem_not_found');
   });
 });
 
@@ -500,6 +505,7 @@ describe('ProblemStatusHandler', () => {
     handler.args = { domainId: 'test-domain' };
     handler.request = { headers: {} };
     handler.response = { body: undefined, status: undefined, type: undefined };
+    handler.translate = jest.fn((key: string) => key);
     handler.limitRate = jest.fn();
     return handler;
   }

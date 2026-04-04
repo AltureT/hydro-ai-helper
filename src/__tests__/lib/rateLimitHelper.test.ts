@@ -6,6 +6,7 @@ describe('applyRateLimit', () => {
   beforeEach(() => {
     mockHandler = {
       limitRate: jest.fn(),
+      translate: jest.fn((key: string) => key),
       response: {
         status: 200,
         body: null,
@@ -139,7 +140,7 @@ describe('applyRateLimit', () => {
       maxOps: 5,
     });
 
-    expect(mockHandler.response.body.error).toBe('请求太频繁，请稍后再试');
+    expect(mockHandler.response.body.error).toBe('ai_helper_err_rate_limited');
   });
 
   describe('ChatHandler dual-window scenario', () => {
