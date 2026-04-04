@@ -8,6 +8,7 @@ import { getDomainId } from '../utils/domainHelper';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { AIConfigModel } from '../models/aiConfig';
 import { applyRateLimit } from '../lib/rateLimitHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 
 export class CostAnalyticsHandler extends Handler {
   async get() {
@@ -75,7 +76,7 @@ export class CostAnalyticsHandler extends Handler {
 
       const enrichedTopUsers = topUsers.map(u => ({
         ...u,
-        userName: userNameMap.get(u.userId) || this.translate('ai_helper_cost_user_fallback', u.userId),
+        userName: userNameMap.get(u.userId) || translateWithParams(this, 'ai_helper_cost_user_fallback', u.userId),
       }));
 
       // 计算 period 汇总
@@ -176,7 +177,7 @@ export class CostAnalyticsHandler extends Handler {
       const userColl = db.collection('user');
       const users = await userColl.find({ _id: { $in: userIds } }).toArray();
       for (const user of users) {
-        nameMap.set(user._id as number, (user as Record<string, unknown>).uname as string || this.translate('ai_helper_cost_user_fallback', user._id));
+        nameMap.set(user._id as number, (user as Record<string, unknown>).uname as string || translateWithParams(this, 'ai_helper_cost_user_fallback', user._id as number));
       }
     } catch (err) {
       console.error('[CostAnalyticsHandler] Failed to fetch user names:', err);

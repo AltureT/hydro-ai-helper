@@ -1,5 +1,6 @@
 import { Handler, PRIV } from 'hydrooj';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 import type { TelemetryService, FeedbackPayload } from '../services/telemetryService';
 
 const VALID_TYPES = new Set(['bug', 'feature', 'other']);
@@ -34,7 +35,7 @@ export class FeedbackHandler extends Handler {
 
       if (subject.length > MAX_SUBJECT_LENGTH) {
         this.response.status = 400;
-        this.response.body = { error: this.translate('ai_helper_feedback_subject_too_long', MAX_SUBJECT_LENGTH), code: 'SUBJECT_TOO_LONG' };
+        this.response.body = { error: translateWithParams(this, 'ai_helper_feedback_subject_too_long', MAX_SUBJECT_LENGTH), code: 'SUBJECT_TOO_LONG' };
         this.response.type = 'application/json';
         return;
       }
@@ -42,7 +43,7 @@ export class FeedbackHandler extends Handler {
       const bodyText = typeof feedbackBody === 'string' ? feedbackBody : '';
       if (bodyText.length > MAX_BODY_LENGTH) {
         this.response.status = 400;
-        this.response.body = { error: this.translate('ai_helper_feedback_body_too_long', MAX_BODY_LENGTH), code: 'BODY_TOO_LONG' };
+        this.response.body = { error: translateWithParams(this, 'ai_helper_feedback_body_too_long', MAX_BODY_LENGTH), code: 'BODY_TOO_LONG' };
         this.response.type = 'application/json';
         return;
       }

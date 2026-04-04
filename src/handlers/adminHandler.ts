@@ -12,6 +12,7 @@ import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 
 /**
  * 更新配置请求接口
@@ -445,7 +446,7 @@ export class FetchModelsHandler extends Handler {
       const urlError = validateApiBaseUrl(apiBaseUrl);
       if (urlError) {
         this.response.status = 400;
-        this.response.body = { success: false, error: this.translate('ai_helper_admin_url_invalid', urlError) };
+        this.response.body = { success: false, error: translateWithParams(this, 'ai_helper_admin_url_invalid', urlError) };
         this.response.type = 'application/json';
         return;
       }

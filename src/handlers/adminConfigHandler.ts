@@ -10,6 +10,7 @@ import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 import type { PluginInstallModel } from '../models/pluginInstall';
 
 /**
@@ -205,7 +206,7 @@ export class AdminConfigHandler extends Handler {
             } catch (_err) {
               this.response.status = 500;
               this.response.body = {
-                error: this.translate('ai_helper_config_endpoint_encrypt_failed', ep.name),
+                error: translateWithParams(this, 'ai_helper_config_endpoint_encrypt_failed', ep.name),
                 code: 'ENCRYPT_FAILED',
               };
               this.response.type = 'application/json';

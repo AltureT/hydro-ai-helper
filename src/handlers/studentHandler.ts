@@ -19,6 +19,7 @@ import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
 import { createSSEWriter } from '../lib/sseHelper';
@@ -203,7 +204,7 @@ export class ChatHandler extends Handler {
           this.response.status = 429;
           this.response.body = {
             error: budgetCheck.reasonKey
-              ? this.translate(budgetCheck.reasonKey, ...(budgetCheck.reasonParams || []))
+              ? translateWithParams(this, budgetCheck.reasonKey, ...(budgetCheck.reasonParams || []))
               : this.translate('ai_helper_budget_user_daily_exceeded'),
             code: 'BUDGET_EXCEEDED'
           };
@@ -211,7 +212,7 @@ export class ChatHandler extends Handler {
           return null;
         }
         if (budgetCheck.warningKey) {
-          budgetWarning = this.translate(budgetCheck.warningKey, ...(budgetCheck.warningParams || []));
+          budgetWarning = translateWithParams(this, budgetCheck.warningKey, ...(budgetCheck.warningParams || []));
         } else if (budgetCheck.warning) {
           budgetWarning = budgetCheck.warning;
         }
@@ -327,7 +328,7 @@ export class ChatHandler extends Handler {
       // 检查代码长度,超过 5000 字符则截断
       if (code.length > PROMPT_LIMITS.MAX_CODE_LENGTH) {
         processedCode = code.substring(0, PROMPT_LIMITS.MAX_CODE_LENGTH);
-        codeWarning = this.translate('ai_helper_err_code_truncated', PROMPT_LIMITS.MAX_CODE_LENGTH);
+        codeWarning = translateWithParams(this, 'ai_helper_err_code_truncated', PROMPT_LIMITS.MAX_CODE_LENGTH);
       } else {
         processedCode = code;
       }
@@ -400,14 +401,14 @@ export class ChatHandler extends Handler {
       }
       throw new Error(
         validation.errorKey
-          ? this.translate(validation.errorKey, ...(validation.errorParams || []))
+          ? translateWithParams(this, validation.errorKey, ...(validation.errorParams || []))
           : (validation.error || this.translate('ai_helper_err_input_validation_failed'))
       );
     }
 
     // 构造 system prompt
     // 优先使用服务端获取的可信题目标题，其次使用前端传入的，最后使用题目ID
-    const problemTitleStr = trustedProblemTitle || problemTitle || `题目 ${problemId}`;
+    const problemTitleStr = trustedProblemTitle || problemTitle || translateWithParams(this, 'ai_helper_problem_fallback_title', problemId);
     const userLang = this.user?.viewLang || this.session?.viewLang || undefined;
     const systemPrompt = promptService.buildSystemPrompt(
       problemTitleStr,
@@ -798,7 +799,9 @@ export class ChatHandler extends Handler {
       });
 
       if (safetyResult.rewritten) {
-        fullContent = safetyResult.content;
+        fullContent = safetyResult.replacementKey
+          ? this.translate(safetyResult.replacementKey)
+          : safetyResult.content;
         sse.writeEvent('replace', { content: fullContent });
       }
 
@@ -1004,7 +1007,9 @@ export class ChatHandler extends Handler {
       problemTitle: p.problemTitleStr,
       problemContent: p.processedProblemContent
     });
-    aiResponse = safetyResult.content;
+    aiResponse = safetyResult.replacementKey
+      ? this.translate(safetyResult.replacementKey)
+      : safetyResult.content;
 
     // 保存 AI 消息到数据库（含 token 用量元数据）
     const aiMessageTimestamp = new Date();

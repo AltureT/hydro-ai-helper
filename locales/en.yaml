@@ -141,6 +141,11 @@ ai_helper_config_get_failed: "Failed to get configuration"
 ai_helper_teacher_invalid_conversation_id: "Invalid conversation ID"
 ai_helper_teacher_conversation_not_found: "Conversation not found"
 ai_helper_teacher_conversation_forbidden: "Access denied for this conversation"
+ai_helper_teacher_deleted_user: "Deleted user"
+
+# ─── Common fallbacks ────────────────────────────────
+ai_helper_problem_fallback_title: "Problem {0}"
+ai_helper_problem_fallback_prefix: "Problem"
 
 # ─── Admin operations ─────────────────────────────────
 ai_helper_admin_test_rate_limited: "Test connection requests too frequent, please try again later"

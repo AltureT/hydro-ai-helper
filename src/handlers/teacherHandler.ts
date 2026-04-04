@@ -17,7 +17,7 @@ import type { UserDocument } from '../types/hydrooj';
  * @param uids 用户 ID 数组
  * @returns uid -> uname 映射表
  */
-async function getUserNameMap(uids: number[]): Promise<Map<number, string>> {
+async function getUserNameMap(uids: number[], deletedUserFallback: string): Promise<Map<number, string>> {
   const uniqueUids = [...new Set(uids)];
   const userMap = new Map<number, string>();
 
@@ -26,24 +26,21 @@ async function getUserNameMap(uids: number[]): Promise<Map<number, string>> {
   }
 
   try {
-    // 直接使用 HydroOJ db 访问 user 集合
     const userColl = db.collection('user');
     const users = await userColl.find({ _id: { $in: uniqueUids } }).toArray();
     for (const user of users) {
       const u = user as UserDocument;
-      userMap.set(u._id, u.uname || '已删除用户');
+      userMap.set(u._id, u.uname || deletedUserFallback);
     }
-    // 对于不存在的用户，设置默认值
     for (const uid of uniqueUids) {
       if (!userMap.has(uid)) {
-        userMap.set(uid, '已删除用户');
+        userMap.set(uid, deletedUserFallback);
       }
     }
   } catch (err) {
     console.error('[AI Helper] Failed to fetch user names:', err);
-    // 出错时全部使用默认值
     for (const uid of uniqueUids) {
-      userMap.set(uid, '已删除用户');
+      userMap.set(uid, deletedUserFallback);
     }
   }
 
@@ -159,7 +156,8 @@ export class ConversationListHandler extends Handler {
 
       // 批量获取用户名（避免 N+1 查询）
       const uids = conversations.map(conv => conv.userId);
-      const userNameMap = await getUserNameMap(uids);
+      const deletedUserLabel = this.translate('ai_helper_teacher_deleted_user');
+      const userNameMap = await getUserNameMap(uids, deletedUserLabel);
 
       // T048: 批量获取每个会话的第一条学生消息
       const messageModel: MessageModel = this.ctx.get('messageModel');
@@ -181,7 +179,7 @@ export class ConversationListHandler extends Handler {
         return {
           _id: convIdStr,
           userId: conv.userId,
-          userName: userNameMap.get(conv.userId) || '已删除用户',
+          userName: userNameMap.get(conv.userId) || deletedUserLabel,
           classId: conv.classId,
           problemId: conv.problemId,
           problemUrl: buildProblemUrl(domainId, conv.problemId),  // T031: 题目链接
@@ -272,9 +270,9 @@ export class ConversationDetailHandler extends Handler {
         metadata: msg.metadata
       }));
 
-      // 获取用户名
-      const userNameMap = await getUserNameMap([conversation.userId]);
-      const userName = userNameMap.get(conversation.userId) || '已删除用户';
+      const deletedLabel = this.translate('ai_helper_teacher_deleted_user');
+      const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
+      const userName = userNameMap.get(conversation.userId) || deletedLabel;
 
       // T032: 对话详情响应（包含 problemUrl）
       const conversationData = {

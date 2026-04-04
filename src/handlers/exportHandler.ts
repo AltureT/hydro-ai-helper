@@ -9,6 +9,7 @@ import { Handler, PRIV } from 'hydrooj';
 import { ExportService, ConversationExportFilters, ConversationExportOptions } from '../services/exportService';
 import { getDomainId } from '../utils/domainHelper';
 import { applyRateLimit } from '../lib/rateLimitHelper';
+import { translateWithParams } from '../utils/i18nHelper';
 
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
@@ -65,7 +66,7 @@ export class ExportHandler extends Handler {
           this.response.body = {
             error: {
               code: 'INVALID_DATE',
-              message: this.translate('ai_helper_export_invalid_start_date', startDate as string)
+              message: translateWithParams(this, 'ai_helper_export_invalid_start_date', startDate as string)
             }
           };
           this.response.type = 'application/json';
@@ -81,7 +82,7 @@ export class ExportHandler extends Handler {
           this.response.body = {
             error: {
               code: 'INVALID_DATE',
-              message: this.translate('ai_helper_export_invalid_end_date', endDate as string)
+              message: translateWithParams(this, 'ai_helper_export_invalid_end_date', endDate as string)
             }
           };
           this.response.type = 'application/json';

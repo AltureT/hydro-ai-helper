@@ -36,7 +36,7 @@ interface AnalyticsItem {
  * @param problemIds 题目 ID 数组（字符串格式，如 "P1000"）
  * @returns problemId -> title 映射表
  */
-async function _getProblemTitleMap(domainId: string, problemIds: string[]): Promise<Map<string, string>> {
+async function _getProblemTitleMap(domainId: string, problemIds: string[], problemFallbackPrefix: string): Promise<Map<string, string>> {
   const uniqueIds = [...new Set(problemIds)];
   const titleMap = new Map<string, string>();
 
@@ -45,11 +45,8 @@ async function _getProblemTitleMap(domainId: string, problemIds: string[]): Prom
   }
 
   try {
-    // HydroOJ 的 problem 集合使用 domainId + docId 作为复合键
-    // 题目 ID 格式可能是 "P1000" 或纯数字 "1000"
     const problemColl = db.collection('document');
 
-    // 解析题目 ID（去掉可能的 "P" 前缀）
     const docIds: number[] = [];
     for (const pid of uniqueIds) {
       const numericId = parseInt(pid.replace(/^[Pp]/, ''), 10);
@@ -58,7 +55,6 @@ async function _getProblemTitleMap(domainId: string, problemIds: string[]): Prom
       }
     }
 
-    // 查询题目（docType: 10 表示 problem）
     const problems = await problemColl.find({
       domainId,
       docType: 10,
@@ -68,23 +64,20 @@ async function _getProblemTitleMap(domainId: string, problemIds: string[]): Prom
     for (const prob of problems) {
       const p = prob as ProblemDocument;
       const docId = p.docId;
-      const title = p.title || `题目 ${docId}`;
-      // 存储两种格式的映射
+      const title = p.title || `${problemFallbackPrefix} ${docId}`;
       titleMap.set(String(docId), title);
       titleMap.set(`P${docId}`, title);
     }
 
-    // 对于未找到的题目，设置默认值
     for (const pid of uniqueIds) {
       if (!titleMap.has(pid)) {
-        titleMap.set(pid, `题目 ${pid}`);
+        titleMap.set(pid, `${problemFallbackPrefix} ${pid}`);
       }
     }
   } catch (err) {
     console.error('[AI Helper] Failed to fetch problem titles:', err);
-    // 出错时全部使用默认值
     for (const pid of uniqueIds) {
-      titleMap.set(pid, `题目 ${pid}`);
+      titleMap.set(pid, `${problemFallbackPrefix} ${pid}`);
     }
   }
 
@@ -96,7 +89,7 @@ async function _getProblemTitleMap(domainId: string, problemIds: string[]): Prom
  * @param userIds 用户 ID 数组（数字格式）
  * @returns userId -> uname 映射表
  */
-async function getUserNameMap(userIds: number[]): Promise<Map<number, string>> {
+async function getUserNameMap(userIds: number[], deletedUserFallback: string): Promise<Map<number, string>> {
   const uniqueIds = [...new Set(userIds)];
   const nameMap = new Map<number, string>();
 
@@ -110,20 +103,18 @@ async function getUserNameMap(userIds: number[]): Promise<Map<number, string>> {
 
     for (const user of users) {
       const u = user as UserDocument;
-      nameMap.set(u._id, u.uname || '已删除用户');
+      nameMap.set(u._id, u.uname || deletedUserFallback);
     }
 
-    // 对于不存在的用户，设置默认值
     for (const uid of uniqueIds) {
       if (!nameMap.has(uid)) {
-        nameMap.set(uid, '已删除用户');
+        nameMap.set(uid, deletedUserFallback);
       }
     }
   } catch (err) {
     console.error('[AI Helper] Failed to fetch user names:', err);
-    // 出错时全部使用默认值
     for (const uid of uniqueIds) {
-      nameMap.set(uid, '已删除用户');
+      nameMap.set(uid, deletedUserFallback);
     }
   }
 
@@ -443,7 +434,7 @@ export class AnalyticsHandler extends Handler {
         _id: 0,
         key: '$_id',
         displayName: {
-          $ifNull: ['$problemTitle', { $concat: ['题目 ', { $toString: '$_id' }] }]
+          $ifNull: ['$problemTitle', { $concat: [this.translate('ai_helper_problem_fallback_prefix'), ' ', { $toString: '$_id' }] }]
         },
         totalConversations: 1,
         effectiveConversations: 1,
@@ -555,7 +546,7 @@ export class AnalyticsHandler extends Handler {
 
     // T028: 获取用户名并添加 displayName
     const userIds = items.map(item => Number(item.key)).filter(id => !isNaN(id));
-    const nameMap = await getUserNameMap(userIds);
+    const nameMap = await getUserNameMap(userIds, this.translate('ai_helper_teacher_deleted_user'));
 
     const enrichedItems: AnalyticsItem[] = items.map(item => {
       const key = Number(item.key);
