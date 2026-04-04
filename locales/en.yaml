@@ -98,6 +98,8 @@ ai_helper_err_contest_check_failed: "Contest status check failed, please try aga
 ai_helper_err_chat_rate_limited: "Too many questions, please think carefully before asking again"
 ai_helper_err_invalid_question_type: "Invalid question type"
 ai_helper_err_budget_exceeded: "AI quota exhausted, please try again later"
+ai_helper_safety_off_topic_replacement: "that topic"
+ai_helper_safety_code_truncated: "Code truncated (teaching mode does not show full implementation)"
 ai_helper_err_problem_not_found: "Problem not found"
 ai_helper_err_optimize_requires_ac: "Code optimization is only available for users who have passed this problem"
 ai_helper_err_code_truncated: "Code truncated to {0} characters"

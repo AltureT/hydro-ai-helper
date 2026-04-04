@@ -26,6 +26,8 @@ export interface SanitizeOptions {
   questionType: QuestionType;
   problemTitle?: string;
   problemContent?: string;
+  offTopicReplacement?: string;
+  codeTruncatedComment?: string;
 }
 
 export interface SanitizeResult {
@@ -58,7 +60,7 @@ export class OutputSafetyService {
       }
       // 检测 AI 回复中是否包含跑题关键词
       if (result.includes(keyword)) {
-        result = result.split(keyword).join('该话题');
+        result = result.split(keyword).join(options.offTopicReplacement || '该话题');
         rewritten = true;
       }
     }
@@ -74,7 +76,7 @@ export class OutputSafetyService {
     }
 
     // 代码泄露检测（optimize 类型豁免）
-    const codeLeakResult = this.detectCodeLeak(result, options.questionType);
+    const codeLeakResult = this.detectCodeLeak(result, options.questionType, options.codeTruncatedComment);
     if (codeLeakResult.detected) {
       result = codeLeakResult.content;
       rewritten = true;
@@ -85,7 +87,8 @@ export class OutputSafetyService {
 
   private detectCodeLeak(
     content: string,
-    questionType: QuestionType
+    questionType: QuestionType,
+    truncatedComment?: string
   ): { content: string; detected: boolean } {
     if (questionType === 'optimize') {
       return { content, detected: false };
@@ -110,7 +113,8 @@ export class OutputSafetyService {
           const kept = realCodeLines.slice(0, CODE_LEAK_KEEP_LINES).join('\n');
           const langMatch = match.match(/^```(\w*)/);
           const lang = langMatch ? langMatch[1] : '';
-          return `\`\`\`${lang}\n${kept}\n# ... 代码已被截断（教学模式不展示完整实现）...\n\`\`\``;
+          const comment = truncatedComment || '代码已被截断（教学模式不展示完整实现）';
+          return `\`\`\`${lang}\n${kept}\n# ... ${comment} ...\n\`\`\``;
         }
 
         return match;

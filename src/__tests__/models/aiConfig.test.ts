@@ -100,7 +100,7 @@ describe('AIConfigModel', () => {
       expect(result!.endpoints[0].apiKeyEncrypted).toBe('enc_key_123');
       expect(result!.endpoints[0].models).toEqual(['gpt-4o']);
       expect(result!.endpoints[0].enabled).toBe(true);
-      expect(result!.endpoints[0].name).toBe('默认端点');
+      expect(result!.endpoints[0].name).toBe('Default Endpoint');
       expect(result!.selectedModels).toHaveLength(1);
       expect(result!.selectedModels[0].modelName).toBe('gpt-4o');
       // Should persist migration

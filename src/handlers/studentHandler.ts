@@ -796,6 +796,8 @@ export class ChatHandler extends Handler {
         questionType: p.questionType,
         problemTitle: p.problemTitleStr,
         problemContent: p.processedProblemContent,
+        offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
+        codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
       });
 
       if (safetyResult.rewritten) {
@@ -1005,7 +1007,9 @@ export class ChatHandler extends Handler {
     const safetyResult = outputSafetyService.sanitize(aiResponse, {
       questionType: p.questionType,
       problemTitle: p.problemTitleStr,
-      problemContent: p.processedProblemContent
+      problemContent: p.processedProblemContent,
+      offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
+      codeTruncatedComment: this.translate('ai_helper_safety_code_truncated')
     });
     aiResponse = safetyResult.replacementKey
       ? this.translate(safetyResult.replacementKey)

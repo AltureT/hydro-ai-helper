@@ -147,7 +147,7 @@ export class AIConfigModel {
     if (legacy.endpoints && legacy.endpoints.length > 0) {
       const normalizedEndpoints = legacy.endpoints.map((endpoint, index) => ({
         id: endpoint.id || randomUUID(),
-        name: endpoint.name || `端点 ${index + 1}`,
+        name: endpoint.name || `Endpoint ${index + 1}`,
         apiBaseUrl: endpoint.apiBaseUrl || legacy.apiBaseUrl || '',
         apiKeyEncrypted: endpoint.apiKeyEncrypted || legacy.apiKeyEncrypted || '',
         models: Array.isArray(endpoint.models) ? endpoint.models : [],
@@ -180,7 +180,7 @@ export class AIConfigModel {
     // 从旧字段创建默认端点
     const defaultEndpoint: APIEndpoint = {
       id: randomUUID(),
-      name: '默认端点',
+      name: 'Default Endpoint',
       apiBaseUrl: legacy.apiBaseUrl || '',
       apiKeyEncrypted: legacy.apiKeyEncrypted || '',
       models: legacy.modelName ? [legacy.modelName] : [],
