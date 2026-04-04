@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   cardStyle, getButtonStyle,
@@ -29,11 +30,11 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
     >
       <h2 style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
         <span style={{ display: 'inline-block', transition: 'transform 0.2s', transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)', marginRight: '8px' }}>▼</span>
-        越狱尝试记录
+        {i18n('ai_helper_admin_jailbreak_title')}
       </h2>
       {logPagination.total > 0 && (
         <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
-          共 {logPagination.total} 条记录
+          {i18n('ai_helper_admin_jailbreak_total', logPagination.total)}
         </span>
       )}
     </div>
@@ -43,17 +44,17 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
         padding: SPACING.base, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md,
         border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, fontSize: '14px',
       }}>
-        暂无命中记录，说明最近没有学生尝试修改系统提示词。
+        {i18n('ai_helper_admin_jailbreak_empty')}
       </div>
     ) : (
       <>
         <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.base }}>
           {logPagination.logs.map((log) => {
             const contextPieces: string[] = [];
-            if (log.userId !== undefined) contextPieces.push(`用户 ID：${log.userId}`);
-            if (log.problemId) contextPieces.push(`题目 ID：${log.problemId}`);
-            if (log.conversationId) contextPieces.push(`会话 ID：${log.conversationId}`);
-            if (log.questionType) contextPieces.push(`问题类型：${log.questionType}`);
+            if (log.userId !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_user_id')}${log.userId}`);
+            if (log.problemId) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_problem_id')}${log.problemId}`);
+            if (log.conversationId) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_conversation_id')}${log.conversationId}`);
+            if (log.questionType) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_question_type')}${log.questionType}`);
             const contextText = contextPieces.join(' \u00b7 ');
 
             return (
@@ -61,10 +62,10 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                 ...cardStyle,
               }}>
                 <div style={{ fontSize: '14px', color: COLORS.textPrimary, fontWeight: 500 }}>
-                  时间：{new Date(log.createdAt).toLocaleString()}
+                  {i18n('ai_helper_admin_jailbreak_time')}{new Date(log.createdAt).toLocaleString()}
                 </div>
                 <div style={{ marginTop: '6px', fontSize: '13px', color: COLORS.textSecondary }}>
-                  命中规则：<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
+                  {i18n('ai_helper_admin_jailbreak_matched_rule')}<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
                 </div>
                 <pre style={{
                   marginTop: '10px', padding: SPACING.md, backgroundColor: '#1f2937', color: '#f9fafb',
@@ -79,17 +80,17 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                 )}
                 <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                   <button type="button" onClick={() => onCopyToClipboard(log.matchedText)} style={getButtonStyle('secondary')}>
-                    复制命中文本
+                    {i18n('ai_helper_admin_jailbreak_copy_text')}
                   </button>
                   <button type="button" onClick={() => onCopyToClipboard(log.matchedPattern)} style={getButtonStyle('secondary')}>
-                    复制命中正则
+                    {i18n('ai_helper_admin_jailbreak_copy_regex')}
                   </button>
                   <button
                     type="button"
                     onClick={() => onAppendPattern(log.matchedPattern)}
                     style={getButtonStyle('ghost')}
                   >
-                    追加到自定义规则
+                    {i18n('ai_helper_admin_jailbreak_append_rule')}
                   </button>
                 </div>
               </div>
@@ -110,10 +111,10 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                 cursor: logPagination.page <= 1 ? 'not-allowed' : 'pointer',
               }}
             >
-              上一页
+              {i18n('ai_helper_admin_jailbreak_prev_page')}
             </button>
             <span style={{ fontSize: '14px', color: COLORS.textSecondary }}>
-              第 {logPagination.page} / {logPagination.totalPages} 页
+              {i18n('ai_helper_admin_jailbreak_page_info', logPagination.page, logPagination.totalPages)}
             </span>
             <button
               onClick={() => onChangePage(logPagination.page + 1)}
@@ -124,7 +125,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                 cursor: logPagination.page >= logPagination.totalPages ? 'not-allowed' : 'pointer',
               }}
             >
-              下一页
+              {i18n('ai_helper_admin_jailbreak_next_page')}
             </button>
           </div>
         )}

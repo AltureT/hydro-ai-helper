@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { i18n } from 'vj/utils';
 import { buildApiUrl } from '../utils/domainUtils';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
@@ -77,25 +78,25 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
     const items: string[] = [];
 
     if (filters.startDate || filters.endDate) {
-      const start = filters.startDate || '不限';
-      const end = filters.endDate || '不限';
-      items.push(`时间范围：${start} ~ ${end}`);
+      const start = filters.startDate || i18n('ai_helper_teacher_export_unlimited');
+      const end = filters.endDate || i18n('ai_helper_teacher_export_unlimited');
+      items.push(`${i18n('ai_helper_teacher_export_time_range')}${start} ~ ${end}`);
     }
 
     if (filters.classId) {
-      items.push(`班级：${filters.classId}`);
+      items.push(`${i18n('ai_helper_teacher_conv_col_class')}${filters.classId}`);
     }
 
     if (filters.problemId) {
-      items.push(`题目：${filters.problemId}`);
+      items.push(`${i18n('ai_helper_teacher_conv_col_problem')}${filters.problemId}`);
     }
 
     if (filters.userId) {
-      items.push(`学生 ID：${filters.userId}`);
+      items.push(`${i18n('ai_helper_teacher_filter_student_id')}${filters.userId}`);
     }
 
     if (items.length === 0) {
-      items.push('导出全部对话记录');
+      items.push(i18n('ai_helper_teacher_export_all'));
     }
 
     return items;
@@ -122,7 +123,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
             color: COLORS.textPrimary,
           }}
         >
-          导出对话数据
+          {i18n('ai_helper_teacher_export_title')}
         </h2>
 
         {/* 导出格式选择 */}
@@ -136,11 +137,11 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
               color: COLORS.textSecondary,
             }}
           >
-            导出格式
+            {i18n('ai_helper_teacher_export_format')}
           </label>
           <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
             <input type="radio" name="format" value="csv" checked readOnly />
-            <span style={{ ...TYPOGRAPHY.sm, color: COLORS.textMuted }}>CSV（兼容 Excel）</span>
+            <span style={{ ...TYPOGRAPHY.sm, color: COLORS.textMuted }}>{i18n('ai_helper_teacher_export_csv_label')}</span>
           </div>
           <p
             style={{
@@ -150,7 +151,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
               lineHeight: '1.4',
             }}
           >
-            暂时仅支持 CSV 格式，后续可扩展为 Excel。
+            {i18n('ai_helper_teacher_export_csv_note')}
           </p>
         </div>
 
@@ -173,7 +174,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
               onChange={(e) => setIncludeSensitive(e.target.checked)}
               style={{ cursor: 'pointer' }}
             />
-            包含真实学生 ID（敏感数据）
+            {i18n('ai_helper_teacher_export_include_sensitive')}
           </label>
           <p
             style={{
@@ -183,7 +184,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
               lineHeight: '1.4',
             }}
           >
-            建议在对外分享时关闭此选项；关闭时会使用匿名 ID 替代真实学生账号。
+            {i18n('ai_helper_teacher_export_sensitive_note')}
           </p>
         </div>
 
@@ -198,7 +199,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
               color: COLORS.textSecondary,
             }}
           >
-            导出范围预览
+            {i18n('ai_helper_teacher_export_preview')}
           </label>
           <ul
             style={{
@@ -239,14 +240,14 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
             onClick={onClose}
             style={getButtonStyle('secondary')}
           >
-            取消
+            {i18n('ai_helper_teacher_cancel')}
           </button>
           <button
             type="button"
             onClick={handleExport}
             style={getButtonStyle('primary')}
           >
-            导出
+            {i18n('ai_helper_teacher_export_btn')}
           </button>
         </div>
       </div>

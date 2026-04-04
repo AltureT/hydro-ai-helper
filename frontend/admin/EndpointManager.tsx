@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { i18n } from 'vj/utils';
 import {
   COLORS, SPACING, RADIUS, SHADOWS, TRANSITIONS,
   getInputStyle, getButtonStyle, getBadgeStyle,
@@ -51,7 +52,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
     <>
       <div style={{ ...sectionStyle, marginTop: '30px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h2 style={{ margin: 0, fontSize: '18px', color: COLORS.textPrimary }}>API 端点配置</h2>
+          <h2 style={{ margin: 0, fontSize: '18px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_endpoint_title')}</h2>
           {isUsingNewConfig && (
             <button
               onClick={onAddEndpoint}
@@ -62,7 +63,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                 opacity: disabled ? 0.5 : 1,
               }}
             >
-              + 添加端点
+              + {i18n('ai_helper_admin_endpoint_add')}
             </button>
           )}
         </div>
@@ -73,8 +74,8 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
             border: `1px solid ${COLORS.border}`,
           }}>
             <div style={{ textAlign: 'center', marginBottom: '20px' }}>
-              <h3 style={{ margin: '0 0 8px', fontSize: '16px', color: COLORS.textPrimary }}>开始配置 AI 服务</h3>
-              <p style={{ margin: 0, fontSize: '14px', color: COLORS.textMuted }}>配置 API 端点以启用 AI 学习助手功能</p>
+              <h3 style={{ margin: '0 0 8px', fontSize: '16px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_endpoint_start_title')}</h3>
+              <p style={{ margin: 0, fontSize: '14px', color: COLORS.textMuted }}>{i18n('ai_helper_admin_endpoint_start_desc')}</p>
             </div>
 
             <div style={{
@@ -85,11 +86,11 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                 <span style={{
                   fontSize: '11px', fontWeight: 600, color: COLORS.primary,
                   backgroundColor: COLORS.bgCard, padding: '2px 8px', borderRadius: RADIUS.sm,
-                }}>推荐</span>
-                <span style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary }}>多端点配置</span>
+                }}>{i18n('ai_helper_admin_endpoint_recommended')}</span>
+                <span style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n('ai_helper_admin_endpoint_multi_config')}</span>
               </div>
               <p style={{ margin: '0 0 12px', fontSize: '13px', color: COLORS.textMuted }}>
-                支持多端点、自动故障转移、模型选择
+                {i18n('ai_helper_admin_endpoint_multi_desc')}
               </p>
               <button
                 onClick={onAddEndpoint}
@@ -101,7 +102,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   opacity: disabled ? 0.5 : 1,
                 }}
               >
-                添加第一个端点
+                {i18n('ai_helper_admin_endpoint_add_first')}
               </button>
             </div>
 
@@ -118,14 +119,14 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   display: 'inline-block', transition: `transform ${TRANSITIONS.fast}`,
                   transform: legacyExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
                 }}>&#9654;</span>
-                快速配置（单端点）
+                {i18n('ai_helper_admin_endpoint_quick_config')}
               </button>
 
               {legacyExpanded && (
                 <div style={{ marginTop: SPACING.md, display: 'flex', flexDirection: 'column', gap: SPACING.md }}>
                   <div>
                     <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-                      API Base URL <span style={{ color: COLORS.error }}>*</span>
+                      {i18n('ai_helper_config_api_base_url')} <span style={{ color: COLORS.error }}>*</span>
                     </label>
                     <input
                       type="text"
@@ -138,7 +139,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   </div>
                   <div>
                     <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-                      模型名称 <span style={{ color: COLORS.error }}>*</span>
+                      {i18n('ai_helper_config_model_name')} <span style={{ color: COLORS.error }}>*</span>
                     </label>
                     <input
                       type="text"
@@ -151,7 +152,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   </div>
                   <div>
                     <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-                      API Key 状态
+                      {i18n('ai_helper_config_current_api_key')}
                     </label>
                     <div style={{
                       padding: SPACING.md,
@@ -159,12 +160,12 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                       borderRadius: RADIUS.md, fontSize: '14px',
                       color: legacy.hasApiKey ? COLORS.successText : COLORS.errorText,
                     }}>
-                      {legacy.hasApiKey ? `已配置：${legacy.apiKeyMasked}` : '尚未配置 API Key'}
+                      {legacy.hasApiKey ? i18n('ai_helper_config_api_key_configured', legacy.apiKeyMasked) : i18n('ai_helper_config_api_key_not_configured')}
                     </div>
                   </div>
                   <div>
                     <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-                      新的 API Key（留空则不修改）
+                      {i18n('ai_helper_config_new_api_key')}
                     </label>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <input
@@ -180,7 +181,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                         disabled={disabled}
                         style={getButtonStyle('secondary')}
                       >
-                        {legacy.showApiKey ? '隐藏' : '显示'}
+                        {legacy.showApiKey ? i18n('ai_helper_config_hide_api_key') : i18n('ai_helper_config_show_api_key')}
                       </button>
                     </div>
                   </div>
@@ -225,7 +226,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                       type="text"
                       value={endpoint.name}
                       onChange={(e) => onUpdateEndpoint(index, { name: e.target.value })}
-                      placeholder="端点名称"
+                      placeholder={i18n('ai_helper_admin_endpoint_name_placeholder')}
                       style={{
                         fontSize: '16px', fontWeight: 500, border: 'none',
                         borderBottom: '1px solid transparent', backgroundColor: 'transparent',
@@ -241,7 +242,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                           checked={endpoint.enabled}
                           onChange={(e) => onUpdateEndpoint(index, { enabled: e.target.checked })}
                         />
-                        启用
+                        {i18n('ai_helper_admin_endpoint_enabled')}
                       </label>
                       <button
                         onClick={() => onRemoveEndpoint(index)}
@@ -250,7 +251,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                           padding: '4px 8px', fontSize: '12px',
                         }}
                       >
-                        删除
+                        {i18n('ai_helper_admin_endpoint_delete')}
                       </button>
                     </div>
                   </div>
@@ -265,7 +266,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                     </div>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '13px', fontWeight: 600, color: step1Active ? COLORS.primary : COLORS.textPrimary, marginBottom: SPACING.sm }}>
-                        填写端点信息
+                        {i18n('ai_helper_admin_endpoint_step1')}
                       </div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
                         <div>
@@ -282,13 +283,13 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                         </div>
                         <div>
                           <label style={{ display: 'block', marginBottom: SPACING.xs, fontSize: '13px', fontWeight: 500, color: COLORS.textSecondary }}>
-                            API Key {endpoint.hasApiKey && <span style={{ color: COLORS.success }}>(已配置: {endpoint.apiKeyMasked})</span>}
+                            API Key {endpoint.hasApiKey && <span style={{ color: COLORS.success }}>({i18n('ai_helper_admin_endpoint_key_configured')}: {endpoint.apiKeyMasked})</span>}
                           </label>
                           <input
                             type="password"
                             value={endpoint.newApiKey || ''}
                             onChange={(e) => onUpdateEndpoint(index, { newApiKey: e.target.value })}
-                            placeholder={endpoint.hasApiKey ? '留空保持不变' : 'sk-...'}
+                            placeholder={endpoint.hasApiKey ? i18n('ai_helper_admin_endpoint_key_keep') : 'sk-...'}
                             style={getInputStyle()}
                           />
                         </div>
@@ -306,7 +307,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                     </div>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '13px', fontWeight: 600, color: step2Active ? COLORS.primary : COLORS.textPrimary, marginBottom: SPACING.sm }}>
-                        获取可用模型
+                        {i18n('ai_helper_admin_endpoint_step2')}
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '5px', flexWrap: 'wrap' }}>
                         <button
@@ -320,21 +321,21 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                             boxShadow: step2Active ? SHADOWS.focus : 'none',
                           }}
                         >
-                          {fetchingModels === endpointKey ? '获取中...' : hasModels ? '重新获取' : '获取模型列表'}
+                          {fetchingModels === endpointKey ? i18n('ai_helper_admin_endpoint_fetching') : hasModels ? i18n('ai_helper_admin_endpoint_refetch') : i18n('ai_helper_admin_endpoint_fetch_models')}
                         </button>
                         {step2Active && !hasModels && (
                           <span style={{ fontSize: '13px', color: COLORS.primary, fontWeight: 500 }}>
-                            ← 点击获取 API 支持的模型
+                            {i18n('ai_helper_admin_endpoint_click_fetch')}
                           </span>
                         )}
                         {hasModels && (
                           <span style={getBadgeStyle('success')}>
-                            {'\u2713'} 已获取 {endpoint.models.length} 个模型
+                            {'\u2713'} {i18n('ai_helper_admin_endpoint_models_fetched', endpoint.models.length)}
                           </span>
                         )}
                         {endpoint.modelsLastFetched && (
                           <span style={{ fontSize: '12px', color: COLORS.textMuted, marginLeft: 'auto' }}>
-                            上次获取: {new Date(endpoint.modelsLastFetched).toLocaleString()}
+                            {i18n('ai_helper_admin_endpoint_last_fetched')}: {new Date(endpoint.modelsLastFetched).toLocaleString()}
                           </span>
                         )}
                       </div>
@@ -350,9 +351,9 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                     </div>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '13px', fontWeight: 600, color: step3Active ? COLORS.primary : COLORS.textPrimary, marginBottom: SPACING.sm }}>
-                        选择启用的模型
+                        {i18n('ai_helper_admin_endpoint_step3')}
                         <span style={{ fontSize: '12px', fontWeight: 400, color: COLORS.textMuted, marginLeft: SPACING.sm }}>
-                          ({endpoint.models.length} 个可用)
+                          ({i18n('ai_helper_admin_endpoint_available_count', endpoint.models.length)})
                         </span>
                       </div>
                       {hasModels ? (
@@ -363,7 +364,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                               backgroundColor: COLORS.warningBg, borderRadius: RADIUS.sm,
                               fontSize: '13px', color: COLORS.warningText,
                             }}>
-                              请至少点击一个模型以供学生使用
+                              {i18n('ai_helper_admin_endpoint_select_hint')}
                             </div>
                           )}
                           <div style={{
@@ -387,7 +388,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                                       fontSize: '12px', fontWeight: isSelected ? 500 : 400,
                                       cursor: endpoint.id ? 'pointer' : 'not-allowed',
                                     }}
-                                    title={endpoint.id ? (isSelected ? '已选中' : '点击添加到选中模型') : '请先保存端点'}
+                                    title={endpoint.id ? (isSelected ? i18n('ai_helper_admin_endpoint_model_selected') : i18n('ai_helper_admin_endpoint_model_click_add')) : i18n('ai_helper_admin_endpoint_save_first')}
                                   >
                                     {model}
                                   </button>
@@ -401,7 +402,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                           padding: SPACING.md, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.sm,
                           border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, fontSize: '13px', textAlign: 'center',
                         }}>
-                          请先完成第 2 步
+                          {i18n('ai_helper_admin_endpoint_complete_step2')}
                         </div>
                       )}
                     </div>
@@ -416,10 +417,10 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
       {isUsingNewConfig && (
         <div style={{ ...sectionStyle, marginTop: '20px' }}>
           <h2 style={{ marginTop: 0, marginBottom: '15px', fontSize: '18px', color: COLORS.textPrimary }}>
-            模型优先级（按顺序 Fallback）
+            {i18n('ai_helper_admin_endpoint_priority_title')}
           </h2>
           <p style={{ fontSize: '13px', color: COLORS.textMuted, marginBottom: '15px' }}>
-            调用时将按以下顺序尝试模型，如果第一个失败则自动切换到下一个。
+            {i18n('ai_helper_admin_endpoint_priority_desc')}
           </p>
 
           {selectedModels.length === 0 ? (
@@ -427,7 +428,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
               padding: '20px', backgroundColor: COLORS.bgCard, borderRadius: RADIUS.md,
               border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, textAlign: 'center',
             }}>
-              尚未选择模型。请在上方端点的可用模型列表中点击添加。
+              {i18n('ai_helper_admin_endpoint_no_models_selected')}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.sm }}>
@@ -451,7 +452,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                     </span>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '14px', fontWeight: 500, color: COLORS.textPrimary }}>{sm.modelName}</div>
-                      <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{ep?.name || '未知端点'}</div>
+                      <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{ep?.name || i18n('ai_helper_admin_endpoint_unknown')}</div>
                     </div>
                     <div style={{ display: 'flex', gap: '4px' }}>
                       <button

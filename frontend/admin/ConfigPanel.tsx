@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { i18n } from 'vj/utils';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { BudgetConfigForm } from './BudgetConfigForm';
@@ -47,7 +48,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       });
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(text || `加载配置失败: ${res.status}`);
+        throw new Error(text || `${i18n('ai_helper_config_error_load_failed', res.status)}`);
       }
       const json: APIConfigResponse = await res.json();
       setBuiltinJailbreakPatterns(json.builtinJailbreakPatterns || []);
@@ -84,7 +85,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
     } catch (err: any) {
       console.error('Load config error:', err);
-      showToast(err.message || '加载配置失败', 'error');
+      showToast(err.message || i18n('ai_helper_config_error_load_failed', ''), 'error');
     } finally {
       setLoading(false);
     }
@@ -96,12 +97,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       const res = await fetch(`/ai-helper/admin/jailbreak-logs?page=${page}&limit=20`, {
         method: 'GET', credentials: 'include',
       });
-      if (!res.ok) throw new Error(`加载日志失败: ${res.status}`);
+      if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_load_failed')}: ${res.status}`);
       const json: JailbreakLogPagination = await res.json();
       setLogPagination(json);
     } catch (err: any) {
       console.error('Load jailbreak logs error:', err);
-      showToast(err.message || '加载越狱日志失败', 'error');
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_load_failed'), 'error');
     } finally {
       setLogsLoading(false);
     }
@@ -144,7 +145,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       });
       if (!res.ok) {
         const errorJson = await res.json();
-        throw new Error(errorJson.error || `保存失败: ${res.status}`);
+        throw new Error(errorJson.error || `${i18n('ai_helper_config_error_save_failed', res.status)}`);
       }
       const json: APIConfigResponse = await res.json();
       if (json.config) {
@@ -168,10 +169,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         });
       }
       setNewApiKey('');
-      showToast('配置已保存', 'success');
+      showToast(i18n('ai_helper_config_save_success'), 'success');
     } catch (err: any) {
       console.error('Save config error:', err);
-      showToast(err.message || '保存配置失败', 'error');
+      showToast(err.message || i18n('ai_helper_config_error_save_failed', ''), 'error');
     } finally {
       setSaving(false);
     }
@@ -186,11 +187,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         credentials: 'include',
       });
       const json = await res.json();
-      if (json.success) showToast('连接成功，AI 服务可用', 'success');
-      else showToast(json.message || '连接失败，AI 服务不可用', 'error');
+      if (json.success) showToast(i18n('ai_helper_config_test_success'), 'success');
+      else showToast(json.message || i18n('ai_helper_config_test_failed'), 'error');
     } catch (err: any) {
       console.error('Test connection error:', err);
-      showToast(err.message || '连接测试失败', 'error');
+      showToast(err.message || i18n('ai_helper_config_error_test_failed', ''), 'error');
     } finally {
       setTesting(false);
     }
@@ -207,7 +208,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       if (endpoint.id && !endpoint.isNew) {
         body = { endpointId: endpoint.id };
       } else {
-        if (!endpoint.apiBaseUrl || !endpoint.newApiKey) throw new Error('请先填写 API Base URL 和 API Key');
+        if (!endpoint.apiBaseUrl || !endpoint.newApiKey) throw new Error(i18n('ai_helper_admin_fetch_models_params_missing'));
         body = { apiBaseUrl: endpoint.apiBaseUrl, apiKey: endpoint.newApiKey };
       }
       const res = await fetch('/ai-helper/admin/fetch-models', {
@@ -221,13 +222,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         const newEndpoints = [...config.endpoints];
         newEndpoints[endpointIndex] = { ...newEndpoints[endpointIndex], models: json.models || [], modelsLastFetched: new Date().toISOString() };
         setConfig({ ...config, endpoints: newEndpoints });
-        showToast(`获取到 ${json.models?.length || 0} 个可用模型`, 'success');
+        showToast(i18n('ai_helper_admin_endpoint_models_fetched', json.models?.length || 0), 'success');
       } else {
-        showToast(json.error || '获取模型列表失败', 'error');
+        showToast(json.error || i18n('ai_helper_admin_fetch_models_failed'), 'error');
       }
     } catch (err: any) {
       console.error('Fetch models error:', err);
-      showToast(err.message || '获取模型列表失败', 'error');
+      showToast(err.message || i18n('ai_helper_admin_fetch_models_failed'), 'error');
     } finally {
       setFetchingModels(null);
     }
@@ -236,7 +237,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const addEndpoint = useCallback(() => {
     setConfig(prev => {
       if (!prev) return prev;
-      return { ...prev, endpoints: [...prev.endpoints, { id: `temp-${Date.now()}`, name: `端点 ${prev.endpoints.length + 1}`, apiBaseUrl: '', models: [], enabled: true, isNew: true, newApiKey: '' }] };
+      return { ...prev, endpoints: [...prev.endpoints, { id: `temp-${Date.now()}`, name: `${i18n('ai_helper_admin_endpoint_default_name')} ${prev.endpoints.length + 1}`, apiBaseUrl: '', models: [], enabled: true, isNew: true, newApiKey: '' }] };
     });
   }, []);
 
@@ -296,13 +297,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     try {
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
-        showToast('已复制到剪贴板', 'success');
+        showToast(i18n('ai_helper_admin_copied_to_clipboard'), 'success');
       } else {
-        window.prompt('请复制以下内容', text);
+        window.prompt(i18n('ai_helper_admin_copy_prompt'), text);
       }
     } catch (err) {
       console.error('Copy to clipboard failed:', err);
-      window.prompt('复制失败，请手动复制：', text);
+      window.prompt(i18n('ai_helper_admin_copy_fallback'), text);
     }
   };
 
@@ -337,9 +338,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   if (loading) {
     return (
       <div style={outerStyle}>
-        {!embedded && <h1 style={{ ...TYPOGRAPHY.xl, color: COLORS.textPrimary, letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>}
+        {!embedded && <h1 style={{ ...TYPOGRAPHY.xl, color: COLORS.textPrimary, letterSpacing: '-0.025em' }}>{i18n('ai_helper_config_title')}</h1>}
         <div style={{ ...dsCardStyle, marginTop: '20px', textAlign: 'center', color: COLORS.textMuted }}>
-          正在加载配置...
+          {i18n('ai_helper_config_loading')}
         </div>
       </div>
     );
@@ -353,8 +354,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
       {!embedded && (
         <div style={{ marginBottom: SPACING.xl }}>
-          <h1 style={{ ...TYPOGRAPHY.xl, color: COLORS.textPrimary, marginBottom: SPACING.sm, letterSpacing: '-0.025em' }}>AI 学习助手配置</h1>
-          <p style={{ fontSize: '15px', color: COLORS.textMuted, margin: 0 }}>管理 API 端点、模型选择与安全策略</p>
+          <h1 style={{ ...TYPOGRAPHY.xl, color: COLORS.textPrimary, marginBottom: SPACING.sm, letterSpacing: '-0.025em' }}>{i18n('ai_helper_config_title')}</h1>
+          <p style={{ fontSize: '15px', color: COLORS.textMuted, margin: 0 }}>{i18n('ai_helper_admin_config_subtitle')}</p>
         </div>
       )}
 
@@ -390,10 +391,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         </div>
 
         <div style={dsCardStyle}>
-          <h2 style={cardTitleStyle}>通用设置</h2>
+          <h2 style={cardTitleStyle}>{i18n('ai_helper_admin_general_settings')}</h2>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
             <div>
-              <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>超时时间（秒）</label>
+              <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>{i18n('ai_helper_config_timeout_seconds')}</label>
               <input
                 type="number"
                 value={config.timeoutSeconds}
@@ -402,7 +403,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
               />
             </div>
             <div>
-              <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>每分钟最大请求数</label>
+              <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>{i18n('ai_helper_config_rate_limit_per_minute')}</label>
               <input
                 type="number"
                 value={config.rateLimitPerMinute}
@@ -420,22 +421,22 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         />
 
         <div style={dsCardStyle}>
-          <h2 style={cardTitleStyle}>高级设置</h2>
+          <h2 style={cardTitleStyle}>{i18n('ai_helper_config_advanced_section')}</h2>
           <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>System Prompt 模板</label>
+            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>{i18n('ai_helper_config_system_prompt')}</label>
             <textarea
               value={config.systemPromptTemplate}
               onChange={(e) => setConfig({ ...config, systemPromptTemplate: e.target.value })}
-              placeholder="你是一位耐心的算法学习导师..."
+              placeholder={i18n('ai_helper_admin_system_prompt_placeholder')}
               disabled={isBusy} rows={6}
               style={{ ...getInputStyle(), fontFamily: 'monospace', resize: 'vertical' }}
             />
           </div>
           <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>内置越狱规则（只读）</label>
+            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>{i18n('ai_helper_admin_builtin_jailbreak_rules')}</label>
             <div style={{ maxHeight: '200px', overflowY: 'auto', padding: SPACING.md, borderRadius: RADIUS.md, border: `1px solid ${COLORS.border}`, backgroundColor: COLORS.bgPage }}>
               {builtinJailbreakPatterns.length === 0 ? (
-                <div style={{ color: COLORS.textMuted, fontSize: '13px' }}>暂无内置规则</div>
+                <div style={{ color: COLORS.textMuted, fontSize: '13px' }}>{i18n('ai_helper_admin_no_builtin_rules')}</div>
               ) : (
                 <ul style={{ margin: 0, paddingLeft: '20px' }}>
                   {builtinJailbreakPatterns.map((pattern, index) => (
@@ -446,11 +447,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             </div>
           </div>
           <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>自定义越狱规则（每行一个正则表达式）</label>
+            <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>{i18n('ai_helper_admin_custom_jailbreak_rules')}</label>
             <textarea
               value={config.extraJailbreakPatternsText}
               onChange={(e) => setConfig({ ...config, extraJailbreakPatternsText: e.target.value })}
-              placeholder="忽略.*提示词"
+              placeholder={i18n('ai_helper_admin_jailbreak_pattern_placeholder')}
               disabled={isBusy} rows={5}
               style={{ ...getInputStyle(), fontFamily: 'monospace', resize: 'vertical' }}
             />
@@ -475,8 +476,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
                 body: JSON.stringify({ telemetryEnabled: enabled }),
               });
               setTelemetry(prev => prev ? { ...prev, enabled } : null);
-              showToast(enabled ? '遥测已启用' : '遥测已禁用', 'success');
-            } catch { showToast('更新遥测设置失败', 'error'); }
+              showToast(enabled ? i18n('ai_helper_admin_telemetry_enabled') : i18n('ai_helper_admin_telemetry_disabled'), 'success');
+            } catch { showToast(i18n('ai_helper_admin_telemetry_update_failed'), 'error'); }
           }}
           disabled={saving}
         />
@@ -512,7 +513,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
               cursor: isBusy || loading ? 'not-allowed' : 'pointer',
             }}
           >
-            {testing ? '测试中...' : '测试连接'}
+            {testing ? i18n('ai_helper_config_testing') : i18n('ai_helper_config_test_connection')}
           </button>
           <button
             onClick={saveConfig}
@@ -524,7 +525,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
               cursor: isBusy || loading ? 'not-allowed' : 'pointer',
             }}
           >
-            {saving ? '保存中...' : '保存配置'}
+            {saving ? i18n('ai_helper_config_saving') : i18n('ai_helper_config_save')}
           </button>
         </div>
       </div>

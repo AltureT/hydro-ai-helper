@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import { renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
 import { COLORS, SPACING, RADIUS, SHADOWS, ZINDEX, FONT_FAMILY } from '../utils/styles';
 import { ThinkingBlock } from './ThinkingBlock';
@@ -77,10 +78,10 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
         <div style={{
           display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: COLORS.warningBg, borderBottom: `1px solid ${COLORS.warningBorder}`
         }}>
-          <span style={{ fontSize: '12px', color: COLORS.warningText, whiteSpace: 'nowrap' }}>⚠️ 无法获取题目</span>
+          <span style={{ fontSize: '12px', color: COLORS.warningText, whiteSpace: 'nowrap' }}>⚠️ {i18n('ai_helper_student_cannot_get_problem')}</span>
           <input
             type="text"
-            placeholder="请手动输入题目标题"
+            placeholder={i18n('ai_helper_student_manual_title_placeholder')}
             value={manualTitle}
             onChange={(e) => onManualTitleChange(e.target.value)}
             style={{
@@ -104,9 +105,9 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
         boxShadow: '0 8px 24px rgba(37, 99, 235, 0.2)',
         animation: 'float 3s ease-in-out infinite',
       }}>🤖</div>
-      <div style={{ fontSize: '18px', fontWeight: 600, color: COLORS.textPrimary, marginBottom: '8px' }}>你好！我是 AI 学习助手</div>
+      <div style={{ fontSize: '18px', fontWeight: 600, color: COLORS.textPrimary, marginBottom: '8px' }}>{i18n('ai_helper_student_welcome_title')}</div>
       <div style={{ fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.8' }}>
-        选择下方的问题类型，描述你的疑惑<br/>我来帮你理清思路
+        {i18n('ai_helper_student_welcome_desc_line1')}<br/>{i18n('ai_helper_student_welcome_desc_line2')}
       </div>
     </div>
   );
@@ -129,7 +130,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
         <div style={{ maxWidth: '80%', display: 'flex', flexDirection: 'column', gap: '2px' }}>
           {/* Speaker label */}
           <div style={{ fontSize: '11px', color: COLORS.textMuted, textAlign: isStudent ? 'right' : 'left' }}>
-            {isStudent ? '我' : 'AI 助手'}
+            {isStudent ? i18n('ai_helper_student_me') : i18n('ai_helper_student_ai_assistant')}
           </div>
           {/* Bubble */}
           <div
@@ -159,10 +160,10 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
               maxWidth: '100%', overflow: 'hidden',
             }}>
               <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.xs, display: 'flex', alignItems: 'center', gap: SPACING.xs }}>
-                📝 附带代码
+                📝 {i18n('ai_helper_student_attached_code')}
               </div>
               <div className="markdown-body" dangerouslySetInnerHTML={{
-                __html: renderMarkdownSafe(`\`\`\`\n${msg.code.length > 500 ? msg.code.substring(0, 500) + '\n// ... 代码已截断' : msg.code}\n\`\`\``).innerHTML
+                __html: renderMarkdownSafe(`\`\`\`\n${msg.code.length > 500 ? msg.code.substring(0, 500) + `\n// ... ${i18n('ai_helper_student_code_truncated')}` : msg.code}\n\`\`\``).innerHTML
               }} />
             </div>
           )}
@@ -212,8 +213,8 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
       {isLoading && !isStreaming && (
         <div style={{ display: 'flex', gap: SPACING.sm }}>
           <div style={{ padding: '10px 14px', borderRadius: '12px 12px 12px 4px', background: COLORS.primaryLight, color: COLORS.textSecondary, fontSize: '13px' }}>
-            <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>正在思考中...</span>
-            <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: SPACING.sm }}>点击取消按钮可中止</span>
+            <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>{i18n('ai_helper_student_loading')}</span>
+            <span style={{ color: COLORS.textMuted, fontSize: '11px', marginLeft: SPACING.sm }}>{i18n('ai_helper_student_click_cancel')}</span>
           </div>
         </div>
       )}
@@ -231,7 +232,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
           onMouseDown={(e) => e.preventDefault()}
           onClick={onDontUnderstand}
         >
-          ❓ 我不理解
+          ❓ {i18n('ai_helper_student_dont_understand')}
         </div>
       )}
 

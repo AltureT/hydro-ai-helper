@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { i18n } from 'vj/utils';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   getInputStyle, getButtonStyle,
@@ -8,10 +9,10 @@ interface FeedbackFormProps {
   showToast: (msg: string, type: 'success' | 'error') => void;
 }
 
-const TYPES = [
-  { value: 'bug', label: 'Bug 报告' },
-  { value: 'feature', label: '功能建议' },
-  { value: 'other', label: '其他' },
+const getTypes = () => [
+  { value: 'bug', label: i18n('ai_helper_admin_feedback_type_bug') },
+  { value: 'feature', label: i18n('ai_helper_admin_feedback_type_feature') },
+  { value: 'other', label: i18n('ai_helper_admin_feedback_type_other') },
 ];
 
 export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
@@ -23,7 +24,7 @@ export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
 
   const handleSubmit = async () => {
     if (!subject.trim()) {
-      showToast('请填写反馈主题', 'error');
+      showToast(i18n('ai_helper_feedback_subject_required'), 'error');
       return;
     }
 
@@ -46,15 +47,15 @@ export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
 
       const data = await res.json();
       if (data.success) {
-        showToast('反馈已提交，感谢您的意见！', 'success');
+        showToast(i18n('ai_helper_feedback_success'), 'success');
         setSubject('');
         setBody('');
         setEmail('');
       } else {
-        showToast(data.error || '提交失败', 'error');
+        showToast(data.error || i18n('ai_helper_feedback_submit_failed'), 'error');
       }
     } catch {
-      showToast('网络错误，请稍后再试', 'error');
+      showToast(i18n('ai_helper_admin_feedback_network_error'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -66,36 +67,36 @@ export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
       borderRadius: RADIUS.md, border: `1px solid ${COLORS.border}`
     }}>
       <h2 style={{ marginTop: 0, marginBottom: SPACING.sm, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
-        问题反馈
+        {i18n('ai_helper_admin_feedback_title')}
       </h2>
       <p style={{ margin: '0 0 4px', color: COLORS.textMuted, fontSize: '13px' }}>
-        向开发者提交 Bug 报告或功能建议。
+        {i18n('ai_helper_admin_feedback_desc')}
       </p>
       <p style={{ margin: '0 0 16px', color: COLORS.warning, fontSize: '12px', fontWeight: 500 }}>
-        请勿包含学生信息、API Key 或原始日志内容。
+        {i18n('ai_helper_admin_feedback_warning')}
       </p>
 
       <div style={{ display: 'flex', gap: SPACING.base, marginBottom: SPACING.base }}>
         <div style={{ flex: '0 0 140px' }}>
-          <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>类型</label>
+          <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_feedback_type_label')}</label>
           <select
             value={type}
             onChange={(e) => setType(e.target.value)}
             disabled={submitting}
             style={{ ...getInputStyle(), width: '100%' }}
           >
-            {TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            {getTypes().map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
         </div>
         <div style={{ flex: 1 }}>
           <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-            主题 <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>({subject.length}/200)</span>
+            {i18n('ai_helper_admin_feedback_subject')} <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>({subject.length}/200)</span>
           </label>
           <input
             type="text"
             value={subject}
             onChange={(e) => setSubject(e.target.value.slice(0, 200))}
-            placeholder="简要描述问题或建议"
+            placeholder={i18n('ai_helper_admin_feedback_subject_placeholder')}
             disabled={submitting}
             style={getInputStyle()}
           />
@@ -104,12 +105,12 @@ export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
 
       <div style={{ marginBottom: SPACING.base }}>
         <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-          详细描述 <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>({body.length}/2000)</span>
+          {i18n('ai_helper_admin_feedback_body')} <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>({body.length}/2000)</span>
         </label>
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value.slice(0, 2000))}
-          placeholder="详细描述遇到的问题、复现步骤或功能需求..."
+          placeholder={i18n('ai_helper_admin_feedback_body_placeholder')}
           disabled={submitting}
           rows={4}
           style={{ ...getInputStyle(), resize: 'vertical', minHeight: '80px' }}
@@ -119,13 +120,13 @@ export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
       <div style={{ display: 'flex', gap: SPACING.base, alignItems: 'flex-end' }}>
         <div style={{ flex: '0 0 280px' }}>
           <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-            联系邮箱 <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>(可选)</span>
+            {i18n('ai_helper_admin_feedback_email')} <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>({i18n('ai_helper_admin_feedback_optional')})</span>
           </label>
           <input
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="方便开发者联系您"
+            placeholder={i18n('ai_helper_admin_feedback_email_placeholder')}
             disabled={submitting}
             style={getInputStyle()}
           />
@@ -139,7 +140,7 @@ export const FeedbackForm: React.FC<FeedbackFormProps> = ({ showToast }) => {
             cursor: (submitting || !subject.trim()) ? 'not-allowed' : 'pointer',
           }}
         >
-          {submitting ? '提交中...' : '提交反馈'}
+          {submitting ? i18n('ai_helper_admin_feedback_submitting') : i18n('ai_helper_admin_feedback_submit')}
         </button>
       </div>
     </div>

@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import { COLORS } from '../utils/styles';
 
 interface ErrorBoundaryProps {
@@ -38,10 +39,10 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
         }}>
           <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x26A0;&#xFE0F;</div>
           <h2 style={{ fontSize: '18px', fontWeight: 600, color: '#1f2937', marginBottom: '8px' }}>
-            页面渲染出错
+            {i18n('ai_helper_student_render_error')}
           </h2>
           <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '20px' }}>
-            {this.state.error?.message || '发生了未知错误'}
+            {this.state.error?.message || i18n('ai_helper_student_unknown_error')}
           </p>
           <button
             onClick={this.handleRetry}
@@ -56,7 +57,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
               cursor: 'pointer',
             }}
           >
-            重试
+            {i18n('ai_helper_student_retry')}
           </button>
         </div>
       );

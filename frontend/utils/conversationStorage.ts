@@ -66,9 +66,9 @@ const CONVERSATION_ERROR_CODES = new Set([
 ]);
 
 const CONVERSATION_ERROR_HINTS = [
-  '无效的会话 ID',
-  '会话不存在',
-  '无权访问此会话'
+  '无效的会话 ID', 'Invalid conversation ID',
+  '会话不存在', 'Conversation not found',
+  '无权访问此会话', 'Access denied'
 ];
 
 export function shouldResetConversation(

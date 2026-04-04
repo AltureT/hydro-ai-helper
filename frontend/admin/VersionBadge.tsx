@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { i18n } from 'vj/utils';
 import { buildApiUrl } from '../utils/domainUtils';
 import {
   COLORS, SPACING, RADIUS, SHADOWS, TRANSITIONS, ANIMATIONS, TYPOGRAPHY, FONT_FAMILY,
@@ -102,7 +103,7 @@ export const VersionBadge: React.FC = () => {
       setState('success');
     } catch (err) {
       console.error('[VersionBadge] Failed to fetch version info:', err);
-      setError(err instanceof Error ? err.message : '检查失败');
+      setError(err instanceof Error ? err.message : i18n('ai_helper_version_check_failed'));
       setState('error');
     }
   };
@@ -162,7 +163,7 @@ export const VersionBadge: React.FC = () => {
 
   const handleConfirmUpdate = async () => {
     setUpdateState('updating');
-    setUpdateLogs(['等待服务器输出...']);
+    setUpdateLogs([i18n('ai_helper_admin_version_waiting_output')]);
     setUpdateError(null);
 
     const startedAtMs = Date.now();
@@ -203,7 +204,7 @@ export const VersionBadge: React.FC = () => {
         stopPollingProgress();
         setUpdateState('error');
         setUpdateLogs(progress.logs || []);
-        setUpdateError(progress.error || progress.message || '更新失败');
+        setUpdateError(progress.error || progress.message || i18n('ai_helper_update_failed'));
       }
     };
 
@@ -228,14 +229,14 @@ export const VersionBadge: React.FC = () => {
         if (progress?.status === 'running') {
           setUpdateLogs((prev) => [
             ...prev,
-            `服务器响应异常（HTTP ${response.status}），但更新仍在进行，继续等待...`
+            i18n('ai_helper_admin_version_server_error_continuing', response.status)
           ]);
           return;
         }
 
         stopPollingProgress();
         setUpdateState('error');
-        setUpdateLogs([`服务器错误: ${response.status} ${response.statusText}`]);
+        setUpdateLogs([`${i18n('ai_helper_admin_version_server_error')}: ${response.status} ${response.statusText}`]);
         setUpdateError(errorText || `HTTP ${response.status}`);
         return;
       }
@@ -245,25 +246,26 @@ export const VersionBadge: React.FC = () => {
         stopPollingProgress();
         setUpdateState('error');
         setUpdateLogs(result.logs || []);
-        setUpdateError(result.error || result.message || '更新失败');
+        setUpdateError(result.error || result.message || i18n('ai_helper_update_failed'));
       }
     } catch (err) {
       console.error('[VersionBadge] Update failed:', err);
       const progress = await fetchUpdateProgress();
       if (progress?.status === 'running') {
-        setUpdateLogs((prev) => [...prev, '连接中断（可能正在重启中），继续等待...']);
+        setUpdateLogs((prev) => [...prev, i18n('ai_helper_admin_version_connection_lost')]);
         return;
       }
 
       stopPollingProgress();
       setUpdateState('error');
-      setUpdateError(err instanceof Error ? err.message : '更新请求失败');
+      setUpdateError(err instanceof Error ? err.message : i18n('ai_helper_admin_version_update_request_failed'));
     }
   };
 
   const formatCheckedAt = (isoString: string): string => {
     const date = new Date(isoString);
-    return date.toLocaleString('zh-CN', {
+    const locale = (typeof window !== 'undefined' && (window as any).LOCALES?.__id) || 'zh';
+    return date.toLocaleString(locale, {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -287,10 +289,10 @@ export const VersionBadge: React.FC = () => {
             ...TYPOGRAPHY.md,
             color: COLORS.textPrimary,
           }}>
-            {updateState === 'confirming' && '确认更新插件'}
-            {updateState === 'updating' && '正在更新...'}
-            {updateState === 'success' && '更新成功'}
-            {updateState === 'error' && '更新失败'}
+            {updateState === 'confirming' && i18n('ai_helper_admin_version_confirm_title')}
+            {updateState === 'updating' && i18n('ai_helper_admin_version_updating')}
+            {updateState === 'success' && i18n('ai_helper_admin_version_update_success')}
+            {updateState === 'error' && i18n('ai_helper_admin_version_update_failed_title')}
           </h3>
 
           {updateState === 'confirming' && (
@@ -300,16 +302,16 @@ export const VersionBadge: React.FC = () => {
                 marginBottom: SPACING.base,
               }}>
                 <div style={{ fontWeight: 500, marginBottom: SPACING.sm }}>
-                  注意事项
+                  {i18n('ai_helper_admin_version_notice_title')}
                 </div>
                 <ul style={{
                   margin: 0,
                   paddingLeft: '20px',
                   fontSize: '14px'
                 }}>
-                  <li>更新将执行 git pull、npm run build 和 pm2 restart</li>
-                  <li>HydroOJ 服务将短暂重启，可能导致数秒服务中断</li>
-                  <li>请确保当前没有重要操作正在进行</li>
+                  <li>{i18n('ai_helper_admin_version_notice_1')}</li>
+                  <li>{i18n('ai_helper_admin_version_notice_2')}</li>
+                  <li>{i18n('ai_helper_admin_version_notice_3')}</li>
                 </ul>
               </div>
 
@@ -322,11 +324,11 @@ export const VersionBadge: React.FC = () => {
                   fontSize: '14px'
                 }}>
                   <div style={{ marginBottom: SPACING.xs }}>
-                    <span style={{ color: COLORS.textMuted }}>插件路径: </span>
+                    <span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_admin_version_plugin_path')}: </span>
                     <code style={{ color: COLORS.textPrimary }}>{updateInfo.path}</code>
                   </div>
                   <div>
-                    <span style={{ color: COLORS.textMuted }}>状态: </span>
+                    <span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_admin_version_status')}: </span>
                     <span style={{ color: updateInfo.isValid ? COLORS.success : COLORS.error }}>
                       {updateInfo.message}
                     </span>
@@ -339,7 +341,7 @@ export const VersionBadge: React.FC = () => {
                   onClick={handleCancelUpdate}
                   style={getButtonStyle('secondary')}
                 >
-                  取消
+                  {i18n('ai_helper_admin_version_cancel')}
                 </button>
                 <button
                   onClick={handleConfirmUpdate}
@@ -350,7 +352,7 @@ export const VersionBadge: React.FC = () => {
                     cursor: updateInfo?.isValid ? 'pointer' : 'not-allowed',
                   }}
                 >
-                  确认更新
+                  {i18n('ai_helper_admin_version_confirm')}
                 </button>
               </div>
             </>
@@ -372,7 +374,7 @@ export const VersionBadge: React.FC = () => {
                   borderRadius: '50%',
                   animation: ANIMATIONS.spin,
                 }} />
-                <span style={{ color: COLORS.textPrimary }}>正在执行更新，请勿关闭页面...</span>
+                <span style={{ color: COLORS.textPrimary }}>{i18n('ai_helper_admin_version_do_not_close')}</span>
               </div>
               <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
               {renderLogs()}
@@ -386,7 +388,7 @@ export const VersionBadge: React.FC = () => {
                 marginBottom: SPACING.base,
               }}>
                 <div style={{ fontWeight: 500 }}>
-                  更新完成！页面将在 20 秒后自动刷新...
+                  {i18n('ai_helper_admin_version_success_message')}
                 </div>
               </div>
               {renderLogs()}
@@ -400,7 +402,7 @@ export const VersionBadge: React.FC = () => {
                 marginBottom: SPACING.base,
               }}>
                 <div style={{ fontWeight: 500, marginBottom: SPACING.sm }}>
-                  更新失败
+                  {i18n('ai_helper_admin_version_update_failed_title')}
                 </div>
                 <div style={{ fontSize: '14px' }}>
                   {updateError}
@@ -412,7 +414,7 @@ export const VersionBadge: React.FC = () => {
                   onClick={handleCancelUpdate}
                   style={getButtonStyle('secondary')}
                 >
-                  关闭
+                  {i18n('ai_helper_admin_version_close')}
                 </button>
               </div>
             </div>
@@ -462,7 +464,7 @@ export const VersionBadge: React.FC = () => {
             fontWeight: 600,
             color: COLORS.textPrimary,
           }}>
-            插件版本
+            {i18n('ai_helper_admin_version_title')}
           </h3>
           <button
             onClick={() => fetchVersionInfo(true)}
@@ -475,19 +477,19 @@ export const VersionBadge: React.FC = () => {
               cursor: state === 'loading' ? 'not-allowed' : 'pointer',
             }}
           >
-            {state === 'loading' ? '检查中...' : '刷新'}
+            {state === 'loading' ? i18n('ai_helper_admin_version_checking') : i18n('ai_helper_admin_version_refresh')}
           </button>
         </div>
 
         {state === 'loading' && !versionInfo && (
           <div style={{ color: COLORS.textMuted, fontSize: '14px' }}>
-            正在检查版本...
+            {i18n('ai_helper_admin_version_checking_full')}
           </div>
         )}
 
         {state === 'error' && (
           <div style={getAlertStyle('error')}>
-            版本检查失败: {error}
+            {i18n('ai_helper_version_check_failed')}: {error}
           </div>
         )}
 
@@ -499,7 +501,7 @@ export const VersionBadge: React.FC = () => {
               gap: SPACING.sm,
               marginBottom: SPACING.sm,
             }}>
-              <span style={{ fontSize: '14px', color: COLORS.textMuted }}>当前版本:</span>
+              <span style={{ fontSize: '14px', color: COLORS.textMuted }}>{i18n('ai_helper_admin_version_current')}:</span>
               <span style={{
                 fontSize: '14px',
                 fontWeight: 600,
@@ -525,14 +527,14 @@ export const VersionBadge: React.FC = () => {
                     fontSize: '14px',
                     fontWeight: 600,
                   }}>
-                    有新版本可用!
+                    {i18n('ai_helper_admin_version_new_available')}
                   </span>
                 </div>
                 <div style={{
                   fontSize: '14px',
                   marginBottom: '10px'
                 }}>
-                  最新版本: <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                  {i18n('ai_helper_admin_version_latest')}: <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>
                     v{versionInfo.latestVersion}
                   </span>
                 </div>
@@ -541,7 +543,7 @@ export const VersionBadge: React.FC = () => {
                     onClick={handleUpdateClick}
                     style={getButtonStyle('primary')}
                   >
-                    一键更新
+                    {i18n('ai_helper_admin_version_one_click_update')}
                   </button>
                   <a
                     href={versionInfo.releaseUrl}
@@ -552,7 +554,7 @@ export const VersionBadge: React.FC = () => {
                       textDecoration: 'none',
                     }}
                   >
-                    查看发布页
+                    {i18n('ai_helper_admin_version_view_release')}
                   </a>
                 </div>
               </div>
@@ -567,7 +569,7 @@ export const VersionBadge: React.FC = () => {
                 <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
                   <span style={{ fontSize: '14px' }}>{'\u2713'}</span>
                   <span style={{ fontSize: '14px' }}>
-                    已是最新版本
+                    {i18n('ai_helper_admin_version_up_to_date')}
                   </span>
                 </div>
                 <button
@@ -580,7 +582,7 @@ export const VersionBadge: React.FC = () => {
                     color: COLORS.successText,
                   }}
                 >
-                  覆盖更新
+                  {i18n('ai_helper_admin_version_force_update')}
                 </button>
               </div>
             )}
@@ -594,7 +596,7 @@ export const VersionBadge: React.FC = () => {
               gap: SPACING.xs,
               flexWrap: 'wrap'
             }}>
-              <span>上次检查: {formatCheckedAt(versionInfo.checkedAt)}</span>
+              <span>{i18n('ai_helper_admin_version_last_checked')}: {formatCheckedAt(versionInfo.checkedAt)}</span>
               {versionInfo.source && (
                 <span style={getBadgeStyle('info')}>
                   {versionInfo.source}
@@ -608,7 +610,7 @@ export const VersionBadge: React.FC = () => {
                   borderRadius: RADIUS.sm,
                   fontSize: '11px'
                 }}>
-                  缓存
+                  {i18n('ai_helper_admin_version_cached')}
                 </span>
               )}
             </div>

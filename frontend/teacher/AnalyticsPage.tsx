@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { i18n } from 'vj/utils';
 import { buildApiUrl } from '../utils/domainUtils';
 import {
   COLORS, FONT_FAMILY, SPACING, RADIUS, SHADOWS, TRANSITIONS,
@@ -32,10 +33,10 @@ interface AnalyticsPageProps {
   embedded?: boolean;
 }
 
-const DIMENSION_OPTIONS: { value: Dimension; label: string }[] = [
-  { value: 'problem', label: '按题目' },
-  { value: 'student', label: '按学生' },
-  { value: 'class', label: '按班级' },
+const DIMENSION_OPTIONS: { value: Dimension; labelKey: string }[] = [
+  { value: 'problem', labelKey: 'ai_helper_teacher_analytics_by_problem' },
+  { value: 'student', labelKey: 'ai_helper_teacher_analytics_by_student' },
+  { value: 'class', labelKey: 'ai_helper_teacher_analytics_by_class' },
 ];
 
 const labelStyle: React.CSSProperties = {
@@ -100,13 +101,13 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
       });
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(text || `请求失败: ${res.status}`);
+        throw new Error(text || `${i18n('ai_helper_teacher_request_failed')}: ${res.status}`);
       }
       const json: AnalyticsResponse = await res.json();
       setData(json);
     } catch (err: any) {
       console.error('Fetch analytics error', err);
-      setError(err.message || '加载统计数据失败');
+      setError(err.message || i18n('ai_helper_teacher_analytics_load_failed'));
     } finally {
       setLoading(false);
     }
@@ -145,7 +146,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
       return (
         <div style={emptyStateStyle}>
           <div style={{ fontSize: '48px', marginBottom: SPACING.base }}>&#x1F4CA;</div>
-          <div style={{ fontSize: '15px' }}>暂无数据，请调整筛选条件后重新查询</div>
+          <div style={{ fontSize: '15px' }}>{i18n('ai_helper_teacher_analytics_no_data')}</div>
         </div>
       );
     }
@@ -200,17 +201,17 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
           marginBottom: SPACING.xl,
           padding: `${SPACING.lg} ${SPACING.xl}`,
         }}>
-          <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: COLORS.textPrimary }}>AI 使用统计</h1>
-          <p style={{ margin: `${SPACING.sm} 0 0`, color: COLORS.textSecondary, fontSize: '14px' }}>查看学生使用 AI 学习助手的详细统计数据</p>
+          <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_analytics_title')}</h1>
+          <p style={{ margin: `${SPACING.sm} 0 0`, color: COLORS.textSecondary, fontSize: '14px' }}>{i18n('ai_helper_teacher_analytics_subtitle')}</p>
         </div>
       )}
 
       {/* Filter form */}
       <div style={{ ...cardStyle, marginBottom: SPACING.lg }}>
-        <h3 style={{ margin: `0 0 ${SPACING.lg}`, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>筛选条件</h3>
+        <h3 style={{ margin: `0 0 ${SPACING.lg}`, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_filter_title')}</h3>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.lg }}>
           <div>
-            <label style={labelStyle}>统计维度</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_dimension')}</label>
             <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
               {DIMENSION_OPTIONS.map(opt => (
                 <button
@@ -218,34 +219,34 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
                   onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); }}
                   style={getPillStyle(dimension === opt.value)}
                 >
-                  {opt.label}
+                  {i18n(opt.labelKey)}
                 </button>
               ))}
             </div>
           </div>
           <div>
-            <label style={labelStyle}>开始日期</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_start_date')}</label>
             <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)}
               style={getInputStyle()} />
           </div>
           <div>
-            <label style={labelStyle}>结束日期</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_end_date')}</label>
             <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)}
               style={getInputStyle()} />
           </div>
           <div>
-            <label style={labelStyle}>班级</label>
-            <input type="text" value={classId} onChange={(e) => setClassId(e.target.value)} placeholder="班级 ID（可选）"
+            <label style={labelStyle}>{i18n('ai_helper_teacher_conv_col_class')}</label>
+            <input type="text" value={classId} onChange={(e) => setClassId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_class_id_optional')}
               style={getInputStyle()} />
           </div>
           <div>
-            <label style={labelStyle}>题目 ID</label>
-            <input type="text" value={problemId} onChange={(e) => setProblemId(e.target.value)} placeholder="题目 ID（可选）"
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>
+            <input type="text" value={problemId} onChange={(e) => setProblemId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_problem_id_optional')}
               style={getInputStyle()} />
           </div>
         </div>
         <button onClick={fetchData} disabled={loading} style={queryButtonStyle}>
-          {loading ? '查询中...' : '查询'}
+          {loading ? i18n('ai_helper_teacher_querying') : i18n('ai_helper_teacher_query')}
         </button>
       </div>
 
@@ -259,13 +260,13 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
           border: `1px solid ${COLORS.border}`,
         }}>
           <div style={{ fontSize: '24px', marginBottom: SPACING.md }}>&#x23F3;</div>
-          正在加载统计数据...
+          {i18n('ai_helper_teacher_analytics_loading')}
         </div>
       )}
 
       {error && (
         <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.lg }}>
-          <strong>加载失败：</strong> {error}
+          <strong>{i18n('ai_helper_teacher_load_failed')}</strong> {error}
         </div>
       )}
 

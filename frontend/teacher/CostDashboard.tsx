@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { i18n } from 'vj/utils';
 import { Chart, registerables } from 'chart.js';
 import {
   COLORS,
@@ -153,7 +154,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       const json = await res.json();
       setData(json);
     } catch (err: any) {
-      setError(err.message || '加载失败');
+      setError(err.message || i18n('ai_helper_teacher_load_failed'));
     } finally {
       setLoading(false);
     }
@@ -269,7 +270,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
   if (loading) {
     return (
       <div style={{ padding: embedded ? SPACING.lg : SPACING.xl, textAlign: 'center', color: COLORS.textMuted }}>
-        加载中...
+        {i18n('ai_helper_teacher_loading')}
       </div>
     );
   }
@@ -291,7 +292,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
             fontFamily: FONT_FAMILY,
           }}
         >
-          重试
+          {i18n('ai_helper_teacher_retry')}
         </button>
       </div>
     );
@@ -299,7 +300,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
 
   if (!data) return null;
 
-  const periodLabel = period === 'day' ? '今日' : period === 'week' ? '本周' : '本月';
+  const periodLabel = period === 'day' ? i18n('ai_helper_teacher_cost_today') : period === 'week' ? i18n('ai_helper_teacher_cost_this_week') : i18n('ai_helper_teacher_cost_this_month');
 
   const budgetPercent = data.summary.budgetUsagePercent;
   const budgetColor = budgetPercent === null
@@ -314,7 +315,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
     <div style={{ padding: embedded ? SPACING.lg : SPACING.xl, fontFamily: FONT_FAMILY }}>
       {!embedded && (
         <h1 style={{ ...TYPOGRAPHY.xl, margin: `0 0 ${SPACING.lg}`, color: COLORS.textPrimary }}>
-          成本分析
+          {i18n('ai_helper_teacher_cost_title')}
         </h1>
       )}
 
@@ -322,7 +323,7 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       <div style={{ marginBottom: SPACING.lg, display: 'flex', gap: SPACING.sm }}>
         {(['day', 'week', 'month'] as const).map((p) => (
           <button key={p} onClick={() => setPeriod(p)} style={getPeriodPillStyle(period === p)}>
-            {p === 'day' ? '今日' : p === 'week' ? '本周' : '本月'}
+            {p === 'day' ? i18n('ai_helper_teacher_cost_today') : p === 'week' ? i18n('ai_helper_teacher_cost_this_week') : i18n('ai_helper_teacher_cost_this_month')}
           </button>
         ))}
       </div>
@@ -333,24 +334,24 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
           <div style={statCard.label}>{periodLabel} Tokens</div>
           <div style={statCard.value}>{formatTokens(data.summary.totalTokens)}</div>
           <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
-            {data.summary.requestCount} 次请求
+            {data.summary.requestCount} {i18n('ai_helper_teacher_cost_requests')}
           </div>
         </div>
         <div style={statCard.container}>
-          <div style={statCard.label}>{periodLabel}成本</div>
+          <div style={statCard.label}>{periodLabel}{i18n('ai_helper_teacher_cost_cost')}</div>
           <div style={statCard.value}>{formatCost(data.summary.totalCost)}</div>
         </div>
         <div style={statCard.container}>
-          <div style={statCard.label}>本月累计</div>
+          <div style={statCard.label}>{i18n('ai_helper_teacher_cost_monthly_total')}</div>
           <div style={statCard.value}>{formatTokens(data.monthly.totalTokens)}</div>
           <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
             {formatCost(data.monthly.totalCost)}
           </div>
         </div>
         <div style={statCard.container}>
-          <div style={statCard.label}>预算使用率</div>
+          <div style={statCard.label}>{i18n('ai_helper_teacher_cost_budget_usage')}</div>
           <div style={{ ...statCard.value, color: budgetColor }}>
-            {budgetPercent !== null ? `${budgetPercent}%` : '未设置'}
+            {budgetPercent !== null ? `${budgetPercent}%` : i18n('ai_helper_teacher_cost_not_set')}
           </div>
           {budgetPercent !== null && (
             <div style={{ ...progressBarTrackStyle, marginTop: SPACING.sm }}>
@@ -366,10 +367,10 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       {/* Daily Trend Chart (Chart.js line) */}
       <div style={{ ...cardStyle, marginBottom: SPACING.lg }}>
         <h3 style={sectionTitleStyle}>
-          日趋势（{data.dateRange.startDate} ~ {data.dateRange.endDate}）
+          {i18n('ai_helper_teacher_cost_daily_trend')}（{data.dateRange.startDate} ~ {data.dateRange.endDate}）
         </h3>
         {data.dailyTrend.length === 0 ? (
-          <div style={emptyStateStyle}>暂无数据</div>
+          <div style={emptyStateStyle}>{i18n('ai_helper_teacher_no_data')}</div>
         ) : (
           <div style={{ position: 'relative', height: '240px' }}>
             <canvas ref={trendChartRef} />
@@ -381,17 +382,17 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: SPACING.base }}>
         {/* Top Users */}
         <div style={cardStyle}>
-          <h3 style={sectionTitleStyle}>{periodLabel} Top 10 用户</h3>
+          <h3 style={sectionTitleStyle}>{periodLabel} {i18n('ai_helper_teacher_cost_top_users')}</h3>
           {data.topUsers.length === 0 ? (
-            <div style={emptyStateStyle}>暂无数据</div>
+            <div style={emptyStateStyle}>{i18n('ai_helper_teacher_no_data')}</div>
           ) : (
             <table style={tableRootStyle}>
               <thead>
                 <tr>
-                  <th style={thStyle}>用户</th>
+                  <th style={thStyle}>{i18n('ai_helper_teacher_cost_col_user')}</th>
                   <th style={thRightStyle}>Tokens</th>
-                  <th style={thRightStyle}>请求数</th>
-                  <th style={thRightStyle}>成本</th>
+                  <th style={thRightStyle}>{i18n('ai_helper_teacher_cost_col_requests')}</th>
+                  <th style={thRightStyle}>{i18n('ai_helper_teacher_cost_col_cost')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -413,9 +414,9 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
 
         {/* Model Breakdown (Chart.js doughnut + table) */}
         <div style={cardStyle}>
-          <h3 style={sectionTitleStyle}>模型消耗分布</h3>
+          <h3 style={sectionTitleStyle}>{i18n('ai_helper_teacher_cost_model_distribution')}</h3>
           {data.modelBreakdown.length === 0 ? (
-            <div style={emptyStateStyle}>暂无数据</div>
+            <div style={emptyStateStyle}>{i18n('ai_helper_teacher_no_data')}</div>
           ) : (
             <>
               <div style={{ position: 'relative', height: '200px', marginBottom: SPACING.base }}>
@@ -424,10 +425,10 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
               <table style={tableRootStyle}>
                 <thead>
                   <tr>
-                    <th style={thStyle}>模型</th>
+                    <th style={thStyle}>{i18n('ai_helper_teacher_cost_col_model')}</th>
                     <th style={thRightStyle}>Tokens</th>
-                    <th style={thRightStyle}>请求数</th>
-                    <th style={thRightStyle}>成本</th>
+                    <th style={thRightStyle}>{i18n('ai_helper_teacher_cost_col_requests')}</th>
+                    <th style={thRightStyle}>{i18n('ai_helper_teacher_cost_col_cost')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -459,10 +460,10 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
         justifyContent: 'space-between',
       }}>
         <span>
-          区间汇总: {formatTokens(data.summary.totalTokens)} tokens / {formatCost(data.summary.totalCost)} / {data.summary.requestCount} 次请求
+          {i18n('ai_helper_teacher_cost_summary')}: {formatTokens(data.summary.totalTokens)} tokens / {formatCost(data.summary.totalCost)} / {data.summary.requestCount} {i18n('ai_helper_teacher_cost_requests')}
         </span>
         <span>
-          平均 {data.summary.avgTokensPerRequest} tokens/次
+          {i18n('ai_helper_teacher_cost_avg')} {data.summary.avgTokensPerRequest} tokens/{i18n('ai_helper_teacher_cost_per_request')}
         </span>
       </div>
     </div>

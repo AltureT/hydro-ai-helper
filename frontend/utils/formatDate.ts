@@ -2,7 +2,8 @@ export function formatDateTime(isoString: string | undefined): string {
   if (!isoString) return '-';
   try {
     const date = new Date(isoString);
-    return date.toLocaleString('zh-CN', {
+    const locale = (typeof window !== 'undefined' && (window as any).LOCALES?.__id) || 'zh';
+    return date.toLocaleString(locale, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',

@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import {
   COLORS, SPACING, RADIUS, SHADOWS, TRANSITIONS, FONT_FAMILY,
   getButtonStyle, getPillStyle, getInputStyle,
@@ -7,6 +8,7 @@ import {
 interface QuestionType {
   value: string;
   label: string;
+  description?: string;
 }
 
 interface ChatInputProps {
@@ -48,7 +50,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         fontSize: '12px', color: questionType === 'optimize' ? COLORS.textDisabled : COLORS.textSecondary,
         whiteSpace: 'nowrap', alignSelf: 'center',
       }}
-      title={questionType === 'optimize' ? '代码优化必须附带代码' : undefined}
+      title={questionType === 'optimize' ? i18n('ai_helper_student_optimize_code_required') : undefined}
     >
       <input
         type="checkbox" checked={includeCode} disabled={questionType === 'optimize'}
@@ -56,7 +58,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         style={{ marginRight: '6px', accentColor: COLORS.primary }}
       />
       {labelText}
-      {questionType === 'optimize' && <span style={{ marginLeft: '4px', color: COLORS.warning, fontSize: '11px' }}>(必需)</span>}
+      {questionType === 'optimize' && <span style={{ marginLeft: '4px', color: COLORS.warning, fontSize: '11px' }}>({i18n('ai_helper_student_required')})</span>}
       {includeCode && code && questionType !== 'optimize' && <span style={{ marginLeft: '4px', color: COLORS.success, fontSize: '11px' }}>&#10003;</span>}
     </label>
   );
@@ -65,7 +67,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     <textarea
       value={userThinking}
       onChange={(e) => onUserThinkingChange(e.target.value)}
-      placeholder={isFirstConversation ? '描述你的问题或疑惑...' : '继续追问...'}
+      placeholder={isFirstConversation ? i18n('ai_helper_student_placeholder_first') : i18n('ai_helper_student_placeholder_followup')}
       style={{
         ...getInputStyle(),
         border: 'none', outline: 'none', boxShadow: 'none',
@@ -107,7 +109,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       {/* Question type pills - above the card */}
       {isFirstConversation && (
         <div style={{ padding: `${SPACING.sm} ${SPACING.base} 0` }}>
-          <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginBottom: SPACING.xs }}>选择问题类型：</div>
+          <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginBottom: SPACING.xs }}>{i18n('ai_helper_student_select_type')}：</div>
           <div className="hide-scrollbar" style={{ display: 'flex', overflowX: 'auto', gap: SPACING.sm }}>
             {questionTypes.map(type => {
               const isSelected = questionType === type.value;
@@ -124,18 +126,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     checked={isSelected} onChange={(e) => onQuestionTypeChange(e.target.value)}
                     style={{ display: 'none' }}
                   />
-                  {type.label.split(' - ')[0]}
+                  {i18n(type.label)}
                 </label>
               );
             })}
           </div>
           {questionType && (() => {
             const selected = questionTypes.find(t => t.value === questionType);
-            const desc = selected?.label.split(' - ')[1];
-            return desc ? (
+            const descKey = (selected as any)?.description;
+            return descKey ? (
               <div style={{ fontSize: '12px', color: COLORS.textSecondary, marginTop: SPACING.xs }}>
-                {desc}
-                {questionType === 'debug' && '，将自动附带最近一次评测结果'}
+                {i18n(descKey)}
+                {questionType === 'debug' && i18n('ai_helper_student_debug_auto_attach')}
               </div>
             ) : null;
           })()}
@@ -153,7 +155,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               display: 'flex', alignItems: 'center', gap: SPACING.xs,
             }}
           >
-            📎 {includeCode ? '已附带代码' : '附带代码'}
+            📎 {includeCode ? i18n('ai_helper_student_code_attached') : i18n('ai_helper_student_attach_code')}
           </button>
           <button
             type="button" onClick={onNewConversation}
@@ -163,7 +165,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               border: `1px solid ${COLORS.border}`,
             }}
           >
-            🔄 新对话
+            🔄 {i18n('ai_helper_student_new_conversation')}
           </button>
         </div>
       )}
@@ -174,12 +176,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           padding: SPACING.sm, margin: `${SPACING.sm} ${SPACING.base} 0`, fontSize: '11px',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.xs }}>
-            <span style={{ color: COLORS.textSecondary }}>📝 已附带代码 ({code.length} 字符)</span>
+            <span style={{ color: COLORS.textSecondary }}>📝 {i18n('ai_helper_student_code_attached')} ({code.length} {i18n('ai_helper_student_chars')})</span>
             <button
               type="button" onClick={onCodeClear}
               style={{ background: 'none', border: 'none', color: COLORS.error, cursor: 'pointer', fontSize: '11px', padding: '2px 4px' }}
             >
-              ✕ 移除
+              ✕ {i18n('ai_helper_student_remove')}
             </button>
           </div>
           <pre style={{
@@ -199,19 +201,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       }}>
         {renderTextarea(isFirstConversation ? '48px' : '24px', '120px')}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
-          {isFirstConversation ? renderIncludeCodeCheckbox('📎 附带当前代码') : <div />}
+          {isFirstConversation ? renderIncludeCodeCheckbox(`📎 ${i18n('ai_helper_student_attach_current_code')}`) : <div />}
           {isLoading ? (
             <button
               onClick={onCancel}
               style={{ ...getButtonStyle('danger'), whiteSpace: 'nowrap', borderRadius: RADIUS.full, padding: '6px 16px', fontSize: '13px' }}
             >
-              取消
+              {i18n('ai_helper_student_cancel')}
             </button>
           ) : (
             <button
               onClick={onSubmit} disabled={disabledSubmit}
               style={submitStyle}
-              title="发送 (Ctrl+Enter)"
+              title={i18n('ai_helper_student_send_shortcut')}
             >
               &#x27A4;
             </button>

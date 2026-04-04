@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import { tableRootStyle, getTableCellStyle, COLORS, getBadgeStyle } from '../utils/styles';
 
 export type Dimension = 'class' | 'problem' | 'student';
@@ -26,25 +27,29 @@ export type ProblemColumnKey = 'displayName' | 'totalConversations' | 'studentCo
 
 export interface ColumnConfig {
   key: ProblemColumnKey;
-  label: string;
+  labelKey: string;
   defaultVisible: boolean;
   canHide: boolean;
 }
 
 export const PROBLEM_COLUMNS: ColumnConfig[] = [
-  { key: 'displayName', label: '题目', defaultVisible: true, canHide: true },
-  { key: 'totalConversations', label: '对话总数', defaultVisible: true, canHide: true },
-  { key: 'studentCount', label: '使用学生', defaultVisible: true, canHide: true },
-  { key: 'avgMessageCount', label: '平均轮数', defaultVisible: true, canHide: true },
-  { key: 'effectiveConversations', label: '有效对话', defaultVisible: false, canHide: true },
-  { key: 'effectiveRatio', label: '有效率', defaultVisible: false, canHide: true },
-  { key: 'understand', label: '理解题意', defaultVisible: true, canHide: true },
-  { key: 'think', label: '理清思路', defaultVisible: true, canHide: true },
-  { key: 'debug', label: '分析错误', defaultVisible: true, canHide: true },
-  { key: 'clarify', label: '追问解释', defaultVisible: true, canHide: true },
-  { key: 'optimize', label: '代码优化', defaultVisible: true, canHide: true },
-  { key: 'actions', label: '操作', defaultVisible: true, canHide: false }
+  { key: 'displayName', labelKey: 'ai_helper_teacher_analytics_problem', defaultVisible: true, canHide: true },
+  { key: 'totalConversations', labelKey: 'ai_helper_teacher_analytics_total_conversations', defaultVisible: true, canHide: true },
+  { key: 'studentCount', labelKey: 'ai_helper_teacher_analytics_student_count', defaultVisible: true, canHide: true },
+  { key: 'avgMessageCount', labelKey: 'ai_helper_teacher_analytics_avg_rounds', defaultVisible: true, canHide: true },
+  { key: 'effectiveConversations', labelKey: 'ai_helper_teacher_analytics_effective_conversations', defaultVisible: false, canHide: true },
+  { key: 'effectiveRatio', labelKey: 'ai_helper_teacher_analytics_effective_ratio', defaultVisible: false, canHide: true },
+  { key: 'understand', labelKey: 'ai_helper_teacher_analytics_understand', defaultVisible: true, canHide: true },
+  { key: 'think', labelKey: 'ai_helper_teacher_analytics_think', defaultVisible: true, canHide: true },
+  { key: 'debug', labelKey: 'ai_helper_teacher_analytics_debug', defaultVisible: true, canHide: true },
+  { key: 'clarify', labelKey: 'ai_helper_teacher_analytics_clarify', defaultVisible: true, canHide: true },
+  { key: 'optimize', labelKey: 'ai_helper_teacher_analytics_optimize', defaultVisible: true, canHide: true },
+  { key: 'actions', labelKey: 'ai_helper_teacher_analytics_actions', defaultVisible: true, canHide: false }
 ];
+
+export function getColumnLabel(col: ColumnConfig): string {
+  return i18n(col.labelKey);
+}
 
 export interface SortableHeaderProps {
   field: string;

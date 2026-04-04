@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { i18n } from 'vj/utils';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
@@ -105,9 +106,9 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
         setConversation(null);
         setMessages([]);
         if (response.status === 404) {
-          setError('对话不存在');
+          setError(i18n('ai_helper_teacher_conv_not_found'));
         } else {
-          setError(`加载失败：${response.status}`);
+          setError(`${i18n('ai_helper_teacher_load_failed')}${response.status}`);
         }
         return;
       }
@@ -121,7 +122,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
       console.error('[AI Helper] error while loading conversation detail', err);
       setConversation(null);
       setMessages([]);
-      setError('加载失败：网络错误');
+      setError(i18n('ai_helper_teacher_load_failed_network'));
     } finally {
       setLoading(false);
     }
@@ -135,7 +136,8 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
 
   const formatDateTime = (isoString: string): string => {
     const date = new Date(isoString);
-    return date.toLocaleString('zh-CN', {
+    const locale = (typeof window !== 'undefined' && (window as any).LOCALES?.__id) || 'zh';
+    return date.toLocaleString(locale, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -146,12 +148,12 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
   };
 
   const getQuestionTypeLabel = (type?: string): string => {
-    const labels: Record<string, string> = {
-      understand: '理解题意',
-      think: '理清思路',
-      debug: '分析错误'
+    const labelKeys: Record<string, string> = {
+      understand: 'ai_helper_teacher_qtype_understand',
+      think: 'ai_helper_teacher_qtype_think',
+      debug: 'ai_helper_teacher_qtype_debug'
     };
-    return type ? labels[type] || type : '';
+    return type ? (labelKeys[type] ? i18n(labelKeys[type]) : type) : '';
   };
 
   return (
@@ -181,7 +183,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           transition: 'all 0.2s'
         }}
       >
-        ← 返回对话列表
+        ← {i18n('ai_helper_teacher_conv_back_to_list')}
       </a>
 
       {/* 页面标题 */}
@@ -192,8 +194,8 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
         borderRadius: RADIUS.lg,
         borderLeft: `4px solid ${COLORS.primary}`,
       }}>
-        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl, color: COLORS.primary }}>对话详情</h1>
-        <p style={{ margin: '8px 0 0', ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>查看完整的学生与 AI 对话内容</p>
+        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl, color: COLORS.primary }}>{i18n('ai_helper_teacher_conv_detail_title')}</h1>
+        <p style={{ margin: '8px 0 0', ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>{i18n('ai_helper_teacher_conv_detail_subtitle')}</p>
       </div>
 
       {/* 加载状态 */}
@@ -207,7 +209,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           border: `1px solid ${COLORS.border}`
         }}>
           <div style={{ fontSize: '32px', marginBottom: SPACING.base }}>⏳</div>
-          <div style={{ ...TYPOGRAPHY.sm }}>加载中...</div>
+          <div style={{ ...TYPOGRAPHY.sm }}>{i18n('ai_helper_teacher_loading')}</div>
         </div>
       )}
 
@@ -220,7 +222,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           borderLeft: 'none',
           border: `1px solid ${COLORS.errorBorder}`,
         }}>
-          ⚠️ 错误: {error}
+          {error}
         </div>
       )}
 
@@ -231,38 +233,38 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
             ...cardStyle,
             marginBottom: SPACING.xl,
           }}>
-            <h2 style={{ margin: `0 0 ${SPACING.lg}`, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>会话信息</h2>
+            <h2 style={{ margin: `0 0 ${SPACING.lg}`, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_conv_session_info')}</h2>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.lg }}>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>学生</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_student')}</div>
                 <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>
                   {conversation.userName ? `${conversation.userName} (${conversation.userId})` : `#${conversation.userId}`}
                 </div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>班级</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_class')}</div>
                 <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>{conversation.classId || '-'}</div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>题目</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_problem')}</div>
                 <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>
                   {conversation.metadata?.problemTitle || conversation.problemId}
                 </div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>消息数</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_messages')}</div>
                 <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>{conversation.messageCount}</div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>开始时间</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_start_time')}</div>
                 <div style={{ fontSize: '14px', color: COLORS.textSecondary }}>{formatDateTime(conversation.startTime)}</div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>结束时间</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_end_time')}</div>
                 <div style={{ fontSize: '14px', color: COLORS.textSecondary }}>{formatDateTime(conversation.endTime)}</div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>有效对话</div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_effective_conv')}</div>
                 <div>
                   <span style={{
                     display: 'inline-block',
@@ -273,13 +275,13 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                     backgroundColor: conversation.isEffective ? COLORS.successBg : COLORS.errorBg,
                     color: conversation.isEffective ? COLORS.successText : COLORS.errorText
                   }}>
-                    {conversation.isEffective ? '是' : '否'}
+                    {conversation.isEffective ? i18n('ai_helper_teacher_yes') : i18n('ai_helper_teacher_no')}
                   </span>
                 </div>
               </div>
               {conversation.tags.length > 0 && (
                 <div style={{ gridColumn: '1 / -1', padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
-                  <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.sm }}>标签</div>
+                  <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.sm }}>{i18n('ai_helper_teacher_conv_tags')}</div>
                   <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
                     {conversation.tags.map((tag, idx) => (
                       <span key={idx} style={{
@@ -298,7 +300,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
               )}
               {conversation.teacherNote && (
                 <div style={{ gridColumn: '1 / -1', padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.warningBg, borderRadius: RADIUS.md, border: `1px solid ${COLORS.warningBorder}` }}>
-                  <div style={{ ...TYPOGRAPHY.xs, color: COLORS.warningText, marginBottom: SPACING.xs }}>教师备注</div>
+                  <div style={{ ...TYPOGRAPHY.xs, color: COLORS.warningText, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_teacher_note')}</div>
                   <div style={{ fontSize: '14px', color: COLORS.warningText }}>{conversation.teacherNote}</div>
                 </div>
               )}
@@ -309,7 +311,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           <div style={{
             ...cardStyle,
           }}>
-            <h2 style={{ margin: `0 0 ${SPACING.lg}`, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>对话内容</h2>
+            <h2 style={{ margin: `0 0 ${SPACING.lg}`, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_conv_content')}</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.lg }}>
               {messages.map((msg) => (
                 <div
@@ -336,7 +338,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                         fontSize: '14px',
                         color: msg.role === 'student' ? COLORS.infoText : COLORS.textSecondary
                       }}>
-                        {msg.role === 'student' ? '学生' : 'AI 助手'}
+                        {msg.role === 'student' ? i18n('ai_helper_teacher_role_student') : i18n('ai_helper_teacher_role_ai')}
                       </span>
                       {msg.questionType && (
                         <span style={{
@@ -359,7 +361,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                           fontSize: '12px',
                           fontWeight: 500
                         }}>
-                          附带代码
+                          {i18n('ai_helper_teacher_conv_attached_code')}
                         </span>
                       )}
                       <span style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted }}>
@@ -380,7 +382,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                         padding: SPACING.md,
                         fontSize: '12px',
                       }}>
-                        <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.sm }}>&#128221; 学生代码</div>
+                        <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.sm }}>&#128221; {i18n('ai_helper_teacher_conv_student_code')}</div>
                         <MarkdownContent content={`\`\`\`\n${msg.metadata.codeContent}\n\`\`\``} className="markdown-body" />
                       </div>
                     )}

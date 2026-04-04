@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import { buildPageUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
 import { COLORS, getTableHeaderStyle, getTableRowStyle, TRANSITIONS } from '../utils/styles';
@@ -42,13 +43,13 @@ export const StudentAnalyticsTable: React.FC<StudentAnalyticsTableProps> = ({
     <table style={tableStyle}>
       <thead>
         <tr>
-          <SortableHeader field="displayName" label="学生" align="left" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="lastUsedAt" label="最近使用" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>操作</th>
+          <SortableHeader field="displayName" label={i18n('ai_helper_teacher_conv_col_student')} align="left" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="totalConversations" label={i18n('ai_helper_teacher_analytics_total_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="effectiveConversations" label={i18n('ai_helper_teacher_analytics_effective_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="effectiveRatio" label={i18n('ai_helper_teacher_analytics_effective_ratio')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="avgMessageCount" label={i18n('ai_helper_teacher_analytics_avg_rounds')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="lastUsedAt" label={i18n('ai_helper_teacher_analytics_last_used')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
         </tr>
       </thead>
       <tbody>
@@ -65,7 +66,7 @@ export const StudentAnalyticsTable: React.FC<StudentAnalyticsTableProps> = ({
             </td>
             <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textMuted, fontSize: '13px' }}>{formatDateTime(item.lastUsedAt)}</td>
             <td style={{ ...cellStyle, textAlign: 'center' }}>
-              <a href={buildPageUrl(`/ai-helper/conversations?userId=${item.key}`)} style={linkStyle}>查看对话</a>
+              <a href={buildPageUrl(`/ai-helper/conversations?userId=${item.key}`)} style={linkStyle}>{i18n('ai_helper_teacher_view_conversations')}</a>
             </td>
           </tr>
         ))}

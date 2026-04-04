@@ -13,9 +13,9 @@ declare global {
 }
 
 export const BASE_QUESTION_TYPES = [
-  { value: 'understand', label: '理解题意 - 我对题目要求不太清楚' },
-  { value: 'think', label: '理清思路 - 我需要帮助梳理解题思路' },
-  { value: 'debug', label: '分析错误 - 我的代码有问题,需要找出原因' }
+  { value: 'understand', label: 'ai_helper_student_qt_understand', description: 'ai_helper_student_qtd_understand' },
+  { value: 'think', label: 'ai_helper_student_qt_think', description: 'ai_helper_student_qtd_think' },
+  { value: 'debug', label: 'ai_helper_student_qt_debug', description: 'ai_helper_student_qtd_debug' },
 ];
 
 export interface ProblemInfo {

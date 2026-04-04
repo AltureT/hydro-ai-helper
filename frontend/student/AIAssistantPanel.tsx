@@ -1,4 +1,5 @@
 import React, { useEffect, useCallback } from 'react';
+import { i18n } from 'vj/utils';
 import 'highlight.js/styles/github.css';
 import { useChatSession } from './hooks/useChatSession';
 import { useTextSelection } from './hooks/useTextSelection';
@@ -22,7 +23,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
   const textSelection = useTextSelection({
     onClarify: useCallback((text: string, _sourceId: string) => {
       dispatch({ type: 'SET_QUESTION_TYPE', payload: 'clarify' });
-      dispatch({ type: 'SET_USER_THINKING', payload: `我不太理解这部分："${text}"，能再解释一下吗？` });
+      dispatch({ type: 'SET_USER_THINKING', payload: i18n('ai_helper_student_clarify_template').replace('{text}', text) });
     }, [dispatch]),
   });
 
@@ -62,7 +63,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
               flexShrink: 0,
             }}
           >
-            重试
+            {i18n('ai_helper_student_retry')}
           </button>
         )}
       </div>
@@ -81,10 +82,10 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
           background: COLORS.bgCard, borderRadius: RADIUS.lg, padding: SPACING.lg,
           maxWidth: '420px', width: '90%', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'
         }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px', fontWeight: '600', color: COLORS.textPrimary }}>加载AC代码</h3>
+          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px', fontWeight: '600', color: COLORS.textPrimary }}>{i18n('ai_helper_student_load_ac_code')}</h3>
           <p style={{ margin: '0 0 20px 0', fontSize: '14px', color: COLORS.textSecondary, lineHeight: '1.5' }}>
-            是否将最近一次AC的代码加载到当前编辑器？
-            <br /><span style={{ color: COLORS.error, fontSize: '13px' }}>注意：这将覆盖编辑器中的当前代码</span>
+            {i18n('ai_helper_student_load_ac_confirm')}
+            <br /><span style={{ color: COLORS.error, fontSize: '13px' }}>{i18n('ai_helper_student_load_ac_warning')}</span>
           </p>
           <div style={{ display: 'flex', gap: SPACING.md, justifyContent: 'flex-end' }}>
             <button
@@ -99,7 +100,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
                 padding: '10px 20px', fontSize: '14px',
               }}
             >
-              使用当前代码
+              {i18n('ai_helper_student_use_current_code')}
             </button>
             <button
               onClick={() => {
@@ -115,7 +116,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
                 padding: '10px 20px', fontSize: '14px',
               }}
             >
-              加载AC代码
+              {i18n('ai_helper_student_load_ac_code')}
             </button>
           </div>
         </div>
@@ -176,9 +177,9 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
         textAlign: 'center', background: COLORS.bgCard,
       }}>
         <div style={{ fontSize: '40px', marginBottom: SPACING.base }}>🔒</div>
-        <div style={{ fontSize: '16px', fontWeight: '600', color: COLORS.textPrimary, marginBottom: SPACING.sm }}>AI 助手功能受限</div>
+        <div style={{ fontSize: '16px', fontWeight: '600', color: COLORS.textPrimary, marginBottom: SPACING.sm }}>{i18n('ai_helper_student_contest_title')}</div>
         <div style={{ fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
-          比赛期间 AI 助手不可用，请独立完成作答。<br />比赛结束后可正常使用。
+          {i18n('ai_helper_student_contest_desc_line1')}<br />{i18n('ai_helper_student_contest_desc_line2')}
         </div>
       </div>
     );

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { i18n } from 'vj/utils';
 import { buildPageUrl } from '../utils/domainUtils';
 import { COLORS, RADIUS, SHADOWS, SPACING, TRANSITIONS, ZINDEX, getTableHeaderStyle, getTableRowStyle } from '../utils/styles';
 import {
   AnalyticsItem, ProblemColumnKey, SortableHeaderProps,
-  PROBLEM_COLUMNS, tableStyle, cellStyle, linkStyle,
+  PROBLEM_COLUMNS, getColumnLabel, tableStyle, cellStyle, linkStyle,
   formatPercent, formatNumber, renderEffectiveRatio,
 } from './analyticsTypes';
 
@@ -68,7 +69,7 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
           }}
         >
           <span style={{ fontSize: '14px' }}>&#9776;</span>
-          列设置
+          {i18n('ai_helper_teacher_analytics_column_settings')}
           <span style={{ fontSize: '10px', color: COLORS.textMuted }}>({visibleColumns.size - 1}/{PROBLEM_COLUMNS.length - 1})</span>
         </button>
         {showColumnSelector && (
@@ -78,7 +79,7 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
             borderRadius: RADIUS.md, boxShadow: SHADOWS.md,
             padding: SPACING.md, zIndex: ZINDEX.dropdown, minWidth: '200px'
           }}>
-            <div style={{ marginBottom: SPACING.sm, fontWeight: 600, fontSize: '13px', color: COLORS.textPrimary }}>显示列</div>
+            <div style={{ marginBottom: SPACING.sm, fontWeight: 600, fontSize: '13px', color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_analytics_show_columns')}</div>
             {PROBLEM_COLUMNS.filter(c => c.canHide).map(col => (
               <label
                 key={col.key}
@@ -93,7 +94,7 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
                   onChange={() => toggleColumn(col.key)}
                   style={{ cursor: 'pointer' }}
                 />
-                {col.label}
+                {getColumnLabel(col)}
               </label>
             ))}
           </div>
@@ -104,18 +105,18 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
         <table style={tableStyle}>
           <thead>
             <tr>
-              {isVisible('displayName') && <SortableHeader field="displayName" label="题目" align="left" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('totalConversations') && <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('studentCount') && <SortableHeader field="studentCount" label="使用学生" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('avgMessageCount') && <SortableHeader field="avgMessageCount" label="平均轮数" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('effectiveConversations') && <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('effectiveRatio') && <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('understand') && <SortableHeader field="understand" label="理解题意" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('think') && <SortableHeader field="think" label="理清思路" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('debug') && <SortableHeader field="debug" label="分析错误" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('clarify') && <SortableHeader field="clarify" label="追问解释" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              {isVisible('optimize') && <SortableHeader field="optimize" label="代码优化" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
-              <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>操作</th>
+              {isVisible('displayName') && <SortableHeader field="displayName" label={i18n('ai_helper_teacher_analytics_problem')} align="left" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('totalConversations') && <SortableHeader field="totalConversations" label={i18n('ai_helper_teacher_analytics_total_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('studentCount') && <SortableHeader field="studentCount" label={i18n('ai_helper_teacher_analytics_student_count')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('avgMessageCount') && <SortableHeader field="avgMessageCount" label={i18n('ai_helper_teacher_analytics_avg_rounds')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('effectiveConversations') && <SortableHeader field="effectiveConversations" label={i18n('ai_helper_teacher_analytics_effective_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('effectiveRatio') && <SortableHeader field="effectiveRatio" label={i18n('ai_helper_teacher_analytics_effective_ratio')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('understand') && <SortableHeader field="understand" label={i18n('ai_helper_teacher_analytics_understand')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('think') && <SortableHeader field="think" label={i18n('ai_helper_teacher_analytics_think')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('debug') && <SortableHeader field="debug" label={i18n('ai_helper_teacher_analytics_debug')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('clarify') && <SortableHeader field="clarify" label={i18n('ai_helper_teacher_analytics_clarify')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('optimize') && <SortableHeader field="optimize" label={i18n('ai_helper_teacher_analytics_optimize')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -152,7 +153,7 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
                 {isVisible('clarify') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.clarify ?? 0}</td>}
                 {isVisible('optimize') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.optimize ?? 0}</td>}
                 <td style={{ ...cellStyle, textAlign: 'center' }}>
-                  <a href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)} style={linkStyle}>查看对话</a>
+                  <a href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)} style={linkStyle}>{i18n('ai_helper_teacher_view_conversations')}</a>
                 </td>
               </tr>
             ))}

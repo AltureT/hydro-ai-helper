@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { i18n } from 'vj/utils';
 import { ExportDialog } from './ExportDialog';
 import { ConversationDetailModal } from './ConversationDetailModal';
 import { buildApiUrl } from '../utils/domainUtils';
@@ -89,10 +90,10 @@ interface ConversationListProps {
 /**
  * ConversationList 组件
  */
-const questionTypeBadgeMap: Record<string, { bg: string; color: string; label: string }> = {
-  understand: { bg: '#dbeafe', color: '#1e40af', label: '理解题意' },
-  think: { bg: '#f3e8ff', color: '#6b21a8', label: '理清思路' },
-  debug: { bg: '#fee2e2', color: '#991b1b', label: '分析错误' },
+const questionTypeBadgeMap: Record<string, { bg: string; color: string; labelKey: string }> = {
+  understand: { bg: '#dbeafe', color: '#1e40af', labelKey: 'ai_helper_teacher_qtype_understand' },
+  think: { bg: '#f3e8ff', color: '#6b21a8', labelKey: 'ai_helper_teacher_qtype_think' },
+  debug: { bg: '#fee2e2', color: '#991b1b', labelKey: 'ai_helper_teacher_qtype_debug' },
 };
 
 export const ConversationList: React.FC<ConversationListProps> = ({ embedded = false }) => {
@@ -144,7 +145,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
         console.error('[AI Helper] failed to load conversations', response.status, text);
         setConversations([]);
         setTotal(0);
-        setError(`加载失败：${response.status}`);
+        setError(`${i18n('ai_helper_teacher_load_failed')}${response.status}`);
         return;
       }
 
@@ -157,7 +158,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
       console.error('[AI Helper] error while loading conversations', err);
       setConversations([]);
       setTotal(0);
-      setError('加载失败：网络错误');
+      setError(i18n('ai_helper_teacher_load_failed_network'));
     } finally {
       setLoading(false);
     }
@@ -204,8 +205,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
         marginBottom: SPACING.xl,
         padding: `${SPACING.lg} ${SPACING.xl}`,
       }}>
-        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl, color: COLORS.textPrimary }}>对话记录</h1>
-        <p style={{ margin: `${SPACING.sm} 0 0`, color: COLORS.textMuted, fontSize: '14px' }}>查看和管理学生与 AI 助手的对话记录</p>
+        <h1 style={{ margin: 0, ...TYPOGRAPHY.xl, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_conv_title')}</h1>
+        <p style={{ margin: `${SPACING.sm} 0 0`, color: COLORS.textMuted, fontSize: '14px' }}>{i18n('ai_helper_teacher_conv_subtitle')}</p>
       </div>
       )}
 
@@ -214,7 +215,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
         marginBottom: SPACING.lg,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.lg }}>
-          <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>筛选条件</h3>
+          <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_filter_title')}</h3>
           <div style={{ display: 'flex', gap: SPACING.md }}>
             <button
               type="button"
@@ -225,13 +226,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                 boxShadow: SHADOWS.sm,
               }}
             >
-              导出数据
+              {i18n('ai_helper_teacher_export_data')}
             </button>
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.lg }}>
           <div>
-            <label style={labelStyle}>开始日期</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_start_date')}</label>
             <input
               type="date"
               value={filters.startDate}
@@ -240,7 +241,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
             />
           </div>
           <div>
-            <label style={labelStyle}>结束日期</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_end_date')}</label>
             <input
               type="date"
               value={filters.endDate}
@@ -249,32 +250,32 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
             />
           </div>
           <div>
-            <label style={labelStyle}>题目 ID</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>
             <input
               type="text"
               value={filters.problemId}
               onChange={(e) => handleFilterChange('problemId', e.target.value)}
-              placeholder="如: P1000"
+              placeholder={i18n('ai_helper_teacher_filter_problem_id_placeholder')}
               style={getInputStyle()}
             />
           </div>
           <div>
-            <label style={labelStyle}>班级 ID</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_class_id')}</label>
             <input
               type="text"
               value={filters.classId}
               onChange={(e) => handleFilterChange('classId', e.target.value)}
-              placeholder="班级 ID"
+              placeholder={i18n('ai_helper_teacher_filter_class_id')}
               style={getInputStyle()}
             />
           </div>
           <div>
-            <label style={labelStyle}>学生 ID</label>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_student_id')}</label>
             <input
               type="text"
               value={filters.userId}
               onChange={(e) => handleFilterChange('userId', e.target.value)}
-              placeholder="学生用户 ID"
+              placeholder={i18n('ai_helper_teacher_filter_student_id')}
               style={getInputStyle()}
             />
           </div>
@@ -289,7 +290,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
             fontWeight: 600,
           }}
         >
-          搜索
+          {i18n('ai_helper_teacher_search')}
         </button>
       </form>
 
@@ -301,7 +302,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
           color: COLORS.textMuted,
         }}>
           <div style={{ fontSize: '24px', marginBottom: SPACING.md }}>...</div>
-          正在加载对话列表...
+          {i18n('ai_helper_teacher_conv_loading')}
         </div>
       )}
 
@@ -319,7 +320,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
           {conversations.length === 0 ? (
             <div style={emptyStateStyle}>
               <div style={{ fontSize: '48px', marginBottom: SPACING.base }}>--</div>
-              <div style={{ fontSize: '15px' }}>暂无对话记录</div>
+              <div style={{ fontSize: '15px' }}>{i18n('ai_helper_teacher_conv_empty')}</div>
             </div>
           ) : (
             <>
@@ -332,7 +333,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                 fontSize: '14px',
                 color: COLORS.textSecondary
               }}>
-                共 <strong style={{ color: COLORS.textPrimary }}>{total}</strong> 条记录，当前第 <strong style={{ color: COLORS.textPrimary }}>{page}</strong> 页
+                {i18n('ai_helper_teacher_conv_total_prefix')} <strong style={{ color: COLORS.textPrimary }}>{total}</strong> {i18n('ai_helper_teacher_conv_total_records')}{i18n('ai_helper_teacher_conv_current_page_prefix')} <strong style={{ color: COLORS.textPrimary }}>{page}</strong> {i18n('ai_helper_teacher_conv_current_page_suffix')}
               </div>
               <div style={{
                 backgroundColor: COLORS.bgCard,
@@ -345,14 +346,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                 <table style={tableRootStyle}>
                   <thead>
                     <tr>
-                      <th style={getTableHeaderStyle()}>学生</th>
-                      <th style={getTableHeaderStyle()}>班级</th>
-                      <th style={getTableHeaderStyle()}>题目</th>
-                      <th style={{ ...getTableHeaderStyle(), minWidth: '200px' }}>问题摘要</th>
-                      <th style={getTableHeaderStyle()}>开始时间</th>
-                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>消息数</th>
-                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>有效</th>
-                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>操作</th>
+                      <th style={getTableHeaderStyle()}>{i18n('ai_helper_teacher_conv_col_student')}</th>
+                      <th style={getTableHeaderStyle()}>{i18n('ai_helper_teacher_conv_col_class')}</th>
+                      <th style={getTableHeaderStyle()}>{i18n('ai_helper_teacher_conv_col_problem')}</th>
+                      <th style={{ ...getTableHeaderStyle(), minWidth: '200px' }}>{i18n('ai_helper_teacher_conv_col_summary')}</th>
+                      <th style={getTableHeaderStyle()}>{i18n('ai_helper_teacher_conv_col_start_time')}</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_conv_col_messages')}</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_conv_col_effective')}</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -370,7 +371,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                             <a
                               href={conv.problemUrl}
                               style={{ ...linkStyle, fontWeight: 500 }}
-                              title={`查看题目 ${conv.problemId}`}
+                              title={`${i18n('ai_helper_teacher_conv_view_problem')} ${conv.problemId}`}
                             >
                               {conv.metadata?.problemTitle || conv.problemId}
                             </a>
@@ -401,7 +402,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                               color: questionTypeBadgeMap[conv.questionType].color,
                               marginRight: '6px',
                             }}>
-                              {questionTypeBadgeMap[conv.questionType].label}
+                              {i18n(questionTypeBadgeMap[conv.questionType].labelKey)}
                             </span>
                           )}
                           {conv.firstMessageSummary || <span style={{ color: COLORS.textDisabled }}>-</span>}
@@ -423,7 +424,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                         </td>
                         <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
                           <span style={getBadgeStyle(conv.isEffective ? 'success' : 'error')}>
-                            {conv.isEffective ? '有效' : '无效'}
+                            {conv.isEffective ? i18n('ai_helper_teacher_effective') : i18n('ai_helper_teacher_ineffective')}
                           </span>
                         </td>
                         <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
@@ -443,7 +444,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                               fontSize: '13px',
                             }}
                           >
-                            查看详情
+                            {i18n('ai_helper_teacher_view_detail')}
                           </button>
                         </td>
                       </tr>
@@ -468,17 +469,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                 disabled={prevDisabled}
                 style={getPaginationButtonStyle(false, prevDisabled)}
               >
-                上一页
+                {i18n('ai_helper_teacher_prev_page')}
               </button>
               <span style={getPaginationButtonStyle(true, false)}>
-                第 {page} 页
+                {i18n('ai_helper_teacher_page_prefix')} {page} {i18n('ai_helper_teacher_page_suffix')}
               </span>
               <button
                 onClick={() => setPage(p => p + 1)}
                 disabled={nextDisabled}
                 style={getPaginationButtonStyle(false, nextDisabled)}
               >
-                下一页
+                {i18n('ai_helper_teacher_next_page')}
               </button>
             </div>
           )}

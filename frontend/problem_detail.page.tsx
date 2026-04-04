@@ -5,6 +5,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { i18n } from 'vj/utils';
 import { renderComponent } from './utils/renderHelper';
 import { AIAssistantPanel } from './student/AIAssistantPanel';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -194,7 +195,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             zIndex: 9998,
             gap: '4px'
           }}
-          title="打开 AI 学习助手"
+          title={i18n('ai_helper_student_open_panel')}
         >
           {/* AI 图标 */}
           <svg
@@ -281,7 +282,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             onMouseLeave={(e) => {
               if (!isResizing) e.currentTarget.style.background = 'transparent';
             }}
-            title="拖拽调整面板宽度"
+            title={i18n('ai_helper_student_resize_panel')}
           >
             {/* 竖线拖拽指示器 */}
             <div style={{
@@ -316,7 +317,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
                   fill="#2563eb"
                 />
               </svg>
-              <span style={{ fontWeight: 600, fontSize: '14px', color: '#1f2937' }}>AI 学习助手</span>
+              <span style={{ fontWeight: 600, fontSize: '14px', color: '#1f2937' }}>{i18n('ai_helper_student_panel_title')}</span>
             </div>
             <button
               onClick={handleClosePanel}
@@ -332,12 +333,12 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
                 alignItems: 'center',
                 gap: '4px'
               }}
-              title="收起面板"
+              title={i18n('ai_helper_student_collapse_panel')}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                 <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z" fill="#4b5563"/>
               </svg>
-              收起
+              {i18n('ai_helper_student_collapse')}
             </button>
           </div>
 

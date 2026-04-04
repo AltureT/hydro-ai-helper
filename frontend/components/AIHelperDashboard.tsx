@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { i18n } from 'vj/utils';
 import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';
@@ -42,10 +43,10 @@ export const AIHelperDashboard: React.FC = () => {
   };
 
   const tabs: { id: TabType; label: string }[] = [
-    { id: 'conversations', label: '对话记录' },
-    { id: 'analytics', label: '使用统计' },
-    { id: 'cost', label: '成本分析' },
-    { id: 'config', label: 'AI 配置' },
+    { id: 'conversations', label: i18n('ai_helper_dashboard_tab_conversations') },
+    { id: 'analytics', label: i18n('ai_helper_dashboard_tab_analytics') },
+    { id: 'cost', label: i18n('ai_helper_dashboard_tab_cost') },
+    { id: 'config', label: i18n('ai_helper_dashboard_tab_config') },
   ];
 
   return (
@@ -66,10 +67,10 @@ export const AIHelperDashboard: React.FC = () => {
           boxShadow: SHADOWS.sm,
         }}>
           <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: COLORS.textPrimary }}>
-            AI 助手
+            {i18n('ai_helper')}
           </h1>
           <p style={{ margin: '8px 0 0', color: COLORS.textSecondary, fontSize: '14px' }}>
-            管理 AI 助手对话、查看统计数据及系统配置
+            {i18n('ai_helper_dashboard_subtitle')}
           </p>
         </div>
 

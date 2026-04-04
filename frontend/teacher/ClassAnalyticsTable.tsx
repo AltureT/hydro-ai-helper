@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import { buildPageUrl } from '../utils/domainUtils';
 import { COLORS, getTableHeaderStyle, getTableRowStyle, TRANSITIONS } from '../utils/styles';
 import {
@@ -41,13 +42,13 @@ export const ClassAnalyticsTable: React.FC<ClassAnalyticsTableProps> = ({
     <table style={tableStyle}>
       <thead>
         <tr>
-          <SortableHeader field="key" label="班级" align="left" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="totalConversations" label="对话总数" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="studentCount" label="参与学生" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="avgConversationsPerStudent" label="人均对话" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="effectiveConversations" label="有效对话" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <SortableHeader field="effectiveRatio" label="有效率" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
-          <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>操作</th>
+          <SortableHeader field="key" label={i18n('ai_helper_teacher_conv_col_class')} align="left" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="totalConversations" label={i18n('ai_helper_teacher_analytics_total_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="studentCount" label={i18n('ai_helper_teacher_analytics_participating_students')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="avgConversationsPerStudent" label={i18n('ai_helper_teacher_analytics_avg_per_student')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="effectiveConversations" label={i18n('ai_helper_teacher_analytics_effective_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="effectiveRatio" label={i18n('ai_helper_teacher_analytics_effective_ratio')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
         </tr>
       </thead>
       <tbody>
@@ -64,7 +65,7 @@ export const ClassAnalyticsTable: React.FC<ClassAnalyticsTableProps> = ({
               <span style={renderEffectiveRatio(item.effectiveRatio)}>{formatPercent(item.effectiveRatio)}</span>
             </td>
             <td style={{ ...cellStyle, textAlign: 'center' }}>
-              <a href={buildPageUrl(`/ai-helper/conversations?classId=${item.key}`)} style={linkStyle}>查看对话</a>
+              <a href={buildPageUrl(`/ai-helper/conversations?classId=${item.key}`)} style={linkStyle}>{i18n('ai_helper_teacher_view_conversations')}</a>
             </td>
           </tr>
         ))}

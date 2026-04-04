@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
 } from '../utils/styles';
@@ -19,10 +20,10 @@ export const TelemetrySettings: React.FC<TelemetrySettingsProps> = ({ telemetry,
       borderRadius: RADIUS.md, border: `1px solid ${COLORS.border}`
     }}>
       <h2 style={{ marginTop: 0, marginBottom: SPACING.sm, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
-        遥测设置
+        {i18n('ai_helper_admin_telemetry_title')}
       </h2>
       <p style={{ margin: '0 0 16px', color: COLORS.textMuted, fontSize: '13px' }}>
-        匿名使用数据帮助开发者改进插件。不采集学生对话内容、个人信息或 API 密钥。
+        {i18n('ai_helper_admin_telemetry_desc')}
       </p>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.base, marginBottom: SPACING.base }}>
@@ -35,7 +36,7 @@ export const TelemetrySettings: React.FC<TelemetrySettingsProps> = ({ telemetry,
             style={{ width: '16px', height: '16px' }}
           />
           <span style={{ fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-            {telemetry.enabled ? '已启用' : '已禁用'}
+            {telemetry.enabled ? i18n('ai_helper_admin_telemetry_enabled') : i18n('ai_helper_admin_telemetry_disabled')}
           </span>
         </label>
       </div>
@@ -46,31 +47,31 @@ export const TelemetrySettings: React.FC<TelemetrySettingsProps> = ({ telemetry,
         fontSize: '13px', color: COLORS.textMuted
       }}>
         <div>
-          <span style={{ fontWeight: 500 }}>实例 ID: </span>
+          <span style={{ fontWeight: 500 }}>{i18n('ai_helper_admin_telemetry_instance_id')}: </span>
           <code style={{ fontSize: '12px' }}>...{telemetry.instanceId}</code>
         </div>
         <div>
-          <span style={{ fontWeight: 500 }}>版本: </span>
+          <span style={{ fontWeight: 500 }}>{i18n('ai_helper_admin_telemetry_version')}: </span>
           v{telemetry.version}
         </div>
         <div>
-          <span style={{ fontWeight: 500 }}>最后上报: </span>
+          <span style={{ fontWeight: 500 }}>{i18n('ai_helper_admin_telemetry_last_report')}: </span>
           {telemetry.lastReportAt
             ? new Date(telemetry.lastReportAt).toLocaleString()
-            : '从未'}
+            : i18n('ai_helper_admin_telemetry_never')}
         </div>
       </div>
 
       <details style={{ marginTop: SPACING.sm }}>
         <summary style={{ cursor: 'pointer', fontSize: '13px', color: COLORS.textMuted }}>
-          采集了哪些数据？
+          {i18n('ai_helper_admin_telemetry_what_collected')}
         </summary>
         <ul style={{ margin: '8px 0 0', paddingLeft: '20px', fontSize: '13px', color: COLORS.textMuted, lineHeight: 1.6 }}>
-          <li>活跃用户数（7天内）、对话总数</li>
-          <li>API 成功/失败率、平均响应时间</li>
-          <li>插件版本、运行环境（Node.js 版本、操作系统）</li>
-          <li>启用的功能（预算限制、多端点等）</li>
-          <li>错误类型和频率（不含具体内容）</li>
+          <li>{i18n('ai_helper_admin_telemetry_data_1')}</li>
+          <li>{i18n('ai_helper_admin_telemetry_data_2')}</li>
+          <li>{i18n('ai_helper_admin_telemetry_data_3')}</li>
+          <li>{i18n('ai_helper_admin_telemetry_data_4')}</li>
+          <li>{i18n('ai_helper_admin_telemetry_data_5')}</li>
         </ul>
       </details>
     </div>

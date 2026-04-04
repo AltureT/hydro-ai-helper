@@ -1,4 +1,5 @@
 import { useReducer, useRef, useCallback, useEffect, useMemo } from 'react';
+import { i18n } from 'vj/utils';
 import { buildApiUrl } from '../../utils/domainUtils';
 import {
   clearConversationId as clearStoredConversationId,
@@ -45,7 +46,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
   const QUESTION_TYPES = useMemo(() => {
     const types = [...BASE_QUESTION_TYPES];
     if (hasAccepted) {
-      types.push({ value: 'optimize', label: '代码优化 - 代码能运行,但想让它更高效' });
+      types.push({ value: 'optimize', label: 'ai_helper_student_qt_optimize', description: 'ai_helper_student_qtd_optimize' });
     }
     return types;
   }, [hasAccepted]);
@@ -157,29 +158,29 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
   const handleSubmit = async (clarifyContext?: { sourceAiMessageId: string; selectedText: string }) => {
     const effectiveQuestionType = questionType || (conversationHistory.length > 0 ? 'think' : '');
     if (!effectiveQuestionType) {
-      dispatch({ type: 'SET_ERROR', payload: { error: '请选择问题类型' } });
+      dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_select_type') } });
       return;
     }
 
     if (conversationHistory.length > 0 && !userThinking.trim()) {
-      dispatch({ type: 'SET_ERROR', payload: { error: '请输入追问内容' } });
+      dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_enter_followup') } });
       return;
     }
 
     if (includeCode && !code.trim()) {
-      dispatch({ type: 'SET_ERROR', payload: { error: '请粘贴代码或关闭「附带代码」选项' } });
+      dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_paste_code') } });
       return;
     }
 
     const getQuestionTypeLabel = (type: string) => {
       const found = QUESTION_TYPES.find(t => t.value === type);
-      return found ? found.label.split(' - ')[0] : type;
+      return found ? i18n(found.label) : type;
     };
     const messageContent = userThinking.trim()
       ? userThinking
       : (conversationHistory.length === 0
-        ? `【${getQuestionTypeLabel(effectiveQuestionType)}】请帮我分析这道题`
-        : '（继续追问）');
+        ? `【${getQuestionTypeLabel(effectiveQuestionType)}】${i18n('ai_helper_student_analyze_problem')}`
+        : i18n('ai_helper_student_followup_continue'));
     const studentMessage: Message = {
       role: 'student',
       content: messageContent,
@@ -192,7 +193,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
     dispatch({ type: 'CLEAR_ERROR' });
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      dispatch({ type: 'SET_ERROR', payload: { error: '网络已断开，请检查网络连接后重试', category: 'network', retryable: true } });
+      dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_network_offline'), category: 'network', retryable: true } });
       return;
     }
 
@@ -261,7 +262,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
 
         if (response.status === 403 && errorData.code === 'CONTEST_MODE_RESTRICTED') {
           dispatch({ type: 'SET_CONTEST_RESTRICTED', payload: true });
-          throw new Error(errorData.error || '比赛期间 AI 助手不可用，请独立完成作答');
+          throw new Error(errorData.error || i18n('ai_helper_student_contest_restricted'));
         }
 
         if (conversationId && shouldResetConversation(response.status, errorData.error, errorData.code)) {
@@ -270,10 +271,10 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           response = await sendChatRequest(null);
           if (!response.ok) {
             errorData = await parseErrorPayload(response);
-            throw createCategorizedError(errorData.error || '请求失败', errorData.category, errorData.retryable);
+            throw createCategorizedError(errorData.error || i18n('ai_helper_student_err_request_failed'), errorData.category, errorData.retryable);
           }
         } else {
-          throw createCategorizedError(errorData.error || '请求失败', errorData.category, errorData.retryable);
+          throw createCategorizedError(errorData.error || i18n('ai_helper_student_err_request_failed'), errorData.category, errorData.retryable);
         }
       }
 
@@ -325,7 +326,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
             dispatch({ type: 'SET_IS_STREAMING', payload: false });
             dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
             streamingContentRef.current = '';
-            throw createCategorizedError(data.error || 'AI 服务异常', data.category, data.retryable);
+            throw createCategorizedError(data.error || i18n('ai_helper_student_err_ai_service'), data.category, data.retryable);
           },
         };
 
@@ -348,10 +349,10 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
         try {
           data = await response.json();
         } catch {
-          throw createCategorizedError('服务器返回格式异常，请稍后重试', 'server', true);
+          throw createCategorizedError(i18n('ai_helper_student_err_bad_response'), 'server', true);
         }
         if (!data?.message?.content) {
-          throw createCategorizedError('AI 返回内容为空，请重试', 'server', true);
+          throw createCategorizedError(i18n('ai_helper_student_err_empty_response'), 'server', true);
         }
 
         const aiMessage: Message = {
@@ -371,13 +372,13 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         if (clientTimedOut) {
-          dispatch({ type: 'SET_ERROR', payload: { error: 'AI 服务响应超时，请稍后再试', category: 'timeout', retryable: true } });
+          dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_timeout'), category: 'timeout', retryable: true } });
         } else {
-          dispatch({ type: 'SET_ERROR', payload: { error: '请求已取消', category: 'aborted', retryable: false } });
+          dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_cancelled'), category: 'aborted', retryable: false } });
         }
       } else {
         const errObj = err as Error & { _category?: string; _retryable?: boolean };
-        dispatch({ type: 'SET_ERROR', payload: { error: errObj.message || '未知错误', category: errObj._category, retryable: errObj._retryable } });
+        dispatch({ type: 'SET_ERROR', payload: { error: errObj.message || i18n('ai_helper_student_unknown_error'), category: errObj._category, retryable: errObj._retryable } });
       }
       console.error('[AI Helper] 提交失败:', err);
       dispatch({ type: 'SET_USER_THINKING', payload: savedUserThinking });
@@ -480,11 +481,11 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           payload: { title, problemId: problemIdFromUrl, content },
         });
       } else {
-        dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: '无法自动读取题目信息,请手动输入题目标题' });
+        dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: i18n('ai_helper_student_err_read_problem') });
       }
     } catch (err) {
-      console.error('[AI Helper] 读取题目信息失败:', err);
-      dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: '读取题目信息失败,请手动输入' });
+      console.error('[AI Helper] Failed to read problem info:', err);
+      dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: i18n('ai_helper_student_err_read_problem_failed') });
     }
   }, [problemId]);
 

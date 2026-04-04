@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { i18n } from 'vj/utils';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl } from '../utils/domainUtils';
@@ -51,10 +52,10 @@ interface ConversationDetailResponse {
   messages: Message[];
 }
 
-const questionTypeBadgeMap: Record<string, { bg: string; color: string; label: string }> = {
-  understand: { bg: '#dbeafe', color: '#1e40af', label: '理解题意' },
-  think: { bg: '#f3e8ff', color: '#6b21a8', label: '理清思路' },
-  debug: { bg: '#fee2e2', color: '#991b1b', label: '分析错误' },
+const questionTypeBadgeMap: Record<string, { bg: string; color: string; labelKey: string }> = {
+  understand: { bg: '#dbeafe', color: '#1e40af', labelKey: 'ai_helper_teacher_qtype_understand' },
+  think: { bg: '#f3e8ff', color: '#6b21a8', labelKey: 'ai_helper_teacher_qtype_think' },
+  debug: { bg: '#fee2e2', color: '#991b1b', labelKey: 'ai_helper_teacher_qtype_debug' },
 };
 
 function QuestionTypeBadge({ type }: { type: string }) {
@@ -69,7 +70,7 @@ function QuestionTypeBadge({ type }: { type: string }) {
       backgroundColor: info.bg,
       color: info.color,
     }}>
-      {info.label}
+      {i18n(info.labelKey)}
     </span>
   );
 }
@@ -140,7 +141,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
         });
         if (cancelled) return;
         if (!resp.ok) {
-          setError(resp.status === 404 ? '对话不存在' : `加载失败：${resp.status}`);
+          setError(resp.status === 404 ? i18n('ai_helper_teacher_conv_not_found') : `${i18n('ai_helper_teacher_load_failed')}${resp.status}`);
           setConversation(null);
           setMessages([]);
           return;
@@ -151,7 +152,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
         setMessages(data.messages);
       } catch {
         if (!cancelled) {
-          setError('加载失败：网络错误');
+          setError(i18n('ai_helper_teacher_load_failed_network'));
           setConversation(null);
           setMessages([]);
         }
@@ -224,17 +225,17 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                   borderRadius: '50%',
                   backgroundColor: conversation.isEffective ? COLORS.success : COLORS.error,
                   flexShrink: 0,
-                }} title={conversation.isEffective ? '有效对话' : '无效对话'} />
+                }} title={conversation.isEffective ? i18n('ai_helper_teacher_conv_effective_conv') : i18n('ai_helper_teacher_conv_ineffective_conv')} />
               </>
             )}
-            {!conversation && !loading && <span style={{ color: COLORS.textMuted }}>对话详情</span>}
+            {!conversation && !loading && <span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_detail_title')}</span>}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
             <button onClick={navigatePrev} disabled={!hasPrev} style={navBtnStyle(!hasPrev)}>
-              ← 上一条
+              ← {i18n('ai_helper_teacher_prev_item')}
             </button>
             <button onClick={navigateNext} disabled={!hasNext} style={navBtnStyle(!hasNext)}>
-              下一条 →
+              {i18n('ai_helper_teacher_next_item')} →
             </button>
             <button
               onClick={onClose}
@@ -249,7 +250,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                 lineHeight: 1,
                 fontFamily: FONT_FAMILY,
               }}
-              title="关闭 (Esc)"
+              title={`${i18n('ai_helper_teacher_close')} (Esc)`}
             >
               ✕
             </button>
@@ -268,17 +269,17 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
             color: '#64748b',
             borderBottom: '1px solid #e2e8f0',
           }}>
-            <div><span style={{ color: COLORS.textMuted }}>班级 </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.classId || '-'}</span></div>
-            <div><span style={{ color: COLORS.textMuted }}>消息数 </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.messageCount}</span></div>
-            <div><span style={{ color: COLORS.textMuted }}>开始 </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.startTime)}</span></div>
-            <div><span style={{ color: COLORS.textMuted }}>结束 </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.endTime)}</span></div>
+            <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_col_class')} </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.classId || '-'}</span></div>
+            <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_col_messages')} </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.messageCount}</span></div>
+            <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_start')} </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.startTime)}</span></div>
+            <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_end')} </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.endTime)}</span></div>
           </div>
         )}
 
         {/* Message thread */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {loading && (
-            <div style={{ textAlign: 'center', padding: '40px', color: COLORS.textMuted }}>加载中...</div>
+            <div style={{ textAlign: 'center', padding: '40px', color: COLORS.textMuted }}>{i18n('ai_helper_teacher_loading')}</div>
           )}
           {error && (
             <div style={{
@@ -299,7 +300,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
               <div key={msg._id} style={{ alignSelf: isStudent ? 'flex-end' : 'flex-start', maxWidth: '85%' }}>
                 <div style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '12px', color: COLORS.textMuted, fontWeight: 500 }}>
-                    {isStudent ? '学生' : 'AI 助手'}
+                    {isStudent ? i18n('ai_helper_teacher_role_student') : i18n('ai_helper_teacher_role_ai')}
                   </span>
                   {isStudent && msg.questionType && <QuestionTypeBadge type={msg.questionType} />}
                   {hasCode && (
@@ -307,7 +308,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                       padding: '1px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 600,
                       backgroundColor: '#fef3c7', color: '#92400e',
                     }}>
-                      附带代码
+                      {i18n('ai_helper_teacher_conv_attached_code')}
                     </span>
                   )}
                   <span style={{ fontSize: '11px', color: COLORS.textMuted }}>{formatDateTime(msg.timestamp)}</span>

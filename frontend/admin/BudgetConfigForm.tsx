@@ -1,4 +1,5 @@
 import React from 'react';
+import { i18n } from 'vj/utils';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   getInputStyle,
@@ -16,41 +17,41 @@ export const BudgetConfigForm: React.FC<BudgetConfigFormProps> = ({ budgetConfig
     marginTop: '20px', padding: '20px', backgroundColor: COLORS.bgPage,
     borderRadius: RADIUS.md, border: `1px solid ${COLORS.border}`
   }}>
-    <h2 style={{ marginTop: 0, marginBottom: SPACING.sm, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>Token 预算控制</h2>
+    <h2 style={{ marginTop: 0, marginBottom: SPACING.sm, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>{i18n('ai_helper_admin_budget_title')}</h2>
     <p style={{ margin: '0 0 16px', color: COLORS.textMuted, fontSize: '13px' }}>
-      限制 AI 调用的 Token 用量，防止成本失控。设为 0 或留空表示不限制。
+      {i18n('ai_helper_admin_budget_desc')}
     </p>
 
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: SPACING.base }}>
       <div>
-        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>每用户日 Token 上限</label>
+        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_budget_daily_user')}</label>
         <input
           type="number"
           value={budgetConfig.dailyTokenLimitPerUser}
           onChange={(e) => onChange({ dailyTokenLimitPerUser: e.target.value === '' ? '' : Number(e.target.value) })}
-          placeholder="0 = 不限制" min="0" disabled={disabled} style={getInputStyle()}
+          placeholder={i18n('ai_helper_admin_budget_no_limit')} min="0" disabled={disabled} style={getInputStyle()}
         />
       </div>
       <div>
-        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>全站日 Token 上限</label>
+        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_budget_daily_domain')}</label>
         <input
           type="number"
           value={budgetConfig.dailyTokenLimitPerDomain}
           onChange={(e) => onChange({ dailyTokenLimitPerDomain: e.target.value === '' ? '' : Number(e.target.value) })}
-          placeholder="0 = 不限制" min="0" disabled={disabled} style={getInputStyle()}
+          placeholder={i18n('ai_helper_admin_budget_no_limit')} min="0" disabled={disabled} style={getInputStyle()}
         />
       </div>
       <div>
-        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>全站月 Token 上限</label>
+        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_budget_monthly_domain')}</label>
         <input
           type="number"
           value={budgetConfig.monthlyTokenLimitPerDomain}
           onChange={(e) => onChange({ monthlyTokenLimitPerDomain: e.target.value === '' ? '' : Number(e.target.value) })}
-          placeholder="0 = 不限制" min="0" disabled={disabled} style={getInputStyle()}
+          placeholder={i18n('ai_helper_admin_budget_no_limit')} min="0" disabled={disabled} style={getInputStyle()}
         />
       </div>
       <div>
-        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>软限阈值 (%)</label>
+        <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>{i18n('ai_helper_admin_budget_soft_limit')}</label>
         <input
           type="number"
           value={budgetConfig.softLimitPercent}
@@ -58,7 +59,7 @@ export const BudgetConfigForm: React.FC<BudgetConfigFormProps> = ({ budgetConfig
           placeholder="80" min="0" max="100" disabled={disabled} style={getInputStyle()}
         />
         <span style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: SPACING.xs, display: 'block' }}>
-          达到此百分比时显示警告，100% 时硬拒绝
+          {i18n('ai_helper_admin_budget_soft_limit_hint')}
         </span>
       </div>
     </div>
