@@ -55,14 +55,14 @@ describe('encrypt / decrypt round-trip', () => {
 describe('encrypt edge cases', () => {
   it('should throw on empty string', () => {
     const { encrypt } = loadCrypto();
-    expect(() => encrypt('')).toThrow('输入文本不能为空');
+    expect(() => encrypt('')).toThrow('input text is empty');
   });
 });
 
 describe('decrypt edge cases', () => {
   it('should throw on empty string', () => {
     const { decrypt } = loadCrypto();
-    expect(() => decrypt('')).toThrow('输入密文不能为空');
+    expect(() => decrypt('')).toThrow('input ciphertext is empty');
   });
 
   it('should throw on corrupted ciphertext', () => {
@@ -79,7 +79,7 @@ describe('decrypt edge cases', () => {
     process.env.ENCRYPTION_KEY = 'different-key-32chars-here!!!!';
     const { decrypt } = loadCrypto();
 
-    expect(() => decrypt(cipherText)).toThrow('密钥不匹配');
+    expect(() => decrypt(cipherText)).toThrow('key mismatch or data corrupted');
   });
 });
 
@@ -150,7 +150,7 @@ describe('ENCRYPTION_KEY validation', () => {
   it('should throw if key is too short', () => {
     jest.resetModules();
     process.env.ENCRYPTION_KEY = 'short';
-    expect(() => loadCrypto()).toThrow('长度不足');
+    expect(() => loadCrypto()).toThrow('ENCRYPTION_KEY too short');
   });
 
   it('should use dev default and warn when ENCRYPTION_KEY is unset', () => {

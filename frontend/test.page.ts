@@ -37,10 +37,10 @@ const initAiHelperBanner = () => {
 
   notification.innerHTML = `
     <div style="font-weight: bold; margin-bottom: 5px;">
-      ✓ AI 助手插件已加载
+      ✓ AI Helper Plugin Loaded
     </div>
     <div style="font-size: 12px; opacity: 0.7;">
-      版本: ${pkg.version}
+      Version: ${pkg.version}
     </div>
   `;
 
@@ -59,7 +59,7 @@ const initAiHelperBanner = () => {
         border-top: 1px solid #dbeafe;
         font-size: 12px;
       `;
-      backendStatus.textContent = '✓ 后端连接正常';
+      backendStatus.textContent = '✓ Backend connected';
       notification.appendChild(backendStatus);
     })
     .catch(() => {
@@ -72,7 +72,7 @@ const initAiHelperBanner = () => {
         font-size: 12px;
         color: #dc2626;
       `;
-      errorStatus.textContent = '⚠ 后端连接失败';
+      errorStatus.textContent = '⚠ Backend connection failed';
       notification.appendChild(errorStatus);
     });
 

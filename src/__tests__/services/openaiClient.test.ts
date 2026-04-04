@@ -519,7 +519,7 @@ describe('MultiModelClient', () => {
       const error = await errorPromise;
       expect(error).toBeInstanceOf(AIServiceError);
       expect((error as AIServiceError).category).toBe('server');
-      expect((error as AIServiceError).message).toBe('AI 服务暂时不可用，请稍后再试');
+      expect((error as AIServiceError).message).toBe('All models failed (dominant: server)');
     });
 
     it('should include skipped endpoints in structured log', async () => {
@@ -720,56 +720,56 @@ describe('fetchAvailableModels', () => {
     mockedAxios.get.mockResolvedValueOnce({ data: {} });
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('缺少 data 字段');
+    expect(result.errorKey).toBe('ai_helper_admin_models_invalid_response');
   });
 
   it('should return error on 401', async () => {
     mockedAxios.get.mockRejectedValueOnce(createAxiosError(401));
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('无效或已过期');
+    expect(result.errorKey).toBe('ai_helper_admin_models_invalid_key');
   });
 
   it('should return error on 403', async () => {
     mockedAxios.get.mockRejectedValueOnce(createAxiosError(403));
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('无权访问');
+    expect(result.errorKey).toBe('ai_helper_admin_models_forbidden');
   });
 
   it('should return error on 404', async () => {
     mockedAxios.get.mockRejectedValueOnce(createAxiosError(404));
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('不支持获取模型列表');
+    expect(result.errorKey).toBe('ai_helper_admin_models_not_supported');
   });
 
   it('should return error on 5xx', async () => {
     mockedAxios.get.mockRejectedValueOnce(createAxiosError(500));
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('获取模型列表失败');
+    expect(result.errorKey).toBe('ai_helper_admin_models_http_error');
   });
 
   it('should return error on timeout', async () => {
     mockedAxios.get.mockRejectedValueOnce(createTimeoutError());
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('请求超时');
+    expect(result.errorKey).toBe('ai_helper_admin_models_timeout');
   });
 
   it('should return error on ENOTFOUND', async () => {
     mockedAxios.get.mockRejectedValueOnce(createNetworkError('ENOTFOUND'));
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('无法连接');
+    expect(result.errorKey).toBe('ai_helper_admin_models_connection');
   });
 
   it('should return generic network error for unknown axios code', async () => {
     mockedAxios.get.mockRejectedValueOnce(createNetworkError('EPIPE'));
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(false);
-    expect(result.error).toContain('网络错误');
+    expect(result.errorKey).toBe('ai_helper_admin_models_network_error');
   });
 
   it('should return error on non-axios error', async () => {

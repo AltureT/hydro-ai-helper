@@ -58,15 +58,19 @@ export interface UpdateResult {
   success: boolean;
   step: UpdateStep;
   message: string;
+  messageKey?: string;
+  messageArgs?: string[];
   logs: string[];
   pluginPath?: string;
   error?: string;
+  errorKey?: string;
+  errorArgs?: string[];
 }
 
 /**
  * 更新进度回调
  */
-export type UpdateProgressCallback = (step: UpdateStep, log: string) => void;
+export type UpdateProgressCallback = (step: UpdateStep, messageKey: string, ...messageArgs: string[]) => void;
 
 /**
  * 文件锁信息
@@ -208,7 +212,7 @@ export class UpdateService {
   /**
    * 🔒 尝试获取文件锁（支持 cluster 模式）
    */
-  private async acquireFileLock(): Promise<{ success: boolean; message?: string }> {
+  private async acquireFileLock(): Promise<{ success: boolean; message?: string; messageArgs?: string[] }> {
     try {
       // 检查锁文件是否存在
       if (fs.existsSync(this.LOCK_FILE)) {
@@ -238,22 +242,25 @@ export class UpdateService {
               process.kill(lockInfo.pid, 0);  // 检查进程存在性（不发送信号）
               return {
                 success: false,
-                message: `更新正在进行中（PID: ${lockInfo.pid}），请稍后重试`
+                message: 'ai_helper_update_lock_in_progress',
+                messageArgs: [String(lockInfo.pid)]
               };
             } catch (e: unknown) {
               const nodeErr = e as NodeJS.ErrnoException;
               if (nodeErr?.code === 'ESRCH') {
-                console.log(`[UpdateService] 清理过期锁文件（进程 ${lockInfo.pid} 已退出）`);
+                console.log(`[UpdateService] Cleaned stale lock file (process ${lockInfo.pid} exited)`);
                 await fsPromises.unlink(this.LOCK_FILE);
               } else if (nodeErr?.code === 'EPERM') {
                 return {
                   success: false,
-                  message: `更新锁被其他用户进程持有（PID: ${lockInfo.pid}），当前进程无权限探测其状态，请稍后重试`
+                  message: 'ai_helper_update_lock_held_by_other',
+                  messageArgs: [String(lockInfo.pid)]
                 };
               } else {
                 return {
                   success: false,
-                  message: `更新锁状态未知（PID: ${lockInfo.pid}），为安全起见已拒绝并发更新，请稍后重试`
+                  message: 'ai_helper_update_lock_unknown',
+                  messageArgs: [String(lockInfo.pid)]
                 };
               }
             }
@@ -277,10 +284,10 @@ export class UpdateService {
       const nodeErr = err as NodeJS.ErrnoException;
       if (nodeErr.code === 'EEXIST') {
         // 并���写入冲突，锁已被其他进程获取
-        return { success: false, message: '更新锁被其他进程持有，请稍后重试' };
+        return { success: false, message: 'ai_helper_update_lock_race_condition' };
       }
-      console.error('[UpdateService] 文件锁异常:', err);
-      return { success: false, message: `锁文件操作失败: ${nodeErr.message}` };
+      console.error('[UpdateService] File lock error:', err);
+      return { success: false, message: 'ai_helper_update_lock_failed', messageArgs: [nodeErr.message] };
     }
   }
 
@@ -308,31 +315,29 @@ export class UpdateService {
   /**
    * 验证插件路径是否有效（不检查 git 仓库）
    */
-  validatePluginPath(): { valid: boolean; message: string; needsGitInit: boolean } {
+  validatePluginPath(): { valid: boolean; message: string; messageArgs?: string[]; needsGitInit: boolean } {
     // 检查路径是否存在
     if (!fs.existsSync(this.pluginPath)) {
-      return { valid: false, message: `插件路径不存在: ${this.pluginPath}`, needsGitInit: false };
+      return { valid: false, message: 'ai_helper_update_path_not_found', messageArgs: [this.pluginPath], needsGitInit: false };
     }
 
-    // 检查是否有 package.json
     const packageJsonPath = path.join(this.pluginPath, 'package.json');
     if (!fs.existsSync(packageJsonPath)) {
-      return { valid: false, message: `未找到 package.json: ${packageJsonPath}`, needsGitInit: false };
+      return { valid: false, message: 'ai_helper_update_package_json_not_found', messageArgs: [packageJsonPath], needsGitInit: false };
     }
 
-    // 检查是否是 git 仓库
     const gitPath = path.join(this.pluginPath, '.git');
     if (!fs.existsSync(gitPath)) {
-      return { valid: true, message: '需要初始化 git 仓库', needsGitInit: true };
+      return { valid: true, message: 'ai_helper_update_needs_git_init', needsGitInit: true };
     }
 
-    return { valid: true, message: '路径验证通过', needsGitInit: false };
+    return { valid: true, message: 'ai_helper_update_path_valid', needsGitInit: false };
   }
 
   /**
    * 🔒 写权限预检（避免更新过程中途失败）
    */
-  private async checkWritePermission(onLog?: (msg: string) => void): Promise<{ ok: boolean; message?: string }> {
+  private async checkWritePermission(onLog?: (msg: string) => void): Promise<{ ok: boolean; message?: string; messageArgs?: string[] }> {
     const log = (msg: string) => onLog?.(msg);
     try {
       await fsPromises.access(this.pluginPath, fs.constants.W_OK);
@@ -360,9 +365,9 @@ export class UpdateService {
 
       return { ok: true };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '未知错误';
-      log(`写权限检查失败: ${msg}`);
-      return { ok: false, message: `当前进程对插件目录缺少写入权限: ${msg}` };
+      const msg = err instanceof Error ? err.message : 'unknown error';
+      log(`ai_helper_update_write_check_failed: ${msg}`);
+      return { ok: false, message: 'ai_helper_update_no_write_permission', messageArgs: [msg] };
     }
   }
 
@@ -372,44 +377,39 @@ export class UpdateService {
   private async initGitRepo(repoUrl: string, onLog?: (msg: string) => void, fallbackRepoUrls?: Array<{ name: string; url: string }>): Promise<boolean> {
     const log = (msg: string) => onLog?.(msg);
 
-    log('目录不是 git 仓库，正在初始化...');
+    log('ai_helper_update_not_git_repo_initializing');
 
-    // git init
-    log('执行 git init...');
+    log('ai_helper_update_running_git_init');
     const initResult = await this.executeCommand('git', ['init'], this.pluginPath, undefined, 300000);
     if (initResult.code !== 0) {
-      log(`git init 失败: ${initResult.stderr}`);
+      log(`git init failed: ${initResult.stderr}`);
       return false;
     }
 
-    // git remote add origin
-    log(`添加远程仓库: ${repoUrl}`);
+    log(`ai_helper_update_adding_remote: ${repoUrl}`);
     const remoteResult = await this.executeCommand('git', ['remote', 'add', 'origin', repoUrl], this.pluginPath, undefined, 300000);
     if (remoteResult.code !== 0) {
-      // 如果 remote 已存在，尝试设置 URL
       const setUrlResult = await this.executeCommand('git', ['remote', 'set-url', 'origin', repoUrl], this.pluginPath, undefined, 300000);
       if (setUrlResult.code !== 0) {
-        log(`设置远程仓库失败: ${setUrlResult.stderr}`);
+        log(`ai_helper_update_set_remote_failed: ${setUrlResult.stderr}`);
         return false;
       }
     }
 
-    // git fetch（避免 TOCTOU：仅获取对象，不切换工作区；待签名验证通过后再 checkout/reset）
-    log('正在获取远程代码...');
+    log('ai_helper_update_fetching_remote');
     let fetchResult = await this.executeCommand(
       'git',
       ['fetch', '--prune', 'origin', 'main'],
       this.pluginPath,
       (line) => log(line.trim()),
-      300000  // 🔒 5 分钟超时
+      300000
     );
 
-    // 🔒 fetch 失败时尝试回退到备选仓库
     if (fetchResult.code !== 0 && fallbackRepoUrls && fallbackRepoUrls.length > 0) {
-      log(`当前仓库 fetch 失败: ${fetchResult.stderr}`);
+      log(`ai_helper_update_fetch_failed: ${fetchResult.stderr}`);
       for (const repo of fallbackRepoUrls) {
         if (repo.url === repoUrl) continue;
-        log(`尝试回退到 ${repo.name} (${repo.url})...`);
+        log(`ai_helper_update_trying_fallback: ${repo.name} (${repo.url})`);
         await this.executeCommand('git', ['remote', 'set-url', 'origin', repo.url], this.pluginPath, undefined, 300000);
         fetchResult = await this.executeCommand(
           'git',
@@ -419,19 +419,19 @@ export class UpdateService {
           300000
         );
         if (fetchResult.code === 0) {
-          log(`回退到 ${repo.name} 成功`);
+          log(`ai_helper_update_fallback_success: ${repo.name}`);
           break;
         }
-        log(`${repo.name} fetch 也失败: ${fetchResult.stderr}`);
+        log(`${repo.name} fetch failed: ${fetchResult.stderr}`);
       }
     }
 
     if (fetchResult.code !== 0) {
-      log(`所有仓库 git fetch 均失败: ${fetchResult.stderr}`);
+      log(`ai_helper_update_all_fetch_failed: ${fetchResult.stderr}`);
       return false;
     }
 
-    log('git 仓库初始化完成（已获取远程对象，待签名验证通过后切换到 main）');
+    log('ai_helper_update_git_init_complete');
     return true;
   }
 
@@ -468,17 +468,17 @@ export class UpdateService {
       const googleOk = results[1].status === 'fulfilled';
 
       if (baiduOk && !googleOk) {
-        log('检测到国内网络环境');
+        log('ai_helper_update_network_cn');
         return 'cn';
       }
       if (googleOk) {
-        log('检测到国外网络环境');
+        log('ai_helper_update_network_global');
         return 'global';
       }
-      log('网络环境检测失败，使用默认配置');
+      log('ai_helper_update_network_detect_failed');
       return 'unknown';
     } catch {
-      log('网络环境检测异常，使用默认配置');
+      log('ai_helper_update_network_detect_error');
       return 'unknown';
     }
   }
@@ -501,26 +501,24 @@ export class UpdateService {
   async selectBestRepo(onLog?: (msg: string) => void): Promise<RepoSelection> {
     const log = (msg: string) => onLog?.(msg);
 
-    log('正在检测最优仓库...');
+    log('ai_helper_update_detecting_best_repo');
 
     const region = await this.detectNetworkRegion(onLog);
     const orderedRepos = this.getRepoOrder(region);
 
-    // 按优先级测试仓库
     for (const repo of orderedRepos) {
-      log(`测试 ${repo.name} 连接...`);
+      log(`ai_helper_update_testing_repo: ${repo.name}`);
       const latency = await this.testRepoLatency(repo);
 
       if (latency > 0) {
-        log(`${repo.name} 延迟: ${latency}ms ✓`);
+        log(`${repo.name}: ${latency}ms ✓`);
         return { name: repo.name, url: repo.url, latency };
       } else {
-        log(`${repo.name} 连接失败，尝试下一个...`);
+        log(`ai_helper_update_repo_failed: ${repo.name}`);
       }
     }
 
-    // 所有仓库都失败，返回第一个作为默认
-    log('所有仓库连接测试失败，使用默认仓库');
+    log('ai_helper_update_all_repos_failed');
     return { name: orderedRepos[0].name, url: orderedRepos[0].url, latency: -1 };
   }
 
@@ -567,13 +565,13 @@ export class UpdateService {
       return '';
     }
     if (!(await this.commandExists('sudo'))) {
-      log('未检测到 sudo，请手动安装 git 或确保当前用户拥有免密 sudo 权限');
+      log('ai_helper_update_no_sudo');
       return null;
     }
 
     const sudoCheck = await this.runShellCommand('sudo -n true', this.pluginPath);
     if (sudoCheck.code !== 0) {
-      log('当前用户无 sudo 免密权限，请手动安装 git 或配置免密 sudo');
+      log('ai_helper_update_no_passwordless_sudo');
       return null;
     }
 
@@ -595,17 +593,17 @@ export class UpdateService {
 
     // 安全策略：禁止 Web 应用使用 sudo 安装系统软件
     const installGuides = {
-      linux: 'Linux 系统请使用包管理器手动安装 Git:\n  • Debian/Ubuntu: sudo apt-get install git\n  • CentOS/RHEL: sudo yum install git\n  • Fedora: sudo dnf install git\n  • Arch: sudo pacman -S git\n  • Alpine: sudo apk add git',
-      darwin: 'macOS 系统请手动安装 Git:\n  • 方法1: 下载官方安装包 https://git-scm.com/download/mac\n  • 方法2: 使用 Homebrew: brew install git\n  • 方法3: 安装 Xcode Command Line Tools',
-      win32: 'Windows 系统请手动安装 Git:\n  • 下载官方安装包: https://git-scm.com/download/win\n  • 或使用包管理器: winget install Git.Git'
+      linux: 'ai_helper_update_install_git_linux',
+      darwin: 'ai_helper_update_install_git_macos',
+      win32: 'ai_helper_update_install_git_windows'
     };
 
-    const guide = installGuides[platform as keyof typeof installGuides] || '请手动安装 Git';
+    const guide = installGuides[platform as keyof typeof installGuides] || 'ai_helper_update_install_git_generic';
     log(guide);
 
     return {
       ok: false,
-      message: `需要手动安装 Git。${platform === 'linux' ? '请使用系统包管理器安装后重试。' : ''}`
+      message: 'ai_helper_update_git_manual_install_required'
     };
   }
 
@@ -618,24 +616,24 @@ export class UpdateService {
   ): Promise<{ ok: boolean; message?: string }> {
     const log = (msg: string) => onLog?.(msg);
 
-    log('检查 git 是否已安装...');
+    log('ai_helper_update_checking_git');
     if (await this.isGitInstalled()) {
-      log('git 已安装');
+      log('ai_helper_update_git_installed');
       return { ok: true };
     }
 
-    log('未检测到 git，尝试自动安装...');
+    log('ai_helper_update_git_not_found');
     const installResult = await this.installGit(region, onLog);
     if (!installResult.ok) {
-      return { ok: false, message: installResult.message || '自动安装 git 失败' };
+      return { ok: false, message: installResult.message || 'ai_helper_update_git_install_failed' };
     }
 
     if (await this.isGitInstalled()) {
-      log('git 安装完成');
+      log('ai_helper_update_git_install_complete');
       return { ok: true };
     }
 
-    return { ok: false, message: 'git 安装完成但仍无法使用，可能需要重启终端' };
+    return { ok: false, message: 'ai_helper_update_git_installed_but_unusable' };
   }
 
   /**
@@ -683,7 +681,7 @@ export class UpdateService {
       }
 
       // 回退到 npm install（兼容 package-lock 不一致等情况）
-      onOutput?.('npm ci 失败，回退到 npm install...');
+      onOutput?.('ai_helper_update_npm_ci_fallback');
       const installResult = await runNpm(['install'], false);
       return { ...installResult, ignoreScripts };
     }
@@ -692,7 +690,7 @@ export class UpdateService {
     try {
       const nodeModulesPath = path.join(this.pluginPath, 'node_modules');
       if (fs.existsSync(nodeModulesPath)) {
-        onOutput?.('未找到 package-lock.json，正在清理旧依赖包...');
+        onOutput?.('ai_helper_update_cleaning_old_deps');
         await fsPromises.rm(nodeModulesPath, { recursive: true, force: true });
       }
     } catch {
@@ -766,7 +764,7 @@ export class UpdateService {
       return {
         code: 1,
         stdout: buildResult.stdout || '',
-        stderr: `原子化构建替换失败: ${err instanceof Error ? err.message : '未知错误'}`
+        stderr: `Atomic build swap failed: ${err instanceof Error ? err.message : 'unknown error'}`
       };
     }
   }
@@ -1213,9 +1211,9 @@ export class UpdateService {
     UpdateService.updateLock = true;
 
     const logs: string[] = [];
-    const log = (step: UpdateStep, message: string) => {
-      logs.push(`[${step}] ${message}`);
-      if (onProgress) onProgress(step, message);
+    const log = (step: UpdateStep, messageKey: string, ...messageArgs: string[]) => {
+      logs.push(`[${step}] ${messageKey}`);
+      if (onProgress) onProgress(step, messageKey, ...messageArgs);
     };
 
     // 用于失败回滚的备份 commit（在函数作用域声明）

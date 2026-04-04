@@ -20,14 +20,14 @@ function getEncryptionKey(): Buffer {
   const keyRaw = process.env.ENCRYPTION_KEY;
 
   if (!keyRaw) {
-    console.error('[Crypto] ⚠️  ENCRYPTION_KEY 环境变量未设置，使用默认密钥');
-    console.error('[Crypto] ⚠️  请尽快在服务器环境中设置 ENCRYPTION_KEY 以保障 API Key 安全！');
+    console.error('[Crypto] ENCRYPTION_KEY env var not set, using default key');
+    console.error('[Crypto] Please set ENCRYPTION_KEY in production to secure API keys!');
     return deriveKey('dev-encryption-key-please-change-me-32');
   }
 
   if (keyRaw.length < MIN_KEY_LENGTH) {
     throw new Error(
-      `[Crypto] ENCRYPTION_KEY 长度不足: 最少需要 ${MIN_KEY_LENGTH} 个字符，当前 ${keyRaw.length} 个字符`
+      `[Crypto] ENCRYPTION_KEY too short: minimum ${MIN_KEY_LENGTH} chars, got ${keyRaw.length}`
     );
   }
 
@@ -49,7 +49,7 @@ const ENCRYPTION_KEY = getEncryptionKey();
  */
 export function encrypt(text: string): string {
   if (!text) {
-    throw new Error('加密失败：输入文本不能为空');
+    throw new Error('Encryption failed: input text is empty');
   }
 
   try {
@@ -66,7 +66,7 @@ export function encrypt(text: string): string {
 
     return CIPHER_VERSION_PREFIX + combined.toString('base64');
   } catch (_error) {
-    throw new Error('加密失败：请检查加密配置');
+    throw new Error('Encryption failed: check encryption configuration');
   }
 }
 
@@ -95,7 +95,7 @@ function decryptWithKey(payload: Buffer, key: Buffer): string {
  */
 export function decrypt(cipherText: string): string {
   if (!cipherText) {
-    throw new Error('解密失败：输入密文不能为空');
+    throw new Error('Decryption failed: input ciphertext is empty');
   }
 
   const isV1 = cipherText.startsWith(CIPHER_VERSION_PREFIX);
@@ -114,7 +114,7 @@ export function decrypt(cipherText: string): string {
     }
   }
 
-  throw new Error('解密失败：密钥不匹配或数据已损坏');
+  throw new Error('Decryption failed: key mismatch or data corrupted');
 }
 
 /**

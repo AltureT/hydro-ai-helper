@@ -469,9 +469,15 @@ export class FetchModelsHandler extends Handler {
           models: result.models
         };
       } else {
+        let errorMessage = result.error || '';
+        if (result.errorKey) {
+          errorMessage = result.errorParams?.length
+            ? translateWithParams(this, result.errorKey, ...result.errorParams)
+            : this.translate(result.errorKey);
+        }
         this.response.body = {
           success: false,
-          error: result.error
+          error: errorMessage
         };
       }
       this.response.type = 'application/json';

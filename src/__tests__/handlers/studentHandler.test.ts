@@ -33,7 +33,7 @@ jest.mock('../../services/openaiClient', () => {
         this.isRetryable = isRetryable;
       }
     },
-    USER_ERROR_MESSAGES: { unknown: 'AI 服务异常，请稍后再试' },
+    USER_ERROR_MESSAGE_KEYS: { unknown: 'ai_helper_err_ai_unknown' },
     getHttpStatusForCategory: jest.fn().mockReturnValue(500),
   };
 });
