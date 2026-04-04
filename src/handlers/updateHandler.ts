@@ -205,11 +205,16 @@ export class UpdateHandler extends Handler {
         }, 200);
       };
 
-      // 执行更新
-      const result = await updateService.performUpdate((step, log) => {
-        const entry = `[${step}] ${log}`;
+      const translateKey = (key: string, ...args: string[]): string => {
+        const translated = this.translate(key, ...args);
+        return translated !== key ? translated : key;
+      };
+
+      const result = await updateService.performUpdate((step, messageKey, ...messageArgs) => {
+        const translatedMsg = translateKey(messageKey, ...messageArgs);
+        const entry = `[${step}] ${translatedMsg}`;
         progress.step = step;
-        progress.message = log;
+        progress.message = translatedMsg;
         progress.logs.push(entry);
         if (progress.logs.length > UPDATE_PROGRESS_MAX_LOGS) {
           progress.logs = progress.logs.slice(-UPDATE_PROGRESS_MAX_LOGS);
@@ -217,25 +222,35 @@ export class UpdateHandler extends Handler {
         progress.updatedAt = new Date().toISOString();
         scheduleFlush();
 
-        console.log(`[UpdateHandler] ${step}: ${log}`);
+        console.log(`[UpdateHandler] ${step}: ${translatedMsg}`);
       });
 
-      // 写入最终状态
+      const translatedMessage = result.messageKey
+        ? translateKey(result.messageKey, ...(result.messageArgs || []))
+        : result.message;
+      const translatedError = result.errorKey
+        ? translateKey(result.errorKey, ...(result.errorArgs || []))
+        : result.error;
+
       progress.status = result.success ? 'completed' : 'failed';
       progress.step = result.step;
-      progress.message = result.message;
-      progress.logs = (result.logs || []).slice(-UPDATE_PROGRESS_MAX_LOGS);
-      progress.error = result.error;
+      progress.message = translatedMessage;
+      // progress.logs already has translated entries from the callback;
+      // trim to max size for the final write
+      if (progress.logs.length > UPDATE_PROGRESS_MAX_LOGS) {
+        progress.logs = progress.logs.slice(-UPDATE_PROGRESS_MAX_LOGS);
+      }
+      progress.error = translatedError;
       progress.updatedAt = new Date().toISOString();
       await flush();
 
       setJsonResponse(this, {
         success: result.success,
         step: result.step,
-        message: result.message,
-        logs: result.logs,
+        message: translatedMessage,
+        logs: progress.logs,
         pluginPath: result.pluginPath,
-        error: result.error
+        error: translatedError
       });
     } catch (err) {
       console.error('[UpdateHandler] Error:', err);

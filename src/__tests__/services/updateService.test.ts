@@ -73,7 +73,7 @@ describe('UpdateService (security)', () => {
       const result = await service.verifyGPGSignature();
 
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('不在信任列表');
+      expect(result.error).toContain('ai_helper_update_gpg_untrusted_fingerprint');
 
       fs.rmSync(pluginDir, { recursive: true, force: true });
     });
@@ -98,7 +98,7 @@ describe('UpdateService (security)', () => {
       const result = await service.verifyGPGSignature();
 
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('未启用 GPG 签名');
+      expect(result.error).toContain('ai_helper_update_gpg_no_signature');
 
       fs.rmSync(pluginDir, { recursive: true, force: true });
     });
@@ -117,7 +117,7 @@ describe('UpdateService (security)', () => {
       const result = await service.verifyGPGSignature();
 
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('未检测到可用的 gpg');
+      expect(result.error).toContain('ai_helper_update_gpg_not_found');
 
       fs.rmSync(pluginDir, { recursive: true, force: true });
     });
