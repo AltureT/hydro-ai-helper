@@ -33,7 +33,7 @@
     "@types/markdown-it": "^14.1.2",
     "axios": "^1.13.5",
     "chart.js": "^4.5.1",
-    "dompurify": "^3.2.4",
+    "dompurify": "^3.3.2",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.33",
     "markdown-it": "^14.1.0",
