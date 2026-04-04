@@ -22,7 +22,7 @@ export class ExportHandler extends Handler {
       if (await applyRateLimit(this, {
         op: 'ai_export', periodSecs: 60, maxOps: 5,
         failOpen: true,
-        errorMessage: '导出请求太频繁，请稍后再试',
+        errorMessage: 'ai_helper_export_rate_limited',
       })) return;
 
       // 获取当前域 ID（用于域隔离）
@@ -45,7 +45,7 @@ export class ExportHandler extends Handler {
         this.response.body = {
           error: {
             code: 'UNSUPPORTED_FORMAT',
-            message: '当前仅支持 CSV 导出(format=csv)'
+            message: this.translate('ai_helper_export_unsupported_format')
           }
         };
         this.response.type = 'application/json';
@@ -65,7 +65,7 @@ export class ExportHandler extends Handler {
           this.response.body = {
             error: {
               code: 'INVALID_DATE',
-              message: `无效的开始日期: ${startDate}`
+              message: this.translate('ai_helper_export_invalid_start_date', startDate as string)
             }
           };
           this.response.type = 'application/json';
@@ -81,7 +81,7 @@ export class ExportHandler extends Handler {
           this.response.body = {
             error: {
               code: 'INVALID_DATE',
-              message: `无效的结束日期: ${endDate}`
+              message: this.translate('ai_helper_export_invalid_end_date', endDate as string)
             }
           };
           this.response.type = 'application/json';
@@ -126,7 +126,7 @@ export class ExportHandler extends Handler {
       this.response.body = {
         error: {
           code: 'EXPORT_ERROR',
-          message: err instanceof Error ? err.message : '数据导出失败'
+          message: err instanceof Error ? err.message : this.translate('ai_helper_export_failed')
         }
       };
       this.response.type = 'application/json';

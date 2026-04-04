@@ -27,7 +27,7 @@ ai_helper_config_system_prompt_hint: "AI 助手的系统提示词，定义其角
 
 # API Key 相关
 ai_helper_config_current_api_key: "当前 API Key 状态"
-ai_helper_config_api_key_configured: "已配置：{masked}"
+ai_helper_config_api_key_configured: "已配置：{0}"
 ai_helper_config_api_key_not_configured: "尚未配置 API Key"
 ai_helper_config_new_api_key: "新的 API Key（留空则不修改）"
 ai_helper_config_new_api_key_hint: "出于安全考虑，无法查看已保存的完整 API Key。输入新值将覆盖原有密钥，留空则保持不变。"
@@ -45,9 +45,9 @@ ai_helper_config_error_api_base_url_empty: "API Base URL 不能为空"
 ai_helper_config_error_model_name_empty: "模型名称不能为空"
 ai_helper_config_error_rate_limit_invalid: "每分钟最大请求数必须大于 0"
 ai_helper_config_error_timeout_invalid: "超时时间必须大于 0"
-ai_helper_config_error_load_failed: "加载配置失败：{msg}"
-ai_helper_config_error_save_failed: "保存配置失败：{msg}"
-ai_helper_config_error_test_failed: "连接测试失败：{msg}"
+ai_helper_config_error_load_failed: "加载配置失败：{0}"
+ai_helper_config_error_save_failed: "保存配置失败：{0}"
+ai_helper_config_error_test_failed: "连接测试失败：{0}"
 
 # 导出功能相关
 ai_helper_export_button: "导出数据"
@@ -75,3 +75,119 @@ ai_helper_analytics_search: "查询"
 ai_helper_analytics_loading: "加载中..."
 ai_helper_analytics_empty: "暂无数据，请调整筛选条件后重新查询。"
 ai_helper_analytics_error_prefix: "加载统计数据失败："
+
+# ─── 通用错误 ─────────────────────────────────────────
+ai_helper_err_internal: "服务器内部错误，请稍后重试"
+ai_helper_err_rate_limited: "请求太频繁，请稍后再试"
+ai_helper_err_input_validation_failed: "输入验证失败"
+
+# ─── AI 服务错误 ──────────────────────────────────────
+ai_helper_err_ai_auth: "AI 服务认证失败，请联系管理员检查配置"
+ai_helper_err_ai_rate_limit: "AI 服务繁忙，请稍后再试"
+ai_helper_err_ai_server: "AI 服务暂时不可用，请稍后再试"
+ai_helper_err_ai_client: "AI 服务配置错误，请联系管理员"
+ai_helper_err_ai_timeout: "AI 服务响应超时，请稍后再试"
+ai_helper_err_ai_network: "无法连接到 AI 服务，请稍后再试"
+ai_helper_err_ai_aborted: "请求已取消"
+ai_helper_err_ai_unknown: "AI 服务异常，请稍后再试"
+ai_helper_err_ai_unavailable: "AI 服务暂时不可用，请稍后重试"
+
+# ─── 学生端错误 ──────────────────────────────────────
+ai_helper_err_contest_restricted: "比赛期间 AI 助手不可用，请独立完成作答"
+ai_helper_err_contest_check_failed: "比赛状态校验失败，请稍后重试"
+ai_helper_err_chat_rate_limited: "提问太频繁了，请仔细思考后再提问"
+ai_helper_err_invalid_question_type: "无效的问题类型"
+ai_helper_err_problem_not_found: "题目不存在"
+ai_helper_err_optimize_requires_ac: "代码优化功能仅对已通过该题的用户开放"
+ai_helper_err_code_truncated: "代码已截断到 {0} 字符"
+ai_helper_err_invalid_conversation_id: "无效的会话 ID"
+ai_helper_err_conversation_not_found: "会话不存在"
+ai_helper_err_conversation_access_denied: "无权访问此会话"
+ai_helper_err_invalid_problem_id: "无效的题目 ID"
+ai_helper_err_off_topic_reply: "这个追问与当前编程题无关。请贴出你的代码片段、报错信息或你已尝试的思路，我再继续帮你。"
+
+# Clarify 错误
+ai_helper_err_clarify_needs_conversation: "追问功能需要基于已有会话"
+ai_helper_err_clarify_needs_selection: "追问功能需要选中 AI 回复中的内容"
+ai_helper_err_invalid_message_source: "无效的消息来源 ID"
+ai_helper_err_clarify_source_invalid: "来源消息不存在或不是 AI 回复"
+ai_helper_err_clarify_source_mismatch: "来源消息不属于当前会话"
+ai_helper_err_clarify_text_not_found: "选中文本不在来源消息内容中"
+ai_helper_err_clarify_off_topic: "这个内容与编程学习无关，我无法解释。请选中 AI 回复中与代码或算法相关的部分来追问。"
+
+# ─── 输入验证 ─────────────────────────────────────────
+ai_helper_err_thinking_too_long: "描述过长(最多 {0} 字)"
+ai_helper_err_code_too_long: "代码片段过长(最多 {0} 字符)"
+ai_helper_err_jailbreak_detected: "当前输入中包含与系统规则冲突的指令。请专注描述你对题目的理解、思路或遇到的具体错误，而不要尝试修改系统设定。"
+
+# ─── 预算控制 ─────────────────────────────────────────
+ai_helper_budget_user_daily_exceeded: "今天的 AI 额度已用完（已使用 {0} / {1} tokens）"
+ai_helper_budget_user_daily_warning: "AI 额度即将用尽（剩余约 {0} tokens）"
+ai_helper_budget_domain_daily_exceeded: "今日全站 AI 额度已用完，请明天再试"
+ai_helper_budget_domain_daily_warning: "全站 AI 额度即将用尽，请节约使用"
+ai_helper_budget_domain_monthly_exceeded: "本月全站 AI 额度已用完，请联系管理员"
+ai_helper_budget_domain_monthly_warning: "本月全站 AI 额度即将用尽"
+
+# ─── 管理员配置 Handler ──────────────────────────────
+ai_helper_config_endpoint_encrypt_failed: "端点 \"{0}\" 的 API Key 加密失败"
+ai_helper_config_rate_limit_invalid: "rateLimitPerMinute 必须为非负整数"
+ai_helper_config_timeout_invalid: "timeoutSeconds 必须大于 0"
+ai_helper_config_apikey_encrypt_failed: "API Key 加密失败"
+ai_helper_config_update_failed: "更新配置失败"
+ai_helper_config_jailbreak_logs_failed: "获取越狱日志失败"
+ai_helper_config_get_failed: "获取配置失败"
+
+# ─── 教师端 ──────────────────────────────────────────
+ai_helper_teacher_invalid_conversation_id: "无效的会话 ID"
+ai_helper_teacher_conversation_not_found: "会话不存在"
+ai_helper_teacher_conversation_forbidden: "无权访问此对话"
+
+# ─── 管理员操作 ──────────────────────────────────────
+ai_helper_admin_test_rate_limited: "测试连接请求太频繁，请稍后再试"
+ai_helper_admin_config_not_exist: "AI 服务配置不存在，请先设置配置。"
+ai_helper_admin_config_incomplete: "AI 服务配置不完整，请先设置 API Base URL、模型名称和 API Key。"
+ai_helper_admin_apikey_decrypt_failed: "API Key 解密失败，请检查加密密钥配置"
+ai_helper_admin_test_success: "连接成功！AI 服务配置正确。"
+ai_helper_admin_test_call_failed: "调用 AI 服务失败"
+ai_helper_admin_test_failed: "测试连接失败"
+ai_helper_admin_models_rate_limited: "获取模型列表请求太频繁，请稍后再试"
+ai_helper_admin_endpoint_not_found: "端点不存在"
+ai_helper_admin_fetch_models_params_missing: "请提供 endpointId 或者 apiBaseUrl + apiKey"
+ai_helper_admin_url_invalid: "API Base URL 不合法: {0}"
+ai_helper_admin_fetch_models_failed: "获取模型列表失败"
+
+# ─── 统计分析 ─────────────────────────────────────────
+ai_helper_analytics_rate_limited: "统计请求太频繁，请稍后再试"
+ai_helper_analytics_invalid_dimension: "dimension 参数必须为 class / problem / student 之一"
+
+# ─── 更新 ────────────────────────────────────────────
+ai_helper_update_info_failed: "获取更新信息失败"
+ai_helper_update_permission_read: "读取更新进度需要管理员权限。"
+ai_helper_update_no_task: "暂无更新任务"
+ai_helper_update_progress_failed: "获取更新进度失败"
+ai_helper_update_permission_execute: "执行插件更新需要管理员权限。更新操作会修改代码并重启服务，仅允许管理员执行。"
+ai_helper_update_started: "更新任务已开始"
+ai_helper_update_failed: "更新失败"
+
+# ─── 导出 Handler ────────────────────────────────────
+ai_helper_export_rate_limited: "导出请求太频繁，请稍后再试"
+ai_helper_export_unsupported_format: "当前仅支持 CSV 导出(format=csv)"
+ai_helper_export_invalid_start_date: "无效的开始日期: {0}"
+ai_helper_export_invalid_end_date: "无效的结束日期: {0}"
+ai_helper_export_failed: "数据导出失败"
+
+# ─── 费用分析 ────────────────────────────────────────
+ai_helper_cost_rate_limited: "请求太频繁，请稍后再试"
+ai_helper_cost_user_fallback: "用户 {0}"
+
+# ─── 反馈 ────────────────────────────────────────────
+ai_helper_feedback_invalid_type: "反馈类型必须为 bug、feature 或 other"
+ai_helper_feedback_subject_required: "请填写反馈主题"
+ai_helper_feedback_subject_too_long: "主题不能超过 {0} 字符"
+ai_helper_feedback_body_too_long: "描述不能超过 {0} 字符"
+ai_helper_feedback_success: "反馈已提交，感谢您的意见！"
+ai_helper_feedback_submit_failed: "反馈提交失败，请稍后再试"
+ai_helper_feedback_failed: "提交反馈失败"
+
+# ─── 版本 ────────────────────────────────────────────
+ai_helper_version_check_failed: "版本检查失败"

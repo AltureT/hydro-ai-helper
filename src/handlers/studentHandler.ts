@@ -6,7 +6,7 @@
 import type { ServerResponse } from 'http';
 import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
 import { formatJudgeInfo } from '../services/judgeInfoService';
-import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult, USER_ERROR_MESSAGES, getHttpStatusForCategory, TokenUsage } from '../services/openaiClient';
+import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, TokenUsage } from '../services/openaiClient';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS, API_DEFAULTS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
@@ -122,7 +122,7 @@ export class ChatHandler extends Handler {
     } catch (err) {
       console.error('[AI Helper] ChatHandler error:', err);
       this.response.status = 500;
-      this.response.body = { error: '服务器内部错误，请稍后重试' };
+      this.response.body = { error: this.translate('ai_helper_err_internal') };
       this.response.type = 'application/json';
     }
   }
@@ -154,7 +154,7 @@ export class ChatHandler extends Handler {
         if (tdoc && tdoc.rule !== 'homework' && ContestModel.isOngoing(tdoc)) {
           this.response.status = 403;
           this.response.body = {
-            error: '比赛期间 AI 助手不可用，请独立完成作答',
+            error: this.translate('ai_helper_err_contest_restricted'),
             code: 'CONTEST_MODE_RESTRICTED'
           };
           this.response.type = 'application/json';
@@ -163,7 +163,7 @@ export class ChatHandler extends Handler {
       } catch (err) {
         console.warn('[ChatHandler] 比赛校验失败:', err);
         this.response.status = 503;
-        this.response.body = { error: '比赛状态校验失败，请稍后重试', code: 'CONTEST_CHECK_FAILED' };
+        this.response.body = { error: this.translate('ai_helper_err_contest_check_failed'), code: 'CONTEST_CHECK_FAILED' };
         this.response.type = 'application/json';
         return null;
       }
@@ -181,14 +181,14 @@ export class ChatHandler extends Handler {
       // 主限流：N 次/60秒
       if (await applyRateLimit(this, {
         op: 'ai_chat', periodSecs: 60, maxOps: rateLimitPerMinute,
-        errorMessage: '提问太频繁了，请仔细思考后再提问',
+        errorMessage: 'ai_helper_err_chat_rate_limited',
       })) return null;
 
       // 突发限流：防止固定窗口边界攻击
       const burstMax = Math.max(1, Math.ceil(rateLimitPerMinute / 3));
       if (await applyRateLimit(this, {
         op: 'ai_chat_burst', periodSecs: 10, maxOps: burstMax,
-        errorMessage: '提问太频繁了，请仔细思考后再提问',
+        errorMessage: 'ai_helper_err_chat_rate_limited',
       })) return null;
     }
 
@@ -201,11 +201,18 @@ export class ChatHandler extends Handler {
         const budgetCheck = await budgetService.checkBudget(domainId, userId, aiConfig.budgetConfig);
         if (!budgetCheck.allowed) {
           this.response.status = 429;
-          this.response.body = { error: budgetCheck.reason || '今天的 AI 额度已用完', code: 'BUDGET_EXCEEDED' };
+          this.response.body = {
+            error: budgetCheck.reasonKey
+              ? this.translate(budgetCheck.reasonKey, ...(budgetCheck.reasonParams || []))
+              : this.translate('ai_helper_budget_user_daily_exceeded'),
+            code: 'BUDGET_EXCEEDED'
+          };
           this.response.type = 'application/json';
           return null;
         }
-        if (budgetCheck.warning) {
+        if (budgetCheck.warningKey) {
+          budgetWarning = this.translate(budgetCheck.warningKey, ...(budgetCheck.warningParams || []));
+        } else if (budgetCheck.warning) {
           budgetWarning = budgetCheck.warning;
         }
       }
@@ -233,7 +240,7 @@ export class ChatHandler extends Handler {
     // 验证问题类型
     const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'clarify', 'optimize'];
     if (!validQuestionTypes.includes(questionType as QuestionType)) {
-      throw new Error('无效的问题类型');
+      throw new Error(this.translate('ai_helper_err_invalid_question_type'));
     }
 
     // Clarify 预校验：先拒绝无效请求，避免创建空会话
@@ -250,7 +257,7 @@ export class ChatHandler extends Handler {
       if (!conversationId) {
         this.response.status = 400;
         this.response.body = {
-          error: '追问功能需要基于已有会话',
+          error: this.translate('ai_helper_err_clarify_needs_conversation'),
           code: 'CLARIFY_ANCHOR_INVALID'
         };
         this.response.type = 'application/json';
@@ -259,7 +266,7 @@ export class ChatHandler extends Handler {
       if (!clarifySourceAiMessageId || !clarifySelectedTextNorm) {
         this.response.status = 400;
         this.response.body = {
-          error: '追问功能需要选中 AI 回复中的内容',
+          error: this.translate('ai_helper_err_clarify_needs_selection'),
           code: 'CLARIFY_ANCHOR_INVALID'
         };
         this.response.type = 'application/json';
@@ -268,7 +275,7 @@ export class ChatHandler extends Handler {
       if (!ObjectId.isValid(clarifySourceAiMessageId)) {
         this.response.status = 400;
         this.response.body = {
-          error: '无效的消息来源 ID',
+          error: this.translate('ai_helper_err_invalid_message_source'),
           code: 'CLARIFY_ANCHOR_INVALID'
         };
         this.response.type = 'application/json';
@@ -283,7 +290,7 @@ export class ChatHandler extends Handler {
       const pdoc = await ProblemModel.get(domainId, problemId, ['docId']);
       if (!pdoc) {
         this.response.status = 404;
-        this.response.body = { error: '题目不存在' };
+        this.response.body = { error: this.translate('ai_helper_err_problem_not_found'), code: 'PROBLEM_NOT_FOUND' };
         this.response.type = 'application/json';
         return null;
       }
@@ -301,7 +308,7 @@ export class ChatHandler extends Handler {
       if (!acRecord) {
         this.response.status = 403;
         this.response.body = {
-          error: '代码优化功能仅对已通过该题的用户开放',
+          error: this.translate('ai_helper_err_optimize_requires_ac'),
           code: 'OPTIMIZE_REQUIRES_AC'
         };
         this.response.type = 'application/json';
@@ -320,7 +327,7 @@ export class ChatHandler extends Handler {
       // 检查代码长度,超过 5000 字符则截断
       if (code.length > PROMPT_LIMITS.MAX_CODE_LENGTH) {
         processedCode = code.substring(0, PROMPT_LIMITS.MAX_CODE_LENGTH);
-        codeWarning = `代码已截断到 ${PROMPT_LIMITS.MAX_CODE_LENGTH} 字符`;
+        codeWarning = this.translate('ai_helper_err_code_truncated', PROMPT_LIMITS.MAX_CODE_LENGTH);
       } else {
         processedCode = code;
       }
@@ -391,16 +398,22 @@ export class ChatHandler extends Handler {
           console.error('[ChatHandler] 记录越狱日志失败', logErr);
         }
       }
-      throw new Error(validation.error || '输入验证失败');
+      throw new Error(
+        validation.errorKey
+          ? this.translate(validation.errorKey, ...(validation.errorParams || []))
+          : (validation.error || this.translate('ai_helper_err_input_validation_failed'))
+      );
     }
 
     // 构造 system prompt
     // 优先使用服务端获取的可信题目标题，其次使用前端传入的，最后使用题目ID
     const problemTitleStr = trustedProblemTitle || problemTitle || `题目 ${problemId}`;
+    const userLang = this.user?.viewLang || this.session?.viewLang || undefined;
     const systemPrompt = promptService.buildSystemPrompt(
       problemTitleStr,
       processedProblemContent,
-      customSystemPromptTemplate
+      customSystemPromptTemplate,
+      userLang
     );
 
     // 处理对话会话 (新建或复用)
@@ -411,7 +424,7 @@ export class ChatHandler extends Handler {
       if (!ObjectId.isValid(conversationId)) {
         this.response.status = 400;
         this.response.body = {
-          error: '无效的会话 ID',
+          error: this.translate('ai_helper_err_invalid_conversation_id'),
           code: 'INVALID_CONVERSATION_ID'
         };
         this.response.type = 'application/json';
@@ -422,7 +435,7 @@ export class ChatHandler extends Handler {
       if (!conversation) {
         this.response.status = 404;
         this.response.body = {
-          error: '会话不存在',
+          error: this.translate('ai_helper_err_conversation_not_found'),
           code: 'CONVERSATION_NOT_FOUND'
         };
         this.response.type = 'application/json';
@@ -432,7 +445,7 @@ export class ChatHandler extends Handler {
       if (conversation.userId !== userId || conversation.domainId !== domainId) {
         this.response.status = 403;
         this.response.body = {
-          error: '无权访问此会话',
+          error: this.translate('ai_helper_err_conversation_access_denied'),
           code: 'CONVERSATION_ACCESS_DENIED'
         };
         this.response.type = 'application/json';
@@ -466,7 +479,7 @@ export class ChatHandler extends Handler {
       if (!sourceMessage || sourceMessage.role !== 'ai') {
         this.response.status = 400;
         this.response.body = {
-          error: '来源消息不存在或不是 AI 回复',
+          error: this.translate('ai_helper_err_clarify_source_invalid'),
           code: 'CLARIFY_ANCHOR_INVALID'
         };
         this.response.type = 'application/json';
@@ -475,7 +488,7 @@ export class ChatHandler extends Handler {
       if (sourceMessage.conversationId.toHexString() !== currentConversationId.toHexString()) {
         this.response.status = 400;
         this.response.body = {
-          error: '来源消息不属于当前会话',
+          error: this.translate('ai_helper_err_clarify_source_mismatch'),
           code: 'CLARIFY_ANCHOR_INVALID'
         };
         this.response.type = 'application/json';
@@ -487,7 +500,7 @@ export class ChatHandler extends Handler {
           && !sourceContentNorm.includes(clarifySelectedTextNorm)) {
         this.response.status = 400;
         this.response.body = {
-          error: '选中文本不在来源消息内容中',
+          error: this.translate('ai_helper_err_clarify_text_not_found'),
           code: 'CLARIFY_ANCHOR_INVALID'
         };
         this.response.type = 'application/json';
@@ -506,7 +519,7 @@ export class ChatHandler extends Handler {
       const strikeCount = await conversationModel.incrementOffTopicStrike(currentConversationId);
       if (strikeCount >= 2) {
         // 连续偏题 >= 2 次，直接返回固定模板，不调 LLM
-        const fixedReply = '这个追问与当前编程题无关。请贴出你的代码片段、报错信息或你已尝试的思路，我再继续帮你。';
+        const fixedReply = this.translate('ai_helper_err_off_topic_reply');
         // 先保存学生消息，确保会话消息顺序与实际轮次一致
         const studentMessageTimestamp = new Date();
         await messageModel.create({
@@ -668,7 +681,7 @@ export class ChatHandler extends Handler {
       // 配置不存在或不完整
       console.error('[AI Helper] 创建 AI 客户端失败:', error);
       this.response.status = 500;
-      this.response.body = { error: 'AI 服务暂时不可用，请稍后重试' };
+      this.response.body = { error: this.translate('ai_helper_err_ai_unavailable') };
       this.response.type = 'application/json';
       return null;
     }
@@ -748,7 +761,7 @@ export class ChatHandler extends Handler {
           },
           onError: (error: AIServiceError) => {
             sse.writeEvent('error', {
-              error: USER_ERROR_MESSAGES[error.category],
+              error: this.translate(USER_ERROR_MESSAGE_KEYS[error.category]),
               category: error.category,
               retryable: error.isRetryable,
             });
@@ -880,13 +893,13 @@ export class ChatHandler extends Handler {
       if (!sse.closed) {
         if (error instanceof AIServiceError) {
           sse.writeEvent('error', {
-            error: USER_ERROR_MESSAGES[error.category],
+            error: this.translate(USER_ERROR_MESSAGE_KEYS[error.category]),
             category: error.category,
             retryable: error.isRetryable,
           });
         } else {
           sse.writeEvent('error', {
-            error: 'AI 服务异常，请稍后再试',
+            error: this.translate('ai_helper_err_ai_unknown'),
             category: 'unknown',
             retryable: true,
           });
@@ -913,7 +926,7 @@ export class ChatHandler extends Handler {
     // 提前检查客户端是否已断开（close 事件可能在前序 DB 操作期间已触发）
     if (rawReq?.destroyed || rawReq?.aborted) {
       this.response.status = 499;
-      this.response.body = { error: '请求已取消' };
+      this.response.body = { error: this.translate('ai_helper_err_ai_aborted') };
       this.response.type = 'application/json';
       return;
     }
@@ -963,7 +976,7 @@ export class ChatHandler extends Handler {
       if (error instanceof AIServiceError) {
         this.response.status = getHttpStatusForCategory(error.category);
         this.response.body = {
-          error: USER_ERROR_MESSAGES[error.category],
+          error: this.translate(USER_ERROR_MESSAGE_KEYS[error.category]),
           code: `AI_${error.category.toUpperCase()}`,
           category: error.category,
           retryable: error.isRetryable,
@@ -1136,13 +1149,13 @@ export class ProblemStatusHandler extends Handler {
     if (await applyRateLimit(this, {
       op: 'ai_problem_status', periodSecs: 60, maxOps: 30,
       failOpen: true,
-      errorMessage: '请求太频繁，请稍后再试',
+      errorMessage: 'ai_helper_err_rate_limited',
     })) return;
 
     // 输入验证：problemId 不能为空且长度合理
     if (!problemId || typeof problemId !== 'string' || problemId.length > 50) {
       this.response.status = 400;
-      this.response.body = { error: '无效的题目 ID' };
+      this.response.body = { error: this.translate('ai_helper_err_invalid_problem_id') };
       this.response.type = 'application/json';
       return;
     }

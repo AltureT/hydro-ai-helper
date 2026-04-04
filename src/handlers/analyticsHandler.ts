@@ -153,7 +153,7 @@ export class AnalyticsHandler extends Handler {
       if (await applyRateLimit(this, {
         op: 'ai_analytics', periodSecs: 60, maxOps: 10,
         failOpen: true,
-        errorMessage: '统计请求太频繁，请稍后再试',
+        errorMessage: 'ai_helper_analytics_rate_limited',
       })) return;
 
       // 获取当前域 ID（用于域隔离）
@@ -185,7 +185,7 @@ export class AnalyticsHandler extends Handler {
         this.response.body = {
           error: {
             code: 'INVALID_DIMENSION',
-            message: 'dimension 参数必须为 class / problem / student 之一',
+            message: this.translate('ai_helper_analytics_invalid_dimension'),
           },
         };
         this.response.type = 'application/json';
@@ -239,7 +239,7 @@ export class AnalyticsHandler extends Handler {
       this.response.body = {
         error: {
           code: 'INTERNAL_ERROR',
-          message: err instanceof Error ? err.message : '服务器内部错误',
+          message: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
         },
       };
       this.response.type = 'application/json';

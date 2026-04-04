@@ -32,6 +32,7 @@ export interface SanitizeResult {
   content: string;
   rewritten: boolean;
   codeLeakDetected?: boolean;
+  replacementKey?: string;
 }
 
 const CODE_BLOCK_REGEX = /```\w*\n([\s\S]*?)```/g;
@@ -68,6 +69,7 @@ export class OutputSafetyService {
       if (!hasProgrammingContent) {
         result = '这个内容与编程学习无关，我无法解释。请选中 AI 回复中与代码或算法相关的部分来追问。';
         rewritten = true;
+        return { content: result, rewritten, replacementKey: 'ai_helper_err_clarify_off_topic' };
       }
     }
 

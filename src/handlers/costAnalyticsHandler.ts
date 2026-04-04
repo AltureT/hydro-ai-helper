@@ -15,7 +15,7 @@ export class CostAnalyticsHandler extends Handler {
       if (await applyRateLimit(this, {
         op: 'ai_cost_analytics', periodSecs: 60, maxOps: 10,
         failOpen: true,
-        errorMessage: '请求太频繁，请稍后再试',
+        errorMessage: 'ai_helper_cost_rate_limited',
       })) return;
 
       const domainId = getDomainId(this);
@@ -75,7 +75,7 @@ export class CostAnalyticsHandler extends Handler {
 
       const enrichedTopUsers = topUsers.map(u => ({
         ...u,
-        userName: userNameMap.get(u.userId) || `用户 ${u.userId}`,
+        userName: userNameMap.get(u.userId) || this.translate('ai_helper_cost_user_fallback', u.userId),
       }));
 
       // 计算 period 汇总
@@ -125,7 +125,7 @@ export class CostAnalyticsHandler extends Handler {
     } catch (err) {
       console.error('[CostAnalyticsHandler] error:', err);
       this.response.status = 500;
-      this.response.body = { error: '服务器内部错误' };
+      this.response.body = { error: this.translate('ai_helper_err_internal'), code: 'INTERNAL_ERROR' };
       this.response.type = 'application/json';
     }
   }
@@ -176,7 +176,7 @@ export class CostAnalyticsHandler extends Handler {
       const userColl = db.collection('user');
       const users = await userColl.find({ _id: { $in: userIds } }).toArray();
       for (const user of users) {
-        nameMap.set(user._id as number, (user as Record<string, unknown>).uname as string || `用户 ${user._id}`);
+        nameMap.set(user._id as number, (user as Record<string, unknown>).uname as string || this.translate('ai_helper_cost_user_fallback', user._id));
       }
     } catch (err) {
       console.error('[CostAnalyticsHandler] Failed to fetch user names:', err);

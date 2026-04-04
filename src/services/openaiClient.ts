@@ -56,6 +56,18 @@ export class AIServiceError extends Error {
   }
 }
 
+export const USER_ERROR_MESSAGE_KEYS: Record<ErrorCategory, string> = {
+  auth: 'ai_helper_err_ai_auth',
+  rate_limit: 'ai_helper_err_ai_rate_limit',
+  server: 'ai_helper_err_ai_server',
+  client: 'ai_helper_err_ai_client',
+  timeout: 'ai_helper_err_ai_timeout',
+  network: 'ai_helper_err_ai_network',
+  aborted: 'ai_helper_err_ai_aborted',
+  unknown: 'ai_helper_err_ai_unknown',
+};
+
+/** @deprecated Use USER_ERROR_MESSAGE_KEYS with this.translate() instead */
 export const USER_ERROR_MESSAGES: Record<ErrorCategory, string> = {
   auth: 'AI 服务认证失败，请联系管理员检查配置',
   rate_limit: 'AI 服务繁忙，请稍后再试',

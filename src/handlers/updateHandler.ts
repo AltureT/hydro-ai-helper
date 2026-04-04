@@ -80,7 +80,7 @@ export class UpdateInfoHandler extends Handler {
       setJsonResponse(this, info);
     } catch (err) {
       console.error('[UpdateInfoHandler] Error:', err);
-      setErrorResponse(this, 'UPDATE_INFO_FAILED', err instanceof Error ? err.message : '获取更新信息失败', 500);
+      setErrorResponse(this, 'UPDATE_INFO_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_update_info_failed'), 500);
     }
   }
 }
@@ -115,7 +115,7 @@ export class UpdateHandler extends Handler {
         return setErrorResponse(
           this,
           'PERMISSION_DENIED',
-          '读取更新进度需要管理员权限。',
+          this.translate('ai_helper_update_permission_read'),
           403
         );
       }
@@ -132,14 +132,14 @@ export class UpdateHandler extends Handler {
       return setJsonResponse(this, {
         status: 'idle',
         step: 'detecting',
-        message: '暂无更新任务',
+        message: this.translate('ai_helper_update_no_task'),
         logs: [],
         pluginPath,
         updatedAt: new Date().toISOString()
       } satisfies UpdateProgressData);
     } catch (err) {
       console.error('[UpdateHandler] Error:', err);
-      setErrorResponse(this, 'UPDATE_PROGRESS_FAILED', err instanceof Error ? err.message : '获取更新进度失败', 500);
+      setErrorResponse(this, 'UPDATE_PROGRESS_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_update_progress_failed'), 500);
     }
   }
 
@@ -153,7 +153,7 @@ export class UpdateHandler extends Handler {
         return setErrorResponse(
           this,
           'PERMISSION_DENIED',
-          '执行插件更新需要管理员权限。更新操作会修改代码并重启服务，仅允许管理员执行。',
+          this.translate('ai_helper_update_permission_execute'),
           403
         );
       }
@@ -166,7 +166,7 @@ export class UpdateHandler extends Handler {
       const progress: UpdateProgressData = {
         status: 'running',
         step: 'detecting',
-        message: '更新任务已开始',
+        message: this.translate('ai_helper_update_started'),
         logs: [],
         pluginPath,
         startedAt,
@@ -245,7 +245,7 @@ export class UpdateHandler extends Handler {
         const pluginPath = updateService.getPluginPath();
         const progressFilePath = getProgressFilePath(pluginPath);
         const failedAt = new Date().toISOString();
-        const msg = err instanceof Error ? err.message : '更新失败';
+        const msg = err instanceof Error ? err.message : this.translate('ai_helper_update_failed');
         const progress: UpdateProgressData = {
           status: 'failed',
           step: 'failed',
@@ -260,7 +260,7 @@ export class UpdateHandler extends Handler {
       } catch {
         // ignore
       }
-      setErrorResponse(this, 'UPDATE_FAILED', err instanceof Error ? err.message : '更新失败', 500);
+      setErrorResponse(this, 'UPDATE_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_update_failed'), 500);
     }
   }
 }

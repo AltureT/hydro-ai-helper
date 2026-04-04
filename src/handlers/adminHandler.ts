@@ -89,7 +89,8 @@ export class GetConfigHandler extends Handler {
       console.error('[GetConfigHandler] Error:', err instanceof Error ? err.message : 'unknown');
       this.response.status = 500;
       this.response.body = {
-        error: '获取配置失败'
+        error: this.translate('ai_helper_config_get_failed'),
+        code: 'CONFIG_GET_FAILED',
       };
       this.response.type = 'application/json';
     }
@@ -125,7 +126,8 @@ export class UpdateConfigHandler extends Handler {
         if (Number.isNaN(rate) || rate < 0) {
           this.response.status = 400;
           this.response.body = {
-            error: 'rateLimitPerMinute 必须为非负整数'
+            error: this.translate('ai_helper_config_rate_limit_invalid'),
+            code: 'INVALID_RATE_LIMIT',
           };
           this.response.type = 'application/json';
           return;
@@ -138,7 +140,8 @@ export class UpdateConfigHandler extends Handler {
         if (timeout <= 0) {
           this.response.status = 400;
           this.response.body = {
-            error: 'timeoutSeconds 必须大于 0'
+            error: this.translate('ai_helper_config_timeout_invalid'),
+            code: 'INVALID_TIMEOUT',
           };
           this.response.type = 'application/json';
           return;
@@ -162,7 +165,8 @@ export class UpdateConfigHandler extends Handler {
         } catch (err) {
           this.response.status = 500;
           this.response.body = {
-            error: 'API Key 加密失败'
+            error: this.translate('ai_helper_config_apikey_encrypt_failed'),
+            code: 'ENCRYPT_FAILED',
           };
           this.response.type = 'application/json';
           return;
@@ -221,7 +225,8 @@ export class UpdateConfigHandler extends Handler {
       console.error('[UpdateConfigHandler] Error:', err instanceof Error ? err.message : 'unknown');
       this.response.status = 500;
       this.response.body = {
-        error: '更新配置失败'
+        error: this.translate('ai_helper_config_update_failed'),
+        code: 'CONFIG_UPDATE_FAILED',
       };
       this.response.type = 'application/json';
     }
@@ -239,7 +244,7 @@ export class TestConnectionHandler extends Handler {
       // 限流：5 次/60秒，fail-closed（触发外部 API）
       if (await applyRateLimit(this, {
         op: 'ai_admin_test', periodSecs: 60, maxOps: 5,
-        errorMessage: '测试连接请求太频繁，请稍后再试',
+        errorMessage: 'ai_helper_admin_test_rate_limited',
       })) return;
 
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
@@ -251,7 +256,7 @@ export class TestConnectionHandler extends Handler {
         this.response.status = 400;
         this.response.body = {
           success: false,
-          message: 'AI 服务配置不存在，请先设置配置。'
+          message: this.translate('ai_helper_admin_config_not_exist'),
         };
         this.response.type = 'application/json';
         return;
@@ -286,7 +291,7 @@ export class TestConnectionHandler extends Handler {
         this.response.status = 400;
         this.response.body = {
           success: false,
-          message: 'AI 服务配置不完整，请先设置 API Base URL、模型名称和 API Key。'
+          message: this.translate('ai_helper_admin_config_incomplete'),
         };
         this.response.type = 'application/json';
         return;
@@ -300,7 +305,7 @@ export class TestConnectionHandler extends Handler {
         this.response.status = 500;
         this.response.body = {
           success: false,
-          message: 'API Key 解密失败，请检查加密密钥配置'
+          message: this.translate('ai_helper_admin_apikey_decrypt_failed'),
         };
         this.response.type = 'application/json';
         return;
@@ -323,7 +328,7 @@ export class TestConnectionHandler extends Handler {
 
         this.response.body = {
           success: true,
-          message: '连接成功！AI 服务配置正确。'
+          message: this.translate('ai_helper_admin_test_success'),
         };
         this.response.type = 'application/json';
 
@@ -332,7 +337,7 @@ export class TestConnectionHandler extends Handler {
         this.response.status = 200;
         this.response.body = {
           success: false,
-          message: err instanceof Error ? err.message : '调用 AI 服务失败'
+          message: err instanceof Error ? err.message : this.translate('ai_helper_admin_test_call_failed')
         };
         this.response.type = 'application/json';
       }
@@ -342,7 +347,7 @@ export class TestConnectionHandler extends Handler {
       this.response.status = 500;
       this.response.body = {
         success: false,
-        message: '测试连接失败'
+        message: this.translate('ai_helper_admin_test_failed')
       };
       this.response.type = 'application/json';
     }
@@ -368,11 +373,11 @@ function validateApiBaseUrl(url: string): string | null {
   try {
     parsed = new URL(url);
   } catch {
-    return '无效的 URL 格式';
+    return 'INVALID_URL_FORMAT';
   }
 
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    return '仅允许 HTTP 或 HTTPS 协议';
+    return 'INVALID_URL_PROTOCOL';
   }
 
   return null;
@@ -389,7 +394,7 @@ export class FetchModelsHandler extends Handler {
       // 限流：10 次/60秒，fail-closed（触发外部 API）
       if (await applyRateLimit(this, {
         op: 'ai_admin_models', periodSecs: 60, maxOps: 10,
-        errorMessage: '获取模型列表请求太频繁，请稍后再试',
+        errorMessage: 'ai_helper_admin_models_rate_limited',
       })) return;
 
       const body = this.request.body as {
@@ -408,7 +413,7 @@ export class FetchModelsHandler extends Handler {
 
         if (!endpoint) {
           this.response.status = 404;
-          this.response.body = { success: false, error: '端点不存在' };
+          this.response.body = { success: false, error: this.translate('ai_helper_admin_endpoint_not_found') };
           this.response.type = 'application/json';
           return;
         }
@@ -418,7 +423,7 @@ export class FetchModelsHandler extends Handler {
           apiKey = decrypt(endpoint.apiKeyEncrypted);
         } catch {
           this.response.status = 400;
-          this.response.body = { success: false, error: 'API Key 解密失败' };
+          this.response.body = { success: false, error: this.translate('ai_helper_admin_apikey_decrypt_failed') };
           this.response.type = 'application/json';
           return;
         }
@@ -430,7 +435,7 @@ export class FetchModelsHandler extends Handler {
         this.response.status = 400;
         this.response.body = {
           success: false,
-          error: '请提供 endpointId 或者 apiBaseUrl + apiKey'
+          error: this.translate('ai_helper_admin_fetch_models_params_missing')
         };
         this.response.type = 'application/json';
         return;
@@ -440,7 +445,7 @@ export class FetchModelsHandler extends Handler {
       const urlError = validateApiBaseUrl(apiBaseUrl);
       if (urlError) {
         this.response.status = 400;
-        this.response.body = { success: false, error: `API Base URL 不合法: ${urlError}` };
+        this.response.body = { success: false, error: this.translate('ai_helper_admin_url_invalid', urlError) };
         this.response.type = 'application/json';
         return;
       }
@@ -474,7 +479,7 @@ export class FetchModelsHandler extends Handler {
       this.response.status = 500;
       this.response.body = {
         success: false,
-        error: '获取模型列表失败'
+        error: this.translate('ai_helper_admin_fetch_models_failed')
       };
       this.response.type = 'application/json';
     }

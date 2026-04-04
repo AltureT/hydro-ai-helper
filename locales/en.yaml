@@ -2,3 +2,192 @@ ai_helper: "AI Assistant"
 ai_helper_conversations: "AI Conversations"
 ai_helper_analytics: "AI Analytics"
 ai_helper_admin_config: "AI Config"
+
+# Admin config page
+ai_helper_config_title: "AI Learning Assistant Configuration"
+ai_helper_config_loading: "Loading configuration..."
+ai_helper_config_save_success: "Configuration saved"
+ai_helper_config_test_success: "Connection successful, AI service is available"
+ai_helper_config_test_failed: "Connection failed, AI service is unavailable"
+
+# Config section titles
+ai_helper_config_basic_section: "Basic Configuration"
+ai_helper_config_rate_limit_section: "Rate Limiting"
+ai_helper_config_advanced_section: "Advanced Settings"
+ai_helper_config_api_key_section: "API Key Settings"
+
+# Config field labels
+ai_helper_config_api_base_url: "API Base URL"
+ai_helper_config_model_name: "Model Name"
+ai_helper_config_timeout_seconds: "Timeout (seconds)"
+ai_helper_config_rate_limit_per_minute: "Max Requests per Minute"
+ai_helper_config_rate_limit_hint: "Limit the number of requests each student can send per minute to prevent abuse"
+ai_helper_config_system_prompt: "System Prompt Template"
+ai_helper_config_system_prompt_hint: "System prompt for the AI assistant, defining its role and behavior"
+
+# API Key related
+ai_helper_config_current_api_key: "Current API Key Status"
+ai_helper_config_api_key_configured: "Configured: {0}"
+ai_helper_config_api_key_not_configured: "API Key not configured"
+ai_helper_config_new_api_key: "New API Key (leave empty to keep current)"
+ai_helper_config_new_api_key_hint: "For security, the full saved API Key cannot be viewed. Entering a new value will overwrite the existing key; leave empty to keep unchanged."
+ai_helper_config_show_api_key: "Show"
+ai_helper_config_hide_api_key: "Hide"
+
+# Buttons
+ai_helper_config_test_connection: "Test Connection"
+ai_helper_config_testing: "Testing..."
+ai_helper_config_save: "Save Configuration"
+ai_helper_config_saving: "Saving..."
+
+# Errors and hints
+ai_helper_config_error_api_base_url_empty: "API Base URL cannot be empty"
+ai_helper_config_error_model_name_empty: "Model name cannot be empty"
+ai_helper_config_error_rate_limit_invalid: "Max requests per minute must be greater than 0"
+ai_helper_config_error_timeout_invalid: "Timeout must be greater than 0"
+ai_helper_config_error_load_failed: "Failed to load configuration: {0}"
+ai_helper_config_error_save_failed: "Failed to save configuration: {0}"
+ai_helper_config_error_test_failed: "Connection test failed: {0}"
+
+# Export feature
+ai_helper_export_button: "Export Data"
+ai_helper_export_title: "Export Conversation Data"
+ai_helper_export_format_label: "Export Format"
+ai_helper_export_format_csv: "CSV (Excel compatible)"
+ai_helper_export_format_hint: "Currently only CSV format is supported; Excel export may be added later."
+ai_helper_export_sensitive_label: "Include real student IDs (sensitive data)"
+ai_helper_export_sensitive_hint: "Recommended to disable when sharing externally; anonymous IDs will replace real student accounts when disabled."
+ai_helper_export_filters_label: "Export Scope Preview"
+ai_helper_export_cancel: "Cancel"
+ai_helper_export_confirm: "Export"
+
+# Analytics
+ai_helper_analytics_title: "AI Usage Statistics"
+ai_helper_analytics_dimension_label: "Statistics Dimension"
+ai_helper_analytics_dimension_class: "By Class"
+ai_helper_analytics_dimension_problem: "By Problem"
+ai_helper_analytics_dimension_student: "By Student"
+ai_helper_analytics_date_start: "Start Date"
+ai_helper_analytics_date_end: "End Date"
+ai_helper_analytics_class_id: "Class"
+ai_helper_analytics_problem_id: "Problem ID"
+ai_helper_analytics_search: "Search"
+ai_helper_analytics_loading: "Loading..."
+ai_helper_analytics_empty: "No data available. Please adjust filters and try again."
+ai_helper_analytics_error_prefix: "Failed to load statistics: "
+
+# ─── Common errors ────────────────────────────────────
+ai_helper_err_internal: "Internal server error, please try again later"
+ai_helper_err_rate_limited: "Too many requests, please try again later"
+ai_helper_err_input_validation_failed: "Input validation failed"
+
+# ─── AI service errors ────────────────────────────────
+ai_helper_err_ai_auth: "AI service authentication failed, please contact administrator"
+ai_helper_err_ai_rate_limit: "AI service is busy, please try again later"
+ai_helper_err_ai_server: "AI service is temporarily unavailable, please try again later"
+ai_helper_err_ai_client: "AI service configuration error, please contact administrator"
+ai_helper_err_ai_timeout: "AI service response timed out, please try again later"
+ai_helper_err_ai_network: "Cannot connect to AI service, please try again later"
+ai_helper_err_ai_aborted: "Request cancelled"
+ai_helper_err_ai_unknown: "AI service error, please try again later"
+ai_helper_err_ai_unavailable: "AI service is temporarily unavailable, please try again later"
+
+# ─── Student errors ───────────────────────────────────
+ai_helper_err_contest_restricted: "AI assistant is unavailable during contests, please complete the work independently"
+ai_helper_err_contest_check_failed: "Contest status check failed, please try again later"
+ai_helper_err_chat_rate_limited: "Too many questions, please think carefully before asking again"
+ai_helper_err_invalid_question_type: "Invalid question type"
+ai_helper_err_problem_not_found: "Problem not found"
+ai_helper_err_optimize_requires_ac: "Code optimization is only available for users who have passed this problem"
+ai_helper_err_code_truncated: "Code truncated to {0} characters"
+ai_helper_err_invalid_conversation_id: "Invalid conversation ID"
+ai_helper_err_conversation_not_found: "Conversation not found"
+ai_helper_err_conversation_access_denied: "Access denied for this conversation"
+ai_helper_err_invalid_problem_id: "Invalid problem ID"
+ai_helper_err_off_topic_reply: "This question is unrelated to the current programming problem. Please share your code snippet, error message, or your attempted approach, and I will continue to help you."
+
+# Clarify errors
+ai_helper_err_clarify_needs_conversation: "Follow-up requires an existing conversation"
+ai_helper_err_clarify_needs_selection: "Follow-up requires selecting content from AI reply"
+ai_helper_err_invalid_message_source: "Invalid message source ID"
+ai_helper_err_clarify_source_invalid: "Source message does not exist or is not an AI reply"
+ai_helper_err_clarify_source_mismatch: "Source message does not belong to the current conversation"
+ai_helper_err_clarify_text_not_found: "Selected text not found in the source message"
+ai_helper_err_clarify_off_topic: "This content is unrelated to programming. Please select code or algorithm related content from the AI reply to ask about."
+
+# ─── Input validation ─────────────────────────────────
+ai_helper_err_thinking_too_long: "Description too long (max {0} characters)"
+ai_helper_err_code_too_long: "Code snippet too long (max {0} characters)"
+ai_helper_err_jailbreak_detected: "Your input contains instructions that conflict with system rules. Please focus on describing your understanding of the problem, your approach, or specific errors, rather than trying to modify system settings."
+
+# ─── Budget control ───────────────────────────────────
+ai_helper_budget_user_daily_exceeded: "Daily AI quota used up (used {0} / {1} tokens)"
+ai_helper_budget_user_daily_warning: "AI quota running low (approximately {0} tokens remaining)"
+ai_helper_budget_domain_daily_exceeded: "Site-wide daily AI quota used up, please try again tomorrow"
+ai_helper_budget_domain_daily_warning: "Site-wide AI quota running low, please use sparingly"
+ai_helper_budget_domain_monthly_exceeded: "Site-wide monthly AI quota used up, please contact administrator"
+ai_helper_budget_domain_monthly_warning: "Site-wide monthly AI quota running low"
+
+# ─── Admin config handler ─────────────────────────────
+ai_helper_config_endpoint_encrypt_failed: "Failed to encrypt API Key for endpoint \"{0}\""
+ai_helper_config_rate_limit_invalid: "rateLimitPerMinute must be a non-negative integer"
+ai_helper_config_timeout_invalid: "timeoutSeconds must be greater than 0"
+ai_helper_config_apikey_encrypt_failed: "Failed to encrypt API Key"
+ai_helper_config_update_failed: "Failed to update configuration"
+ai_helper_config_jailbreak_logs_failed: "Failed to fetch jailbreak logs"
+ai_helper_config_get_failed: "Failed to get configuration"
+
+# ─── Teacher ──────────────────────────────────────────
+ai_helper_teacher_invalid_conversation_id: "Invalid conversation ID"
+ai_helper_teacher_conversation_not_found: "Conversation not found"
+ai_helper_teacher_conversation_forbidden: "Access denied for this conversation"
+
+# ─── Admin operations ─────────────────────────────────
+ai_helper_admin_test_rate_limited: "Test connection requests too frequent, please try again later"
+ai_helper_admin_config_not_exist: "AI service configuration does not exist. Please set up the configuration first."
+ai_helper_admin_config_incomplete: "AI service configuration is incomplete. Please set up API Base URL, model name and API Key first."
+ai_helper_admin_apikey_decrypt_failed: "Failed to decrypt API Key. Please check the encryption key configuration."
+ai_helper_admin_test_success: "Connection successful! AI service configuration is correct."
+ai_helper_admin_test_call_failed: "Failed to call AI service"
+ai_helper_admin_test_failed: "Test connection failed"
+ai_helper_admin_models_rate_limited: "Fetch models requests too frequent, please try again later"
+ai_helper_admin_endpoint_not_found: "Endpoint not found"
+ai_helper_admin_fetch_models_params_missing: "Please provide endpointId or apiBaseUrl + apiKey"
+ai_helper_admin_url_invalid: "Invalid API Base URL: {0}"
+ai_helper_admin_fetch_models_failed: "Failed to fetch model list"
+
+# ─── Analytics handler ────────────────────────────────
+ai_helper_analytics_rate_limited: "Analytics requests too frequent, please try again later"
+ai_helper_analytics_invalid_dimension: "dimension must be one of: class, problem, student"
+
+# ─── Update ───────────────────────────────────────────
+ai_helper_update_info_failed: "Failed to get update info"
+ai_helper_update_permission_read: "Administrator privileges required to read update progress."
+ai_helper_update_no_task: "No update task"
+ai_helper_update_progress_failed: "Failed to get update progress"
+ai_helper_update_permission_execute: "Administrator privileges required to execute plugin update. Update operations modify code and restart services, only administrators are allowed."
+ai_helper_update_started: "Update task started"
+ai_helper_update_failed: "Update failed"
+
+# ─── Export handler ───────────────────────────────────
+ai_helper_export_rate_limited: "Export requests too frequent, please try again later"
+ai_helper_export_unsupported_format: "Only CSV export is currently supported (format=csv)"
+ai_helper_export_invalid_start_date: "Invalid start date: {0}"
+ai_helper_export_invalid_end_date: "Invalid end date: {0}"
+ai_helper_export_failed: "Data export failed"
+
+# ─── Cost analytics ───────────────────────────────────
+ai_helper_cost_rate_limited: "Requests too frequent, please try again later"
+ai_helper_cost_user_fallback: "User {0}"
+
+# ─── Feedback ─────────────────────────────────────────
+ai_helper_feedback_invalid_type: "Feedback type must be bug, feature, or other"
+ai_helper_feedback_subject_required: "Please fill in the feedback subject"
+ai_helper_feedback_subject_too_long: "Subject cannot exceed {0} characters"
+ai_helper_feedback_body_too_long: "Description cannot exceed {0} characters"
+ai_helper_feedback_success: "Feedback submitted, thank you for your input!"
+ai_helper_feedback_submit_failed: "Failed to submit feedback, please try again later"
+ai_helper_feedback_failed: "Failed to submit feedback"
+
+# ─── Version ──────────────────────────────────────────
+ai_helper_version_check_failed: "Version check failed"

@@ -51,7 +51,7 @@ export class VersionCheckHandler extends Handler {
       });
     } catch (err) {
       console.error('[VersionCheckHandler] Error:', err);
-      setErrorResponse(this, 'VERSION_CHECK_FAILED', err instanceof Error ? err.message : '版本检查失败', 500);
+      setErrorResponse(this, 'VERSION_CHECK_FAILED', err instanceof Error ? err.message : this.translate('ai_helper_version_check_failed'), 500);
     }
   }
 }

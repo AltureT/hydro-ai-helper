@@ -214,7 +214,7 @@ export class ConversationListHandler extends Handler {
       });
     } catch (err) {
       console.error('[AI Helper] ConversationListHandler error:', err);
-      setErrorResponse(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : '服务器内部错误', 500);
+      setErrorResponse(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : this.translate('ai_helper_err_internal'), 500);
     }
   }
 }
@@ -235,7 +235,7 @@ export class ConversationDetailHandler extends Handler {
       const domainId = getDomainId(this);
 
       if (!ObjectId.isValid(id)) {
-        setErrorResponse(this, 'INVALID_ID', '无效的会话 ID');
+        setErrorResponse(this, 'INVALID_ID', this.translate('ai_helper_teacher_invalid_conversation_id'));
         return;
       }
 
@@ -243,7 +243,7 @@ export class ConversationDetailHandler extends Handler {
       const conversation = await conversationModel.findById(id);
 
       if (!conversation) {
-        setErrorResponse(this, 'NOT_FOUND', '会话不存在', 404);
+        setErrorResponse(this, 'NOT_FOUND', this.translate('ai_helper_teacher_conversation_not_found'), 404);
         return;
       }
 
@@ -253,7 +253,7 @@ export class ConversationDetailHandler extends Handler {
       // 2. 当前访问域为 'system'（主站访问）时，允许访问所有域的对话
       const conversationDomain = conversation.domainId || 'system';
       if (conversationDomain !== domainId && conversationDomain !== 'system' && domainId !== 'system') {
-        setErrorResponse(this, 'FORBIDDEN', '无权访问此对话', 403);
+        setErrorResponse(this, 'FORBIDDEN', this.translate('ai_helper_teacher_conversation_forbidden'), 403);
         return;
       }
 
@@ -307,7 +307,7 @@ export class ConversationDetailHandler extends Handler {
       });
     } catch (err) {
       console.error('[AI Helper] ConversationDetailHandler error:', err);
-      setErrorResponse(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : '服务器内部错误', 500);
+      setErrorResponse(this, 'INTERNAL_ERROR', err instanceof Error ? err.message : this.translate('ai_helper_err_internal'), 500);
     }
   }
 }

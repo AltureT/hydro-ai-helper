@@ -12,6 +12,8 @@ declare module 'hydrooj' {
     response: any;
     user?: any;
     args?: any;
+    session?: any;
+    translate(str: string, ...params: any[]): string;
     limitRate(op: string, periodSecs: number, maxOperations: number, defaultKey?: string): Promise<void>;
   }
 
