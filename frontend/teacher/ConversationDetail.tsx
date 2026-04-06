@@ -8,6 +8,8 @@ import { i18n } from '@hydrooj/ui-default';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl, buildPageUrl } from '../utils/domainUtils';
+import type { ConversationMetricsDTO, MetricsStatus } from './analyticsTypes';
+import { MetricsPanel } from './MetricsPanel';
 import {
   COLORS, FONT_FAMILY, TYPOGRAPHY, SPACING, RADIUS, SHADOWS,
   cardStyle, getAlertStyle, markdownTheme,
@@ -26,6 +28,8 @@ interface Conversation {
   endTime: string;
   messageCount: number;
   isEffective: boolean;
+  metrics?: ConversationMetricsDTO;
+  metricsStatus?: MetricsStatus;
   tags: string[];
   teacherNote?: string;
   metadata?: {
@@ -306,6 +310,11 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
               )}
             </div>
           </div>
+
+          <MetricsPanel
+            metrics={conversation.metrics}
+            metricsStatus={conversation.metricsStatus || 'legacy'}
+          />
 
           {/* 对话消息列表 */}
           <div style={{

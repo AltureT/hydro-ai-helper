@@ -9,6 +9,8 @@ import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
+import type { ConversationMetricsDTO, MetricsStatus } from './analyticsTypes';
+import { MetricsPanel } from './MetricsPanel';
 import {
   COLORS, FONT_FAMILY, SPACING, RADIUS, SHADOWS,
   modalOverlayStyle, markdownTheme,
@@ -24,6 +26,8 @@ interface Conversation {
   endTime: string;
   messageCount: number;
   isEffective: boolean;
+  metrics?: ConversationMetricsDTO;
+  metricsStatus?: MetricsStatus;
   tags: string[];
   teacherNote?: string;
   metadata?: {
@@ -273,6 +277,13 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
             <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_col_messages')} </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.messageCount}</span></div>
             <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_start')} </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.startTime)}</span></div>
             <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_end')} </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.endTime)}</span></div>
+          </div>
+        )}
+
+        {/* Metrics compact bar */}
+        {conversation && conversation.metricsStatus && conversation.metricsStatus !== 'legacy' && (
+          <div style={{ padding: '8px 24px', borderBottom: '1px solid #e2e8f0' }}>
+            <MetricsPanel metrics={conversation.metrics} metricsStatus={conversation.metricsStatus} compact />
           </div>
         )}
 
