@@ -4,6 +4,18 @@ import { tableRootStyle, getTableCellStyle, COLORS, getBadgeStyle } from '../uti
 
 export type Dimension = 'class' | 'problem' | 'student';
 
+export type MetricsStatus = 'legacy' | 'pending' | 'complete';
+
+export interface ConversationMetricsDTO {
+  v: number;
+  studentMessageCount: number;
+  studentTotalLength: number;
+  submissionsAfter: number | null;
+  firstAcceptedIndex: number | null;
+  problemDifficulty: number | null;
+  backfilledAt: string | null;
+}
+
 export interface AnalyticsItem {
   key: string;
   displayName?: string;
@@ -19,11 +31,16 @@ export interface AnalyticsItem {
   debug?: number;
   clarify?: number;
   optimize?: number;
+  avgStudentMessages?: number;
+  avgSubmissionsAfter?: number | null;
+  acRate?: number | null;
 }
 
 export type ProblemColumnKey = 'displayName' | 'totalConversations' | 'studentCount' | 'avgMessageCount'
   | 'effectiveConversations' | 'effectiveRatio'
-  | 'understand' | 'think' | 'debug' | 'clarify' | 'optimize' | 'actions';
+  | 'understand' | 'think' | 'debug' | 'clarify' | 'optimize'
+  | 'avgStudentMessages' | 'avgSubmissionsAfter' | 'acRate'
+  | 'actions';
 
 export interface ColumnConfig {
   key: ProblemColumnKey;
@@ -44,6 +61,9 @@ export const PROBLEM_COLUMNS: ColumnConfig[] = [
   { key: 'debug', labelKey: 'ai_helper_teacher_analytics_debug', defaultVisible: true, canHide: true },
   { key: 'clarify', labelKey: 'ai_helper_teacher_analytics_clarify', defaultVisible: true, canHide: true },
   { key: 'optimize', labelKey: 'ai_helper_teacher_analytics_optimize', defaultVisible: true, canHide: true },
+  { key: 'avgStudentMessages', labelKey: 'ai_helper_teacher_analytics_avg_msgs', defaultVisible: false, canHide: true },
+  { key: 'avgSubmissionsAfter', labelKey: 'ai_helper_teacher_analytics_avg_subs', defaultVisible: false, canHide: true },
+  { key: 'acRate', labelKey: 'ai_helper_teacher_analytics_ac_rate', defaultVisible: false, canHide: true },
   { key: 'actions', labelKey: 'ai_helper_teacher_analytics_actions', defaultVisible: true, canHide: false }
 ];
 
