@@ -421,7 +421,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                       <th style={{ ...getTableHeaderStyle(), minWidth: '200px' }}>{i18n('ai_helper_teacher_conv_col_summary')}</th>
                       <th style={getTableHeaderStyle()}>{i18n('ai_helper_teacher_conv_col_start_time')}</th>
                       <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_conv_col_messages')}</th>
-                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center', minWidth: '140px' }}>{i18n('ai_helper_teacher_conv_col_effective')}</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center', minWidth: '140px' }} title={i18n('ai_helper_teacher_conv_col_effective_tooltip')}>{i18n('ai_helper_teacher_conv_col_effective')}</th>
                       <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
                     </tr>
                   </thead>

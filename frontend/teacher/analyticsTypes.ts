@@ -53,17 +53,17 @@ export const PROBLEM_COLUMNS: ColumnConfig[] = [
   { key: 'displayName', labelKey: 'ai_helper_teacher_analytics_problem', defaultVisible: true, canHide: true },
   { key: 'totalConversations', labelKey: 'ai_helper_teacher_analytics_total_conversations', defaultVisible: true, canHide: true },
   { key: 'studentCount', labelKey: 'ai_helper_teacher_analytics_student_count', defaultVisible: true, canHide: true },
-  { key: 'avgMessageCount', labelKey: 'ai_helper_teacher_analytics_avg_rounds', defaultVisible: true, canHide: true },
+  { key: 'avgMessageCount', labelKey: 'ai_helper_teacher_analytics_avg_rounds', defaultVisible: false, canHide: true },
   { key: 'effectiveConversations', labelKey: 'ai_helper_teacher_analytics_effective_conversations', defaultVisible: false, canHide: true },
   { key: 'effectiveRatio', labelKey: 'ai_helper_teacher_analytics_effective_ratio', defaultVisible: false, canHide: true },
   { key: 'understand', labelKey: 'ai_helper_teacher_analytics_understand', defaultVisible: true, canHide: true },
   { key: 'think', labelKey: 'ai_helper_teacher_analytics_think', defaultVisible: true, canHide: true },
   { key: 'debug', labelKey: 'ai_helper_teacher_analytics_debug', defaultVisible: true, canHide: true },
-  { key: 'clarify', labelKey: 'ai_helper_teacher_analytics_clarify', defaultVisible: true, canHide: true },
-  { key: 'optimize', labelKey: 'ai_helper_teacher_analytics_optimize', defaultVisible: true, canHide: true },
+  { key: 'clarify', labelKey: 'ai_helper_teacher_analytics_clarify', defaultVisible: false, canHide: true },
+  { key: 'optimize', labelKey: 'ai_helper_teacher_analytics_optimize', defaultVisible: false, canHide: true },
   { key: 'avgStudentMessages', labelKey: 'ai_helper_teacher_analytics_avg_msgs', defaultVisible: false, canHide: true },
   { key: 'avgSubmissionsAfter', labelKey: 'ai_helper_teacher_analytics_avg_subs', defaultVisible: false, canHide: true },
-  { key: 'acRate', labelKey: 'ai_helper_teacher_analytics_ac_rate', defaultVisible: false, canHide: true },
+  { key: 'acRate', labelKey: 'ai_helper_teacher_analytics_ac_rate', defaultVisible: true, canHide: true },
   { key: 'actions', labelKey: 'ai_helper_teacher_analytics_actions', defaultVisible: true, canHide: false }
 ];
 

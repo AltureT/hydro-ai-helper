@@ -55,6 +55,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [endDate, setEndDate] = useState<string>(initialFilters.endDate);
   const [classId, setClassId] = useState<string>(initialFilters.classId);
   const [problemId, setProblemId] = useState<string>(initialFilters.problemId);
+  const [studentSearch, setStudentSearch] = useState<string>('');
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,10 +65,12 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
+  const COLUMN_PREFS_VERSION = 2;
   const [visibleColumns, setVisibleColumns] = useState<Set<ProblemColumnKey>>(() => {
     try {
+      const savedVersion = localStorage.getItem('ai_analytics_visible_columns_v');
       const saved = localStorage.getItem('ai_analytics_visible_columns');
-      if (saved) {
+      if (saved && savedVersion === String(COLUMN_PREFS_VERSION)) {
         const parsed = JSON.parse(saved) as ProblemColumnKey[];
         if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
       }
@@ -78,6 +81,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   useEffect(() => {
     try {
       localStorage.setItem('ai_analytics_visible_columns', JSON.stringify([...visibleColumns]));
+      localStorage.setItem('ai_analytics_visible_columns_v', String(COLUMN_PREFS_VERSION));
     } catch {}
   }, [visibleColumns]);
 
@@ -169,7 +173,14 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
       );
     }
     if (data.dimension === 'student') {
-      return <StudentAnalyticsTable items={sortedItems} sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />;
+      const keyword = studentSearch.trim().toLowerCase();
+      const filtered = keyword
+        ? sortedItems.filter(item => {
+            const name = (item.displayName || String(item.key) || '').toLowerCase();
+            return name.includes(keyword);
+          })
+        : sortedItems;
+      return <StudentAnalyticsTable items={filtered} sortField={sortField} sortOrder={sortOrder} onSort={handleSort} />;
     }
     return null;
   };
@@ -216,7 +227,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
               {DIMENSION_OPTIONS.map(opt => (
                 <button
                   key={opt.value}
-                  onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); }}
+                  onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); setStudentSearch(''); }}
                   style={getPillStyle(dimension === opt.value)}
                 >
                   {i18n(opt.labelKey)}
@@ -245,6 +256,18 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
               style={getInputStyle()} />
           </div>
         </div>
+        {dimension === 'student' && (
+          <div style={{ marginTop: SPACING.md }}>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_student_search')}</label>
+            <input
+              type="text"
+              value={studentSearch}
+              onChange={(e) => setStudentSearch(e.target.value)}
+              placeholder={i18n('ai_helper_teacher_analytics_student_search_placeholder')}
+              style={getInputStyle()}
+            />
+          </div>
+        )}
         <button onClick={fetchData} disabled={loading} style={queryButtonStyle}>
           {loading ? i18n('ai_helper_teacher_querying') : i18n('ai_helper_teacher_query')}
         </button>

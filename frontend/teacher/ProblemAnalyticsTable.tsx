@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import { buildPageUrl } from '../utils/domainUtils';
-import { COLORS, RADIUS, SHADOWS, SPACING, TRANSITIONS, ZINDEX, getTableHeaderStyle, getTableRowStyle } from '../utils/styles';
+import { COLORS, RADIUS, SPACING, TRANSITIONS, getTableHeaderStyle, getTableRowStyle } from '../utils/styles';
 import {
   AnalyticsItem, ProblemColumnKey, SortableHeaderProps,
   PROBLEM_COLUMNS, getColumnLabel, tableStyle, cellStyle, linkStyle,
@@ -37,12 +37,25 @@ interface ProblemAnalyticsTableProps {
   onVisibleColumnsChange: (cols: Set<ProblemColumnKey>) => void;
 }
 
+const getColumnChipStyle = (isActive: boolean): React.CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: `4px ${SPACING.sm}`,
+  fontSize: '12px',
+  fontWeight: isActive ? 600 : 400,
+  color: isActive ? COLORS.primary : COLORS.textMuted,
+  backgroundColor: isActive ? COLORS.primaryLight : 'transparent',
+  border: `1px solid ${isActive ? COLORS.primary : COLORS.border}`,
+  borderRadius: RADIUS.full,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap' as const,
+  transition: `all ${TRANSITIONS.fast}`,
+});
+
 export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
   items, sortField, sortOrder, onSort,
   visibleColumns, onVisibleColumnsChange,
 }) => {
-  const [showColumnSelector, setShowColumnSelector] = useState(false);
-
   const toggleColumn = (key: ProblemColumnKey) => {
     const col = PROBLEM_COLUMNS.find(c => c.key === key);
     if (!col || !col.canHide) return;
@@ -56,49 +69,26 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
 
   return (
     <div>
-      {/* Column selector */}
-      <div style={{ marginBottom: SPACING.base, position: 'relative' }}>
-        <button
-          onClick={() => setShowColumnSelector(!showColumnSelector)}
-          style={{
-            padding: `${SPACING.sm} ${SPACING.base}`, backgroundColor: COLORS.bgHover,
-            border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
-            fontSize: '13px', fontWeight: 500, color: COLORS.textPrimary,
-            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
-            transition: `all ${TRANSITIONS.fast}`
-          }}
-        >
-          <span style={{ fontSize: '14px' }}>&#9776;</span>
-          {i18n('ai_helper_teacher_analytics_column_settings')}
-          <span style={{ fontSize: '10px', color: COLORS.textMuted }}>({visibleColumns.size - 1}/{PROBLEM_COLUMNS.length - 1})</span>
-        </button>
-        {showColumnSelector && (
-          <div style={{
-            position: 'absolute', top: '100%', left: 0, marginTop: SPACING.xs,
-            backgroundColor: COLORS.bgCard, border: `1px solid ${COLORS.border}`,
-            borderRadius: RADIUS.md, boxShadow: SHADOWS.md,
-            padding: SPACING.md, zIndex: ZINDEX.dropdown, minWidth: '200px'
-          }}>
-            <div style={{ marginBottom: SPACING.sm, fontWeight: 600, fontSize: '13px', color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_analytics_show_columns')}</div>
-            {PROBLEM_COLUMNS.filter(c => c.canHide).map(col => (
-              <label
-                key={col.key}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: SPACING.sm,
-                  padding: `6px ${SPACING.xs}`, cursor: 'pointer', fontSize: '13px', color: COLORS.textSecondary
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={isVisible(col.key)}
-                  onChange={() => toggleColumn(col.key)}
-                  style={{ cursor: 'pointer' }}
-                />
-                {getColumnLabel(col)}
-              </label>
-            ))}
-          </div>
-        )}
+      {/* Inline chip column toggles */}
+      <div style={{
+        marginBottom: SPACING.base,
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: SPACING.sm,
+        alignItems: 'center',
+      }}>
+        <span style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textSecondary, marginRight: SPACING.xs }}>
+          {i18n('ai_helper_teacher_analytics_show_columns')}:
+        </span>
+        {PROBLEM_COLUMNS.filter(c => c.canHide).map(col => (
+          <button
+            key={col.key}
+            onClick={() => toggleColumn(col.key)}
+            style={getColumnChipStyle(isVisible(col.key))}
+          >
+            {getColumnLabel(col)}
+          </button>
+        ))}
       </div>
 
       <div style={{ overflowX: 'auto' }}>
