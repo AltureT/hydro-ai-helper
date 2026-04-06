@@ -290,7 +290,18 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         if (Object.keys(match).length > 0) {
             pipeline.push({ $match: match });
         }
-        // 2. Lookup ai_messages - 使用 pipeline 模式 + 条件求和统计问题类型
+        // 2a. 添加分层 metrics 标志（避免 $ifNull 混淆 null 语义）
+        pipeline.push({
+            $addFields: {
+                _hasMetrics: { $eq: ['$metrics.v', 1] },
+                _hasSubmissionContext: { $and: [
+                        { $eq: ['$metrics.v', 1] },
+                        { $ne: ['$metrics.backfilledAt', null] },
+                        { $ne: ['$metrics.submissionsAfter', null] },
+                    ] },
+            },
+        });
+        // 2b. Lookup ai_messages - 使用 pipeline 模式 + 条件求和统计问题类型
         pipeline.push({
             $lookup: {
                 from: 'ai_messages',
@@ -332,7 +343,16 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                 qt_think: { $sum: { $ifNull: [{ $first: '$qt.think' }, 0] } },
                 qt_debug: { $sum: { $ifNull: [{ $first: '$qt.debug' }, 0] } },
                 qt_clarify: { $sum: { $ifNull: [{ $first: '$qt.clarify' }, 0] } },
-                qt_optimize: { $sum: { $ifNull: [{ $first: '$qt.optimize' }, 0] } }
+                qt_optimize: { $sum: { $ifNull: [{ $first: '$qt.optimize' }, 0] } },
+                // metrics 分层聚合
+                metricsConvCount: { $sum: { $cond: ['$_hasMetrics', 1, 0] } },
+                totalStudentMessages: { $sum: { $cond: ['$_hasMetrics', '$metrics.studentMessageCount', 0] } },
+                submissionContextCount: { $sum: { $cond: ['$_hasSubmissionContext', 1, 0] } },
+                totalSubmissions: { $sum: { $cond: ['$_hasSubmissionContext', '$metrics.submissionsAfter', 0] } },
+                acCount: { $sum: { $cond: [
+                            { $and: ['$_hasSubmissionContext', { $ne: ['$metrics.firstAcceptedIndex', null] }] },
+                            1, 0,
+                        ] } },
             },
         });
         // 4. 再按 problemId 汇总
@@ -348,10 +368,15 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                 think: { $sum: '$qt_think' },
                 debug: { $sum: '$qt_debug' },
                 clarify: { $sum: '$qt_clarify' },
-                optimize: { $sum: '$qt_optimize' }
+                optimize: { $sum: '$qt_optimize' },
+                metricsConvCount: { $sum: '$metricsConvCount' },
+                totalStudentMessages: { $sum: '$totalStudentMessages' },
+                submissionContextCount: { $sum: '$submissionContextCount' },
+                totalSubmissions: { $sum: '$totalSubmissions' },
+                acCount: { $sum: '$acCount' },
             },
         });
-        // 5. 派生字段（扁平化输出问题类型统计）
+        // 5. 派生字段（扁平化输出问题类型统计 + metrics 聚合）
         pipeline.push({
             $project: {
                 _id: 0,
@@ -380,7 +405,22 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                 think: 1,
                 debug: 1,
                 clarify: 1,
-                optimize: 1
+                optimize: 1,
+                avgStudentMessages: {
+                    $cond: [{ $gt: ['$metricsConvCount', 0] },
+                        { $round: [{ $divide: ['$totalStudentMessages', '$metricsConvCount'] }, 1] },
+                        null],
+                },
+                avgSubmissionsAfter: {
+                    $cond: [{ $gt: ['$submissionContextCount', 0] },
+                        { $round: [{ $divide: ['$totalSubmissions', '$submissionContextCount'] }, 1] },
+                        null],
+                },
+                acRate: {
+                    $cond: [{ $gt: ['$submissionContextCount', 0] },
+                        { $round: [{ $divide: ['$acCount', '$submissionContextCount'] }, 4] },
+                        null],
+                },
             },
         });
         const items = await col.aggregate(pipeline).toArray();
@@ -418,7 +458,18 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         if (Object.keys(match).length > 0) {
             pipeline.push({ $match: match });
         }
-        // 2. 按 userId 分组
+        // 2a. 分层 metrics 标志
+        pipeline.push({
+            $addFields: {
+                _hasMetrics: { $eq: ['$metrics.v', 1] },
+                _hasSubmissionContext: { $and: [
+                        { $eq: ['$metrics.v', 1] },
+                        { $ne: ['$metrics.backfilledAt', null] },
+                        { $ne: ['$metrics.submissionsAfter', null] },
+                    ] },
+            },
+        });
+        // 2b. 按 userId 分组
         pipeline.push({
             $group: {
                 _id: '$userId',
@@ -428,6 +479,13 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                 },
                 totalMessageCount: { $sum: '$messageCount' },
                 lastUsedAt: { $max: '$endTime' },
+                metricsConvCount: { $sum: { $cond: ['$_hasMetrics', 1, 0] } },
+                totalStudentMessages: { $sum: { $cond: ['$_hasMetrics', '$metrics.studentMessageCount', 0] } },
+                submissionContextCount: { $sum: { $cond: ['$_hasSubmissionContext', 1, 0] } },
+                acCount: { $sum: { $cond: [
+                            { $and: ['$_hasSubmissionContext', { $ne: ['$metrics.firstAcceptedIndex', null] }] },
+                            1, 0,
+                        ] } },
             },
         });
         // 3. 派生字段
@@ -451,6 +509,16 @@ class AnalyticsHandler extends hydrooj_1.Handler {
                         { $divide: ['$effectiveConversations', '$totalConversations'] },
                         0,
                     ],
+                },
+                avgStudentMessages: {
+                    $cond: [{ $gt: ['$metricsConvCount', 0] },
+                        { $round: [{ $divide: ['$totalStudentMessages', '$metricsConvCount'] }, 1] },
+                        null],
+                },
+                acRate: {
+                    $cond: [{ $gt: ['$submissionContextCount', 0] },
+                        { $round: [{ $divide: ['$acCount', '$submissionContextCount'] }, 4] },
+                        null],
                 },
             },
         });
