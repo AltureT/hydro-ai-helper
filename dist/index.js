@@ -54,6 +54,7 @@ console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
 const telemetryService_1 = require("./services/telemetryService");
+const effectivenessService_1 = require("./services/effectivenessService");
 const errorReporter_1 = require("./services/errorReporter");
 const requestStats_1 = require("./models/requestStats");
 console.log('[AI-Helper] services OK');
@@ -168,6 +169,13 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
             });
             errorReporter.start();
         }, 5000);
+        // 补偿回填独立延迟启动，避免阻塞遥测初始化
+        setTimeout(() => {
+            const effectivenessService = new effectivenessService_1.EffectivenessService(ctx);
+            effectivenessService.compensateBackfill().catch(err => {
+                console.error('[AI-Helper] Effectiveness compensate backfill failed:', err);
+            });
+        }, 10000);
         // 注册测试路由
         // GET /ai-helper/hello - 返回插件状态
         ctx.Route('ai_helper_hello', '/ai-helper/hello', testHandler_1.HelloHandler, testHandler_1.HelloHandlerPriv);

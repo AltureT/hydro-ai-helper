@@ -69,6 +69,7 @@ console.log('[AI-Helper] models OK');
 import { MigrationService } from './services/migrationService';
 import { VersionService } from './services/versionService';
 import { TelemetryService } from './services/telemetryService';
+import { EffectivenessService } from './services/effectivenessService';
 import { ErrorReporter } from './services/errorReporter';
 import { RequestStatsModel } from './models/requestStats';
 console.log('[AI-Helper] services OK');
@@ -200,6 +201,14 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
       });
       errorReporter.start();
     }, 5000);
+
+    // 补偿回填独立延迟启动，避免阻塞遥测初始化
+    setTimeout(() => {
+      const effectivenessService = new EffectivenessService(ctx);
+      effectivenessService.compensateBackfill().catch(err => {
+        console.error('[AI-Helper] Effectiveness compensate backfill failed:', err);
+      });
+    }, 10000);
 
     // 注册测试路由
     // GET /ai-helper/hello - 返回插件状态

@@ -7,6 +7,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AnalyticsHandlerPriv = exports.AnalyticsHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const domainHelper_1 = require("../utils/domainHelper");
+const problemIdHelper_1 = require("../utils/problemIdHelper");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 /**
  * T026: 批量获取题目标题映射
@@ -24,8 +25,8 @@ async function _getProblemTitleMap(domainId, problemIds, problemFallbackPrefix) 
         const problemColl = hydrooj_1.db.collection('document');
         const docIds = [];
         for (const pid of uniqueIds) {
-            const numericId = parseInt(pid.replace(/^[Pp]/, ''), 10);
-            if (!isNaN(numericId)) {
+            const numericId = (0, problemIdHelper_1.parseProblemId)(pid);
+            if (numericId !== null) {
                 docIds.push(numericId);
             }
         }

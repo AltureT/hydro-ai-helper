@@ -42,6 +42,10 @@ class ConversationModel {
         await this.collection.createIndex({ startTime: -1 }, { name: 'idx_startTime' });
         // 创建索引: 结束时间 (用于查询最近对话时间)
         await this.collection.createIndex({ endTime: -1 }, { name: 'idx_endTime' });
+        // 创建复合索引: 用户 + 题目 + 开始时间 (用于行为信号归因查询)
+        await this.collection.createIndex({ userId: 1, problemId: 1, startTime: -1 }, { name: 'idx_userId_problemId_startTime' });
+        // 创建稀疏索引: 待回填文档扫描 (启动补偿用)
+        await this.collection.createIndex({ 'metrics.backfilledAt': 1, endTime: 1 }, { name: 'idx_metrics_backfill', sparse: true });
         console.log('[ConversationModel] Indexes created successfully');
     }
     /**
@@ -87,6 +91,24 @@ class ConversationModel {
     async updateEffectiveness(id, isEffective) {
         const _id = (0, ensureObjectId_1.ensureObjectId)(id);
         await this.collection.updateOne({ _id }, { $set: { isEffective } });
+    }
+    /**
+     * 幂等写入对话有效性信号（使用 $set，防止并发 fire-and-forget 累加出错）
+     */
+    async updateMetrics(id, metrics, isEffective) {
+        const _id = (0, ensureObjectId_1.ensureObjectId)(id);
+        await this.collection.updateOne({ _id }, { $set: { metrics, isEffective } });
+    }
+    /**
+     * 查找待回填的文档（metrics.backfilledAt=null 且 endTime 已超过指定时间）
+     * 利用 idx_metrics_backfill 稀疏索引
+     */
+    async findPendingBackfill(endTimeBefore, limit = 100) {
+        return this.collection.find({
+            'metrics.v': 1,
+            'metrics.backfilledAt': null,
+            endTime: { $lte: endTimeBefore },
+        }).limit(limit).toArray();
     }
     /**
      * 根据筛选条件查找会话列表 (分页)

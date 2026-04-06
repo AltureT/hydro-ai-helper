@@ -6,6 +6,7 @@
 import { Handler, PRIV, db } from 'hydrooj';
 import type { Document } from 'mongodb';
 import { getDomainId } from '../utils/domainHelper';
+import { parseProblemId } from '../utils/problemIdHelper';
 import type { ProblemDocument, UserDocument } from '../types/hydrooj';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 
@@ -49,8 +50,8 @@ async function _getProblemTitleMap(domainId: string, problemIds: string[], probl
 
     const docIds: number[] = [];
     for (const pid of uniqueIds) {
-      const numericId = parseInt(pid.replace(/^[Pp]/, ''), 10);
-      if (!isNaN(numericId)) {
+      const numericId = parseProblemId(pid);
+      if (numericId !== null) {
         docIds.push(numericId);
       }
     }
