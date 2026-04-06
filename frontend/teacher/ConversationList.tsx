@@ -9,6 +9,7 @@ import { ExportDialog } from './ExportDialog';
 import { ConversationDetailModal } from './ConversationDetailModal';
 import { buildApiUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
+import type { ConversationMetricsDTO, MetricsStatus } from './analyticsTypes';
 import {
   COLORS,
   SPACING,
@@ -45,6 +46,8 @@ interface ConversationSummary {
   endTime: string;
   messageCount: number;
   isEffective: boolean;
+  metrics?: ConversationMetricsDTO;
+  metricsStatus?: MetricsStatus;
   tags: string[];
   teacherNote?: string;
   metadata?: {
@@ -53,6 +56,69 @@ interface ConversationSummary {
   };
   firstMessageSummary?: string;
   questionType?: string;
+}
+
+const signalPillStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: SPACING.xs,
+  padding: `2px ${SPACING.sm}`,
+  borderRadius: RADIUS.sm,
+  fontSize: '12px',
+  fontWeight: 500,
+  lineHeight: '18px',
+  whiteSpace: 'nowrap',
+};
+
+function SignalPillGroup({ conv }: { conv: ConversationSummary }) {
+  const status = conv.metricsStatus || 'legacy';
+  const m = conv.metrics;
+
+  if (status === 'legacy' || !m) {
+    return (
+      <span style={getBadgeStyle(conv.isEffective ? 'success' : 'error')}>
+        {conv.isEffective ? i18n('ai_helper_teacher_effective') : i18n('ai_helper_teacher_ineffective')}
+      </span>
+    );
+  }
+
+  const msgColor = m.studentMessageCount >= 6 ? COLORS.primary
+    : m.studentMessageCount >= 3 ? COLORS.info
+    : COLORS.textMuted;
+
+  return (
+    <span style={{ display: 'inline-flex', gap: SPACING.xs, flexWrap: 'wrap', justifyContent: 'center' }}>
+      <span style={{ ...signalPillStyle, backgroundColor: `${msgColor}14`, color: msgColor }}>
+        {'\u{1F4AC}'} {m.studentMessageCount}
+      </span>
+      {status === 'pending' ? (
+        <span style={{ ...signalPillStyle, backgroundColor: COLORS.bgHover, color: COLORS.textMuted }}
+          title={i18n('ai_helper_teacher_signal_pending')}>
+          {'\u23F3'}
+        </span>
+      ) : m.submissionsAfter === null ? (
+        <span style={{ ...signalPillStyle, backgroundColor: COLORS.bgHover, color: COLORS.textMuted }}
+          title={i18n('ai_helper_teacher_signal_no_problem')}>
+          —
+        </span>
+      ) : (
+        <>
+          <span style={{ ...signalPillStyle, backgroundColor: m.submissionsAfter > 0 ? `${COLORS.info}14` : COLORS.bgHover, color: m.submissionsAfter > 0 ? COLORS.info : COLORS.textMuted }}>
+            {'\u{1F4DD}'} {m.submissionsAfter}
+          </span>
+          {m.firstAcceptedIndex !== null ? (
+            <span style={{ ...signalPillStyle, backgroundColor: `${COLORS.success}14`, color: COLORS.success }}>
+              {'\u2705'} AC(#{m.firstAcceptedIndex + 1})
+            </span>
+          ) : m.submissionsAfter > 0 ? (
+            <span style={{ ...signalPillStyle, backgroundColor: `${COLORS.error}14`, color: COLORS.error }}>
+              {'\u274C'}
+            </span>
+          ) : null}
+        </>
+      )}
+    </span>
+  );
 }
 
 /**
@@ -352,7 +418,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                       <th style={{ ...getTableHeaderStyle(), minWidth: '200px' }}>{i18n('ai_helper_teacher_conv_col_summary')}</th>
                       <th style={getTableHeaderStyle()}>{i18n('ai_helper_teacher_conv_col_start_time')}</th>
                       <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_conv_col_messages')}</th>
-                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_conv_col_effective')}</th>
+                      <th style={{ ...getTableHeaderStyle(), textAlign: 'center', minWidth: '140px' }}>{i18n('ai_helper_teacher_conv_col_effective')}</th>
                       <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
                     </tr>
                   </thead>
@@ -423,9 +489,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                           </span>
                         </td>
                         <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
-                          <span style={getBadgeStyle(conv.isEffective ? 'success' : 'error')}>
-                            {conv.isEffective ? i18n('ai_helper_teacher_effective') : i18n('ai_helper_teacher_ineffective')}
-                          </span>
+                          <SignalPillGroup conv={conv} />
                         </td>
                         <td style={{ ...getTableCellStyle(), textAlign: 'center' }}>
                           <button
