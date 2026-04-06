@@ -282,7 +282,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
 
         {/* Metrics compact bar */}
         {conversation && conversation.metricsStatus && conversation.metricsStatus !== 'legacy' && (
-          <div style={{ padding: '8px 24px', borderBottom: '1px solid #e2e8f0' }}>
+          <div style={{ padding: '8px 24px', borderBottom: `1px solid ${COLORS.border}` }}>
             <MetricsPanel metrics={conversation.metrics} metricsStatus={conversation.metricsStatus} compact />
           </div>
         )}

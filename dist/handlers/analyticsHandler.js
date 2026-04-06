@@ -185,6 +185,18 @@ class AnalyticsHandler extends hydrooj_1.Handler {
      * @param filters 筛选条件
      * @returns 按班级聚合的统计数据
      */
+    static metricsAddFieldsStage() {
+        return {
+            $addFields: {
+                _hasMetrics: { $eq: ['$metrics.v', 1] },
+                _hasSubmissionContext: { $and: [
+                        { $eq: ['$metrics.v', 1] },
+                        { $ne: ['$metrics.backfilledAt', null] },
+                        { $ne: ['$metrics.submissionsAfter', null] },
+                    ] },
+            },
+        };
+    }
     async aggregateByClass(filters) {
         const db = this.ctx.db;
         const col = db.collection('ai_conversations');
@@ -290,17 +302,8 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         if (Object.keys(match).length > 0) {
             pipeline.push({ $match: match });
         }
-        // 2a. 添加分层 metrics 标志（避免 $ifNull 混淆 null 语义）
-        pipeline.push({
-            $addFields: {
-                _hasMetrics: { $eq: ['$metrics.v', 1] },
-                _hasSubmissionContext: { $and: [
-                        { $eq: ['$metrics.v', 1] },
-                        { $ne: ['$metrics.backfilledAt', null] },
-                        { $ne: ['$metrics.submissionsAfter', null] },
-                    ] },
-            },
-        });
+        // 2a. 添加分层 metrics 标志
+        pipeline.push(AnalyticsHandler.metricsAddFieldsStage());
         // 2b. Lookup ai_messages - 使用 pipeline 模式 + 条件求和统计问题类型
         pipeline.push({
             $lookup: {
@@ -459,16 +462,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
             pipeline.push({ $match: match });
         }
         // 2a. 分层 metrics 标志
-        pipeline.push({
-            $addFields: {
-                _hasMetrics: { $eq: ['$metrics.v', 1] },
-                _hasSubmissionContext: { $and: [
-                        { $eq: ['$metrics.v', 1] },
-                        { $ne: ['$metrics.backfilledAt', null] },
-                        { $ne: ['$metrics.submissionsAfter', null] },
-                    ] },
-            },
-        });
+        pipeline.push(AnalyticsHandler.metricsAddFieldsStage());
         // 2b. 按 userId 分组
         pipeline.push({
             $group: {

@@ -122,23 +122,7 @@ class ExportService {
                 conv.isEffective ? 'true' : 'false',
                 conv.teacherNote || '',
                 Array.isArray(conv.tags) ? conv.tags.join(';') : '',
-                ...(options.includeMetrics ? (() => {
-                    const m = conv.metrics;
-                    if (!m)
-                        return ['legacy', '', '', '', '', ''];
-                    const status = m.backfilledAt === null ? 'pending' : 'complete';
-                    const avgLen = m.studentMessageCount > 0
-                        ? String(Math.round(m.studentTotalLength / m.studentMessageCount))
-                        : '';
-                    return [
-                        status,
-                        String(m.studentMessageCount),
-                        avgLen,
-                        m.submissionsAfter !== null ? String(m.submissionsAfter) : '',
-                        m.firstAcceptedIndex !== null ? String(m.firstAcceptedIndex) : '',
-                        m.problemDifficulty !== null ? String(m.problemDifficulty) : '',
-                    ];
-                })() : []),
+                ...(options.includeMetrics ? this.getMetricsCsvColumns(conv) : []),
             ];
             rows.push(row);
         }
@@ -151,6 +135,23 @@ class ExportService {
      * @param rows 二维数组,第一行为表头,后续为数据行
      * @returns CSV 字符串
      */
+    getMetricsCsvColumns(conv) {
+        const m = conv.metrics;
+        if (!m)
+            return ['legacy', '', '', '', '', ''];
+        const status = m.backfilledAt === null ? 'pending' : 'complete';
+        const avgLen = m.studentMessageCount > 0
+            ? String(Math.round(m.studentTotalLength / m.studentMessageCount))
+            : '';
+        return [
+            status,
+            String(m.studentMessageCount),
+            avgLen,
+            m.submissionsAfter !== null ? String(m.submissionsAfter) : '',
+            m.firstAcceptedIndex !== null ? String(m.firstAcceptedIndex) : '',
+            m.problemDifficulty !== null ? String(m.problemDifficulty) : '',
+        ];
+    }
     convertToCsv(rows) {
         return rows.map(row => row.map(this.escapeCsvField).join(',')).join('\n');
     }

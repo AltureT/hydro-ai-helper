@@ -60,6 +60,13 @@ interface ConversationMetricsDTO {
   backfilledAt: string | null;
 }
 
+type MetricsStatus = 'legacy' | 'pending' | 'complete';
+
+function deriveMetricsStatus(metrics?: { backfilledAt: Date | null }): MetricsStatus {
+  if (!metrics) return 'legacy';
+  return metrics.backfilledAt === null ? 'pending' : 'complete';
+}
+
 interface ConversationSummary {
   _id: string;
   userId: number;
@@ -72,7 +79,7 @@ interface ConversationSummary {
   messageCount: number;
   isEffective: boolean;
   metrics?: ConversationMetricsDTO;
-  metricsStatus: 'legacy' | 'pending' | 'complete';
+  metricsStatus: MetricsStatus;
   tags: string[];
   teacherNote?: string;
   metadata?: {
@@ -188,9 +195,7 @@ export class ConversationListHandler extends Handler {
             : firstMsg.content;
         }
 
-        const metricsStatus: ConversationSummary['metricsStatus'] = !conv.metrics ? 'legacy'
-          : conv.metrics.backfilledAt === null ? 'pending'
-          : 'complete';
+        const metricsStatus = deriveMetricsStatus(conv.metrics);
 
         return {
           _id: convIdStr,
@@ -296,9 +301,7 @@ export class ConversationDetailHandler extends Handler {
       const userName = userNameMap.get(conversation.userId) || deletedLabel;
 
       // T032: 对话详情响应（包含 problemUrl + metrics）
-      const detailMetricsStatus: ConversationSummary['metricsStatus'] = !conversation.metrics ? 'legacy'
-        : conversation.metrics.backfilledAt === null ? 'pending'
-        : 'complete';
+      const detailMetricsStatus = deriveMetricsStatus(conversation.metrics);
 
       const conversationData = {
         _id: conversation._id.toString(),

@@ -70,6 +70,9 @@ const signalPillStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
+const MSG_ENGAGEMENT_HIGH = 6;
+const MSG_ENGAGEMENT_MEDIUM = 3;
+
 function SignalPillGroup({ conv }: { conv: ConversationSummary }) {
   const status = conv.metricsStatus || 'legacy';
   const m = conv.metrics;
@@ -82,8 +85,8 @@ function SignalPillGroup({ conv }: { conv: ConversationSummary }) {
     );
   }
 
-  const msgColor = m.studentMessageCount >= 6 ? COLORS.primary
-    : m.studentMessageCount >= 3 ? COLORS.info
+  const msgColor = m.studentMessageCount >= MSG_ENGAGEMENT_HIGH ? COLORS.primary
+    : m.studentMessageCount >= MSG_ENGAGEMENT_MEDIUM ? COLORS.info
     : COLORS.textMuted;
 
   return (

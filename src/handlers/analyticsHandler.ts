@@ -243,6 +243,19 @@ export class AnalyticsHandler extends Handler {
    * @param filters 筛选条件
    * @returns 按班级聚合的统计数据
    */
+  private static metricsAddFieldsStage(): Document {
+    return {
+      $addFields: {
+        _hasMetrics: { $eq: ['$metrics.v', 1] },
+        _hasSubmissionContext: { $and: [
+          { $eq: ['$metrics.v', 1] },
+          { $ne: ['$metrics.backfilledAt', null] },
+          { $ne: ['$metrics.submissionsAfter', null] },
+        ] },
+      },
+    };
+  }
+
   private async aggregateByClass(filters: AnalyticsFilters) {
     const db = this.ctx.db;
     const col = db.collection('ai_conversations');
@@ -365,17 +378,8 @@ export class AnalyticsHandler extends Handler {
       pipeline.push({ $match: match });
     }
 
-    // 2a. 添加分层 metrics 标志（避免 $ifNull 混淆 null 语义）
-    pipeline.push({
-      $addFields: {
-        _hasMetrics: { $eq: ['$metrics.v', 1] },
-        _hasSubmissionContext: { $and: [
-          { $eq: ['$metrics.v', 1] },
-          { $ne: ['$metrics.backfilledAt', null] },
-          { $ne: ['$metrics.submissionsAfter', null] },
-        ] },
-      },
-    });
+    // 2a. 添加分层 metrics 标志
+    pipeline.push(AnalyticsHandler.metricsAddFieldsStage());
 
     // 2b. Lookup ai_messages - 使用 pipeline 模式 + 条件求和统计问题类型
     pipeline.push({
@@ -547,16 +551,7 @@ export class AnalyticsHandler extends Handler {
     }
 
     // 2a. 分层 metrics 标志
-    pipeline.push({
-      $addFields: {
-        _hasMetrics: { $eq: ['$metrics.v', 1] },
-        _hasSubmissionContext: { $and: [
-          { $eq: ['$metrics.v', 1] },
-          { $ne: ['$metrics.backfilledAt', null] },
-          { $ne: ['$metrics.submissionsAfter', null] },
-        ] },
-      },
-    });
+    pipeline.push(AnalyticsHandler.metricsAddFieldsStage());
 
     // 2b. 按 userId 分组
     pipeline.push({

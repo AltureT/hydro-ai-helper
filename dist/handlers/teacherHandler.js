@@ -42,6 +42,11 @@ async function getUserNameMap(uids, deletedUserFallback) {
     }
     return userMap;
 }
+function deriveMetricsStatus(metrics) {
+    if (!metrics)
+        return 'legacy';
+    return metrics.backfilledAt === null ? 'pending' : 'complete';
+}
 /**
  * T031/T032: 生成题目详情页 URL
  * @param domainId 域 ID
@@ -114,9 +119,7 @@ class ConversationListHandler extends hydrooj_1.Handler {
                         ? firstMsg.content.substring(0, 100) + '...'
                         : firstMsg.content;
                 }
-                const metricsStatus = !conv.metrics ? 'legacy'
-                    : conv.metrics.backfilledAt === null ? 'pending'
-                        : 'complete';
+                const metricsStatus = deriveMetricsStatus(conv.metrics);
                 return {
                     _id: convIdStr,
                     userId: conv.userId,
@@ -211,9 +214,7 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
             const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
             const userName = userNameMap.get(conversation.userId) || deletedLabel;
             // T032: 对话详情响应（包含 problemUrl + metrics）
-            const detailMetricsStatus = !conversation.metrics ? 'legacy'
-                : conversation.metrics.backfilledAt === null ? 'pending'
-                    : 'complete';
+            const detailMetricsStatus = deriveMetricsStatus(conversation.metrics);
             const conversationData = {
                 _id: conversation._id.toString(),
                 userId: conversation.userId,
