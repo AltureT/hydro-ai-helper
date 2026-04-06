@@ -152,5 +152,95 @@ describe('ExportService', () => {
       const csv = await service.exportConversations({});
       expect(csv).toContain('算法;循环');
     });
+
+    describe('includeMetrics option', () => {
+      const metricsConversations = [
+        {
+          ...mockConversations[0],
+          metrics: {
+            v: 1,
+            studentMessageCount: 3,
+            studentTotalLength: 150,
+            submissionsAfter: 2,
+            firstAcceptedIndex: 1,
+            problemDifficulty: 0.45,
+            backfilledAt: new Date('2024-01-01T11:00:00Z'),
+          },
+        },
+        {
+          ...mockConversations[1],
+          // no metrics — legacy conversation
+        },
+      ];
+
+      beforeEach(() => {
+        mockCursor[Symbol.asyncIterator] = async function* () {
+          for (const conv of metricsConversations) yield conv;
+        };
+      });
+
+      it('should not include metrics columns by default', async () => {
+        const csv = await service.exportConversations({});
+        const headers = csv.split('\n')[0];
+        expect(headers).not.toContain('metrics_status');
+        expect(headers).not.toContain('student_msg_count');
+      });
+
+      it('should include metrics columns when includeMetrics=true', async () => {
+        const csv = await service.exportConversations({}, { includeMetrics: true });
+        const headers = csv.split('\n')[0];
+        expect(headers).toContain('metrics_status');
+        expect(headers).toContain('student_msg_count');
+        expect(headers).toContain('avg_msg_length');
+        expect(headers).toContain('submissions_after');
+        expect(headers).toContain('first_ac_index');
+        expect(headers).toContain('problem_difficulty');
+      });
+
+      it('should output correct metrics values for complete conversation', async () => {
+        const csv = await service.exportConversations({}, { includeMetrics: true });
+        const lines = csv.split('\n');
+        const firstDataRow = lines[1];
+        // complete,3,50,2,1,0.45
+        expect(firstDataRow).toContain('complete');
+        expect(firstDataRow).toContain(',3,');
+        expect(firstDataRow).toContain(',50,');  // 150/3 = 50
+        expect(firstDataRow).toContain(',2,');
+        expect(firstDataRow).toContain(',1,');
+        expect(firstDataRow).toContain('0.45');
+      });
+
+      it('should output legacy status for conversation without metrics', async () => {
+        const csv = await service.exportConversations({}, { includeMetrics: true });
+        const lines = csv.split('\n');
+        const secondDataRow = lines[2];
+        expect(secondDataRow).toContain('legacy');
+      });
+
+      it('should output firstAcceptedIndex=0 as "0" not empty (0-based trap)', async () => {
+        const zeroAcConv = [{
+          ...mockConversations[0],
+          metrics: {
+            v: 1,
+            studentMessageCount: 2,
+            studentTotalLength: 80,
+            submissionsAfter: 1,
+            firstAcceptedIndex: 0,  // first-try AC
+            problemDifficulty: null,
+            backfilledAt: new Date(),
+          },
+        }];
+        mockCursor[Symbol.asyncIterator] = async function* () {
+          for (const c of zeroAcConv) yield c;
+        };
+
+        const csv = await service.exportConversations({}, { includeMetrics: true });
+        const dataRow = csv.split('\n')[1];
+        // Should contain ",0," for firstAcceptedIndex, not ",,"
+        const cols = dataRow.split(',');
+        const acIdxCol = cols[cols.length - 2]; // second to last column
+        expect(acIdxCol).toBe('0');
+      });
+    });
   });
 });
