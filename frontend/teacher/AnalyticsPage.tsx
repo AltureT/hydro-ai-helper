@@ -250,24 +250,26 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
             <input type="text" value={classId} onChange={(e) => setClassId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_class_id_optional')}
               style={getInputStyle()} />
           </div>
-          <div>
-            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>
-            <input type="text" value={problemId} onChange={(e) => setProblemId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_problem_id_optional')}
-              style={getInputStyle()} />
-          </div>
+          {dimension !== 'student' && (
+            <div>
+              <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>
+              <input type="text" value={problemId} onChange={(e) => setProblemId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_problem_id_optional')}
+                style={getInputStyle()} />
+            </div>
+          )}
+          {dimension === 'student' && (
+            <div>
+              <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_student_search')}</label>
+              <input
+                type="text"
+                value={studentSearch}
+                onChange={(e) => setStudentSearch(e.target.value)}
+                placeholder={i18n('ai_helper_teacher_analytics_student_search_placeholder')}
+                style={getInputStyle()}
+              />
+            </div>
+          )}
         </div>
-        {dimension === 'student' && (
-          <div style={{ marginTop: SPACING.md }}>
-            <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_student_search')}</label>
-            <input
-              type="text"
-              value={studentSearch}
-              onChange={(e) => setStudentSearch(e.target.value)}
-              placeholder={i18n('ai_helper_teacher_analytics_student_search_placeholder')}
-              style={getInputStyle()}
-            />
-          </div>
-        )}
         <button onClick={fetchData} disabled={loading} style={queryButtonStyle}>
           {loading ? i18n('ai_helper_teacher_querying') : i18n('ai_helper_teacher_query')}
         </button>
