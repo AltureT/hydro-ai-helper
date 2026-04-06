@@ -50,6 +50,16 @@ async function getUserNameMap(uids: number[], deletedUserFallback: string): Prom
 /**
  * 对话概要接口
  */
+interface ConversationMetricsDTO {
+  v: number;
+  studentMessageCount: number;
+  studentTotalLength: number;
+  submissionsAfter: number | null;
+  firstAcceptedIndex: number | null;
+  problemDifficulty: number | null;
+  backfilledAt: string | null;
+}
+
 interface ConversationSummary {
   _id: string;
   userId: number;
@@ -61,6 +71,8 @@ interface ConversationSummary {
   endTime: string;
   messageCount: number;
   isEffective: boolean;
+  metrics?: ConversationMetricsDTO;
+  metricsStatus: 'legacy' | 'pending' | 'complete';
   tags: string[];
   teacherNote?: string;
   metadata?: {
@@ -176,6 +188,10 @@ export class ConversationListHandler extends Handler {
             : firstMsg.content;
         }
 
+        const metricsStatus: ConversationSummary['metricsStatus'] = !conv.metrics ? 'legacy'
+          : conv.metrics.backfilledAt === null ? 'pending'
+          : 'complete';
+
         return {
           _id: convIdStr,
           userId: conv.userId,
@@ -187,6 +203,11 @@ export class ConversationListHandler extends Handler {
           endTime: conv.endTime.toISOString(),
           messageCount: conv.messageCount,
           isEffective: conv.isEffective,
+          metrics: conv.metrics ? {
+            ...conv.metrics,
+            backfilledAt: conv.metrics.backfilledAt?.toISOString() ?? null,
+          } : undefined,
+          metricsStatus,
           tags: conv.tags,
           teacherNote: conv.teacherNote,
           metadata: conv.metadata,
@@ -274,7 +295,11 @@ export class ConversationDetailHandler extends Handler {
       const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
       const userName = userNameMap.get(conversation.userId) || deletedLabel;
 
-      // T032: 对话详情响应（包含 problemUrl）
+      // T032: 对话详情响应（包含 problemUrl + metrics）
+      const detailMetricsStatus: ConversationSummary['metricsStatus'] = !conversation.metrics ? 'legacy'
+        : conversation.metrics.backfilledAt === null ? 'pending'
+        : 'complete';
+
       const conversationData = {
         _id: conversation._id.toString(),
         userId: conversation.userId,
@@ -286,6 +311,11 @@ export class ConversationDetailHandler extends Handler {
         endTime: conversation.endTime.toISOString(),
         messageCount: conversation.messageCount,
         isEffective: conversation.isEffective,
+        metrics: conversation.metrics ? {
+          ...conversation.metrics,
+          backfilledAt: conversation.metrics.backfilledAt?.toISOString() ?? null,
+        } : undefined,
+        metricsStatus: detailMetricsStatus,
         tags: conversation.tags,
         teacherNote: conversation.teacherNote,
         metadata: conversation.metadata

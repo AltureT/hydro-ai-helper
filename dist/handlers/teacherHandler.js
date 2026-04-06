@@ -114,6 +114,9 @@ class ConversationListHandler extends hydrooj_1.Handler {
                         ? firstMsg.content.substring(0, 100) + '...'
                         : firstMsg.content;
                 }
+                const metricsStatus = !conv.metrics ? 'legacy'
+                    : conv.metrics.backfilledAt === null ? 'pending'
+                        : 'complete';
                 return {
                     _id: convIdStr,
                     userId: conv.userId,
@@ -125,6 +128,11 @@ class ConversationListHandler extends hydrooj_1.Handler {
                     endTime: conv.endTime.toISOString(),
                     messageCount: conv.messageCount,
                     isEffective: conv.isEffective,
+                    metrics: conv.metrics ? {
+                        ...conv.metrics,
+                        backfilledAt: conv.metrics.backfilledAt?.toISOString() ?? null,
+                    } : undefined,
+                    metricsStatus,
                     tags: conv.tags,
                     teacherNote: conv.teacherNote,
                     metadata: conv.metadata,
@@ -202,7 +210,10 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
             const deletedLabel = this.translate('ai_helper_teacher_deleted_user');
             const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
             const userName = userNameMap.get(conversation.userId) || deletedLabel;
-            // T032: 对话详情响应（包含 problemUrl）
+            // T032: 对话详情响应（包含 problemUrl + metrics）
+            const detailMetricsStatus = !conversation.metrics ? 'legacy'
+                : conversation.metrics.backfilledAt === null ? 'pending'
+                    : 'complete';
             const conversationData = {
                 _id: conversation._id.toString(),
                 userId: conversation.userId,
@@ -214,6 +225,11 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
                 endTime: conversation.endTime.toISOString(),
                 messageCount: conversation.messageCount,
                 isEffective: conversation.isEffective,
+                metrics: conversation.metrics ? {
+                    ...conversation.metrics,
+                    backfilledAt: conversation.metrics.backfilledAt?.toISOString() ?? null,
+                } : undefined,
+                metricsStatus: detailMetricsStatus,
                 tags: conversation.tags,
                 teacherNote: conversation.teacherNote,
                 metadata: conversation.metadata

@@ -301,6 +301,7 @@ export class ConversationModel {
       endTime: 1,
       messageCount: 1,
       isEffective: 1,
+      metrics: 1,
       tags: 1,
       teacherNote: 1,
       metadata: 1
