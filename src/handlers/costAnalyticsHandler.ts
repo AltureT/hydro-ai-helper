@@ -50,6 +50,11 @@ export class CostAnalyticsHandler extends Handler {
       const today = new Date().toISOString().slice(0, 10);
       const yearMonth = today.slice(0, 7);
 
+      // topUsers / modelBreakdown 应使用 period 对应的实际范围
+      // period=day 时 getDateRange 返回 30 天（给趋势图用），但 Top 用户只需今天
+      const periodStart = validPeriod === 'day' ? today : startDate;
+      const periodEnd = validPeriod === 'day' ? today : endDate;
+
       const [
         todayUsage,
         monthlyUsage,
@@ -60,8 +65,8 @@ export class CostAnalyticsHandler extends Handler {
         tokenUsageModel.getDomainDailyUsage(domainId, today),
         tokenUsageModel.getDomainMonthlyUsage(domainId, yearMonth),
         tokenUsageModel.getDailyTrend(domainId, startDate, endDate),
-        tokenUsageModel.getTopUsersByDateRange(domainId, startDate, endDate, 10),
-        tokenUsageModel.getModelBreakdown(domainId, startDate, endDate),
+        tokenUsageModel.getTopUsersByDateRange(domainId, periodStart, periodEnd, 10),
+        tokenUsageModel.getModelBreakdown(domainId, periodStart, periodEnd),
       ]);
 
       // 计算预算使用百分比
