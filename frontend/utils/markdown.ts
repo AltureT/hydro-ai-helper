@@ -54,7 +54,12 @@ export function createMarkdownRenderer(): MarkdownIt {
           console.error('[AI Helper] Highlight.js error:', err);
         }
       }
-      return '';
+      // Auto-detect language when not specified
+      try {
+        return hljs.highlightAuto(str).value;
+      } catch (err) {
+        return '';
+      }
     }
   });
 

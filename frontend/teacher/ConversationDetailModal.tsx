@@ -324,21 +324,23 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                   )}
                   <span style={{ fontSize: '11px', color: COLORS.textMuted }}>{formatDateTime(msg.timestamp)}</span>
                 </div>
-                <div style={{
-                  backgroundColor: isStudent ? '#f1f5f9' : '#eff6ff',
-                  border: isStudent ? 'none' : '1px solid #dbeafe',
-                  color: '#1e293b',
-                  borderRadius: '12px',
-                  borderTopLeftRadius: isStudent ? '12px' : '2px',
-                  borderTopRightRadius: isStudent ? '2px' : '12px',
-                  padding: '12px 16px',
-                }}>
-                  {isStudent ? (
-                    <div style={{ whiteSpace: 'pre-wrap', fontSize: '14px', lineHeight: 1.6 }}>{msg.content}</div>
-                  ) : (
-                    <MarkdownContent content={msg.content} />
-                  )}
-                </div>
+                {(!isStudent || !hasCode || msg.content.trim()) && (
+                  <div style={{
+                    backgroundColor: isStudent ? '#f1f5f9' : '#eff6ff',
+                    border: isStudent ? 'none' : '1px solid #dbeafe',
+                    color: '#1e293b',
+                    borderRadius: '12px',
+                    borderTopLeftRadius: isStudent ? '12px' : '2px',
+                    borderTopRightRadius: isStudent ? '2px' : '12px',
+                    padding: '12px 16px',
+                  }}>
+                    {isStudent ? (
+                      <div style={{ whiteSpace: 'pre-wrap', fontSize: '14px', lineHeight: 1.6 }}>{msg.content}</div>
+                    ) : (
+                      <MarkdownContent content={msg.content} />
+                    )}
+                  </div>
+                )}
                 {hasCode && (
                   <div style={{ marginTop: '6px' }}>
                     {msg.metadata?.codeWarning && (
