@@ -205,6 +205,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // GET /ai-helper/analytics - AI 使用统计页面
         ctx.Route('ai_helper_analytics', '/ai-helper/analytics', analyticsHandler_1.AnalyticsHandler, analyticsHandler_1.AnalyticsHandlerPriv);
         ctx.Route('ai_helper_analytics_domain', '/d/:domainId/ai-helper/analytics', analyticsHandler_1.AnalyticsHandler, analyticsHandler_1.AnalyticsHandlerPriv);
+        // GET /ai-helper/analytics/filter-options - 筛选条件可选值（班级/题目自动补全）
+        ctx.Route('ai_helper_analytics_filter_options', '/ai-helper/analytics/filter-options', analyticsHandler_1.AnalyticsFilterOptionsHandler, analyticsHandler_1.AnalyticsFilterOptionsHandlerPriv);
+        ctx.Route('ai_helper_analytics_filter_options_domain', '/d/:domainId/ai-helper/analytics/filter-options', analyticsHandler_1.AnalyticsFilterOptionsHandler, analyticsHandler_1.AnalyticsFilterOptionsHandlerPriv);
         // GET /ai-helper/admin/config - AI 配置页面 & JSON API（通过 Accept 头区分）
         ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', adminConfigHandler_1.AdminConfigHandler, adminConfigHandler_1.AdminConfigHandlerPriv);
         // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点

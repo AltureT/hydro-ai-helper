@@ -627,5 +627,52 @@ export class AnalyticsHandler extends Handler {
   }
 }
 
+/**
+ * AnalyticsFilterOptionsHandler - 返回筛选条件的可选值（班级/题目）
+ * GET /ai-helper/analytics/filter-options
+ */
+export class AnalyticsFilterOptionsHandler extends Handler {
+  async get() {
+    try {
+      if (await applyRateLimit(this, {
+        op: 'ai_analytics_filter', periodSecs: 60, maxOps: 20,
+        failOpen: true,
+        errorMessage: 'ai_helper_analytics_rate_limited',
+      })) return;
+
+      const domainId = getDomainId(this);
+      const col = this.ctx.db.collection('ai_conversations');
+      const filter: Document = {};
+      if (domainId) filter.domainId = domainId;
+
+      const [classIds, problemIds] = await Promise.all([
+        col.distinct('classId', filter) as Promise<string[]>,
+        col.distinct('problemId', filter) as Promise<string[]>,
+      ]);
+
+      // 获取题目标题映射
+      const validClassIds = classIds.filter(Boolean).sort();
+      const validProblemIds = problemIds.filter(Boolean).sort();
+      const titleMap = validProblemIds.length > 0
+        ? await _getProblemTitleMap(domainId, validProblemIds, this.translate('ai_helper_teacher_conv_col_problem_prefix'))
+        : new Map<string, string>();
+
+      const problemOptions = validProblemIds.map(id => ({
+        id,
+        title: titleMap.get(id) || id,
+      }));
+
+      this.response.body = { classIds: validClassIds, problemOptions };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[AI Helper] AnalyticsFilterOptionsHandler error:', err);
+      this.response.status = 500;
+      this.response.body = { error: { code: 'INTERNAL_ERROR', message: 'Failed to load filter options' } };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
 // 导出路由权限配置（使用与对话列表相同的权限）
 export const AnalyticsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const AnalyticsFilterOptionsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;

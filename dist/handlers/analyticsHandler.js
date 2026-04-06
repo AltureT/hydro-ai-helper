@@ -4,7 +4,7 @@
  * 处理统计分析 API 请求,支持按班级/题目/学生维度聚合数据
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AnalyticsHandlerPriv = exports.AnalyticsHandler = void 0;
+exports.AnalyticsFilterOptionsHandlerPriv = exports.AnalyticsHandlerPriv = exports.AnalyticsFilterOptionsHandler = exports.AnalyticsHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const domainHelper_1 = require("../utils/domainHelper");
 const problemIdHelper_1 = require("../utils/problemIdHelper");
@@ -532,6 +532,51 @@ class AnalyticsHandler extends hydrooj_1.Handler {
     }
 }
 exports.AnalyticsHandler = AnalyticsHandler;
+/**
+ * AnalyticsFilterOptionsHandler - 返回筛选条件的可选值（班级/题目）
+ * GET /ai-helper/analytics/filter-options
+ */
+class AnalyticsFilterOptionsHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_analytics_filter', periodSecs: 60, maxOps: 20,
+                failOpen: true,
+                errorMessage: 'ai_helper_analytics_rate_limited',
+            }))
+                return;
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const col = this.ctx.db.collection('ai_conversations');
+            const filter = {};
+            if (domainId)
+                filter.domainId = domainId;
+            const [classIds, problemIds] = await Promise.all([
+                col.distinct('classId', filter),
+                col.distinct('problemId', filter),
+            ]);
+            // 获取题目标题映射
+            const validClassIds = classIds.filter(Boolean).sort();
+            const validProblemIds = problemIds.filter(Boolean).sort();
+            const titleMap = validProblemIds.length > 0
+                ? await _getProblemTitleMap(domainId, validProblemIds, this.translate('ai_helper_teacher_conv_col_problem_prefix'))
+                : new Map();
+            const problemOptions = validProblemIds.map(id => ({
+                id,
+                title: titleMap.get(id) || id,
+            }));
+            this.response.body = { classIds: validClassIds, problemOptions };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] AnalyticsFilterOptionsHandler error:', err);
+            this.response.status = 500;
+            this.response.body = { error: { code: 'INTERNAL_ERROR', message: 'Failed to load filter options' } };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.AnalyticsFilterOptionsHandler = AnalyticsFilterOptionsHandler;
 // 导出路由权限配置（使用与对话列表相同的权限）
 exports.AnalyticsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.AnalyticsFilterOptionsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 //# sourceMappingURL=analyticsHandler.js.map

@@ -47,6 +47,11 @@ const labelStyle: React.CSSProperties = {
   color: COLORS.textSecondary,
 };
 
+interface FilterOption {
+  id: string;
+  title: string;
+}
+
 export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }) => {
   const initialFilters = getInitialFiltersFromUrl();
 
@@ -60,6 +65,10 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsResponse | null>(null);
+
+  // 筛选条件自动补全选项
+  const [classOptions, setClassOptions] = useState<string[]>([]);
+  const [problemOptions, setProblemOptions] = useState<FilterOption[]>([]);
 
   type SortField = keyof AnalyticsItem;
   const [sortField, setSortField] = useState<SortField | null>(null);
@@ -119,6 +128,23 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
 
   useEffect(() => {
     if (hasInitialFilters) fetchData();
+  }, []);
+
+  // 加载筛选条件自动补全选项
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(buildApiUrl('/ai-helper/analytics/filter-options'), {
+          method: 'GET',
+          credentials: 'include',
+        });
+        if (res.ok) {
+          const json = await res.json();
+          setClassOptions(json.classIds || []);
+          setProblemOptions(json.problemOptions || []);
+        }
+      } catch {}
+    })();
   }, []);
 
   const handleSort = (field: string) => {
@@ -227,7 +253,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
               {DIMENSION_OPTIONS.map(opt => (
                 <button
                   key={opt.value}
-                  onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); setStudentSearch(''); }}
+                  onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); setStudentSearch(''); setProblemId(''); }}
                   style={getPillStyle(dimension === opt.value)}
                 >
                   {i18n(opt.labelKey)}
@@ -248,15 +274,19 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
           <div>
             <label style={labelStyle}>{i18n('ai_helper_teacher_conv_col_class')}</label>
             <input type="text" value={classId} onChange={(e) => setClassId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_class_id_optional')}
-              style={getInputStyle()} />
+              list="analytics-class-options" style={getInputStyle()} />
+            <datalist id="analytics-class-options">
+              {classOptions.map(c => <option key={c} value={c} />)}
+            </datalist>
           </div>
-          {dimension !== 'student' && (
-            <div>
-              <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>
-              <input type="text" value={problemId} onChange={(e) => setProblemId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_problem_id_optional')}
-                style={getInputStyle()} />
-            </div>
-          )}
+          <div>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>
+            <input type="text" value={problemId} onChange={(e) => setProblemId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_problem_id_optional')}
+              list="analytics-problem-options" style={getInputStyle()} />
+            <datalist id="analytics-problem-options">
+              {problemOptions.map(p => <option key={p.id} value={p.id} label={p.title} />)}
+            </datalist>
+          </div>
           {dimension === 'student' && (
             <div>
               <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_student_search')}</label>

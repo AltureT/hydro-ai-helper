@@ -29,7 +29,7 @@ import {
 } from './handlers/teacherHandler';
 console.log('[AI-Helper] teacherHandler OK');
 
-import { AnalyticsHandler, AnalyticsHandlerPriv } from './handlers/analyticsHandler';
+import { AnalyticsHandler, AnalyticsHandlerPriv, AnalyticsFilterOptionsHandler, AnalyticsFilterOptionsHandlerPriv } from './handlers/analyticsHandler';
 console.log('[AI-Helper] analyticsHandler OK');
 
 import { AdminConfigHandler, AdminConfigHandlerPriv, JailbreakLogsHandler, JailbreakLogsHandlerPriv } from './handlers/adminConfigHandler';
@@ -247,6 +247,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/analytics - AI 使用统计页面
     ctx.Route('ai_helper_analytics', '/ai-helper/analytics', AnalyticsHandler, AnalyticsHandlerPriv);
     ctx.Route('ai_helper_analytics_domain', '/d/:domainId/ai-helper/analytics', AnalyticsHandler, AnalyticsHandlerPriv);
+
+    // GET /ai-helper/analytics/filter-options - 筛选条件可选值（班级/题目自动补全）
+    ctx.Route('ai_helper_analytics_filter_options', '/ai-helper/analytics/filter-options', AnalyticsFilterOptionsHandler, AnalyticsFilterOptionsHandlerPriv);
+    ctx.Route('ai_helper_analytics_filter_options_domain', '/d/:domainId/ai-helper/analytics/filter-options', AnalyticsFilterOptionsHandler, AnalyticsFilterOptionsHandlerPriv);
 
     // GET /ai-helper/admin/config - AI 配置页面 & JSON API（通过 Accept 头区分）
     ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', AdminConfigHandler, AdminConfigHandlerPriv);
