@@ -37,7 +37,8 @@ export class ExportHandler extends Handler {
         classId,
         problemId,
         userId,
-        includeSensitive = 'false'
+        includeSensitive = 'false',
+        includeMetrics = 'false',
       } = this.request.query;
 
       // 2. 验证导出格式(目前仅支持 CSV)
@@ -104,7 +105,8 @@ export class ExportHandler extends Handler {
 
       // 4. 构造导出选项
       const options: ConversationExportOptions = {
-        includeSensitive: includeSensitive === 'true'
+        includeSensitive: includeSensitive === 'true',
+        includeMetrics: includeMetrics === 'true',
       };
 
       // 5. 调用 ExportService 生成 CSV

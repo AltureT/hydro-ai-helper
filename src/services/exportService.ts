@@ -25,6 +25,7 @@ export interface ConversationExportFilters {
  */
 export interface ConversationExportOptions {
   includeSensitive?: boolean;  // 是否包含敏感信息(真实 userId),默认 false
+  includeMetrics?: boolean;    // 是否包含对话信号列,默认 false
 }
 
 /**
@@ -57,6 +58,7 @@ export class ExportService {
       endTime: 1,
       messageCount: 1,
       isEffective: 1,
+      metrics: 1,
       teacherNote: 1,
       tags: 1,
       metadata: 1
@@ -128,7 +130,15 @@ export class ExportService {
       'messageCount',
       'isEffective',
       'teacherNote',
-      'tags'
+      'tags',
+      ...(options.includeMetrics ? [
+        'metrics_status',
+        'student_msg_count',
+        'avg_msg_length',
+        'submissions_after',
+        'first_ac_index',
+        'problem_difficulty',
+      ] : []),
     ];
     rows.push(headers);
 
@@ -145,7 +155,23 @@ export class ExportService {
         conv.messageCount.toString(),
         conv.isEffective ? 'true' : 'false',
         conv.teacherNote || '',
-        Array.isArray(conv.tags) ? conv.tags.join(';') : ''
+        Array.isArray(conv.tags) ? conv.tags.join(';') : '',
+        ...(options.includeMetrics ? (() => {
+          const m = conv.metrics;
+          if (!m) return ['legacy', '', '', '', '', ''];
+          const status = m.backfilledAt === null ? 'pending' : 'complete';
+          const avgLen = m.studentMessageCount > 0
+            ? String(Math.round(m.studentTotalLength / m.studentMessageCount))
+            : '';
+          return [
+            status,
+            String(m.studentMessageCount),
+            avgLen,
+            m.submissionsAfter !== null ? String(m.submissionsAfter) : '',
+            m.firstAcceptedIndex !== null ? String(m.firstAcceptedIndex) : '',
+            m.problemDifficulty !== null ? String(m.problemDifficulty) : '',
+          ];
+        })() : []),
       ];
       rows.push(row);
     }

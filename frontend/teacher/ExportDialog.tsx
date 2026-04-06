@@ -35,6 +35,7 @@ export interface ExportDialogProps {
 export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, filters }) => {
   // 是否包含敏感信息（默认不包含）
   const [includeSensitive, setIncludeSensitive] = useState(false);
+  const [includeMetrics, setIncludeMetrics] = useState(false);
 
   // 如果弹窗关闭，不渲染
   if (!isOpen) return null;
@@ -57,6 +58,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
 
     // 3. 添加敏感信息选项
     params.includeSensitive = includeSensitive ? 'true' : 'false';
+    if (includeMetrics) params.includeMetrics = 'true';
 
     // 4. 构造导出 URL（使用域前缀）
     const query = new URLSearchParams(params).toString();
@@ -185,6 +187,38 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
             }}
           >
             {i18n('ai_helper_teacher_export_sensitive_note')}
+          </p>
+        </div>
+
+        {/* 对话信号数据选项 */}
+        <div style={{ marginBottom: SPACING.lg }}>
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: SPACING.sm,
+              fontWeight: 500,
+              color: COLORS.textSecondary,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={includeMetrics}
+              onChange={(e) => setIncludeMetrics(e.target.checked)}
+              style={{ cursor: 'pointer' }}
+            />
+            {i18n('ai_helper_teacher_export_include_metrics')}
+          </label>
+          <p
+            style={{
+              margin: `${SPACING.sm} 0 0 0`,
+              fontSize: '13px',
+              color: COLORS.textMuted,
+              lineHeight: '1.4',
+            }}
+          >
+            {i18n('ai_helper_teacher_export_metrics_note')}
           </p>
         </div>
 
