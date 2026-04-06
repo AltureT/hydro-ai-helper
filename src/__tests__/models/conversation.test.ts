@@ -52,7 +52,7 @@ describe('ConversationModel', () => {
   describe('ensureIndexes', () => {
     it('should create all indexes and log success', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(11);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(13);
       expect(console.log).toHaveBeenCalledWith('[ConversationModel] Indexes created successfully');
     });
   });
@@ -263,6 +263,30 @@ describe('ConversationModel', () => {
 
       await model.findByFilters({});
       expect(mockColl._chain.sort).toHaveBeenCalledWith({ startTime: -1 });
+    });
+  });
+
+  // ─── findPendingBackfill ─────────────────────────────
+
+  describe('findPendingBackfill', () => {
+    it('should query with correct filter and limit', async () => {
+      const cutoff = new Date('2026-01-01');
+      mockColl._chain.toArray.mockResolvedValue([]);
+
+      await model.findPendingBackfill(cutoff, 50);
+
+      expect(mockColl.find).toHaveBeenCalledWith({
+        'metrics.v': 1,
+        'metrics.backfilledAt': null,
+        endTime: { $lte: cutoff },
+      });
+      expect(mockColl._chain.limit).toHaveBeenCalledWith(50);
+    });
+
+    it('should use default limit of 100', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      await model.findPendingBackfill(new Date());
+      expect(mockColl._chain.limit).toHaveBeenCalledWith(100);
     });
   });
 

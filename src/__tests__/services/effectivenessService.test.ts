@@ -1,16 +1,48 @@
 import { EffectivenessService } from '../../services/effectivenessService';
 
-function createMockCtx(messages: any[] = [], overrides: Record<string, any> = {}) {
+const TEST_CONV_ID = '507f1f77bcf86cd799439011';
+
+const baseConversation = {
+  _id: TEST_CONV_ID,
+  domainId: 'default',
+  userId: 1001,
+  problemId: 'P1000',
+  startTime: new Date('2026-01-01T10:00:00Z'),
+  endTime: new Date('2026-01-01T10:30:00Z'),
+  messageCount: 4,
+  isEffective: false,
+  tags: [],
+};
+
+function createMockCtx(
+  messages: any[] = [],
+  convOverrides: Record<string, any> = {},
+  dbOverrides: Record<string, any> = {},
+) {
   const mockMessageModel = {
     findByConversationId: jest.fn().mockResolvedValue(messages),
   };
   const mockConversationModel = {
+    findById: jest.fn().mockResolvedValue({ ...baseConversation, ...convOverrides }),
+    findByFilters: jest.fn().mockResolvedValue({ conversations: [], total: 0 }),
+    findPendingBackfill: jest.fn().mockResolvedValue([]),
     updateEffectiveness: jest.fn().mockResolvedValue(undefined),
+    updateMetrics: jest.fn().mockResolvedValue(undefined),
   };
   const mockJailbreakLogModel = {
     create: jest.fn().mockResolvedValue(undefined),
   };
 
+  const mockDocumentCollection = {
+    findOne: jest.fn().mockResolvedValue({ nSubmit: 100, nAccept: 40 }),
+  };
+  const mockRecordCollection = {
+    find: jest.fn().mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        toArray: jest.fn().mockResolvedValue([]),
+      }),
+    }),
+  };
   return {
     ctx: {
       get: jest.fn((name: string) => {
@@ -19,14 +51,23 @@ function createMockCtx(messages: any[] = [], overrides: Record<string, any> = {}
         if (name === 'jailbreakLogModel') return mockJailbreakLogModel;
         return null;
       }),
+      db: {
+        collection: jest.fn((name: string) => {
+          if (name === 'document') return mockDocumentCollection;
+          if (name === 'record') return mockRecordCollection;
+          return dbOverrides[name] || {};
+        }),
+      },
       logger: {
         error: jest.fn(),
+        info: jest.fn(),
       },
-      ...overrides,
     },
     mockMessageModel,
     mockConversationModel,
     mockJailbreakLogModel,
+    mockDocumentCollection,
+    mockRecordCollection,
   };
 }
 
@@ -38,110 +79,468 @@ function makeAiMsg(content: string) {
 }
 
 describe('EffectivenessService', () => {
-  describe('analyzeConversation', () => {
-    it('should return false when no messages exist', async () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  describe('analyzeConversation — Phase A (immediate)', () => {
+    it('should return false when conversation not found', async () => {
       const { ctx, mockConversationModel } = createMockCtx([]);
+      mockConversationModel.findById.mockResolvedValue(null);
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
-
+      const result = await service.analyzeConversation(TEST_CONV_ID);
       expect(result).toBe(false);
-      expect(mockConversationModel.updateEffectiveness).toHaveBeenCalledWith(
+    });
+
+    it('should compute Group 1 signals correctly', async () => {
+      const messages = [
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下动态规划的思路'),
+        makeStudentMsg('明白了，那优化的方向是什么呢？可以降低时间复杂度吗'),
+        makeAiMsg('这道题可以用动态规划来解决'),
+        makeAiMsg('可以通过空间优化将复杂度降低'),
+      ];
+      const { ctx, mockConversationModel } = createMockCtx(messages);
+      const service = new EffectivenessService(ctx as any);
+
+      await service.analyzeConversation(TEST_CONV_ID);
+
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
         expect.anything(),
-        false
+        expect.objectContaining({
+          v: 1,
+          studentMessageCount: 2,
+          studentTotalLength: messages[0].content.length + messages[1].content.length,
+          submissionsAfter: null,
+          firstAcceptedIndex: null,
+          backfilledAt: null,
+        }),
+        expect.any(Boolean),
       );
     });
 
-    it('should return false when not enough student messages', async () => {
+    it('should use $set idempotent write (updateMetrics, not $inc)', async () => {
       const messages = [
-        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下'),
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解动态规划'),
+        makeStudentMsg('明白了，那优化的方向是什么呢'),
+        makeAiMsg('可以用动态规划'),
+        makeAiMsg('复杂度是 O(n)'),
+      ];
+      const { ctx, mockConversationModel } = createMockCtx(messages);
+      const service = new EffectivenessService(ctx as any);
+
+      // Call twice to simulate concurrent fire-and-forget
+      await service.analyzeConversation(TEST_CONV_ID);
+      await service.analyzeConversation(TEST_CONV_ID);
+
+      // Both calls should use updateMetrics (idempotent $set), not incrementing
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledTimes(2);
+      const firstCall = mockConversationModel.updateMetrics.mock.calls[0][1];
+      const secondCall = mockConversationModel.updateMetrics.mock.calls[1][1];
+      expect(firstCall.studentMessageCount).toBe(secondCall.studentMessageCount);
+    });
+
+    it('should return false before backfill even when messages are sufficient', async () => {
+      const messages = [
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下动态规划的思路'),
+        makeStudentMsg('明白了，那优化的方向是什么呢？可以降低时间复杂度吗'),
         makeAiMsg('这道题可以用动态规划来解决'),
-        makeAiMsg('时间复杂度为 O(n)'),
+        makeAiMsg('可以通过空间优化将复杂度降低'),
       ];
       const { ctx } = createMockCtx(messages);
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
+      // Phase A always returns false (conservative, waiting for backfill)
+      const result = await service.analyzeConversation(TEST_CONV_ID);
       expect(result).toBe(false);
     });
 
-    it('should return false when not enough AI messages', async () => {
+    it('should return false when only 1 student message', async () => {
       const messages = [
-        makeStudentMsg('这道题的算法复杂度怎么理解？'),
-        makeStudentMsg('那优化的思路是什么呢？'),
-        makeAiMsg('可以用贪心算法'),
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下'),
+        makeAiMsg('可以用动态规划'),
+        makeAiMsg('复杂度是 O(n)'),
       ];
       const { ctx } = createMockCtx(messages);
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
+      const result = await service.analyzeConversation(TEST_CONV_ID);
       expect(result).toBe(false);
     });
 
     it('should return false when student messages are too short', async () => {
       const messages = [
         makeStudentMsg('不懂'),
-        makeStudentMsg('还是不理解'),
+        makeStudentMsg('还是不懂'),
         makeAiMsg('这道题需要理解递归的概念'),
         makeAiMsg('递归是指函数调用自身'),
       ];
       const { ctx } = createMockCtx(messages);
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
+      const result = await service.analyzeConversation(TEST_CONV_ID);
       expect(result).toBe(false);
     });
 
-    it('should return false when no learning keywords matched', async () => {
+    it('should snapshot problemDifficulty from document collection', async () => {
       const messages = [
-        makeStudentMsg('这道题的输入输出格式是什么样子的呢？我看不懂题目的描述'),
-        makeStudentMsg('好的，那数据范围大概是多少呢？我需要知道有多大的数字'),
-        makeAiMsg('这道题的输入是一个整数 n'),
-        makeAiMsg('数据范围是 1 到 1000'),
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下动态规划'),
+        makeStudentMsg('明白了，那优化的方向是什么呢？可以降低复杂度吗'),
+        makeAiMsg('可以用动态规划'),
+        makeAiMsg('复杂度是 O(n)'),
       ];
-      const { ctx } = createMockCtx(messages);
+      const { ctx, mockConversationModel, mockDocumentCollection } = createMockCtx(messages);
+      mockDocumentCollection.findOne.mockResolvedValue({ nSubmit: 200, nAccept: 80 });
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
-      expect(result).toBe(false);
+      await service.analyzeConversation(TEST_CONV_ID);
+
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          problemDifficulty: 0.4,  // 80/200
+        }),
+        expect.any(Boolean),
+      );
     });
 
-    it('should return true when all conditions are met', async () => {
+    it('should set problemDifficulty to null when pid is not numeric', async () => {
       const messages = [
-        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下动态规划的思路'),
-        makeStudentMsg('明白了，那优化的方向是什么呢？可以降低时间复杂度吗'),
-        makeAiMsg('这道题可以用动态规划来解决，核心是状态转移方程'),
-        makeAiMsg('可以通过空间优化将复杂度从 O(n^2) 降低到 O(n)'),
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下动态规划'),
+        makeStudentMsg('明白了那优化的方向是什么呢'),
+        makeAiMsg('可以用动态规划'),
+        makeAiMsg('复杂度是 O(n)'),
+      ];
+      const { ctx, mockConversationModel } = createMockCtx(messages, { problemId: 'abc-invalid' });
+      const service = new EffectivenessService(ctx as any);
+
+      await service.analyzeConversation(TEST_CONV_ID);
+
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          problemDifficulty: null,
+        }),
+        expect.any(Boolean),
+      );
+    });
+
+    it('should set backfilledAt to null (pending backfill)', async () => {
+      const messages = [
+        makeStudentMsg('这道题的算法复杂度怎么分析？我想理解一下动态规划'),
+        makeStudentMsg('明白了那优化的方向是什么呢？可以降低复杂度吗'),
+        makeAiMsg('可以用动态规划'),
+        makeAiMsg('复杂度是 O(n)'),
       ];
       const { ctx, mockConversationModel } = createMockCtx(messages);
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
+      await service.analyzeConversation(TEST_CONV_ID);
 
-      expect(result).toBe(true);
-      expect(mockConversationModel.updateEffectiveness).toHaveBeenCalledWith(
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
         expect.anything(),
-        true
+        expect.objectContaining({ backfilledAt: null }),
+        expect.any(Boolean),
       );
     });
 
     it('should handle errors gracefully and return false', async () => {
       const { ctx } = createMockCtx([]);
-      // Override messageModel to throw
       (ctx.get as jest.Mock).mockImplementation((name: string) => {
         if (name === 'messageModel') {
           return { findByConversationId: jest.fn().mockRejectedValue(new Error('DB error')) };
         }
         if (name === 'conversationModel') {
-          return { updateEffectiveness: jest.fn() };
+          return { findById: jest.fn().mockRejectedValue(new Error('DB error')) };
         }
         return null;
       });
       const service = new EffectivenessService(ctx as any);
 
-      const result = await service.analyzeConversation('507f1f77bcf86cd799439011');
-
+      const result = await service.analyzeConversation(TEST_CONV_ID);
       expect(result).toBe(false);
+      expect(ctx.logger.error).toHaveBeenCalled();
+    });
+  });
+
+  describe('backfillBehavioralSignals — Phase B (delayed)', () => {
+    it('should query record collection with correct domainId and numeric pid', async () => {
+      const existingMetrics = {
+        v: 1 as const,
+        studentMessageCount: 2,
+        studentTotalLength: 100,
+        submissionsAfter: null,
+        firstAcceptedIndex: null,
+        problemDifficulty: 0.4,
+        backfilledAt: null,
+      };
+      const { ctx, mockConversationModel, mockRecordCollection } = createMockCtx(
+        [], { metrics: existingMetrics },
+      );
+      const service = new EffectivenessService(ctx as any);
+
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      expect(ctx.db.collection).toHaveBeenCalledWith('record');
+      const findCall = mockRecordCollection.find.mock.calls[0][0];
+      expect(findCall.domainId).toBe('default');
+      expect(findCall.uid).toBe(1001);
+      expect(findCall.pid).toBe(1000); // numeric, stripped 'P' prefix
+    });
+
+    it('should compute submissionsAfter and firstAcceptedIndex', async () => {
+      const existingMetrics = {
+        v: 1 as const,
+        studentMessageCount: 2,
+        studentTotalLength: 100,
+        submissionsAfter: null,
+        firstAcceptedIndex: null,
+        problemDifficulty: 0.4,
+        backfilledAt: null,
+      };
+      const { ctx, mockConversationModel, mockRecordCollection } = createMockCtx(
+        [], { metrics: existingMetrics },
+      );
+      // Mock 3 submissions: WA, WA, AC
+      mockRecordCollection.find.mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          toArray: jest.fn().mockResolvedValue([
+            { status: 3 }, // WA
+            { status: 3 }, // WA
+            { status: 1 }, // AC
+          ]),
+        }),
+      });
+      const service = new EffectivenessService(ctx as any);
+
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          submissionsAfter: 3,
+          firstAcceptedIndex: 2,
+          backfilledAt: expect.any(Date),
+        }),
+        expect.any(Boolean),
+      );
+    });
+
+    it('should set submissionsAfter=0 when no submissions', async () => {
+      const existingMetrics = {
+        v: 1 as const,
+        studentMessageCount: 2,
+        studentTotalLength: 100,
+        submissionsAfter: null,
+        firstAcceptedIndex: null,
+        problemDifficulty: 0.4,
+        backfilledAt: null,
+      };
+      const { ctx, mockConversationModel } = createMockCtx([], { metrics: existingMetrics });
+      const service = new EffectivenessService(ctx as any);
+
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          submissionsAfter: 0,
+          firstAcceptedIndex: null,
+        }),
+        expect.any(Boolean),
+      );
+    });
+
+    it('should set submissionsAfter=null for domainId=system', async () => {
+      const existingMetrics = {
+        v: 1 as const,
+        studentMessageCount: 2,
+        studentTotalLength: 100,
+        submissionsAfter: null,
+        firstAcceptedIndex: null,
+        problemDifficulty: null,
+        backfilledAt: null,
+      };
+      const { ctx, mockConversationModel } = createMockCtx(
+        [], { domainId: 'system', metrics: existingMetrics },
+      );
+      const service = new EffectivenessService(ctx as any);
+
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          submissionsAfter: null,
+          firstAcceptedIndex: null,
+          backfilledAt: expect.any(Date),
+        }),
+        expect.any(Boolean),
+      );
+    });
+
+    it('should skip when conversation has no metrics', async () => {
+      const { ctx, mockConversationModel } = createMockCtx([], { metrics: undefined });
+      const service = new EffectivenessService(ctx as any);
+
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      expect(mockConversationModel.updateMetrics).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('isEffective derivation (post-backfill)', () => {
+    function makeMetrics(overrides: Partial<typeof baseMetrics> = {}) {
+      return { ...baseMetrics, ...overrides };
+    }
+    const baseMetrics = {
+      v: 1 as const,
+      studentMessageCount: 2,
+      studentTotalLength: 100,
+      submissionsAfter: null as number | null,
+      firstAcceptedIndex: null as number | null,
+      problemDifficulty: 0.4,
+      backfilledAt: null as Date | null,
+    };
+
+    it('should derive true when AC after backfill', async () => {
+      const { ctx, mockConversationModel, mockRecordCollection } = createMockCtx(
+        [], { metrics: makeMetrics() },
+      );
+      mockRecordCollection.find.mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          toArray: jest.fn().mockResolvedValue([{ status: 1 }]),
+        }),
+      });
+      const service = new EffectivenessService(ctx as any);
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      const [, , isEffective] = mockConversationModel.updateMetrics.mock.calls[0];
+      expect(isEffective).toBe(true);
+    });
+
+    it('should derive false when 0 submissions (asked but never tried)', async () => {
+      const { ctx, mockConversationModel } = createMockCtx(
+        [], { metrics: makeMetrics() },
+      );
+      const service = new EffectivenessService(ctx as any);
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      const [, , isEffective] = mockConversationModel.updateMetrics.mock.calls[0];
+      expect(isEffective).toBe(false);
+    });
+
+    it('should derive true when all submissions failed but student engaged (msg>=3)', async () => {
+      const { ctx, mockConversationModel, mockRecordCollection } = createMockCtx(
+        [], { metrics: makeMetrics({ studentMessageCount: 3 }) },
+      );
+      mockRecordCollection.find.mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          toArray: jest.fn().mockResolvedValue([{ status: 3 }, { status: 3 }]),
+        }),
+      });
+      const service = new EffectivenessService(ctx as any);
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      const [, , isEffective] = mockConversationModel.updateMetrics.mock.calls[0];
+      expect(isEffective).toBe(true);
+    });
+
+    it('should derive false when all submissions failed and low engagement (msg<3)', async () => {
+      const { ctx, mockConversationModel, mockRecordCollection } = createMockCtx(
+        [], { metrics: makeMetrics({ studentMessageCount: 2 }) },
+      );
+      mockRecordCollection.find.mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          toArray: jest.fn().mockResolvedValue([{ status: 3 }]),
+        }),
+      });
+      const service = new EffectivenessService(ctx as any);
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      const [, , isEffective] = mockConversationModel.updateMetrics.mock.calls[0];
+      expect(isEffective).toBe(false);
+    });
+
+    it('should derive true for no-problem consultation with deep engagement (msg>=4)', async () => {
+      const { ctx, mockConversationModel } = createMockCtx(
+        [], {
+          domainId: 'system',
+          metrics: makeMetrics({ studentMessageCount: 4, studentTotalLength: 200 }),
+        },
+      );
+      const service = new EffectivenessService(ctx as any);
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      const [, , isEffective] = mockConversationModel.updateMetrics.mock.calls[0];
+      expect(isEffective).toBe(true);
+    });
+
+    it('should derive false for no-problem consultation with shallow engagement (msg<4)', async () => {
+      const { ctx, mockConversationModel } = createMockCtx(
+        [], {
+          domainId: 'system',
+          metrics: makeMetrics({ studentMessageCount: 2, studentTotalLength: 100 }),
+        },
+      );
+      const service = new EffectivenessService(ctx as any);
+      await service.backfillBehavioralSignals(TEST_CONV_ID as any);
+
+      const [, , isEffective] = mockConversationModel.updateMetrics.mock.calls[0];
+      expect(isEffective).toBe(false);
+    });
+  });
+
+  describe('compensateBackfill', () => {
+    it('should call findPendingBackfill and process pending docs', async () => {
+      const pendingMetrics = {
+        v: 1 as const,
+        studentMessageCount: 3,
+        studentTotalLength: 150,
+        submissionsAfter: null,
+        firstAcceptedIndex: null,
+        problemDifficulty: 0.4,
+        backfilledAt: null,
+      };
+      const pendingDoc = { ...baseConversation, metrics: pendingMetrics };
+      // findById must return the same doc with metrics for backfillBehavioralSignals
+      const { ctx, mockConversationModel } = createMockCtx([], { metrics: pendingMetrics });
+      mockConversationModel.findPendingBackfill.mockResolvedValue([pendingDoc]);
+      const service = new EffectivenessService(ctx as any);
+
+      const count = await service.compensateBackfill();
+
+      expect(mockConversationModel.findPendingBackfill).toHaveBeenCalledWith(
+        expect.any(Date), 100,
+      );
+      expect(count).toBe(1);
+      expect(mockConversationModel.updateMetrics).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ backfilledAt: expect.any(Date) }),
+        expect.any(Boolean),
+      );
+    });
+
+    it('should return 0 when no pending docs', async () => {
+      const { ctx, mockConversationModel } = createMockCtx();
+      mockConversationModel.findPendingBackfill.mockResolvedValue([]);
+      const service = new EffectivenessService(ctx as any);
+
+      const count = await service.compensateBackfill();
+      expect(count).toBe(0);
+      expect(mockConversationModel.updateMetrics).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      const { ctx, mockConversationModel } = createMockCtx();
+      mockConversationModel.findPendingBackfill.mockRejectedValue(new Error('DB error'));
+      const service = new EffectivenessService(ctx as any);
+
+      const count = await service.compensateBackfill();
+      expect(count).toBe(0);
       expect(ctx.logger.error).toHaveBeenCalled();
     });
   });
