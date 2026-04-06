@@ -48,6 +48,8 @@ export const StudentAnalyticsTable: React.FC<StudentAnalyticsTableProps> = ({
           <SortableHeader field="effectiveConversations" label={i18n('ai_helper_teacher_analytics_effective_conversations')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
           <SortableHeader field="effectiveRatio" label={i18n('ai_helper_teacher_analytics_effective_ratio')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
           <SortableHeader field="avgMessageCount" label={i18n('ai_helper_teacher_analytics_avg_rounds')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="avgStudentMessages" label={i18n('ai_helper_teacher_analytics_avg_msgs')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+          <SortableHeader field="acRate" label={i18n('ai_helper_teacher_analytics_ac_rate')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
           <SortableHeader field="lastUsedAt" label={i18n('ai_helper_teacher_analytics_last_used')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
           <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
         </tr>
@@ -64,6 +66,8 @@ export const StudentAnalyticsTable: React.FC<StudentAnalyticsTableProps> = ({
             <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>
               {item.avgMessageCount != null ? formatNumber(item.avgMessageCount) : '-'}
             </td>
+            <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.avgStudentMessages != null ? formatNumber(item.avgStudentMessages) : '--'}</td>
+            <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.acRate != null ? formatPercent(item.acRate) : '--'}</td>
             <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textMuted, fontSize: '13px' }}>{formatDateTime(item.lastUsedAt)}</td>
             <td style={{ ...cellStyle, textAlign: 'center' }}>
               <a href={buildPageUrl(`/ai-helper/conversations?userId=${item.key}`)} style={linkStyle}>{i18n('ai_helper_teacher_view_conversations')}</a>

@@ -116,6 +116,9 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
               {isVisible('debug') && <SortableHeader field="debug" label={i18n('ai_helper_teacher_analytics_debug')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
               {isVisible('clarify') && <SortableHeader field="clarify" label={i18n('ai_helper_teacher_analytics_clarify')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
               {isVisible('optimize') && <SortableHeader field="optimize" label={i18n('ai_helper_teacher_analytics_optimize')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('avgStudentMessages') && <SortableHeader field="avgStudentMessages" label={i18n('ai_helper_teacher_analytics_avg_msgs')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('avgSubmissionsAfter') && <SortableHeader field="avgSubmissionsAfter" label={i18n('ai_helper_teacher_analytics_avg_subs')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
+              {isVisible('acRate') && <SortableHeader field="acRate" label={i18n('ai_helper_teacher_analytics_ac_rate')} sortField={sortField} sortOrder={sortOrder} onSort={onSort} />}
               <th style={{ ...getTableHeaderStyle(), textAlign: 'center' }}>{i18n('ai_helper_teacher_analytics_actions')}</th>
             </tr>
           </thead>
@@ -152,6 +155,9 @@ export const ProblemAnalyticsTable: React.FC<ProblemAnalyticsTableProps> = ({
                 {isVisible('debug') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.debug ?? 0}</td>}
                 {isVisible('clarify') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.clarify ?? 0}</td>}
                 {isVisible('optimize') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.optimize ?? 0}</td>}
+                {isVisible('avgStudentMessages') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.avgStudentMessages != null ? formatNumber(item.avgStudentMessages) : '--'}</td>}
+                {isVisible('avgSubmissionsAfter') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.avgSubmissionsAfter != null ? formatNumber(item.avgSubmissionsAfter) : '--'}</td>}
+                {isVisible('acRate') && <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.acRate != null ? formatPercent(item.acRate) : '--'}</td>}
                 <td style={{ ...cellStyle, textAlign: 'center' }}>
                   <a href={buildPageUrl(`/ai-helper/conversations?problemId=${item.key}`)} style={linkStyle}>{i18n('ai_helper_teacher_view_conversations')}</a>
                 </td>
