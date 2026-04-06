@@ -61,10 +61,18 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
             let periodTokens = 0;
             let periodCost = 0;
             let periodRequests = 0;
-            for (const d of dailyTrend) {
-                periodTokens += d.totalTokens;
-                periodCost += d.totalCost;
-                periodRequests += d.requestCount;
+            if (validPeriod === 'day') {
+                // "今日" 直接使用当天聚合数据，而非 dailyTrend（30天）的累加
+                periodTokens = todayUsage.totalTokens;
+                periodCost = todayUsage.totalCost;
+                periodRequests = todayUsage.requestCount;
+            }
+            else {
+                for (const d of dailyTrend) {
+                    periodTokens += d.totalTokens;
+                    periodCost += d.totalCost;
+                    periodRequests += d.requestCount;
+                }
             }
             // 补全日期范围内缺失的日期（填零值）
             const filledTrend = this.fillMissingDates(dailyTrend, startDate, endDate);
