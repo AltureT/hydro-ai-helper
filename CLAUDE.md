@@ -65,9 +65,20 @@ frontend/  → React 17 components (TSX, rendered into HydroOJ templates)
 - **AIConfigModel** stores a single config record (id=`'default'`) with v2 schema supporting multiple API endpoints with fallback priority
 - **API keys** are AES-256-GCM encrypted via `lib/crypto.ts`; encryption key from `ENCRYPTION_KEY` env var
 
-### MongoDB Collections
+### MongoDB Collections & Model Injection
 
-`ai_conversations`, `ai_messages`, `ai_config`, `ai_rate_limit_records` (TTL 2min), `ai_jailbreak_logs`, `ai_plugin_install`, `ai_version_cache`. All records carry `domainId` for tenant isolation (default: `'system'`).
+All records carry `domainId` for tenant isolation (default: `'system'`). Models are injected in `src/index.ts` via `ctx.provide()`:
+
+| `ctx.get(name)` | Class | Collection |
+|---|---|---|
+| `'aiConfigModel'` | `AIConfigModel` | `ai_config` |
+| `'conversationModel'` | `ConversationModel` | `ai_conversations` |
+| `'messageModel'` | `MessageModel` | `ai_messages` |
+| `'rateLimitRecordModel'` | `RateLimitRecordModel` | `ai_rate_limit_records` (TTL 2min) |
+| `'jailbreakLogModel'` | `JailbreakLogModel` | `ai_jailbreak_logs` |
+| `'tokenUsageModel'` | `TokenUsageModel` | `ai_token_usage` |
+
+Other collections (no model wrapper): `ai_plugin_install`, `ai_version_cache`.
 
 ## Critical Import Pattern
 
@@ -127,19 +138,6 @@ Handler registration is in `src/index.ts`. Key routes:
 
 All routes also registered with `/d/:domainId/` prefix for domain isolation.
 
-## Model Injection Names
-
-In `src/index.ts`, models are injected via `ctx.provide()`:
-
-| `ctx.get(name)` | Class | Collection |
-|---|---|---|
-| `'aiConfigModel'` | `AIConfigModel` | `ai_config` |
-| `'conversationModel'` | `ConversationModel` | `ai_conversations` |
-| `'messageModel'` | `MessageModel` | `ai_messages` |
-| `'rateLimitRecordModel'` | `RateLimitRecordModel` | `ai_rate_limit_records` |
-| `'jailbreakLogModel'` | `JailbreakLogModel` | `ai_jailbreak_logs` |
-| `'tokenUsageModel'` | `TokenUsageModel` | `ai_token_usage` |
-
 ## Handler Response Patterns
 
 - **JSON API**: `this.response.type = 'application/json'; this.response.body = {...}`
@@ -147,14 +145,35 @@ In `src/index.ts`, models are injected via `ctx.provide()`:
 - **SSE streaming**: Use `createSSEWriter()` from `lib/sseHelper.ts`, set headers via helper
 - Always check `this.request.headers.accept` when handler supports both HTML and JSON
 
-## Error Categories (AIServiceError)
-
-Retryable: `rate_limit`, `server`, `timeout`, `network`
-Non-retryable: `auth`, `client`, `aborted`, `unknown`
-User-facing messages defined in `openaiClient.ts` → `USER_ERROR_MESSAGES`
-
 ## Frontend
 
 React 17 components in `frontend/` are bundled by HydroOJ's build system (not this plugin).
 Page files (`*.page.tsx`) register with HydroOJ's page loader automatically.
 No separate frontend build command needed — HydroOJ handles compilation.
+
+### Frontend Build Pipeline (HydroOJ internals)
+
+HydroOJ uses **esbuild at runtime** (not webpack) to compile addon `frontend/*.page.tsx` files:
+- `@hydrooj/ui-default/backendlib/builder.ts` → `buildUI()` runs on `app/started` event
+- Scans all addon `frontend/` dirs for `*.page.tsx` / `*.lazy.tsx`
+- Output served via `/lazy/:version/:name` with cache-busting version hash
+- **After `pm2 restart hydrooj`**, frontend is automatically recompiled
+
+### i18n — Critical: How Translations Reach the Frontend
+
+Frontend `i18n()` (from `@hydrooj/ui-default/utils/base.ts`) reads from `window.LOCALES` object.
+This object is serialized into `lang-zh.js` during `buildUI()` from `global.Hydro.locales`.
+
+**Translation flow:**
+1. Plugin `apply()` calls `ctx.i18n.load('zh', dict)` → registers translations in `global.Hydro.locales`
+2. `ctx.i18n.load()` emits `app/i18n/update` event
+3. Builder listens: `ctx.on('app/i18n/update', debouncedBuildUI)` (2s debounce)
+4. `buildUI()` serializes `global.Hydro.locales[lang]` → `lang-zh.js` → `window.LOCALES={...}`
+5. Browser loads versioned `lang-zh.js`, frontend `i18n(key)` finds the translation
+
+**When adding new i18n keys:**
+- Add keys to BOTH `locales/en.yaml` and `locales/zh.yaml`
+- The plugin's `apply()` in `src/index.ts` loads these via `ctx.i18n.load()`
+- After deploy + `pm2 restart`, the debouncedBuildUI should regenerate `lang-zh.js`
+- Users may need to **hard-refresh** (Ctrl+Shift+R) to bypass browser cache of old `lang-*.js`
+- If translations still show as raw keys, verify: (1) YAML parses correctly, (2) `[AI-Helper] Locales loaded` appears in pm2 logs, (3) timing — buildUI may run before plugin locale load; a full `pm2 restart` (not reload) ensures proper sequencing
