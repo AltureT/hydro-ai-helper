@@ -574,14 +574,22 @@ class AnalyticsFilterOptionsHandler extends hydrooj_1.Handler {
             const validClassIds = classIds.filter(Boolean).sort();
             const validProblemIds = problemIds.filter(Boolean).sort();
             const titleMap = validProblemIds.length > 0
-                ? await _getProblemTitleMap(domainId, validProblemIds, this.translate('ai_helper_teacher_conv_col_problem_prefix'))
+                ? await _getProblemTitleMap(domainId, validProblemIds, this.translate('ai_helper_problem_fallback_prefix'))
                 : new Map();
             const problemOptions = validProblemIds.map(id => ({
                 id,
                 title: titleMap.get(id) || id,
             }));
             const validUserIds = userIds.filter(Boolean).sort((a, b) => a - b);
-            this.response.body = { classIds: validClassIds, problemOptions, userIds: validUserIds };
+            // 获取用户名映射
+            const userNameMap = validUserIds.length > 0
+                ? await getUserNameMap(validUserIds, this.translate('ai_helper_teacher_deleted_user'))
+                : new Map();
+            const userOptions = validUserIds.map(id => ({
+                id,
+                name: userNameMap.get(id) || String(id),
+            }));
+            this.response.body = { classIds: validClassIds, problemOptions, userIds: validUserIds, userOptions };
             this.response.type = 'application/json';
         }
         catch (err) {
