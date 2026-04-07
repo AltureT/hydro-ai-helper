@@ -131,6 +131,7 @@ interface AnalyticsFilters {
   endDate?: Date;
   classId?: string;
   problemId?: string;
+  userId?: number;
 }
 
 /**
@@ -156,12 +157,13 @@ export class AnalyticsHandler extends Handler {
       const preferJson = accept.includes('application/json');
 
       // 读取查询参数
-      const { dimension, startDate, endDate, classId, problemId } = this.request.query as {
+      const { dimension, startDate, endDate, classId, problemId, userId } = this.request.query as {
         dimension?: string;
         startDate?: string;
         endDate?: string;
         classId?: string;
         problemId?: string;
+        userId?: string;
       };
 
       // 浏览器直接访问页面时（无 dimension 参数且未声明 JSON），返回模板而不是报错
@@ -211,6 +213,13 @@ export class AnalyticsHandler extends Handler {
 
       if (problemId) {
         filters.problemId = String(problemId);
+      }
+
+      if (userId) {
+        const parsedUserId = parseInt(String(userId), 10);
+        if (!isNaN(parsedUserId)) {
+          filters.userId = parsedUserId;
+        }
       }
 
       // 根据维度分发到不同聚合方法
@@ -280,6 +289,10 @@ export class AnalyticsHandler extends Handler {
 
     if (filters.problemId) {
       match.problemId = filters.problemId;
+    }
+
+    if (filters.userId !== undefined) {
+      match.userId = filters.userId;
     }
 
     const pipeline: Document[] = [];
@@ -369,6 +382,10 @@ export class AnalyticsHandler extends Handler {
 
     if (filters.problemId) {
       match.problemId = filters.problemId;
+    }
+
+    if (filters.userId !== undefined) {
+      match.userId = filters.userId;
     }
 
     const pipeline: Document[] = [];
@@ -543,6 +560,10 @@ export class AnalyticsHandler extends Handler {
       match.problemId = filters.problemId;
     }
 
+    if (filters.userId !== undefined) {
+      match.userId = filters.userId;
+    }
+
     const pipeline: Document[] = [];
 
     // 1. Match 阶段
@@ -645,9 +666,10 @@ export class AnalyticsFilterOptionsHandler extends Handler {
       const filter: Document = {};
       if (domainId) filter.domainId = domainId;
 
-      const [classIds, problemIds] = await Promise.all([
+      const [classIds, problemIds, userIds] = await Promise.all([
         col.distinct('classId', filter) as Promise<string[]>,
         col.distinct('problemId', filter) as Promise<string[]>,
+        col.distinct('userId', filter) as Promise<number[]>,
       ]);
 
       // 获取题目标题映射
@@ -662,7 +684,9 @@ export class AnalyticsFilterOptionsHandler extends Handler {
         title: titleMap.get(id) || id,
       }));
 
-      this.response.body = { classIds: validClassIds, problemOptions };
+      const validUserIds = userIds.filter(Boolean).sort((a, b) => a - b);
+
+      this.response.body = { classIds: validClassIds, problemOptions, userIds: validUserIds };
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[AI Helper] AnalyticsFilterOptionsHandler error:', err);

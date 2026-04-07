@@ -109,7 +109,7 @@ class AnalyticsHandler extends hydrooj_1.Handler {
             const accept = this.request.headers.accept || '';
             const preferJson = accept.includes('application/json');
             // 读取查询参数
-            const { dimension, startDate, endDate, classId, problemId } = this.request.query;
+            const { dimension, startDate, endDate, classId, problemId, userId } = this.request.query;
             // 浏览器直接访问页面时（无 dimension 参数且未声明 JSON），返回模板而不是报错
             if (!dimension && !preferJson) {
                 this.response.template = 'ai-helper/analytics.html';
@@ -153,6 +153,12 @@ class AnalyticsHandler extends hydrooj_1.Handler {
             }
             if (problemId) {
                 filters.problemId = String(problemId);
+            }
+            if (userId) {
+                const parsedUserId = parseInt(String(userId), 10);
+                if (!isNaN(parsedUserId)) {
+                    filters.userId = parsedUserId;
+                }
             }
             // 根据维度分发到不同聚合方法
             let result;
@@ -218,6 +224,9 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         }
         if (filters.problemId) {
             match.problemId = filters.problemId;
+        }
+        if (filters.userId !== undefined) {
+            match.userId = filters.userId;
         }
         const pipeline = [];
         // 1. Match 阶段
@@ -296,6 +305,9 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         }
         if (filters.problemId) {
             match.problemId = filters.problemId;
+        }
+        if (filters.userId !== undefined) {
+            match.userId = filters.userId;
         }
         const pipeline = [];
         // 1. Match 阶段
@@ -456,6 +468,9 @@ class AnalyticsHandler extends hydrooj_1.Handler {
         if (filters.problemId) {
             match.problemId = filters.problemId;
         }
+        if (filters.userId !== undefined) {
+            match.userId = filters.userId;
+        }
         const pipeline = [];
         // 1. Match 阶段
         if (Object.keys(match).length > 0) {
@@ -550,9 +565,10 @@ class AnalyticsFilterOptionsHandler extends hydrooj_1.Handler {
             const filter = {};
             if (domainId)
                 filter.domainId = domainId;
-            const [classIds, problemIds] = await Promise.all([
+            const [classIds, problemIds, userIds] = await Promise.all([
                 col.distinct('classId', filter),
                 col.distinct('problemId', filter),
+                col.distinct('userId', filter),
             ]);
             // 获取题目标题映射
             const validClassIds = classIds.filter(Boolean).sort();
@@ -564,7 +580,8 @@ class AnalyticsFilterOptionsHandler extends hydrooj_1.Handler {
                 id,
                 title: titleMap.get(id) || id,
             }));
-            this.response.body = { classIds: validClassIds, problemOptions };
+            const validUserIds = userIds.filter(Boolean).sort((a, b) => a - b);
+            this.response.body = { classIds: validClassIds, problemOptions, userIds: validUserIds };
             this.response.type = 'application/json';
         }
         catch (err) {

@@ -60,6 +60,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [endDate, setEndDate] = useState<string>(initialFilters.endDate);
   const [classId, setClassId] = useState<string>(initialFilters.classId);
   const [problemId, setProblemId] = useState<string>(initialFilters.problemId);
+  const [userId, setUserId] = useState<string>(initialFilters.userId);
   const [studentSearch, setStudentSearch] = useState<string>('');
 
   const [loading, setLoading] = useState<boolean>(false);
@@ -69,6 +70,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   // 筛选条件自动补全选项
   const [classOptions, setClassOptions] = useState<string[]>([]);
   const [problemOptions, setProblemOptions] = useState<FilterOption[]>([]);
+  const [userOptions, setUserOptions] = useState<number[]>([]);
 
   type SortField = keyof AnalyticsItem;
   const [sortField, setSortField] = useState<SortField | null>(null);
@@ -95,7 +97,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   }, [visibleColumns]);
 
   const hasInitialFilters = initialFilters.startDate || initialFilters.endDate ||
-                           initialFilters.classId || initialFilters.problemId;
+                           initialFilters.classId || initialFilters.problemId ||
+                           initialFilters.userId;
 
   const fetchData = async () => {
     setLoading(true);
@@ -107,6 +110,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
       if (endDate) params.set('endDate', endDate);
       if (classId) params.set('classId', classId);
       if (problemId) params.set('problemId', problemId);
+      if (userId) params.set('userId', userId);
 
       const res = await fetch(buildApiUrl(`/ai-helper/analytics?${params.toString()}`), {
         method: 'GET',
@@ -142,6 +146,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
           const json = await res.json();
           setClassOptions(json.classIds || []);
           setProblemOptions(json.problemOptions || []);
+          setUserOptions(json.userIds || []);
         }
       } catch {}
     })();
@@ -244,14 +249,17 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
       )}
 
       {/* Filter form */}
-      <div style={{ ...cardStyle, marginBottom: SPACING.lg }}>
-        <h3 style={{ margin: `0 0 ${SPACING.lg}`, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_filter_title')}</h3>
+      <form onSubmit={(e) => { e.preventDefault(); fetchData(); }} style={{ ...cardStyle, marginBottom: SPACING.lg }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.lg }}>
+          <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n('ai_helper_teacher_filter_title')}</h3>
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: SPACING.lg }}>
           <div>
             <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_dimension')}</label>
             <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
               {DIMENSION_OPTIONS.map(opt => (
                 <button
+                  type="button"
                   key={opt.value}
                   onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); setStudentSearch(''); setProblemId(''); }}
                   style={getPillStyle(dimension === opt.value)}
@@ -287,6 +295,14 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
               {problemOptions.map(p => <option key={p.id} value={p.id} label={p.title} />)}
             </datalist>
           </div>
+          <div>
+            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_student_id')}</label>
+            <input type="text" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_student_id')}
+              list="analytics-user-options" style={getInputStyle()} />
+            <datalist id="analytics-user-options">
+              {userOptions.map(u => <option key={u} value={String(u)} />)}
+            </datalist>
+          </div>
           {dimension === 'student' && (
             <div>
               <label style={labelStyle}>{i18n('ai_helper_teacher_analytics_student_search')}</label>
@@ -300,10 +316,10 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
             </div>
           )}
         </div>
-        <button onClick={fetchData} disabled={loading} style={queryButtonStyle}>
+        <button type="submit" disabled={loading} style={queryButtonStyle}>
           {loading ? i18n('ai_helper_teacher_querying') : i18n('ai_helper_teacher_query')}
         </button>
-      </div>
+      </form>
 
       {loading && (
         <div style={{

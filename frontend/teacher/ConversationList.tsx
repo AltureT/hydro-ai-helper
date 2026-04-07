@@ -229,6 +229,29 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
 
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
+  // autocomplete 选项
+  const [classOptions, setClassOptions] = useState<string[]>([]);
+  const [problemOptions, setProblemOptions] = useState<{ id: string; title: string }[]>([]);
+  const [userOptions, setUserOptions] = useState<number[]>([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(buildApiUrl('/ai-helper/analytics/filter-options'), {
+          headers: { 'Accept': 'application/json' },
+        });
+        if (res.ok) {
+          const json = await res.json();
+          setClassOptions(json.classIds || []);
+          setProblemOptions(json.problemOptions || []);
+          setUserOptions(json.userIds || []);
+        }
+      } catch (err) {
+        console.error('[AI Helper] Failed to load filter options:', err);
+      }
+    })();
+  }, []);
+
   const loadConversations = async (targetPage?: number) => {
     setLoading(true);
     setError(null);
@@ -368,8 +391,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               value={filters.problemId}
               onChange={(e) => handleFilterChange('problemId', e.target.value)}
               placeholder={i18n('ai_helper_teacher_filter_problem_id_placeholder')}
+              list="conv-problem-options"
               style={getInputStyle()}
             />
+            <datalist id="conv-problem-options">
+              {problemOptions.map(p => <option key={p.id} value={p.id} label={p.title} />)}
+            </datalist>
           </div>
           <div>
             <label style={labelStyle}>{i18n('ai_helper_teacher_filter_class_id')}</label>
@@ -378,8 +405,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               value={filters.classId}
               onChange={(e) => handleFilterChange('classId', e.target.value)}
               placeholder={i18n('ai_helper_teacher_filter_class_id')}
+              list="conv-class-options"
               style={getInputStyle()}
             />
+            <datalist id="conv-class-options">
+              {classOptions.map(c => <option key={c} value={c} />)}
+            </datalist>
           </div>
           <div>
             <label style={labelStyle}>{i18n('ai_helper_teacher_filter_student_id')}</label>
@@ -388,8 +419,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
               value={filters.userId}
               onChange={(e) => handleFilterChange('userId', e.target.value)}
               placeholder={i18n('ai_helper_teacher_filter_student_id')}
+              list="conv-user-options"
               style={getInputStyle()}
             />
+            <datalist id="conv-user-options">
+              {userOptions.map(u => <option key={u} value={String(u)} />)}
+            </datalist>
           </div>
         </div>
         <button
