@@ -29,7 +29,7 @@ const initialState: BatchSummaryState = {
   error: null,
 };
 
-function buildUrl(domainId: string, path: string): string {
+export function buildUrl(domainId: string, path: string): string {
   return domainId !== 'system'
     ? `/d/${domainId}/ai-helper/batch-summaries${path}`
     : `/ai-helper/batch-summaries${path}`;

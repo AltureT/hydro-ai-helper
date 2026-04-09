@@ -198,22 +198,32 @@ export class BatchSummaryService {
       // a. Mark as generating
       await this.summaryModel.markGenerating(summary._id);
 
-      // b. Fetch submissions per problem
+      // b. Fetch all submissions for this student in one query
+      const pids = problems.map((p) => p.pid);
+      const allRecords = await this.db
+        .collection('record')
+        .find({
+          domainId: job.domainId,
+          uid: summary.userId,
+          pid: { $in: pids },
+        })
+        .sort({ judgeAt: 1 })
+        .toArray();
+
+      // Group records by pid
+      const recordsByPid = new Map<string, any[]>();
+      for (const r of allRecords) {
+        const pid = String(r.pid);
+        if (!recordsByPid.has(pid)) recordsByPid.set(pid, []);
+        recordsByPid.get(pid)!.push(r);
+      }
+
+      // c. Sample per problem
       const sampleResults = new Map<string, SampleResult>();
       const problemSnapshots: ProblemSnapshot[] = [];
 
       for (const problem of problems) {
-        const rawRecords = await this.db
-          .collection('record')
-          .find({
-            domainId: job.domainId,
-            uid: summary.userId,
-            pid: problem.pid,
-          })
-          .sort({ judgeAt: 1 })
-          .toArray();
-
-        // c. Map to RawSubmission and sample
+        const rawRecords = recordsByPid.get(problem.pid) ?? [];
         const rawSubmissions: RawSubmission[] = rawRecords.map((r: any) => ({
           recordId: r._id,
           code: r.code ?? '',

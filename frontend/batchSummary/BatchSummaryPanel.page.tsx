@@ -8,7 +8,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import { COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle, getAlertStyle } from '../utils/styles';
-import { useBatchSummary } from './useBatchSummary';
+import { useBatchSummary, buildUrl } from './useBatchSummary';
 import { SummaryCard } from './SummaryCard';
 
 // ─── Props ─────────────────────────────────────────────────────────────────────
@@ -18,14 +18,6 @@ interface BatchSummaryPanelProps {
   contestId: string;
   isTeacher: boolean;
   existingJobId?: string;
-}
-
-// ─── URL helper ────────────────────────────────────────────────────────────────
-
-function buildUrl(domainId: string, path: string): string {
-  return domainId !== 'system'
-    ? `/d/${domainId}/ai-helper/batch-summaries${path}`
-    : `/ai-helper/batch-summaries${path}`;
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────

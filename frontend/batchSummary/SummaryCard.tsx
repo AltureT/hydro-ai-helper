@@ -244,7 +244,7 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
                     fontSize: '13px',
                   }}
                 >
-                  保存
+                  {i18n('Save')}
                 </button>
                 <button
                   onClick={handleEditCancel}
@@ -254,7 +254,7 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
                     fontSize: '13px',
                   }}
                 >
-                  取消
+                  {i18n('ai_helper_batch_summary_cancel')}
                 </button>
               </div>
             </div>

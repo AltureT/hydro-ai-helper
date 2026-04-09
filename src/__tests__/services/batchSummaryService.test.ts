@@ -192,7 +192,7 @@ describe('BatchSummaryService', () => {
         expect.objectContaining({
           domainId: 'test-domain',
           uid: 42,
-          pid: 'p1',
+          pid: { $in: ['p1'] },
         }),
       );
     });
