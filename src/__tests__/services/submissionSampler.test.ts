@@ -247,7 +247,7 @@ describe('SubmissionSampler', () => {
       expect(result.sampledSubmissions).toHaveLength(1);
       expect(result.submissionCount).toBe(1);
       const s = result.sampledSubmissions[0];
-      expect(s.milestone).toMatch(/first|final/);
+      expect(s.milestone).toBe('first+final');
     });
 
     it('caps at MAX_SAMPLES (5) submissions', () => {

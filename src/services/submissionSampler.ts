@@ -232,7 +232,7 @@ export class SubmissionSampler {
             code,
             status: sub.status,
             timestamp: sub.timestamp,
-            milestone: 'first',
+            milestone: 'first+final',
           },
         ],
         allStatuses,
