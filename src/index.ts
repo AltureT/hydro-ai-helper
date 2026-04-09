@@ -12,7 +12,7 @@ console.log('[AI-Helper] Loading plugin...');
 import path from 'path';
 import fs from 'fs';
 import yaml from 'js-yaml';
-import { Context, definePlugin, Schema } from 'hydrooj';
+import { Context, definePlugin, Schema, PRIV } from 'hydrooj';
 console.log('[AI-Helper] hydrooj imports OK');
 
 import { HelloHandler, HelloHandlerPriv } from './handlers/testHandler';
@@ -50,6 +50,16 @@ console.log('[AI-Helper] versionHandler OK');
 import { CostAnalyticsHandler, CostAnalyticsHandlerPriv } from './handlers/costAnalyticsHandler';
 console.log('[AI-Helper] costAnalyticsHandler OK');
 
+import {
+  BatchSummaryGenerateHandler,
+  BatchSummaryResultHandler,
+  BatchSummaryRetryHandler,
+  BatchSummaryPublishHandler,
+  BatchSummaryExportHandler,
+  BatchSummaryEditHandler,
+} from './handlers/batchSummaryHandler';
+console.log('[AI-Helper] batchSummaryHandler OK');
+
 import { FeedbackHandler, FeedbackHandlerPriv } from './handlers/feedbackHandler';
 console.log('[AI-Helper] feedbackHandler OK');
 
@@ -64,6 +74,8 @@ import { JailbreakLogModel } from './models/jailbreakLog';
 import { VersionCacheModel } from './models/versionCache';
 import { PluginInstallModel } from './models/pluginInstall';
 import { TokenUsageModel } from './models/tokenUsage';
+import { BatchSummaryJobModel } from './models/batchSummaryJob';
+import { StudentSummaryModel } from './models/studentSummary';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -125,6 +137,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const pluginInstallModel = new PluginInstallModel(db);
     const tokenUsageModel = new TokenUsageModel(db);
     const requestStatsModel = new RequestStatsModel(db);
+    const batchSummaryJobModel = new BatchSummaryJobModel(db);
+    const studentSummaryModel = new StudentSummaryModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -147,6 +161,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
     await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
     await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
+    await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
+    await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
@@ -183,6 +199,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('pluginInstallModel', pluginInstallModel);
     ctx.provide('tokenUsageModel', tokenUsageModel);
     ctx.provide('requestStatsModel', requestStatsModel);
+    ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
+    ctx.provide('studentSummaryModel', studentSummaryModel);
     ctx.provide('errorReporter', errorReporter);
 
     // 初始化版本服务
@@ -284,6 +302,31 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/analytics/cost - 成本分析 API
     ctx.Route('ai_helper_cost_analytics', '/ai-helper/analytics/cost', CostAnalyticsHandler, CostAnalyticsHandlerPriv);
     ctx.Route('ai_helper_cost_analytics_domain', '/d/:domainId/ai-helper/analytics/cost', CostAnalyticsHandler, CostAnalyticsHandlerPriv);
+
+    // 批量摘要路由
+    // POST /ai-helper/batch-summaries/generate - 触发批量生成
+    ctx.Route('ai_batch_summary_generate', '/ai-helper/batch-summaries/generate', BatchSummaryGenerateHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_generate_domain', '/d/:domainId/ai-helper/batch-summaries/generate', BatchSummaryGenerateHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // GET /ai-helper/batch-summaries/:jobId/result - 查询任务结果
+    ctx.Route('ai_batch_summary_result', '/ai-helper/batch-summaries/:jobId/result', BatchSummaryResultHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_result_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/result', BatchSummaryResultHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // POST /ai-helper/batch-summaries/:jobId/retry/:userId - 重试失败摘要
+    ctx.Route('ai_batch_summary_retry', '/ai-helper/batch-summaries/:jobId/retry/:userId', BatchSummaryRetryHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_retry_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/retry/:userId', BatchSummaryRetryHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // POST /ai-helper/batch-summaries/:jobId/publish - 发布摘要
+    ctx.Route('ai_batch_summary_publish', '/ai-helper/batch-summaries/:jobId/publish', BatchSummaryPublishHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_publish_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/publish', BatchSummaryPublishHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // GET /ai-helper/batch-summaries/:jobId/export - 导出 CSV
+    ctx.Route('ai_batch_summary_export', '/ai-helper/batch-summaries/:jobId/export', BatchSummaryExportHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_export_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/export', BatchSummaryExportHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // POST /ai-helper/batch-summaries/:jobId/edit/:userId - 编辑摘要
+    ctx.Route('ai_batch_summary_edit', '/ai-helper/batch-summaries/:jobId/edit/:userId', BatchSummaryEditHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_edit_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/edit/:userId', BatchSummaryEditHandler, PRIV.PRIV_READ_RECORD_CODE);
   }
 });
 
