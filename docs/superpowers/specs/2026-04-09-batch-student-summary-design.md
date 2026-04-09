@@ -11,8 +11,10 @@ Teachers click "Generate AI Summary" on a homework/contest scoreboard page. The 
 - Entry point: homework/contest scoreboard page (成绩表)
 - Data scope: problem content (Markdown + samples) + submission records (code + judge results)
 - AI conversation history: NOT included
-- Visibility: generated summaries immediately visible to both teachers and students
-- Teacher can edit/delete summaries after generation (edit saves to `ai_student_summaries.summary` field directly, no version history)
+- Visibility: summaries default to "draft" state (teacher-only); teacher publishes to make visible to students
+- Teacher can edit/delete summaries after generation; original AI output preserved in `originalSummary` field
+- Re-generation: teacher can click "Generate" again to regenerate (e.g., after students submit new code); warns if edited summaries exist
+- Export: CSV export via API endpoint for downstream data integration
 
 ## Data Model
 
@@ -37,7 +39,7 @@ Teachers click "Generate AI Summary" on a homework/contest scoreboard page. The 
 }
 ```
 
-Index: `{ domainId, contestId }` unique — one job per contest, re-generation overwrites.
+Index: `{ domainId, contestId }` unique — one job per contest. Re-generation creates a new job (old job archived with `status='archived'`).
 
 ### Collection: `ai_student_summaries`
 
@@ -49,7 +51,9 @@ Index: `{ domainId, contestId }` unique — one job per contest, re-generation o
   contestId: ObjectId,
   userId: number,
   status: 'pending' | 'generating' | 'completed' | 'failed',
-  summary: string | null,      // AI-generated Markdown
+  publishStatus: 'draft' | 'published',  // draft = teacher-only; published = visible to student
+  summary: string | null,      // current Markdown (may be teacher-edited)
+  originalSummary: string | null, // original AI-generated Markdown (preserved on edit)
   problemSnapshots: [{
     pid: string,
     title: string,
@@ -158,6 +162,8 @@ POST /ai-helper/batch-summaries/generate
 ctx.Route('ai_batch_summary_generate', '/ai-helper/batch-summaries/generate', BatchSummaryHandler, PRIV.PRIV_READ_RECORD_CODE)
 ctx.Route('ai_batch_summary_result', '/ai-helper/batch-summaries/:jobId', BatchSummaryResultHandler)
 ctx.Route('ai_batch_summary_retry', '/ai-helper/batch-summaries/:jobId/retry/:userId', BatchSummaryRetryHandler)
+ctx.Route('ai_batch_summary_publish', '/ai-helper/batch-summaries/:jobId/publish', BatchSummaryPublishHandler)  // POST: publish all or selected
+ctx.Route('ai_batch_summary_export', '/ai-helper/batch-summaries/:jobId/export', BatchSummaryExportHandler)    // GET: CSV export API
 // + /d/:domainId/ prefixed variants
 ```
 
@@ -250,13 +256,22 @@ ctx.Route('ai_batch_summary_retry', '/ai-helper/batch-summaries/:jobId/retry/:us
 
 **Batch controls:** "全部展开 / 全部折叠" toggle button near the progress bar area.
 
+**Draft/Publish flow:**
+- All summaries default to `publishStatus: 'draft'` (visible only to teacher)
+- AI column icons show a "draft" badge (e.g., dashed circle outline) until published
+- **One-click publish:** "一键发布全部" button appears after generation completes, publishes all draft summaries at once
+- Teacher can also publish individual summaries from the expanded card
+- Re-generation: if teacher clicks "Generate" again, system warns if edited summaries exist; confirmed → archives old job, generates fresh summaries as new drafts
+
+**Export:** "导出 CSV" button calls `GET /ai-helper/batch-summaries/:jobId/export`, returns CSV with columns: userId, userName, score, summaryText, status, generatedAt.
+
 ### Student View
 
-- Student sees the scoreboard with their own summary auto-expanded (if generated)
-- Only their own summary is visible; other students' AI column shows nothing
+- Student sees the scoreboard with their own summary auto-expanded (if `publishStatus === 'published'`)
+- Only their own published summary is visible; draft summaries and other students' AI column show nothing
 - No edit/delete buttons
 - Same submission reference links (pointing to their own records)
-- If not yet generated, AI column shows `—`
+- If not yet generated or still in draft, AI column shows `—`
 
 ### Frontend Implementation
 
