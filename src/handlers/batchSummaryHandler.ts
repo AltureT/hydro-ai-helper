@@ -291,6 +291,38 @@ export class BatchSummaryRetryHandler extends Handler {
 }
 
 /**
+ * BatchSummaryRetryFailedHandler - 批量重置所有失败的学生为待处理
+ * POST /ai-helper/batch-summaries/:jobId/retry-failed
+ */
+export class BatchSummaryRetryFailedHandler extends Handler {
+  async post() {
+    try {
+      const { jobId } = this.request.params;
+      const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
+      const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
+
+      const job = await jobModel.findById(jobId);
+      if (!job) {
+        this.response.status = 404;
+        this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const count = await summaryModel.resetFailedToPending(job._id);
+
+      this.response.body = { ok: true, reset: count };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[BatchSummaryRetryFailedHandler] error:', err);
+      this.response.status = 500;
+      this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
+/**
  * BatchSummaryPublishHandler - 发布摘要
  * POST /ai-helper/batch-summaries/:jobId/publish
  */

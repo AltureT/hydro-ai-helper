@@ -5,7 +5,7 @@
  * 提供竞赛批量摘要的生成、查看、重试、发布、导出、编辑、停止和继续功能
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.StudentSummaryHandler = exports.BatchSummaryContinueHandler = exports.BatchSummaryStopHandler = exports.BatchSummaryLatestHandler = exports.BatchSummaryEditHandler = exports.BatchSummaryExportHandler = exports.BatchSummaryPublishHandler = exports.BatchSummaryRetryHandler = exports.BatchSummaryResultHandler = exports.BatchSummaryGenerateHandler = void 0;
+exports.StudentSummaryHandler = exports.BatchSummaryContinueHandler = exports.BatchSummaryStopHandler = exports.BatchSummaryLatestHandler = exports.BatchSummaryEditHandler = exports.BatchSummaryExportHandler = exports.BatchSummaryPublishHandler = exports.BatchSummaryRetryFailedHandler = exports.BatchSummaryRetryHandler = exports.BatchSummaryResultHandler = exports.BatchSummaryGenerateHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -255,6 +255,36 @@ class BatchSummaryRetryHandler extends hydrooj_1.Handler {
     }
 }
 exports.BatchSummaryRetryHandler = BatchSummaryRetryHandler;
+/**
+ * BatchSummaryRetryFailedHandler - 批量重置所有失败的学生为待处理
+ * POST /ai-helper/batch-summaries/:jobId/retry-failed
+ */
+class BatchSummaryRetryFailedHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            const { jobId } = this.request.params;
+            const jobModel = this.ctx.get('batchSummaryJobModel');
+            const summaryModel = this.ctx.get('studentSummaryModel');
+            const job = await jobModel.findById(jobId);
+            if (!job) {
+                this.response.status = 404;
+                this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
+                this.response.type = 'application/json';
+                return;
+            }
+            const count = await summaryModel.resetFailedToPending(job._id);
+            this.response.body = { ok: true, reset: count };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[BatchSummaryRetryFailedHandler] error:', err);
+            this.response.status = 500;
+            this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.BatchSummaryRetryFailedHandler = BatchSummaryRetryFailedHandler;
 /**
  * BatchSummaryPublishHandler - 发布摘要
  * POST /ai-helper/batch-summaries/:jobId/publish

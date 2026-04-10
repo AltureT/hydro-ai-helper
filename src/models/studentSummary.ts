@@ -141,6 +141,14 @@ export class StudentSummaryModel {
     );
   }
 
+  async resetFailedToPending(jobId: ObjectIdType): Promise<number> {
+    const result = await this.collection.updateMany(
+      { jobId, status: 'failed' },
+      { $set: { status: 'pending', error: null, updatedAt: new Date() } },
+    );
+    return result.modifiedCount;
+  }
+
   async editSummary(id: ObjectIdType, summary: string): Promise<void> {
     await this.collection.updateOne(
       { _id: id },

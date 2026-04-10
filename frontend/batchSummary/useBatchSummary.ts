@@ -468,6 +468,46 @@ export function useBatchSummary(domainId: string) {
     }
   }, [domainId, state.jobId, updateSummary]);
 
+  /** Reset all failed students to pending, then trigger continue generation */
+  const retryFailed = useCallback(async () => {
+    if (!state.jobId) return;
+    setState(prev => ({ ...prev, error: null }));
+
+    try {
+      // 1. Batch-reset all failed → pending
+      const res = await fetch(buildUrl(domainId, `/${state.jobId}/retry-failed`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setState(prev => ({ ...prev, error: extractErrorMsg(errData, `HTTP ${res.status}`) }));
+        return;
+      }
+
+      // 2. Update local state: mark failed → pending
+      setState(prev => {
+        const next = new Map(prev.summaries);
+        for (const [uid, s] of next) {
+          if (s.status === 'failed') {
+            next.set(uid, { ...s, status: 'pending', error: undefined });
+          }
+        }
+        return { ...prev, summaries: next, failed: 0 };
+      });
+
+      // 3. Trigger continue to actually re-generate them
+      await continueGeneration();
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
+      setState(prev => ({ ...prev, error: errMsg }));
+    }
+  }, [domainId, state.jobId, continueGeneration]);
+
   const cleanup = useCallback(() => {
     if (readerRef.current) {
       try { readerRef.current.cancel(); } catch { /* ignore */ }
@@ -481,6 +521,7 @@ export function useBatchSummary(domainId: string) {
     startGeneration,
     stopGeneration,
     continueGeneration,
+    retryFailed,
     loadLatest,
     loadExisting,
     publishAll,

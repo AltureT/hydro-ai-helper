@@ -65,6 +65,10 @@ class StudentSummaryModel {
     async resetToPending(id) {
         await this.collection.updateOne({ _id: id }, { $set: { status: 'pending', error: null, updatedAt: new Date() } });
     }
+    async resetFailedToPending(jobId) {
+        const result = await this.collection.updateMany({ jobId, status: 'failed' }, { $set: { status: 'pending', error: null, updatedAt: new Date() } });
+        return result.modifiedCount;
+    }
     async editSummary(id, summary) {
         await this.collection.updateOne({ _id: id }, { $set: { summary, updatedAt: new Date() } });
     }

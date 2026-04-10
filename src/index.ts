@@ -60,6 +60,7 @@ import {
   BatchSummaryLatestHandler,
   BatchSummaryStopHandler,
   BatchSummaryContinueHandler,
+  BatchSummaryRetryFailedHandler,
   StudentSummaryHandler,
 } from './handlers/batchSummaryHandler';
 console.log('[AI-Helper] batchSummaryHandler OK');
@@ -335,6 +336,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // POST /ai-helper/batch-summaries/:jobId/edit/:userId - 编辑摘要
     ctx.Route('ai_batch_summary_edit', '/ai-helper/batch-summaries/:jobId/edit/:userId', BatchSummaryEditHandler, PRIV.PRIV_READ_RECORD_CODE);
     ctx.Route('ai_batch_summary_edit_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/edit/:userId', BatchSummaryEditHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // POST /ai-helper/batch-summaries/:jobId/retry-failed - 批量重试失败
+    ctx.Route('ai_batch_summary_retry_failed', '/ai-helper/batch-summaries/:jobId/retry-failed', BatchSummaryRetryFailedHandler, PRIV.PRIV_READ_RECORD_CODE);
+    ctx.Route('ai_batch_summary_retry_failed_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/retry-failed', BatchSummaryRetryFailedHandler, PRIV.PRIV_READ_RECORD_CODE);
 
     // POST /ai-helper/batch-summaries/:jobId/stop - 停止生成
     ctx.Route('ai_batch_summary_stop', '/ai-helper/batch-summaries/:jobId/stop', BatchSummaryStopHandler, PRIV.PRIV_READ_RECORD_CODE);

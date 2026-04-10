@@ -17,6 +17,7 @@ const I18N_FALLBACK: Record<string, string> = {
   ai_helper_batch_summary_loading: '加载中...',
   ai_helper_batch_summary_stopped_notice: '生成已停止，部分学生尚未处理。点击「继续生成」恢复。',
   ai_helper_batch_summary_my_title: 'AI 学习总结',
+  ai_helper_batch_summary_retry_failed: '重试失败',
 };
 function t(key: string): string {
   const val = i18n(key);
@@ -46,7 +47,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
 }) => {
   const {
     state, startGeneration, stopGeneration, continueGeneration,
-    loadLatest, publishAll, retryStudent, cleanup,
+    retryFailed, loadLatest, publishAll, retryStudent, cleanup,
   } = useBatchSummary(domainId);
 
   const [expandedUsers, setExpandedUsers] = useState<Set<number>>(new Set());
@@ -170,6 +171,9 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   const hasPending = Array.from(state.summaries.values()).some(
     s => s.status === 'pending',
   );
+  const hasFailed = Array.from(state.summaries.values()).some(
+    s => s.status === 'failed',
+  );
   const progressPct =
     state.total > 0 ? Math.round(((state.completed + state.failed) / state.total) * 100) : 0;
   const isStopped = state.jobStatus === 'stopped';
@@ -254,6 +258,16 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
               style={getButtonStyle('primary')}
             >
               {t('ai_helper_batch_summary_continue')}
+            </button>
+          )}
+
+          {/* Retry failed button */}
+          {!state.isGenerating && hasFailed && (
+            <button
+              onClick={retryFailed}
+              style={getButtonStyle('danger')}
+            >
+              {t('ai_helper_batch_summary_retry_failed')}
             </button>
           )}
 

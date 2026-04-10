@@ -264,6 +264,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // POST /ai-helper/batch-summaries/:jobId/edit/:userId - 编辑摘要
         ctx.Route('ai_batch_summary_edit', '/ai-helper/batch-summaries/:jobId/edit/:userId', batchSummaryHandler_1.BatchSummaryEditHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         ctx.Route('ai_batch_summary_edit_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/edit/:userId', batchSummaryHandler_1.BatchSummaryEditHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        // POST /ai-helper/batch-summaries/:jobId/retry-failed - 批量重试失败
+        ctx.Route('ai_batch_summary_retry_failed', '/ai-helper/batch-summaries/:jobId/retry-failed', batchSummaryHandler_1.BatchSummaryRetryFailedHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        ctx.Route('ai_batch_summary_retry_failed_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/retry-failed', batchSummaryHandler_1.BatchSummaryRetryFailedHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         // POST /ai-helper/batch-summaries/:jobId/stop - 停止生成
         ctx.Route('ai_batch_summary_stop', '/ai-helper/batch-summaries/:jobId/stop', batchSummaryHandler_1.BatchSummaryStopHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         ctx.Route('ai_batch_summary_stop_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/stop', batchSummaryHandler_1.BatchSummaryStopHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
