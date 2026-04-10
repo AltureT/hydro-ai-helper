@@ -106,8 +106,22 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
-            // Setup SSE
-            const sse = (0, sseHelper_1.createSSEWriter)(this.response.raw);
+            // Setup SSE — access raw Node.js ServerResponse via Koa context
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const koaCtx = this.context;
+            const rawRes = koaCtx?.res;
+            if (!rawRes) {
+                this.response.status = 500;
+                this.response.body = { error: { code: 'SSE_UNAVAILABLE', message: 'Raw response not available' } };
+                this.response.type = 'application/json';
+                return;
+            }
+            koaCtx.respond = false;
+            if ('compress' in koaCtx)
+                koaCtx.compress = false;
+            koaCtx.req?.socket?.setNoDelay?.(true);
+            koaCtx.req?.socket?.setTimeout?.(0);
+            const sse = (0, sseHelper_1.createSSEWriter)(rawRes);
             sse.writeEvent('job_started', { jobId: String(jobId), totalStudents: attendees.length });
             // Launch service in background
             const aiClient = this.ctx.get('aiClient') || null;

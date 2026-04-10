@@ -5,6 +5,7 @@
  */
 
 import { Handler, PRIV, db } from 'hydrooj';
+import type { ServerResponse } from 'http';
 import { ObjectId } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { createSSEWriter } from '../lib/sseHelper';
@@ -124,8 +125,22 @@ export class BatchSummaryGenerateHandler extends Handler {
         return;
       }
 
-      // Setup SSE
-      const sse = createSSEWriter(this.response.raw);
+      // Setup SSE — access raw Node.js ServerResponse via Koa context
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const koaCtx = (this as any).context;
+      const rawRes: ServerResponse | undefined = koaCtx?.res;
+      if (!rawRes) {
+        this.response.status = 500;
+        this.response.body = { error: { code: 'SSE_UNAVAILABLE', message: 'Raw response not available' } };
+        this.response.type = 'application/json';
+        return;
+      }
+      koaCtx.respond = false;
+      if ('compress' in koaCtx) koaCtx.compress = false;
+      koaCtx.req?.socket?.setNoDelay?.(true);
+      koaCtx.req?.socket?.setTimeout?.(0);
+
+      const sse = createSSEWriter(rawRes);
       sse.writeEvent('job_started', { jobId: String(jobId), totalStudents: attendees.length });
 
       // Launch service in background
