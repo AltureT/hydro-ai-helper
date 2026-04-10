@@ -68,9 +68,9 @@ export class BatchSummaryGenerateHandler extends Handler {
         await jobModel.archive(existingJob._id);
       }
 
-      // Fetch contest document
-      const contestColl = db.collection('contest');
-      const tdoc = await contestColl.findOne({ _id: contestObjId, domainId });
+      // Fetch contest/homework document (HydroOJ stores in 'document' collection, docType 30)
+      const documentColl = db.collection('document');
+      const tdoc = await documentColl.findOne({ domainId, docType: 30, docId: contestObjId });
       if (!tdoc) {
         this.response.status = 404;
         this.response.body = { error: { code: 'CONTEST_NOT_FOUND', message: 'Contest not found' } };
@@ -78,14 +78,19 @@ export class BatchSummaryGenerateHandler extends Handler {
         return;
       }
 
-      // Get attendees and pids from contest doc
+      // Get pids from contest doc
       const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
-      const attendees: number[] = (tdoc.attend || []).map((a: unknown) => Number(a));
 
-      // Fetch problem documents
-      const problemColl = db.collection('document');
+      // Get attendees from document.status collection (HydroOJ stores per-user contest status here)
+      const statusColl = db.collection('document.status');
+      const tsdocs = await statusColl
+        .find({ domainId, docType: 30, docId: contestObjId }, { projection: { uid: 1 } })
+        .toArray();
+      const attendees: number[] = tsdocs.map((s: any) => Number(s.uid)).filter((uid: number) => uid > 0);
+
+      // Fetch problem documents (docType 10 = problem in HydroOJ document collection)
       const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
-      const problemDocs = await problemColl
+      const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
         .toArray();
 
