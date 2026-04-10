@@ -29,6 +29,14 @@ const initialState: BatchSummaryState = {
   error: null,
 };
 
+/** Extract a string message from backend error responses ({ error: string | { code, message } }) */
+function extractErrorMsg(data: any, fallback: string): string {
+  const err = data?.error;
+  if (typeof err === 'string') return err;
+  if (err && typeof err.message === 'string') return err.message;
+  return fallback;
+}
+
 export function buildUrl(domainId: string, path: string): string {
   return domainId !== 'system'
     ? `/d/${domainId}/ai-helper/batch-summaries${path}`
@@ -80,7 +88,7 @@ export function useBatchSummary(domainId: string) {
         let errMsg = `HTTP ${res.status}`;
         try {
           const errData = await res.json();
-          errMsg = errData.error || errMsg;
+          errMsg = extractErrorMsg(errData, errMsg);
         } catch { /* ignore parse error */ }
         setState(prev => ({ ...prev, isGenerating: false, error: errMsg }));
         return {};
@@ -233,7 +241,7 @@ export function useBatchSummary(domainId: string) {
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        setState(prev => ({ ...prev, error: errData.error || `HTTP ${res.status}` }));
+        setState(prev => ({ ...prev, error: extractErrorMsg(errData, `HTTP ${res.status}`) }));
         return;
       }
       const data = await res.json();
@@ -279,7 +287,7 @@ export function useBatchSummary(domainId: string) {
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        setState(prev => ({ ...prev, error: errData.error || `HTTP ${res.status}` }));
+        setState(prev => ({ ...prev, error: extractErrorMsg(errData, `HTTP ${res.status}`) }));
         return;
       }
       // Update all completed summaries to published
@@ -314,8 +322,9 @@ export function useBatchSummary(domainId: string) {
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        updateSummary(userId, { status: 'failed', error: errData.error || `HTTP ${res.status}` });
-        setState(prev => ({ ...prev, error: errData.error || `HTTP ${res.status}` }));
+        const msg = extractErrorMsg(errData, `HTTP ${res.status}`);
+        updateSummary(userId, { status: 'failed', error: msg });
+        setState(prev => ({ ...prev, error: msg }));
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Unknown error';

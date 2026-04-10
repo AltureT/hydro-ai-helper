@@ -399,11 +399,10 @@ export default BatchSummaryPanel;
 
 // ─── Scoreboard page URL patterns ─────────────────────────────────────────────
 
+// Match contestId (ObjectId hex) from homework/contest scoreboard URLs
 const SCOREBOARD_PATTERNS: RegExp[] = [
-  /^\/d\/([^/]+)\/homework\/([a-f0-9]{24})\/scoreboard/,
-  /^\/d\/([^/]+)\/contest\/([a-f0-9]{24})\/scoreboard/,
-  /^\/homework\/([a-f0-9]{24})\/scoreboard/,
-  /^\/contest\/([a-f0-9]{24})\/scoreboard/,
+  /\/homework\/([a-f0-9]{24})\/scoreboard/,
+  /\/contest\/([a-f0-9]{24})\/scoreboard/,
 ];
 
 function parseScoreboardUrl(): { domainId: string; contestId: string } | null {
@@ -411,11 +410,9 @@ function parseScoreboardUrl(): { domainId: string; contestId: string } | null {
   for (const pattern of SCOREBOARD_PATTERNS) {
     const match = pathname.match(pattern);
     if (match) {
-      // Patterns with domainId capture two groups, without domainId capture one
-      if (match.length === 3) {
-        return { domainId: match[1], contestId: match[2] };
-      }
-      return { domainId: 'system', contestId: match[1] };
+      // domainId from UiContext (always correct, even without /d/ prefix in URL)
+      const domainId = (window as any).UiContext?.domainId || 'system';
+      return { domainId, contestId: match[1] };
     }
   }
   return null;
