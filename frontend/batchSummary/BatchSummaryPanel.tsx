@@ -7,6 +7,21 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import { COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
+
+/** i18n with hardcoded Chinese fallback for keys that may not yet be in lang-*.js */
+const I18N_FALLBACK: Record<string, string> = {
+  ai_helper_batch_summary_stop: '停止',
+  ai_helper_batch_summary_continue: '继续生成',
+  ai_helper_batch_summary_regenerate: '重新生成',
+  ai_helper_batch_summary_pending: '待处理',
+  ai_helper_batch_summary_loading: '加载中...',
+  ai_helper_batch_summary_stopped_notice: '生成已停止，部分学生尚未处理。点击「继续生成」恢复。',
+  ai_helper_batch_summary_my_title: 'AI 学习总结',
+};
+function t(key: string): string {
+  const val = i18n(key);
+  return val === key ? (I18N_FALLBACK[key] || val) : val;
+}
 import { useBatchSummary, buildUrl } from './useBatchSummary';
 import { SummaryCard } from './SummaryCard';
 import { StudentSummaryView } from './StudentSummaryView';
@@ -164,7 +179,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   if (state.loading) {
     return (
       <div style={{ textAlign: 'center', padding: SPACING.xl, color: COLORS.textMuted, fontSize: '14px' }}>
-        {i18n('ai_helper_batch_summary_loading')}
+        {t('ai_helper_batch_summary_loading')}
       </div>
     );
   }
@@ -228,7 +243,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                 gap: '4px',
               }}
             >
-              {i18n('ai_helper_batch_summary_stop')}
+              {t('ai_helper_batch_summary_stop')}
             </button>
           )}
 
@@ -238,7 +253,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
               onClick={continueGeneration}
               style={getButtonStyle('primary')}
             >
-              {i18n('ai_helper_batch_summary_continue')}
+              {t('ai_helper_batch_summary_continue')}
             </button>
           )}
 
@@ -249,7 +264,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
               style={getButtonStyle('primary')}
             >
               {state.summaries.size > 0
-                ? i18n('ai_helper_batch_summary_regenerate')
+                ? t('ai_helper_batch_summary_regenerate')
                 : i18n('ai_helper_batch_summary_generate')}
             </button>
           )}
@@ -308,7 +323,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
           fontSize: '13px',
           color: COLORS.warningText,
         }}>
-          {i18n('ai_helper_batch_summary_stopped_notice')}
+          {t('ai_helper_batch_summary_stopped_notice')}
         </div>
       )}
 
@@ -413,7 +428,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                     {data.status === 'failed'
                       ? i18n('ai_helper_batch_summary_failed')
                       : data.status === 'pending'
-                        ? i18n('ai_helper_batch_summary_pending')
+                        ? t('ai_helper_batch_summary_pending')
                         : data.publishStatus === 'published'
                           ? i18n('ai_helper_batch_summary_published')
                           : i18n('ai_helper_batch_summary_draft')}
