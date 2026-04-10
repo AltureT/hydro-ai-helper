@@ -526,6 +526,9 @@ function isLoggedIn(): boolean {
 }
 
 function insertContainer(id: string): HTMLDivElement | null {
+  // Prevent double-mount
+  if (document.getElementById(id)) return null;
+
   const container = document.createElement('div');
   container.id = id;
   container.style.margin = `${SPACING.base} 0`;
@@ -554,7 +557,6 @@ function initBatchSummaryPanel() {
   const isTeacher = hasTeacherPrivilege();
 
   if (isTeacher) {
-    // Teacher: full management panel
     const container = insertContainer('ai-batch-summary-root');
     if (!container) return;
     renderComponent(
@@ -568,7 +570,6 @@ function initBatchSummaryPanel() {
       container,
     );
   } else {
-    // Student: read-only view of their published summary
     const container = insertContainer('ai-student-summary-root');
     if (!container) return;
     renderComponent(
@@ -583,8 +584,25 @@ function initBatchSummaryPanel() {
   }
 }
 
+// ─── Initialization: handle both full page load and PJAX navigation ─────────
+
+// 1. Full page load
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initBatchSummaryPanel, { once: true });
 } else {
   initBatchSummaryPanel();
+}
+
+// 2. PJAX navigation: HydroOJ triggers jQuery 'vjContentNew' on replaced fragments
+//    Re-run init when scoreboard content is loaded via PJAX.
+if (typeof (window as any).$ === 'function') {
+  (window as any).$(document).on('vjContentNew', () => {
+    // Small delay to ensure DOM is fully updated after PJAX replacement
+    setTimeout(initBatchSummaryPanel, 50);
+  });
+} else {
+  // Fallback: listen for native custom event (some HydroOJ builds dispatch both)
+  document.addEventListener('vjContentNew', () => {
+    setTimeout(initBatchSummaryPanel, 50);
+  });
 }
