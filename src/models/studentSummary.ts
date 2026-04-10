@@ -177,6 +177,18 @@ export class StudentSummaryModel {
     );
   }
 
+  async findPendingByJob(jobId: ObjectIdType): Promise<StudentSummary[]> {
+    return this.collection.find({ jobId, status: 'pending' }).sort({ userId: 1 }).toArray();
+  }
+
+  async resetGeneratingToPending(jobId: ObjectIdType): Promise<number> {
+    const result = await this.collection.updateMany(
+      { jobId, status: 'generating' },
+      { $set: { status: 'pending', updatedAt: new Date() } },
+    );
+    return result.modifiedCount;
+  }
+
   async hasEditedSummaries(jobId: ObjectIdType): Promise<boolean> {
     const doc = await this.collection.findOne({
       jobId,

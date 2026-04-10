@@ -14,7 +14,7 @@ export interface BatchSummaryJob {
   contestId: ObjectIdType;
   contestTitle: string;
   createdBy: number;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'archived';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped' | 'archived';
   totalStudents: number;
   completedCount: number;
   failedCount: number;

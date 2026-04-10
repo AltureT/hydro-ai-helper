@@ -47,10 +47,10 @@ function makePendingSummary(userId: number): any {
   };
 }
 
-function makeRecord(pid: string, uid: number, n: number): any {
+function makeRecord(pid: string | number, uid: number, n: number): any {
   return {
     _id: makeId(n),
-    pid,
+    pid: typeof pid === 'string' ? Number(pid) || pid : pid,
     uid,
     domainId: 'test-domain',
     code: `code_${n}`,
@@ -73,14 +73,14 @@ describe('BatchSummaryService', () => {
   let service: BatchSummaryService;
 
   const problems: ProblemInfo[] = [
-    { pid: 'p1', title: 'Problem 1', content: 'Write a solution' },
+    { pid: '1', title: 'Problem 1', content: 'Write a solution' },
   ];
 
   beforeEach(() => {
     mockRecordCollection = {
       find: jest.fn().mockReturnValue({
         sort: jest.fn().mockReturnValue({
-          toArray: jest.fn().mockResolvedValue([makeRecord('p1', 42, 1)]),
+          toArray: jest.fn().mockResolvedValue([makeRecord('1', 42, 1)]),
         }),
       }),
     };
@@ -90,6 +90,7 @@ describe('BatchSummaryService', () => {
     };
 
     mockJobModel = {
+      findById: jest.fn().mockResolvedValue(makeJob({ status: 'running' })),
       updateStatus: jest.fn().mockResolvedValue(undefined),
       incrementCompleted: jest.fn().mockResolvedValue(undefined),
       incrementFailed: jest.fn().mockResolvedValue(undefined),
@@ -97,6 +98,8 @@ describe('BatchSummaryService', () => {
 
     mockSummaryModel = {
       findAllByJob: jest.fn().mockResolvedValue([makePendingSummary(42)]),
+      findPendingByJob: jest.fn().mockResolvedValue([makePendingSummary(42)]),
+      resetGeneratingToPending: jest.fn().mockResolvedValue(0),
       markGenerating: jest.fn().mockResolvedValue(undefined),
       completeSummary: jest.fn().mockResolvedValue(undefined),
       markFailed: jest.fn().mockResolvedValue(undefined),
@@ -192,7 +195,7 @@ describe('BatchSummaryService', () => {
         expect.objectContaining({
           domainId: 'test-domain',
           uid: 42,
-          pid: { $in: ['p1'] },
+          pid: { $in: [1] },
         }),
       );
     });

@@ -9,6 +9,7 @@ import { i18n } from '@hydrooj/ui-default';
 import {
   COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle,
 } from '../utils/styles';
+import { renderMarkdown } from '../utils/markdown';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -28,33 +29,18 @@ export interface SummaryCardProps {
 
 // ─── Submission Link Renderer ─────────────────────────────────────────────────
 
-function renderSummaryWithLinks(summary: string, domainId: string): React.ReactNode[] {
-  const parts = summary.split(/(\[提交 #r[a-f0-9]+\])/g);
-  return parts.map((part, idx) => {
-    const match = part.match(/^\[提交 #(r[a-f0-9]+)\]$/);
-    if (match) {
-      const recordId = match[1];
-      return (
-        <a
-          key={idx}
-          href={`/d/${domainId}/record/${recordId}`}
-          style={{
-            color: COLORS.primary,
-            backgroundColor: '#eff6ff',
-            borderRadius: RADIUS.sm,
-            padding: '1px 4px',
-            textDecoration: 'none',
-            fontSize: 'inherit',
-          }}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          {part}
-        </a>
-      );
-    }
-    return <React.Fragment key={idx}>{part}</React.Fragment>;
-  });
+/** Render markdown to sanitized HTML, then replace [提交 #rXXX] with clickable links */
+function renderSummaryHtml(summary: string, domainId: string): string {
+  let html = renderMarkdown(summary);
+  // Replace submission references with styled links
+  html = html.replace(
+    /\[提交 #(r[a-f0-9]+)\]/g,
+    (_match, recordId) =>
+      `<a href="/d/${domainId}/record/${recordId}" target="_blank" rel="noopener noreferrer" `
+      + `style="color:${COLORS.primary};background:#eff6ff;border-radius:4px;padding:1px 4px;text-decoration:none">`
+      + `[提交 #${recordId}]</a>`,
+  );
+  return html;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -259,15 +245,16 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
               </div>
             </div>
           ) : (
-            <div style={{
-              fontSize: '14px',
-              color: COLORS.textPrimary,
-              lineHeight: 1.6,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}>
-              {renderSummaryWithLinks(summary, domainId)}
-            </div>
+            <div
+              className="markdown-body"
+              dangerouslySetInnerHTML={{ __html: renderSummaryHtml(summary, domainId) }}
+              style={{
+                fontSize: '14px',
+                color: COLORS.textPrimary,
+                lineHeight: 1.6,
+                wordBreak: 'break-word',
+              }}
+            />
           )}
         </div>
       </div>

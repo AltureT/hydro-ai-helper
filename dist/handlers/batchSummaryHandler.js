@@ -2,10 +2,10 @@
 /**
  * Batch Summary Handlers - 批量生成学生 AI 学习总结 API
  *
- * 提供竞赛批量摘要的生成、查看、重试、发布、导出和编辑功能
+ * 提供竞赛批量摘要的生成、查看、重试、发布、导出、编辑、停止和继续功能
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BatchSummaryEditHandler = exports.BatchSummaryExportHandler = exports.BatchSummaryPublishHandler = exports.BatchSummaryRetryHandler = exports.BatchSummaryResultHandler = exports.BatchSummaryGenerateHandler = void 0;
+exports.BatchSummaryContinueHandler = exports.BatchSummaryStopHandler = exports.BatchSummaryLatestHandler = exports.BatchSummaryEditHandler = exports.BatchSummaryExportHandler = exports.BatchSummaryPublishHandler = exports.BatchSummaryRetryHandler = exports.BatchSummaryResultHandler = exports.BatchSummaryGenerateHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -390,4 +390,223 @@ class BatchSummaryEditHandler extends hydrooj_1.Handler {
     }
 }
 exports.BatchSummaryEditHandler = BatchSummaryEditHandler;
+/**
+ * BatchSummaryLatestHandler - 查询指定竞赛的最新任务及摘要
+ * GET /ai-helper/batch-summaries/latest?contestId=xxx
+ */
+class BatchSummaryLatestHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const contestId = this.request.query?.contestId;
+            if (!contestId) {
+                this.response.body = { job: null, summaries: [] };
+                this.response.type = 'application/json';
+                return;
+            }
+            let contestObjId;
+            try {
+                contestObjId = new mongo_1.ObjectId(contestId);
+            }
+            catch {
+                this.response.body = { job: null, summaries: [] };
+                this.response.type = 'application/json';
+                return;
+            }
+            const jobModel = this.ctx.get('batchSummaryJobModel');
+            const summaryModel = this.ctx.get('studentSummaryModel');
+            const job = await jobModel.findActiveJob(domainId, contestObjId);
+            if (!job) {
+                this.response.body = { job: null, summaries: [] };
+                this.response.type = 'application/json';
+                return;
+            }
+            // Fetch user names
+            const summaries = await summaryModel.findAllByJob(job._id);
+            const uids = summaries.map((s) => s.userId).filter((uid) => uid > 0);
+            const userColl = hydrooj_1.db.collection('user');
+            const userDocs = await userColl
+                .find({ _id: { $in: uids } }, { projection: { _id: 1, uname: 1 } })
+                .toArray();
+            const userNameMap = new Map();
+            for (const u of userDocs) {
+                userNameMap.set(u._id, u.uname || `User #${u._id}`);
+            }
+            const enriched = summaries.map((s) => ({
+                userId: s.userId,
+                userName: userNameMap.get(s.userId) || `User #${s.userId}`,
+                status: s.status,
+                publishStatus: s.publishStatus,
+                summary: s.summary,
+                error: s.error,
+            }));
+            this.response.body = {
+                job: {
+                    _id: job._id,
+                    status: job.status,
+                    totalStudents: job.totalStudents,
+                    completedCount: job.completedCount,
+                    failedCount: job.failedCount,
+                    contestTitle: job.contestTitle,
+                },
+                summaries: enriched,
+            };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[BatchSummaryLatestHandler] error:', err);
+            this.response.status = 500;
+            this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.BatchSummaryLatestHandler = BatchSummaryLatestHandler;
+/**
+ * BatchSummaryStopHandler - 停止正在进行的批量生成
+ * POST /ai-helper/batch-summaries/:jobId/stop
+ */
+class BatchSummaryStopHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            const { jobId } = this.request.params;
+            const jobModel = this.ctx.get('batchSummaryJobModel');
+            const summaryModel = this.ctx.get('studentSummaryModel');
+            const job = await jobModel.findById(jobId);
+            if (!job) {
+                this.response.status = 404;
+                this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
+                this.response.type = 'application/json';
+                return;
+            }
+            // Mark job as stopped — the service loop checks this between batches
+            await jobModel.updateStatus(job._id, 'stopped');
+            // Reset any students stuck in 'generating' back to 'pending'
+            await summaryModel.resetGeneratingToPending(job._id);
+            this.response.body = { ok: true };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[BatchSummaryStopHandler] error:', err);
+            this.response.status = 500;
+            this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.BatchSummaryStopHandler = BatchSummaryStopHandler;
+/**
+ * BatchSummaryContinueHandler - 继续生成剩余的待定学生摘要
+ * POST /ai-helper/batch-summaries/:jobId/continue
+ */
+class BatchSummaryContinueHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            const { jobId } = this.request.params;
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const jobModel = this.ctx.get('batchSummaryJobModel');
+            const summaryModel = this.ctx.get('studentSummaryModel');
+            const job = await jobModel.findById(jobId);
+            if (!job) {
+                this.response.status = 404;
+                this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
+                this.response.type = 'application/json';
+                return;
+            }
+            // Fetch problem info (same as generate handler)
+            const documentColl = hydrooj_1.db.collection('document');
+            const tdoc = await documentColl.findOne({ domainId, docType: 30, docId: job.contestId });
+            if (!tdoc) {
+                this.response.status = 404;
+                this.response.body = { error: { code: 'CONTEST_NOT_FOUND', message: 'Contest not found' } };
+                this.response.type = 'application/json';
+                return;
+            }
+            const pids = (tdoc.pids || []).map((p) => String(p));
+            const numericPids = pids.map((p) => parseInt(p.replace(/^P/i, ''), 10)).filter((n) => !isNaN(n));
+            const problemDocs = await documentColl
+                .find({ domainId, docType: 10, docId: { $in: numericPids } })
+                .toArray();
+            const problems = problemDocs.map((doc) => ({
+                pid: String(doc.docId),
+                title: doc.title || `Problem ${doc.docId}`,
+                content: doc.content || '',
+            }));
+            // Fetch user names for SSE enrichment
+            const pendingSummaries = await summaryModel.findPendingByJob(job._id);
+            const uids = pendingSummaries.map((s) => s.userId).filter((uid) => uid > 0);
+            const userColl = hydrooj_1.db.collection('user');
+            const userDocs = await userColl
+                .find({ _id: { $in: uids } }, { projection: { _id: 1, uname: 1 } })
+                .toArray();
+            const userNameMap = new Map();
+            for (const u of userDocs) {
+                userNameMap.set(u._id, u.uname || `User #${u._id}`);
+            }
+            // Setup SSE
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const koaCtx = this.context;
+            const rawRes = koaCtx?.res;
+            if (!rawRes) {
+                this.response.status = 500;
+                this.response.body = { error: { code: 'SSE_UNAVAILABLE', message: 'Raw response not available' } };
+                this.response.type = 'application/json';
+                return;
+            }
+            koaCtx.respond = false;
+            if ('compress' in koaCtx)
+                koaCtx.compress = false;
+            koaCtx.req?.socket?.setNoDelay?.(true);
+            koaCtx.req?.socket?.setTimeout?.(0);
+            const sse = (0, sseHelper_1.createSSEWriter)(rawRes);
+            sse.writeEvent('job_started', {
+                jobId: String(job._id),
+                totalStudents: pendingSummaries.length,
+            });
+            // Create AI client
+            let aiClient;
+            try {
+                aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx);
+            }
+            catch (clientErr) {
+                console.error('[BatchSummaryContinueHandler] Failed to create AI client:', clientErr);
+                sse.writeEvent('error', { error: clientErr instanceof Error ? clientErr.message : 'AI service not configured' });
+                sse.end();
+                return;
+            }
+            const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
+            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel);
+            service.execute(job, problems, (event) => {
+                if (!sse.closed) {
+                    const uid = Number(event.userId);
+                    if (uid && userNameMap.has(uid)) {
+                        event.userName = userNameMap.get(uid);
+                    }
+                    sse.writeEvent(event.type, event);
+                }
+            }, true).then(() => {
+                if (!sse.closed)
+                    sse.end();
+            }).catch((err) => {
+                console.error('[BatchSummaryContinueHandler] execute error:', err);
+                if (!sse.closed) {
+                    sse.writeEvent('error', { message: err instanceof Error ? err.message : 'Unknown error' });
+                    sse.end();
+                }
+            });
+        }
+        catch (err) {
+            console.error('[BatchSummaryContinueHandler] error:', err);
+            this.response.status = 500;
+            this.response.body = {
+                error: {
+                    code: 'INTERNAL_ERROR',
+                    message: err instanceof Error ? err.message : 'Internal server error',
+                },
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.BatchSummaryContinueHandler = BatchSummaryContinueHandler;
 //# sourceMappingURL=batchSummaryHandler.js.map

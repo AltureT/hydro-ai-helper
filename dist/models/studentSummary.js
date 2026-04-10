@@ -85,6 +85,13 @@ class StudentSummaryModel {
             },
         });
     }
+    async findPendingByJob(jobId) {
+        return this.collection.find({ jobId, status: 'pending' }).sort({ userId: 1 }).toArray();
+    }
+    async resetGeneratingToPending(jobId) {
+        const result = await this.collection.updateMany({ jobId, status: 'generating' }, { $set: { status: 'pending', updatedAt: new Date() } });
+        return result.modifiedCount;
+    }
     async hasEditedSummaries(jobId) {
         const doc = await this.collection.findOne({
             jobId,

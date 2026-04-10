@@ -83,11 +83,17 @@ class BatchSummaryService {
         this.tokenUsageModel = tokenUsageModel;
         this.sampler = new submissionSampler_1.SubmissionSampler();
     }
-    async execute(job, problems, onEvent) {
+    /**
+     * Execute batch summary generation.
+     * @param pendingOnly - if true, only process students with 'pending' status (for continue after stop)
+     */
+    async execute(job, problems, onEvent, pendingOnly = false) {
         // Step 1: Mark job as running
         await this.jobModel.updateStatus(job._id, 'running');
-        // Step 2: Fetch all pending summaries
-        const summaries = await this.summaryModel.findAllByJob(job._id);
+        // Step 2: Fetch summaries to process
+        const summaries = pendingOnly
+            ? await this.summaryModel.findPendingByJob(job._id)
+            : await this.summaryModel.findAllByJob(job._id);
         const total = summaries.length;
         const concurrency = job.config?.concurrency ?? 10;
         let completedCount = 0;
@@ -95,6 +101,18 @@ class BatchSummaryService {
         let totalTokens = 0;
         // Step 3: Process in batches of `concurrency`
         for (let i = 0; i < summaries.length; i += concurrency) {
+            // Check if job was stopped between batches
+            const currentJob = await this.jobModel.findById(job._id);
+            if (currentJob?.status === 'stopped') {
+                // Reset any students stuck in 'generating' back to 'pending'
+                await this.summaryModel.resetGeneratingToPending(job._id);
+                onEvent({
+                    type: 'job_stopped',
+                    completed: completedCount,
+                    failed: failedCount,
+                });
+                return;
+            }
             const batch = summaries.slice(i, i + concurrency);
             const results = await Promise.allSettled(batch.map((summary) => this.processStudent(job, summary, problems, onEvent)));
             for (const result of results) {
@@ -133,13 +151,14 @@ class BatchSummaryService {
             // a. Mark as generating
             await this.summaryModel.markGenerating(summary._id);
             // b. Fetch all submissions for this student in one query
-            const pids = problems.map((p) => p.pid);
+            // HydroOJ record.pid is number — convert string pids to numbers for query
+            const numericPids = problems.map((p) => Number(p.pid)).filter((n) => !Number.isNaN(n));
             const allRecords = await this.db
                 .collection('record')
                 .find({
                 domainId: job.domainId,
                 uid: summary.userId,
-                pid: { $in: pids },
+                pid: { $in: numericPids },
             })
                 .sort({ judgeAt: 1 })
                 .toArray();

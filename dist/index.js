@@ -243,6 +243,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_cost_analytics', '/ai-helper/analytics/cost', costAnalyticsHandler_1.CostAnalyticsHandler, costAnalyticsHandler_1.CostAnalyticsHandlerPriv);
         ctx.Route('ai_helper_cost_analytics_domain', '/d/:domainId/ai-helper/analytics/cost', costAnalyticsHandler_1.CostAnalyticsHandler, costAnalyticsHandler_1.CostAnalyticsHandlerPriv);
         // 批量摘要路由
+        // GET /ai-helper/batch-summaries/latest?contestId=xxx - 查询最新任务
+        ctx.Route('ai_batch_summary_latest', '/ai-helper/batch-summaries/latest', batchSummaryHandler_1.BatchSummaryLatestHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        ctx.Route('ai_batch_summary_latest_domain', '/d/:domainId/ai-helper/batch-summaries/latest', batchSummaryHandler_1.BatchSummaryLatestHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         // POST /ai-helper/batch-summaries/generate - 触发批量生成
         ctx.Route('ai_batch_summary_generate', '/ai-helper/batch-summaries/generate', batchSummaryHandler_1.BatchSummaryGenerateHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         ctx.Route('ai_batch_summary_generate_domain', '/d/:domainId/ai-helper/batch-summaries/generate', batchSummaryHandler_1.BatchSummaryGenerateHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
@@ -261,6 +264,12 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // POST /ai-helper/batch-summaries/:jobId/edit/:userId - 编辑摘要
         ctx.Route('ai_batch_summary_edit', '/ai-helper/batch-summaries/:jobId/edit/:userId', batchSummaryHandler_1.BatchSummaryEditHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         ctx.Route('ai_batch_summary_edit_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/edit/:userId', batchSummaryHandler_1.BatchSummaryEditHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        // POST /ai-helper/batch-summaries/:jobId/stop - 停止生成
+        ctx.Route('ai_batch_summary_stop', '/ai-helper/batch-summaries/:jobId/stop', batchSummaryHandler_1.BatchSummaryStopHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        ctx.Route('ai_batch_summary_stop_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/stop', batchSummaryHandler_1.BatchSummaryStopHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        // POST /ai-helper/batch-summaries/:jobId/continue - 继续生成
+        ctx.Route('ai_batch_summary_continue', '/ai-helper/batch-summaries/:jobId/continue', batchSummaryHandler_1.BatchSummaryContinueHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        ctx.Route('ai_batch_summary_continue_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/continue', batchSummaryHandler_1.BatchSummaryContinueHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
     }
 });
 exports.Config = configSchema;
