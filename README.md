@@ -49,6 +49,11 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 
 ### Teachers
 
+- **Batch AI Summary** — one-click generation of personalized learning summaries for all students on homework/contest scoreboard pages
+  - Real-time progress via SSE streaming; supports stop, continue, and retry failed
+  - Smart submission sampling: automatically selects key milestones (first submit, first AC, score improvements) to capture learning trajectory
+  - Draft/publish workflow: review and edit before publishing to students
+  - Students see their published summary on the scoreboard, with auto-refresh polling
 - Browse student conversations with filters (time / problem / class / student / userId)
 - Autocomplete search for class and problem filters
 - Multi-dimensional effectiveness metrics and question-type distribution
@@ -130,6 +135,19 @@ db.ai_plugin_install.updateOne(
 </details>
 
 ## Changelog
+
+<details open>
+<summary><b>v1.21.0</b> — Batch AI Learning Summary</summary>
+
+- One-click AI summary generation for all students on homework/contest scoreboard pages
+- Smart submission sampling based on milestones (first submit, first AC, score improvements, status changes)
+- Real-time SSE progress with stop / continue / retry-failed controls
+- Draft → publish workflow; teachers can edit summaries before publishing
+- Student view: auto-displays published summary on scoreboard with periodic polling
+- Submission reference links in summaries clickable to view code details
+- CSV export for generated summaries
+
+</details>
 
 <details>
 <summary><b>v1.20.0</b> — Teacher Analytics Enhancement</summary>
