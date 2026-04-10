@@ -270,6 +270,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // POST /ai-helper/batch-summaries/:jobId/continue - 继续生成
         ctx.Route('ai_batch_summary_continue', '/ai-helper/batch-summaries/:jobId/continue', batchSummaryHandler_1.BatchSummaryContinueHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
         ctx.Route('ai_batch_summary_continue_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/continue', batchSummaryHandler_1.BatchSummaryContinueHandler, hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+        // GET /ai-helper/batch-summaries/my-summary?contestId=xxx - 学生查看自己的已发布总结
+        ctx.Route('ai_batch_summary_my', '/ai-helper/batch-summaries/my-summary', batchSummaryHandler_1.StudentSummaryHandler, hydrooj_1.PRIV.PRIV_USER_PROFILE);
+        ctx.Route('ai_batch_summary_my_domain', '/d/:domainId/ai-helper/batch-summaries/my-summary', batchSummaryHandler_1.StudentSummaryHandler, hydrooj_1.PRIV.PRIV_USER_PROFILE);
     }
 });
 exports.Config = configSchema;

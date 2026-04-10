@@ -60,6 +60,7 @@ import {
   BatchSummaryLatestHandler,
   BatchSummaryStopHandler,
   BatchSummaryContinueHandler,
+  StudentSummaryHandler,
 } from './handlers/batchSummaryHandler';
 console.log('[AI-Helper] batchSummaryHandler OK');
 
@@ -342,6 +343,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // POST /ai-helper/batch-summaries/:jobId/continue - 继续生成
     ctx.Route('ai_batch_summary_continue', '/ai-helper/batch-summaries/:jobId/continue', BatchSummaryContinueHandler, PRIV.PRIV_READ_RECORD_CODE);
     ctx.Route('ai_batch_summary_continue_domain', '/d/:domainId/ai-helper/batch-summaries/:jobId/continue', BatchSummaryContinueHandler, PRIV.PRIV_READ_RECORD_CODE);
+
+    // GET /ai-helper/batch-summaries/my-summary?contestId=xxx - 学生查看自己的已发布总结
+    ctx.Route('ai_batch_summary_my', '/ai-helper/batch-summaries/my-summary', StudentSummaryHandler, PRIV.PRIV_USER_PROFILE);
+    ctx.Route('ai_batch_summary_my_domain', '/d/:domainId/ai-helper/batch-summaries/my-summary', StudentSummaryHandler, PRIV.PRIV_USER_PROFILE);
   }
 });
 

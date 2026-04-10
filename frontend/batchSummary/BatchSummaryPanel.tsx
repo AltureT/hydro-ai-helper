@@ -9,6 +9,7 @@ import { i18n } from '@hydrooj/ui-default';
 import { COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
 import { useBatchSummary, buildUrl } from './useBatchSummary';
 import { SummaryCard } from './SummaryCard';
+import { StudentSummaryView } from './StudentSummaryView';
 import { renderComponent } from '../utils/renderHelper';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 
@@ -519,26 +520,21 @@ function hasTeacherPrivilege(): boolean {
 
 // ─── Self-mounting on scoreboard pages ────────────────────────────────────────
 
-function initBatchSummaryPanel() {
-  const parsed = parseScoreboardUrl();
-  if (!parsed) return;
+function isLoggedIn(): boolean {
+  const ctx = window.UserContext;
+  return !!(ctx && ctx._id);
+}
 
-  if (!hasTeacherPrivilege()) return;
-
-  // HydroOJ scoreboard DOM: .section__header contains export <a class="button"> elements
-  const sectionHeader = document.querySelector('.section__header');
-
-  // Create container — insert between .section__header and the scoreboard table
+function insertContainer(id: string): HTMLDivElement | null {
   const container = document.createElement('div');
-  container.id = 'ai-batch-summary-root';
+  container.id = id;
   container.style.margin = `${SPACING.base} 0`;
   container.style.padding = `0 ${SPACING.base}`;
 
+  const sectionHeader = document.querySelector('.section__header');
   if (sectionHeader && sectionHeader.parentElement) {
-    // Insert after .section__header (before scoreboard table fragment)
     sectionHeader.parentElement.insertBefore(container, sectionHeader.nextSibling);
   } else {
-    // Fallback: insert before [data-fragment-id="scoreboard"] or at section top
     const scoreboard = document.querySelector('[data-fragment-id="scoreboard"]');
     if (scoreboard && scoreboard.parentElement) {
       scoreboard.parentElement.insertBefore(container, scoreboard);
@@ -547,17 +543,44 @@ function initBatchSummaryPanel() {
       section.appendChild(container);
     }
   }
+  return container;
+}
 
-  renderComponent(
-    <ErrorBoundary>
-      <BatchSummaryPanel
-        domainId={parsed.domainId}
-        contestId={parsed.contestId}
-        isTeacher={true}
-      />
-    </ErrorBoundary>,
-    container,
-  );
+function initBatchSummaryPanel() {
+  const parsed = parseScoreboardUrl();
+  if (!parsed) return;
+  if (!isLoggedIn()) return;
+
+  const isTeacher = hasTeacherPrivilege();
+
+  if (isTeacher) {
+    // Teacher: full management panel
+    const container = insertContainer('ai-batch-summary-root');
+    if (!container) return;
+    renderComponent(
+      <ErrorBoundary>
+        <BatchSummaryPanel
+          domainId={parsed.domainId}
+          contestId={parsed.contestId}
+          isTeacher={true}
+        />
+      </ErrorBoundary>,
+      container,
+    );
+  } else {
+    // Student: read-only view of their published summary
+    const container = insertContainer('ai-student-summary-root');
+    if (!container) return;
+    renderComponent(
+      <ErrorBoundary>
+        <StudentSummaryView
+          domainId={parsed.domainId}
+          contestId={parsed.contestId}
+        />
+      </ErrorBoundary>,
+      container,
+    );
+  }
 }
 
 if (document.readyState === 'loading') {

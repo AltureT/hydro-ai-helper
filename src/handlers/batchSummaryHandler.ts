@@ -674,3 +674,56 @@ export class BatchSummaryContinueHandler extends Handler {
     }
   }
 }
+
+/**
+ * StudentSummaryHandler - 学生查看自己的已发布学习总结
+ * GET /ai-helper/batch-summaries/my-summary?contestId=xxx
+ * 仅返回当前登录用户的 published 总结，无需教师权限
+ */
+export class StudentSummaryHandler extends Handler {
+  async get() {
+    try {
+      const domainId = getDomainId(this);
+      const contestId = this.request.query?.contestId as string;
+      const userId = this.user._id;
+
+      if (!contestId || !userId) {
+        this.response.body = { summary: null };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      let contestObjId;
+      try {
+        contestObjId = new ObjectId(contestId);
+      } catch {
+        this.response.body = { summary: null };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
+      const doc = await summaryModel.findPublishedForStudent(domainId, contestObjId, userId);
+
+      if (!doc) {
+        this.response.body = { summary: null };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      this.response.body = {
+        summary: {
+          summary: doc.summary,
+          contestId: String(doc.contestId),
+          updatedAt: doc.updatedAt,
+        },
+      };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[StudentSummaryHandler] error:', err);
+      this.response.status = 500;
+      this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+      this.response.type = 'application/json';
+    }
+  }
+}

@@ -5,7 +5,7 @@
  * 提供竞赛批量摘要的生成、查看、重试、发布、导出、编辑、停止和继续功能
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BatchSummaryContinueHandler = exports.BatchSummaryStopHandler = exports.BatchSummaryLatestHandler = exports.BatchSummaryEditHandler = exports.BatchSummaryExportHandler = exports.BatchSummaryPublishHandler = exports.BatchSummaryRetryHandler = exports.BatchSummaryResultHandler = exports.BatchSummaryGenerateHandler = void 0;
+exports.StudentSummaryHandler = exports.BatchSummaryContinueHandler = exports.BatchSummaryStopHandler = exports.BatchSummaryLatestHandler = exports.BatchSummaryEditHandler = exports.BatchSummaryExportHandler = exports.BatchSummaryPublishHandler = exports.BatchSummaryRetryHandler = exports.BatchSummaryResultHandler = exports.BatchSummaryGenerateHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -609,4 +609,54 @@ class BatchSummaryContinueHandler extends hydrooj_1.Handler {
     }
 }
 exports.BatchSummaryContinueHandler = BatchSummaryContinueHandler;
+/**
+ * StudentSummaryHandler - 学生查看自己的已发布学习总结
+ * GET /ai-helper/batch-summaries/my-summary?contestId=xxx
+ * 仅返回当前登录用户的 published 总结，无需教师权限
+ */
+class StudentSummaryHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const contestId = this.request.query?.contestId;
+            const userId = this.user._id;
+            if (!contestId || !userId) {
+                this.response.body = { summary: null };
+                this.response.type = 'application/json';
+                return;
+            }
+            let contestObjId;
+            try {
+                contestObjId = new mongo_1.ObjectId(contestId);
+            }
+            catch {
+                this.response.body = { summary: null };
+                this.response.type = 'application/json';
+                return;
+            }
+            const summaryModel = this.ctx.get('studentSummaryModel');
+            const doc = await summaryModel.findPublishedForStudent(domainId, contestObjId, userId);
+            if (!doc) {
+                this.response.body = { summary: null };
+                this.response.type = 'application/json';
+                return;
+            }
+            this.response.body = {
+                summary: {
+                    summary: doc.summary,
+                    contestId: String(doc.contestId),
+                    updatedAt: doc.updatedAt,
+                },
+            };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[StudentSummaryHandler] error:', err);
+            this.response.status = 500;
+            this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.StudentSummaryHandler = StudentSummaryHandler;
 //# sourceMappingURL=batchSummaryHandler.js.map
