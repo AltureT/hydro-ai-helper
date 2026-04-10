@@ -34,11 +34,11 @@ function renderSummaryHtml(summary: string, domainId: string): string {
   let html = renderMarkdown(summary);
   // Replace submission references with styled links
   html = html.replace(
-    /\[提交 #(r[a-f0-9]+)\]/g,
-    (_match, recordId) =>
-      `<a href="/d/${domainId}/record/${recordId}" target="_blank" rel="noopener noreferrer" `
+    /\[提交 #(r([a-f0-9]+))\]/g,
+    (_match, display, objectId) =>
+      `<a href="/d/${domainId}/record/${objectId}" target="_blank" rel="noopener noreferrer" `
       + `style="color:${COLORS.primary};background:#eff6ff;border-radius:4px;padding:1px 4px;text-decoration:none">`
-      + `[提交 #${recordId}]</a>`,
+      + `[提交 #${display}]</a>`,
   );
   return html;
 }
