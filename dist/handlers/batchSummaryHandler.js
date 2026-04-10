@@ -10,6 +10,7 @@ const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
 const sseHelper_1 = require("../lib/sseHelper");
+const openaiClient_1 = require("../services/openaiClient");
 const batchSummaryService_1 = require("../services/batchSummaryService");
 // ─── CSV helper ───────────────────────────────────────────────────────────────
 function escapeCsv(value) {
@@ -75,6 +76,15 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
                 .find({ domainId, docType: 30, docId: contestObjId }, { projection: { uid: 1 } })
                 .toArray();
             const attendees = tsdocs.map((s) => Number(s.uid)).filter((uid) => uid > 0);
+            // Fetch user names for all attendees (HydroOJ user collection)
+            const userColl = hydrooj_1.db.collection('user');
+            const userDocs = await userColl
+                .find({ _id: { $in: attendees } }, { projection: { _id: 1, uname: 1 } })
+                .toArray();
+            const userNameMap = new Map();
+            for (const u of userDocs) {
+                userNameMap.set(u._id, u.uname || `User #${u._id}`);
+            }
             // Fetch problem documents (docType 10 = problem in HydroOJ document collection)
             const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
             const problemDocs = await documentColl
@@ -123,12 +133,26 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
             koaCtx.req?.socket?.setTimeout?.(0);
             const sse = (0, sseHelper_1.createSSEWriter)(rawRes);
             sse.writeEvent('job_started', { jobId: String(jobId), totalStudents: attendees.length });
-            // Launch service in background
-            const aiClient = this.ctx.get('aiClient') || null;
+            // Create AI client from database config (same pattern as studentHandler)
+            let aiClient;
+            try {
+                aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx);
+            }
+            catch (clientErr) {
+                console.error('[BatchSummaryGenerateHandler] Failed to create AI client:', clientErr);
+                sse.writeEvent('error', { error: clientErr instanceof Error ? clientErr.message : 'AI service not configured' });
+                sse.end();
+                return;
+            }
             const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
             const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel);
             service.execute(job, problems, (event) => {
                 if (!sse.closed) {
+                    // Enrich events with userName from pre-fetched map
+                    const uid = Number(event.userId);
+                    if (uid && userNameMap.has(uid)) {
+                        event.userName = userNameMap.get(uid);
+                    }
                     sse.writeEvent(event.type, event);
                 }
             }).then(() => {

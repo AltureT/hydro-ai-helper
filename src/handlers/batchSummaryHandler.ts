@@ -9,6 +9,7 @@ import type { ServerResponse } from 'http';
 import { ObjectId } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { createSSEWriter } from '../lib/sseHelper';
+import { createMultiModelClientFromConfig } from '../services/openaiClient';
 import { BatchSummaryJobModel } from '../models/batchSummaryJob';
 import { StudentSummaryModel } from '../models/studentSummary';
 import { BatchSummaryService, ProblemInfo } from '../services/batchSummaryService';
@@ -89,6 +90,16 @@ export class BatchSummaryGenerateHandler extends Handler {
         .toArray();
       const attendees: number[] = tsdocs.map((s: any) => Number(s.uid)).filter((uid: number) => uid > 0);
 
+      // Fetch user names for all attendees (HydroOJ user collection)
+      const userColl = db.collection('user');
+      const userDocs = await userColl
+        .find({ _id: { $in: attendees } }, { projection: { _id: 1, uname: 1 } })
+        .toArray();
+      const userNameMap = new Map<number, string>();
+      for (const u of userDocs) {
+        userNameMap.set(u._id, u.uname || `User #${u._id}`);
+      }
+
       // Fetch problem documents (docType 10 = problem in HydroOJ document collection)
       const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
       const problemDocs = await documentColl
@@ -143,8 +154,16 @@ export class BatchSummaryGenerateHandler extends Handler {
       const sse = createSSEWriter(rawRes);
       sse.writeEvent('job_started', { jobId: String(jobId), totalStudents: attendees.length });
 
-      // Launch service in background
-      const aiClient = this.ctx.get('aiClient') || null;
+      // Create AI client from database config (same pattern as studentHandler)
+      let aiClient;
+      try {
+        aiClient = await createMultiModelClientFromConfig(this.ctx);
+      } catch (clientErr) {
+        console.error('[BatchSummaryGenerateHandler] Failed to create AI client:', clientErr);
+        sse.writeEvent('error', { error: clientErr instanceof Error ? clientErr.message : 'AI service not configured' });
+        sse.end();
+        return;
+      }
       const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
       const service = new BatchSummaryService(
         this.ctx.db,
@@ -156,6 +175,11 @@ export class BatchSummaryGenerateHandler extends Handler {
 
       service.execute(job, problems, (event) => {
         if (!sse.closed) {
+          // Enrich events with userName from pre-fetched map
+          const uid = Number(event.userId);
+          if (uid && userNameMap.has(uid)) {
+            (event as any).userName = userNameMap.get(uid);
+          }
           sse.writeEvent(event.type, event);
         }
       }).then(() => {
