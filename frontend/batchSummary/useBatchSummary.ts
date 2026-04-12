@@ -16,6 +16,7 @@ export interface BatchSummaryState {
   completed: number;
   total: number;
   failed: number;
+  newStudentCount: number;
   summaries: Map<number, StudentSummaryData>;
   error: string | null;
   loading: boolean;
@@ -28,6 +29,7 @@ const initialState: BatchSummaryState = {
   completed: 0,
   total: 0,
   failed: 0,
+  newStudentCount: 0,
   summaries: new Map(),
   error: null,
   loading: false,
@@ -94,6 +96,8 @@ export function useBatchSummary(domainId: string) {
             jobId: data.jobId ?? prev.jobId,
             jobStatus: 'running',
             total: data.totalStudents ?? data.total ?? prev.total,
+            completed: data.previousCompleted ?? prev.completed,
+            failed: data.previousFailed ?? prev.failed,
           }));
           break;
 
@@ -227,6 +231,8 @@ export function useBatchSummary(domainId: string) {
           if (s.status === 'failed') failedCount++;
         }
       }
+      const currentAttendeeCount = data.currentAttendeeCount ?? summaries.size;
+      const newStudentCount = Math.max(0, currentAttendeeCount - summaries.size);
       setState({
         jobId: String(data.job._id),
         jobStatus: data.job.status,
@@ -234,6 +240,7 @@ export function useBatchSummary(domainId: string) {
         completed: completedCount,
         total: summaries.size,
         failed: failedCount,
+        newStudentCount,
         summaries,
         error: null,
         loading: false,
@@ -245,11 +252,19 @@ export function useBatchSummary(domainId: string) {
 
   // ── Start generation ──
 
-  const startGeneration = useCallback(async (
-    contestId: string | number,
-    confirmRegenerate?: boolean,
-  ): Promise<StartGenerationResult> => {
-    setState(prev => ({ ...prev, isGenerating: true, error: null, summaries: new Map(), completed: 0, failed: 0 }));
+  const startGeneration = useCallback(async (opts: {
+    contestId: string | number;
+    mode?: 'new_only' | 'regenerate';
+    confirmRegenerate?: boolean;
+  }): Promise<StartGenerationResult> => {
+    const { contestId, mode, confirmRegenerate } = opts;
+
+    // For new_only mode, don't clear existing summaries
+    if (mode !== 'new_only') {
+      setState(prev => ({ ...prev, isGenerating: true, error: null, summaries: new Map(), completed: 0, failed: 0 }));
+    } else {
+      setState(prev => ({ ...prev, isGenerating: true, error: null }));
+    }
 
     try {
       const res = await fetch(buildUrl(domainId, '/generate'), {
@@ -260,7 +275,7 @@ export function useBatchSummary(domainId: string) {
           'X-Requested-With': 'XMLHttpRequest',
         },
         credentials: 'include',
-        body: JSON.stringify({ contestId, confirmRegenerate }),
+        body: JSON.stringify({ contestId, mode, confirmRegenerate }),
       });
 
       if (!res.ok) {
@@ -273,7 +288,7 @@ export function useBatchSummary(domainId: string) {
         return {};
       }
 
-      // Check for needConfirm JSON response (non-SSE)
+      // Check for JSON responses (needConfirm, noNewStudents)
       const contentType = res.headers.get('content-type') || '';
       if (!contentType.includes('text/event-stream')) {
         try {
@@ -281,6 +296,10 @@ export function useBatchSummary(domainId: string) {
           if (data.needConfirm) {
             setState(prev => ({ ...prev, isGenerating: false }));
             return { needConfirm: true, message: data.message };
+          }
+          if (data.noNewStudents) {
+            setState(prev => ({ ...prev, isGenerating: false, newStudentCount: 0 }));
+            return {};
           }
         } catch { /* ignore */ }
         setState(prev => ({ ...prev, isGenerating: false }));
