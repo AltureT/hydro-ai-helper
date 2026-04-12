@@ -152,20 +152,6 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
     });
   }, []);
 
-  const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const currentIndex = tabsList.findIndex(t => t.id === activeTab);
-    let nextIndex = currentIndex;
-    if (e.key === 'ArrowRight') {
-      nextIndex = (currentIndex + 1) % tabsList.length;
-    } else if (e.key === 'ArrowLeft') {
-      nextIndex = (currentIndex - 1 + tabsList.length) % tabsList.length;
-    } else {
-      return;
-    }
-    e.preventDefault();
-    switchTab(tabsList[nextIndex].id);
-  }, [activeTab, tabsList, switchTab]);
-
   // ── Badge callbacks (invoked by child panels) ─────────────────────────────
 
   const handleTeachingStats = useCallback((findingsCount: number) => {
@@ -201,6 +187,22 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
 
     return list;
   }, [isTeacher, teachingBadge, learningBadge]);
+
+  // ── Keyboard navigation (must be after tabsList declaration) ──────────────
+
+  const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const currentIndex = tabsList.findIndex(t => t.id === activeTab);
+    let nextIndex = currentIndex;
+    if (e.key === 'ArrowRight') {
+      nextIndex = (currentIndex + 1) % tabsList.length;
+    } else if (e.key === 'ArrowLeft') {
+      nextIndex = (currentIndex - 1 + tabsList.length) % tabsList.length;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    switchTab(tabsList[nextIndex].id);
+  }, [activeTab, tabsList, switchTab]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
