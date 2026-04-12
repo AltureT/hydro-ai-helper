@@ -188,7 +188,7 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
                     }
                     sse.writeEvent(event.type, event);
                 }
-            }, pendingOnly).then(() => {
+            }, pendingOnly, userNameMap).then(() => {
                 if (!sse.closed)
                     sse.end();
             }).catch((err) => {
@@ -656,7 +656,7 @@ class BatchSummaryContinueHandler extends hydrooj_1.Handler {
                     }
                     sse.writeEvent(event.type, event);
                 }
-            }, true).then(() => {
+            }, true, userNameMap).then(() => {
                 if (!sse.closed)
                     sse.end();
             }).catch((err) => {

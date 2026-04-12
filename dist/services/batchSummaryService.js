@@ -223,7 +223,7 @@ class BatchSummaryService {
      * Execute batch summary generation.
      * @param pendingOnly - if true, only process students with 'pending' status (for continue after stop)
      */
-    async execute(job, problems, onEvent, pendingOnly = false) {
+    async execute(job, problems, onEvent, pendingOnly = false, userNameMap) {
         // Step 1: Mark job as running
         await this.jobModel.updateStatus(job._id, 'running');
         // Step 2: Fetch summaries to process
@@ -252,7 +252,7 @@ class BatchSummaryService {
                 return;
             }
             const batch = summaries.slice(i, i + concurrency);
-            const results = await Promise.allSettled(batch.map((summary) => this.processStudent(job, summary, problems, systemPrompt, onEvent)));
+            const results = await Promise.allSettled(batch.map((summary) => this.processStudent(job, summary, problems, systemPrompt, onEvent, userNameMap)));
             for (const result of results) {
                 if (result.status === 'fulfilled') {
                     completedCount++;
@@ -284,7 +284,7 @@ class BatchSummaryService {
      * Process a single student's summary.
      * Returns total tokens used on success; throws on failure.
      */
-    async processStudent(job, summary, problems, systemPrompt, onEvent) {
+    async processStudent(job, summary, problems, systemPrompt, onEvent, userNameMap) {
         try {
             // a. Mark as generating
             await this.summaryModel.markGenerating(summary._id);
@@ -348,7 +348,9 @@ class BatchSummaryService {
                 }
             }
             // d4. Build user prompt with scenario + history
-            let userPrompt = buildUserPrompt(problems, sampleResults);
+            const studentName = userNameMap?.get(summary.userId) || `User #${summary.userId}`;
+            let userPrompt = `# 学生：${studentName}\n\n`;
+            userPrompt += buildUserPrompt(problems, sampleResults);
             userPrompt += `\n\n---\n系统预判：该学生属于【情境 ${scenario}】，请据此调整侧重点。`;
             if (historyContext) {
                 userPrompt += `\n\n历史背景:\n该学生在本课程的近期表现摘要如下，请参考以提供纵向对比和鼓励：\n${historyContext}\n\n特别注意：\n- 如果上次建议（last_advice）与本次表现有关联，请明确提及\n- 如果错误类型在升级（如从 CE 转向 WA/TLE），这是认知进步的信号\n- 如果发现连续多次受挫（continuous_struggle=true），降低难度期望，提供情感支持`;

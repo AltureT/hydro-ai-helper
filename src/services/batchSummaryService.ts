@@ -288,6 +288,7 @@ export class BatchSummaryService {
     problems: ProblemInfo[],
     onEvent: (event: SSEEvent) => void,
     pendingOnly = false,
+    userNameMap?: Map<number, string>,
   ): Promise<void> {
     // Step 1: Mark job as running
     await this.jobModel.updateStatus(job._id, 'running');
@@ -324,7 +325,7 @@ export class BatchSummaryService {
       const batch = summaries.slice(i, i + concurrency);
 
       const results = await Promise.allSettled(
-        batch.map((summary) => this.processStudent(job, summary, problems, systemPrompt, onEvent)),
+        batch.map((summary) => this.processStudent(job, summary, problems, systemPrompt, onEvent, userNameMap)),
       );
 
       for (const result of results) {
@@ -367,6 +368,7 @@ export class BatchSummaryService {
     problems: ProblemInfo[],
     systemPrompt: string,
     onEvent: (event: SSEEvent) => void,
+    userNameMap?: Map<number, string>,
   ): Promise<number> {
     try {
       // a. Mark as generating
@@ -438,7 +440,9 @@ export class BatchSummaryService {
       }
 
       // d4. Build user prompt with scenario + history
-      let userPrompt = buildUserPrompt(problems, sampleResults);
+      const studentName = userNameMap?.get(summary.userId) || `User #${summary.userId}`;
+      let userPrompt = `# 学生：${studentName}\n\n`;
+      userPrompt += buildUserPrompt(problems, sampleResults);
       userPrompt += `\n\n---\n系统预判：该学生属于【情境 ${scenario}】，请据此调整侧重点。`;
       if (historyContext) {
         userPrompt += `\n\n历史背景:\n该学生在本课程的近期表现摘要如下，请参考以提供纵向对比和鼓励：\n${historyContext}\n\n特别注意：\n- 如果上次建议（last_advice）与本次表现有关联，请明确提及\n- 如果错误类型在升级（如从 CE 转向 WA/TLE），这是认知进步的信号\n- 如果发现连续多次受挫（continuous_struggle=true），降低难度期望，提供情感支持`;

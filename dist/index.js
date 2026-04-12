@@ -42,6 +42,8 @@ const batchSummaryHandler_1 = require("./handlers/batchSummaryHandler");
 console.log('[AI-Helper] batchSummaryHandler OK');
 const feedbackHandler_1 = require("./handlers/feedbackHandler");
 console.log('[AI-Helper] feedbackHandler OK');
+const teachingSummaryHandler_1 = require("./handlers/teachingSummaryHandler");
+const teachingSummary_1 = require("./models/teachingSummary");
 const updateHandler_1 = require("./handlers/updateHandler");
 console.log('[AI-Helper] updateHandler OK');
 const conversation_1 = require("./models/conversation");
@@ -109,6 +111,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const batchSummaryJobModel = new batchSummaryJob_1.BatchSummaryJobModel(db);
         const studentSummaryModel = new studentSummary_1.StudentSummaryModel(db);
         const studentHistoryModel = new studentHistory_1.StudentHistoryModel(db);
+        const teachingSummaryModel = new teachingSummary_1.TeachingSummaryModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
@@ -133,6 +136,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
         await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
         await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
+        await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
         // 执行数据迁移（为历史数据添加 domainId）
         const migrationService = new migrationService_1.MigrationService(db);
         await migrationService.runAllMigrations();
@@ -170,6 +174,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
         ctx.provide('studentSummaryModel', studentSummaryModel);
         ctx.provide('studentHistoryModel', studentHistoryModel);
+        ctx.provide('teachingSummaryModel', teachingSummaryModel);
         ctx.provide('errorReporter', errorReporter);
         // 初始化版本服务
         const versionService = new versionService_1.VersionService(versionCacheModel);
@@ -280,6 +285,13 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // GET /ai-helper/batch-summaries/my-summary?contestId=xxx - 学生查看自己的已发布总结
         ctx.Route('ai_batch_summary_my', '/ai-helper/batch-summaries/my-summary', batchSummaryHandler_1.StudentSummaryHandler, hydrooj_1.PRIV.PRIV_USER_PROFILE);
         ctx.Route('ai_batch_summary_my_domain', '/d/:domainId/ai-helper/batch-summaries/my-summary', batchSummaryHandler_1.StudentSummaryHandler, hydrooj_1.PRIV.PRIV_USER_PROFILE);
+        // 教学建议路由
+        ctx.Route('ai_teaching_summary', '/ai-helper/teaching-summary/:contestId', teachingSummaryHandler_1.TeachingSummaryHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
+        ctx.Route('ai_teaching_summary_domain', '/d/:domainId/ai-helper/teaching-summary/:contestId', teachingSummaryHandler_1.TeachingSummaryHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
+        ctx.Route('ai_teaching_review', '/ai-helper/teaching-review', teachingSummaryHandler_1.TeachingReviewHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
+        ctx.Route('ai_teaching_review_domain', '/d/:domainId/ai-helper/teaching-review', teachingSummaryHandler_1.TeachingReviewHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
+        ctx.Route('ai_teaching_summary_feedback', '/ai-helper/teaching-summary/:summaryId/feedback', teachingSummaryHandler_1.TeachingSummaryFeedbackHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
+        ctx.Route('ai_teaching_summary_feedback_domain', '/d/:domainId/ai-helper/teaching-summary/:summaryId/feedback', teachingSummaryHandler_1.TeachingSummaryFeedbackHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
     }
 });
 exports.Config = configSchema;

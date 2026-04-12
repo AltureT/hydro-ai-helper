@@ -224,7 +224,7 @@ export class BatchSummaryGenerateHandler extends Handler {
           }
           sse.writeEvent(event.type, event);
         }
-      }, pendingOnly).then(() => {
+      }, pendingOnly, userNameMap).then(() => {
         if (!sse.closed) sse.end();
       }).catch((err) => {
         console.error('[BatchSummaryGenerateHandler] execute error:', err);
@@ -736,7 +736,7 @@ export class BatchSummaryContinueHandler extends Handler {
           }
           sse.writeEvent(event.type, event);
         }
-      }, true).then(() => {
+      }, true, userNameMap).then(() => {
         if (!sse.closed) sse.end();
       }).catch((err) => {
         console.error('[BatchSummaryContinueHandler] execute error:', err);
