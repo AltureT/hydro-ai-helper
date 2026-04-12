@@ -120,6 +120,31 @@ describe('buildMainPrompt', () => {
     expect(user).not.toContain('教学目标未提供');
     expect(user).toContain('理解递归');
   });
+
+  it('should include few-shot quality examples in system prompt', () => {
+    const input = makeInput();
+    const { system } = buildMainPrompt(input);
+    expect(system).toContain('坏例子');
+    expect(system).toContain('好例子');
+    expect(system).toContain('明天上课就能直接用');
+  });
+
+  it('should include edge case handling in system prompt', () => {
+    const input = makeInput();
+    const { system } = buildMainPrompt(input);
+    expect(system).toContain('培优建议');
+    expect(system).toContain('AI 使用数据为 0');
+  });
+
+  it('should include P0/P1/P2 framework with classroom action format', () => {
+    const input = makeInput();
+    const { system } = buildMainPrompt(input);
+    expect(system).toContain('开场提问');
+    expect(system).toContain('演示/板书');
+    expect(system).toContain('当堂检验');
+    expect(system).toContain('persistent_learner');
+    expect(system).toContain('burst_then_quit');
+  });
 });
 
 // ─── buildDeepDivePrompt ─────────────────────────────────
