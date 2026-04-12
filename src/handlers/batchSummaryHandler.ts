@@ -31,8 +31,9 @@ export class BatchSummaryGenerateHandler extends Handler {
   async post() {
     try {
       const domainId = getDomainId(this);
-      const { contestId, confirmRegenerate } = this.request.body as {
+      const { contestId, mode, confirmRegenerate } = this.request.body as {
         contestId?: string;
+        mode?: 'new_only' | 'regenerate';
         confirmRegenerate?: boolean;
       };
 
@@ -46,7 +47,6 @@ export class BatchSummaryGenerateHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
-      // Parse contestId as ObjectId
       let contestObjId;
       try {
         contestObjId = new ObjectId(contestId);
@@ -57,20 +57,7 @@ export class BatchSummaryGenerateHandler extends Handler {
         return;
       }
 
-      // Check for existing active job
-      const existingJob = await jobModel.findActiveJob(domainId, contestObjId);
-      if (existingJob) {
-        const hasEdited = await summaryModel.hasEditedSummaries(existingJob._id);
-        if (hasEdited && !confirmRegenerate) {
-          this.response.body = { needConfirm: true };
-          this.response.type = 'application/json';
-          return;
-        }
-        // Archive old job before regenerating
-        await jobModel.archive(existingJob._id);
-      }
-
-      // Fetch contest/homework document (HydroOJ stores in 'document' collection, docType 30)
+      // Fetch contest document
       const documentColl = db.collection('document');
       const tdoc = await documentColl.findOne({ domainId, docType: 30, docId: contestObjId });
       if (!tdoc) {
@@ -80,64 +67,109 @@ export class BatchSummaryGenerateHandler extends Handler {
         return;
       }
 
-      // Get pids from contest doc
-      const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
-
-      // Get attendees from document.status collection (HydroOJ stores per-user contest status here)
+      // Get all current attendees
       const statusColl = db.collection('document.status');
       const tsdocs = await statusColl
         .find({ domainId, docType: 30, docId: contestObjId }, { projection: { uid: 1 } })
         .toArray();
-      const attendees: number[] = tsdocs.map((s: any) => Number(s.uid)).filter((uid: number) => uid > 0);
+      const allAttendees: number[] = tsdocs.map((s: any) => Number(s.uid)).filter((uid: number) => uid > 0);
 
-      // Fetch user names for all attendees (HydroOJ user collection)
+      // Check for existing active job
+      const existingJob = await jobModel.findActiveJob(domainId, contestObjId);
+
+      // Determine effective mode
+      const effectiveMode = mode || (existingJob ? 'new_only' : 'regenerate');
+
+      let job: any;
+      let newStudentIds: number[];
+      let previousCompleted = 0;
+      let previousFailed = 0;
+
+      if (effectiveMode === 'new_only' && existingJob) {
+        // --- Supplementary generation: append new students to existing job ---
+        const existingUserIds = await summaryModel.findUserIdsByJob(existingJob._id);
+        const existingSet = new Set(existingUserIds);
+        newStudentIds = allAttendees.filter((uid) => !existingSet.has(uid));
+
+        if (newStudentIds.length === 0) {
+          this.response.body = { noNewStudents: true };
+          this.response.type = 'application/json';
+          return;
+        }
+
+        // Insert new summary records (safe against concurrent inserts)
+        await summaryModel.createBatchSafe(existingJob._id, domainId, contestObjId, newStudentIds);
+
+        // Track previous counts for SSE progress offset
+        previousCompleted = existingJob.completedCount;
+        previousFailed = existingJob.failedCount;
+
+        // Atomically update totalStudents and reset job to running
+        const newTotal = existingUserIds.length + newStudentIds.length;
+        await jobModel.prepareForSupplementary(existingJob._id, newTotal);
+
+        job = await jobModel.findById(existingJob._id);
+      } else {
+        // --- Full regeneration ---
+        if (existingJob) {
+          if (!confirmRegenerate) {
+            const hasEdited = await summaryModel.hasEditedSummaries(existingJob._id);
+            if (hasEdited) {
+              this.response.body = { needConfirm: true };
+              this.response.type = 'application/json';
+              return;
+            }
+          }
+          await jobModel.archive(existingJob._id);
+        }
+
+        newStudentIds = allAttendees;
+
+        const jobId = await jobModel.create({
+          domainId,
+          contestId: contestObjId,
+          contestTitle: String(tdoc.title || contestId),
+          createdBy: this.user._id,
+          totalStudents: allAttendees.length,
+          config: { concurrency: 10, locale: 'zh' },
+        });
+
+        if (allAttendees.length > 0) {
+          await summaryModel.createBatch(jobId, domainId, contestObjId, allAttendees);
+        }
+
+        job = await jobModel.findById(jobId);
+        if (!job) {
+          this.response.status = 500;
+          this.response.body = { error: { code: 'JOB_CREATE_FAILED', message: 'Failed to create job' } };
+          this.response.type = 'application/json';
+          return;
+        }
+      }
+
+      // Fetch user names
       const userColl = db.collection('user');
       const userDocs = await userColl
-        .find({ _id: { $in: attendees } }, { projection: { _id: 1, uname: 1 } })
+        .find({ _id: { $in: allAttendees } }, { projection: { _id: 1, uname: 1 } })
         .toArray();
       const userNameMap = new Map<number, string>();
       for (const u of userDocs) {
         userNameMap.set(u._id, u.uname || `User #${u._id}`);
       }
 
-      // Fetch problem documents (docType 10 = problem in HydroOJ document collection)
+      // Fetch problem info
+      const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
       const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
       const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
         .toArray();
-
       const problems: ProblemInfo[] = problemDocs.map((doc: any) => ({
         pid: String(doc.docId),
         title: doc.title || `Problem ${doc.docId}`,
         content: doc.content || '',
       }));
 
-      // Create new job
-      const jobId = await jobModel.create({
-        domainId,
-        contestId: contestObjId,
-        contestTitle: String(tdoc.title || contestId),
-        createdBy: this.user._id,
-        totalStudents: attendees.length,
-        config: { concurrency: 10, locale: 'zh' },
-      });
-
-      // Create summary records for each attendee
-      if (attendees.length > 0) {
-        await summaryModel.createBatch(jobId, domainId, contestObjId, attendees);
-      }
-
-      // Fetch the newly created job
-      const job = await jobModel.findById(jobId);
-      if (!job) {
-        this.response.status = 500;
-        this.response.body = { error: { code: 'JOB_CREATE_FAILED', message: 'Failed to create job' } };
-        this.response.type = 'application/json';
-        return;
-      }
-
-      // Setup SSE — access raw Node.js ServerResponse via Koa context
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // Setup SSE
       const koaCtx = (this as any).context;
       const rawRes: ServerResponse | undefined = koaCtx?.res;
       if (!rawRes) {
@@ -152,9 +184,15 @@ export class BatchSummaryGenerateHandler extends Handler {
       koaCtx.req?.socket?.setTimeout?.(0);
 
       const sse = createSSEWriter(rawRes);
-      sse.writeEvent('job_started', { jobId: String(jobId), totalStudents: attendees.length });
+      sse.writeEvent('job_started', {
+        jobId: String(job._id),
+        totalStudents: job.totalStudents,
+        newStudents: newStudentIds.length,
+        previousCompleted,
+        previousFailed,
+      });
 
-      // Create AI client from database config (same pattern as studentHandler)
+      // Create AI client
       let aiClient;
       try {
         aiClient = await createMultiModelClientFromConfig(this.ctx);
@@ -165,24 +203,27 @@ export class BatchSummaryGenerateHandler extends Handler {
         return;
       }
       const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
+      const historyModel = this.ctx.get('studentHistoryModel') || null;
       const service = new BatchSummaryService(
         this.ctx.db,
         jobModel,
         summaryModel,
         aiClient,
         tokenUsageModel,
+        historyModel,
       );
+
+      const pendingOnly = effectiveMode === 'new_only';
 
       service.execute(job, problems, (event) => {
         if (!sse.closed) {
-          // Enrich events with userName from pre-fetched map
           const uid = Number(event.userId);
           if (uid && userNameMap.has(uid)) {
             (event as any).userName = userNameMap.get(uid);
           }
           sse.writeEvent(event.type, event);
         }
-      }).then(() => {
+      }, pendingOnly).then(() => {
         if (!sse.closed) sse.end();
       }).catch((err) => {
         console.error('[BatchSummaryGenerateHandler] execute error:', err);
@@ -505,6 +546,14 @@ export class BatchSummaryLatestHandler extends Handler {
         return;
       }
 
+      // Query current attendee count for new-student detection
+      const statusColl = db.collection('document.status');
+      const attendeeCount = await statusColl.countDocuments({
+        domainId,
+        docType: 30,
+        docId: contestObjId,
+      });
+
       // Fetch user names
       const summaries = await summaryModel.findAllByJob(job._id);
       const uids = summaries.map((s) => s.userId).filter((uid) => uid > 0);
@@ -536,6 +585,7 @@ export class BatchSummaryLatestHandler extends Handler {
           contestTitle: job.contestTitle,
         },
         summaries: enriched,
+        currentAttendeeCount: attendeeCount,
       };
       this.response.type = 'application/json';
     } catch (err) {
@@ -667,12 +717,14 @@ export class BatchSummaryContinueHandler extends Handler {
         return;
       }
       const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
+      const historyModel = this.ctx.get('studentHistoryModel') || null;
       const service = new BatchSummaryService(
         this.ctx.db,
         jobModel,
         summaryModel,
         aiClient,
         tokenUsageModel,
+        historyModel,
       );
 
       service.execute(job, problems, (event) => {
