@@ -12,12 +12,13 @@ import { TeachingFinding, FindingDimension } from '../models/teachingSummary';
 
 const MIN_AFFECTED = 5;
 
-/** HydroOJ record status codes */
+/** HydroOJ record status codes (from batchSummaryService.ts STATUS_MAP) */
 const STATUS = {
   AC: 1,
-  WA: 30,
+  WA: 2,
   TLE: 3,
   MLE: 4,
+  OLE: 5,
   RE: 6,
   CE: 7,
 } as const;

@@ -3,7 +3,7 @@ import { TeachingAnalysisService, AnalyzeInput } from '../../services/teachingAn
 // ─── Mock helpers ────────────────────────────────────────────────────────────
 
 const STATUS_AC = 1;
-const STATUS_WA = 30;
+const STATUS_WA = 2;
 const STATUS_TLE = 3;
 const STATUS_RE = 6;
 
