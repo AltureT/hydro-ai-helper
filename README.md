@@ -50,15 +50,23 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 - AI chat panel on problem pages with real-time streaming (SSE) and LaTeX rendering
 - Choose question type: **Understand** / **Approach** / **Debug** / **Optimize** (AC-only)
 - Multi-turn conversations with history; select confusing text for instant clarification
-- Responsive UI — side panel on wide screens, floating panel on narrow screens
+- View personalized AI learning summaries on scoreboard pages
 
 ### Teachers
 
-- **Batch AI Summary** — one-click generation of personalized learning summaries for all students on homework/contest scoreboard pages
-  - Real-time progress via SSE streaming; supports stop, continue, and retry failed
-  - Smart submission sampling: automatically selects key milestones (first submit, first AC, score improvements) to capture learning trajectory
-  - Draft/publish workflow: review and edit before publishing to students
-  - Students see their published summary on the scoreboard, with auto-refresh polling
+- **Teaching Analysis** — class-level insights from collective submission data, helping teachers discover teaching problems and take action
+  - 8-dimension rule-engine analysis: common errors, comprehension gaps, learning strategies, at-risk students, difficulty anomalies, progress trends, cognitive paths, AI tutoring effectiveness
+  - Error signature clustering: groups similar compile/runtime errors across students to surface shared misconceptions
+  - Temporal behavior patterns: classifies students into 5 patterns (strategic solver, disengaged, burst-then-quit, stuck-silent, persistent learner)
+  - Cross-dimensional correlation: detects compound risk patterns (e.g., high AI usage + low AC rate)
+  - Code fill-in exercises: auto-generates blanked-code exercises from AC submissions for targeted practice
+  - LLM-powered actionable suggestions with priority framework (P0/P1/P2) — specific classroom actions, not generic advice
+  - 60/40 split layout with sticky AI suggestion sidebar, skeleton loading, confidence badges
+- **Batch AI Summary** — one-click personalized learning summaries for all students on scoreboard pages
+  - Longitudinal student history tracking: records error trends, struggle indicators, and actionable advice across assignments
+  - Smart submission sampling based on milestones (first submit, first AC, score improvements, status changes)
+  - Supplemental generation for late-arriving students without regenerating existing summaries
+  - Draft/publish workflow with real-time SSE progress, stop/continue/retry controls
 - Browse student conversations with filters (time / problem / class / student / userId)
 - Autocomplete search for class and problem filters
 - Multi-dimensional effectiveness metrics and question-type distribution
@@ -142,6 +150,33 @@ db.ai_plugin_install.updateOne(
 ## Changelog
 
 <details open>
+<summary><b>v2.0.0</b> — Teaching Analysis & Design Overhaul</summary>
+
+**Teaching Analysis System (NEW)**
+- 8-dimension class-level analysis: common errors, comprehension gaps, learning strategies, at-risk students, difficulty anomalies, progress trends, cognitive paths, AI tutoring effectiveness
+- Rule-engine-first architecture: anomaly detection via data pipeline, LLM for actionable suggestions — 1/30 cost of pure-LLM approach
+- Error signature clustering with compiler error normalization
+- Temporal behavior pattern analyzer (5-way student classification)
+- Cross-dimensional correlation detection (3 priority pairs)
+- Auto-generated code fill-in exercises from AC submissions
+- Adaptive class-size strategy (<10 / 10-20 / 20-100+ students)
+- 60/40 split layout with sticky suggestion sidebar, skeleton loading, confidence badges
+
+**Batch Summary Enhancement**
+- Student history tracking across assignments (error trends, struggle indicators, prior advice)
+- Supplemental generation mode for late-arriving students
+- Rewritten prompts with educational psychology principles and historical context injection
+- Smart primary button state machine (generate new / retry failed / continue)
+
+**Frontend Redesign**
+- Unified design token system with green accent theme for teacher features
+- Tab restyling with ARIA accessibility attributes and keyboard navigation
+- Finding cards with severity-based color coding (high/medium/low)
+- Responsive 60/40 → vertical layout below 768px
+
+</details>
+
+<details>
 <summary><b>v1.21.0</b> — Batch AI Learning Summary</summary>
 
 - One-click AI summary generation for all students on homework/contest scoreboard pages
