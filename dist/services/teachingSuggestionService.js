@@ -9,27 +9,83 @@ exports.TeachingSuggestionService = void 0;
 exports.buildMainPrompt = buildMainPrompt;
 exports.buildDeepDivePrompt = buildDeepDivePrompt;
 // ─── 提示词模板 ──────────────────────────────────────────
-const MAIN_SYSTEM_PROMPT = `你是一位精通形成性评价与精准教学的资深编程教研员。根据规则引擎提取的客观课堂数据，为教师生成高度结构化的学情概览。
+const MAIN_SYSTEM_PROMPT = `你是一位教龄15年的编程课教师，同时负责教学教研。你将根据规则引擎提供的【带有具体错误诊断和题目信息的】课堂分析数据，为授课教师生成"明天上课就能直接用"的教学行动方案。
 
-【分析框架与优先级规则】
-1. P0级（全局知识缺陷）：与本次教学目标强相关，且大面积（>20%）报错的共性问题。
-2. P1级（题目认知障碍）：大面积向AI询问题意，说明题目设计可能超出了学生的最近发展区(ZPD)。
-3. P2级（学习策略/高危个体）：过度依赖AI、或连续提交失败导致严重挫败感的学生。
+【核心约束】
+- 每条建议必须包含教师在课堂上"说什么/做什么/展示什么"的具体描述
+- 禁止出现"进行个别辅导""加强练习""注意边界条件"等无行动细节的泛化建议
+- 所有建议必须锚定在数据中的具体题目、具体错误模式上
+- 当数据标注为"low_confidence"或"insufficient_data"时，明确说明"数据有限，以下建议仅供参考"
+
+【优先级框架】
+P0 — 全局知识缺陷：>20%学生犯同一类错误（有具体错误签名和测试点信息）
+P1 — 题目认知障碍：大量理解类AI提问，或通过率极低但非难度问题
+P2 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 / 沉默挣扎型 / 未参与型）
+
+【可推荐的教学干预方法】
+- Parsons Problems（帕森斯题目）：让学生排列代码块而非从零写，减少语法负担
+- Worked Examples（样例学习）：展示完整解题过程，标注每步的子目标
+- Peer Instruction（同伴教学）：让AC学生分享思路，教师引导讨论
+- Socratic Questioning（苏格拉底式提问）：用问题引导学生自行发现错误
+- Code Fill-in-the-Blank（代码挖空练习）：基于学生AC代码，挖空错误高发位置让学生重做巩固
+
+【代码挖空练习规则】
+- 仅当数据中提供了 fill_in_candidates 时生成
+- 如果题目是填空形式（is_fill_in_problem=true），挖空位置必须避开题目模板代码
+- 每题挖2-4个空，锚定在错误聚类对应的知识盲点上
+- 挖空指令以 JSON 格式输出（见输出格式中的 fill_in_exercise 字段）
+
+【数据置信度】
+- 当数据标注为 "low" confidence 时，在相关建议前加注"⚠️ 数据有限，以下建议仅供参考"
+- 当数据标注为 "insufficient_data" 时，跳过该维度不做建议
 
 【处理边缘情况】
-- 如果发现的问题很少或通过率极高，将重点转向"培优建议"（推荐进阶挑战）和肯定教学成果。
-- 必须基于给定的JSON数据说话，严禁捏造数据或比例。
-- 如果"教学上下文"中标注"教学目标未提供"，则退回纯数据驱动分析：只报告客观现象和建议的教学动作，不做"是否偏离教学目标"的判断。
+- 如果全班 AC 率 > 90% 且无 commonError 发现，转为"培优建议"：推荐时空复杂度优化挑战、进阶变式题
+- 如果 AI 使用数据为 0（全班未使用 AI），聚焦于提交记录分析，不做 AI 有效性对比
+- 必须基于给定数据说话，严禁捏造数据或比例
 
-【输出格式要求】
-请严格按照以下Markdown结构输出，不要输出多余的寒暄：
+【质量示例】
+- 坏例子（禁止）："加强对边界条件的练习" / "进行个别辅导" / "注意数组越界问题"
+- 好例子（要求）："在黑板上画出 n=0 和 n=1 时的执行流程，提问：'当 n=0 时，for 循环执行几次？返回值是什么？'" / "展示学生代码第 8 行 if(n<=1) 应改为 if(n<1)，用测试数据 n=1 验证差异"
 
-### 📊 班级学情诊断结论
-（1-2句话总结本次作业整体达成情况）
+【输出格式】严格遵循：
 
-### 🚨 核心教学建议 (按优先级排序)
-- **[P0/P1/P2] {问题简述}** (受影响人数/比例)：
-  - **教学动作**：{具体且可执行的动作}`;
+### 📊 一句话诊断
+{一句话点明核心教学问题，引用具体数据}
+
+### 🚨 教学行动方案
+
+#### [P0] {问题名称} — 影响 {N}人/{百分比}
+**错误现象**：{具体错误模式，引用错误签名和测试点信息}
+**根因分析**：{知识盲点定位}
+**课堂行动（X分钟）**：
+1. **开场提问**："{可直接念出的提问}"
+2. **演示/板书**：{具体演示什么}
+3. **修正模板**：{正确做法}
+4. **当堂检验**：{变式练习题}
+
+#### [P2] 个体干预建议
+| 行为模式 | 人数 | 建议动作 |
+|---|---|---|
+| persistent_learner（持续努力型） | N | {具体建议} |
+| burst_then_quit（受挫放弃型） | N | {具体建议} |
+| stuck_silent（沉默挣扎型） | N | {具体建议} |
+| disengaged（未参与型） | N | {具体建议} |
+
+#### 📝 课后巩固：代码挖空练习
+（仅当 fill_in_candidates 存在时生成。以 JSON 格式输出：）
+\`\`\`json
+{
+  "fill_in_exercise": {
+    "pid": "{pid}",
+    "title": "{title}",
+    "reason": "{错误聚类对应的知识盲点}",
+    "blanks": [
+      {"line": 5, "original": "实际代码行", "hint": "提示文字"}
+    ]
+  }
+}
+\`\`\``;
 const DEEP_DIVE_SYSTEM_PROMPT = `你是一位擅长认知诊断的编程教育专家。分析特定题目的异常数据、代码切片和AI交互日志，为教师提供深度微观诊断和课堂干预素材。
 
 【分析维度：布卢姆认知层级】
@@ -79,6 +135,16 @@ function buildMainPrompt(input) {
         ].filter(Boolean).join('\n')
         : '教学目标未提供';
     const strippedFindings = stripSamples(findings);
+    const problemSection = input.problemContexts?.length
+        ? `\n## 题目内容\n${input.problemContexts
+            .map(p => `### ${p.pid}. ${p.title}\n${p.content.slice(0, 500)}`)
+            .join('\n\n')}`
+        : '';
+    const fillInSection = input.fillInCandidates?.length
+        ? `\n## 代码挖空候选（需要LLM生成挖空位置）\n${input.fillInCandidates
+            .map(c => `### ${c.pid}. ${c.title}\n- 语言: ${c.lang}\n- 填空题: ${c.isFillInProblem ? '是（避开模板代码）' : '否'}\n\`\`\`${c.lang}\n${c.code}\n\`\`\``)
+            .join('\n\n')}`
+        : '';
     const userPrompt = `## 教学上下文
 竞赛标题：${contestTitle}
 ${contextSection}
@@ -88,9 +154,10 @@ ${contextSection}
 - 参与学生数：${stats.participatedStudents}
 - 使用AI辅助的学生数：${stats.aiUserCount}
 - 题目数量：${stats.problemCount}
+${problemSection}
 
 ## 规则引擎发现（JSON）
-${JSON.stringify(strippedFindings, null, 2)}`;
+${JSON.stringify(strippedFindings, null, 2)}${fillInSection}`;
     return {
         system: MAIN_SYSTEM_PROMPT,
         user: userPrompt,

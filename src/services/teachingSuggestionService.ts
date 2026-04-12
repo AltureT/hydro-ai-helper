@@ -26,6 +26,17 @@ P2 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 
 - Worked Examples（样例学习）：展示完整解题过程，标注每步的子目标
 - Peer Instruction（同伴教学）：让AC学生分享思路，教师引导讨论
 - Socratic Questioning（苏格拉底式提问）：用问题引导学生自行发现错误
+- Code Fill-in-the-Blank（代码挖空练习）：基于学生AC代码，挖空错误高发位置让学生重做巩固
+
+【代码挖空练习规则】
+- 仅当数据中提供了 fill_in_candidates 时生成
+- 如果题目是填空形式（is_fill_in_problem=true），挖空位置必须避开题目模板代码
+- 每题挖2-4个空，锚定在错误聚类对应的知识盲点上
+- 挖空指令以 JSON 格式输出（见输出格式中的 fill_in_exercise 字段）
+
+【数据置信度】
+- 当数据标注为 "low" confidence 时，在相关建议前加注"⚠️ 数据有限，以下建议仅供参考"
+- 当数据标注为 "insufficient_data" 时，跳过该维度不做建议
 
 【处理边缘情况】
 - 如果全班 AC 率 > 90% 且无 commonError 发现，转为"培优建议"：推荐时空复杂度优化挑战、进阶变式题
@@ -55,10 +66,25 @@ P2 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 
 #### [P2] 个体干预建议
 | 行为模式 | 人数 | 建议动作 |
 |---|---|---|
-| 持续努力型 | N | {具体建议} |
-| 受挫放弃型 | N | {具体建议} |
-| 沉默挣扎型 | N | {具体建议} |
-| 未参与型 | N | {具体建议} |`;
+| persistent_learner（持续努力型） | N | {具体建议} |
+| burst_then_quit（受挫放弃型） | N | {具体建议} |
+| stuck_silent（沉默挣扎型） | N | {具体建议} |
+| disengaged（未参与型） | N | {具体建议} |
+
+#### 📝 课后巩固：代码挖空练习
+（仅当 fill_in_candidates 存在时生成。以 JSON 格式输出：）
+\`\`\`json
+{
+  "fill_in_exercise": {
+    "pid": "{pid}",
+    "title": "{title}",
+    "reason": "{错误聚类对应的知识盲点}",
+    "blanks": [
+      {"line": 5, "original": "实际代码行", "hint": "提示文字"}
+    ]
+  }
+}
+\`\`\``;
 
 const DEEP_DIVE_SYSTEM_PROMPT = `你是一位擅长认知诊断的编程教育专家。分析特定题目的异常数据、代码切片和AI交互日志，为教师提供深度微观诊断和课堂干预素材。
 
@@ -98,6 +124,13 @@ export interface MainPromptInput {
   };
   findings: TeachingFinding[];
   problemContexts?: Array<{ pid: number; title: string; content: string }>;
+  fillInCandidates?: Array<{
+    pid: number;
+    title: string;
+    lang: string;
+    code: string;
+    isFillInProblem: boolean;
+  }>;
 }
 
 export interface PromptMessages {
@@ -152,6 +185,12 @@ export function buildMainPrompt(input: MainPromptInput): PromptMessages {
         .join('\n\n')}`
     : '';
 
+  const fillInSection = input.fillInCandidates?.length
+    ? `\n## 代码挖空候选（需要LLM生成挖空位置）\n${input.fillInCandidates
+        .map(c => `### ${c.pid}. ${c.title}\n- 语言: ${c.lang}\n- 填空题: ${c.isFillInProblem ? '是（避开模板代码）' : '否'}\n\`\`\`${c.lang}\n${c.code}\n\`\`\``)
+        .join('\n\n')}`
+    : '';
+
   const userPrompt = `## 教学上下文
 竞赛标题：${contestTitle}
 ${contextSection}
@@ -164,7 +203,7 @@ ${contextSection}
 ${problemSection}
 
 ## 规则引擎发现（JSON）
-${JSON.stringify(strippedFindings, null, 2)}`;
+${JSON.stringify(strippedFindings, null, 2)}${fillInSection}`;
 
   return {
     system: MAIN_SYSTEM_PROMPT,
