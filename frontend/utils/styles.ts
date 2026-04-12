@@ -38,6 +38,13 @@ export const COLORS = {
   infoText: '#0c4a6e',
   codeBg: '#f6f8fa',
   codeBorder: '#e2e8f0',
+  // HydroOJ native integration colors
+  hydroGreen: '#21ba45',
+  hydroGreenLight: '#e8f5e9',
+  hydroGreenDark: '#1a9c39',
+  nativeText: '#333333',
+  nativeBorder: '#dddddd',
+  nativeHeaderBg: '#f9fafb',
   blockquoteBorder: '#2563eb',
   blockquoteBg: '#f0f9ff',
   gradient: 'linear-gradient(135deg, #2563eb, #3b82f6)',
