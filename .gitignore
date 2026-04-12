@@ -2,6 +2,11 @@
 .claude/
 .specify/
 .chatgpt/
+.superpowers/
+CLAUDE.md
+
+# Test coverage
+coverage/
 
 
 # Ignore environment variable files
