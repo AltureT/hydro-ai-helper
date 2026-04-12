@@ -89,13 +89,13 @@ function getTabItemStyle(isActive: boolean): React.CSSProperties {
     display: 'inline-flex',
     alignItems: 'center',
     gap: '6px',
-    padding: `10px ${SPACING.base}`,
+    padding: '10px 15px',
     fontSize: '14px',
-    fontWeight: isActive ? 600 : 400,
-    color: isActive ? COLORS.primary : COLORS.textSecondary,
-    backgroundColor: isActive ? COLORS.bgCard : 'transparent',
+    fontWeight: isActive ? 700 : 400,
+    color: isActive ? '#000000' : '#666666',
+    backgroundColor: 'transparent',
     border: 'none',
-    borderBottom: isActive ? `2px solid ${COLORS.primary}` : '2px solid transparent',
+    borderBottom: isActive ? '2px solid #21ba45' : '2px solid transparent',
     cursor: 'pointer',
     outline: 'none',
     whiteSpace: 'nowrap',
@@ -152,6 +152,20 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
     });
   }, []);
 
+  const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const currentIndex = tabsList.findIndex(t => t.id === activeTab);
+    let nextIndex = currentIndex;
+    if (e.key === 'ArrowRight') {
+      nextIndex = (currentIndex + 1) % tabsList.length;
+    } else if (e.key === 'ArrowLeft') {
+      nextIndex = (currentIndex - 1 + tabsList.length) % tabsList.length;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    switchTab(tabsList[nextIndex].id);
+  }, [activeTab, tabsList, switchTab]);
+
   // ── Badge callbacks (invoked by child panels) ─────────────────────────────
 
   const handleTeachingStats = useCallback((findingsCount: number) => {
@@ -192,15 +206,13 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
 
   return (
     <div style={{ margin: `${SPACING.base} 0`, fontFamily: 'inherit' }}>
+      <style>{`@keyframes fadeSlideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }`}</style>
       {/* Tab bar */}
-      <div style={{
+      <div role="tablist" onKeyDown={handleTabKeyDown} style={{
         display: 'flex',
         alignItems: 'stretch',
-        borderBottom: `1px solid ${COLORS.border}`,
+        borderBottom: '1px solid #dddddd',
         marginBottom: SPACING.base,
-        backgroundColor: COLORS.bgPage,
-        borderRadius: `${RADIUS.md} ${RADIUS.md} 0 0`,
-        padding: `0 ${SPACING.sm}`,
         overflowX: 'auto',
       }}>
         {tabsList.map(tab => {
@@ -208,6 +220,9 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
           return (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`tabpanel-${tab.id}`}
               onClick={() => switchTab(tab.id)}
               style={getTabItemStyle(isActive)}
             >
@@ -216,7 +231,7 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
                 <span style={{
                   fontSize: '11px',
                   fontWeight: 600,
-                  backgroundColor: isActive ? COLORS.primary : COLORS.textMuted,
+                  backgroundColor: isActive ? '#21ba45' : '#94a3b8',
                   color: '#ffffff',
                   padding: '1px 7px',
                   borderRadius: RADIUS.full,
@@ -236,7 +251,14 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
       <div style={{ padding: `0 ${SPACING.base}` }}>
         {/* Teaching Analysis tab (teacher only) */}
         {isTeacher && mountedTabs.has(TABS.TEACHING) && (
-          <div style={{ display: activeTab === TABS.TEACHING ? 'block' : 'none' }}>
+          <div
+            role="tabpanel"
+            id="tabpanel-TEACHING"
+            style={{
+              display: activeTab === TABS.TEACHING ? 'block' : 'none',
+              animation: activeTab === TABS.TEACHING ? 'fadeSlideIn 200ms ease-out' : 'none',
+            }}
+          >
             <TeachingSummaryPanel
               domainId={domainId}
               contestId={contestId}
@@ -247,7 +269,14 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
 
         {/* Learning Summaries tab */}
         {mountedTabs.has(TABS.LEARNING) && (
-          <div style={{ display: activeTab === TABS.LEARNING ? 'block' : 'none' }}>
+          <div
+            role="tabpanel"
+            id="tabpanel-LEARNING"
+            style={{
+              display: activeTab === TABS.LEARNING ? 'block' : 'none',
+              animation: activeTab === TABS.LEARNING ? 'fadeSlideIn 200ms ease-out' : 'none',
+            }}
+          >
             {isTeacher ? (
               <BatchSummaryPanel
                 domainId={domainId}
