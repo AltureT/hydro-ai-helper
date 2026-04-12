@@ -43,8 +43,14 @@ Redesign the teaching analysis feature across three layers:
 - Remove blue background/border styling from tab buttons
 - Remove `backgroundColor: COLORS.bgPage` and `borderRadius` from tab container
 - Badge: gray background by default, green when active (not blue)
-- Export buttons: integrated into tab bar right side, visible only on Scoreboard tab
+- Export buttons: NOT moved into tab bar (DOM migration risks event listener breakage). Instead, keep native export buttons in their original position, toggle visibility via existing `setNativeVisibility()` — visible only on Scoreboard tab.
 - Transition: panel switch with `opacity 0→1 + translateY(4px→0)`, `200ms ease-out`
+
+**Accessibility (a11y):**
+- Tab container: `role="tablist"`
+- Each tab: `role="tab"`, `aria-selected="true/false"`, `aria-controls="{panel-id}"`
+- Each panel: `role="tabpanel"`, `id="{panel-id}"`
+- Keyboard: `onKeyDown` left/right arrow keys to switch tab focus
 
 **CSS class convention:**
 ```css
@@ -54,7 +60,7 @@ Redesign the teaching analysis feature across three layers:
 ```
 
 **Files to modify:**
-- `frontend/components/ScoreboardTabContainer.tsx` — tab styling, export button integration, transition animation
+- `frontend/components/ScoreboardTabContainer.tsx` — tab styling, ARIA attributes, keyboard navigation, transition animation
 - `frontend/utils/styles.ts` — add HydroOJ-native color tokens
 
 ### 2.2 Teaching Analysis Page — 60/40 Split Layout
@@ -100,12 +106,19 @@ Redesign the teaching analysis feature across three layers:
 - Content: structured markdown (diagnosis → action plan → individual intervention)
 - Feedback buttons: ghost style (gray border + small text), bottom-right aligned
 - `position: sticky; top: 16px` for scroll-following
+- `max-height: calc(100vh - 32px); overflow-y: auto` to handle long content
+- **Sticky compatibility**: check if HydroOJ's `.section` sets `overflow: hidden`; if so, override with `.section.ai-helper-container { overflow: visible !important; }`
+
+**Loading states:**
+- Sidebar: skeleton screen (gray placeholder blocks mimicking markdown line structure) while AI generates
+- Main column: simple text loading indicator (no spinner animation, consistent with HydroOJ's plain style)
+- Empty state (no findings): text message "今日课堂表现良好，未发现明显问题" — no illustration (matches HydroOJ's functional style)
 
 **Responsive:**
 - Below 768px: sidebar collapses below main column, full-width vertical flow
 
 **Files to modify:**
-- `frontend/teachingSummary/TeachingSummaryPanel.tsx` — layout restructure, style changes
+- `frontend/teachingSummary/TeachingSummaryPanel.tsx` — layout restructure, style changes, skeleton, sticky overflow fix
 - `frontend/utils/styles.ts` — new HydroOJ-native tokens and component styles
 
 ---
@@ -135,7 +148,11 @@ interface RecordDoc {
 }
 ```
 
-**MongoDB projection in `fetchRecords()`** must add these fields. Use `testCases: { $slice: 80 }` and `compilerTexts: { $slice: -3 }` to limit payload.
+**Query strategy: split queries, not monolithic fetch.**
+- Main query (`fetchRecords()`): keep existing lightweight projection (pid, uid, status, score, judgeAt) for all 8 existing dimensions
+- Error clustering query: separate `fetchRecordsForClustering()` — only non-AC records, projection: `{ pid, uid, status, testCases, compilerTexts, judgeTexts }`
+- AC code selection query: separate `fetchACSubmissions()` — only AC records, projection: `{ pid, uid, code, lang }`
+- Use aggregation pipeline `$project` stage for `$slice` operations (avoids MongoDB 4.4+ incompatibility of `$slice` mixed with inclusion projections in `find()`)
 
 ### 3.2 Error Clustering Dimension (Phase 1)
 
@@ -143,24 +160,33 @@ interface RecordDoc {
 
 ```typescript
 function errorSignature(record: RecordDoc): string {
-  if (record.status === 7 && record.compilerTexts?.length) {
-    return `CE:${normalizeCompilerError(record.compilerTexts[0])}`;
+  if (record.status === 7) {
+    if (record.compilerTexts?.length) {
+      return `CE:${normalizeCompilerError(record.compilerTexts[0])}`;
+    }
+    return 'CE:unknown';  // CE but no compiler text available
   }
   const failingTests = (record.testCases || [])
     .filter(tc => tc.status !== 1)
-    .map(tc => tc.id)
+    .map(tc => tc.id ?? tc.subtaskId ?? '?')  // handle undefined id (subtask mode)
     .sort()
+    .slice(0, 5)  // cap at 5 to avoid overly-long signatures when all tests fail
     .join(',');
-  return `${STATUS_LABEL[record.status] || record.status}:tests[${failingTests}]`;
+  const totalFailing = (record.testCases || []).filter(tc => tc.status !== 1).length;
+  const suffix = totalFailing > 5 ? `...+${totalFailing - 5}` : '';
+  return `${STATUS_LABEL[record.status] || record.status}:tests[${failingTests}${suffix}]`;
 }
 
 function normalizeCompilerError(msg: string): string {
-  return msg
+  const lines = msg.split('\n').filter(l => l.trim());
+  // Python traceback: first line is "Traceback (most recent call last):" — useless
+  // Take last line (actual error) for Python, first line for C++/Java
+  const errorLine = msg.includes('Traceback') ? lines[lines.length - 1] : lines[0];
+  return (errorLine || msg)
     .replace(/line \d+/gi, 'line N')
     .replace(/column \d+/gi, 'col N')
     .replace(/'[a-zA-Z_]\w*'/g, "'VAR'")
-    .replace(/\/[\w\/]+\.\w+/g, 'FILE')
-    .split('\n')[0];
+    .replace(/\/[\w\/]+\.\w+/g, 'FILE');
 }
 ```
 
@@ -187,15 +213,38 @@ function normalizeCompilerError(msg: string): string {
 | Pattern | Rule | Teaching Implication |
 |---|---|---|
 | `strategic_solver` | firstACIndex ≤ 3 | No intervention needed |
-| `disengaged` | totalSubmissions ≤ 2, finalStatus ≠ AC, timeSinceLastSubmit > 24h | Confirm objective reasons first |
+| `disengaged` | totalSubmissions ≤ 2, finalStatus ≠ AC, timeSinceLastSubmit > disengagedThreshold | Confirm objective reasons first |
 | `burst_then_quit` | burstCount ≥ 1, finalStatus ≠ AC, timeSinceLastSubmit > 2h | Needs emotional support, confidence building |
-| `stuck_silent` | totalSubmissions ≥ 8, finalStatus ≠ AC, no AI conversation | Teacher proactive intervention |
+| `stuck_silent` | totalSubmissions ≥ 8, finalStatus ≠ AC, no AI conversation **on this problem** | Teacher proactive intervention |
 | `persistent_learner` | distinctSessions ≥ 2, statusTransitions ≥ 2 | Has motivation, needs method/tools |
+
+**Dynamic threshold for `disengaged`:**
+```typescript
+const contestDuration = contestEndTime && contestStartTime
+  ? contestEndTime.getTime() - contestStartTime.getTime()
+  : 24 * 60 * 60 * 1000; // default 24h for non-contest mode
+const disengagedThreshold = Math.max(2 * 60 * 60 * 1000, contestDuration * 0.5);
+// For a 2h contest: threshold = 2h. For a week-long homework: threshold = 3.5 days.
+```
+
+**Per-problem conversation lookup for `stuck_silent`:**
+Requires `conversationsByUserPid` two-level index (not just `conversationsByUser`):
+```typescript
+const conversationsByUserPid = new Map<string, ConversationDoc[]>();
+for (const c of conversations) {
+  const key = `${c.userId}:${c.problemId}`;
+  if (!conversationsByUserPid.has(key)) conversationsByUserPid.set(key, []);
+  conversationsByUserPid.get(key)!.push(c);
+}
+```
+
+**Classification scope:** classify per (uid, pid), then aggregate to student-level by taking the "worst" pattern as the student's primary label for atRisk cross-correlation.
 
 **Threshold rationale:**
 - 60s burst: "change one line and resubmit" takes 30-90s; below 60s = no substantial thinking
 - 30min session: industry standard (Google Analytics session timeout)
 - 8 submissions stuck: average AC is 3-5 attempts; 8+ without AC = stuck
+- disengaged: adaptive to contest duration, minimum 2h
 
 ### 3.4 Cross-Dimensional Correlation (Phase 2)
 
@@ -342,7 +391,17 @@ P2 — 个体干预：按行为模式分类（persistent_learner / burst_then_qu
 - 仅当该题存在commonError发现、且首次提交AC率≤70%时生成
 - 如果题目本身是填空形式，挖空位置必须避开题目模板代码，仅在学生自写部分挖空
 - 每题挖2-4个空，锚定在错误聚类对应的知识盲点上
-- 提供每个空位的提示和参考答案
+- 挖空指令必须以 JSON 格式输出（见下方 fill_in_exercise 字段），不要在 markdown 中直接嵌入挖空后的代码
+
+【处理边缘情况】
+- 如果全班 AC 率 > 90% 且无 commonError 发现，转为"培优建议"：推荐时空复杂度优化挑战、进阶变式题
+- 如果 AI 使用数据为 0（全班未使用 AI），聚焦于提交记录分析，不做 AI 有效性对比
+- 必须基于给定数据说话，严禁捏造数据或比例
+- 当数据标注为"low_confidence"或"insufficient_data"时，明确说明"数据有限，以下建议仅供参考"
+
+【质量示例】
+- 坏例子（禁止）："加强对边界条件的练习" / "进行个别辅导" / "注意数组越界问题"
+- 好例子（要求）："在黑板上画出 n=0 和 n=1 时的执行流程，提问：'当 n=0 时，for 循环执行几次？返回值是什么？'" / "展示学生代码第 8 行 `if(n<=1)` 应改为 `if(n<1)`，用测试数据 n=1 验证差异"
 
 【输出格式】严格遵循：
 
@@ -361,11 +420,20 @@ P2 — 个体干预：按行为模式分类（persistent_learner / burst_then_qu
 4. **当堂检验**：{变式练习题}
 
 #### 📝 课后巩固：代码挖空练习
-（仅当触发条件满足时生成，见§3.7）
-**题目：{pid}. {title}**
-**挖空原因**：{错误聚类对应的知识盲点}
-**练习模板**：{AC代码，关键行替换为空白+提示}
-**参考答案**：{每个空的正确代码}
+（仅当触发条件满足时生成，见§3.7。以 JSON 格式输出，前端负责渲染。）
+```json
+{
+  "fill_in_exercise": {
+    "pid": "{pid}",
+    "title": "{title}",
+    "reason": "{错误聚类对应的知识盲点}",
+    "blanks": [
+      {"line": 5, "original": "ListNode* next = head->next;", "hint": "保存当前节点的下一个节点"},
+      {"line": 8, "original": "head = next;", "hint": "移动到下一个节点"}
+    ]
+  }
+}
+```
 
 #### [P2] 个体干预建议
 | 行为模式 | 人数 | 建议动作 |
@@ -428,15 +496,18 @@ Add `课堂行动（5-10分钟）` section to output format, aligned with overal
 
 ## 5. Implementation Phases
 
-### Phase 1 (1-2 days) — Quick Wins
+### Phase 1a (1 day) — Frontend + Prompt
 
-1. **Frontend: Tab restyling** — green accent, native HydroOJ look
+1. **Frontend: Tab restyling** — green accent, ARIA attributes, keyboard navigation
 2. **Frontend: Stat bar simplification** — remove colored cards, inline text
-3. **Frontend: Suggestion default expanded** — remove collapse, add green left border
-4. **Backend: Extend RecordDoc** — add testCases, compilerTexts, judgeTexts to fetchRecords()
-5. **Backend: Error signature clustering** — new `analyzeErrorCluster()` dimension
-6. **Backend: Problem context** — attach title+content to overall suggestion prompt
-7. **Backend: Prompt rewrite** — new system prompt with classroom action format
+3. **Frontend: Suggestion default expanded** — remove collapse, add green left border, sticky + max-height
+4. **Backend: Prompt rewrite** — new system prompt with classroom action format, few-shot examples, edge case handling
+
+### Phase 1b (2 days) — Data Pipeline
+
+5. **Backend: Split queries** — separate fetchRecordsForClustering() and fetchACSubmissions() with proper projections
+6. **Backend: Error signature clustering** — new `analyzeErrorCluster()` with testCase.id fallback, Python traceback handling, signature length cap
+7. **Backend: Problem context** — attach title+content to overall suggestion prompt
 
 ### Phase 2 (3-5 days) — Deeper Analysis
 
@@ -467,8 +538,13 @@ Add `课堂行动（5-10分钟）` section to output format, aligned with overal
 - `frontend/utils/styles.ts` — new HydroOJ-native design tokens
 
 ### Backend
-- `src/services/teachingAnalysisService.ts` — RecordDoc extension, error clustering, temporal patterns, cross-correlation, class size strategy, AC code selection for fill-in exercises
-- `src/services/teachingSuggestionService.ts` — prompt rewrite, data compression, problem context, fill-in exercise generation prompt
+- `src/services/teachingAnalysisService.ts` — refactored to orchestrator role (~300 lines), delegates to analyzers
+- `src/services/analyzers/commonErrorAnalyzer.ts` — Dim A + error clustering (NEW)
+- `src/services/analyzers/temporalPatternAnalyzer.ts` — temporal behavior classification (NEW)
+- `src/services/analyzers/correlationAnalyzer.ts` — cross-dimensional correlation (NEW)
+- `src/services/analyzers/codeSelectionService.ts` — AC code selection + fill-in detection (NEW)
+- `src/services/analyzers/classSizeStrategy.ts` — adaptive dimension enabling (NEW)
+- `src/services/teachingSuggestionService.ts` — prompt rewrite, data compression, problem context, fill-in exercise JSON format
 - `src/handlers/teachingSummaryHandler.ts` — pass extended data to suggestion service, fill-in trigger condition checks
 - `src/models/teachingSummary.ts` — extended TeachingFinding types for new dimensions
 
