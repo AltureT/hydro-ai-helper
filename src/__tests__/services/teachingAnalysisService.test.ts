@@ -18,6 +18,9 @@ function createMockDb(overrides: Record<string, any[]> = {}) {
 
   return {
     collection: (name: string) => ({
+      aggregate: (_pipeline?: any[]) => ({
+        toArray: () => Promise.resolve([]),
+      }),
       find: (filter?: any) => {
         let data = collections[name] || [];
         if (filter) {

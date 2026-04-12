@@ -7,6 +7,7 @@
 
 import type { Db } from 'mongodb';
 import { TeachingFinding, FindingDimension } from '../models/teachingSummary';
+import { analyzeErrorClusters } from './analyzers/errorClusterAnalyzer';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -127,6 +128,10 @@ export class TeachingAnalysisService {
     console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d',
       records.length, conversations.length, messages.length, jailbreakLogs.length);
 
+    // Layer 1b: Fetch extended data for error clustering (separate query)
+    const clusteringRecords = await this.fetchRecordsForClustering(input);
+    console.log('[TeachingAnalysis] Clustering records fetched: %d', clusteringRecords.length);
+
     // Build lookup structures
     const recordsByPidUid = this.groupRecordsByPidUid(records);
     const conversationsByUser = this.groupByField<ConversationDoc>(conversations, 'userId');
@@ -166,6 +171,16 @@ export class TeachingAnalysisService {
       }
     }
 
+    // Error clustering dimension (uses separate query data)
+    const errorClusterFindings = analyzeErrorClusters(
+      clusteringRecords,
+      input.pids,
+      input.studentUids.length,
+    );
+    for (const f of errorClusterFindings) {
+      if (f) findings.push(f);
+    }
+
     console.log('[TeachingAnalysis] Completed: %d findings generated', findings.length);
 
     return { stats, findings };
@@ -195,6 +210,36 @@ export class TeachingAnalysisService {
       problemId: { $in: pidStrings },
     };
     return this.db.collection('ai_conversations').find(filter).toArray() as Promise<ConversationDoc[]>;
+  }
+
+  /**
+   * Fetch non-AC records with testCases and compilerTexts for error clustering.
+   * Separate query to avoid loading heavy fields for all dimensions.
+   * Records are sorted by judgeAt ascending (required by errorClusterAnalyzer).
+   */
+  private async fetchRecordsForClustering(input: AnalyzeInput): Promise<any[]> {
+    const matchStage: any = {
+      domainId: input.domainId,
+      pid: { $in: input.pids },
+      uid: { $in: input.studentUids },
+      status: { $ne: 1 },
+    };
+    if (input.contestStartTime || input.contestEndTime) {
+      matchStage.judgeAt = {};
+      if (input.contestStartTime) matchStage.judgeAt.$gte = input.contestStartTime;
+      if (input.contestEndTime) matchStage.judgeAt.$lte = input.contestEndTime;
+    }
+
+    return this.db.collection('record').aggregate([
+      { $match: matchStage },
+      { $project: {
+        pid: 1, uid: 1, status: 1, judgeAt: 1,
+        testCases: { $slice: ['$testCases', 80] },
+        compilerTexts: { $slice: ['$compilerTexts', -3] },
+        code: 1,
+      }},
+      { $sort: { judgeAt: 1 } },
+    ]).toArray();
   }
 
   private async fetchJailbreakLogs(input: AnalyzeInput): Promise<JailbreakDoc[]> {
