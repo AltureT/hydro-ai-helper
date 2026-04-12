@@ -16,10 +16,19 @@ class BatchSummaryJobModel {
      * 唯一部分索引: 同一域+竞赛只能有一个非归档任务
      */
     async ensureIndexes() {
+        // 清理旧版本索引（v1 使用了不被 partialFilterExpression 支持的 $ne）
+        try {
+            await this.collection.dropIndex('idx_domainId_contestId_active');
+        }
+        catch {
+            // 旧索引不存在，忽略
+        }
         await this.collection.createIndex({ domainId: 1, contestId: 1 }, {
-            name: 'idx_domainId_contestId_active',
+            name: 'idx_domainId_contestId_active_v2',
             unique: true,
-            partialFilterExpression: { status: { $ne: 'archived' } },
+            partialFilterExpression: {
+                status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] },
+            },
         });
         console.log('[BatchSummaryJobModel] Indexes created successfully');
     }
