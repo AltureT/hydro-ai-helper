@@ -68,6 +68,9 @@ console.log('[AI-Helper] batchSummaryHandler OK');
 import { FeedbackHandler, FeedbackHandlerPriv } from './handlers/feedbackHandler';
 console.log('[AI-Helper] feedbackHandler OK');
 
+import { TeachingSummaryHandler, TeachingReviewHandler, TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv } from './handlers/teachingSummaryHandler';
+import { TeachingSummaryModel } from './models/teachingSummary';
+
 import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerPriv } from './handlers/updateHandler';
 console.log('[AI-Helper] updateHandler OK');
 
@@ -146,6 +149,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const batchSummaryJobModel = new BatchSummaryJobModel(db);
     const studentSummaryModel = new StudentSummaryModel(db);
     const studentHistoryModel = new StudentHistoryModel(db);
+    const teachingSummaryModel = new TeachingSummaryModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -171,6 +175,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
     await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
     await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
+    await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
@@ -210,6 +215,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
     ctx.provide('studentSummaryModel', studentSummaryModel);
     ctx.provide('studentHistoryModel', studentHistoryModel);
+    ctx.provide('teachingSummaryModel', teachingSummaryModel);
     ctx.provide('errorReporter', errorReporter);
 
     // 初始化版本服务
@@ -356,6 +362,14 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/batch-summaries/my-summary?contestId=xxx - 学生查看自己的已发布总结
     ctx.Route('ai_batch_summary_my', '/ai-helper/batch-summaries/my-summary', StudentSummaryHandler, PRIV.PRIV_USER_PROFILE);
     ctx.Route('ai_batch_summary_my_domain', '/d/:domainId/ai-helper/batch-summaries/my-summary', StudentSummaryHandler, PRIV.PRIV_USER_PROFILE);
+
+    // 教学建议路由
+    ctx.Route('ai_teaching_summary', '/ai-helper/teaching-summary/:contestId', TeachingSummaryHandler, TeachingSummaryHandlerPriv);
+    ctx.Route('ai_teaching_summary_domain', '/d/:domainId/ai-helper/teaching-summary/:contestId', TeachingSummaryHandler, TeachingSummaryHandlerPriv);
+    ctx.Route('ai_teaching_review', '/ai-helper/teaching-review', TeachingReviewHandler, TeachingSummaryHandlerPriv);
+    ctx.Route('ai_teaching_review_domain', '/d/:domainId/ai-helper/teaching-review', TeachingReviewHandler, TeachingSummaryHandlerPriv);
+    ctx.Route('ai_teaching_summary_feedback', '/ai-helper/teaching-summary/:summaryId/feedback', TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv);
+    ctx.Route('ai_teaching_summary_feedback_domain', '/d/:domainId/ai-helper/teaching-summary/:summaryId/feedback', TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv);
   }
 });
 

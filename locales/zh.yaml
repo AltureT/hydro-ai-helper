@@ -779,3 +779,28 @@ ai_helper_batch_summary_stats_published: "已发布"
 ai_helper_batch_summary_stats_failed: "失败"
 ai_helper_batch_summary_stats_not_generated: "未生成"
 ai_helper_batch_summary_no_new_students: "所有学生已生成总结，无需补充"
+
+# 教学建议
+ai_helper_dashboard_tab_teaching_review: 教学总结回顾
+ai_helper_teaching_generate: 生成教学建议
+ai_helper_teaching_regenerate: 重新生成
+ai_helper_teaching_generating: 正在生成教学建议...
+ai_helper_teaching_overview: 概览
+ai_helper_teaching_findings: 发现的问题
+ai_helper_teaching_suggestion: AI 教学建议
+ai_helper_teaching_detail: 查看详情
+ai_helper_teaching_students_affected: 涉及 {0} 名学生
+ai_helper_teaching_severity_high: 高优先
+ai_helper_teaching_severity_medium: 中优先
+ai_helper_teaching_severity_low: 低优先
+ai_helper_teaching_feedback_prompt: 这份教学建议对您有帮助吗？
+ai_helper_teaching_feedback_thanks: 感谢您的反馈！
+ai_helper_teaching_no_data: 参与人数过少，统计结果可能不具代表性
+ai_helper_teaching_snapshot_time: 数据截止时间
+ai_helper_teaching_ai_user_note: 基于 {0} 名使用 AI 助手的学生数据
+ai_helper_teaching_focus_placeholder: 本次教学重点（可选）
+ai_helper_teaching_exists_confirm: 该作业已有教学建议，是否重新生成？
+ai_helper_teaching_deep_dive: 深度分析
+ai_helper_teaching_student_list: 涉及学生列表
+ai_helper_teaching_code_samples: 代表性代码样本
+ai_helper_teaching_copy_warning: 注意：高度一致的错误可能涉及代码共享
