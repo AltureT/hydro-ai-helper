@@ -19,20 +19,25 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 
 ## Screenshots
 
-<img src="assets/screenshots/1.png" alt="Student panel - wide screen" width="800">
+<img src="assets/screenshots/1.png" alt="Student panel - AI chat" width="800">
 
-<img src="assets/screenshots/2.png" alt="Student panel - narrow screen" width="400">
+<details>
+<summary><b>Batch AI Learning Summary</b></summary>
+
+<img src="assets/screenshots/8.png" alt="Batch summary - scoreboard integration" width="800">
+
+<img src="assets/screenshots/9.png" alt="Batch summary - generated results" width="800">
+
+</details>
 
 <details>
 <summary><b>Admin screenshots</b></summary>
 
-<img src="assets/screenshots/3.png" alt="Admin - conversations" width="800">
+<img src="assets/screenshots/4.png" alt="Admin - conversation records" width="800">
 
-<img src="assets/screenshots/4.png" alt="Admin - analytics" width="800">
+<img src="assets/screenshots/5.png" alt="Admin - usage analytics" width="800">
 
-<img src="assets/screenshots/5.png" alt="Admin - configuration" width="800">
-
-<img src="assets/screenshots/6.png" alt="Admin - jailbreak logs" width="400">
+<img src="assets/screenshots/6.png" alt="Admin - AI configuration" width="800">
 
 <img src="assets/screenshots/7.png" alt="Admin - cost dashboard" width="500">
 

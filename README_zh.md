@@ -19,20 +19,25 @@
 
 ## 截图预览
 
-<img src="assets/screenshots/1.png" alt="学生端 - 宽屏" width="800">
+<img src="assets/screenshots/1.png" alt="学生端 - AI 对话" width="800">
 
-<img src="assets/screenshots/2.png" alt="学生端 - 窄屏" width="400">
+<details>
+<summary><b>批量 AI 学习总结</b></summary>
+
+<img src="assets/screenshots/8.png" alt="学习总结 - 成绩表集成" width="800">
+
+<img src="assets/screenshots/9.png" alt="学习总结 - 生成结果" width="800">
+
+</details>
 
 <details>
 <summary><b>管理后台截图</b></summary>
 
-<img src="assets/screenshots/3.png" alt="后台 - 对话记录" width="800">
+<img src="assets/screenshots/4.png" alt="后台 - 对话记录" width="800">
 
-<img src="assets/screenshots/4.png" alt="后台 - 使用统计" width="800">
+<img src="assets/screenshots/5.png" alt="后台 - 使用统计" width="800">
 
-<img src="assets/screenshots/5.png" alt="后台 - AI 配置" width="800">
-
-<img src="assets/screenshots/6.png" alt="后台 - 越狱记录" width="400">
+<img src="assets/screenshots/6.png" alt="后台 - AI 配置" width="800">
 
 <img src="assets/screenshots/7.png" alt="后台 - 成本看板" width="500">
 
