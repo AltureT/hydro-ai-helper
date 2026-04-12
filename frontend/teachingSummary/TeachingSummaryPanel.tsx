@@ -86,31 +86,30 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
       border: `1px solid ${COLORS.border}`,
       borderLeft: `3px solid ${colors.text}`,
       borderRadius: RADIUS.md,
-      marginBottom: SPACING.sm,
+      marginBottom: SPACING.md,
       overflow: 'hidden',
+      transition: 'box-shadow 200ms ease',
     }}>
-      {/* Card header */}
       <div
         onClick={() => setExpanded(!expanded)}
         style={{
           display: 'flex', alignItems: 'center', gap: SPACING.sm,
-          padding: `${SPACING.sm} ${SPACING.base}`,
+          padding: `${SPACING.md} ${SPACING.base}`,
           cursor: 'pointer', userSelect: 'none',
         }}
       >
-        {/* Dimension badge */}
         <span style={{
-          fontSize: '11px', fontWeight: 500, padding: '1px 6px',
+          fontSize: '11px', fontWeight: 600, padding: '2px 8px',
           borderRadius: RADIUS.sm,
-          border: `1px solid ${colors.text}`,
+          backgroundColor: colors.bg,
+          border: `1px solid ${colors.border}`,
           color: colors.text,
-          backgroundColor: 'transparent',
           flexShrink: 0,
+          letterSpacing: '0.02em',
         }}>
           {dimensionLabel}
         </span>
 
-        {/* Title */}
         <span style={{
           flex: 1, fontSize: '14px', fontWeight: 500,
           color: COLORS.textPrimary, minWidth: 0,
@@ -119,75 +118,79 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
           {finding.title}
         </span>
 
-        {/* Affected count */}
-        <span style={{ fontSize: '12px', color: COLORS.textMuted, flexShrink: 0 }}>
+        <span style={{
+          fontSize: '12px', color: COLORS.textMuted, flexShrink: 0,
+          padding: '2px 8px',
+          backgroundColor: COLORS.bgPage,
+          borderRadius: RADIUS.full,
+        }}>
           {t('ai_helper_teaching_summary_affected')} {affectedCount} {t('ai_helper_teaching_summary_students')}
         </span>
 
-        {/* Chevron */}
         <span style={{
-          display: 'inline-block', width: 0, height: 0, flexShrink: 0,
-          borderTop: '5px solid transparent',
-          borderBottom: '5px solid transparent',
-          borderLeft: `6px solid ${COLORS.textMuted}`,
-          transition: 'transform 150ms',
+          display: 'inline-block', width: '16px', height: '16px', flexShrink: 0,
+          textAlign: 'center', lineHeight: '16px', fontSize: '12px',
+          color: COLORS.textMuted,
+          transition: 'transform 200ms ease',
           transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-        }} />
+        }}>▶</span>
       </div>
 
-      {/* Expanded content */}
       {expanded && (
         <div style={{
           padding: `0 ${SPACING.base} ${SPACING.base}`,
-          borderTop: `1px solid ${colors.border}`,
-          paddingTop: SPACING.sm,
+          borderTop: `1px solid ${COLORS.border}`,
+          paddingTop: SPACING.md,
         }}>
-          {/* Metrics */}
           {Object.keys(finding.evidence.metrics).length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm, marginBottom: SPACING.sm }}>
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: SPACING.sm,
+              marginBottom: SPACING.md,
+              padding: `${SPACING.sm} ${SPACING.md}`,
+              backgroundColor: COLORS.bgPage,
+              borderRadius: RADIUS.sm,
+            }}>
               {Object.entries(finding.evidence.metrics).map(([key, val]) => (
                 <span key={key} style={{
                   fontSize: '12px', color: COLORS.textSecondary,
-                  backgroundColor: COLORS.bgHover,
-                  padding: `2px ${SPACING.sm}`, borderRadius: RADIUS.sm,
                 }}>
-                  {key}: {typeof val === 'number' ? (val % 1 === 0 ? val : val.toFixed(2)) : val}
+                  <span style={{ color: COLORS.textMuted }}>{key}:</span>{' '}
+                  <strong>{typeof val === 'number' ? (val % 1 === 0 ? val : val.toFixed(2)) : val}</strong>
                 </span>
               ))}
             </div>
           )}
 
-          {/* AI suggestion */}
           {finding.aiSuggestion && (
-            <div style={{ fontSize: '13px', color: COLORS.textSecondary, marginBottom: SPACING.sm }}>
+            <div style={{ fontSize: '13px', color: COLORS.textSecondary, marginBottom: SPACING.md, lineHeight: 1.6 }}>
               <strong>{DIMENSION_LABELS[finding.dimension] || finding.dimension}：</strong>
               {finding.aiSuggestion}
             </div>
           )}
 
-          {/* Deep dive AI analysis */}
           {deepDiveText && (
             <div
               className="markdown-body"
-              style={{ fontSize: '13px', marginTop: SPACING.sm }}
+              style={{ marginTop: SPACING.sm }}
               dangerouslySetInnerHTML={{ __html: renderMarkdown(deepDiveText) }}
             />
           )}
 
-          {/* Common error code samples warning */}
-          {finding.dimension === 'commonError' && finding.evidence.samples?.code && finding.evidence.samples.code.length > 0 && (
-            <div style={{
-              marginTop: SPACING.sm, padding: SPACING.sm,
-              backgroundColor: COLORS.warningBg,
-              border: `1px solid ${COLORS.warningBorder}`,
-              borderRadius: RADIUS.sm,
-              fontSize: '12px', color: COLORS.warningText,
-            }}>
-              <strong>{t('ai_helper_teaching_summary_copy_warning')}</strong>
+          {(finding.dimension === 'commonError' || finding.dimension === 'errorCluster')
+            && finding.evidence.samples?.code && finding.evidence.samples.code.length > 0 && (
+            <div style={{ marginTop: SPACING.md }}>
+              <div style={{
+                fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary,
+                marginBottom: SPACING.sm, letterSpacing: '0.02em',
+              }}>
+                {t('ai_helper_teaching_summary_copy_warning')}
+              </div>
               <pre style={{
-                marginTop: '4px', fontSize: '11px', overflowX: 'auto',
-                backgroundColor: COLORS.codeBg, borderRadius: RADIUS.sm,
-                padding: SPACING.sm, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                margin: 0, fontSize: '13px', overflowX: 'auto',
+                backgroundColor: '#1e293b', borderRadius: RADIUS.md,
+                padding: SPACING.base, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                color: '#e2e8f0', lineHeight: 1.6,
+                fontFamily: "'SFMono-Regular', 'Menlo', 'Consolas', monospace",
               }}>
                 {finding.evidence.samples.code[0]}
               </pre>
@@ -401,10 +404,19 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
       {/* Panel header */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        marginBottom: SPACING.base,
+        marginBottom: SPACING.lg,
+        paddingBottom: SPACING.md,
+        borderBottom: `1px solid ${COLORS.border}`,
       }}>
-        <div style={{ fontWeight: 600, fontSize: '16px' }}>
-          {t('ai_helper_teaching_summary_title')}
+        <div>
+          <div style={{ fontWeight: 700, fontSize: '18px', color: COLORS.textPrimary }}>
+            {t('ai_helper_teaching_summary_title')}
+          </div>
+          {snapshotDate && (
+            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '4px' }}>
+              {t('ai_helper_teaching_summary_snapshot_notice')}{snapshotDate}
+            </div>
+          )}
         </div>
         <button
           onClick={() => handleGenerate(true)}
@@ -424,13 +436,6 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
           borderRadius: RADIUS.md, fontSize: '13px', marginBottom: SPACING.base,
         }}>
           {error}
-        </div>
-      )}
-
-      {/* Snapshot notice */}
-      {snapshotDate && (
-        <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: SPACING.sm }}>
-          {t('ai_helper_teaching_summary_snapshot_notice')}{snapshotDate}
         </div>
       )}
 
@@ -456,8 +461,12 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
       )}
 
       {/* Findings list */}
-      <div style={{ marginBottom: SPACING.base }}>
-        <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: SPACING.sm, color: COLORS.textSecondary }}>
+      <div style={{ marginBottom: SPACING.lg }}>
+        <div style={{
+          fontWeight: 600, fontSize: '13px', marginBottom: SPACING.md,
+          color: COLORS.textMuted, textTransform: 'uppercase' as const,
+          letterSpacing: '0.05em',
+        }}>
           {t('ai_helper_teaching_summary_findings_title')}
         </div>
 
@@ -492,37 +501,39 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
         )}
       </div>
 
-      {/* Overall AI suggestion (collapsible) */}
+      {/* Overall AI suggestion */}
       {summary.overallSuggestion && (
         <div style={{
           border: `1px solid ${COLORS.border}`,
           borderLeft: `4px solid ${COLORS.hydroGreen}`,
           borderRadius: RADIUS.md,
-          marginBottom: SPACING.base,
+          marginBottom: SPACING.lg,
           overflow: 'hidden',
-          boxShadow: SHADOWS.sm,
         }}>
           <div
             onClick={() => setSuggestionExpanded(!suggestionExpanded)}
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: `${SPACING.sm} ${SPACING.base}`,
+              padding: `${SPACING.md} ${SPACING.base}`,
               cursor: 'pointer', userSelect: 'none',
               backgroundColor: COLORS.hydroGreenLight,
-              borderBottom: suggestionExpanded ? `1px solid ${COLORS.infoBorder}` : 'none',
+              borderBottom: suggestionExpanded ? `1px solid ${COLORS.border}` : 'none',
             }}
           >
-            <span style={{ fontWeight: 600, fontSize: '14px', color: COLORS.hydroGreenDark }}>
+            <span style={{
+              fontWeight: 600, fontSize: '13px', color: COLORS.hydroGreenDark,
+              textTransform: 'uppercase' as const, letterSpacing: '0.05em',
+            }}>
               {t('ai_helper_teaching_summary_overall_suggestion')}
             </span>
-            <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
+            <span style={{ fontSize: '12px', color: COLORS.textMuted }}>
               {suggestionExpanded ? t('ai_helper_teaching_summary_collapse') : t('ai_helper_teaching_summary_expand')}
             </span>
           </div>
           {suggestionExpanded && (
             <div
               className="markdown-body"
-              style={{ padding: SPACING.base, fontSize: '14px' }}
+              style={{ padding: `${SPACING.base} ${SPACING.lg}` }}
               dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.overallSuggestion) }}
             />
           )}

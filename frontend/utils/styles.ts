@@ -321,25 +321,42 @@ export const linkStyle: React.CSSProperties = {
 // ─── Shared Markdown Theme ───────────────────────────────────────────────────
 
 export const markdownTheme = `
-  .markdown-body { font-family: ${FONT_FAMILY}; color: ${COLORS.textPrimary}; line-height: 1.6; word-wrap: break-word; }
-  .markdown-body h1 { font-size: 1.5em; font-weight: 700; margin: 0.67em 0; padding-bottom: 0.3em; border-bottom: 1px solid ${COLORS.border}; }
-  .markdown-body h2 { font-size: 1.3em; font-weight: 600; margin: 0.83em 0; padding-bottom: 0.3em; border-bottom: 1px solid ${COLORS.border}; }
-  .markdown-body h3 { font-size: 1.15em; font-weight: 600; margin: 1em 0; }
-  .markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 1em; font-weight: 600; margin: 1em 0; }
-  .markdown-body p { margin: 0.5em 0; }
+  .markdown-body { font-family: ${FONT_FAMILY}; color: ${COLORS.textPrimary}; line-height: 1.7; word-wrap: break-word; font-size: 14px; }
+  .markdown-body h1 { font-size: 1.4em; font-weight: 700; margin: 1em 0 0.5em; padding-bottom: 0.3em; border-bottom: 1px solid ${COLORS.border}; }
+  .markdown-body h2 { font-size: 1.25em; font-weight: 600; margin: 1em 0 0.5em; padding-bottom: 0.3em; border-bottom: 1px solid ${COLORS.border}; }
+  .markdown-body h3 { font-size: 1.1em; font-weight: 600; margin: 0.8em 0 0.4em; color: ${COLORS.textPrimary}; }
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 1em; font-weight: 600; margin: 0.8em 0 0.4em; }
+  .markdown-body p { margin: 0.5em 0; line-height: 1.7; }
   .markdown-body a { color: ${COLORS.primary}; text-decoration: none; }
   .markdown-body a:hover { text-decoration: underline; }
-  .markdown-body pre { background: ${COLORS.codeBg}; border: 1px solid ${COLORS.codeBorder}; border-radius: ${RADIUS.md}; padding: ${SPACING.base}; overflow-x: auto; margin: 0.5em 0; }
-  .markdown-body code { background: ${COLORS.codeBg}; border-radius: ${RADIUS.sm}; padding: 2px 6px; font-size: 0.9em; }
-  .markdown-body pre code { background: none; padding: 0; border-radius: 0; }
+  .markdown-body pre { background: #1e293b; border: none; border-radius: ${RADIUS.md}; padding: ${SPACING.base}; overflow-x: auto; margin: 0.75em 0; }
+  .markdown-body code { font-family: 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace; font-size: 13px; }
+  .markdown-body :not(pre) > code { background: ${COLORS.codeBg}; border: 1px solid ${COLORS.codeBorder}; border-radius: ${RADIUS.sm}; padding: 2px 6px; color: #c7254e; }
+  .markdown-body pre code { background: none; padding: 0; border: none; border-radius: 0; color: #e2e8f0; font-size: 13px; line-height: 1.6; }
   .markdown-body blockquote { border-left: 4px solid ${COLORS.blockquoteBorder}; background: ${COLORS.blockquoteBg}; margin: 0.5em 0; padding: ${SPACING.sm} ${SPACING.base}; color: ${COLORS.textSecondary}; }
   .markdown-body ul, .markdown-body ol { padding-left: 2em; margin: 0.5em 0; }
-  .markdown-body li { margin: 0.25em 0; }
-  .markdown-body table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
-  .markdown-body th, .markdown-body td { border: 1px solid ${COLORS.border}; padding: ${SPACING.sm} ${SPACING.md}; text-align: left; }
-  .markdown-body th { background: ${COLORS.bgHover}; font-weight: 600; }
-  .markdown-body hr { border: none; border-top: 1px solid ${COLORS.border}; margin: 1em 0; }
+  .markdown-body li { margin: 0.3em 0; line-height: 1.7; }
+  .markdown-body li > strong:first-child { color: ${COLORS.textPrimary}; }
+  .markdown-body table { border-collapse: collapse; width: 100%; margin: 0.75em 0; font-size: 13px; }
+  .markdown-body th, .markdown-body td { border: 1px solid ${COLORS.border}; padding: 10px 14px; text-align: left; }
+  .markdown-body th { background: #f8fafc; font-weight: 600; color: ${COLORS.textSecondary}; text-transform: none; font-size: 12px; letter-spacing: 0.02em; }
+  .markdown-body td { color: ${COLORS.textPrimary}; }
+  .markdown-body tr:hover td { background: #fafbfc; }
+  .markdown-body hr { border: none; border-top: 1px solid ${COLORS.border}; margin: 1.2em 0; }
   .markdown-body img { max-width: 100%; }
+  /* highlight.js dark theme (GitHub Dark) */
+  .markdown-body .hljs-keyword, .markdown-body .hljs-selector-tag { color: #ff7b72; }
+  .markdown-body .hljs-string, .markdown-body .hljs-attr { color: #a5d6ff; }
+  .markdown-body .hljs-number, .markdown-body .hljs-literal { color: #79c0ff; }
+  .markdown-body .hljs-built_in { color: #ffa657; }
+  .markdown-body .hljs-comment { color: #8b949e; font-style: italic; }
+  .markdown-body .hljs-function .hljs-title, .markdown-body .hljs-title.function_ { color: #d2a8ff; }
+  .markdown-body .hljs-type, .markdown-body .hljs-title.class_ { color: #ffa657; }
+  .markdown-body .hljs-variable, .markdown-body .hljs-template-variable { color: #ffa657; }
+  .markdown-body .hljs-operator { color: #ff7b72; }
+  .markdown-body .hljs-punctuation { color: #c9d1d9; }
+  .markdown-body .hljs-meta { color: #79c0ff; }
+  .markdown-body .hljs-params { color: #c9d1d9; }
 `;
 
 // ─── Shared Keyframe CSS ─────────────────────────────────────────────────────
