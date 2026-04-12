@@ -8,6 +8,18 @@
 import type { Db } from 'mongodb';
 import { TeachingFinding, FindingDimension } from '../models/teachingSummary';
 import { analyzeErrorClusters } from './analyzers/errorClusterAnalyzer';
+import { analyzeTemporalPatterns } from './analyzers/temporalPatternAnalyzer';
+import { analyzeCorrelations } from './analyzers/correlationAnalyzer';
+import { getClassSizeStrategy } from './analyzers/classSizeStrategy';
+import {
+  shouldGenerateFillIn,
+  selectACCode,
+  ACSubmission,
+} from './analyzers/codeSelectionService';
+import {
+  StudentTemporalProfile,
+  FillInExercise,
+} from '../models/teachingSummary';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -53,6 +65,9 @@ export interface AnalyzeResult {
     problemCount: number;
   };
   findings: TeachingFinding[];
+  temporalProfiles: StudentTemporalProfile[];
+  fillInCandidates: FillInExercise[];
+  classSizeLabel: string;
 }
 
 // ─── Internal Data Structures ────────────────────────────────────────────────
@@ -96,10 +111,12 @@ interface JailbreakDoc {
 export class TeachingAnalysisService {
   private db: Db;
   private findingCounter: number;
+  private effectiveMinAffected: number;
 
   constructor(db: Db) {
     this.db = db;
     this.findingCounter = 0;
+    this.effectiveMinAffected = MIN_AFFECTED;
   }
 
   /**
@@ -149,6 +166,12 @@ export class TeachingAnalysisService {
       problemCount: input.pids.length,
     };
 
+    // Class size strategy
+    const strategy = getClassSizeStrategy(stats.participatedStudents, aiUserUids.size);
+    this.effectiveMinAffected = strategy.minAffected;
+    console.log('[TeachingAnalysis] Class size strategy: %s (students=%d, minAffected=%d)',
+      strategy.label, stats.participatedStudents, strategy.minAffected);
+
     // Layer 2: Rule Engine - run all 8 dimensions
     const findings: TeachingFinding[] = [];
 
@@ -180,9 +203,107 @@ export class TeachingAnalysisService {
       if (f) findings.push(f);
     }
 
-    console.log('[TeachingAnalysis] Completed: %d findings generated', findings.length);
+    // Build conversationsByUserPid for temporal pattern analyzer
+    const conversationsByUserPid = new Map<string, boolean>();
+    for (const c of conversations) {
+      conversationsByUserPid.set(`${c.userId}:${c.problemId}`, true);
+    }
 
-    return { stats, findings };
+    // Temporal pattern analysis
+    const temporalProfiles: StudentTemporalProfile[] = [];
+    const temporalFindings = analyzeTemporalPatterns(
+      records as any[], input.pids, input.studentUids,
+      conversationsByUserPid,
+      input.contestStartTime, input.contestEndTime,
+      temporalProfiles,
+    );
+    for (const f of temporalFindings) {
+      if (f) findings.push(f);
+    }
+
+    // Cross-dimensional correlations
+    const correlationFindings = analyzeCorrelations(
+      findings, temporalProfiles, input.studentUids.length,
+      aiUserUids, recordsByPidUid as any,
+    );
+    for (const f of correlationFindings) {
+      findings.push(f);
+    }
+
+    // Filter out findings from disabled dimensions
+    const filteredFindings = findings.filter(
+      f => !strategy.disabledDimensions.includes(f.dimension),
+    );
+
+    // Fill-in exercise candidates
+    const fillInCandidates: FillInExercise[] = [];
+    const errorFindings = filteredFindings.filter(
+      f => f.dimension === 'commonError' || f.dimension === 'errorCluster',
+    );
+
+    const fillInPids: number[] = [];
+    for (const pid of input.pids) {
+      const hasError = errorFindings.some(f => f.evidence.affectedProblems.includes(pid));
+      if (!hasError) continue;
+
+      let attempted = 0, firstAC = 0, totalAC = 0, totalSubs = 0;
+      for (const uid of input.studentUids) {
+        const recs = recordsByPidUid.get(`${pid}:${uid}`) || [];
+        if (recs.length === 0) continue;
+        attempted++;
+        totalSubs += recs.length;
+        if (recs.some(r => r.status === 1)) totalAC++;
+        if (recs[0].status === 1) firstAC++;
+      }
+      if (attempted === 0) continue;
+
+      const trigger = shouldGenerateFillIn({
+        hasCommonError: true,
+        finalACRate: totalAC / attempted,
+        firstAttemptACRate: firstAC / attempted,
+        avgSubmissionCount: totalSubs / attempted,
+      });
+      if (trigger) fillInPids.push(pid);
+    }
+
+    if (fillInPids.length > 0) {
+      const acRecords = await this.fetchACSubmissions(input, fillInPids);
+      const acByPid = new Map<number, ACSubmission[]>();
+      for (const r of acRecords) {
+        if (!r.code) continue;
+        if (!acByPid.has(r.pid)) acByPid.set(r.pid, []);
+        acByPid.get(r.pid)!.push({
+          uid: r.uid, code: r.code, lang: r.lang || 'unknown', score: 0,
+        });
+      }
+
+      for (const pid of fillInPids) {
+        const submissions = acByPid.get(pid) || [];
+        const candidates = selectACCode(submissions);
+        if (candidates.length === 0) continue;
+
+        const title = input.pidTitles?.get(pid) || `题目 ${pid}`;
+        const primary = candidates[0];
+
+        fillInCandidates.push({
+          pid, title, lang: primary.lang,
+          reason: '', code: primary.code, blanks: [],
+          alternatives: candidates.slice(1).map(c => ({
+            uid: c.uid, code: c.code, score: c.score,
+          })),
+        });
+      }
+    }
+
+    console.log('[TeachingAnalysis] Completed: %d findings generated', filteredFindings.length);
+
+    return {
+      stats,
+      findings: filteredFindings,
+      temporalProfiles,
+      fillInCandidates,
+      classSizeLabel: strategy.label,
+    };
   }
 
   // ─── Layer 1: Data Fetching ──────────────────────────────────────────────
@@ -241,6 +362,26 @@ export class TeachingAnalysisService {
     ]).toArray();
   }
 
+  private async fetchACSubmissions(input: AnalyzeInput, pids: number[]): Promise<any[]> {
+    if (pids.length === 0) return [];
+    const matchStage: any = {
+      domainId: input.domainId,
+      pid: { $in: pids },
+      uid: { $in: input.studentUids },
+      status: 1,
+    };
+    if (input.contestStartTime || input.contestEndTime) {
+      matchStage.judgeAt = {};
+      if (input.contestStartTime) matchStage.judgeAt.$gte = input.contestStartTime;
+      if (input.contestEndTime) matchStage.judgeAt.$lte = input.contestEndTime;
+    }
+    return this.db.collection('record').aggregate([
+      { $match: matchStage },
+      { $project: { pid: 1, uid: 1, code: 1, lang: 1 } },
+      { $sort: { judgeAt: -1 } },
+    ]).toArray();
+  }
+
   private async fetchJailbreakLogs(input: AnalyzeInput): Promise<JailbreakDoc[]> {
     const filter: any = {
       userId: { $in: input.studentUids },
@@ -296,7 +437,7 @@ export class TeachingAnalysisService {
     needsDeepDive: boolean,
     samples?: { code?: string[]; conversations?: string[] },
   ): TeachingFinding | null {
-    if (affectedStudents.length < MIN_AFFECTED) return null;
+    if (affectedStudents.length < this.effectiveMinAffected) return null;
 
     this.findingCounter++;
     return {

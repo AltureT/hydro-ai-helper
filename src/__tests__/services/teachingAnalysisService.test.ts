@@ -389,16 +389,16 @@ describe('TeachingAnalysisService', () => {
   });
 
   describe('min sample gate', () => {
-    it('should not create finding when affected students < 5', async () => {
-      // Only 4 students in total — below MIN_AFFECTED for any dimension
-      const input = baseInput({ studentUids: [101, 102, 103, 104], pids: [1] });
-      const records = [101, 102, 103, 104].map((uid) => makeRecord(1, uid, STATUS_WA));
+    it('should not create finding when affected students < effectiveMinAffected', async () => {
+      // Only 2 students in total — below minAffected=3 for individual strategy
+      const input = baseInput({ studentUids: [101, 102], pids: [1] });
+      const records = [101, 102].map((uid) => makeRecord(1, uid, STATUS_WA));
 
       const db = createMockDb({ record: records });
       const service = new TeachingAnalysisService(db);
       const result = await service.analyze(input);
 
-      // atRisk would have 4 students (all fail) but 4 < 5 → null
+      // atRisk would have 2 students but 2 < 3 (individual strategy minAffected) → null
       const atRisk = result.findings.filter((f) => f.dimension === 'atRisk');
       expect(atRisk.length).toBe(0);
     });
