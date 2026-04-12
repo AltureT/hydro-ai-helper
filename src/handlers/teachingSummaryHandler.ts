@@ -11,6 +11,7 @@ import { createOpenAIClientFromConfig } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService } from '../services/teachingSuggestionService';
+import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 
 export const TeachingSummaryHandlerPriv = PRIV.PRIV_READ_RECORD_CODE;
 
@@ -202,6 +203,19 @@ export class TeachingSummaryHandler extends Handler {
         contestEndTime: tdoc.endAt ? new Date(tdoc.endAt) : undefined,
       });
 
+      // Prepare fill-in candidates with problem content for template detection
+      const fillInCandidatesForPrompt = analysisResult.fillInCandidates.map(c => {
+        const problemDoc = problemDocs.find((d: any) => d.docId === c.pid);
+        const problemContent = (problemDoc?.content || '') as string;
+        return {
+          pid: c.pid,
+          title: c.title,
+          lang: c.lang,
+          code: c.code,
+          isFillInProblem: isFillInBlankProblem(problemContent),
+        };
+      });
+
       // Layer 2: AI suggestions
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
@@ -213,6 +227,7 @@ export class TeachingSummaryHandler extends Handler {
         stats: analysisResult.stats,
         findings: analysisResult.findings,
         problemContexts,
+        fillInCandidates: fillInCandidatesForPrompt,
       });
 
       let totalPromptTokens = overallResult.tokenUsage.promptTokens;
