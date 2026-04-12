@@ -145,6 +145,24 @@ describe('buildMainPrompt', () => {
     expect(system).toContain('persistent_learner');
     expect(system).toContain('burst_then_quit');
   });
+
+  it('should format user prompt with problem contexts', () => {
+    const input = makeInput({
+      problemContexts: [
+        { pid: 101, title: '数组求和', content: '给定一个数组...' },
+      ],
+    });
+    const { user } = buildMainPrompt(input);
+    expect(user).toContain('## 题目内容');
+    expect(user).toContain('101. 数组求和');
+    expect(user).toContain('给定一个数组');
+  });
+
+  it('should omit problem section when no contexts provided', () => {
+    const input = makeInput({ problemContexts: undefined });
+    const { user } = buildMainPrompt(input);
+    expect(user).not.toContain('## 题目内容');
+  });
 });
 
 // ─── buildDeepDivePrompt ─────────────────────────────────

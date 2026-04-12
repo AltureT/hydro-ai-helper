@@ -97,6 +97,7 @@ export interface MainPromptInput {
     problemCount: number;
   };
   findings: TeachingFinding[];
+  problemContexts?: Array<{ pid: number; title: string; content: string }>;
 }
 
 export interface PromptMessages {
@@ -145,6 +146,12 @@ export function buildMainPrompt(input: MainPromptInput): PromptMessages {
 
   const strippedFindings = stripSamples(findings);
 
+  const problemSection = input.problemContexts?.length
+    ? `\n## 题目内容\n${input.problemContexts
+        .map(p => `### ${p.pid}. ${p.title}\n${p.content.slice(0, 500)}`)
+        .join('\n\n')}`
+    : '';
+
   const userPrompt = `## 教学上下文
 竞赛标题：${contestTitle}
 ${contextSection}
@@ -154,6 +161,7 @@ ${contextSection}
 - 参与学生数：${stats.participatedStudents}
 - 使用AI辅助的学生数：${stats.aiUserCount}
 - 题目数量：${stats.problemCount}
+${problemSection}
 
 ## 规则引擎发现（JSON）
 ${JSON.stringify(strippedFindings, null, 2)}`;

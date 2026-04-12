@@ -191,12 +191,25 @@ export class TeachingSummaryHandler extends Handler {
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
 
+      // Fetch problem content for overall suggestion
+      const documentColl = db.collection('document');
+      const problemDocs = await documentColl
+        .find({ domainId, docType: 10, docId: { $in: pids } })
+        .toArray();
+
+      const problemContexts = problemDocs.map((doc: any) => ({
+        pid: doc.docId as number,
+        title: (doc.title || String(doc.docId)) as string,
+        content: (doc.content || '') as string,
+      }));
+
       const overallResult = await suggestionService.generateOverallSuggestion({
         contestTitle: String(tdoc.title || ''),
         contestContent: String(tdoc.content || ''),
         teachingFocus,
         stats: analysisResult.stats,
         findings: analysisResult.findings,
+        problemContexts,
       });
 
       let totalPromptTokens = overallResult.tokenUsage.promptTokens;
@@ -204,7 +217,6 @@ export class TeachingSummaryHandler extends Handler {
 
       // Deep dives for findings that need them
       const deepDiveResults: Record<string, string> = {};
-      const documentColl = db.collection('document');
 
       for (const finding of analysisResult.findings) {
         if (!finding.needsDeepDive) continue;
