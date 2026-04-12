@@ -36,9 +36,6 @@ function t(key: string): string {
 }
 import { useBatchSummary, buildUrl } from './useBatchSummary';
 import { SummaryCard } from './SummaryCard';
-import { StudentSummaryView } from './StudentSummaryView';
-import { renderComponent } from '../utils/renderHelper';
-import { ErrorBoundary } from '../components/ErrorBoundary';
 
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
@@ -47,6 +44,8 @@ interface BatchSummaryPanelProps {
   contestId: string;
   isTeacher: boolean;
   existingJobId?: string;
+  /** Callback to report progress for parent tab badge */
+  onProgressUpdate?: (completed: number, total: number) => void;
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────
@@ -55,6 +54,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   domainId,
   contestId,
   isTeacher,
+  onProgressUpdate,
 }) => {
   const {
     state, startGeneration, stopGeneration, continueGeneration,
@@ -72,6 +72,13 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
       cleanup();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Report progress to parent for tab badge
+  useEffect(() => {
+    if (onProgressUpdate && state.total > 0) {
+      onProgressUpdate(state.completed, state.total);
+    }
+  }, [state.completed, state.total]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Expand/collapse helpers ─────────────────────────────────────────────────
 
@@ -547,147 +554,3 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
 };
 
 export default BatchSummaryPanel;
-
-// ─── Scoreboard page URL patterns ─────────────────────────────────────────────
-
-// Match contestId (ObjectId hex) from homework/contest scoreboard URLs
-const SCOREBOARD_PATTERNS: RegExp[] = [
-  /\/homework\/([a-f0-9]{24})\/scoreboard/,
-  /\/contest\/([a-f0-9]{24})\/scoreboard/,
-];
-
-function parseScoreboardUrl(): { domainId: string; contestId: string } | null {
-  const pathname = window.location.pathname;
-  for (const pattern of SCOREBOARD_PATTERNS) {
-    const match = pathname.match(pattern);
-    if (match) {
-      // domainId from UiContext (always correct, even without /d/ prefix in URL)
-      const domainId = (window as any).UiContext?.domainId || 'system';
-      return { domainId, contestId: match[1] };
-    }
-  }
-  return null;
-}
-
-// ─── Permission detection ─────────────────────────────────────────────────────
-
-declare global {
-  interface Window {
-    UserContext?: {
-      _id?: number | string;
-      priv?: number;
-      role?: string;
-    };
-  }
-}
-
-// PRIV_READ_RECORD_CODE = 1 << 7 (128) in HydroOJ (packages/common/permission.ts)
-const PRIV_READ_RECORD_CODE = 1 << 7;
-
-function hasTeacherPrivilege(): boolean {
-  const ctx = window.UserContext;
-  if (!ctx || !ctx._id) return false;
-
-  const priv = ctx.priv;
-  if (typeof priv === 'number') {
-    // Super admin: priv is -1
-    if (priv < 0) return true;
-    // Has PRIV_READ_RECORD_CODE bit
-    if ((priv & PRIV_READ_RECORD_CODE) !== 0) return true;
-  }
-
-  // Domain role fallback (admin/root roles have elevated permissions)
-  const role = ctx.role;
-  if (typeof role === 'string' && role !== 'default' && role !== 'guest' && role !== '') return true;
-
-  return false;
-}
-
-// ─── Self-mounting on scoreboard pages ────────────────────────────────────────
-
-function isLoggedIn(): boolean {
-  const ctx = window.UserContext;
-  return !!(ctx && ctx._id);
-}
-
-function insertContainer(id: string): HTMLDivElement | null {
-  // Prevent double-mount
-  if (document.getElementById(id)) return null;
-
-  const container = document.createElement('div');
-  container.id = id;
-  container.style.margin = `${SPACING.base} 0`;
-  container.style.padding = `0 ${SPACING.base}`;
-
-  const sectionHeader = document.querySelector('.section__header');
-  if (sectionHeader && sectionHeader.parentElement) {
-    sectionHeader.parentElement.insertBefore(container, sectionHeader.nextSibling);
-  } else {
-    const scoreboard = document.querySelector('[data-fragment-id="scoreboard"]');
-    if (scoreboard && scoreboard.parentElement) {
-      scoreboard.parentElement.insertBefore(container, scoreboard);
-    } else {
-      const section = document.querySelector('.section.visible') || document.body;
-      section.appendChild(container);
-    }
-  }
-  return container;
-}
-
-function initBatchSummaryPanel() {
-  const parsed = parseScoreboardUrl();
-  if (!parsed) return;
-  if (!isLoggedIn()) return;
-
-  const isTeacher = hasTeacherPrivilege();
-
-  if (isTeacher) {
-    const container = insertContainer('ai-batch-summary-root');
-    if (!container) return;
-    renderComponent(
-      <ErrorBoundary>
-        <BatchSummaryPanel
-          domainId={parsed.domainId}
-          contestId={parsed.contestId}
-          isTeacher={true}
-        />
-      </ErrorBoundary>,
-      container,
-    );
-  } else {
-    const container = insertContainer('ai-student-summary-root');
-    if (!container) return;
-    renderComponent(
-      <ErrorBoundary>
-        <StudentSummaryView
-          domainId={parsed.domainId}
-          contestId={parsed.contestId}
-        />
-      </ErrorBoundary>,
-      container,
-    );
-  }
-}
-
-// ─── Initialization: handle both full page load and PJAX navigation ─────────
-
-// 1. Full page load
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initBatchSummaryPanel, { once: true });
-} else {
-  initBatchSummaryPanel();
-}
-
-// 2. PJAX navigation: HydroOJ triggers jQuery 'vjContentNew' on replaced fragments
-//    Re-run init when scoreboard content is loaded via PJAX.
-if (typeof (window as any).$ === 'function') {
-  (window as any).$(document).on('vjContentNew', () => {
-    // Small delay to ensure DOM is fully updated after PJAX replacement
-    setTimeout(initBatchSummaryPanel, 50);
-  });
-} else {
-  // Fallback: listen for native custom event (some HydroOJ builds dispatch both)
-  document.addEventListener('vjContentNew', () => {
-    setTimeout(initBatchSummaryPanel, 50);
-  });
-}

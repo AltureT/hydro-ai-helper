@@ -780,6 +780,11 @@ ai_helper_batch_summary_stats_failed: "失败"
 ai_helper_batch_summary_stats_not_generated: "未生成"
 ai_helper_batch_summary_no_new_students: "所有学生已生成总结，无需补充"
 
+# 计分板标签
+ai_helper_scoreboard_tab_main: "成绩表"
+ai_helper_scoreboard_tab_teaching: "教学分析"
+ai_helper_scoreboard_tab_learning: "学习总结"
+
 # 教学建议
 ai_helper_dashboard_tab_teaching_review: 教学总结回顾
 ai_helper_teaching_generate: 生成教学建议

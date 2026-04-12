@@ -780,6 +780,11 @@ ai_helper_batch_summary_stats_failed: "Failed"
 ai_helper_batch_summary_stats_not_generated: "Not generated"
 ai_helper_batch_summary_no_new_students: "All students already have summaries"
 
+# Scoreboard Tabs
+ai_helper_scoreboard_tab_main: "Scoreboard"
+ai_helper_scoreboard_tab_teaching: "Teaching Analysis"
+ai_helper_scoreboard_tab_learning: "Learning Summaries"
+
 # Teaching Suggestions
 ai_helper_dashboard_tab_teaching_review: Teaching Review
 ai_helper_teaching_generate: Generate Teaching Suggestions

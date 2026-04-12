@@ -243,9 +243,11 @@ const OverviewBar: React.FC<OverviewBarProps> = ({ stats, findingsCount, highCou
 interface TeachingSummaryPanelProps {
   domainId: string;
   contestId: string;
+  /** Callback to report findings count for parent tab badge */
+  onStatsUpdate?: (findingsCount: number) => void;
 }
 
-export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ domainId, contestId }) => {
+export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ domainId, contestId, onStatsUpdate }) => {
   const { summary, loading, error, fetchSummary, generate, submitFeedback } = useTeachingSummary(domainId, contestId);
 
   const [teachingFocus, setTeachingFocus] = useState('');
@@ -255,6 +257,13 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   useEffect(() => {
     fetchSummary();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Report findings count to parent for tab badge
+  useEffect(() => {
+    if (onStatsUpdate && summary?.findings) {
+      onStatsUpdate(summary.findings.length);
+    }
+  }, [summary?.findings?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleGenerate = useCallback(async (regenerate?: boolean) => {
     if (regenerate) {
