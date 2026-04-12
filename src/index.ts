@@ -81,6 +81,7 @@ import { PluginInstallModel } from './models/pluginInstall';
 import { TokenUsageModel } from './models/tokenUsage';
 import { BatchSummaryJobModel } from './models/batchSummaryJob';
 import { StudentSummaryModel } from './models/studentSummary';
+import { StudentHistoryModel } from './models/studentHistory';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -144,6 +145,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const requestStatsModel = new RequestStatsModel(db);
     const batchSummaryJobModel = new BatchSummaryJobModel(db);
     const studentSummaryModel = new StudentSummaryModel(db);
+    const studentHistoryModel = new StudentHistoryModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -168,6 +170,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
     await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
     await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
+    await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
@@ -206,6 +209,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('requestStatsModel', requestStatsModel);
     ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
     ctx.provide('studentSummaryModel', studentSummaryModel);
+    ctx.provide('studentHistoryModel', studentHistoryModel);
     ctx.provide('errorReporter', errorReporter);
 
     // 初始化版本服务
