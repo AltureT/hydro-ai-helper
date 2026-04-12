@@ -192,11 +192,18 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
       };
     }
 
-    return null;
+    // All done — show regenerate as the main button (secondary style)
+    return {
+      label: t('ai_helper_batch_summary_regenerate_all'),
+      action: () => handleGenerate('regenerate'),
+      variant: 'secondary',
+    };
   };
 
   const smartButton = getSmartButton();
-  const showDropdown = state.summaries.size > 0 && !state.isGenerating;
+  // Show dropdown only when there's a higher-priority action AND regenerate is a secondary option
+  const showDropdown = !state.isGenerating && state.summaries.size > 0
+    && smartButton !== null && smartButton.variant !== 'secondary';
 
   // ── Export ──────────────────────────────────────────────────────────────────
 
