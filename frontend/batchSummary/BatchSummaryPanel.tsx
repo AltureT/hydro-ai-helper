@@ -136,7 +136,9 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   }, [state.summaries]);
 
   const { completed: completedCount, draft: draftCount, published: publishedCount, failed: failedCount, pending: pendingCount } = stats;
-  const hasPending = pendingCount > 0;
+  // Pending students may not be in the summaries Map during live SSE (only populated on student_done/student_failed).
+  // Fall back to total vs completed+failed counts from the job_started event.
+  const hasPending = pendingCount > 0 || (state.total > 0 && state.completed + state.failed < state.total);
   const progressPct = state.total > 0 ? Math.round(((state.completed + state.failed) / state.total) * 100) : 0;
 
   // ── Smart button config ────────────────────────────────────────────────────
