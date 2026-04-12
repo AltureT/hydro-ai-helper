@@ -7,6 +7,11 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TeachingAnalysisService = void 0;
+const errorClusterAnalyzer_1 = require("./analyzers/errorClusterAnalyzer");
+const temporalPatternAnalyzer_1 = require("./analyzers/temporalPatternAnalyzer");
+const correlationAnalyzer_1 = require("./analyzers/correlationAnalyzer");
+const classSizeStrategy_1 = require("./analyzers/classSizeStrategy");
+const codeSelectionService_1 = require("./analyzers/codeSelectionService");
 // ─── Constants ───────────────────────────────────────────────────────────────
 const MIN_AFFECTED = 5;
 /** HydroOJ record status codes (from batchSummaryService.ts STATUS_MAP) */
@@ -32,6 +37,7 @@ class TeachingAnalysisService {
     constructor(db) {
         this.db = db;
         this.findingCounter = 0;
+        this.effectiveMinAffected = MIN_AFFECTED;
     }
     /**
      * 主入口：聚合数据并运行规则引擎
@@ -39,11 +45,12 @@ class TeachingAnalysisService {
     async analyze(input) {
         console.log('[TeachingAnalysis] Starting analysis for domain=%s, pids=%j, students=%d', input.domainId, input.pids, input.studentUids.length);
         this.findingCounter = 0;
-        // Layer 1: Data Aggregation
-        const [records, conversations, jailbreakLogs] = await Promise.all([
+        // Layer 1: Data Aggregation (all independent queries in parallel)
+        const [records, conversations, jailbreakLogs, clusteringRecords] = await Promise.all([
             this.fetchRecords(input),
             this.fetchConversations(input),
             this.fetchJailbreakLogs(input),
+            this.fetchRecordsForClustering(input),
         ]);
         // Fetch messages using conversation IDs from above (avoids duplicate query)
         const convIds = conversations.map((c) => c._id);
@@ -52,7 +59,7 @@ class TeachingAnalysisService {
                 conversationId: { $in: convIds },
             }).toArray()
             : [];
-        console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d', records.length, conversations.length, messages.length, jailbreakLogs.length);
+        console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d, clusteringRecords=%d', records.length, conversations.length, messages.length, jailbreakLogs.length, clusteringRecords.length);
         // Build lookup structures
         const recordsByPidUid = this.groupRecordsByPidUid(records);
         const conversationsByUser = this.groupByField(conversations, 'userId');
@@ -68,6 +75,10 @@ class TeachingAnalysisService {
             aiUserCount: aiUserUids.size,
             problemCount: input.pids.length,
         };
+        // Class size strategy
+        const strategy = (0, classSizeStrategy_1.getClassSizeStrategy)(stats.participatedStudents, aiUserUids.size);
+        this.effectiveMinAffected = strategy.minAffected;
+        console.log('[TeachingAnalysis] Class size strategy: %s (students=%d, minAffected=%d)', strategy.label, stats.participatedStudents, strategy.minAffected);
         // Layer 2: Rule Engine - run all 8 dimensions
         const findings = [];
         const dimensionResults = [
@@ -86,8 +97,98 @@ class TeachingAnalysisService {
                     findings.push(f);
             }
         }
-        console.log('[TeachingAnalysis] Completed: %d findings generated', findings.length);
-        return { stats, findings };
+        // Error clustering dimension (uses separate query data)
+        const errorClusterFindings = (0, errorClusterAnalyzer_1.analyzeErrorClusters)(clusteringRecords, input.pids, input.studentUids.length, input.pidTitles);
+        for (const f of errorClusterFindings) {
+            if (f)
+                findings.push(f);
+        }
+        // Build conversationsByUserPid for temporal pattern analyzer
+        const conversationsByUserPid = new Map();
+        for (const c of conversations) {
+            conversationsByUserPid.set(`${c.userId}:${c.problemId}`, true);
+        }
+        // Temporal pattern analysis
+        const temporalProfiles = [];
+        const temporalFindings = (0, temporalPatternAnalyzer_1.analyzeTemporalPatterns)(records, input.pids, input.studentUids, conversationsByUserPid, input.contestStartTime, input.contestEndTime, temporalProfiles);
+        for (const f of temporalFindings) {
+            if (f)
+                findings.push(f);
+        }
+        // Cross-dimensional correlations
+        const correlationFindings = (0, correlationAnalyzer_1.analyzeCorrelations)(findings, temporalProfiles, input.studentUids.length, aiUserUids, recordsByPidUid);
+        for (const f of correlationFindings) {
+            findings.push(f);
+        }
+        // Filter out findings from disabled dimensions
+        const filteredFindings = findings.filter(f => !strategy.disabledDimensions.includes(f.dimension));
+        // Fill-in exercise candidates
+        const fillInCandidates = [];
+        const errorFindings = filteredFindings.filter(f => f.dimension === 'commonError' || f.dimension === 'errorCluster');
+        const fillInPids = [];
+        for (const pid of input.pids) {
+            const hasError = errorFindings.some(f => f.evidence.affectedProblems.includes(pid));
+            if (!hasError)
+                continue;
+            let attempted = 0, firstAC = 0, totalAC = 0, totalSubs = 0;
+            for (const uid of input.studentUids) {
+                const recs = recordsByPidUid.get(`${pid}:${uid}`) || [];
+                if (recs.length === 0)
+                    continue;
+                attempted++;
+                totalSubs += recs.length;
+                if (recs.some(r => r.status === 1))
+                    totalAC++;
+                if (recs[0].status === 1)
+                    firstAC++;
+            }
+            if (attempted === 0)
+                continue;
+            const trigger = (0, codeSelectionService_1.shouldGenerateFillIn)({
+                hasCommonError: true,
+                finalACRate: totalAC / attempted,
+                firstAttemptACRate: firstAC / attempted,
+                avgSubmissionCount: totalSubs / attempted,
+            });
+            if (trigger)
+                fillInPids.push(pid);
+        }
+        if (fillInPids.length > 0) {
+            const acRecords = await this.fetchACSubmissions(input, fillInPids);
+            const acByPid = new Map();
+            for (const r of acRecords) {
+                if (!r.code)
+                    continue;
+                if (!acByPid.has(r.pid))
+                    acByPid.set(r.pid, []);
+                acByPid.get(r.pid).push({
+                    uid: r.uid, code: r.code, lang: r.lang || 'unknown', score: 0,
+                });
+            }
+            for (const pid of fillInPids) {
+                const submissions = acByPid.get(pid) || [];
+                const candidates = (0, codeSelectionService_1.selectACCode)(submissions);
+                if (candidates.length === 0)
+                    continue;
+                const title = input.pidTitles?.get(pid) || `题目 ${pid}`;
+                const primary = candidates[0];
+                fillInCandidates.push({
+                    pid, title, lang: primary.lang,
+                    reason: '', code: primary.code, blanks: [],
+                    alternatives: candidates.slice(1).map(c => ({
+                        uid: c.uid, code: c.code, score: c.score,
+                    })),
+                });
+            }
+        }
+        console.log('[TeachingAnalysis] Completed: %d findings generated', filteredFindings.length);
+        return {
+            stats,
+            findings: filteredFindings,
+            temporalProfiles,
+            fillInCandidates,
+            classSizeLabel: strategy.label,
+        };
     }
     // ─── Layer 1: Data Fetching ──────────────────────────────────────────────
     async fetchRecords(input) {
@@ -113,6 +214,58 @@ class TeachingAnalysisService {
             problemId: { $in: pidStrings },
         };
         return this.db.collection('ai_conversations').find(filter).toArray();
+    }
+    /**
+     * Fetch non-AC records with testCases and compilerTexts for error clustering.
+     * Separate query to avoid loading heavy fields for all dimensions.
+     * Records are sorted by judgeAt ascending (required by errorClusterAnalyzer).
+     */
+    async fetchRecordsForClustering(input) {
+        const matchStage = {
+            domainId: input.domainId,
+            pid: { $in: input.pids },
+            uid: { $in: input.studentUids },
+            status: { $ne: 1 },
+        };
+        if (input.contestStartTime || input.contestEndTime) {
+            matchStage.judgeAt = {};
+            if (input.contestStartTime)
+                matchStage.judgeAt.$gte = input.contestStartTime;
+            if (input.contestEndTime)
+                matchStage.judgeAt.$lte = input.contestEndTime;
+        }
+        return this.db.collection('record').aggregate([
+            { $match: matchStage },
+            { $project: {
+                    pid: 1, uid: 1, status: 1, judgeAt: 1,
+                    testCases: { $slice: ['$testCases', 80] },
+                    compilerTexts: { $slice: ['$compilerTexts', -3] },
+                    code: 1,
+                } },
+            { $sort: { judgeAt: 1 } },
+        ]).toArray();
+    }
+    async fetchACSubmissions(input, pids) {
+        if (pids.length === 0)
+            return [];
+        const matchStage = {
+            domainId: input.domainId,
+            pid: { $in: pids },
+            uid: { $in: input.studentUids },
+            status: 1,
+        };
+        if (input.contestStartTime || input.contestEndTime) {
+            matchStage.judgeAt = {};
+            if (input.contestStartTime)
+                matchStage.judgeAt.$gte = input.contestStartTime;
+            if (input.contestEndTime)
+                matchStage.judgeAt.$lte = input.contestEndTime;
+        }
+        return this.db.collection('record').aggregate([
+            { $match: matchStage },
+            { $project: { pid: 1, uid: 1, code: 1, lang: 1 } },
+            { $sort: { judgeAt: -1 } },
+        ]).toArray();
     }
     async fetchJailbreakLogs(input) {
         const filter = {
@@ -151,11 +304,16 @@ class TeachingAnalysisService {
         }
         return map;
     }
+    /** Resolve pid to title using pidTitles mapping, fallback to numeric ID */
+    pidLabel(pid, input) {
+        const title = input.pidTitles?.get(pid);
+        return title ? `${title} (${pid})` : `题目 ${pid}`;
+    }
     /**
      * 创建 Finding，若受影响学生数 < MIN_AFFECTED 则返回 null
      */
     makeFinding(dimension, severity, title, affectedStudents, affectedProblems, metrics, needsDeepDive, samples) {
-        if (affectedStudents.length < MIN_AFFECTED)
+        if (affectedStudents.length < this.effectiveMinAffected)
             return null;
         this.findingCounter++;
         return {
@@ -203,7 +361,7 @@ class TeachingAnalysisService {
                 if (uids.size >= threshold) {
                     const label = STATUS_LABEL[status] || `Status_${status}`;
                     const pct = Math.round((uids.size / input.studentUids.length) * 100);
-                    const finding = this.makeFinding('commonError', uids.size >= input.studentUids.length * 0.5 ? 'high' : 'medium', `题目 ${pid}：${pct}% 学生遇到 ${label} 错误`, Array.from(uids), [pid], { affectedCount: uids.size, totalStudents: input.studentUids.length, percentage: pct }, true);
+                    const finding = this.makeFinding('commonError', uids.size >= input.studentUids.length * 0.5 ? 'high' : 'medium', `${this.pidLabel(pid, input)}：${pct}% 学生遇到 ${label} 错误`, Array.from(uids), [pid], { affectedCount: uids.size, totalStudents: input.studentUids.length, percentage: pct }, true);
                     findings.push(finding);
                 }
             }
@@ -330,7 +488,7 @@ class TeachingAnalysisService {
             const passRate = attemptedCount > 0 ? acCount / attemptedCount : 0;
             if (passRate < 0.2) {
                 const pct = Math.round(passRate * 100);
-                findings.push(this.makeFinding('difficulty', passRate < 0.1 ? 'high' : 'medium', `题目 ${pid} 通过率极低（${pct}%，${acCount}/${attemptedCount}）`, failedStudents, [pid], { passRate: pct, attempted: attemptedCount, accepted: acCount }, true));
+                findings.push(this.makeFinding('difficulty', passRate < 0.1 ? 'high' : 'medium', `${this.pidLabel(pid, input)} 通过率极低（${pct}%，${acCount}/${attemptedCount}）`, failedStudents, [pid], { passRate: pct, attempted: attemptedCount, accepted: acCount }, true));
             }
         }
         return findings;

@@ -7,7 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import {
   COLORS, SPACING, RADIUS, SHADOWS,
-  getButtonStyle, cardStyle, markdownTheme,
+  getButtonStyle, cardStyle, markdownTheme, LAYOUT,
 } from '../utils/styles';
 import { renderMarkdown } from '../utils/markdown';
 import { useTeachingSummary, TeachingFinding, TeachingSummary } from './useTeachingSummary';
@@ -272,8 +272,17 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   const { summary, loading, error, fetchSummary, generate, submitFeedback } = useTeachingSummary(domainId, contestId);
 
   const [teachingFocus, setTeachingFocus] = useState('');
-  const [suggestionExpanded, setSuggestionExpanded] = useState(true);
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+
+  const [isWide, setIsWide] = useState(
+    typeof window !== 'undefined' ? window.innerWidth >= LAYOUT.splitBreakpoint : true,
+  );
+
+  useEffect(() => {
+    const handleResize = () => setIsWide(window.innerWidth >= LAYOUT.splitBreakpoint);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     fetchSummary();
@@ -484,122 +493,119 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
         </div>
       )}
 
-      {/* Findings list */}
-      <div style={{ marginBottom: SPACING.lg }}>
+      {/* 60/40 split layout */}
+      <style>{`.section { overflow: visible !important; }`}</style>
+      <div style={{
+        display: 'flex',
+        flexDirection: isWide ? 'row' : 'column',
+        gap: LAYOUT.gap,
+        alignItems: 'flex-start',
+      }}>
+        {/* Main column (60%) — Findings */}
         <div style={{
-          fontWeight: 600, fontSize: '13px', marginBottom: SPACING.md,
-          color: COLORS.textMuted, textTransform: 'uppercase' as const,
-          letterSpacing: '0.05em',
+          flex: isWide ? `0 0 ${LAYOUT.mainColumnWidth}` : '1 1 100%',
+          minWidth: 0,
         }}>
-          {t('ai_helper_teaching_summary_findings_title')}
-        </div>
-
-        {findings.length === 0 ? (
-          <div style={{ color: COLORS.textMuted, fontSize: '13px', fontStyle: 'italic' }}>
-            {t('ai_helper_teaching_summary_no_findings')}
+          <div style={{
+            fontWeight: 600, fontSize: '13px', marginBottom: SPACING.md,
+            color: COLORS.textMuted, textTransform: 'uppercase' as const,
+            letterSpacing: '0.05em',
+          }}>
+            {t('ai_helper_teaching_summary_findings_title')}
           </div>
-        ) : (
-          <>
-            {highFindings.length > 0 && (
-              <div style={{ marginBottom: SPACING.sm }}>
-                {highFindings.map(f => (
-                  <FindingCard key={f.id} finding={f} deepDiveText={summary.deepDiveResults?.[f.id]} />
-                ))}
-              </div>
-            )}
-            {mediumFindings.length > 0 && (
-              <div style={{ marginBottom: SPACING.sm }}>
-                {mediumFindings.map(f => (
-                  <FindingCard key={f.id} finding={f} deepDiveText={summary.deepDiveResults?.[f.id]} />
-                ))}
-              </div>
-            )}
-            {lowFindings.length > 0 && (
-              <div>
-                {lowFindings.map(f => (
-                  <FindingCard key={f.id} finding={f} deepDiveText={summary.deepDiveResults?.[f.id]} />
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
 
-      {/* Overall AI suggestion */}
-      {summary.overallSuggestion && (
-        <div style={{
-          border: `1px solid ${COLORS.border}`,
-          borderLeft: `4px solid ${COLORS.hydroGreen}`,
-          borderRadius: RADIUS.md,
-          marginBottom: SPACING.lg,
-          overflow: 'hidden',
-        }}>
-          <div
-            onClick={() => setSuggestionExpanded(!suggestionExpanded)}
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: `${SPACING.md} ${SPACING.base}`,
-              cursor: 'pointer', userSelect: 'none',
-              backgroundColor: COLORS.hydroGreenLight,
-              borderBottom: suggestionExpanded ? `1px solid ${COLORS.border}` : 'none',
-            }}
-          >
-            <span style={{
-              fontWeight: 600, fontSize: '13px', color: COLORS.hydroGreenDark,
-              textTransform: 'uppercase' as const, letterSpacing: '0.05em',
-            }}>
-              {t('ai_helper_teaching_summary_overall_suggestion')}
-            </span>
-            <span style={{ fontSize: '12px', color: COLORS.textMuted }}>
-              {suggestionExpanded ? t('ai_helper_teaching_summary_collapse') : t('ai_helper_teaching_summary_expand')}
-            </span>
-          </div>
-          {suggestionExpanded && (
-            <div
-              className="markdown-body"
-              style={{ padding: `${SPACING.base} ${SPACING.lg}` }}
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.overallSuggestion) }}
-            />
+          {findings.length === 0 ? (
+            <div style={{ color: COLORS.textMuted, fontSize: '13px', fontStyle: 'italic' }}>
+              {t('ai_helper_teaching_summary_no_findings')}
+            </div>
+          ) : (
+            <>
+              {highFindings.map(f => (
+                <FindingCard key={f.id} finding={f} deepDiveText={summary.deepDiveResults?.[f.id]} />
+              ))}
+              {mediumFindings.map(f => (
+                <FindingCard key={f.id} finding={f} deepDiveText={summary.deepDiveResults?.[f.id]} />
+              ))}
+              {lowFindings.map(f => (
+                <FindingCard key={f.id} finding={f} deepDiveText={summary.deepDiveResults?.[f.id]} />
+              ))}
+            </>
           )}
         </div>
-      )}
 
-      {/* Feedback section */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: SPACING.sm,
-        padding: `${SPACING.sm} 0`,
-        borderTop: `1px solid ${COLORS.border}`,
-      }}>
-        {feedbackSubmitted ? (
-          <span style={{ fontSize: '13px', color: COLORS.successText }}>
-            {t('ai_helper_teaching_summary_feedback_thanks')}
-          </span>
-        ) : (
-          <>
-            <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
-              {t('ai_helper_teaching_summary_overall_suggestion')}：
-            </span>
-            {(['up', 'down'] as const).map(rating => (
-              <button
-                key={rating}
-                onClick={() => handleFeedback(rating)}
-                style={{
-                  fontSize: '12px', padding: '3px 8px',
-                  border: `1px solid ${COLORS.border}`,
-                  borderRadius: RADIUS.sm,
-                  backgroundColor: 'transparent',
-                  color: summary.feedback?.rating === rating
-                    ? (rating === 'up' ? COLORS.successText : COLORS.errorText)
-                    : COLORS.textMuted,
-                  cursor: 'pointer',
-                }}
-              >
-                {rating === 'up' ? '👍' : '👎'} {t(rating === 'up'
-                  ? 'ai_helper_teaching_summary_feedback_helpful'
-                  : 'ai_helper_teaching_summary_feedback_not_helpful')}
-              </button>
-            ))}
-          </>
+        {/* Sidebar (40%) — AI Suggestion */}
+        {summary.overallSuggestion && (
+          <div style={{
+            flex: isWide ? `0 0 ${LAYOUT.sidebarWidth}` : '1 1 100%',
+            minWidth: 0,
+            position: isWide ? 'sticky' as const : 'static' as const,
+            top: isWide ? LAYOUT.sidebarStickyTop : undefined,
+            maxHeight: isWide ? LAYOUT.sidebarMaxHeight : undefined,
+            overflowY: isWide ? 'auto' as const : undefined,
+          }}>
+            <div style={{
+              border: `1px solid ${COLORS.border}`,
+              borderLeft: `4px solid ${COLORS.hydroGreen}`,
+              borderRadius: RADIUS.md,
+              backgroundColor: COLORS.bgCard,
+              boxShadow: SHADOWS.sm,
+            }}>
+              {/* Header */}
+              <div style={{
+                padding: `${SPACING.md} ${SPACING.base}`,
+                borderBottom: `1px solid ${COLORS.border}`,
+                backgroundColor: COLORS.hydroGreenLight,
+              }}>
+                <span style={{
+                  fontWeight: 600, fontSize: '13px', color: COLORS.hydroGreenDark,
+                  textTransform: 'uppercase' as const, letterSpacing: '0.05em',
+                }}>
+                  {t('ai_helper_teaching_summary_overall_suggestion')}
+                </span>
+              </div>
+
+              {/* Content */}
+              <div
+                className="markdown-body"
+                style={{ padding: `${SPACING.base} ${SPACING.lg}` }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.overallSuggestion) }}
+              />
+
+              {/* Feedback — inside sidebar */}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+                gap: SPACING.sm, padding: `${SPACING.sm} ${SPACING.base}`,
+                borderTop: `1px solid ${COLORS.border}`,
+              }}>
+                {feedbackSubmitted ? (
+                  <span style={{ fontSize: '12px', color: COLORS.successText }}>
+                    {t('ai_helper_teaching_summary_feedback_thanks')}
+                  </span>
+                ) : (
+                  <>
+                    {(['up', 'down'] as const).map(rating => (
+                      <button
+                        key={rating}
+                        onClick={() => handleFeedback(rating)}
+                        style={{
+                          fontSize: '12px', padding: '3px 8px',
+                          border: `1px solid ${COLORS.border}`,
+                          borderRadius: RADIUS.sm,
+                          backgroundColor: 'transparent',
+                          color: summary.feedback?.rating === rating
+                            ? (rating === 'up' ? COLORS.successText : COLORS.errorText)
+                            : COLORS.textMuted,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {rating === 'up' ? t('ai_helper_teaching_summary_feedback_helpful') : t('ai_helper_teaching_summary_feedback_not_helpful')}
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

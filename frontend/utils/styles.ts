@@ -318,6 +318,15 @@ export const linkStyle: React.CSSProperties = {
   cursor: 'pointer',
 };
 
+export const LAYOUT = {
+  splitBreakpoint: 768,
+  mainColumnWidth: '58%',
+  sidebarWidth: '40%',
+  sidebarStickyTop: '16px',
+  sidebarMaxHeight: 'calc(100vh - 32px)',
+  gap: '24px',
+};
+
 // ─── Shared Markdown Theme ───────────────────────────────────────────────────
 
 export const markdownTheme = `
