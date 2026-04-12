@@ -73,7 +73,7 @@ export interface UseTeachingSummaryReturn {
   submitFeedback: (summaryId: string, rating: 'up' | 'down', comment?: string) => Promise<void>;
 }
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = 5000;
 
 export function useTeachingSummary(domainId: string, contestId: string): UseTeachingSummaryReturn {
   const [summary, setSummary] = useState<TeachingSummary | null>(null);
@@ -125,7 +125,7 @@ export function useTeachingSummary(domainId: string, contestId: string): UseTeac
     }
   }, [domainId, contestId]);
 
-  const startPolling = useCallback((summaryId: string) => {
+  const startPolling = useCallback(() => {
     stopPolling();
     pollTimerRef.current = setInterval(async () => {
       try {
@@ -176,7 +176,7 @@ export function useTeachingSummary(domainId: string, contestId: string): UseTeac
 
       // If generation started, begin polling
       if (data.started && newSummary) {
-        startPolling(String(newSummary._id));
+        startPolling();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');

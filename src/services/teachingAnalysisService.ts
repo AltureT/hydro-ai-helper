@@ -110,12 +110,19 @@ export class TeachingAnalysisService {
     this.findingCounter = 0;
 
     // Layer 1: Data Aggregation
-    const [records, conversations, messages, jailbreakLogs] = await Promise.all([
+    const [records, conversations, jailbreakLogs] = await Promise.all([
       this.fetchRecords(input),
       this.fetchConversations(input),
-      this.fetchMessages(input),
       this.fetchJailbreakLogs(input),
     ]);
+
+    // Fetch messages using conversation IDs from above (avoids duplicate query)
+    const convIds = conversations.map((c) => c._id);
+    const messages = convIds.length > 0
+      ? await this.db.collection('ai_messages').find({
+          conversationId: { $in: convIds },
+        }).toArray() as MessageDoc[]
+      : [];
 
     console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d',
       records.length, conversations.length, messages.length, jailbreakLogs.length);
@@ -188,23 +195,6 @@ export class TeachingAnalysisService {
       problemId: { $in: pidStrings },
     };
     return this.db.collection('ai_conversations').find(filter).toArray() as Promise<ConversationDoc[]>;
-  }
-
-  private async fetchMessages(input: AnalyzeInput): Promise<MessageDoc[]> {
-    // First get conversation IDs, then fetch messages
-    const pidStrings = input.pids.map(String);
-    const conversations = await this.db.collection('ai_conversations').find({
-      domainId: input.domainId,
-      userId: { $in: input.studentUids },
-      problemId: { $in: pidStrings },
-    }).project({ _id: 1 }).toArray();
-
-    if (conversations.length === 0) return [];
-
-    const convIds = conversations.map((c: any) => c._id);
-    return this.db.collection('ai_messages').find({
-      conversationId: { $in: convIds },
-    }).toArray() as Promise<MessageDoc[]>;
   }
 
   private async fetchJailbreakLogs(input: AnalyzeInput): Promise<JailbreakDoc[]> {

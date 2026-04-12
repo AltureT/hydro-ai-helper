@@ -11,18 +11,13 @@ import { ConfigPanel } from '../admin/ConfigPanel';
 import { CostDashboard } from '../teacher/CostDashboard';
 import { TeachingReviewPanel } from '../teachingSummary/TeachingReviewPanel';
 import { COLORS, FONT_FAMILY, SHADOWS, RADIUS, SPACING, getTabStyle } from '../utils/styles';
+import { getDomainFromUrl } from '../utils/domainUtils';
 
 type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'config';
 
-function getDomainId(): string {
-  const domainMatch = window.location.pathname.match(/^\/d\/([^/]+)\//);
-  if (domainMatch) return domainMatch[1];
-  return (window as any).UiContext?.domainId || 'system';
-}
-
 export const AIHelperDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
-  const domainId = getDomainId();
+  const domainId = getDomainFromUrl() || 'system';
 
   useEffect(() => {
     const handlePopState = () => {

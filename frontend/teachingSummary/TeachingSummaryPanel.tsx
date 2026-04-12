@@ -9,6 +9,7 @@ import {
   COLORS, SPACING, RADIUS, SHADOWS,
   getButtonStyle, cardStyle, markdownTheme,
 } from '../utils/styles';
+import { renderMarkdown } from '../utils/markdown';
 import { useTeachingSummary, TeachingFinding, TeachingSummary } from './useTeachingSummary';
 
 // ─── i18n with fallback ───────────────────────────────────────────────────────
@@ -65,20 +66,6 @@ const SEVERITY_COLORS = {
   medium: { bg: '#FFFBEB', text: '#D97706', border: '#FDE68A' },
   low: { bg: '#F0FDF4', text: '#16A34A', border: '#BBF7D0' },
 };
-
-// ─── Simple markdown renderer ─────────────────────────────────────────────────
-
-function simpleMarkdown(text: string): string {
-  if (!text) return '';
-  return text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/### (.+)/g, '<h4>$1</h4>')
-    .replace(/## (.+)/g, '<h3>$1</h3>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\n- /g, '\n<li>')
-    .replace(/\n(\d+)\. /g, '\n<li>')
-    .replace(/\n/g, '<br/>');
-}
 
 // ─── FindingCard subcomponent ─────────────────────────────────────────────────
 
@@ -181,7 +168,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
             <div
               className="markdown-body"
               style={{ fontSize: '13px', marginTop: SPACING.sm }}
-              dangerouslySetInnerHTML={{ __html: simpleMarkdown(deepDiveText) }}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(deepDiveText) }}
             />
           )}
 
@@ -532,7 +519,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             <div
               className="markdown-body"
               style={{ padding: SPACING.base, fontSize: '14px' }}
-              dangerouslySetInnerHTML={{ __html: simpleMarkdown(summary.overallSuggestion) }}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.overallSuggestion) }}
             />
           )}
         </div>
