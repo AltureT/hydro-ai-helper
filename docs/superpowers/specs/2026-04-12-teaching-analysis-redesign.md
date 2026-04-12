@@ -224,6 +224,93 @@ Read problem title + content (truncated to 500 chars) from `document` collection
 
 Already available in `teachingSummaryHandler.ts` for deep dive — extend to overall suggestion.
 
+### 3.7 Code Fill-in-the-Blank Exercise Generation (Phase 2)
+
+Generate "code with blanks" exercises from representative AC submissions, so teachers can use them for post-class consolidation practice.
+
+#### Trigger Conditions
+
+A fill-in exercise is generated for a problem ONLY when ALL conditions are met:
+
+```
+✅ Problem has a commonError finding (clear knowledge gap identified)
+✅ Final AC rate < 90% OR average submission count ≥ 2
+✅ First-attempt AC rate ≤ 70% (most students didn't get it right immediately)
+❌ Skip if all above conditions not met — students already mastered it
+```
+
+#### Fill-in-the-blank Problem Detection
+
+If the problem itself is a fill-in-the-blank format (code template with blanks):
+- Detect by checking problem content for placeholder patterns: `___`, `???`, `/* your code here */`, `// TODO`, `____`
+- Compare AC code against problem content to identify the "template region" (code given by the teacher) vs "student-written region"
+- Blanking must ONLY target student-written code, never the template region
+- If >80% of the AC code overlaps with the problem template, the blanking positions must be chosen from the remaining 20%
+
+#### AC Code Selection Strategy
+
+Default: **auto-select with manual override**.
+
+**Auto-selection algorithm:**
+1. Collect all AC submissions for the problem
+2. Filter: remove submissions with code length in bottom 10% (too short / tricky) or top 10% (too verbose)
+3. Score remaining by readability heuristics:
+   - Has meaningful variable names (not single letters except `i`, `j`, `n`) → +1
+   - Has comments → +1
+   - Function/method structure (not all in main) → +1
+   - Moderate line count (within 1 std dev of median) → +1
+4. Select top-scored submission as default
+5. Also prepare 2 runner-up alternatives for teacher to switch to
+
+**Teacher override UI:** In the finding card's expanded area, show the auto-selected code with a "切换代码" dropdown listing 2 alternatives with preview.
+
+#### Blanking Position Logic
+
+LLM receives the selected AC code + the error cluster data, and generates:
+
+1. **Blanked lines** — the specific lines to remove, chosen based on:
+   - Lines that correspond to the error cluster's knowledge gap (e.g., if students forgot to save `next` pointer, blank that line)
+   - Typically 2-4 lines blanked per exercise (not too many, not too few)
+2. **Blank hints** — optional one-line hint per blank (e.g., "// 保存当前节点的下一个节点")
+3. **Expected answers** — the correct code for each blank
+4. **Difficulty note** — which blank is hardest based on error cluster data
+
+#### Output Format (in LLM suggestion)
+
+Added to the P0 action plan as a new section:
+
+```
+#### 📝 课后巩固：代码挖空练习
+
+**题目：{pid}. {title}**
+**挖空原因**：错误聚类显示 {N}% 的失败提交在{具体知识点}上出错
+
+**练习模板**（基于学生 AC 代码）：
+```{lang}
+ListNode* reverse(ListNode* head) {
+    ListNode* prev = NULL;
+    while (head) {
+        ______________________  // 提示：保存当前节点的下一个节点
+        head->next = prev;
+        prev = head;
+        ______________________  // 提示：移动到下一个节点
+    }
+    return prev;
+}
+```
+
+**参考答案**：
+- 空1：`ListNode* next = head->next;`
+- 空2：`head = next;`
+```
+
+#### Data Flow
+
+1. **teachingAnalysisService** — for each problem with commonError finding, check trigger conditions, select AC code candidates
+2. **teachingSummaryHandler** — pass selected AC code + error cluster to suggestion service
+3. **teachingSuggestionService** — LLM generates blanking positions and hints as part of the teaching action plan
+4. **Frontend (TeachingSummaryPanel)** — render exercise template in finding card, show code selector dropdown for teacher override
+
 ---
 
 ## 4. LLM Prompt Restructuring
@@ -249,6 +336,13 @@ P2 — 个体干预：按行为模式分类（persistent_learner / burst_then_qu
 - Worked Examples（样例学习）：展示完整解题过程，标注每步的子目标
 - Peer Instruction（同伴教学）：让AC学生分享思路，教师引导讨论
 - Socratic Questioning（苏格拉底式提问）：用问题引导学生自行发现错误
+- Code Fill-in-the-Blank（代码挖空练习）：基于学生AC代码，挖空错误高发位置让学生重做巩固
+
+【代码挖空练习规则】
+- 仅当该题存在commonError发现、且首次提交AC率≤70%时生成
+- 如果题目本身是填空形式，挖空位置必须避开题目模板代码，仅在学生自写部分挖空
+- 每题挖2-4个空，锚定在错误聚类对应的知识盲点上
+- 提供每个空位的提示和参考答案
 
 【输出格式】严格遵循：
 
@@ -265,6 +359,13 @@ P2 — 个体干预：按行为模式分类（persistent_learner / burst_then_qu
 2. **演示/板书**：{具体演示什么}
 3. **修正模板**：{正确做法}
 4. **当堂检验**：{变式练习题}
+
+#### 📝 课后巩固：代码挖空练习
+（仅当触发条件满足时生成，见§3.7）
+**题目：{pid}. {title}**
+**挖空原因**：{错误聚类对应的知识盲点}
+**练习模板**：{AC代码，关键行替换为空白+提示}
+**参考答案**：{每个空的正确代码}
 
 #### [P2] 个体干预建议
 | 行为模式 | 人数 | 建议动作 |
@@ -342,10 +443,12 @@ Add `课堂行动（5-10分钟）` section to output format, aligned with overal
 8. **Frontend: 60/40 split layout** — main column + sticky sidebar
 9. **Frontend: Finding card restyling** — white bg + left color bar
 10. **Frontend: Responsive breakpoint** — <768px collapse to vertical
-11. **Backend: Temporal behavior pattern** — feature extraction + 5-way classification
-12. **Backend: Cross-dimensional correlation** — atRisk×temporal, commonError×AI
-13. **Backend: Class size strategy** — adaptive dimension enabling
-14. **Backend: Small sample guards** — minimum sample sizes, confidence annotations
+11. **Frontend: Code fill-in exercise UI** — render exercise template in finding card, AC code selector dropdown for teacher override
+12. **Backend: Temporal behavior pattern** — feature extraction + 5-way classification
+13. **Backend: Cross-dimensional correlation** — atRisk×temporal, commonError×AI
+14. **Backend: Class size strategy** — adaptive dimension enabling
+15. **Backend: Small sample guards** — minimum sample sizes, confidence annotations
+16. **Backend: Code fill-in exercise generation** — AC code selection, trigger conditions, fill-in-the-blank problem detection, pass to LLM
 
 ### Phase 3 (1-2 weeks) — Refinement (future iteration)
 
@@ -360,14 +463,14 @@ Add `课堂行动（5-10分钟）` section to output format, aligned with overal
 
 ### Frontend
 - `frontend/components/ScoreboardTabContainer.tsx` — tab styling, transitions, export button integration
-- `frontend/teachingSummary/TeachingSummaryPanel.tsx` — 60/40 layout, stat bar, finding cards, suggestion section
+- `frontend/teachingSummary/TeachingSummaryPanel.tsx` — 60/40 layout, stat bar, finding cards, suggestion section, code fill-in exercise UI with AC code selector
 - `frontend/utils/styles.ts` — new HydroOJ-native design tokens
 
 ### Backend
-- `src/services/teachingAnalysisService.ts` — RecordDoc extension, error clustering, temporal patterns, cross-correlation, class size strategy
-- `src/services/teachingSuggestionService.ts` — prompt rewrite, data compression, problem context
-- `src/handlers/teachingSummaryHandler.ts` — pass extended data to suggestion service
+- `src/services/teachingAnalysisService.ts` — RecordDoc extension, error clustering, temporal patterns, cross-correlation, class size strategy, AC code selection for fill-in exercises
+- `src/services/teachingSuggestionService.ts` — prompt rewrite, data compression, problem context, fill-in exercise generation prompt
+- `src/handlers/teachingSummaryHandler.ts` — pass extended data to suggestion service, fill-in trigger condition checks
 - `src/models/teachingSummary.ts` — extended TeachingFinding types for new dimensions
 
 ### Types
-- `src/models/teachingSummary.ts` — new FindingDimension values, ErrorCluster interface, TemporalPattern interface
+- `src/models/teachingSummary.ts` — new FindingDimension values, ErrorCluster interface, TemporalPattern interface, FillInExercise interface
