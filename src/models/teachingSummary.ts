@@ -10,7 +10,8 @@ import { ensureObjectId } from '../utils/ensureObjectId';
 
 export type FindingDimension =
   | 'commonError' | 'comprehension' | 'strategy'
-  | 'atRisk' | 'difficulty' | 'progress' | 'cognitivePath' | 'aiEffectiveness';
+  | 'atRisk' | 'difficulty' | 'progress' | 'cognitivePath' | 'aiEffectiveness'
+  | 'errorCluster';
 
 export interface TeachingFinding {
   id: string;
@@ -26,6 +27,17 @@ export interface TeachingFinding {
   needsDeepDive: boolean;
   aiSuggestion?: string;
   aiAnalysis?: string;
+}
+
+export interface ErrorCluster {
+  signature: string;
+  statusLabel: string;
+  failingTestIds: (number | string)[];
+  normalizedError: string;
+  affectedStudentCount: number;
+  totalStudents: number;
+  ratio: number;
+  sampleCode?: string;
 }
 
 export interface TeachingSummary {
