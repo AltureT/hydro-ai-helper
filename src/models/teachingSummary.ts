@@ -11,7 +11,50 @@ import { ensureObjectId } from '../utils/ensureObjectId';
 export type FindingDimension =
   | 'commonError' | 'comprehension' | 'strategy'
   | 'atRisk' | 'difficulty' | 'progress' | 'cognitivePath' | 'aiEffectiveness'
-  | 'errorCluster';
+  | 'errorCluster' | 'temporalPattern' | 'crossCorrelation';
+
+export type TemporalPatternLabel =
+  | 'strategic_solver'
+  | 'disengaged'
+  | 'burst_then_quit'
+  | 'stuck_silent'
+  | 'persistent_learner';
+
+export interface TemporalFeatures {
+  totalSubmissions: number;
+  totalActiveMinutes: number;
+  medianInterval: number | null;
+  burstCount: number;
+  distinctSessions: number;
+  firstACIndex: number | null;
+  timeSinceLastSubmit: number | null;
+}
+
+export interface StudentTemporalProfile {
+  uid: number;
+  pid: number;
+  pattern: TemporalPatternLabel;
+  features: TemporalFeatures;
+  finalStatus: number;
+}
+
+export interface FillInBlank {
+  line: number;
+  original: string;
+  hint: string;
+}
+
+export interface FillInExercise {
+  pid: number;
+  title: string;
+  lang: string;
+  reason: string;
+  code: string;
+  blanks: FillInBlank[];
+  alternatives?: Array<{ uid: number; code: string; score: number }>;
+}
+
+export type ConfidenceLevel = 'high' | 'low' | 'insufficient_data';
 
 export interface TeachingFinding {
   id: string;
@@ -27,6 +70,8 @@ export interface TeachingFinding {
   needsDeepDive: boolean;
   aiSuggestion?: string;
   aiAnalysis?: string;
+  confidence?: ConfidenceLevel;
+  fillInExercise?: FillInExercise;
 }
 
 
