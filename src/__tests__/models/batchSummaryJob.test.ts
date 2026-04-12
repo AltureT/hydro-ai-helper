@@ -51,7 +51,7 @@ describe('BatchSummaryJobModel', () => {
         { domainId: 1, contestId: 1 },
         expect.objectContaining({
           unique: true,
-          partialFilterExpression: { status: { $ne: 'archived' } },
+          partialFilterExpression: { status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] } },
         }),
       );
     });
@@ -137,7 +137,7 @@ describe('BatchSummaryJobModel', () => {
       expect(col.findOne).toHaveBeenCalledWith({
         domainId: 'system',
         contestId: 'cid1',
-        status: { $ne: 'archived' },
+        status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] },
       });
     });
 
