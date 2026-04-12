@@ -779,3 +779,28 @@ ai_helper_batch_summary_stats_published: "Published"
 ai_helper_batch_summary_stats_failed: "Failed"
 ai_helper_batch_summary_stats_not_generated: "Not generated"
 ai_helper_batch_summary_no_new_students: "All students already have summaries"
+
+# Teaching Suggestions
+ai_helper_dashboard_tab_teaching_review: Teaching Review
+ai_helper_teaching_generate: Generate Teaching Suggestions
+ai_helper_teaching_regenerate: Regenerate
+ai_helper_teaching_generating: Generating teaching suggestions...
+ai_helper_teaching_overview: Overview
+ai_helper_teaching_findings: Findings
+ai_helper_teaching_suggestion: AI Teaching Suggestions
+ai_helper_teaching_detail: View Details
+ai_helper_teaching_students_affected: "{0} students affected"
+ai_helper_teaching_severity_high: High Priority
+ai_helper_teaching_severity_medium: Medium Priority
+ai_helper_teaching_severity_low: Low Priority
+ai_helper_teaching_feedback_prompt: Was this helpful?
+ai_helper_teaching_feedback_thanks: Thanks for your feedback!
+ai_helper_teaching_no_data: Too few participants for reliable statistics
+ai_helper_teaching_snapshot_time: Data snapshot time
+ai_helper_teaching_ai_user_note: Based on data from {0} AI assistant users
+ai_helper_teaching_focus_placeholder: Teaching focus for this lesson (optional)
+ai_helper_teaching_exists_confirm: Teaching suggestions already exist. Regenerate?
+ai_helper_teaching_deep_dive: Deep Analysis
+ai_helper_teaching_student_list: Affected Students
+ai_helper_teaching_code_samples: Representative Code Samples
+ai_helper_teaching_copy_warning: "Note: Highly consistent errors may indicate code sharing"
