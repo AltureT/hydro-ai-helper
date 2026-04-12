@@ -204,4 +204,45 @@ export class StudentSummaryModel {
     });
     return doc !== null;
   }
+
+  async createBatchSafe(
+    jobId: ObjectIdType,
+    domainId: string,
+    contestId: ObjectIdType,
+    userIds: number[],
+  ): Promise<number> {
+    if (userIds.length === 0) return 0;
+    const now = new Date();
+    const docs = userIds.map((userId) => ({
+      jobId,
+      domainId,
+      contestId,
+      userId,
+      status: 'pending' as const,
+      publishStatus: 'draft' as const,
+      summary: null,
+      originalSummary: null,
+      problemSnapshots: [],
+      tokenUsage: { prompt: 0, completion: 0 },
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    try {
+      const result = await this.collection.insertMany(docs as StudentSummary[], { ordered: false });
+      return result.insertedCount;
+    } catch (err: any) {
+      if (err.code === 11000 || err.writeErrors) {
+        return err.result?.insertedCount ?? 0;
+      }
+      throw err;
+    }
+  }
+
+  async findUserIdsByJob(jobId: ObjectIdType): Promise<number[]> {
+    const docs = await this.collection
+      .find({ jobId }, { projection: { userId: 1 } })
+      .toArray();
+    return docs.map((d) => d.userId);
+  }
 }

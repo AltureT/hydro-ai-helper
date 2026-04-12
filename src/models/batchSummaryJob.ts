@@ -106,7 +106,7 @@ export class BatchSummaryJobModel {
     return this.collection.findOne({
       domainId,
       contestId,
-      status: { $ne: 'archived' },
+      status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] as const },
     });
   }
 
@@ -158,6 +158,17 @@ export class BatchSummaryJobModel {
     await this.collection.updateOne(
       { _id },
       { $set: { status: 'archived' } },
+    );
+  }
+
+  async prepareForSupplementary(
+    id: string | ObjectIdType,
+    newTotal: number,
+  ): Promise<void> {
+    const _id = ensureObjectId(id);
+    await this.collection.updateOne(
+      { _id },
+      { $set: { totalStudents: newTotal, status: 'running', completedAt: null } },
     );
   }
 }
