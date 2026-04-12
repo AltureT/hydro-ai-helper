@@ -1,6 +1,9 @@
 /**
  * Error Cluster Analyzer — groups non-AC submissions by error signature
  * to find common error patterns across students.
+ *
+ * IMPORTANT: records must be sorted by judgeAt ascending (oldest first).
+ * The analyzer uses last-write-wins to keep each student's latest signature.
  */
 
 import { TeachingFinding } from '../../models/teachingSummary';
@@ -62,6 +65,8 @@ export function analyzeErrorClusters(
   for (const pid of pids) {
     const pidRecords = records.filter(r => r.pid === pid);
 
+    // Last-write-wins: records must be sorted by judgeAt ascending,
+    // so the final set() per uid is the student's latest submission signature.
     const studentSignatures = new Map<number, string>();
     for (const rec of pidRecords) {
       const sig = errorSignature(rec);
