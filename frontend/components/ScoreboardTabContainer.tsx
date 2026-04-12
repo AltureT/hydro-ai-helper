@@ -54,7 +54,6 @@ type TabType = typeof TABS[keyof typeof TABS];
  */
 const NATIVE_SELECTORS = [
   '[data-fragment-id="scoreboard"]',
-  '.section__header',
 ];
 
 function setNativeVisibility(visible: boolean) {

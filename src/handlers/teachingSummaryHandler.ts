@@ -176,13 +176,28 @@ export class TeachingSummaryHandler extends Handler {
         .map((p: unknown) => parseInt(String(p).replace(/^P/i, ''), 10))
         .filter((n: number) => !isNaN(n));
 
-      // Layer 1: Analysis
+      // Fetch problem docs early — needed for both analyzer titles and LLM context
+      const documentColl = db.collection('document');
+      const problemDocs = await documentColl
+        .find({ domainId, docType: 10, docId: { $in: pids } })
+        .toArray();
+
+      const pidTitles = new Map<number, string>();
+      const problemContexts = problemDocs.map((doc: any) => {
+        const pid = doc.docId as number;
+        const title = (doc.title || String(doc.docId)) as string;
+        pidTitles.set(pid, title);
+        return { pid, title, content: (doc.content || '') as string };
+      });
+
+      // Layer 1: Analysis (with problem titles for human-readable findings)
       const analysisService = new TeachingAnalysisService(this.ctx.db);
       const analysisResult = await analysisService.analyze({
         domainId,
         contestId: contestObjId,
         pids,
         studentUids,
+        pidTitles,
         contestStartTime: tdoc.beginAt ? new Date(tdoc.beginAt) : undefined,
         contestEndTime: tdoc.endAt ? new Date(tdoc.endAt) : undefined,
       });
@@ -190,18 +205,6 @@ export class TeachingSummaryHandler extends Handler {
       // Layer 2: AI suggestions
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
-
-      // Fetch problem content for overall suggestion
-      const documentColl = db.collection('document');
-      const problemDocs = await documentColl
-        .find({ domainId, docType: 10, docId: { $in: pids } })
-        .toArray();
-
-      const problemContexts = problemDocs.map((doc: any) => ({
-        pid: doc.docId as number,
-        title: (doc.title || String(doc.docId)) as string,
-        content: (doc.content || '') as string,
-      }));
 
       const overallResult = await suggestionService.generateOverallSuggestion({
         contestTitle: String(tdoc.title || ''),

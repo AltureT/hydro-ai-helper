@@ -142,8 +142,8 @@ describe('buildMainPrompt', () => {
     expect(system).toContain('开场提问');
     expect(system).toContain('演示/板书');
     expect(system).toContain('当堂检验');
-    expect(system).toContain('persistent_learner');
-    expect(system).toContain('burst_then_quit');
+    expect(system).toContain('持续努力型');
+    expect(system).toContain('受挫放弃型');
   });
 
   it('should format user prompt with problem contexts', () => {

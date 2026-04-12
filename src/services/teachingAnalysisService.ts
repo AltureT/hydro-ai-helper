@@ -42,6 +42,7 @@ export interface AnalyzeInput {
   studentUids: number[];
   contestStartTime?: Date;
   contestEndTime?: Date;
+  pidTitles?: Map<number, string>;
 }
 
 export interface AnalyzeResult {
@@ -173,6 +174,7 @@ export class TeachingAnalysisService {
       clusteringRecords,
       input.pids,
       input.studentUids.length,
+      input.pidTitles,
     );
     for (const f of errorClusterFindings) {
       if (f) findings.push(f);
@@ -275,6 +277,12 @@ export class TeachingAnalysisService {
     return map;
   }
 
+  /** Resolve pid to title using pidTitles mapping, fallback to numeric ID */
+  private pidLabel(pid: number, input: AnalyzeInput): string {
+    const title = input.pidTitles?.get(pid);
+    return title ? `${title} (${pid})` : `题目 ${pid}`;
+  }
+
   /**
    * 创建 Finding，若受影响学生数 < MIN_AFFECTED 则返回 null
    */
@@ -346,7 +354,7 @@ export class TeachingAnalysisService {
           const finding = this.makeFinding(
             'commonError',
             uids.size >= input.studentUids.length * 0.5 ? 'high' : 'medium',
-            `题目 ${pid}：${pct}% 学生遇到 ${label} 错误`,
+            `${this.pidLabel(pid, input)}：${pct}% 学生遇到 ${label} 错误`,
             Array.from(uids),
             [pid],
             { affectedCount: uids.size, totalStudents: input.studentUids.length, percentage: pct },
@@ -552,7 +560,7 @@ export class TeachingAnalysisService {
         findings.push(this.makeFinding(
           'difficulty',
           passRate < 0.1 ? 'high' : 'medium',
-          `题目 ${pid} 通过率极低（${pct}%，${acCount}/${attemptedCount}）`,
+          `${this.pidLabel(pid, input)} 通过率极低（${pct}%，${acCount}/${attemptedCount}）`,
           failedStudents,
           [pid],
           { passRate: pct, attempted: attemptedCount, accepted: acCount },

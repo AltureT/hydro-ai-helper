@@ -57,6 +57,7 @@ export function analyzeErrorClusters(
   records: ClusterRecord[],
   pids: number[],
   totalStudents: number,
+  pidTitles?: Map<number, string>,
 ): (TeachingFinding | null)[] {
   const findings: (TeachingFinding | null)[] = [];
   let counter = 0;
@@ -99,7 +100,7 @@ export function analyzeErrorClusters(
         id: `finding_errorCluster_${counter}`,
         dimension: 'errorCluster',
         severity: uids.size >= totalStudents * 0.5 ? 'high' : 'medium',
-        title: `题目 ${pid}：${pct}% 学生遇到相同错误模式 (${statusLabel})`,
+        title: `${pidTitles?.get(pid) || `题目 ${pid}`}：${pct}% 学生遇到相同错误模式 (${statusLabel})`,
         evidence: {
           affectedStudents: Array.from(uids),
           affectedProblems: [pid],
