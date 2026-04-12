@@ -9,18 +9,26 @@ import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';
 import { CostDashboard } from '../teacher/CostDashboard';
+import { TeachingReviewPanel } from '../teachingSummary/TeachingReviewPanel';
 import { COLORS, FONT_FAMILY, SHADOWS, RADIUS, SPACING, getTabStyle } from '../utils/styles';
 
-type TabType = 'conversations' | 'analytics' | 'cost' | 'config';
+type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'config';
+
+function getDomainId(): string {
+  const domainMatch = window.location.pathname.match(/^\/d\/([^/]+)\//);
+  if (domainMatch) return domainMatch[1];
+  return (window as any).UiContext?.domainId || 'system';
+}
 
 export const AIHelperDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
+  const domainId = getDomainId();
 
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
       const tab = params.get('tab') as TabType;
-      if (tab === 'analytics' || tab === 'cost' || tab === 'config' || tab === 'conversations') {
+      if (tab === 'analytics' || tab === 'teaching_review' || tab === 'cost' || tab === 'config' || tab === 'conversations') {
         setActiveTab(tab);
       } else {
         setActiveTab('conversations');
@@ -45,6 +53,7 @@ export const AIHelperDashboard: React.FC = () => {
   const tabs: { id: TabType; label: string }[] = [
     { id: 'conversations', label: i18n('ai_helper_dashboard_tab_conversations') },
     { id: 'analytics', label: i18n('ai_helper_dashboard_tab_analytics') },
+    { id: 'teaching_review', label: i18n('ai_helper_dashboard_tab_teaching_review') || '教学总结回顾' },
     { id: 'cost', label: i18n('ai_helper_dashboard_tab_cost') },
     { id: 'config', label: i18n('ai_helper_dashboard_tab_config') },
   ];
@@ -108,6 +117,7 @@ export const AIHelperDashboard: React.FC = () => {
         }}>
           {activeTab === 'conversations' && <ConversationList embedded />}
           {activeTab === 'analytics' && <AnalyticsPage embedded />}
+          {activeTab === 'teaching_review' && <TeachingReviewPanel domainId={domainId} />}
           {activeTab === 'cost' && <CostDashboard embedded />}
           {activeTab === 'config' && <ConfigPanel embedded />}
         </div>
