@@ -59,13 +59,28 @@ const SummaryCard: React.FC<SummaryCardProps> = ({ summary }) => {
       })
     : '';
 
+  // Navigate to the contest scoreboard with teaching tab
+  const handleClick = () => {
+    const contestId = String(summary.contestId);
+    // Try homework path first (most common), browser will redirect if wrong
+    const domainPrefix = summary.domainId && summary.domainId !== 'system'
+      ? `/d/${summary.domainId}` : '';
+    window.location.href = `${domainPrefix}/homework/${contestId}/scoreboard`;
+  };
+
   return (
-    <div style={{
-      ...cardStyle,
-      marginBottom: SPACING.base,
-      borderLeft: highFindings.length > 0 ? `4px solid ${SEVERITY_DOTS.high}` : `4px solid ${COLORS.border}`,
-    }}>
-      {/* Header row */}
+    <div
+      onClick={handleClick}
+      style={{
+        ...cardStyle,
+        marginBottom: SPACING.base,
+        borderLeft: highFindings.length > 0 ? `3px solid ${SEVERITY_DOTS.high}` : `3px solid ${COLORS.border}`,
+        cursor: 'pointer',
+        transition: 'box-shadow 200ms ease, border-color 200ms ease',
+      }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)'; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = ''; }}
+    >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: SPACING.sm }}>
         <div>
           <span style={{ fontSize: '13px', color: COLORS.textMuted, marginRight: SPACING.sm }}>{dateStr}</span>
@@ -73,21 +88,18 @@ const SummaryCard: React.FC<SummaryCardProps> = ({ summary }) => {
             {summary.contestTitle || summary.contestId}
           </span>
         </div>
-        {/* Student stats */}
         <div style={{ display: 'flex', gap: SPACING.base, fontSize: '12px', color: COLORS.textSecondary }}>
-          <span>{i18n('ai_helper_teaching_summary_participated') || '参与'}: {summary.stats?.participatedStudents ?? 0}</span>
+          <span>参与: {summary.stats?.participatedStudents ?? 0}</span>
           <span>AI: {summary.stats?.aiUserCount ?? 0}</span>
         </div>
       </div>
 
-      {/* Severity dots row */}
       <div style={{ display: 'flex', flexWrap: 'wrap', marginBottom: SPACING.sm }}>
         <SeverityDot color={SEVERITY_DOTS.high} count={highFindings.length} label="高" />
         <SeverityDot color={SEVERITY_DOTS.medium} count={mediumCount} label="中" />
         <SeverityDot color={SEVERITY_DOTS.low} count={lowCount} label="低" />
       </div>
 
-      {/* Top high-priority findings */}
       {highFindings.length > 0 && (
         <div style={{ marginTop: SPACING.sm }}>
           {highFindings.slice(0, 2).map(f => (
@@ -109,6 +121,10 @@ const SummaryCard: React.FC<SummaryCardProps> = ({ summary }) => {
           )}
         </div>
       )}
+
+      <div style={{ fontSize: '12px', color: COLORS.primary, marginTop: SPACING.sm, textAlign: 'right' }}>
+        查看详细分析 →
+      </div>
     </div>
   );
 };

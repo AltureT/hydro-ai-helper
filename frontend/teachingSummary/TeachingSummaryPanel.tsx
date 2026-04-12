@@ -52,6 +52,7 @@ function t(key: string): string {
 
 const DIMENSION_LABELS: Record<string, string> = {
   commonError: '共性错误',
+  errorCluster: '错误聚类',
   comprehension: '题意理解',
   strategy: '学习策略',
   atRisk: '高危预警',
@@ -61,10 +62,33 @@ const DIMENSION_LABELS: Record<string, string> = {
   aiEffectiveness: 'AI 实效',
 };
 
+const METRIC_LABELS: Record<string, string> = {
+  passRate: '通过率',
+  attempted: '尝试人数',
+  accepted: '通过人数',
+  affectedCount: '受影响人数',
+  totalStudents: '总学生数',
+  percentage: '占比',
+  atRiskCount: '高危人数',
+  completedCount: '完成人数',
+  comprehensionPct: '理解类提问占比',
+  aiUserCount: 'AI 使用人数',
+  nonAiUserCount: '未使用 AI 人数',
+  bruteForceCount: '暴力尝试人数',
+  heavyUserCount: '高频使用人数',
+  jailbreakStudentCount: '越狱学生数',
+  totalJailbreaks: '越狱总次数',
+  threshold: '阈值',
+  errorRate: '错误率',
+  aiPassRate: 'AI 用户通过率',
+  nonAiPassRate: '非 AI 通过率',
+  diff: '差异',
+};
+
 const SEVERITY_COLORS = {
-  high: { bg: '#FEF2F2', text: '#DC2626', border: '#FECACA' },
-  medium: { bg: '#FFFBEB', text: '#D97706', border: '#FDE68A' },
-  low: { bg: '#F0FDF4', text: '#16A34A', border: '#BBF7D0' },
+  high: { bg: '#fef2f2', text: '#b91c1c', border: '#fecaca' },
+  medium: { bg: '#fffbeb', text: '#92400e', border: '#fde68a' },
+  low: { bg: '#f0fdf4', text: '#166534', border: '#bbf7d0' },
 };
 
 // ─── FindingCard subcomponent ─────────────────────────────────────────────────
@@ -154,7 +178,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
                 <span key={key} style={{
                   fontSize: '12px', color: COLORS.textSecondary,
                 }}>
-                  <span style={{ color: COLORS.textMuted }}>{key}:</span>{' '}
+                  <span style={{ color: COLORS.textMuted }}>{METRIC_LABELS[key] || key}:</span>{' '}
                   <strong>{typeof val === 'number' ? (val % 1 === 0 ? val : val.toFixed(2)) : val}</strong>
                 </span>
               ))}
