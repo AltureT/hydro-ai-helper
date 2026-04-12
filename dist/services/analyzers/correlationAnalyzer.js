@@ -6,13 +6,11 @@
  * with StudentTemporalProfile data to generate 'crossCorrelation' findings.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resetCounter = resetCounter;
 exports.correlateErrorAI = correlateErrorAI;
 exports.correlateAtRiskTemporal = correlateAtRiskTemporal;
 exports.correlateDifficultyError = correlateDifficultyError;
 exports.analyzeCorrelations = analyzeCorrelations;
 // ── Constants ─────────────────────────────────────────────────────────────────
-let counter = 0;
 const MIN_GROUP_SIZE = 5;
 const LOW_CONFIDENCE_THRESHOLD = 15;
 const PATTERN_LABELS_ZH = {
@@ -31,9 +29,6 @@ const PATTERN_PRIORITY = {
     stuck_silent: 4,
 };
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function resetCounter() {
-    counter = 0;
-}
 function confidenceFor(groupSize) {
     if (groupSize >= LOW_CONFIDENCE_THRESHOLD)
         return 'high';
@@ -81,13 +76,12 @@ function correlateErrorAI(errorFinding, aiUserUids, recordsByPidUid, totalStuden
     const diff = Math.abs(aiRate - nonAiRate);
     if (diff < 5)
         return null;
-    counter++;
     // Extract status label from error finding title (e.g. "WA", "TLE", etc.)
     const titleMatch = errorFinding.title.match(/\(([A-Z]+)\)/);
     const statusLabel = titleMatch ? titleMatch[1] : '错误';
     const groupSize = affectedStudents.length;
     return {
-        id: `finding_crossCorrelation_${counter}`,
+        id: '', // placeholder, assigned by orchestrator
         dimension: 'crossCorrelation',
         severity: diff >= 20 ? 'high' : diff >= 10 ? 'medium' : 'low',
         title: `AI辅导对 ${statusLabel} 错误有效率${aiRate}% vs 未用AI仅${nonAiRate}%`,
@@ -141,13 +135,12 @@ function correlateAtRiskTemporal(atRiskUids, temporalProfiles, totalStudents) {
         .map(([pattern, count]) => `${count}名${PATTERN_LABELS_ZH[pattern]}`);
     const breakdown = breakdownParts.join(', ');
     const count = atRiskUids.length;
-    counter++;
     const metrics = { affectedCount: count, totalStudents };
     for (const [pattern, cnt] of Object.entries(patternCounts)) {
         metrics[pattern] = cnt;
     }
     return {
-        id: `finding_crossCorrelation_${counter}`,
+        id: '', // placeholder, assigned by orchestrator
         dimension: 'crossCorrelation',
         severity: 'high',
         title: `${count}名高危学生行为分布: ${breakdown}`,
@@ -188,13 +181,12 @@ function correlateDifficultyError(difficultyFinding, errorClusterFindings, total
         ? Math.round((clusterSize / failedAttempted) * 100)
         : Math.round((clusterSize / Math.max(totalStudents, 1)) * 100);
     const pid = problems[0];
-    counter++;
     const allAffected = Array.from(new Set([
         ...difficultyFinding.evidence.affectedStudents,
         ...largestCluster.evidence.affectedStudents,
     ]));
     return {
-        id: `finding_crossCorrelation_${counter}`,
+        id: '', // placeholder, assigned by orchestrator
         dimension: 'crossCorrelation',
         severity: passRate <= 20 ? 'high' : 'medium',
         title: `通过率${passRate}%的难题，${clusterPct}%失败集中在同一错误模式`,
@@ -217,7 +209,6 @@ function correlateDifficultyError(difficultyFinding, errorClusterFindings, total
  * Orchestrator: run all 3 correlation pairs and return cross-correlation findings.
  */
 function analyzeCorrelations(findings, temporalProfiles, totalStudents, aiUserUids, recordsByPidUid) {
-    resetCounter();
     const results = [];
     const errorFindings = findings.filter(f => f.dimension === 'commonError' || f.dimension === 'errorCluster');
     const atRiskFindings = findings.filter(f => f.dimension === 'atRisk');
@@ -242,6 +233,10 @@ function analyzeCorrelations(findings, temporalProfiles, totalStudents, aiUserUi
         const result = correlateDifficultyError(diffFinding, errorClusterFindings, totalStudents);
         if (result)
             results.push(result);
+    }
+    // Assign sequential IDs (avoids module-level mutable state)
+    for (let i = 0; i < results.length; i++) {
+        results[i].id = `finding_crossCorrelation_${i + 1}`;
     }
     return results;
 }

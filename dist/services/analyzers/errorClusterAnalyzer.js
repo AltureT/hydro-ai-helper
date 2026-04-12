@@ -41,7 +41,7 @@ function normalizeCompilerError(msg) {
         .replace(/line \d+/gi, 'line N')
         .replace(/column \d+/gi, 'col N')
         .replace(/'[a-zA-Z_]\w*'/g, "'VAR'")
-        .replace(/\/[\w\/]+\.\w+/g, 'FILE');
+        .replace(/\/[\w/]+\.\w+/g, 'FILE');
 }
 function analyzeErrorClusters(records, pids, totalStudents, pidTitles) {
     const findings = [];

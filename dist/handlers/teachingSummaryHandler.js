@@ -12,6 +12,7 @@ const domainHelper_1 = require("../utils/domainHelper");
 const openaiClient_1 = require("../services/openaiClient");
 const teachingAnalysisService_1 = require("../services/teachingAnalysisService");
 const teachingSuggestionService_1 = require("../services/teachingSuggestionService");
+const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
 exports.TeachingSummaryHandlerPriv = hydrooj_1.PRIV.PRIV_READ_RECORD_CODE;
 // ─── Helper: resolve contestId to ObjectId ───────────────────────────────────
 function parseContestId(raw) {
@@ -136,15 +137,40 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             const pids = (tdoc.pids || [])
                 .map((p) => parseInt(String(p).replace(/^P/i, ''), 10))
                 .filter((n) => !isNaN(n));
-            // Layer 1: Analysis
+            // Fetch problem docs early — needed for both analyzer titles and LLM context
+            const documentColl = hydrooj_1.db.collection('document');
+            const problemDocs = await documentColl
+                .find({ domainId, docType: 10, docId: { $in: pids } })
+                .toArray();
+            const pidTitles = new Map();
+            const problemContexts = problemDocs.map((doc) => {
+                const pid = doc.docId;
+                const title = (doc.title || String(doc.docId));
+                pidTitles.set(pid, title);
+                return { pid, title, content: (doc.content || '') };
+            });
+            // Layer 1: Analysis (with problem titles for human-readable findings)
             const analysisService = new teachingAnalysisService_1.TeachingAnalysisService(this.ctx.db);
             const analysisResult = await analysisService.analyze({
                 domainId,
                 contestId: contestObjId,
                 pids,
                 studentUids,
+                pidTitles,
                 contestStartTime: tdoc.beginAt ? new Date(tdoc.beginAt) : undefined,
                 contestEndTime: tdoc.endAt ? new Date(tdoc.endAt) : undefined,
+            });
+            // Prepare fill-in candidates with problem content for template detection
+            const fillInCandidatesForPrompt = analysisResult.fillInCandidates.map(c => {
+                const problemDoc = problemDocs.find((d) => d.docId === c.pid);
+                const problemContent = (problemDoc?.content || '');
+                return {
+                    pid: c.pid,
+                    title: c.title,
+                    lang: c.lang,
+                    code: c.code,
+                    isFillInProblem: (0, codeSelectionService_1.isFillInBlankProblem)(problemContent),
+                };
             });
             // Layer 2: AI suggestions
             const aiClient = await (0, openaiClient_1.createOpenAIClientFromConfig)(this.ctx);
@@ -155,42 +181,68 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 teachingFocus,
                 stats: analysisResult.stats,
                 findings: analysisResult.findings,
+                problemContexts,
+                fillInCandidates: fillInCandidatesForPrompt,
             });
             let totalPromptTokens = overallResult.tokenUsage.promptTokens;
             let totalCompletionTokens = overallResult.tokenUsage.completionTokens;
             // Deep dives for findings that need them
             const deepDiveResults = {};
-            const documentColl = hydrooj_1.db.collection('document');
-            for (const finding of analysisResult.findings) {
-                if (!finding.needsDeepDive)
-                    continue;
-                // Fetch problem content for affected problems
-                const affectedPids = finding.evidence.affectedProblems;
-                let problemContent = '';
-                if (affectedPids.length > 0) {
-                    const problemDocs = await documentColl
-                        .find({ domainId, docType: 10, docId: { $in: affectedPids } })
-                        .toArray();
-                    problemContent = problemDocs
-                        .map((doc) => `### ${doc.title || doc.docId}\n${doc.content || ''}`)
-                        .join('\n\n');
+            const problemDocMap = new Map(problemDocs.map((doc) => [doc.docId, doc]));
+            const deepDiveFindings = analysisResult.findings.filter(f => f.needsDeepDive);
+            // Batch-fetch code samples for all deep-dive findings (avoids N+1 queries)
+            if (deepDiveFindings.length > 0) {
+                const allSampleUids = new Set();
+                const allSamplePids = new Set();
+                for (const f of deepDiveFindings) {
+                    for (const uid of f.evidence.affectedStudents.slice(0, 5))
+                        allSampleUids.add(uid);
+                    for (const pid of f.evidence.affectedProblems)
+                        allSamplePids.add(pid);
                 }
-                // Collect code samples from records for affected students
-                const sampleUids = finding.evidence.affectedStudents.slice(0, 5);
-                if (sampleUids.length > 0 && affectedPids.length > 0) {
-                    const recordDocs = await this.ctx.db.collection('record').find({
+                const allSampleRecords = allSampleUids.size > 0 && allSamplePids.size > 0
+                    ? await this.ctx.db.collection('record').find({
                         domainId,
-                        pid: { $in: affectedPids },
-                        uid: { $in: sampleUids },
-                    }).limit(5).toArray();
-                    if (recordDocs.length > 0) {
-                        finding.evidence.samples = {
-                            code: recordDocs
-                                .filter((r) => r.code)
-                                .map((r) => String(r.code).slice(0, 500)),
-                        };
+                        pid: { $in: Array.from(allSamplePids) },
+                        uid: { $in: Array.from(allSampleUids) },
+                        code: { $exists: true, $ne: '' },
+                    }).project({ pid: 1, uid: 1, code: 1 }).limit(50).toArray()
+                    : [];
+                // Index by pid:uid for O(1) lookup
+                const samplesByPidUid = new Map();
+                for (const r of allSampleRecords) {
+                    const key = `${r.pid}:${r.uid}`;
+                    if (!samplesByPidUid.has(key)) {
+                        samplesByPidUid.set(key, String(r.code).slice(0, 500));
                     }
                 }
+                // Attach samples to findings
+                for (const finding of deepDiveFindings) {
+                    const codes = [];
+                    for (const uid of finding.evidence.affectedStudents.slice(0, 5)) {
+                        for (const pid of finding.evidence.affectedProblems) {
+                            const code = samplesByPidUid.get(`${pid}:${uid}`);
+                            if (code) {
+                                codes.push(code);
+                                break;
+                            }
+                        }
+                        if (codes.length >= 3)
+                            break;
+                    }
+                    if (codes.length > 0) {
+                        finding.evidence.samples = { code: codes };
+                    }
+                }
+            }
+            for (const finding of deepDiveFindings) {
+                const problemContent = finding.evidence.affectedProblems
+                    .map(pid => {
+                    const doc = problemDocMap.get(pid);
+                    return doc ? `### ${doc.title || doc.docId}\n${doc.content || ''}` : '';
+                })
+                    .filter(Boolean)
+                    .join('\n\n');
                 const deepDiveResult = await suggestionService.generateDeepDive(finding, problemContent);
                 deepDiveResults[finding.id] = deepDiveResult.text;
                 totalPromptTokens += deepDiveResult.tokenUsage.promptTokens;
