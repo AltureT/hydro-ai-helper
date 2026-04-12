@@ -14,7 +14,6 @@ import {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-let counter = 0;
 const MIN_GROUP_SIZE = 5;
 const LOW_CONFIDENCE_THRESHOLD = 15;
 
@@ -36,10 +35,6 @@ const PATTERN_PRIORITY: Record<TemporalPatternLabel, number> = {
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-export function resetCounter(): void {
-  counter = 0;
-}
 
 function confidenceFor(groupSize: number): ConfidenceLevel {
   if (groupSize >= LOW_CONFIDENCE_THRESHOLD) return 'high';
@@ -97,8 +92,6 @@ export function correlateErrorAI(
 
   if (diff < 5) return null;
 
-  counter++;
-
   // Extract status label from error finding title (e.g. "WA", "TLE", etc.)
   const titleMatch = errorFinding.title.match(/\(([A-Z]+)\)/);
   const statusLabel = titleMatch ? titleMatch[1] : '错误';
@@ -106,7 +99,7 @@ export function correlateErrorAI(
   const groupSize = affectedStudents.length;
 
   return {
-    id: `finding_crossCorrelation_${counter}`,
+    id: '', // placeholder, assigned by orchestrator
     dimension: 'crossCorrelation',
     severity: diff >= 20 ? 'high' : diff >= 10 ? 'medium' : 'low',
     title: `AI辅导对 ${statusLabel} 错误有效率${aiRate}% vs 未用AI仅${nonAiRate}%`,
@@ -173,15 +166,13 @@ export function correlateAtRiskTemporal(
   const breakdown = breakdownParts.join(', ');
   const count = atRiskUids.length;
 
-  counter++;
-
   const metrics: Record<string, number> = { affectedCount: count, totalStudents };
   for (const [pattern, cnt] of Object.entries(patternCounts)) {
     metrics[pattern] = cnt as number;
   }
 
   return {
-    id: `finding_crossCorrelation_${counter}`,
+    id: '', // placeholder, assigned by orchestrator
     dimension: 'crossCorrelation',
     severity: 'high',
     title: `${count}名高危学生行为分布: ${breakdown}`,
@@ -239,8 +230,6 @@ export function correlateDifficultyError(
 
   const pid = problems[0];
 
-  counter++;
-
   const allAffected = Array.from(
     new Set([
       ...difficultyFinding.evidence.affectedStudents,
@@ -249,7 +238,7 @@ export function correlateDifficultyError(
   );
 
   return {
-    id: `finding_crossCorrelation_${counter}`,
+    id: '', // placeholder, assigned by orchestrator
     dimension: 'crossCorrelation',
     severity: passRate <= 20 ? 'high' : 'medium',
     title: `通过率${passRate}%的难题，${clusterPct}%失败集中在同一错误模式`,
@@ -279,8 +268,6 @@ export function analyzeCorrelations(
   aiUserUids?: Set<number>,
   recordsByPidUid?: Map<string, Array<{ status: number }>>,
 ): TeachingFinding[] {
-  resetCounter();
-
   const results: TeachingFinding[] = [];
 
   const errorFindings = findings.filter(
@@ -312,6 +299,11 @@ export function analyzeCorrelations(
   for (const diffFinding of difficultyFindings) {
     const result = correlateDifficultyError(diffFinding, errorClusterFindings, totalStudents);
     if (result) results.push(result);
+  }
+
+  // Assign sequential IDs (avoids module-level mutable state)
+  for (let i = 0; i < results.length; i++) {
+    results[i].id = `finding_crossCorrelation_${i + 1}`;
   }
 
   return results;

@@ -11,6 +11,7 @@ import { createOpenAIClientFromConfig } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService } from '../services/teachingSuggestionService';
+import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 
 export const TeachingSummaryHandlerPriv = PRIV.PRIV_READ_RECORD_CODE;
 
@@ -202,6 +203,19 @@ export class TeachingSummaryHandler extends Handler {
         contestEndTime: tdoc.endAt ? new Date(tdoc.endAt) : undefined,
       });
 
+      // Prepare fill-in candidates with problem content for template detection
+      const fillInCandidatesForPrompt = analysisResult.fillInCandidates.map(c => {
+        const problemDoc = problemDocs.find((d: any) => d.docId === c.pid);
+        const problemContent = (problemDoc?.content || '') as string;
+        return {
+          pid: c.pid,
+          title: c.title,
+          lang: c.lang,
+          code: c.code,
+          isFillInProblem: isFillInBlankProblem(problemContent),
+        };
+      });
+
       // Layer 2: AI suggestions
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
@@ -213,6 +227,7 @@ export class TeachingSummaryHandler extends Handler {
         stats: analysisResult.stats,
         findings: analysisResult.findings,
         problemContexts,
+        fillInCandidates: fillInCandidatesForPrompt,
       });
 
       let totalPromptTokens = overallResult.tokenUsage.promptTokens;
@@ -220,38 +235,60 @@ export class TeachingSummaryHandler extends Handler {
 
       // Deep dives for findings that need them
       const deepDiveResults: Record<string, string> = {};
-      // Reuse problemDocs from overall suggestion fetch (avoid N+1 queries)
       const problemDocMap = new Map(problemDocs.map((doc: any) => [doc.docId as number, doc]));
 
-      for (const finding of analysisResult.findings) {
-        if (!finding.needsDeepDive) continue;
+      const deepDiveFindings = analysisResult.findings.filter(f => f.needsDeepDive);
 
-        const affectedPids = finding.evidence.affectedProblems;
-        const problemContent = affectedPids
+      // Batch-fetch code samples for all deep-dive findings (avoids N+1 queries)
+      if (deepDiveFindings.length > 0) {
+        const allSampleUids = new Set<number>();
+        const allSamplePids = new Set<number>();
+        for (const f of deepDiveFindings) {
+          for (const uid of f.evidence.affectedStudents.slice(0, 5)) allSampleUids.add(uid);
+          for (const pid of f.evidence.affectedProblems) allSamplePids.add(pid);
+        }
+        const allSampleRecords = allSampleUids.size > 0 && allSamplePids.size > 0
+          ? await this.ctx.db.collection('record').find({
+              domainId,
+              pid: { $in: Array.from(allSamplePids) },
+              uid: { $in: Array.from(allSampleUids) },
+              code: { $exists: true, $ne: '' },
+            }).project({ pid: 1, uid: 1, code: 1 }).limit(50).toArray()
+          : [];
+
+        // Index by pid:uid for O(1) lookup
+        const samplesByPidUid = new Map<string, string>();
+        for (const r of allSampleRecords) {
+          const key = `${r.pid}:${r.uid}`;
+          if (!samplesByPidUid.has(key)) {
+            samplesByPidUid.set(key, String((r as any).code).slice(0, 500));
+          }
+        }
+
+        // Attach samples to findings
+        for (const finding of deepDiveFindings) {
+          const codes: string[] = [];
+          for (const uid of finding.evidence.affectedStudents.slice(0, 5)) {
+            for (const pid of finding.evidence.affectedProblems) {
+              const code = samplesByPidUid.get(`${pid}:${uid}`);
+              if (code) { codes.push(code); break; }
+            }
+            if (codes.length >= 3) break;
+          }
+          if (codes.length > 0) {
+            finding.evidence.samples = { code: codes };
+          }
+        }
+      }
+
+      for (const finding of deepDiveFindings) {
+        const problemContent = finding.evidence.affectedProblems
           .map(pid => {
             const doc = problemDocMap.get(pid);
             return doc ? `### ${doc.title || doc.docId}\n${doc.content || ''}` : '';
           })
           .filter(Boolean)
           .join('\n\n');
-
-        // Collect code samples from records for affected students
-        const sampleUids = finding.evidence.affectedStudents.slice(0, 5);
-        if (sampleUids.length > 0 && affectedPids.length > 0) {
-          const recordDocs = await this.ctx.db.collection('record').find({
-            domainId,
-            pid: { $in: affectedPids },
-            uid: { $in: sampleUids },
-          }).limit(5).toArray();
-
-          if (recordDocs.length > 0) {
-            finding.evidence.samples = {
-              code: recordDocs
-                .filter((r: any) => r.code)
-                .map((r: any) => String(r.code).slice(0, 500)),
-            };
-          }
-        }
 
         const deepDiveResult = await suggestionService.generateDeepDive(finding, problemContent);
         deepDiveResults[finding.id] = deepDiveResult.text;

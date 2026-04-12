@@ -241,10 +241,10 @@ export class TeachingAnalysisService {
       f => f.dimension === 'commonError' || f.dimension === 'errorCluster',
     );
 
+    const errorPidSet = new Set(errorFindings.flatMap(f => f.evidence.affectedProblems));
     const fillInPids: number[] = [];
     for (const pid of input.pids) {
-      const hasError = errorFindings.some(f => f.evidence.affectedProblems.includes(pid));
-      if (!hasError) continue;
+      if (!errorPidSet.has(pid)) continue;
 
       let attempted = 0, firstAC = 0, totalAC = 0, totalSubs = 0;
       for (const uid of input.studentUids) {
