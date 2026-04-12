@@ -60,6 +60,8 @@ const DIMENSION_LABELS: Record<string, string> = {
   progress: '进步趋势',
   cognitivePath: '认知路径',
   aiEffectiveness: 'AI 实效',
+  temporalPattern: '行为模式',
+  crossCorrelation: '交叉关联',
 };
 
 const METRIC_LABELS: Record<string, string> = {
@@ -83,6 +85,16 @@ const METRIC_LABELS: Record<string, string> = {
   aiPassRate: 'AI 用户通过率',
   nonAiPassRate: '非 AI 通过率',
   diff: '差异',
+  burst_then_quit: '受挫放弃',
+  stuck_silent: '沉默挣扎',
+  persistent_learner: '持续努力',
+  disengaged: '未参与',
+  aiGroupSize: 'AI组人数',
+  nonAiGroupSize: '非AI组人数',
+  aiACRate: 'AI组通过率',
+  nonAiACRate: '非AI组通过率',
+  dominantClusterSize: '主要错误集群人数',
+  dominantClusterPct: '主要错误集群占比',
 };
 
 const SEVERITY_COLORS = {
@@ -90,6 +102,29 @@ const SEVERITY_COLORS = {
   medium: { bg: '#fffbeb', text: '#92400e', border: '#fde68a' },
   low: { bg: '#f0fdf4', text: '#166534', border: '#bbf7d0' },
 };
+
+// ─── SkeletonBlock subcomponent ───────────────────────────────────────────────
+
+const SkeletonBlock: React.FC<{ lines?: number }> = ({ lines = 8 }) => (
+  <div style={{ padding: `${SPACING.base} ${SPACING.lg}` }}>
+    {Array.from({ length: lines }, (_, i) => (
+      <div key={i} style={{
+        height: '14px',
+        backgroundColor: '#e2e8f0',
+        borderRadius: '4px',
+        marginBottom: '10px',
+        width: i === 0 ? '70%' : i === lines - 1 ? '40%' : `${75 + (i * 3) % 20}%`,
+        animation: 'skeleton-pulse 1.5s ease-in-out infinite',
+      }} />
+    ))}
+    <style>{`
+      @keyframes skeleton-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+    `}</style>
+  </div>
+);
 
 // ─── FindingCard subcomponent ─────────────────────────────────────────────────
 
@@ -133,6 +168,19 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
         }}>
           {dimensionLabel}
         </span>
+
+        {finding.confidence && finding.confidence !== 'high' && (
+          <span style={{
+            fontSize: '10px', fontWeight: 500, padding: '1px 6px',
+            borderRadius: RADIUS.sm,
+            backgroundColor: finding.confidence === 'low' ? '#fffbeb' : '#fef2f2',
+            border: `1px solid ${finding.confidence === 'low' ? '#fde68a' : '#fecaca'}`,
+            color: finding.confidence === 'low' ? '#92400e' : '#991b1b',
+            flexShrink: 0,
+          }}>
+            {finding.confidence === 'low' ? '低置信' : '数据不足'}
+          </span>
+        )}
 
         <span style={{
           flex: 1, fontSize: '14px', fontWeight: 500,
@@ -534,7 +582,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
         </div>
 
         {/* Sidebar (40%) — AI Suggestion */}
-        {summary.overallSuggestion && (
+        {(summary.overallSuggestion || summary.status === 'generating') && (
           <div style={{
             flex: isWide ? `0 0 ${LAYOUT.sidebarWidth}` : '1 1 100%',
             minWidth: 0,
@@ -565,11 +613,15 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
               </div>
 
               {/* Content */}
-              <div
-                className="markdown-body"
-                style={{ padding: `${SPACING.base} ${SPACING.lg}` }}
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.overallSuggestion) }}
-              />
+              {summary.overallSuggestion ? (
+                <div
+                  className="markdown-body"
+                  style={{ padding: `${SPACING.base} ${SPACING.lg}` }}
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(summary.overallSuggestion) }}
+                />
+              ) : (
+                <SkeletonBlock lines={10} />
+              )}
 
               {/* Feedback — inside sidebar */}
               <div style={{

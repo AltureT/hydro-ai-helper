@@ -21,6 +21,7 @@ export interface TeachingFinding {
   needsDeepDive: boolean;
   aiSuggestion?: string;
   aiAnalysis?: string;
+  confidence?: 'high' | 'low' | 'insufficient_data';
 }
 
 export interface TeachingSummary {
