@@ -58,23 +58,7 @@ export class StudentSummaryModel {
     contestId: ObjectIdType,
     userIds: number[]
   ): Promise<void> {
-    const now = new Date();
-    const docs = userIds.map((userId) => ({
-      jobId,
-      domainId,
-      contestId,
-      userId,
-      status: 'pending' as const,
-      publishStatus: 'draft' as const,
-      summary: null,
-      originalSummary: null,
-      problemSnapshots: [],
-      tokenUsage: { prompt: 0, completion: 0 },
-      error: null,
-      createdAt: now,
-      updatedAt: now,
-    }));
-    await this.collection.insertMany(docs as StudentSummary[]);
+    await this.createBatchSafe(jobId, domainId, contestId, userIds);
   }
 
   async findByJobAndUser(jobId: ObjectIdType, userId: number): Promise<StudentSummary | null> {

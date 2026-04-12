@@ -11,23 +11,7 @@ class StudentSummaryModel {
         console.log('[StudentSummaryModel] Indexes created successfully');
     }
     async createBatch(jobId, domainId, contestId, userIds) {
-        const now = new Date();
-        const docs = userIds.map((userId) => ({
-            jobId,
-            domainId,
-            contestId,
-            userId,
-            status: 'pending',
-            publishStatus: 'draft',
-            summary: null,
-            originalSummary: null,
-            problemSnapshots: [],
-            tokenUsage: { prompt: 0, completion: 0 },
-            error: null,
-            createdAt: now,
-            updatedAt: now,
-        }));
-        await this.collection.insertMany(docs);
+        await this.createBatchSafe(jobId, domainId, contestId, userIds);
     }
     async findByJobAndUser(jobId, userId) {
         return this.collection.findOne({ jobId, userId });
@@ -102,6 +86,42 @@ class StudentSummaryModel {
             $expr: { $ne: ['$summary', '$originalSummary'] },
         });
         return doc !== null;
+    }
+    async createBatchSafe(jobId, domainId, contestId, userIds) {
+        if (userIds.length === 0)
+            return 0;
+        const now = new Date();
+        const docs = userIds.map((userId) => ({
+            jobId,
+            domainId,
+            contestId,
+            userId,
+            status: 'pending',
+            publishStatus: 'draft',
+            summary: null,
+            originalSummary: null,
+            problemSnapshots: [],
+            tokenUsage: { prompt: 0, completion: 0 },
+            error: null,
+            createdAt: now,
+            updatedAt: now,
+        }));
+        try {
+            const result = await this.collection.insertMany(docs, { ordered: false });
+            return result.insertedCount;
+        }
+        catch (err) {
+            if (err.code === 11000 || err.writeErrors) {
+                return err.result?.insertedCount ?? 0;
+            }
+            throw err;
+        }
+    }
+    async findUserIdsByJob(jobId) {
+        const docs = await this.collection
+            .find({ jobId }, { projection: { userId: 1 } })
+            .toArray();
+        return docs.map((d) => d.userId);
     }
 }
 exports.StudentSummaryModel = StudentSummaryModel;

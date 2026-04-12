@@ -1,0 +1,127 @@
+<h2>教师端交互流程</h2>
+<p class="subtitle">从成绩表触发生成 → SSE 实时进度 → 查看/编辑总结</p>
+
+<div class="section">
+  <h3>流程概览</h3>
+  <div class="mockup">
+    <div class="mockup-header">Step 1: 成绩表页面 — 触发入口</div>
+    <div class="mockup-body" style="padding: 20px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+        <div>
+          <strong style="font-size:1.1em;">作业：Week 3 - 递归与分治</strong>
+          <span style="color:var(--text-muted); margin-left:12px;">5 道题 · 32 名学生</span>
+        </div>
+        <button class="mock-button" style="background:var(--accent); color:white; padding:8px 20px; border-radius:6px; font-weight:600;">
+          生成 AI 学习总结
+        </button>
+      </div>
+      <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+        <thead>
+          <tr style="color:var(--text-muted); text-align:left; border-bottom:1px solid var(--border);">
+            <th style="padding:8px;">学生</th>
+            <th style="padding:8px;">题目 1</th>
+            <th style="padding:8px;">题目 2</th>
+            <th style="padding:8px;">题目 3</th>
+            <th style="padding:8px;">题目 4</th>
+            <th style="padding:8px;">题目 5</th>
+            <th style="padding:8px;">AI 总结</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;">张三</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#ef4444;">WA</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#eab308;">TLE</td>
+            <td style="padding:8px; color:var(--text-muted);">—</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:8px;">李四</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#ef4444;">WA</td>
+            <td style="padding:8px; color:#ef4444;">WA</td>
+            <td style="padding:8px; color:var(--text-muted);">—</td>
+            <td style="padding:8px; color:var(--text-muted);">—</td>
+            <td style="padding:8px; color:var(--text-muted);">—</td>
+          </tr>
+          <tr>
+            <td style="padding:8px;">王五</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:#22c55e;">AC</td>
+            <td style="padding:8px; color:var(--text-muted);">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="split">
+    <div class="mockup" style="flex:1;">
+      <div class="mockup-header">Step 2: SSE 实时生成中</div>
+      <div class="mockup-body" style="padding: 20px;">
+        <div style="margin-bottom:16px;">
+          <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+            <span style="font-weight:600;">生成进度</span>
+            <span style="color:var(--text-muted);">12 / 32 完成</span>
+          </div>
+          <div style="background:var(--bg-secondary); border-radius:8px; height:8px; overflow:hidden;">
+            <div style="background:var(--accent); width:37.5%; height:100%; border-radius:8px; transition:width 0.3s;"></div>
+          </div>
+          <div style="display:flex; gap:12px; margin-top:8px; font-size:0.85em; color:var(--text-muted);">
+            <span style="color:#22c55e;">12 成功</span>
+            <span style="color:#ef4444;">1 失败</span>
+            <span>19 等待中</span>
+          </div>
+        </div>
+        <div style="border:1px solid var(--border); border-radius:8px; padding:12px; margin-top:12px; font-size:0.85em;">
+          <div style="color:#22c55e; margin-bottom:4px;">&#10003; 张三 — 已完成</div>
+          <div style="color:#22c55e; margin-bottom:4px;">&#10003; 王五 — 已完成</div>
+          <div style="color:#ef4444; margin-bottom:4px;">&#10007; 赵六 — API 超时</div>
+          <div style="color:var(--accent); animation:pulse 1.5s infinite;">&#9679; 李四 — 生成中...</div>
+        </div>
+      </div>
+    </div>
+    <div class="mockup" style="flex:1;">
+      <div class="mockup-header">Step 3: 查看总结结果</div>
+      <div class="mockup-body" style="padding: 20px;">
+        <div style="border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <strong>张三</strong>
+            <span style="font-size:0.8em; color:#22c55e; background:#22c55e20; padding:2px 8px; border-radius:4px;">3/5 AC</span>
+          </div>
+          <div style="font-size:0.85em; color:var(--text-secondary); line-height:1.6;">
+            该同学在递归基础题表现扎实，但在<strong>分治优化</strong>方面存在瓶颈。题目3中多次因边界条件出错...
+            <a href="#" style="color:var(--accent);">[提交 #r4521]</a>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:12px;">
+            <button class="mock-button" style="font-size:0.8em; padding:4px 12px;">编辑</button>
+            <button class="mock-button" style="font-size:0.8em; padding:4px 12px; color:#ef4444;">删除</button>
+          </div>
+        </div>
+        <div style="border:1px solid #ef444440; border-radius:8px; padding:16px; background:#ef444408;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>赵六</strong>
+            <span style="font-size:0.8em; color:#ef4444;">生成失败</span>
+          </div>
+          <div style="margin-top:8px;">
+            <button class="mock-button" style="font-size:0.8em; padding:4px 12px; background:var(--accent); color:white;">重试</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+</style>

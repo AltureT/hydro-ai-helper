@@ -303,6 +303,9 @@ export class BatchSummaryService {
     let failedCount = 0;
     let totalTokens = 0;
 
+    // Build system prompt once (invariant across all students in this job)
+    const systemPrompt = buildSystemPrompt(job.config.locale, job.contestTitle, job.domainId);
+
     // Step 3: Process in batches of `concurrency`
     for (let i = 0; i < summaries.length; i += concurrency) {
       // Check if job was stopped between batches
@@ -321,7 +324,7 @@ export class BatchSummaryService {
       const batch = summaries.slice(i, i + concurrency);
 
       const results = await Promise.allSettled(
-        batch.map((summary) => this.processStudent(job, summary, problems, onEvent)),
+        batch.map((summary) => this.processStudent(job, summary, problems, systemPrompt, onEvent)),
       );
 
       for (const result of results) {
@@ -362,6 +365,7 @@ export class BatchSummaryService {
     job: BatchSummaryJob,
     summary: StudentSummary,
     problems: ProblemInfo[],
+    systemPrompt: string,
     onEvent: (event: SSEEvent) => void,
   ): Promise<number> {
     try {
@@ -419,10 +423,7 @@ export class BatchSummaryService {
         });
       }
 
-      // d. Build prompts
-      const systemPrompt = buildSystemPrompt(job.config.locale, job.contestTitle, job.domainId);
-
-      // d2. Classify scenario
+      // d. Classify scenario and build user prompt
       const scenario = classifyStudentScenario(problemSnapshots);
 
       // d3. Fetch historical context
@@ -474,24 +475,22 @@ export class BatchSummaryService {
         console.warn('[BatchSummaryService] Failed to record token usage:', tokenErr);
       }
 
-      // g2. Save historical context record (non-blocking)
+      // g2. Save historical context record (fire-and-forget, non-blocking)
       if (this.historyModel) {
-        try {
-          const stats = computeStudentStats(problemSnapshots);
-          const advice = extractActionableAdvice(summaryText);
-          await this.historyModel.create({
-            domainId: job.domainId,
-            userId: summary.userId,
-            contestId: job.contestId,
-            contestTitle: job.contestTitle,
-            jobId: job._id,
-            ...stats,
-            actionableAdvice: advice,
-            createdAt: new Date(),
+        const stats = computeStudentStats(problemSnapshots);
+        const advice = extractActionableAdvice(summaryText);
+        this.historyModel.create({
+          domainId: job.domainId,
+          userId: summary.userId,
+          contestId: job.contestId,
+          contestTitle: job.contestTitle,
+          jobId: job._id,
+          ...stats,
+          actionableAdvice: advice,
+          createdAt: new Date(),
+          }).catch((histErr: any) => {
+            console.warn('[BatchSummaryService] Failed to save history record:', histErr);
           });
-        } catch (histErr) {
-          console.warn('[BatchSummaryService] Failed to save history record:', histErr);
-        }
       }
 
       await this.jobModel.incrementCompleted(job._id);

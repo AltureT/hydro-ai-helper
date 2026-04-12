@@ -1,0 +1,181 @@
+<h2>成绩表集成方案：可展开行 + 插件风格卡片</h2>
+<p class="subtitle">Gemini 推荐方案 — 在 HydroOJ 成绩表基础上无缝集成 AI 总结</p>
+
+<div class="section">
+  <h3>整体布局</h3>
+  <div class="mockup">
+    <div class="mockup-header">成绩表页面 — 教师视角</div>
+    <div class="mockup-body" style="padding:0; background:#fafafa; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; font-size:13px;">
+
+      <!-- Top action bar -->
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:white; border-bottom:1px solid #e5e5e5;">
+        <div style="display:flex; gap:8px;">
+          <button style="padding:4px 12px; border:1px solid #ddd; border-radius:3px; background:white; font-size:12px; cursor:pointer;">导出为 HTML</button>
+          <button style="padding:4px 12px; border:1px solid #ddd; border-radius:3px; background:white; font-size:12px; cursor:pointer;">导出为 CSV</button>
+          <button style="padding:4px 12px; border:1px solid #ddd; border-radius:3px; background:white; font-size:12px; cursor:pointer;">导出为 Ghost</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px;">
+          <!-- AI Summary Button — plugin style, stands out -->
+          <button style="padding:6px 16px; border:none; border-radius:6px; background:#2563eb; color:white; font-size:12px; font-weight:600; cursor:pointer; box-shadow:0 1px 3px rgba(37,99,235,0.3); display:flex; align-items:center; gap:6px;">
+            <span style="font-size:14px;">&#10024;</span> 生成 AI 学习总结
+          </button>
+          <select style="padding:4px 8px; border:1px solid #ddd; border-radius:3px; font-size:12px;">
+            <option>所有用户</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Progress bar (shown during generation) -->
+      <div style="padding:8px 16px; background:#eff6ff; border-bottom:1px solid #bfdbfe; display:flex; align-items:center; gap:12px;">
+        <div style="flex:1;">
+          <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+            <span style="font-size:11px; color:#2563eb; font-weight:500;">正在生成 AI 总结...</span>
+            <span style="font-size:11px; color:#64748b;">12 / 32 完成 · 1 失败</span>
+          </div>
+          <div style="background:#dbeafe; border-radius:4px; height:4px; overflow:hidden;">
+            <div style="background:#2563eb; width:37.5%; height:100%; border-radius:4px;"></div>
+          </div>
+        </div>
+        <button style="padding:3px 10px; border:1px solid #2563eb; border-radius:4px; background:white; color:#2563eb; font-size:11px; cursor:pointer;">取消</button>
+      </div>
+
+      <!-- Scoreboard table -->
+      <table style="width:100%; border-collapse:collapse; background:white;">
+        <thead>
+          <tr style="background:#f8f9fa; border-bottom:2px solid #e5e5e5;">
+            <th style="padding:8px 12px; text-align:left; font-weight:500; color:#666; width:40px;">排名</th>
+            <th style="padding:8px 12px; text-align:left; font-weight:500; color:#666; min-width:120px;">用户</th>
+            <th style="padding:8px 12px; text-align:center; font-weight:500; color:#666; width:60px;">分数</th>
+            <th style="padding:8px 12px; text-align:center; font-weight:500; color:#666; width:70px;">用时</th>
+            <th style="padding:8px 12px; text-align:center; font-weight:500; color:#666; width:80px;">A<br><span style="font-size:10px; color:#999;">35/73</span></th>
+            <th style="padding:8px 12px; text-align:center; font-weight:500; color:#666; width:80px;">B<br><span style="font-size:10px; color:#999;">9/35</span></th>
+            <th style="padding:8px 12px; text-align:center; font-weight:500; color:#666; width:80px;">C<br><span style="font-size:10px; color:#999;">5/13</span></th>
+            <th style="padding:8px 12px; text-align:center; font-weight:500; color:#2563eb; width:50px; position:relative;">
+              AI
+              <div style="position:absolute; bottom:-2px; left:25%; right:25%; height:2px; background:#2563eb; border-radius:1px;"></div>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Row 1: Normal completed -->
+          <tr style="border-bottom:1px solid #eee; cursor:pointer;" onmouseover="this.style.background='#f8faff'" onmouseout="this.style.background='white'">
+            <td style="padding:8px 12px; color:#666;">1</td>
+            <td style="padding:8px 12px;">
+              <span style="color:#333;">张三</span>
+            </td>
+            <td style="padding:8px 12px; text-align:center;">300</td>
+            <td style="padding:8px 12px; text-align:center; color:#999; font-size:11px;">1h37</td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span><br><span style="font-size:10px; color:#999;">19:18</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span><br><span style="font-size:10px; color:#999;">19:38</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span><br><span style="font-size:10px; color:#999;">19:58</span></td>
+            <td style="padding:8px 12px; text-align:center;">
+              <span style="display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; background:#dcfce7; color:#16a34a; font-size:12px;">&#10003;</span>
+            </td>
+          </tr>
+
+          <!-- Expanded summary card for Row 1 -->
+          <tr>
+            <td colspan="8" style="padding:0; border-bottom:1px solid #eee;">
+              <div style="margin:0 16px 12px 16px; padding:16px 20px; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.06); border-left:3px solid #2563eb;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-weight:600; color:#1e293b; font-size:13px;">张三 · AI 学习总结</span>
+                    <span style="font-size:10px; padding:2px 6px; background:#dcfce7; color:#16a34a; border-radius:3px;">3/3 AC</span>
+                  </div>
+                  <div style="display:flex; gap:6px;">
+                    <button style="padding:2px 8px; border:1px solid #e2e8f0; border-radius:4px; background:white; font-size:11px; color:#64748b; cursor:pointer;">编辑</button>
+                  </div>
+                </div>
+                <div style="font-size:12px; color:#475569; line-height:1.8;">
+                  该同学三道题全部 AC，整体表现优秀。题目 A 一次通过，代码简洁规范；题目 B 经历了 3 次 WA 后 AC，主要问题在于<strong>数组边界处理</strong>
+                  <a href="#" style="color:#2563eb; text-decoration:none; font-size:11px; background:#eff6ff; padding:1px 5px; border-radius:3px; margin:0 2px;">#r4521</a>
+                  ，最终通过添加边界检查解决；题目 C 的递归实现思路清晰，但初始版本存在<strong>重复计算</strong>问题
+                  <a href="#" style="color:#2563eb; text-decoration:none; font-size:11px; background:#eff6ff; padding:1px 5px; border-radius:3px; margin:0 2px;">#r4587</a>
+                  ，后续优化为记忆化搜索。
+                </div>
+                <div style="margin-top:10px; padding-top:8px; border-top:1px solid #f1f5f9; display:flex; gap:6px; flex-wrap:wrap;">
+                  <span style="font-size:10px; color:#94a3b8;">参考提交：</span>
+                  <a href="#" style="font-size:10px; color:#2563eb; background:#eff6ff; padding:1px 6px; border-radius:3px; text-decoration:none;">#r4510 首次</a>
+                  <a href="#" style="font-size:10px; color:#2563eb; background:#eff6ff; padding:1px 6px; border-radius:3px; text-decoration:none;">#r4521 WA→AC</a>
+                  <a href="#" style="font-size:10px; color:#2563eb; background:#eff6ff; padding:1px 6px; border-radius:3px; text-decoration:none;">#r4587 TLE→AC</a>
+                  <a href="#" style="font-size:10px; color:#2563eb; background:#eff6ff; padding:1px 6px; border-radius:3px; text-decoration:none;">#r4601 最终</a>
+                </div>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Row 2: Generating state -->
+          <tr style="border-bottom:1px solid #eee; background:#fefce8;">
+            <td style="padding:8px 12px; color:#666;">2</td>
+            <td style="padding:8px 12px;"><span style="color:#333;">李四</span></td>
+            <td style="padding:8px 12px; text-align:center;">300</td>
+            <td style="padding:8px 12px; text-align:center; color:#999; font-size:11px;">1h18</td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#e08831;">39</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span></td>
+            <td style="padding:8px 12px; text-align:center;">
+              <span style="display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; background:#fef3c7; color:#d97706; font-size:14px; animation:spin 1.5s linear infinite;">&#9881;</span>
+            </td>
+          </tr>
+
+          <!-- Row 3: Failed state -->
+          <tr style="border-bottom:1px solid #eee;">
+            <td style="padding:8px 12px; color:#666;">3</td>
+            <td style="padding:8px 12px;"><span style="color:#333;">王五</span></td>
+            <td style="padding:8px 12px; text-align:center;">200</td>
+            <td style="padding:8px 12px; text-align:center; color:#999; font-size:11px;">1h42</td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#e74c3c;">0</span></td>
+            <td style="padding:8px 12px; text-align:center;">
+              <span title="生成失败，点击重试" style="display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; background:#fee2e2; color:#dc2626; font-size:12px; cursor:pointer;">&#10007;</span>
+            </td>
+          </tr>
+
+          <!-- Row 4: Not generated -->
+          <tr style="border-bottom:1px solid #eee;">
+            <td style="padding:8px 12px; color:#666;">4</td>
+            <td style="padding:8px 12px;"><span style="color:#333;">赵六</span></td>
+            <td style="padding:8px 12px; text-align:center;">100</td>
+            <td style="padding:8px 12px; text-align:center; color:#999; font-size:11px;">2h05</td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#5cb85c;">100</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#e74c3c;">0</span></td>
+            <td style="padding:8px 12px; text-align:center;"><span style="color:#e74c3c;">0</span></td>
+            <td style="padding:8px 12px; text-align:center;">
+              <span style="color:#cbd5e1;">—</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>设计要点</h3>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+    <div style="padding:14px; background:var(--bg-secondary); border-radius:8px; border-left:3px solid #2563eb;">
+      <div style="font-weight:600; margin-bottom:6px; font-size:0.9em;">入口</div>
+      <div style="font-size:0.85em; color:var(--text-secondary);">蓝色按钮在导出按钮对面，插件风格突出但不抢占</div>
+    </div>
+    <div style="padding:14px; background:var(--bg-secondary); border-radius:8px; border-left:3px solid #16a34a;">
+      <div style="font-weight:600; margin-bottom:6px; font-size:0.9em;">AI 列</div>
+      <div style="font-size:0.85em; color:var(--text-secondary);">新增窄列，圆形状态图标：✓完成 / ⚙生成中 / ✗失败 / — 未生成</div>
+    </div>
+    <div style="padding:14px; background:var(--bg-secondary); border-radius:8px; border-left:3px solid #d97706;">
+      <div style="font-weight:600; margin-bottom:6px; font-size:0.9em;">展开卡片</div>
+      <div style="font-size:0.85em; color:var(--text-secondary);">点击行展开总结卡片，左蓝色边框 + 微阴影，与插件风格一致</div>
+    </div>
+    <div style="padding:14px; background:var(--bg-secondary); border-radius:8px; border-left:3px solid #dc2626;">
+      <div style="font-weight:600; margin-bottom:6px; font-size:0.9em;">提交引用</div>
+      <div style="font-size:0.85em; color:var(--text-secondary);">蓝底标签式链接，点击跳转 HydroOJ 提交详情页</div>
+    </div>
+  </div>
+</div>
+
+<style>
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+</style>

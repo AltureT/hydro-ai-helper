@@ -8,6 +8,9 @@ import type { Db, Collection } from 'mongodb';
 import { type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 
+/** All non-archived job statuses (used for partial index and active job queries) */
+export const ACTIVE_JOB_STATUSES = ['pending', 'running', 'completed', 'failed', 'stopped'] as const;
+
 export interface BatchSummaryJob {
   _id: ObjectIdType;
   domainId: string;
@@ -51,7 +54,7 @@ export class BatchSummaryJobModel {
         name: 'idx_domainId_contestId_active_v2',
         unique: true,
         partialFilterExpression: {
-          status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] },
+          status: { $in: [...ACTIVE_JOB_STATUSES] },
         },
       },
     );

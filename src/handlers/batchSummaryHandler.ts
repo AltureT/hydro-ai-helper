@@ -108,7 +108,8 @@ export class BatchSummaryGenerateHandler extends Handler {
         const newTotal = existingUserIds.length + newStudentIds.length;
         await jobModel.prepareForSupplementary(existingJob._id, newTotal);
 
-        job = await jobModel.findById(existingJob._id);
+        // Construct updated job object in-memory (avoid extra DB roundtrip)
+        job = { ...existingJob, totalStudents: newTotal, status: 'running' as const, completedAt: null };
       } else {
         // --- Full regeneration ---
         if (existingJob) {
@@ -147,10 +148,10 @@ export class BatchSummaryGenerateHandler extends Handler {
         }
       }
 
-      // Fetch user names
+      // Fetch user names (only for students being processed in this run)
       const userColl = db.collection('user');
       const userDocs = await userColl
-        .find({ _id: { $in: allAttendees } }, { projection: { _id: 1, uname: 1 } })
+        .find({ _id: { $in: newStudentIds } }, { projection: { _id: 1, uname: 1 } })
         .toArray();
       const userNameMap = new Map<number, string>();
       for (const u of userDocs) {

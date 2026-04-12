@@ -4,7 +4,7 @@
  * Supports SSE progress streaming, expand/collapse, publish, export, stop/continue, and edit flows.
  */
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import { COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
 
@@ -120,9 +120,23 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
     }
   }, [contestId, startGeneration]);
 
-  // ── Derived values (needed by smart button) ────────────────────────────────
+  // ── Derived values (single-pass aggregation) ────────────────────────────────
 
-  const hasPending = Array.from(state.summaries.values()).some(s => s.status === 'pending');
+  const stats = useMemo(() => {
+    let completed = 0, draft = 0, published = 0, failed = 0, pending = 0;
+    for (const s of state.summaries.values()) {
+      if (s.status === 'completed') {
+        completed++;
+        if (s.publishStatus === 'draft') draft++;
+        else if (s.publishStatus === 'published') published++;
+      } else if (s.status === 'failed') failed++;
+      else if (s.status === 'pending') pending++;
+    }
+    return { completed, draft, published, failed, pending };
+  }, [state.summaries]);
+
+  const { completed: completedCount, draft: draftCount, published: publishedCount, failed: failedCount, pending: pendingCount } = stats;
+  const hasPending = pendingCount > 0;
   const progressPct = state.total > 0 ? Math.round(((state.completed + state.failed) / state.total) * 100) : 0;
 
   // ── Smart button config ────────────────────────────────────────────────────
@@ -140,19 +154,6 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [dropdownOpen]);
-
-  const draftCount = Array.from(state.summaries.values()).filter(
-    s => s.status === 'completed' && s.publishStatus === 'draft',
-  ).length;
-  const publishedCount = Array.from(state.summaries.values()).filter(
-    s => s.status === 'completed' && s.publishStatus === 'published',
-  ).length;
-  const completedCount = Array.from(state.summaries.values()).filter(
-    s => s.status === 'completed',
-  ).length;
-  const failedCount = Array.from(state.summaries.values()).filter(
-    s => s.status === 'failed',
-  ).length;
 
   type SmartButtonConfig = { label: string; action: () => void; variant: 'primary' | 'secondary' | 'danger' };
 
@@ -371,11 +372,6 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                     }}
                   >
                     ▾
-                  </button>
-                )}
-                {!smartButton && !showDropdown && state.summaries.size === 0 && (
-                  <button onClick={() => handleGenerate()} style={getButtonStyle('primary')}>
-                    {i18n('ai_helper_batch_summary_generate')}
                   </button>
                 )}
                 {dropdownOpen && (

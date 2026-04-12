@@ -54,6 +54,7 @@ const pluginInstall_1 = require("./models/pluginInstall");
 const tokenUsage_1 = require("./models/tokenUsage");
 const batchSummaryJob_1 = require("./models/batchSummaryJob");
 const studentSummary_1 = require("./models/studentSummary");
+const studentHistory_1 = require("./models/studentHistory");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -107,6 +108,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const requestStatsModel = new requestStats_1.RequestStatsModel(db);
         const batchSummaryJobModel = new batchSummaryJob_1.BatchSummaryJobModel(db);
         const studentSummaryModel = new studentSummary_1.StudentSummaryModel(db);
+        const studentHistoryModel = new studentHistory_1.StudentHistoryModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 创建数据库索引（逐个容错，单个失败不阻塞插件加载）
@@ -130,6 +132,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
         await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
         await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
+        await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
         // 执行数据迁移（为历史数据添加 domainId）
         const migrationService = new migrationService_1.MigrationService(db);
         await migrationService.runAllMigrations();
@@ -166,6 +169,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('requestStatsModel', requestStatsModel);
         ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
         ctx.provide('studentSummaryModel', studentSummaryModel);
+        ctx.provide('studentHistoryModel', studentHistoryModel);
         ctx.provide('errorReporter', errorReporter);
         // 初始化版本服务
         const versionService = new versionService_1.VersionService(versionCacheModel);

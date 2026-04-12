@@ -5,8 +5,10 @@
  * 管理竞赛批量对话摘要任务,跟踪任务状态和进度
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BatchSummaryJobModel = void 0;
+exports.BatchSummaryJobModel = exports.ACTIVE_JOB_STATUSES = void 0;
 const ensureObjectId_1 = require("../utils/ensureObjectId");
+/** All non-archived job statuses (used for partial index and active job queries) */
+exports.ACTIVE_JOB_STATUSES = ['pending', 'running', 'completed', 'failed', 'stopped'];
 class BatchSummaryJobModel {
     constructor(db) {
         this.collection = db.collection('ai_batch_summary_jobs');
@@ -27,7 +29,7 @@ class BatchSummaryJobModel {
             name: 'idx_domainId_contestId_active_v2',
             unique: true,
             partialFilterExpression: {
-                status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] },
+                status: { $in: [...exports.ACTIVE_JOB_STATUSES] },
             },
         });
         console.log('[BatchSummaryJobModel] Indexes created successfully');
@@ -66,7 +68,7 @@ class BatchSummaryJobModel {
         return this.collection.findOne({
             domainId,
             contestId,
-            status: { $ne: 'archived' },
+            status: { $in: ['pending', 'running', 'completed', 'failed', 'stopped'] },
         });
     }
     /**
@@ -101,6 +103,10 @@ class BatchSummaryJobModel {
     async archive(id) {
         const _id = (0, ensureObjectId_1.ensureObjectId)(id);
         await this.collection.updateOne({ _id }, { $set: { status: 'archived' } });
+    }
+    async prepareForSupplementary(id, newTotal) {
+        const _id = (0, ensureObjectId_1.ensureObjectId)(id);
+        await this.collection.updateOne({ _id }, { $set: { totalStudents: newTotal, status: 'running', completedAt: null } });
     }
 }
 exports.BatchSummaryJobModel = BatchSummaryJobModel;
