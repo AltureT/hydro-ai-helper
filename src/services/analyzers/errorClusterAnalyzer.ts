@@ -30,8 +30,8 @@ export function errorSignature(record: ClusterRecord): string {
     }
     return 'CE:unknown';
   }
-  const failingTests = (record.testCases || [])
-    .filter(tc => tc.status !== 1)
+  const failingTCs = (record.testCases || []).filter(tc => tc.status !== 1);
+  const failingTests = failingTCs
     .map(tc => tc.id ?? tc.subtaskId ?? '?')
     .sort((a, b) => {
       if (typeof a === 'number' && typeof b === 'number') return a - b;
@@ -39,8 +39,7 @@ export function errorSignature(record: ClusterRecord): string {
     })
     .slice(0, 5)
     .join(',');
-  const totalFailing = (record.testCases || []).filter(tc => tc.status !== 1).length;
-  const suffix = totalFailing > 5 ? `...+${totalFailing - 5}` : '';
+  const suffix = failingTCs.length > 5 ? `...+${failingTCs.length - 5}` : '';
   return `${STATUS_LABEL[record.status] || record.status}:tests[${failingTests}${suffix}]`;
 }
 
@@ -62,8 +61,15 @@ export function analyzeErrorClusters(
   const findings: (TeachingFinding | null)[] = [];
   let counter = 0;
 
+  // Pre-group by pid to avoid O(pids × records)
+  const recordsByPid = new Map<number, ClusterRecord[]>();
+  for (const rec of records) {
+    if (!recordsByPid.has(rec.pid)) recordsByPid.set(rec.pid, []);
+    recordsByPid.get(rec.pid)!.push(rec);
+  }
+
   for (const pid of pids) {
-    const pidRecords = records.filter(r => r.pid === pid);
+    const pidRecords = recordsByPid.get(pid) ?? [];
 
     // Last-write-wins: records must be sorted by judgeAt ascending,
     // so the final set() per uid is the student's latest submission signature.

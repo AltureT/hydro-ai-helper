@@ -92,10 +92,10 @@ function getTabItemStyle(isActive: boolean): React.CSSProperties {
     padding: '10px 15px',
     fontSize: '14px',
     fontWeight: isActive ? 700 : 400,
-    color: isActive ? '#000000' : '#666666',
+    color: isActive ? COLORS.textPrimary : COLORS.textSecondary,
     backgroundColor: 'transparent',
     border: 'none',
-    borderBottom: isActive ? '2px solid #21ba45' : '2px solid transparent',
+    borderBottom: isActive ? `2px solid ${COLORS.hydroGreen}` : '2px solid transparent',
     cursor: 'pointer',
     outline: 'none',
     whiteSpace: 'nowrap',
@@ -213,7 +213,7 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
       <div role="tablist" onKeyDown={handleTabKeyDown} style={{
         display: 'flex',
         alignItems: 'stretch',
-        borderBottom: '1px solid #dddddd',
+        borderBottom: `1px solid ${COLORS.nativeBorder}`,
         marginBottom: SPACING.base,
         overflowX: 'auto',
       }}>
@@ -233,7 +233,7 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
                 <span style={{
                   fontSize: '11px',
                   fontWeight: 600,
-                  backgroundColor: isActive ? '#21ba45' : '#94a3b8',
+                  backgroundColor: isActive ? COLORS.hydroGreen : COLORS.textMuted,
                   color: '#ffffff',
                   padding: '1px 7px',
                   borderRadius: RADIUS.full,

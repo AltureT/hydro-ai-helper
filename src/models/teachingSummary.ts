@@ -29,16 +29,6 @@ export interface TeachingFinding {
   aiAnalysis?: string;
 }
 
-export interface ErrorCluster {
-  signature: string;
-  statusLabel: string;
-  failingTestIds: (number | string)[];
-  normalizedError: string;
-  affectedStudentCount: number;
-  totalStudents: number;
-  ratio: number;
-  sampleCode?: string;
-}
 
 export interface TeachingSummary {
   _id: ObjectIdType;

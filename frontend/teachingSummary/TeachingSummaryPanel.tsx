@@ -82,7 +82,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
 
   return (
     <div style={{
-      backgroundColor: '#ffffff',
+      backgroundColor: COLORS.bgCard,
       border: `1px solid ${COLORS.border}`,
       borderLeft: `3px solid ${colors.text}`,
       borderRadius: RADIUS.md,
@@ -220,10 +220,10 @@ const OverviewBar: React.FC<OverviewBarProps> = ({ stats, findingsCount, highCou
       { label: t('ai_helper_teaching_summary_ai_users'), value: stats.aiUserCount },
     ].map(({ label, value, highlight }) => (
       <span key={label} style={{ display: 'inline-flex', alignItems: 'baseline', gap: '4px' }}>
-        <span style={{ fontSize: '12px', color: '#94a3b8' }}>{label}</span>
+        <span style={{ fontSize: '12px', color: COLORS.textMuted }}>{label}</span>
         <span style={{
           fontSize: '18px', fontWeight: 700,
-          color: highlight ? '#dc2626' : '#1e293b',
+          color: highlight ? COLORS.error : COLORS.textPrimary,
         }}>
           {value}
         </span>
@@ -496,7 +496,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
       {summary.overallSuggestion && (
         <div style={{
           border: `1px solid ${COLORS.border}`,
-          borderLeft: '4px solid #21ba45',
+          borderLeft: `4px solid ${COLORS.hydroGreen}`,
           borderRadius: RADIUS.md,
           marginBottom: SPACING.base,
           overflow: 'hidden',
@@ -508,11 +508,11 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               padding: `${SPACING.sm} ${SPACING.base}`,
               cursor: 'pointer', userSelect: 'none',
-              backgroundColor: '#f0fdf4',
+              backgroundColor: COLORS.hydroGreenLight,
               borderBottom: suggestionExpanded ? `1px solid ${COLORS.infoBorder}` : 'none',
             }}
           >
-            <span style={{ fontWeight: 600, fontSize: '14px', color: '#1a9c39' }}>
+            <span style={{ fontWeight: 600, fontSize: '14px', color: COLORS.hydroGreenDark }}>
               {t('ai_helper_teaching_summary_overall_suggestion')}
             </span>
             <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
@@ -544,32 +544,26 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
               {t('ai_helper_teaching_summary_overall_suggestion')}：
             </span>
-            <button
-              onClick={() => handleFeedback('up')}
-              style={{
-                fontSize: '12px', padding: '3px 8px',
-                border: '1px solid #e2e8f0',
-                borderRadius: RADIUS.sm,
-                backgroundColor: 'transparent',
-                color: summary.feedback?.rating === 'up' ? '#16a34a' : '#94a3b8',
-                cursor: 'pointer',
-              }}
-            >
-              👍 {t('ai_helper_teaching_summary_feedback_helpful')}
-            </button>
-            <button
-              onClick={() => handleFeedback('down')}
-              style={{
-                fontSize: '12px', padding: '3px 8px',
-                border: '1px solid #e2e8f0',
-                borderRadius: RADIUS.sm,
-                backgroundColor: 'transparent',
-                color: summary.feedback?.rating === 'down' ? '#dc2626' : '#94a3b8',
-                cursor: 'pointer',
-              }}
-            >
-              👎 {t('ai_helper_teaching_summary_feedback_not_helpful')}
-            </button>
+            {(['up', 'down'] as const).map(rating => (
+              <button
+                key={rating}
+                onClick={() => handleFeedback(rating)}
+                style={{
+                  fontSize: '12px', padding: '3px 8px',
+                  border: `1px solid ${COLORS.border}`,
+                  borderRadius: RADIUS.sm,
+                  backgroundColor: 'transparent',
+                  color: summary.feedback?.rating === rating
+                    ? (rating === 'up' ? COLORS.successText : COLORS.errorText)
+                    : COLORS.textMuted,
+                  cursor: 'pointer',
+                }}
+              >
+                {rating === 'up' ? '👍' : '👎'} {t(rating === 'up'
+                  ? 'ai_helper_teaching_summary_feedback_helpful'
+                  : 'ai_helper_teaching_summary_feedback_not_helpful')}
+              </button>
+            ))}
           </>
         )}
       </div>

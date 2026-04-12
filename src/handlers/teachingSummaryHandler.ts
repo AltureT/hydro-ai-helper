@@ -217,22 +217,20 @@ export class TeachingSummaryHandler extends Handler {
 
       // Deep dives for findings that need them
       const deepDiveResults: Record<string, string> = {};
+      // Reuse problemDocs from overall suggestion fetch (avoid N+1 queries)
+      const problemDocMap = new Map(problemDocs.map((doc: any) => [doc.docId as number, doc]));
 
       for (const finding of analysisResult.findings) {
         if (!finding.needsDeepDive) continue;
 
-        // Fetch problem content for affected problems
         const affectedPids = finding.evidence.affectedProblems;
-        let problemContent = '';
-
-        if (affectedPids.length > 0) {
-          const problemDocs = await documentColl
-            .find({ domainId, docType: 10, docId: { $in: affectedPids } })
-            .toArray();
-          problemContent = problemDocs
-            .map((doc: any) => `### ${doc.title || doc.docId}\n${doc.content || ''}`)
-            .join('\n\n');
-        }
+        const problemContent = affectedPids
+          .map(pid => {
+            const doc = problemDocMap.get(pid);
+            return doc ? `### ${doc.title || doc.docId}\n${doc.content || ''}` : '';
+          })
+          .filter(Boolean)
+          .join('\n\n');
 
         // Collect code samples from records for affected students
         const sampleUids = finding.evidence.affectedStudents.slice(0, 5);

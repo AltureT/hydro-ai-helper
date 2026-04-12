@@ -40,7 +40,7 @@ export const COLORS = {
   codeBorder: '#e2e8f0',
   // HydroOJ native integration colors
   hydroGreen: '#21ba45',
-  hydroGreenLight: '#e8f5e9',
+  hydroGreenLight: '#f0fdf4',
   hydroGreenDark: '#1a9c39',
   nativeText: '#333333',
   nativeBorder: '#dddddd',

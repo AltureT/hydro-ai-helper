@@ -110,11 +110,12 @@ export class TeachingAnalysisService {
 
     this.findingCounter = 0;
 
-    // Layer 1: Data Aggregation
-    const [records, conversations, jailbreakLogs] = await Promise.all([
+    // Layer 1: Data Aggregation (all independent queries in parallel)
+    const [records, conversations, jailbreakLogs, clusteringRecords] = await Promise.all([
       this.fetchRecords(input),
       this.fetchConversations(input),
       this.fetchJailbreakLogs(input),
+      this.fetchRecordsForClustering(input),
     ]);
 
     // Fetch messages using conversation IDs from above (avoids duplicate query)
@@ -125,12 +126,8 @@ export class TeachingAnalysisService {
         }).toArray() as MessageDoc[]
       : [];
 
-    console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d',
-      records.length, conversations.length, messages.length, jailbreakLogs.length);
-
-    // Layer 1b: Fetch extended data for error clustering (separate query)
-    const clusteringRecords = await this.fetchRecordsForClustering(input);
-    console.log('[TeachingAnalysis] Clustering records fetched: %d', clusteringRecords.length);
+    console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d, clusteringRecords=%d',
+      records.length, conversations.length, messages.length, jailbreakLogs.length, clusteringRecords.length);
 
     // Build lookup structures
     const recordsByPidUid = this.groupRecordsByPidUid(records);
