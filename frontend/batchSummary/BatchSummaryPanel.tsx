@@ -465,11 +465,14 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                   }}
                 >
                   <span style={{
-                    fontSize: '12px', color: COLORS.textMuted,
+                    display: 'inline-block', width: 0, height: 0, flexShrink: 0,
+                    borderTop: '5px solid transparent',
+                    borderBottom: '5px solid transparent',
+                    borderLeft: `6px solid ${COLORS.textMuted}`,
                     transition: 'transform 150ms',
                     transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
-                    display: 'inline-block', width: '14px', flexShrink: 0,
-                  }}>▶</span>
+                    marginLeft: '2px',
+                  }} />
                   <span style={{
                     fontWeight: 600, fontSize: '14px', color: COLORS.textPrimary,
                     flex: 1, minWidth: 0, overflow: 'hidden',
