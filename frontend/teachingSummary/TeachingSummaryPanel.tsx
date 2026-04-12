@@ -82,8 +82,9 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
 
   return (
     <div style={{
-      backgroundColor: colors.bg,
-      border: `1px solid ${colors.border}`,
+      backgroundColor: '#ffffff',
+      border: `1px solid ${COLORS.border}`,
+      borderLeft: `3px solid ${colors.text}`,
       borderRadius: RADIUS.md,
       marginBottom: SPACING.sm,
       overflow: 'hidden',
@@ -99,10 +100,11 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText }) => {
       >
         {/* Dimension badge */}
         <span style={{
-          fontSize: '11px', fontWeight: 600, padding: `2px 8px`,
-          borderRadius: RADIUS.full,
-          backgroundColor: colors.text,
-          color: '#ffffff',
+          fontSize: '11px', fontWeight: 500, padding: '1px 6px',
+          borderRadius: RADIUS.sm,
+          border: `1px solid ${colors.text}`,
+          color: colors.text,
+          backgroundColor: 'transparent',
           flexShrink: 0,
         }}>
           {dimensionLabel}
@@ -207,8 +209,9 @@ interface OverviewBarProps {
 
 const OverviewBar: React.FC<OverviewBarProps> = ({ stats, findingsCount, highCount }) => (
   <div style={{
-    display: 'flex', flexWrap: 'wrap', gap: SPACING.sm,
+    display: 'flex', flexWrap: 'wrap', gap: SPACING.lg,
     marginBottom: SPACING.base,
+    padding: `${SPACING.sm} 0`,
   }}>
     {[
       { label: t('ai_helper_teaching_summary_participated'), value: stats.participatedStudents },
@@ -216,24 +219,15 @@ const OverviewBar: React.FC<OverviewBarProps> = ({ stats, findingsCount, highCou
       { label: t('ai_helper_teaching_summary_high_priority'), value: highCount, highlight: highCount > 0 },
       { label: t('ai_helper_teaching_summary_ai_users'), value: stats.aiUserCount },
     ].map(({ label, value, highlight }) => (
-      <div key={label} style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        minWidth: '80px', padding: `${SPACING.sm} ${SPACING.base}`,
-        backgroundColor: highlight ? COLORS.errorBg : COLORS.bgPage,
-        border: `1px solid ${highlight ? COLORS.errorBorder : COLORS.border}`,
-        borderRadius: RADIUS.md,
-        flex: '1 0 auto',
-      }}>
+      <span key={label} style={{ display: 'inline-flex', alignItems: 'baseline', gap: '4px' }}>
+        <span style={{ fontSize: '12px', color: '#94a3b8' }}>{label}</span>
         <span style={{
-          fontSize: '22px', fontWeight: 700,
-          color: highlight ? COLORS.errorText : COLORS.primary,
+          fontSize: '18px', fontWeight: 700,
+          color: highlight ? '#dc2626' : '#1e293b',
         }}>
           {value}
         </span>
-        <span style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '2px' }}>
-          {label}
-        </span>
-      </div>
+      </span>
     ))}
   </div>
 );
@@ -251,7 +245,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   const { summary, loading, error, fetchSummary, generate, submitFeedback } = useTeachingSummary(domainId, contestId);
 
   const [teachingFocus, setTeachingFocus] = useState('');
-  const [suggestionExpanded, setSuggestionExpanded] = useState(false);
+  const [suggestionExpanded, setSuggestionExpanded] = useState(true);
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
 
   useEffect(() => {
@@ -502,6 +496,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
       {summary.overallSuggestion && (
         <div style={{
           border: `1px solid ${COLORS.border}`,
+          borderLeft: '4px solid #21ba45',
           borderRadius: RADIUS.md,
           marginBottom: SPACING.base,
           overflow: 'hidden',
@@ -513,11 +508,11 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               padding: `${SPACING.sm} ${SPACING.base}`,
               cursor: 'pointer', userSelect: 'none',
-              backgroundColor: COLORS.infoBg,
+              backgroundColor: '#f0fdf4',
               borderBottom: suggestionExpanded ? `1px solid ${COLORS.infoBorder}` : 'none',
             }}
           >
-            <span style={{ fontWeight: 600, fontSize: '14px', color: COLORS.infoText }}>
+            <span style={{ fontWeight: 600, fontSize: '14px', color: '#1a9c39' }}>
               {t('ai_helper_teaching_summary_overall_suggestion')}
             </span>
             <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
@@ -552,9 +547,12 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             <button
               onClick={() => handleFeedback('up')}
               style={{
-                ...getButtonStyle('secondary'),
-                fontSize: '13px', padding: `4px ${SPACING.sm}`,
-                color: summary.feedback?.rating === 'up' ? COLORS.successText : undefined,
+                fontSize: '12px', padding: '3px 8px',
+                border: '1px solid #e2e8f0',
+                borderRadius: RADIUS.sm,
+                backgroundColor: 'transparent',
+                color: summary.feedback?.rating === 'up' ? '#16a34a' : '#94a3b8',
+                cursor: 'pointer',
               }}
             >
               👍 {t('ai_helper_teaching_summary_feedback_helpful')}
@@ -562,9 +560,12 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             <button
               onClick={() => handleFeedback('down')}
               style={{
-                ...getButtonStyle('secondary'),
-                fontSize: '13px', padding: `4px ${SPACING.sm}`,
-                color: summary.feedback?.rating === 'down' ? COLORS.errorText : undefined,
+                fontSize: '12px', padding: '3px 8px',
+                border: '1px solid #e2e8f0',
+                borderRadius: RADIUS.sm,
+                backgroundColor: 'transparent',
+                color: summary.feedback?.rating === 'down' ? '#dc2626' : '#94a3b8',
+                cursor: 'pointer',
               }}
             >
               👎 {t('ai_helper_teaching_summary_feedback_not_helpful')}
