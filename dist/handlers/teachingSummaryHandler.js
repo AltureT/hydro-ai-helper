@@ -172,6 +172,24 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                     isFillInProblem: (0, codeSelectionService_1.isFillInBlankProblem)(problemContent),
                 };
             });
+            // Aggregate temporal profiles into behavior summary (count-only) for LLM
+            const behaviorCounts = {};
+            for (const profile of (analysisResult.temporalProfiles || [])) {
+                if (!behaviorCounts[profile.pattern]) {
+                    behaviorCounts[profile.pattern] = new Set();
+                }
+                behaviorCounts[profile.pattern].add(profile.uid);
+            }
+            const counts = {
+                persistent_learner: behaviorCounts['persistent_learner']?.size ?? 0,
+                burst_then_quit: behaviorCounts['burst_then_quit']?.size ?? 0,
+                stuck_silent: behaviorCounts['stuck_silent']?.size ?? 0,
+                disengaged: behaviorCounts['disengaged']?.size ?? 0,
+            };
+            const totalBehavior = counts.persistent_learner + counts.burst_then_quit
+                + counts.stuck_silent + counts.disengaged;
+            const behaviorSummary = totalBehavior > 0
+                ? counts : undefined;
             // Layer 2: AI suggestions
             const aiClient = await (0, openaiClient_1.createOpenAIClientFromConfig)(this.ctx);
             const suggestionService = new teachingSuggestionService_1.TeachingSuggestionService(aiClient);
@@ -183,6 +201,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 findings: analysisResult.findings,
                 problemContexts,
                 fillInCandidates: fillInCandidatesForPrompt,
+                behaviorSummary,
             });
             let totalPromptTokens = overallResult.tokenUsage.promptTokens;
             let totalCompletionTokens = overallResult.tokenUsage.completionTokens;

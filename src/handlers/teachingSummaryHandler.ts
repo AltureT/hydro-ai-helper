@@ -224,14 +224,16 @@ export class TeachingSummaryHandler extends Handler {
         }
         behaviorCounts[profile.pattern].add(profile.uid);
       }
-      const bPersistent = behaviorCounts['persistent_learner']?.size ?? 0;
-      const bBurst = behaviorCounts['burst_then_quit']?.size ?? 0;
-      const bStuck = behaviorCounts['stuck_silent']?.size ?? 0;
-      const bDisengaged = behaviorCounts['disengaged']?.size ?? 0;
-      const totalBehavior = bPersistent + bBurst + bStuck + bDisengaged;
+      const counts: BehaviorSummary = {
+        persistent_learner: behaviorCounts['persistent_learner']?.size ?? 0,
+        burst_then_quit: behaviorCounts['burst_then_quit']?.size ?? 0,
+        stuck_silent: behaviorCounts['stuck_silent']?.size ?? 0,
+        disengaged: behaviorCounts['disengaged']?.size ?? 0,
+      };
+      const totalBehavior = counts.persistent_learner + counts.burst_then_quit
+        + counts.stuck_silent + counts.disengaged;
       const behaviorSummary: BehaviorSummary | undefined = totalBehavior > 0
-        ? { persistent_learner: bPersistent, burst_then_quit: bBurst, stuck_silent: bStuck, disengaged: bDisengaged }
-        : undefined;
+        ? counts : undefined;
 
       // Layer 2: AI suggestions
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
