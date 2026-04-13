@@ -10,7 +10,7 @@ import { getDomainId } from '../utils/domainHelper';
 import { createOpenAIClientFromConfig } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
-import { TeachingSuggestionService } from '../services/teachingSuggestionService';
+import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 
 export const TeachingSummaryHandlerPriv = PRIV.PRIV_READ_RECORD_CODE;
@@ -216,6 +216,23 @@ export class TeachingSummaryHandler extends Handler {
         };
       });
 
+      // Aggregate temporal profiles into behavior summary (count-only) for LLM
+      const behaviorCounts: Record<string, Set<number>> = {};
+      for (const profile of (analysisResult.temporalProfiles || [])) {
+        if (!behaviorCounts[profile.pattern]) {
+          behaviorCounts[profile.pattern] = new Set();
+        }
+        behaviorCounts[profile.pattern].add(profile.uid);
+      }
+      const bPersistent = behaviorCounts['persistent_learner']?.size ?? 0;
+      const bBurst = behaviorCounts['burst_then_quit']?.size ?? 0;
+      const bStuck = behaviorCounts['stuck_silent']?.size ?? 0;
+      const bDisengaged = behaviorCounts['disengaged']?.size ?? 0;
+      const totalBehavior = bPersistent + bBurst + bStuck + bDisengaged;
+      const behaviorSummary: BehaviorSummary | undefined = totalBehavior > 0
+        ? { persistent_learner: bPersistent, burst_then_quit: bBurst, stuck_silent: bStuck, disengaged: bDisengaged }
+        : undefined;
+
       // Layer 2: AI suggestions
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
@@ -228,6 +245,7 @@ export class TeachingSummaryHandler extends Handler {
         findings: analysisResult.findings,
         problemContexts,
         fillInCandidates: fillInCandidatesForPrompt,
+        behaviorSummary,
       });
 
       let totalPromptTokens = overallResult.tokenUsage.promptTokens;
