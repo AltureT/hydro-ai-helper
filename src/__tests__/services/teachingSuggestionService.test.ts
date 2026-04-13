@@ -163,6 +163,63 @@ describe('buildMainPrompt', () => {
     const { user } = buildMainPrompt(input);
     expect(user).not.toContain('## 题目内容');
   });
+
+  it('should include output_sections with p2_behavior_intervention when behaviorSummary has data', () => {
+    const input = makeInput({
+      behaviorSummary: {
+        persistent_learner: 8,
+        burst_then_quit: 3,
+        stuck_silent: 2,
+        disengaged: 1,
+      },
+    });
+    const { user } = buildMainPrompt(input);
+    expect(user).toContain('output_sections');
+    expect(user).toContain('p2_behavior_intervention');
+    expect(user).toContain('persistent_learner');
+    expect(user).toContain('"count": 8');
+  });
+
+  it('should exclude p2_behavior_intervention from output_sections when no behaviorSummary', () => {
+    const input = makeInput({ behaviorSummary: undefined });
+    const { user } = buildMainPrompt(input);
+    expect(user).toContain('output_sections');
+    expect(user).not.toContain('p2_behavior_intervention');
+    expect(user).not.toContain('behaviorSummary');
+  });
+
+  it('should include fill_in_exercise in output_sections when fillInCandidates present', () => {
+    const input = makeInput({
+      fillInCandidates: [{
+        pid: 101, title: '数组求和', lang: 'cpp',
+        code: 'int main() {}', isFillInProblem: false,
+      }],
+    });
+    const { user } = buildMainPrompt(input);
+    expect(user).toContain('fill_in_exercise');
+  });
+
+  it('should exclude fill_in_exercise from output_sections when no fillInCandidates', () => {
+    const input = makeInput({ fillInCandidates: undefined });
+    const { user } = buildMainPrompt(input);
+    expect(user).not.toContain('fill_in_exercise');
+  });
+
+  it('should not include uid arrays in behaviorSection, only counts', () => {
+    const input = makeInput({
+      findings: [],
+      behaviorSummary: {
+        persistent_learner: 5,
+        burst_then_quit: 0,
+        stuck_silent: 0,
+        disengaged: 0,
+      },
+    });
+    const { user } = buildMainPrompt(input);
+    // behaviorSection should not contain numeric arrays (uid lists)
+    expect(user).not.toMatch(/\[\s*\d+\s*(,\s*\d+\s*)*\]/);
+    expect(user).toContain('"count": 5');
+  });
 });
 
 // ─── buildDeepDivePrompt ─────────────────────────────────
