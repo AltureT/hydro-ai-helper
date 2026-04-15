@@ -1,8 +1,10 @@
 import {
   buildMainPrompt,
   buildDeepDivePrompt,
+  buildFillInPrompt,
   TeachingSuggestionService,
   MainPromptInput,
+  FillInPromptInput,
 } from '../../services/teachingSuggestionService';
 import { TeachingFinding } from '../../models/teachingSummary';
 
@@ -125,22 +127,22 @@ describe('buildMainPrompt', () => {
     const { system } = buildMainPrompt(input);
     expect(system).toContain('坏例子');
     expect(system).toContain('好例子');
-    expect(system).toContain('明天上课就能直接用');
+    expect(system).toContain('问题发现报告');
   });
 
   it('should include edge case handling in system prompt', () => {
     const input = makeInput();
     const { system } = buildMainPrompt(input);
-    expect(system).toContain('培优建议');
+    expect(system).toContain('全班表现优秀');
     expect(system).toContain('AI 使用数据为 0');
   });
 
-  it('should include P0/P1 framework with classroom action format', () => {
+  it('should include P0/P1 framework with problem discovery format', () => {
     const input = makeInput();
     const { system } = buildMainPrompt(input);
-    expect(system).toContain('开场提问');
-    expect(system).toContain('演示/板书');
-    expect(system).toContain('当堂检验');
+    expect(system).toContain('错误模式');
+    expect(system).toContain('数据全景');
+    expect(system).toContain('根因定位');
     expect(system).toContain('持续努力型');
     expect(system).toContain('受挫放弃型');
   });
@@ -187,21 +189,11 @@ describe('buildMainPrompt', () => {
     expect(user).not.toContain('behaviorSummary');
   });
 
-  it('should include fill_in_exercise in output_sections when fillInCandidates present', () => {
-    const input = makeInput({
-      fillInCandidates: [{
-        pid: 101, title: '数组求和', lang: 'cpp',
-        code: 'int main() {}', isFillInProblem: false,
-      }],
-    });
-    const { user } = buildMainPrompt(input);
-    expect(user).toContain('fill_in_exercise');
-  });
-
-  it('should exclude fill_in_exercise from output_sections when no fillInCandidates', () => {
-    const input = makeInput({ fillInCandidates: undefined });
+  it('should not include fill_in_exercise in output_sections (handled by separate call)', () => {
+    const input = makeInput();
     const { user } = buildMainPrompt(input);
     expect(user).not.toContain('fill_in_exercise');
+    expect(user).not.toContain('代码挖空候选');
   });
 
   it('should not include uid arrays in behaviorSection, only counts', () => {
@@ -346,5 +338,82 @@ describe('TeachingSuggestionService', () => {
 
     expect(result.tokenUsage.promptTokens).toBe(200);
     expect(result.tokenUsage.completionTokens).toBe(80);
+  });
+
+  it('generateFillInExercise should call aiClient.chat with fill-in prompt', async () => {
+    const aiClient = makeAiClient('#### 📝 课后巩固：代码挖空练习\n练习内容');
+    const service = new TeachingSuggestionService(aiClient);
+    const input: FillInPromptInput = {
+      candidates: [{
+        pid: 101, title: '数组求和', lang: 'cpp',
+        code: 'int main() { return 0; }', isFillInProblem: false,
+      }],
+      relatedFindings: [{
+        title: '数组越界错误', affectedCount: 10,
+      }],
+    };
+
+    const result = await service.generateFillInExercise(input);
+
+    expect(aiClient.chat).toHaveBeenCalledTimes(1);
+    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    expect(messages[0].content).toContain('数组求和');
+    expect(messages[0].content).toContain('int main()');
+    expect(messages[0].content).toContain('数组越界错误');
+    expect(systemPrompt).toContain('挖空练习');
+    expect(systemPrompt).toContain('建议挖空点说明');
+    expect(result.text).toContain('课后巩固');
+  });
+});
+
+// ─── buildFillInPrompt ──────────────────────────────────
+
+describe('buildFillInPrompt', () => {
+  it('should include candidate code and related findings', () => {
+    const input: FillInPromptInput = {
+      candidates: [{
+        pid: 101, title: '数组求和', lang: 'cpp',
+        code: 'int sum = 0;', isFillInProblem: false,
+      }],
+      relatedFindings: [{
+        title: '边界条件错误', errorSignature: 'off_by_one', affectedCount: 8,
+      }],
+    };
+    const { user, system } = buildFillInPrompt(input);
+
+    expect(user).toContain('101. 数组求和');
+    expect(user).toContain('int sum = 0;');
+    expect(user).toContain('边界条件错误');
+    expect(user).toContain('off_by_one');
+    expect(user).toContain('8 人');
+    expect(system).toContain('行尾注释');
+    expect(system).toContain('参考答案');
+  });
+
+  it('should mark fill-in-blank problems correctly', () => {
+    const input: FillInPromptInput = {
+      candidates: [{
+        pid: 102, title: '填空题', lang: 'python',
+        code: 'x = ___', isFillInProblem: true,
+      }],
+      relatedFindings: [],
+    };
+    const { user } = buildFillInPrompt(input);
+
+    expect(user).toContain('是（避开模板代码）');
+  });
+
+  it('should handle empty relatedFindings', () => {
+    const input: FillInPromptInput = {
+      candidates: [{
+        pid: 101, title: '求和', lang: 'cpp',
+        code: 'int x;', isFillInProblem: false,
+      }],
+      relatedFindings: [],
+    };
+    const { user } = buildFillInPrompt(input);
+
+    expect(user).not.toContain('相关错误模式');
+    expect(user).toContain('求和');
   });
 });

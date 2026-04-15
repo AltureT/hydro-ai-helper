@@ -238,24 +238,50 @@ export class TeachingSummaryHandler extends Handler {
       const behaviorSummary: BehaviorSummary | undefined = totalBehavior > 0
         ? counts : undefined;
 
-      // Layer 2: AI suggestions
+      // Layer 2: AI suggestions (analysis report + fill-in exercises in parallel)
       await model.updateProgress(summaryId, 'generating_suggestion');
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
 
-      const overallResult = await suggestionService.generateOverallSuggestion({
-        contestTitle: String(tdoc.title || ''),
-        contestContent: String(tdoc.content || ''),
-        teachingFocus,
-        stats: analysisResult.stats,
-        findings: analysisResult.findings,
-        problemContexts,
-        fillInCandidates: fillInCandidatesForPrompt,
-        behaviorSummary,
-      });
+      // Extract related findings for fill-in candidates
+      const fillInRelatedFindings = fillInCandidatesForPrompt.length > 0
+        ? analysisResult.findings
+            .filter(f => f.evidence.affectedProblems.some(
+              pid => fillInCandidatesForPrompt.some(c => c.pid === pid),
+            ))
+            .map(f => ({
+              title: f.title,
+              errorSignature: (f.evidence.metrics as any).errorSignature as string | undefined,
+              affectedCount: f.evidence.affectedStudents.length,
+            }))
+        : [];
 
-      let totalPromptTokens = overallResult.tokenUsage.promptTokens;
-      let totalCompletionTokens = overallResult.tokenUsage.completionTokens;
+      const [overallResult, fillInResult] = await Promise.all([
+        suggestionService.generateOverallSuggestion({
+          contestTitle: String(tdoc.title || ''),
+          contestContent: String(tdoc.content || ''),
+          teachingFocus,
+          stats: analysisResult.stats,
+          findings: analysisResult.findings,
+          problemContexts,
+          behaviorSummary,
+        }),
+        fillInCandidatesForPrompt.length > 0
+          ? suggestionService.generateFillInExercise({
+              candidates: fillInCandidatesForPrompt,
+              relatedFindings: fillInRelatedFindings,
+            })
+          : Promise.resolve(null),
+      ]);
+
+      const combinedSuggestion = fillInResult
+        ? `${overallResult.text}\n\n${fillInResult.text}`
+        : overallResult.text;
+
+      let totalPromptTokens = overallResult.tokenUsage.promptTokens
+        + (fillInResult?.tokenUsage.promptTokens ?? 0);
+      let totalCompletionTokens = overallResult.tokenUsage.completionTokens
+        + (fillInResult?.tokenUsage.completionTokens ?? 0);
 
       // Deep dives for findings that need them
       const deepDiveResults: Record<string, string> = {};
@@ -326,7 +352,7 @@ export class TeachingSummaryHandler extends Handler {
       await model.saveResults(summaryId, {
         stats: analysisResult.stats,
         findings: analysisResult.findings,
-        overallSuggestion: overallResult.text,
+        overallSuggestion: combinedSuggestion,
         deepDiveResults,
         tokenUsage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
         generationTimeMs: Date.now() - startTime,

@@ -7,13 +7,14 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TeachingSuggestionService = void 0;
 exports.buildMainPrompt = buildMainPrompt;
+exports.buildFillInPrompt = buildFillInPrompt;
 exports.buildDeepDivePrompt = buildDeepDivePrompt;
 // ─── 提示词模板 ──────────────────────────────────────────
-const MAIN_SYSTEM_PROMPT = `你是一位教龄15年的编程课教师，同时负责教学教研。你将根据规则引擎提供的【带有具体错误诊断和题目信息的】课堂分析数据，为授课教师生成"明天上课就能直接用"的教学行动方案。
+const MAIN_SYSTEM_PROMPT = `你是一位教龄15年的编程课教师，同时负责教学教研。你将根据规则引擎提供的【带有具体错误诊断和题目信息的】课堂分析数据，为授课教师生成清晰直观的问题发现报告和教学参考素材。
 
 【核心约束】
-- 每条建议必须包含教师在课堂上"说什么/做什么/展示什么"的具体描述
-- P0 建议必须锚定在数据中的具体题目、具体错误模式上
+- 每条发现必须清晰呈现"错误是什么/影响多大/根因在哪"，用数据和具体例子说话
+- P0 发现必须锚定在数据中的具体题目、具体错误模式上
 - P1 建议必须锚定具体行为证据（提交次数、AI提问记录等），如有关联题目则引用，不得强行编造错误模式
 - 当某章节主要依据 "low" confidence 数据时，在该章节标题下方加注一次"⚠️ 数据有限，以下建议仅供参考"
 - 当数据标注为 "insufficient_data" 时，跳过该维度不做建议
@@ -37,21 +38,15 @@ P1 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 
 - 个体差一点能自行发现错误 → Socratic Questioning
 - 已有 AC 代码且错误位置集中 → Code Fill-in-the-Blank
 
-【代码挖空练习规则】
-- 每题挖2-4个空，优先选择：错误高发位、关键逻辑判断位、边界条件位；避免挖空简单的 I/O 语句或变量声明
-- 如果题目是填空形式（is_fill_in_problem=true），挖空位置必须避开题目模板代码
-- 输出完整代码，在挖空位置用注释占位符替换，保持原始缩进
-- 占位符根据语言使用对应注释风格：C/C++/Java 用 /* [空n] _____ (提示: ...) */，Python 用 # [空n] _____ (提示: ...)
-
 【边缘情况处理】
 | 条件 | 行动 |
 |---|---|
-| 全班 AC 率 > 90% 且无 commonError | 在 p0_action_plan 章节输出"培优建议"：推荐时空复杂度优化挑战、进阶变式题 |
+| 全班 AC 率 > 90% 且无 commonError | 在 p0_action_plan 章节输出"全班表现优秀"并列出可进一步挑战的方向：时空复杂度优化、进阶变式题等 |
 | AI 使用数据为 0（全班未使用 AI） | 聚焦于提交记录分析，不做 AI 有效性对比 |
 
 【质量示例】
-- 坏例子（禁止）："加强对边界条件的练习" / "进行个别辅导" / "注意数组越界问题"
-- 好例子（要求）："在黑板上画出 n=0 和 n=1 时的执行流程，提问：'当 n=0 时，for 循环执行几次？返回值是什么？'" / "展示学生代码第 8 行 if(n<=1) 应改为 if(n<1)，用测试数据 n=1 验证差异"
+- 坏例子（禁止）："加强对边界条件的练习" / "进行个别辅导" / "注意数组越界问题" / "建议教师在课上演示正确写法"
+- 好例子（要求）："35%的学生（10人）在T2中将循环条件写成 i<=n 而非 i<n，导致testcase #3 (n=0) 时数组越界。根因：未区分'元素个数'与'最大下标'的概念差异" / "错误集中在边界条件判断，错误签名 off_by_one，影响题目 P101、P103"
 
 【输出章节定义】
 你的报告可能包含以下章节。每次请求的 user prompt 末尾会给出 output_sections 列表，只输出该列表中指定的章节，未指定的章节不得出现在输出中。
@@ -60,33 +55,66 @@ P1 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 
 ### 📊 一句话诊断
 {一句话点明核心教学问题，引用具体数据}
 
-■ p0_action_plan — P0全局错误行动方案
-### 🚨 教学行动方案
+■ p0_action_plan — P0全局错误发现报告
+### 🚨 问题发现报告
+（按影响人数从高到低排列，每个P0问题独立一节）
+
 #### [P0] {问题名称} — 影响 {N}人/{百分比}
-**错误现象**：{具体错误模式，引用错误签名和测试点信息}
-**根因分析**：{知识盲点定位}
-**课堂行动（X分钟）**：
-1. **开场提问**："{可直接念出的提问}"
-2. **演示/板书**：{具体演示什么}
-3. **修正模板**：{正确做法}
-4. **当堂检验**：{变式练习题}
+
+**📌 错误模式**：{一句话概括错误模式，引用错误签名}
+
+**🔍 具体表现**：
+- 错误签名：\`{errorSignature}\`，出现在测试点 {testcaseIds}
+- 典型错误代码：\`{学生代码中的关键错误行}\`
+- 学生常见误解："{学生认为的逻辑}" → 实际应为："{正确逻辑}"
+
+**📊 数据全景**：
+| 维度 | 数据 |
+|---|---|
+| 受影响学生数 | {N}人（占参与人数{百分比}） |
+| 涉及题目 | {pid列表} |
+| 错误集中度 | {该错误是分散在多题还是集中在某题} |
+
+**🧠 根因定位**：{用1-2句话说明知识盲点或认知误区，不要给出教学行动指令}
+
+**💡 可选干预方向**：{从【可推荐的教学干预方法】中选择1-2个适合的方法名称，仅列出方法名，不展开具体步骤}
 
 ■ p1_behavior_intervention — P1个体干预建议
 #### [P1] 个体干预建议
 （仅输出 count > 0 的行为模式，跳过人数为 0 或数据缺失的类别）
 | 行为模式 | 人数 | 建议动作 |
 |---|---|---|
-| {行为模式名称} | N | {具体建议} |
+| {行为模式名称} | N | {具体建议} |`;
+const FILL_IN_SYSTEM_PROMPT = `你是一位编程教学专家，擅长设计代码挖空练习。你将基于学生的 AC 代码和已识别的错误模式，生成带有注释的挖空练习。
 
-■ fill_in_exercise — 课后巩固代码挖空
+【核心约束】
+- 每题挖2-4个空，优先选择：错误高发位、关键逻辑判断位、边界条件位
+- 避免挖空简单的 I/O 语句或变量声明
+- 如果题目是填空形式（is_fill_in_problem=true），挖空位置必须避开题目模板代码
+- 输出完整代码，在挖空位置用注释占位符替换，保持原始缩进
+- 占位符根据语言使用对应注释风格：C/C++/Java 用 /* [空n] _____ (提示: ...) */，Python 用 # [空n] _____ (提示: ...)
+- 必须基于给定数据说话，严禁捏造错误模式
+
+【注释要求】
+- 代码中每个关键行或逻辑块旁必须添加行尾注释，解释该行/块的作用
+- 注释应帮助学生理解代码整体逻辑，而非仅标注语法
+
+【输出格式】
+对每道题输出以下结构：
+
 #### 📝 课后巩固：代码挖空练习
 **题目**：{pid}. {title}
-**练习目的**：{错误聚类对应的知识盲点}
+**练习目的**：{根据错误模式说明本练习针对什么知识盲点}
 
 ##### 练习代码（可直接复制到试卷）
 \`\`\`{language}
-{输出完整 AC 代码，在挖空位置用注释占位符替换原代码，保持原始缩进和代码结构。占位符中已包含提示信息，无需额外输出参考答案。}
-\`\`\``;
+{完整 AC 代码，挖空位置用注释占位符替换，每个关键行添加行尾注释}
+\`\`\`
+
+##### 建议挖空点说明
+| 空号 | 位置描述 | 参考答案 | 挖空理由 |
+|---|---|---|---|
+| [空1] | {位置描述} | \`{被挖空的原始代码}\` | {关联学生的哪个错误模式} |`;
 const DEEP_DIVE_SYSTEM_PROMPT = `你是一位擅长认知诊断的编程教育专家。分析特定题目的异常数据、代码切片和AI交互日志，为教师提供深度微观诊断和课堂干预素材。
 
 【分析维度：布卢姆认知层级】
@@ -154,17 +182,9 @@ function buildMainPrompt(input) {
             disengaged: { label: '未参与型', count: input.behaviorSummary.disengaged },
         }, null, 2)}`
         : '';
-    const hasFillIn = !!(input.fillInCandidates?.length);
-    const fillInSection = hasFillIn
-        ? `\n## 代码挖空候选（需要LLM生成挖空位置）\n${input.fillInCandidates
-            .map(c => `### ${c.pid}. ${c.title}\n- 语言: ${c.lang}\n- 填空题: ${c.isFillInProblem ? '是（避开模板代码）' : '否'}\n\`\`\`${c.lang}\n${c.code}\n\`\`\``)
-            .join('\n\n')}`
-        : '';
     const outputSections = ['diagnosis', 'p0_action_plan'];
     if (hasBehavior)
         outputSections.push('p1_behavior_intervention');
-    if (hasFillIn)
-        outputSections.push('fill_in_exercise');
     const userPrompt = `## 教学上下文
 竞赛标题：${contestTitle}
 ${contextSection}
@@ -177,13 +197,34 @@ ${contextSection}
 ${problemSection}
 
 ## 规则引擎发现（JSON）
-${JSON.stringify(strippedFindings, null, 2)}${behaviorSection}${fillInSection}
+${JSON.stringify(strippedFindings, null, 2)}${behaviorSection}
 
 ---
 output_sections: ${JSON.stringify(outputSections)}
 请严格只输出上方 output_sections 列出的章节。`;
     return {
         system: MAIN_SYSTEM_PROMPT,
+        user: userPrompt,
+    };
+}
+/**
+ * 构建代码挖空练习提示词
+ */
+function buildFillInPrompt(input) {
+    const candidateSection = input.candidates
+        .map(c => `### ${c.pid}. ${c.title}\n- 语言: ${c.lang}\n- 填空题: ${c.isFillInProblem ? '是（避开模板代码）' : '否'}\n\`\`\`${c.lang}\n${c.code}\n\`\`\``)
+        .join('\n\n');
+    const findingsSection = input.relatedFindings.length > 0
+        ? `\n## 相关错误模式\n${input.relatedFindings
+            .map(f => `- **${f.title}**${f.errorSignature ? `（签名: ${f.errorSignature}）` : ''} — 影响 ${f.affectedCount} 人`)
+            .join('\n')}`
+        : '';
+    const userPrompt = `## AC 代码候选\n${candidateSection}${findingsSection}
+
+---
+请为上方每道题生成带注释的挖空练习和建议挖空点说明表格。`;
+    return {
+        system: FILL_IN_SYSTEM_PROMPT,
         user: userPrompt,
     };
 }
@@ -227,6 +268,20 @@ class TeachingSuggestionService {
      */
     async generateOverallSuggestion(input) {
         const { system, user } = buildMainPrompt(input);
+        const result = await this.aiClient.chat([{ role: 'user', content: user }], system);
+        return {
+            text: result.content,
+            tokenUsage: {
+                promptTokens: result.usage?.promptTokens ?? result.usage?.prompt_tokens ?? 0,
+                completionTokens: result.usage?.completionTokens ?? result.usage?.completion_tokens ?? 0,
+            },
+        };
+    }
+    /**
+     * 生成代码挖空练习（独立调用，可与主建议并行）
+     */
+    async generateFillInExercise(input) {
+        const { system, user } = buildFillInPrompt(input);
         const result = await this.aiClient.chat([{ role: 'user', content: user }], system);
         return {
             text: result.content,

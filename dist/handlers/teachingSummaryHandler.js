@@ -192,22 +192,44 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 + counts.stuck_silent + counts.disengaged;
             const behaviorSummary = totalBehavior > 0
                 ? counts : undefined;
-            // Layer 2: AI suggestions
+            // Layer 2: AI suggestions (analysis report + fill-in exercises in parallel)
             await model.updateProgress(summaryId, 'generating_suggestion');
             const aiClient = await (0, openaiClient_1.createOpenAIClientFromConfig)(this.ctx);
             const suggestionService = new teachingSuggestionService_1.TeachingSuggestionService(aiClient);
-            const overallResult = await suggestionService.generateOverallSuggestion({
-                contestTitle: String(tdoc.title || ''),
-                contestContent: String(tdoc.content || ''),
-                teachingFocus,
-                stats: analysisResult.stats,
-                findings: analysisResult.findings,
-                problemContexts,
-                fillInCandidates: fillInCandidatesForPrompt,
-                behaviorSummary,
-            });
-            let totalPromptTokens = overallResult.tokenUsage.promptTokens;
-            let totalCompletionTokens = overallResult.tokenUsage.completionTokens;
+            // Extract related findings for fill-in candidates
+            const fillInRelatedFindings = fillInCandidatesForPrompt.length > 0
+                ? analysisResult.findings
+                    .filter(f => f.evidence.affectedProblems.some(pid => fillInCandidatesForPrompt.some(c => c.pid === pid)))
+                    .map(f => ({
+                    title: f.title,
+                    errorSignature: f.evidence.metrics.errorSignature,
+                    affectedCount: f.evidence.affectedStudents.length,
+                }))
+                : [];
+            const [overallResult, fillInResult] = await Promise.all([
+                suggestionService.generateOverallSuggestion({
+                    contestTitle: String(tdoc.title || ''),
+                    contestContent: String(tdoc.content || ''),
+                    teachingFocus,
+                    stats: analysisResult.stats,
+                    findings: analysisResult.findings,
+                    problemContexts,
+                    behaviorSummary,
+                }),
+                fillInCandidatesForPrompt.length > 0
+                    ? suggestionService.generateFillInExercise({
+                        candidates: fillInCandidatesForPrompt,
+                        relatedFindings: fillInRelatedFindings,
+                    })
+                    : Promise.resolve(null),
+            ]);
+            const combinedSuggestion = fillInResult
+                ? `${overallResult.text}\n\n${fillInResult.text}`
+                : overallResult.text;
+            let totalPromptTokens = overallResult.tokenUsage.promptTokens
+                + (fillInResult?.tokenUsage.promptTokens ?? 0);
+            let totalCompletionTokens = overallResult.tokenUsage.completionTokens
+                + (fillInResult?.tokenUsage.completionTokens ?? 0);
             // Deep dives for findings that need them
             const deepDiveResults = {};
             const problemDocMap = new Map(problemDocs.map((doc) => [doc.docId, doc]));
@@ -276,7 +298,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             await model.saveResults(summaryId, {
                 stats: analysisResult.stats,
                 findings: analysisResult.findings,
-                overallSuggestion: overallResult.text,
+                overallSuggestion: combinedSuggestion,
                 deepDiveResults,
                 tokenUsage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
                 generationTimeMs: Date.now() - startTime,
