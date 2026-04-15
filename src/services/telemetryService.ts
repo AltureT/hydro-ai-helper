@@ -376,10 +376,18 @@ export class TelemetryService {
 const DEFAULT_BASE = 'https://stats.how2learns.com';
 
 /**
+ * 内置遥测 token，用于官方 stats.how2learns.com 端点认证。
+ * 不是真正的秘密（随插件代码分发），但可阻止未安装插件的第三方随意写入遥测数据。
+ * 用户可通过环境变量 AI_HELPER_TELEMETRY_TOKEN 覆盖（自建遥测服务场景）。
+ */
+const DEFAULT_TELEMETRY_TOKEN = '3h5m7qnvzGBJxXQe-Gj7hOf3aDbo2rM8';
+
+/**
  * 获取遥测 token
  */
 export function getTelemetryToken(): string {
-  return (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
+  const envToken = (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
+  return envToken || DEFAULT_TELEMETRY_TOKEN;
 }
 
 /**
