@@ -25,6 +25,8 @@ class BatchSummaryJobModel {
         catch {
             // 旧索引不存在，忽略
         }
+        // 清理重复的活跃任务（v1 索引从未生效，可能已存入重复数据导致 v2 唯一索引创建失败）
+        await this.deduplicateActiveJobs();
         await this.collection.createIndex({ domainId: 1, contestId: 1 }, {
             name: 'idx_domainId_contestId_active_v2',
             unique: true,
@@ -33,6 +35,29 @@ class BatchSummaryJobModel {
             },
         });
         console.log('[BatchSummaryJobModel] Indexes created successfully');
+    }
+    /**
+     * 清理同一域+竞赛下的重复活跃任务，保留最新的一条，其余归档
+     */
+    async deduplicateActiveJobs() {
+        const duplicates = await this.collection.aggregate([
+            { $match: { status: { $in: [...exports.ACTIVE_JOB_STATUSES] } } },
+            { $sort: { createdAt: -1 } },
+            {
+                $group: {
+                    _id: { domainId: '$domainId', contestId: '$contestId' },
+                    count: { $sum: 1 },
+                    ids: { $push: '$_id' },
+                },
+            },
+            { $match: { count: { $gt: 1 } } },
+        ]).toArray();
+        for (const dup of duplicates) {
+            // 保留第一条（最新），其余归档
+            const toArchive = dup.ids.slice(1);
+            await this.collection.updateMany({ _id: { $in: toArchive } }, { $set: { status: 'archived' } });
+            console.log(`[BatchSummaryJobModel] Archived ${toArchive.length} duplicate active jobs for domain=${dup._id.domainId} contest=${dup._id.contestId}`);
+        }
     }
     /**
      * 创建新的批量摘要任务

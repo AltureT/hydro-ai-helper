@@ -101,12 +101,11 @@ describe('buildMainPrompt', () => {
     expect(user).toContain('教学目标未提供');
   });
 
-  it('system prompt should contain P0/P1/P2 and "严禁捏造"', () => {
+  it('system prompt should contain P0/P1 and "严禁捏造"', () => {
     const { system } = buildMainPrompt(makeInput());
 
     expect(system).toContain('P0');
     expect(system).toContain('P1');
-    expect(system).toContain('P2');
     expect(system).toContain('严禁捏造');
   });
 
@@ -136,7 +135,7 @@ describe('buildMainPrompt', () => {
     expect(system).toContain('AI 使用数据为 0');
   });
 
-  it('should include P0/P1/P2 framework with classroom action format', () => {
+  it('should include P0/P1 framework with classroom action format', () => {
     const input = makeInput();
     const { system } = buildMainPrompt(input);
     expect(system).toContain('开场提问');
@@ -164,7 +163,7 @@ describe('buildMainPrompt', () => {
     expect(user).not.toContain('## 题目内容');
   });
 
-  it('should include output_sections with p2_behavior_intervention when behaviorSummary has data', () => {
+  it('should include output_sections with p1_behavior_intervention when behaviorSummary has data', () => {
     const input = makeInput({
       behaviorSummary: {
         persistent_learner: 8,
@@ -175,16 +174,16 @@ describe('buildMainPrompt', () => {
     });
     const { user } = buildMainPrompt(input);
     expect(user).toContain('output_sections');
-    expect(user).toContain('p2_behavior_intervention');
+    expect(user).toContain('p1_behavior_intervention');
     expect(user).toContain('persistent_learner');
     expect(user).toContain('"count": 8');
   });
 
-  it('should exclude p2_behavior_intervention from output_sections when no behaviorSummary', () => {
+  it('should exclude p1_behavior_intervention from output_sections when no behaviorSummary', () => {
     const input = makeInput({ behaviorSummary: undefined });
     const { user } = buildMainPrompt(input);
     expect(user).toContain('output_sections');
-    expect(user).not.toContain('p2_behavior_intervention');
+    expect(user).not.toContain('p1_behavior_intervention');
     expect(user).not.toContain('behaviorSummary');
   });
 
