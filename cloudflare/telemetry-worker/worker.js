@@ -98,7 +98,7 @@ class HttpError extends Error {
 function isAuthorized(request, env) {
   const token = (env.REPORT_TOKEN || '').trim();
   if (!token) {
-    return true;
+    return false;
   }
 
   const header = request.headers.get('Authorization') || '';
@@ -432,7 +432,7 @@ async function handleFeedback(request, env) {
 
 function isDashboardAuthorized(request, env) {
   const token = (env.DASHBOARD_TOKEN || '').trim();
-  if (!token) return true;
+  if (!token) return false;
   const header = request.headers.get('Authorization') || '';
   const [type, value] = header.split(' ');
   return type === 'Bearer' && value === token;

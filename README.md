@@ -97,7 +97,7 @@ git clone https://gitee.com/alture/hydro-ai-helper.git      # Gitee (mirror)
 
 cd hydro-ai-helper
 npm install
-npm run build
+npm run build:plugin
 
 # Install into HydroOJ
 hydrooj addon add /path/to/hydro-ai-helper

@@ -5,7 +5,7 @@ HydroOJ AI Helper 集成测试说明
 
 前置条件
 --------
-- HydroOJ 已安装并运行，且已加载本插件并执行 `npm run build`。
+- HydroOJ 已安装并运行，且已加载本插件并执行 `npm run build:plugin`。
 - 通过环境变量或 `.env` 配置了 `ENCRYPTION_KEY`（用于保存 AI Key）。
 - 至少有一个具备 `PRIV.PRIV_EDIT_SYSTEM` 的管理员账号（教师端接口当前也要求此权限）。
 - 准备若干题目与测试用户（学生/教师）。账号需已登录，以便获取 Cookie。

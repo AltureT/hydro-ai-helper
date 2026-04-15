@@ -26,12 +26,12 @@ jobs:
             PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.prerelease')
           else
             TAG_NAME="${{ github.event.release.tag_name }}"
-            RELEASE_NAME="${{ github.event.release.name }}"
-            RELEASE_BODY=$(cat << 'RELEASE_BODY_EOF'
-          ${{ github.event.release.body }}
-          RELEASE_BODY_EOF
-          )
-            PRERELEASE="${{ github.event.release.prerelease }}"
+            # Fetch release info via API to avoid shell injection from release body/name
+            RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG_NAME}")
+            RELEASE_NAME=$(echo "$RELEASE_INFO" | jq -r '.name // .tag_name')
+            RELEASE_BODY=$(echo "$RELEASE_INFO" | jq -r '.body // ""')
+            PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.prerelease')
           fi
 
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT

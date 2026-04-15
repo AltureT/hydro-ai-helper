@@ -20,12 +20,14 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.GITEE_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -t ed25519,rsa gitee.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
           cat >> ~/.ssh/config << EOF
           Host gitee.com
             HostName gitee.com
             User git
             IdentityFile ~/.ssh/id_rsa
-            StrictHostKeyChecking no
+            StrictHostKeyChecking accept-new
             ServerAliveInterval 60
             ServerAliveCountMax 3
             TCPKeepAlive yes
