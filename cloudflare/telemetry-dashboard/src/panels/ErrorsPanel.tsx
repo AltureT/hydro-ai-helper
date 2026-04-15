@@ -89,7 +89,8 @@ export function ErrorsPanel() {
                   )}
                 </div>
               )}
-              <div style={{ display: 'flex', gap: 16, fontSize: '12px', color: '#6b7280' }}>
+              <div style={{ display: 'flex', gap: 16, fontSize: '12px', color: '#6b7280', flexWrap: 'wrap' }}>
+                {err.versions && <span>版本: <strong style={{ color: '#1f2937' }}>{err.versions}</strong></span>}
                 <span>影响实例: <strong style={{ color: '#1f2937' }}>{err.affected_instances}</strong></span>
                 <span>总次数: <strong style={{ color: '#ef4444' }}>{err.total_count}</strong></span>
                 <span>指纹: <code style={{ fontSize: '11px' }}>{err.stack_fingerprint}</code></span>

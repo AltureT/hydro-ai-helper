@@ -500,7 +500,8 @@ async function handleDashboardErrors(request, env) {
     `SELECT stack_fingerprint, error_type, category, message, metadata,
             COUNT(DISTINCT instance_id) AS affected_instances,
             SUM(count) AS total_count,
-            MAX(last_seen) AS last_seen
+            MAX(last_seen) AS last_seen,
+            GROUP_CONCAT(DISTINCT version) AS versions
      FROM plugin_errors
      WHERE received_at >= ?
      GROUP BY stack_fingerprint
