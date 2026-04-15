@@ -97,6 +97,32 @@ export function useTeachingSummary(domainId: string, contestId: string): UseTeac
     };
   }, [stopPolling]);
 
+  // startPolling must be declared before fetchSummary to avoid TDZ
+  // (fetchSummary's dependency array evaluates startPolling immediately)
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const url = buildUrl(domainId, `/${contestId}`);
+        const res = await fetch(url, {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const fetched: TeachingSummary | null = data.summary ?? null;
+        if (fetched) {
+          setSummary(fetched);
+          if (fetched.status === 'completed' || fetched.status === 'failed') {
+            stopPolling();
+          }
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    }, POLL_INTERVAL_MS);
+  }, [domainId, contestId, stopPolling]);
+
   const fetchSummary = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -132,30 +158,6 @@ export function useTeachingSummary(domainId: string, contestId: string): UseTeac
       setLoading(false);
     }
   }, [domainId, contestId, startPolling]);
-
-  const startPolling = useCallback(() => {
-    stopPolling();
-    pollTimerRef.current = setInterval(async () => {
-      try {
-        const url = buildUrl(domainId, `/${contestId}`);
-        const res = await fetch(url, {
-          credentials: 'include',
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        const fetched: TeachingSummary | null = data.summary ?? null;
-        if (fetched) {
-          setSummary(fetched);
-          if (fetched.status === 'completed' || fetched.status === 'failed') {
-            stopPolling();
-          }
-        }
-      } catch {
-        // ignore transient poll errors
-      }
-    }, POLL_INTERVAL_MS);
-  }, [domainId, contestId, stopPolling]);
 
   const generate = useCallback(async (teachingFocus?: string, regenerate?: boolean) => {
     setLoading(true);
