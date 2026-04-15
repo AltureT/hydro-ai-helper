@@ -41,6 +41,11 @@ const I18N_FALLBACK: Record<string, string> = {
   ai_helper_teaching_summary_failed: '生成失败，请重试',
   ai_helper_teaching_summary_empty: '暂无教学总结，点击上方按钮生成',
   ai_helper_teaching_summary_generating_notice: '正在分析学生学习数据，请稍候...',
+  ai_helper_teaching_summary_phase_collecting_data: '正在收集学生提交记录和对话数据...',
+  ai_helper_teaching_summary_phase_analyzing: '正在分析错误模式和学习行为...',
+  ai_helper_teaching_summary_phase_generating_suggestion: 'AI 正在生成教学建议...',
+  ai_helper_teaching_summary_phase_deep_diving: '正在对重点问题进行深度诊断...',
+  ai_helper_teaching_summary_phase_saving: '正在保存分析结果...',
 };
 
 function t(key: string): string {
@@ -437,7 +442,9 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
         }} />
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         <div style={{ color: COLORS.textMuted, fontSize: '14px' }}>
-          {t('ai_helper_teaching_summary_generating_notice')}
+          {t(summary.progressPhase
+            ? `ai_helper_teaching_summary_phase_${summary.progressPhase}`
+            : 'ai_helper_teaching_summary_generating_notice')}
         </div>
       </div>
     );

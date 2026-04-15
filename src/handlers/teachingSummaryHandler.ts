@@ -12,6 +12,7 @@ import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
+import { TelemetryService } from '../services/telemetryService';
 
 export const TeachingSummaryHandlerPriv = PRIV.PRIV_READ_RECORD_CODE;
 
@@ -171,6 +172,7 @@ export class TeachingSummaryHandler extends Handler {
 
     try {
       await model.updateStatus(summaryId, 'generating');
+      await model.updateProgress(summaryId, 'collecting_data');
 
       // Build pid list from contest
       const pids: number[] = ((tdoc.pids || []) as unknown[])
@@ -192,6 +194,7 @@ export class TeachingSummaryHandler extends Handler {
       });
 
       // Layer 1: Analysis (with problem titles for human-readable findings)
+      await model.updateProgress(summaryId, 'analyzing');
       const analysisService = new TeachingAnalysisService(this.ctx.db);
       const analysisResult = await analysisService.analyze({
         domainId,
@@ -236,6 +239,7 @@ export class TeachingSummaryHandler extends Handler {
         ? counts : undefined;
 
       // Layer 2: AI suggestions
+      await model.updateProgress(summaryId, 'generating_suggestion');
       const aiClient = await createOpenAIClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
 
@@ -261,6 +265,7 @@ export class TeachingSummaryHandler extends Handler {
 
       // Batch-fetch code samples for all deep-dive findings (avoids N+1 queries)
       if (deepDiveFindings.length > 0) {
+        await model.updateProgress(summaryId, 'deep_diving');
         const allSampleUids = new Set<number>();
         const allSamplePids = new Set<number>();
         for (const f of deepDiveFindings) {
@@ -317,6 +322,7 @@ export class TeachingSummaryHandler extends Handler {
       }
 
       // Save completed results
+      await model.updateProgress(summaryId, 'saving');
       await model.saveResults(summaryId, {
         stats: analysisResult.stats,
         findings: analysisResult.findings,
@@ -400,6 +406,16 @@ export class TeachingSummaryFeedbackHandler extends Handler {
       }
 
       await model.saveFeedback(existing._id, rating, comment);
+
+      // Report to telemetry (fire-and-forget)
+      try {
+        const telemetryService: TelemetryService = this.ctx.get('telemetryService');
+        telemetryService.reportFeedback({
+          type: 'other',
+          subject: `teaching_summary_${rating}`,
+          body: comment || '',
+        }).catch(() => { /* ignore telemetry errors */ });
+      } catch { /* telemetryService may not be available */ }
 
       this.response.body = { ok: true };
       this.response.type = 'application/json';

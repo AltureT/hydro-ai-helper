@@ -86,6 +86,7 @@ export interface TeachingSummary {
   createdAt: Date;
   dataSnapshotAt: Date;
   status: 'pending' | 'generating' | 'completed' | 'failed';
+  progressPhase?: 'collecting_data' | 'analyzing' | 'generating_suggestion' | 'deep_diving' | 'saving';
   stats: {
     totalStudents: number;
     participatedStudents: number;
@@ -210,6 +211,17 @@ export class TeachingSummaryModel {
   ): Promise<void> {
     const _id = ensureObjectId(id);
     await this.collection.updateOne({ _id }, { $set: { status } });
+  }
+
+  /**
+   * 更新生成进度阶段
+   */
+  async updateProgress(
+    id: string | ObjectIdType,
+    phase: TeachingSummary['progressPhase'],
+  ): Promise<void> {
+    const _id = ensureObjectId(id);
+    await this.collection.updateOne({ _id }, { $set: { progressPhase: phase } });
   }
 
   /**

@@ -81,6 +81,13 @@ class TeachingSummaryModel {
         await this.collection.updateOne({ _id }, { $set: { status } });
     }
     /**
+     * 更新生成进度阶段
+     */
+    async updateProgress(id, phase) {
+        const _id = (0, ensureObjectId_1.ensureObjectId)(id);
+        await this.collection.updateOne({ _id }, { $set: { progressPhase: phase } });
+    }
+    /**
      * 保存分析结果并将状态设置为 completed
      */
     async saveResults(id, data) {

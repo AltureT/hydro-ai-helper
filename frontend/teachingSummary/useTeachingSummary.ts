@@ -35,6 +35,7 @@ export interface TeachingSummary {
   createdAt: string;
   dataSnapshotAt: string;
   status: 'pending' | 'generating' | 'completed' | 'failed';
+  progressPhase?: 'collecting_data' | 'analyzing' | 'generating_suggestion' | 'deep_diving' | 'saving';
   stats: {
     totalStudents: number;
     participatedStudents: number;

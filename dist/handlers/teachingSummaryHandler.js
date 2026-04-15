@@ -133,6 +133,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
         const startTime = Date.now();
         try {
             await model.updateStatus(summaryId, 'generating');
+            await model.updateProgress(summaryId, 'collecting_data');
             // Build pid list from contest
             const pids = (tdoc.pids || [])
                 .map((p) => parseInt(String(p).replace(/^P/i, ''), 10))
@@ -150,6 +151,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 return { pid, title, content: (doc.content || '') };
             });
             // Layer 1: Analysis (with problem titles for human-readable findings)
+            await model.updateProgress(summaryId, 'analyzing');
             const analysisService = new teachingAnalysisService_1.TeachingAnalysisService(this.ctx.db);
             const analysisResult = await analysisService.analyze({
                 domainId,
@@ -191,6 +193,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             const behaviorSummary = totalBehavior > 0
                 ? counts : undefined;
             // Layer 2: AI suggestions
+            await model.updateProgress(summaryId, 'generating_suggestion');
             const aiClient = await (0, openaiClient_1.createOpenAIClientFromConfig)(this.ctx);
             const suggestionService = new teachingSuggestionService_1.TeachingSuggestionService(aiClient);
             const overallResult = await suggestionService.generateOverallSuggestion({
@@ -211,6 +214,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             const deepDiveFindings = analysisResult.findings.filter(f => f.needsDeepDive);
             // Batch-fetch code samples for all deep-dive findings (avoids N+1 queries)
             if (deepDiveFindings.length > 0) {
+                await model.updateProgress(summaryId, 'deep_diving');
                 const allSampleUids = new Set();
                 const allSamplePids = new Set();
                 for (const f of deepDiveFindings) {
@@ -268,6 +272,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 totalCompletionTokens += deepDiveResult.tokenUsage.completionTokens;
             }
             // Save completed results
+            await model.updateProgress(summaryId, 'saving');
             await model.saveResults(summaryId, {
                 stats: analysisResult.stats,
                 findings: analysisResult.findings,
@@ -342,6 +347,16 @@ class TeachingSummaryFeedbackHandler extends hydrooj_1.Handler {
                 return;
             }
             await model.saveFeedback(existing._id, rating, comment);
+            // Report to telemetry (fire-and-forget)
+            try {
+                const telemetryService = this.ctx.get('telemetryService');
+                telemetryService.reportFeedback({
+                    type: 'other',
+                    subject: `teaching_summary_${rating}`,
+                    body: comment || '',
+                }).catch(() => { });
+            }
+            catch { /* telemetryService may not be available */ }
             this.response.body = { ok: true };
             this.response.type = 'application/json';
         }
