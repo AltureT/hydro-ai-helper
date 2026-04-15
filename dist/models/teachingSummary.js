@@ -74,6 +74,30 @@ class TeachingSummaryModel {
             .toArray();
     }
     /**
+     * 统计指定域的教学总结数量
+     */
+    async countByDomain(domainId) {
+        return this.collection.countDocuments({ domainId });
+    }
+    /**
+     * 统计指定域的反馈数据（up / down 各多少）
+     */
+    async getFeedbackStats(domainId) {
+        const results = await this.collection.aggregate([
+            { $match: { domainId, 'feedback.rating': { $exists: true } } },
+            { $group: { _id: '$feedback.rating', count: { $sum: 1 } } },
+        ]).toArray();
+        let up = 0;
+        let down = 0;
+        for (const r of results) {
+            if (r._id === 'up')
+                up = r.count;
+            else if (r._id === 'down')
+                down = r.count;
+        }
+        return { up, down };
+    }
+    /**
      * 更新总结状态
      */
     async updateStatus(id, status) {

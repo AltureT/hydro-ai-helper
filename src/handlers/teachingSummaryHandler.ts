@@ -361,9 +361,13 @@ export class TeachingReviewHandler extends Handler {
       const limit = Math.min(50, Math.max(1, parseInt(String(rawLimit || '20'), 10)));
 
       const model: TeachingSummaryModel = this.ctx.get('teachingSummaryModel');
-      const summaries = await model.findByDomain(domainId, page, limit);
+      const [summaries, total, feedbackStats] = await Promise.all([
+        model.findByDomain(domainId, page, limit),
+        model.countByDomain(domainId),
+        model.getFeedbackStats(domainId),
+      ]);
 
-      this.response.body = { summaries, page, limit };
+      this.response.body = { summaries, total, page, limit, feedbackStats };
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[TeachingReviewHandler.get] error:', err);

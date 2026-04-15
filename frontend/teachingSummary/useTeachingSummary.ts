@@ -119,13 +119,19 @@ export function useTeachingSummary(domainId: string, contestId: string): UseTeac
         return;
       }
       const data = await res.json();
-      setSummary(data.summary ?? null);
+      const fetched: TeachingSummary | null = data.summary ?? null;
+      setSummary(fetched);
+
+      // Auto-start polling if generation is in progress (e.g. after page refresh)
+      if (fetched && (fetched.status === 'pending' || fetched.status === 'generating')) {
+        startPolling();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setLoading(false);
     }
-  }, [domainId, contestId]);
+  }, [domainId, contestId, startPolling]);
 
   const startPolling = useCallback(() => {
     stopPolling();

@@ -203,6 +203,30 @@ export class TeachingSummaryModel {
   }
 
   /**
+   * 统计指定域的教学总结数量
+   */
+  async countByDomain(domainId: string): Promise<number> {
+    return this.collection.countDocuments({ domainId });
+  }
+
+  /**
+   * 统计指定域的反馈数据（up / down 各多少）
+   */
+  async getFeedbackStats(domainId: string): Promise<{ up: number; down: number }> {
+    const results = await this.collection.aggregate<{ _id: string; count: number }>([
+      { $match: { domainId, 'feedback.rating': { $exists: true } } },
+      { $group: { _id: '$feedback.rating', count: { $sum: 1 } } },
+    ]).toArray();
+    let up = 0;
+    let down = 0;
+    for (const r of results) {
+      if (r._id === 'up') up = r.count;
+      else if (r._id === 'down') down = r.count;
+    }
+    return { up, down };
+  }
+
+  /**
    * 更新总结状态
    */
   async updateStatus(

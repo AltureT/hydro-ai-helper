@@ -7,11 +7,17 @@ import { buildReviewUrl, TeachingSummary } from './useTeachingSummary';
 
 // ─── Return type ──────────────────────────────────────────────────────────────
 
+export interface FeedbackStats {
+  up: number;
+  down: number;
+}
+
 export interface UseTeachingReviewReturn {
   summaries: TeachingSummary[];
   total: number;
   page: number;
   loading: boolean;
+  feedbackStats: FeedbackStats;
   fetchList: (page: number) => Promise<void>;
 }
 
@@ -24,6 +30,7 @@ export function useTeachingReview(domainId: string): UseTeachingReviewReturn {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [feedbackStats, setFeedbackStats] = useState<FeedbackStats>({ up: 0, down: 0 });
 
   const fetchList = useCallback(async (targetPage: number) => {
     setLoading(true);
@@ -39,6 +46,9 @@ export function useTeachingReview(domainId: string): UseTeachingReviewReturn {
       setSummaries(data.summaries ?? []);
       setTotal(data.total ?? 0);
       setPage(targetPage);
+      if (data.feedbackStats) {
+        setFeedbackStats(data.feedbackStats);
+      }
     } catch {
       // ignore transient errors
     } finally {
@@ -46,5 +56,5 @@ export function useTeachingReview(domainId: string): UseTeachingReviewReturn {
     }
   }, [domainId]);
 
-  return { summaries, total, page, loading, fetchList };
+  return { summaries, total, page, loading, feedbackStats, fetchList };
 }

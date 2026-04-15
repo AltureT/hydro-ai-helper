@@ -7,12 +7,9 @@ import { BatchSummaryJobModel } from '../../models/batchSummaryJob';
 function createMockCollection() {
   return {
     createIndex: jest.fn().mockResolvedValue('ok'),
-    dropIndex: jest.fn().mockRejectedValue(new Error('ns not found')),
     insertOne: jest.fn().mockResolvedValue({ insertedId: 'job1' }),
     findOne: jest.fn().mockResolvedValue(null),
     updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
-    updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
-    aggregate: jest.fn().mockReturnValue({ toArray: jest.fn().mockResolvedValue([]) }),
   };
 }
 

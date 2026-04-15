@@ -11,7 +11,7 @@ import {
   cardStyle, getButtonStyle, getPaginationButtonStyle,
 } from '../utils/styles';
 import { TeachingSummary } from './useTeachingSummary';
-import { useTeachingReview } from './useTeachingReview';
+import { useTeachingReview, FeedbackStats } from './useTeachingReview';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -122,8 +122,24 @@ const SummaryCard: React.FC<SummaryCardProps> = ({ summary }) => {
         </div>
       )}
 
-      <div style={{ fontSize: '12px', color: COLORS.primary, marginTop: SPACING.sm, textAlign: 'right' }}>
-        查看详细分析 →
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: SPACING.sm }}>
+        {summary.feedback ? (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: '4px',
+            fontSize: '12px',
+            color: summary.feedback.rating === 'up' ? '#16A34A' : '#DC2626',
+          }}>
+            {summary.feedback.rating === 'up' ? '\u{1F44D}' : '\u{1F44E}'}
+            {summary.feedback.rating === 'up' ? '有帮助' : '没帮助'}
+          </span>
+        ) : (
+          <span style={{ fontSize: '12px', color: COLORS.textMuted }}>
+            未评价
+          </span>
+        )}
+        <span style={{ fontSize: '12px', color: COLORS.primary }}>
+          查看详细分析 →
+        </span>
       </div>
     </div>
   );
@@ -181,8 +197,50 @@ interface TeachingReviewPanelProps {
   domainId: string;
 }
 
+// ─── Feedback stats bar ──────────────────────────────────────────────────────
+
+const FeedbackStatsBar: React.FC<{ stats: FeedbackStats }> = ({ stats }) => {
+  const total = stats.up + stats.down;
+  if (total === 0) return null;
+
+  const upPct = Math.round((stats.up / total) * 100);
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: SPACING.base,
+      padding: `${SPACING.sm} ${SPACING.base}`,
+      backgroundColor: '#F8FAFC',
+      borderRadius: RADIUS.md,
+      marginBottom: SPACING.lg,
+      fontSize: '13px',
+    }}>
+      <span style={{ color: COLORS.textSecondary, fontWeight: 500 }}>教学总结反馈</span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#16A34A' }}>
+        {'\u{1F44D}'} {stats.up}
+      </span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#DC2626' }}>
+        {'\u{1F44E}'} {stats.down}
+      </span>
+      {/* Progress bar */}
+      <div style={{
+        flex: 1, height: '6px', backgroundColor: '#FEE2E2',
+        borderRadius: '3px', overflow: 'hidden', minWidth: '60px',
+      }}>
+        <div style={{
+          width: `${upPct}%`, height: '100%',
+          backgroundColor: '#16A34A', borderRadius: '3px',
+          transition: 'width 300ms ease',
+        }} />
+      </div>
+      <span style={{ color: COLORS.textMuted, fontSize: '12px' }}>
+        {upPct}% 好评
+      </span>
+    </div>
+  );
+};
+
 export const TeachingReviewPanel: React.FC<TeachingReviewPanelProps> = ({ domainId }) => {
-  const { summaries, total, page, loading, fetchList } = useTeachingReview(domainId);
+  const { summaries, total, page, loading, feedbackStats, fetchList } = useTeachingReview(domainId);
 
   useEffect(() => {
     fetchList(1);
@@ -214,6 +272,9 @@ export const TeachingReviewPanel: React.FC<TeachingReviewPanelProps> = ({ domain
           刷新
         </button>
       </div>
+
+      {/* Feedback stats */}
+      {!loading && <FeedbackStatsBar stats={feedbackStats} />}
 
       {/* Loading state */}
       {loading && (
