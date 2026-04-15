@@ -320,11 +320,9 @@ export const linkStyle: React.CSSProperties = {
 
 export const LAYOUT = {
   splitBreakpoint: 768,
-  mainColumnWidth: '58%',
-  sidebarWidth: '40%',
-  sidebarStickyTop: '16px',
-  sidebarMaxHeight: 'calc(100vh - 32px)',
+  contentMaxWidth: '1080px',
   gap: '24px',
+  sectionGap: '32px',
 };
 
 // ─── Shared Markdown Theme ───────────────────────────────────────────────────

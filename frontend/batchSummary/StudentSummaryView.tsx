@@ -6,7 +6,7 @@
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { i18n } from '@hydrooj/ui-default';
-import { COLORS, SPACING, RADIUS, SHADOWS, markdownTheme } from '../utils/styles';
+import { COLORS, SPACING, RADIUS, SHADOWS, LAYOUT, markdownTheme } from '../utils/styles';
 import { renderMarkdown } from '../utils/markdown';
 
 function t(key: string): string {
@@ -99,6 +99,9 @@ export const StudentSummaryView: React.FC<StudentSummaryViewProps> = ({ domainId
 
   return (
     <div style={{
+      maxWidth: LAYOUT.contentMaxWidth,
+      margin: '0 auto',
+      width: '100%',
       backgroundColor: COLORS.bgCard,
       borderRadius: RADIUS.md,
       boxShadow: SHADOWS.sm,

@@ -6,7 +6,7 @@
 
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { i18n } from '@hydrooj/ui-default';
-import { COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
+import { COLORS, SPACING, RADIUS, SHADOWS, LAYOUT, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
 
 /** i18n with hardcoded Chinese fallback for keys that may not yet be in lang-*.js */
 const I18N_FALLBACK: Record<string, string> = {
@@ -287,7 +287,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   }
 
   return (
-    <div style={{ fontFamily: 'inherit', color: COLORS.textPrimary }}>
+    <div style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
       <style>{markdownTheme}</style>
 
       {isTeacher && (
