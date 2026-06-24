@@ -178,7 +178,7 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
             }
             const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
             const historyModel = this.ctx.get('studentHistoryModel') || null;
-            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel);
+            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, this.ctx.get('featureStatsModel') || null);
             const pendingOnly = effectiveMode === 'new_only';
             service.execute(job, problems, (event) => {
                 if (!sse.closed) {
@@ -648,7 +648,7 @@ class BatchSummaryContinueHandler extends hydrooj_1.Handler {
             }
             const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
             const historyModel = this.ctx.get('studentHistoryModel') || null;
-            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel);
+            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, this.ctx.get('featureStatsModel') || null);
             service.execute(job, problems, (event) => {
                 if (!sse.closed) {
                     const uid = Number(event.userId);

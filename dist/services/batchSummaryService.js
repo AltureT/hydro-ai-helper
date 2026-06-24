@@ -210,13 +210,16 @@ function buildUserPrompt(problems, sampleResults) {
 }
 // ─── BatchSummaryService ──────────────────────────────────────────────────────
 class BatchSummaryService {
-    constructor(db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel) {
+    constructor(db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    featureStatsModel) {
         this.db = db;
         this.jobModel = jobModel;
         this.summaryModel = summaryModel;
         this.aiClient = aiClient;
         this.tokenUsageModel = tokenUsageModel;
         this.historyModel = historyModel || null;
+        this.featureStatsModel = featureStatsModel || null;
         this.sampler = new submissionSampler_1.SubmissionSampler();
     }
     /**
@@ -225,6 +228,7 @@ class BatchSummaryService {
      */
     async execute(job, problems, onEvent, pendingOnly = false, userNameMap) {
         // Step 1: Mark job as running
+        this.featureStatsModel?.recordAttempt('batch_summary').catch(() => { });
         await this.jobModel.updateStatus(job._id, 'running');
         // Step 2: Fetch summaries to process
         const summaries = pendingOnly
@@ -273,6 +277,10 @@ class BatchSummaryService {
         // Step 4: Finalize job status
         const finalStatus = completedCount > 0 || failedCount === 0 ? 'completed' : 'failed';
         await this.jobModel.updateStatus(job._id, finalStatus);
+        // Health signal: a job that produced at least one summary is a success.
+        if (completedCount > 0) {
+            this.featureStatsModel?.recordSuccess('batch_summary').catch(() => { });
+        }
         onEvent({
             type: 'job_done',
             completed: completedCount,

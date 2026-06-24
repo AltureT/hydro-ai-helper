@@ -64,6 +64,7 @@ const telemetryService_1 = require("./services/telemetryService");
 const effectivenessService_1 = require("./services/effectivenessService");
 const errorReporter_1 = require("./services/errorReporter");
 const requestStats_1 = require("./models/requestStats");
+const featureStats_1 = require("./models/featureStats");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
 /**
@@ -108,6 +109,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const pluginInstallModel = new pluginInstall_1.PluginInstallModel(db);
         const tokenUsageModel = new tokenUsage_1.TokenUsageModel(db);
         const requestStatsModel = new requestStats_1.RequestStatsModel(db);
+        const featureStatsModel = new featureStats_1.FeatureStatsModel(db);
         const batchSummaryJobModel = new batchSummaryJob_1.BatchSummaryJobModel(db);
         const studentSummaryModel = new studentSummary_1.StudentSummaryModel(db);
         const studentHistoryModel = new studentHistory_1.StudentHistoryModel(db);
@@ -153,6 +155,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
         await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
         await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
+        await safeEnsureIndexes(featureStatsModel, 'featureStatsModel');
         await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
         await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
         await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
@@ -191,6 +194,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('pluginInstallModel', pluginInstallModel);
         ctx.provide('tokenUsageModel', tokenUsageModel);
         ctx.provide('requestStatsModel', requestStatsModel);
+        ctx.provide('featureStatsModel', featureStatsModel);
         ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
         ctx.provide('studentSummaryModel', studentSummaryModel);
         ctx.provide('studentHistoryModel', studentHistoryModel);
@@ -200,7 +204,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const versionService = new versionService_1.VersionService(versionCacheModel);
         ctx.provide('versionService', versionService);
         // 初始化遥测服务（延迟 5 秒启动，避免阻塞插件加载）
-        const telemetryService = new telemetryService_1.TelemetryService(pluginInstallModel, conversationModel, aiConfigModel, requestStatsModel, errorReporter);
+        const telemetryService = new telemetryService_1.TelemetryService(pluginInstallModel, conversationModel, aiConfigModel, requestStatsModel, errorReporter, featureStatsModel);
         ctx.provide('telemetryService', telemetryService);
         setTimeout(() => {
             telemetryService.init().catch(err => {

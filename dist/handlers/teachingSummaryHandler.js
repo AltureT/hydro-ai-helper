@@ -131,6 +131,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
     }
     async generateAsync(model, domainId, summaryId, contestObjId, tdoc, studentUids, teachingFocus) {
         const startTime = Date.now();
+        this.ctx.get('featureStatsModel')?.recordAttempt('teaching_summary').catch(() => { });
         try {
             await model.updateStatus(summaryId, 'generating');
             await model.updateProgress(summaryId, 'collecting_data');
@@ -308,6 +309,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 tokenUsage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
                 generationTimeMs: Date.now() - startTime,
             });
+            this.ctx.get('featureStatsModel')?.recordSuccess('teaching_summary').catch(() => { });
             console.log('[TeachingSummaryHandler] generateAsync completed for summaryId=%s', summaryId);
         }
         catch (err) {

@@ -68,6 +68,7 @@ export class EffectivenessService {
    * 阶段 A：即时分析 — 计算 Group 1 + Group 3 并写入 metrics
    */
   async analyzeConversation(conversationId: string | ObjectIdType): Promise<boolean> {
+    this.recordFeatureAttempt('effectiveness_analyze');
     try {
       const messageModel: MessageModel = this.ctx.get('messageModel');
       const conversationModel: ConversationModel = this.ctx.get('conversationModel');
@@ -105,6 +106,7 @@ export class EffectivenessService {
 
       const isEffective = deriveIsEffective(metrics);
       await conversationModel.updateMetrics(convObjectId, metrics, isEffective);
+      this.recordFeatureSuccess('effectiveness_analyze');
       this.scheduleBackfill(convObjectId);
 
       return isEffective;
@@ -119,6 +121,7 @@ export class EffectivenessService {
    * 阶段 B：延迟回填 — 查询 HydroOJ record 集合获取行为信号
    */
   async backfillBehavioralSignals(conversationId: ObjectIdType): Promise<void> {
+    this.recordFeatureAttempt('effectiveness_backfill');
     try {
       const conversationModel: ConversationModel = this.ctx.get('conversationModel');
       const conv = await conversationModel.findById(conversationId);
@@ -135,6 +138,7 @@ export class EffectivenessService {
         await conversationModel.updateMetrics(
           conversationId, updated, deriveIsEffective(updated),
         );
+        this.recordFeatureSuccess('effectiveness_backfill');
         return;
       }
 
@@ -164,6 +168,7 @@ export class EffectivenessService {
 
       const isEffective = deriveIsEffective(updated);
       await conversationModel.updateMetrics(conversationId, updated, isEffective);
+      this.recordFeatureSuccess('effectiveness_backfill');
     } catch (err) {
       this.ctx.logger.error('EffectivenessService backfill error', err);
       this.reportBackgroundFailure('effectiveness_backfill', err);
@@ -220,6 +225,22 @@ export class EffectivenessService {
     } catch {
       // 遥测不得影响主流程
     }
+  }
+
+  /**
+   * 功能健康计数（fire-and-forget，绝不阻塞或影响主流程）。
+   * 用于检测「尝试发生但成功为 0」的静默瘫痪。
+   */
+  private recordFeatureAttempt(feature: string): void {
+    try {
+      this.ctx.get('featureStatsModel')?.recordAttempt(feature).catch(() => { /* best-effort */ });
+    } catch { /* best-effort */ }
+  }
+
+  private recordFeatureSuccess(feature: string): void {
+    try {
+      this.ctx.get('featureStatsModel')?.recordSuccess(feature).catch(() => { /* best-effort */ });
+    } catch { /* best-effort */ }
   }
 
   /**

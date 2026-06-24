@@ -21,12 +21,13 @@ const axios_1 = __importDefault(require("axios"));
  * Telemetry Service 类
  */
 class TelemetryService {
-    constructor(pluginInstallModel, conversationModel, aiConfigModel, requestStatsModel, errorReporter) {
+    constructor(pluginInstallModel, conversationModel, aiConfigModel, requestStatsModel, errorReporter, featureStatsModel) {
         this.pluginInstallModel = pluginInstallModel;
         this.conversationModel = conversationModel;
         this.aiConfigModel = aiConfigModel;
         this.requestStatsModel = requestStatsModel;
         this.errorReporter = errorReporter;
+        this.featureStatsModel = featureStatsModel;
         this.HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
         this.REQUEST_TIMEOUT = 8000; // 8 秒
     }
@@ -105,12 +106,13 @@ class TelemetryService {
      */
     async collect() {
         // Parallelize independent queries
-        const [activeUsers7d, totalConversations, lastUsedAt, requestStats, aiConfig] = await Promise.all([
+        const [activeUsers7d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats] = await Promise.all([
             this.conversationModel.countActiveUsers(7),
             this.conversationModel.getTotalConversations(),
             this.conversationModel.getLastConversationTime(),
             this.requestStatsModel?.getStats24h().catch(() => null),
             this.aiConfigModel?.getConfig().catch(() => null),
+            this.featureStatsModel?.getStats24h().catch(() => null),
         ]);
         const selfStats = this.errorReporter?.getSelfStats();
         return {
@@ -124,6 +126,7 @@ class TelemetryService {
             suppressedErrorCount: selfStats?.suppressedCount ?? 0,
             droppedErrorCount: selfStats?.droppedCount ?? 0,
             activeEndpointCount: aiConfig?.endpoints.filter(e => e.enabled).length ?? 0,
+            featureStats: featureStats ?? [],
         };
     }
     /**
@@ -185,6 +188,12 @@ class TelemetryService {
                     os_arch: process.arch,
                 },
                 features,
+                feature_stats: stats.featureStats.map((f) => ({
+                    feature: f.feature,
+                    attempts: f.attempts,
+                    successes: f.successes,
+                    last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
+                })),
                 domain_hash: domainHash,
                 timestamp: new Date().toISOString()
             };

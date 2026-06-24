@@ -93,6 +93,7 @@ import { TelemetryService } from './services/telemetryService';
 import { EffectivenessService } from './services/effectivenessService';
 import { ErrorReporter } from './services/errorReporter';
 import { RequestStatsModel } from './models/requestStats';
+import { FeatureStatsModel } from './models/featureStats';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -146,6 +147,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const pluginInstallModel = new PluginInstallModel(db);
     const tokenUsageModel = new TokenUsageModel(db);
     const requestStatsModel = new RequestStatsModel(db);
+    const featureStatsModel = new FeatureStatsModel(db);
     const batchSummaryJobModel = new BatchSummaryJobModel(db);
     const studentSummaryModel = new StudentSummaryModel(db);
     const studentHistoryModel = new StudentHistoryModel(db);
@@ -192,6 +194,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(pluginInstallModel, 'pluginInstallModel');
     await safeEnsureIndexes(tokenUsageModel, 'tokenUsageModel');
     await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
+    await safeEnsureIndexes(featureStatsModel, 'featureStatsModel');
     await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
     await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
     await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
@@ -232,6 +235,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('pluginInstallModel', pluginInstallModel);
     ctx.provide('tokenUsageModel', tokenUsageModel);
     ctx.provide('requestStatsModel', requestStatsModel);
+    ctx.provide('featureStatsModel', featureStatsModel);
     ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
     ctx.provide('studentSummaryModel', studentSummaryModel);
     ctx.provide('studentHistoryModel', studentHistoryModel);
@@ -245,7 +249,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // 初始化遥测服务（延迟 5 秒启动，避免阻塞插件加载）
     const telemetryService = new TelemetryService(
       pluginInstallModel, conversationModel,
-      aiConfigModel, requestStatsModel, errorReporter,
+      aiConfigModel, requestStatsModel, errorReporter, featureStatsModel,
     );
     ctx.provide('telemetryService', telemetryService);
     setTimeout(() => {

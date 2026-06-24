@@ -3,6 +3,7 @@ import { configure } from './api';
 import { OverviewPanel } from './panels/OverviewPanel';
 import { InstancesPanel } from './panels/InstancesPanel';
 import { ErrorsPanel } from './panels/ErrorsPanel';
+import { FeatureHealthPanel } from './panels/FeatureHealthPanel';
 import { FeedbackPanel } from './panels/FeedbackPanel';
 import type { Tab } from './types';
 
@@ -10,6 +11,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: '概览' },
   { key: 'instances', label: '实例' },
   { key: 'errors', label: '错误' },
+  { key: 'feature-health', label: '功能健康' },
   { key: 'feedback', label: '反馈' },
 ];
 
@@ -108,6 +110,7 @@ export function App() {
         {tab === 'overview' && <OverviewPanel />}
         {tab === 'instances' && <InstancesPanel />}
         {tab === 'errors' && <ErrorsPanel />}
+        {tab === 'feature-health' && <FeatureHealthPanel />}
         {tab === 'feedback' && <FeedbackPanel />}
       </main>
     </div>

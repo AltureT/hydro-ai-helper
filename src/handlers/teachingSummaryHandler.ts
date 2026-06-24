@@ -169,6 +169,7 @@ export class TeachingSummaryHandler extends Handler {
     teachingFocus?: string,
   ): Promise<void> {
     const startTime = Date.now();
+    this.ctx.get('featureStatsModel')?.recordAttempt('teaching_summary').catch(() => { /* best-effort */ });
 
     try {
       await model.updateStatus(summaryId, 'generating');
@@ -363,6 +364,7 @@ export class TeachingSummaryHandler extends Handler {
         generationTimeMs: Date.now() - startTime,
       });
 
+      this.ctx.get('featureStatsModel')?.recordSuccess('teaching_summary').catch(() => { /* best-effort */ });
       console.log('[TeachingSummaryHandler] generateAsync completed for summaryId=%s', summaryId);
     } catch (err) {
       console.error('[TeachingSummaryHandler] generateAsync failed for summaryId=%s:', summaryId, err);

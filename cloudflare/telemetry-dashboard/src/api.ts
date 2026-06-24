@@ -1,4 +1,4 @@
-import type { Overview, Instance, ErrorGroup, FeedbackItem } from './types';
+import type { Overview, Instance, ErrorGroup, FeedbackItem, FeatureHealth } from './types';
 
 let apiBase = '';
 let token = '';
@@ -26,3 +26,6 @@ export const getErrors = (limit = 50, offset = 0) =>
 
 export const getFeedback = (limit = 50, offset = 0) =>
   fetchApi<{ feedback: FeedbackItem[] }>(`/api/dashboard/feedback?limit=${limit}&offset=${offset}`);
+
+export const getFeatureHealth = () =>
+  fetchApi<{ features: FeatureHealth[] }>('/api/dashboard/feature-health');

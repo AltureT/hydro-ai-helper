@@ -40,4 +40,13 @@ export interface FeedbackItem {
   received_at: string;
 }
 
-export type Tab = 'overview' | 'instances' | 'errors' | 'feedback';
+export interface FeatureHealth {
+  feature: string;
+  attempts: number;
+  successes: number;
+  broken_instances: number;
+  reporting_instances: number;
+  last_success_at: string | null;
+}
+
+export type Tab = 'overview' | 'instances' | 'errors' | 'feature-health' | 'feedback';

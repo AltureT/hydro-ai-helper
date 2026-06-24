@@ -212,6 +212,7 @@ export class BatchSummaryGenerateHandler extends Handler {
         aiClient,
         tokenUsageModel,
         historyModel,
+        this.ctx.get('featureStatsModel') || null,
       );
 
       const pendingOnly = effectiveMode === 'new_only';
@@ -733,6 +734,7 @@ export class BatchSummaryContinueHandler extends Handler {
         aiClient,
         tokenUsageModel,
         historyModel,
+        this.ctx.get('featureStatsModel') || null,
       );
 
       service.execute(job, problems, (event) => {

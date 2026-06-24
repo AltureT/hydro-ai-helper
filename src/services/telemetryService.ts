@@ -11,6 +11,7 @@ import type { PluginInstallModel } from '../models/pluginInstall';
 import type { ConversationModel } from '../models/conversation';
 import type { AIConfigModel } from '../models/aiConfig';
 import type { RequestStatsModel } from '../models/requestStats';
+import type { FeatureStatsModel, FeatureStats24h } from '../models/featureStats';
 import type { ErrorReporter } from './errorReporter';
 
 /**
@@ -32,6 +33,19 @@ interface TelemetryData {
   suppressedErrorCount: number;
   droppedErrorCount: number;
   activeEndpointCount: number;
+  featureStats: FeatureStats24h[];
+}
+
+/**
+ * Per-feature health entry sent in the heartbeat. `last_success_at` lets the
+ * dashboard flag features that stopped producing results even when nothing
+ * threw (attempts>0 && successes==0).
+ */
+interface FeatureStatPayload {
+  feature: string;
+  attempts: number;
+  successes: number;
+  last_success_at?: string;
 }
 
 /**
@@ -75,6 +89,7 @@ interface ReportPayload {
   };
   environment?: EnvironmentInfo;
   features?: FeatureFlags;
+  feature_stats?: FeatureStatPayload[];
   domain_hash: string;
   timestamp: string;
 }
@@ -103,6 +118,7 @@ export class TelemetryService {
     private aiConfigModel?: AIConfigModel,
     private requestStatsModel?: RequestStatsModel,
     private errorReporter?: ErrorReporter,
+    private featureStatsModel?: FeatureStatsModel,
   ) { }
 
   /**
@@ -188,12 +204,13 @@ export class TelemetryService {
    */
   private async collect(): Promise<TelemetryData> {
     // Parallelize independent queries
-    const [activeUsers7d, totalConversations, lastUsedAt, requestStats, aiConfig] = await Promise.all([
+    const [activeUsers7d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats] = await Promise.all([
       this.conversationModel.countActiveUsers(7),
       this.conversationModel.getTotalConversations(),
       this.conversationModel.getLastConversationTime(),
       this.requestStatsModel?.getStats24h().catch(() => null),
       this.aiConfigModel?.getConfig().catch(() => null),
+      this.featureStatsModel?.getStats24h().catch(() => null),
     ]);
 
     const selfStats = this.errorReporter?.getSelfStats();
@@ -209,6 +226,7 @@ export class TelemetryService {
       suppressedErrorCount: selfStats?.suppressedCount ?? 0,
       droppedErrorCount: selfStats?.droppedCount ?? 0,
       activeEndpointCount: aiConfig?.endpoints.filter(e => e.enabled).length ?? 0,
+      featureStats: featureStats ?? [],
     };
   }
 
@@ -275,6 +293,12 @@ export class TelemetryService {
           os_arch: process.arch,
         },
         features,
+        feature_stats: stats.featureStats.map((f) => ({
+          feature: f.feature,
+          attempts: f.attempts,
+          successes: f.successes,
+          last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
+        })),
         domain_hash: domainHash,
         timestamp: new Date().toISOString()
       };

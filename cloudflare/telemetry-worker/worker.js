@@ -217,6 +217,39 @@ async function handleReport(request, env) {
       )
       .run();
 
+    // Per-feature health snapshot (optional, backward compatible). Upsert one
+    // row per (instance_id, feature) holding the latest 24h counters.
+    if (Array.isArray(body.feature_stats) && body.feature_stats.length > 0) {
+      const reportAt = lastReportAt.toISOString();
+      const featureStmts = [];
+      for (const f of body.feature_stats.slice(0, 50)) {
+        if (!isRecord(f) || typeof f.feature !== 'string' || f.feature.trim() === '') continue;
+        featureStmts.push(
+          env.DB.prepare(
+            `INSERT INTO plugin_feature_stats (
+              instance_id, feature, attempts, successes, last_success_at, version, report_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instance_id, feature) DO UPDATE SET
+              attempts = excluded.attempts,
+              successes = excluded.successes,
+              last_success_at = excluded.last_success_at,
+              version = excluded.version,
+              report_at = excluded.report_at,
+              received_at = datetime('now')`,
+          ).bind(
+            instanceId,
+            f.feature.slice(0, 60),
+            Math.max(0, Math.floor(typeof f.attempts === 'number' ? f.attempts : 0)),
+            Math.max(0, Math.floor(typeof f.successes === 'number' ? f.successes : 0)),
+            typeof f.last_success_at === 'string' ? f.last_success_at.slice(0, 40) : null,
+            version,
+            reportAt,
+          ),
+        );
+      }
+      if (featureStmts.length > 0) await env.DB.batch(featureStmts);
+    }
+
     return json({ success: true }, { status: 200 });
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 500;
@@ -540,6 +573,31 @@ async function handleDashboardErrors(request, env) {
   return json({ errors: rows?.results || [] });
 }
 
+async function handleDashboardFeatureHealth(request, env) {
+  if (!isDashboardAuthorized(request, env)) {
+    return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // Aggregate the latest per-instance snapshots across instances that reported
+  // in the last 7 days. broken_instances = instances that attempted the feature
+  // but produced zero successes (the "100% broken, error rate 0%" signal).
+  const cutoff7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const rows = await env.DB.prepare(
+    `SELECT feature,
+            SUM(attempts) AS attempts,
+            SUM(successes) AS successes,
+            SUM(CASE WHEN attempts > 0 AND successes = 0 THEN 1 ELSE 0 END) AS broken_instances,
+            COUNT(*) AS reporting_instances,
+            MAX(last_success_at) AS last_success_at
+     FROM plugin_feature_stats
+     WHERE report_at >= ?
+     GROUP BY feature
+     ORDER BY feature`,
+  ).bind(cutoff7d).all();
+
+  return json({ features: rows?.results || [] });
+}
+
 async function handleDashboardFeedback(request, env) {
   if (!isDashboardAuthorized(request, env)) {
     return json({ success: false, error: 'Unauthorized' }, { status: 401 });
@@ -599,6 +657,8 @@ export default {
         return handleDashboardInstances(request, env);
       case '/api/dashboard/errors':
         return handleDashboardErrors(request, env);
+      case '/api/dashboard/feature-health':
+        return handleDashboardFeatureHealth(request, env);
       case '/api/dashboard/feedback':
         return handleDashboardFeedback(request, env);
       case '/api/badge-installs':
@@ -635,6 +695,11 @@ export default {
       await env.DB.prepare(
         `DELETE FROM plugin_errors WHERE received_at < ?`,
       ).bind(cutoff30d).run();
+
+      // Clean up feature-health snapshots from instances that stopped reporting (90 days)
+      await env.DB.prepare(
+        `DELETE FROM plugin_feature_stats WHERE report_at < ?`,
+      ).bind(cutoff90d).run();
 
       // Clean up old feedback (90 days)
       await env.DB.prepare(

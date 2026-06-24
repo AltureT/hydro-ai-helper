@@ -56,6 +56,7 @@ class EffectivenessService {
      * 阶段 A：即时分析 — 计算 Group 1 + Group 3 并写入 metrics
      */
     async analyzeConversation(conversationId) {
+        this.recordFeatureAttempt('effectiveness_analyze');
         try {
             const messageModel = this.ctx.get('messageModel');
             const conversationModel = this.ctx.get('conversationModel');
@@ -83,6 +84,7 @@ class EffectivenessService {
             };
             const isEffective = deriveIsEffective(metrics);
             await conversationModel.updateMetrics(convObjectId, metrics, isEffective);
+            this.recordFeatureSuccess('effectiveness_analyze');
             this.scheduleBackfill(convObjectId);
             return isEffective;
         }
@@ -96,6 +98,7 @@ class EffectivenessService {
      * 阶段 B：延迟回填 — 查询 HydroOJ record 集合获取行为信号
      */
     async backfillBehavioralSignals(conversationId) {
+        this.recordFeatureAttempt('effectiveness_backfill');
         try {
             const conversationModel = this.ctx.get('conversationModel');
             const conv = await conversationModel.findById(conversationId);
@@ -110,6 +113,7 @@ class EffectivenessService {
                     backfilledAt: new Date(),
                 };
                 await conversationModel.updateMetrics(conversationId, updated, deriveIsEffective(updated));
+                this.recordFeatureSuccess('effectiveness_backfill');
                 return;
             }
             const windowEnd = new Date(conv.endTime.getTime() + BACKFILL_DELAY_MS);
@@ -135,6 +139,7 @@ class EffectivenessService {
             };
             const isEffective = deriveIsEffective(updated);
             await conversationModel.updateMetrics(conversationId, updated, isEffective);
+            this.recordFeatureSuccess('effectiveness_backfill');
         }
         catch (err) {
             this.ctx.logger.error('EffectivenessService backfill error', err);
@@ -182,6 +187,22 @@ class EffectivenessService {
         catch {
             // 遥测不得影响主流程
         }
+    }
+    /**
+     * 功能健康计数（fire-and-forget，绝不阻塞或影响主流程）。
+     * 用于检测「尝试发生但成功为 0」的静默瘫痪。
+     */
+    recordFeatureAttempt(feature) {
+        try {
+            this.ctx.get('featureStatsModel')?.recordAttempt(feature).catch(() => { });
+        }
+        catch { /* best-effort */ }
+    }
+    recordFeatureSuccess(feature) {
+        try {
+            this.ctx.get('featureStatsModel')?.recordSuccess(feature).catch(() => { });
+        }
+        catch { /* best-effort */ }
     }
     /**
      * 记录越狱尝试日志
