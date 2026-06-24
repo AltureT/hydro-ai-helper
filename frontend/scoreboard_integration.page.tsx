@@ -24,18 +24,40 @@ function parseScoreboardUrl(): { domainId: string; contestId: string } | null {
 
 // ─── Permission detection ─────────────────────────────────────────────────────
 
-const PRIV_READ_RECORD_CODE = 1 << 7;
+const PRIV_READ_RECORD_CODE = 1 << 7;        // global system PRIV bit
+const PERM_READ_RECORD_CODE = 1n << 12n;     // domain PERM bit (BigInt in HydroOJ)
 
 function hasTeacherPrivilege(): boolean {
   const ctx = (window as any).UserContext;
   if (!ctx || !ctx._id) return false;
 
+  // 1) Global system privilege: superadmin or PRIV_READ_RECORD_CODE.
   const priv = ctx.priv;
   if (typeof priv === 'number') {
     if (priv < 0) return true;
     if ((priv & PRIV_READ_RECORD_CODE) !== 0) return true;
   }
 
+  // 2) Domain permission is the authoritative "is teacher" signal inside a
+  //    contest/domain. When perm is available we trust it EXCLUSIVELY: a student
+  //    placed in a custom domain role has a non-'default' role but lacks this
+  //    permission bit, and must NOT be treated as a teacher. The previous
+  //    "role !== 'default'" heuristic mis-classified such students as teachers,
+  //    rendering the teacher panel (which 403s) instead of StudentSummaryView,
+  //    so they never saw their own published learning summary.
+  //    perm is serialized to the browser as a bigint string or number.
+  const rawPerm = ctx.perm;
+  if (rawPerm !== undefined && rawPerm !== null && rawPerm !== '') {
+    try {
+      const perm = typeof rawPerm === 'bigint' ? rawPerm : BigInt(rawPerm);
+      return perm < 0n || (perm & PERM_READ_RECORD_CODE) !== 0n;
+    } catch {
+      /* perm not a valid bigint — fall through to the legacy role heuristic */
+    }
+  }
+
+  // 3) Fallback ONLY when domain perm is unavailable/unparseable, so real
+  //    teachers are not under-detected on HydroOJ builds that don't expose perm.
   const role = ctx.role;
   if (typeof role === 'string' && role !== 'default' && role !== 'guest' && role !== '') return true;
 
