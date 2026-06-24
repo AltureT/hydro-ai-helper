@@ -173,11 +173,15 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
     );
   };
 
-  // Build the message nodes once per `messages` change. Selecting text only
-  // updates popup state (popupPosition); without this memo the whole list
-  // re-renders and React rewrites each .markdown-body's innerHTML, which
-  // detaches the live selection's text node and collapses the highlight.
-  // Stable element references make React bail out of these subtrees.
+  // Memoize message nodes on `messages`. Selecting text only changes popup
+  // state, so without this the whole list re-renders on every selection — and
+  // in the live runtime that re-render coincided with the AI bubble's rendered
+  // DOM being replaced (observed via MutationObserver), which detached the
+  // user's selection and collapsed the highlight. Stable element references
+  // make React bail out of these subtrees, so the selection's DOM (and the
+  // native highlight) survive; it also avoids re-rendering completed messages
+  // on every keystroke. (renderMarkdown itself is deterministic — verified
+  // end-to-end — so this is not about unstable HTML output.)
   const messageNodes = useMemo(
     () => messages.map((msg, idx) => renderMessage(msg, idx)),
     [messages],
