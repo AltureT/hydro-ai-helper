@@ -47,3 +47,6 @@ QUICKSTART.md
 
 # Wrangler local cache
 .wrangler/
+
+# LanceDB local vector store (generated runtime data)
+lancedb/
