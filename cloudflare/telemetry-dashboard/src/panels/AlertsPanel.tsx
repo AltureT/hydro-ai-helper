@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { getAlerts } from '../api';
-import type { Alert } from '../types';
+import { getAlerts, getAlertConfig, saveAlertConfig, testAlertConfig, removeAlertConfig } from '../api';
+import type { Alert, TelegramConfig } from '../types';
 
 const SEVERITY: Record<string, { label: string; bg: string; color: string; border: string }> = {
   critical: { label: '严重', bg: '#fef2f2', color: '#b91c1c', border: '#fecaca' },
@@ -9,6 +9,15 @@ const SEVERITY: Record<string, { label: string; bg: string; color: string; borde
 };
 
 export function AlertsPanel() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <TelegramConfigCard />
+      <AlertsList />
+    </div>
+  );
+}
+
+function AlertsList() {
   const [data, setData] = useState<Alert[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -29,7 +38,7 @@ export function AlertsPanel() {
     <div style={cardStyle}>
       <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>告警 ({data.length})</h3>
       <p style={{ margin: '0 0 16px', fontSize: '12px', color: '#6b7280' }}>
-        近 7 天，worker 每小时基于错误 / 功能健康自动评估（外部推送需配置 ALERT_WEBHOOK_URL）
+        近 7 天，worker 每小时基于错误 / 功能健康自动评估
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {data.map(a => {
@@ -58,10 +67,107 @@ export function AlertsPanel() {
   );
 }
 
+function TelegramConfigCard() {
+  const [cfg, setCfg] = useState<TelegramConfig | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [chatId, setChatId] = useState('');
+  const [token, setToken] = useState('');
+  const [status, setStatus] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    getAlertConfig()
+      .then(r => { setCfg(r.telegram); setEnabled(r.telegram.enabled); setChatId(r.telegram.chat_id || ''); })
+      .catch(e => setStatus('加载失败: ' + e.message));
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, []);
+
+  const save = async () => {
+    setBusy(true); setStatus('');
+    try {
+      const res = await saveAlertConfig({ enabled, chat_id: chatId, token: token || undefined });
+      if (res.success) { setStatus('已保存 ✓'); setToken(''); load(); }
+      else setStatus('保存失败: ' + (res.error || ''));
+    } catch (e) { setStatus('保存失败: ' + (e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const test = async () => {
+    setBusy(true); setStatus('发送测试中...');
+    try {
+      const res = await testAlertConfig();
+      setStatus(res.ok ? '测试消息已发送 ✓' : '测试失败: ' + (res.error || ''));
+    } catch (e) { setStatus('测试失败: ' + (e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async () => {
+    setBusy(true); setStatus('');
+    try {
+      await removeAlertConfig();
+      setEnabled(false); setChatId(''); setToken(''); setStatus('已移除');
+      load();
+    } catch (e) { setStatus('移除失败: ' + (e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const placeholder = cfg?.configured
+    ? `已配置 (bot ${cfg.bot_id || '?'})，留空保持不变`
+    : '粘贴 Bot Token';
+
+  return (
+    <div style={cardStyle}>
+      <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>Telegram 通知</h3>
+      <p style={{ margin: '0 0 16px', fontSize: '12px', color: '#6b7280' }}>
+        告警将推送到此 Telegram 会话。Token 加密存储、只写不回显。
+        {cfg && cfg.configured && !cfg.decryptable && (
+          <span style={{ color: '#dc2626' }}> ⚠ 无法解密(密钥可能已轮换),请重新填写 token。</span>
+        )}
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 480 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '14px' }}>
+          <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} /> 启用
+        </label>
+        <label style={labelStyle}>Chat ID
+          <input style={inputStyle} value={chatId} onChange={e => setChatId(e.target.value)} placeholder="-1001234567890 或 @channel" />
+        </label>
+        <label style={labelStyle}>Bot Token
+          <input style={inputStyle} type="password" autoComplete="off" value={token} onChange={e => setToken(e.target.value)} placeholder={placeholder} />
+        </label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={btnPrimary} disabled={busy} onClick={save}>保存</button>
+          <button style={btnSecondary} disabled={busy || !cfg?.configured} onClick={test}>发送测试</button>
+          <button style={btnDanger} disabled={busy || !cfg?.configured} onClick={remove}>移除</button>
+        </div>
+        {status && <div style={{ fontSize: '13px', color: '#374151' }}>{status}</div>}
+      </div>
+    </div>
+  );
+}
+
 const cardStyle: React.CSSProperties = {
   padding: '20px', background: '#fff', borderRadius: 12,
   boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
 };
 const rowStyle: React.CSSProperties = {
   padding: '14px 16px', borderRadius: 8, border: '1px solid #f3f4f6',
+};
+const labelStyle: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', gap: 6, fontSize: '13px', fontWeight: 500, color: '#374151',
+};
+const inputStyle: React.CSSProperties = {
+  padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: '14px', outline: 'none',
+};
+const btnPrimary: React.CSSProperties = {
+  padding: '8px 16px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 8,
+  fontSize: '14px', fontWeight: 600, cursor: 'pointer',
+};
+const btnSecondary: React.CSSProperties = {
+  padding: '8px 16px', background: '#fff', color: '#2563eb', border: '1px solid #2563eb', borderRadius: 8,
+  fontSize: '14px', fontWeight: 600, cursor: 'pointer',
+};
+const btnDanger: React.CSSProperties = {
+  padding: '8px 16px', background: '#fff', color: '#dc2626', border: '1px solid #fecaca', borderRadius: 8,
+  fontSize: '14px', fontWeight: 600, cursor: 'pointer',
 };

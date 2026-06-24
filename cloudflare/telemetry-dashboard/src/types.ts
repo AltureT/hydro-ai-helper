@@ -71,4 +71,18 @@ export interface Alert {
   created_at: string;
 }
 
+export interface TelegramConfig {
+  enabled: boolean;
+  configured: boolean;
+  decryptable: boolean;
+  bot_id: string | null;
+  chat_id: string | null;
+}
+
+export interface TelegramConfigInput {
+  enabled: boolean;
+  chat_id: string;
+  token?: string; // omitted ⇒ keep existing token
+}
+
 export type Tab = 'overview' | 'instances' | 'errors' | 'feature-health' | 'alerts' | 'feedback';

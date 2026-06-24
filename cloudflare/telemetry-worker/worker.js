@@ -1,3 +1,15 @@
+import {
+  deriveAesKey,
+  decryptConfig,
+  readAlertConfig,
+  writeAlertConfig,
+  removeAlertConfig,
+  buildSafeAlertText,
+  buildTelegramRequest,
+  mapTelegramError,
+  testThrottled,
+} from './alertConfig.mjs';
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -818,23 +830,27 @@ async function evaluateAlerts(env) {
 }
 
 async function pushAlerts(alerts, env) {
+  // Channel 1: opt-in generic webhook (admin-set secret).
   const url = (env.ALERT_WEBHOOK_URL || '').trim();
-  if (!url) return; // external push is opt-in
-  const format = (env.ALERT_WEBHOOK_FORMAT || 'generic').trim().toLowerCase();
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formatAlertPayload(format, alerts)),
-    });
-  } catch (e) {
-    console.error('[alerts] webhook push failed', e);
+  if (url) {
+    const format = (env.ALERT_WEBHOOK_FORMAT || 'generic').trim().toLowerCase();
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formatAlertPayload(format, alerts)),
+      });
+    } catch (e) {
+      console.error('[alerts] webhook push failed', e);
+    }
   }
+  // Channel 2: in-panel Telegram (D1 config). Best-effort; never breaks the cron.
+  await pushTelegram(alerts, env).catch((e) => console.error('[alerts] telegram push failed', e));
 }
 
+// External-push text is redacted (title + severity only, never raw detail/sample).
 function formatAlertPayload(format, alerts) {
-  const lines = alerts.map((a) => `[${a.severity}] ${a.title}${a.detail ? ` — ${a.detail}` : ''}`);
-  const text = `🚨 hydro-ai-helper 告警 (${alerts.length})\n${lines.join('\n')}`;
+  const text = buildSafeAlertText(alerts);
   switch (format) {
     case 'slack':
       return { text };
@@ -845,7 +861,145 @@ function formatAlertPayload(format, alerts) {
     case 'dingtalk':
       return { msgtype: 'text', text: { content: text } };
     default:
-      return { summary: `${alerts.length} alert(s)`, text, alerts };
+      // Structured, non-secret fields only — no raw `detail`.
+      return {
+        summary: `${alerts.length} alert(s)`,
+        text,
+        alerts: alerts.map((a) => ({ severity: a.severity, title: a.title, alert_key: a.alert_key })),
+      };
+  }
+}
+
+// ─── In-panel Telegram alert config ────────────────────
+
+/** Single-row D1-backed store consumed by the alertConfig handlers. */
+function alertConfigStore(env) {
+  return {
+    async get() {
+      return env.DB.prepare(
+        `SELECT id, enabled, bot_id, config_cipher, config_iv, key_version, last_test_at
+         FROM plugin_alert_channels WHERE id = 'telegram'`,
+      ).first();
+    },
+    async put(row) {
+      await env.DB.prepare(
+        `INSERT INTO plugin_alert_channels (id, enabled, bot_id, config_cipher, config_iv, key_version, updated_at)
+         VALUES ('telegram', ?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           enabled = excluded.enabled, bot_id = excluded.bot_id,
+           config_cipher = excluded.config_cipher, config_iv = excluded.config_iv,
+           key_version = excluded.key_version, updated_at = excluded.updated_at`,
+      ).bind(row.enabled, row.bot_id, row.config_cipher, row.config_iv, row.key_version).run();
+    },
+    async del() {
+      await env.DB.prepare(`DELETE FROM plugin_alert_channels WHERE id = 'telegram'`).run();
+    },
+  };
+}
+
+/** Derive the envelope key from the dedicated secret. null ⇒ key not configured. */
+async function alertKey(env) {
+  const secret = (env.ALERT_CONFIG_KEY || '').trim();
+  if (!secret) return null;
+  return deriveAesKey(secret);
+}
+
+function noStoreJson(data, status = 200) {
+  return json(data, { status, headers: { 'Cache-Control': 'no-store' } });
+}
+
+async function pushTelegram(alerts, env) {
+  const key = await alertKey(env);
+  if (!key) return;
+  const row = await alertConfigStore(env).get();
+  if (!row || !row.enabled || !row.config_cipher) return;
+  let cfg;
+  try {
+    cfg = await decryptConfig(key, row.config_cipher, row.config_iv, { id: 'telegram', keyVersion: row.key_version });
+  } catch {
+    return; // rotated key / tampered row — skip silently
+  }
+  await sendTelegram(cfg.token, cfg.chat_id, buildSafeAlertText(alerts));
+}
+
+/** Fire a Telegram sendMessage. Never logs the URL/token/body; bounded + redirect-safe. */
+async function sendTelegram(token, chatId, text) {
+  const { url, body } = buildTelegramRequest(token, chatId, text);
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    redirect: 'error',
+    signal: AbortSignal.timeout(8000),
+  });
+  return resp.status; // caller maps; response body intentionally discarded
+}
+
+async function handleAlertConfigGet(request, env) {
+  if (!isDashboardAuthorized(request, env)) return noStoreJson({ success: false, error: 'Unauthorized' }, 401);
+  const key = await alertKey(env);
+  if (!key) return noStoreJson({ success: false, error: 'encryption key not configured (set ALERT_CONFIG_KEY)' }, 503);
+  const telegram = await readAlertConfig(alertConfigStore(env), key);
+  return noStoreJson({ telegram });
+}
+
+async function handleAlertConfigSave(request, env) {
+  if (!isDashboardAuthorized(request, env)) return noStoreJson({ success: false, error: 'Unauthorized' }, 401);
+  const key = await alertKey(env);
+  if (!key) return noStoreJson({ success: false, error: 'encryption key not configured (set ALERT_CONFIG_KEY)' }, 503);
+
+  if (Number(request.headers.get('content-length') || 0) > 4096) {
+    return noStoreJson({ success: false, error: 'body too large' }, 413);
+  }
+  let body;
+  try { body = await request.json(); } catch { return noStoreJson({ success: false, error: 'Invalid JSON body' }, 400); }
+  if (!isRecord(body) || !isRecord(body.telegram)) return noStoreJson({ success: false, error: 'telegram object required' }, 400);
+
+  const t = body.telegram;
+  const res = await writeAlertConfig(alertConfigStore(env), key, {
+    enabled: t.enabled === true,
+    chat_id: typeof t.chat_id === 'string' ? t.chat_id : '',
+    token: typeof t.token === 'string' && t.token !== '' ? t.token : undefined,
+  });
+  if (!res.ok) return noStoreJson({ success: false, error: res.error }, 400);
+  return noStoreJson({ success: true });
+}
+
+async function handleAlertConfigRemove(request, env) {
+  if (!isDashboardAuthorized(request, env)) return noStoreJson({ success: false, error: 'Unauthorized' }, 401);
+  if (request.method !== 'POST') return noStoreJson({ success: false, error: 'Method Not Allowed' }, 405);
+  await removeAlertConfig(alertConfigStore(env));
+  return noStoreJson({ success: true });
+}
+
+async function handleAlertConfigTest(request, env) {
+  if (!isDashboardAuthorized(request, env)) return noStoreJson({ success: false, error: 'Unauthorized' }, 401);
+  if (request.method !== 'POST') return noStoreJson({ success: false, error: 'Method Not Allowed' }, 405);
+  const key = await alertKey(env);
+  if (!key) return noStoreJson({ success: false, error: 'encryption key not configured (set ALERT_CONFIG_KEY)' }, 503);
+
+  const store = alertConfigStore(env);
+  const row = await store.get();
+  if (!row || !row.config_cipher) return noStoreJson({ ok: false, error: 'not_configured' });
+
+  const lastMs = row.last_test_at ? Date.parse(row.last_test_at) : null;
+  if (testThrottled(lastMs, Date.now())) return noStoreJson({ ok: false, error: 'rate_limited' }, 429);
+
+  let cfg;
+  try {
+    cfg = await decryptConfig(key, row.config_cipher, row.config_iv, { id: 'telegram', keyVersion: row.key_version });
+  } catch {
+    return noStoreJson({ ok: false, error: 'not_decryptable' });
+  }
+
+  await env.DB.prepare(`UPDATE plugin_alert_channels SET last_test_at = datetime('now') WHERE id = 'telegram'`).run();
+
+  try {
+    const status = await sendTelegram(cfg.token, cfg.chat_id, '✅ hydro-ai-helper 测试消息');
+    const code = mapTelegramError(status);
+    return noStoreJson({ ok: code === null, error: code || undefined });
+  } catch {
+    return noStoreJson({ ok: false, error: 'upstream_failure' });
   }
 }
 
@@ -906,6 +1060,14 @@ export default {
         return handleDashboardFeatureHealth(request, env);
       case '/api/dashboard/alerts':
         return handleDashboardAlerts(request, env);
+      case '/api/dashboard/alert-config':
+        return request.method === 'POST'
+          ? handleAlertConfigSave(request, env)
+          : handleAlertConfigGet(request, env);
+      case '/api/dashboard/alert-config/remove':
+        return handleAlertConfigRemove(request, env);
+      case '/api/dashboard/alert-config/test':
+        return handleAlertConfigTest(request, env);
       case '/api/dashboard/feedback':
         return handleDashboardFeedback(request, env);
       case '/api/badge-installs':
