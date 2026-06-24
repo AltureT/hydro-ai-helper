@@ -8,6 +8,18 @@ const SEVERITY: Record<string, { label: string; bg: string; color: string; borde
   info: { label: '提示', bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
 };
 
+const ERR_MSG: Record<string, string> = {
+  rate_limited: '操作过于频繁，请几秒后再试',
+  invalid_token: 'Bot Token 无效',
+  chat_not_found: 'Chat ID 无效，或机器人尚未加入该会话',
+  not_decryptable: '无法解密，请重新填写 Token',
+  not_configured: '请先保存配置',
+  upstream_failure: 'Telegram 暂时不可达，请稍后重试',
+  invalid_chat_id: 'Chat ID 格式不对（应为数字或 @用户名）',
+  token_required: '请填写 Bot Token',
+};
+const errText = (code?: string) => (code && ERR_MSG[code]) || code || '未知错误';
+
 export function AlertsPanel() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -88,7 +100,7 @@ function TelegramConfigCard() {
     try {
       const res = await saveAlertConfig({ enabled, chat_id: chatId, token: token || undefined });
       if (res.success) { setStatus('已保存 ✓'); setToken(''); load(); }
-      else setStatus('保存失败: ' + (res.error || ''));
+      else setStatus('保存失败: ' + errText(res.error));
     } catch (e) { setStatus('保存失败: ' + (e as Error).message); }
     finally { setBusy(false); }
   };
@@ -97,7 +109,9 @@ function TelegramConfigCard() {
     setBusy(true); setStatus('发送测试中...');
     try {
       const res = await testAlertConfig();
-      setStatus(res.ok ? '测试消息已发送 ✓' : '测试失败: ' + (res.error || ''));
+      if (res.ok) setStatus('测试消息已发送 ✓');
+      else if (res.error === 'rate_limited') setStatus('⏳ ' + errText('rate_limited'));
+      else setStatus('测试失败: ' + errText(res.error));
     } catch (e) { setStatus('测试失败: ' + (e as Error).message); }
     finally { setBusy(false); }
   };

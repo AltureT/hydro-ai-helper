@@ -166,8 +166,10 @@ export async function removeAlertConfig(store) {
   return { ok: true };
 }
 
-/** True if a test send is too soon after the last one (anti-spam). */
-export function testThrottled(lastTestMs, nowMs, minGapMs = 12000) {
+// True if a test send is too soon after the last one (anti-spam). 5s is enough
+// to stop accidental rapid re-clicks on an already-authed endpoint while still
+// allowing retry-after-fix during interactive configuration.
+export function testThrottled(lastTestMs, nowMs, minGapMs = 5000) {
   if (lastTestMs == null) return false;
   return nowMs - lastTestMs < minGapMs;
 }
