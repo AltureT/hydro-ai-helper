@@ -931,7 +931,7 @@ async function sendTelegram(token, chatId, text) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    redirect: 'error',
+    redirect: 'manual', // CF edge rejects 'error'; 'manual' still does NOT follow redirects
     signal: AbortSignal.timeout(8000),
   });
   let description;
