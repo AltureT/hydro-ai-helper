@@ -160,7 +160,12 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
         await model.ensureIndexes();
       } catch (err) {
         console.warn(`[AI-Helper] ${name} 索引创建失败，插件继续运行:`, err);
-        errorReporter.capture('startup_failure', 'db', `Index creation failed: ${name}`, undefined, err instanceof Error ? err.stack : undefined);
+        // Include the underlying error text so the telemetry dashboard shows the
+        // real cause (e.g. E11000 / partialFilterExpression unsupported) instead
+        // of an opaque "Index creation failed: <name>". Fingerprint is computed
+        // from the stack, so a varying message does not fragment error grouping.
+        const detail = err instanceof Error ? err.message : String(err);
+        errorReporter.capture('startup_failure', 'db', `Index creation failed: ${name}: ${detail}`, undefined, err instanceof Error ? err.stack : undefined);
       }
     };
     await safeEnsureIndexes(conversationModel, 'conversationModel');
