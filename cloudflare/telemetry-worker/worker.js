@@ -521,9 +521,15 @@ async function handleDashboardFeedback(request, env) {
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
+  // Exclude teaching-summary rating beacons (type='other', subject
+  // 'teaching_summary_up'/'teaching_summary_down') emitted by the plugin when a
+  // teacher rates a summary. They are usage telemetry, not bug/feature feedback,
+  // and otherwise drown real reports in this view. Data is retained in D1.
   const rows = await env.DB.prepare(
     `SELECT id, instance_id, version, type, subject, body, contact_email, received_at
-     FROM plugin_feedback ORDER BY received_at DESC LIMIT ? OFFSET ?`,
+     FROM plugin_feedback
+     WHERE NOT (type = 'other' AND subject LIKE 'teaching_summary_%')
+     ORDER BY received_at DESC LIMIT ? OFFSET ?`,
   ).bind(limit, offset).all();
 
   return json({ feedback: rows?.results || [] });
