@@ -14,7 +14,7 @@ jest.mock('hydrooj', () => ({
 }));
 
 jest.mock('../../services/openaiClient', () => ({
-  createOpenAIClientFromConfig: jest.fn(),
+  createMultiModelClientFromConfig: jest.fn(),
 }));
 
 jest.mock('../../services/teachingAnalysisService', () => ({
