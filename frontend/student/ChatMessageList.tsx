@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import { renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
 import { ZINDEX } from '../utils/styles';
@@ -173,6 +173,16 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
     );
   };
 
+  // Build the message nodes once per `messages` change. Selecting text only
+  // updates popup state (popupPosition); without this memo the whole list
+  // re-renders and React rewrites each .markdown-body's innerHTML, which
+  // detaches the live selection's text node and collapses the highlight.
+  // Stable element references make React bail out of these subtrees.
+  const messageNodes = useMemo(
+    () => messages.map((msg, idx) => renderMessage(msg, idx)),
+    [messages],
+  );
+
   return (
     <div
       ref={chatContainerRef}
@@ -188,8 +198,8 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
       {/* Empty state */}
       {messages.length === 0 && !isStreaming && !isLoading && renderEmptyState()}
 
-      {/* Messages */}
-      {messages.map((msg, idx) => renderMessage(msg, idx))}
+      {/* Messages (memoized — see messageNodes above) */}
+      {messageNodes}
 
       {/* Streaming output */}
       {isStreaming && streamingContent && (() => {
