@@ -813,6 +813,27 @@ describe('createMultiModelClientFromConfig', () => {
     expect(client).toBeInstanceOf(MultiModelClient);
   });
 
+  // Regression: teaching summary reported "AI 服务配置不完整" while chat worked.
+  // Root cause was the legacy single-client factory; the multi-endpoint factory
+  // must succeed when endpoints[] are configured even if the legacy top-level
+  // fields are empty strings (the state left after deleting & re-adding a key).
+  it('should prefer endpoints[] over empty legacy fields (v2 config, no 配置不完整)', async () => {
+    const config = {
+      endpoints: [
+        { id: 'ep-1', name: 'Primary', apiBaseUrl: 'https://api.test.com/v1', apiKeyEncrypted: 'enc_key1', models: ['gpt-4o'], enabled: true },
+      ],
+      selectedModels: [{ endpointId: 'ep-1', modelName: 'gpt-4o' }],
+      // legacy fields empty — the exact condition that broke teaching summary
+      apiBaseUrl: '',
+      modelName: '',
+      apiKeyEncrypted: '',
+      timeoutSeconds: 30,
+    };
+
+    const client = await createMultiModelClientFromConfig(makeCtx(config));
+    expect(client).toBeInstanceOf(MultiModelClient);
+  });
+
   it('should skip disabled endpoints in v2 config', async () => {
     const config = {
       endpoints: [

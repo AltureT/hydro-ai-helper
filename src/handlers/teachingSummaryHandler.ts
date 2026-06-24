@@ -7,7 +7,7 @@
 import { Handler, PRIV, db } from 'hydrooj';
 import { ObjectId, ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
-import { createOpenAIClientFromConfig } from '../services/openaiClient';
+import { createMultiModelClientFromConfig } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
@@ -240,7 +240,12 @@ export class TeachingSummaryHandler extends Handler {
 
       // Layer 2: AI suggestions (analysis report + fill-in exercises in parallel)
       await model.updateProgress(summaryId, 'generating_suggestion');
-      const aiClient = await createOpenAIClientFromConfig(this.ctx);
+      // Use the multi-endpoint client (same source as chat & batch summary) so
+      // teaching analysis reads config.endpoints[]. The legacy single-client path
+      // validated only top-level apiBaseUrl/modelName/apiKeyEncrypted, which are
+      // empty under the v2 multi-endpoint config — causing "AI 服务配置不完整"
+      // even when chat worked. MultiModelClient also falls back to legacy fields.
+      const aiClient = await createMultiModelClientFromConfig(this.ctx);
       const suggestionService = new TeachingSuggestionService(aiClient);
 
       // Extract related findings for fill-in candidates
