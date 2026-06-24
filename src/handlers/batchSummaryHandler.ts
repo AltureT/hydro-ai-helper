@@ -228,6 +228,13 @@ export class BatchSummaryGenerateHandler extends Handler {
         if (!sse.closed) sse.end();
       }).catch((err) => {
         console.error('[BatchSummaryGenerateHandler] execute error:', err);
+        this.ctx.get('errorReporter')?.capture(
+          'background_job', 'batch_summary',
+          err instanceof Error ? err.message : String(err),
+          undefined,
+          err instanceof Error ? err.stack : undefined,
+          { jobId: job._id?.toString(), domainId: job.domainId },
+        );
         if (!sse.closed) {
           sse.writeEvent('error', { message: err instanceof Error ? err.message : 'Unknown error' });
           sse.end();
@@ -740,6 +747,13 @@ export class BatchSummaryContinueHandler extends Handler {
         if (!sse.closed) sse.end();
       }).catch((err) => {
         console.error('[BatchSummaryContinueHandler] execute error:', err);
+        this.ctx.get('errorReporter')?.capture(
+          'background_job', 'batch_summary',
+          err instanceof Error ? err.message : String(err),
+          undefined,
+          err instanceof Error ? err.stack : undefined,
+          { jobId: job._id?.toString(), domainId: job.domainId },
+        );
         if (!sse.closed) {
           sse.writeEvent('error', { message: err instanceof Error ? err.message : 'Unknown error' });
           sse.end();

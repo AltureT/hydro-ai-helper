@@ -585,4 +585,54 @@ describe('EffectivenessService', () => {
       ).resolves.toBeUndefined();
     });
   });
+
+  describe('background_job telemetry (P2.1)', () => {
+    function withErrorReporter(deps: ReturnType<typeof createMockCtx>) {
+      const capture = jest.fn();
+      // Capture the original impl BEFORE overriding to avoid self-recursion.
+      const originalImpl = (deps.ctx.get as jest.Mock).getMockImplementation()!;
+      (deps.ctx.get as jest.Mock).mockImplementation((name: string) => {
+        if (name === 'errorReporter') return { capture };
+        return originalImpl(name);
+      });
+      return capture;
+    }
+
+    it('reports background_job/effectiveness_analyze when analyze throws', async () => {
+      const deps = createMockCtx([makeStudentMsg('hi')]);
+      deps.mockConversationModel.updateMetrics.mockRejectedValue(new Error('db down'));
+      const capture = withErrorReporter(deps);
+
+      const service = new EffectivenessService(deps.ctx as any);
+      const result = await service.analyzeConversation(TEST_CONV_ID);
+
+      expect(result).toBe(false);
+      expect(capture).toHaveBeenCalledWith(
+        'background_job', 'effectiveness_analyze', 'db down', undefined, expect.any(String),
+      );
+    });
+
+    it('reports background_job/effectiveness_compensate when the pending scan throws', async () => {
+      const deps = createMockCtx();
+      deps.mockConversationModel.findPendingBackfill.mockRejectedValue(new Error('scan fail'));
+      const capture = withErrorReporter(deps);
+
+      const service = new EffectivenessService(deps.ctx as any);
+      const count = await service.compensateBackfill();
+
+      expect(count).toBe(0);
+      expect(capture).toHaveBeenCalledWith(
+        'background_job', 'effectiveness_compensate', 'scan fail', undefined, expect.any(String),
+      );
+    });
+
+    it('never lets a missing errorReporter break the main flow', async () => {
+      const deps = createMockCtx([makeStudentMsg('hi')]);
+      deps.mockConversationModel.updateMetrics.mockRejectedValue(new Error('db down'));
+      // ctx.get returns null for 'errorReporter' (default mock) — must not throw.
+
+      const service = new EffectivenessService(deps.ctx as any);
+      await expect(service.analyzeConversation(TEST_CONV_ID)).resolves.toBe(false);
+    });
+  });
 });

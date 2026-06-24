@@ -110,6 +110,7 @@ export class EffectivenessService {
       return isEffective;
     } catch (err) {
       this.ctx.logger.error('EffectivenessService analyzeConversation error', err);
+      this.reportBackgroundFailure('effectiveness_analyze', err);
       return false;
     }
   }
@@ -165,6 +166,7 @@ export class EffectivenessService {
       await conversationModel.updateMetrics(conversationId, updated, isEffective);
     } catch (err) {
       this.ctx.logger.error('EffectivenessService backfill error', err);
+      this.reportBackgroundFailure('effectiveness_backfill', err);
     }
   }
 
@@ -196,7 +198,27 @@ export class EffectivenessService {
       return count;
     } catch (err) {
       this.ctx.logger.error('EffectivenessService compensateBackfill error', err);
+      this.reportBackgroundFailure('effectiveness_compensate', err);
       return 0;
+    }
+  }
+
+  /**
+   * 后台任务失败遥测：把吞掉的错误（含脱敏堆栈）上报到错误管道，
+   * 否则整条效果分析功能瘫痪时聚合错误率仍为 0%、面板零信号。
+   */
+  private reportBackgroundFailure(category: string, err: unknown): void {
+    try {
+      const errorReporter = this.ctx.get('errorReporter');
+      errorReporter?.capture(
+        'background_job',
+        category,
+        err instanceof Error ? err.message : String(err),
+        undefined,
+        err instanceof Error ? err.stack : undefined,
+      );
+    } catch {
+      // 遥测不得影响主流程
     }
   }
 
