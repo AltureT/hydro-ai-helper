@@ -50,11 +50,13 @@ describe('BatchSummaryJobModel', () => {
     it('should create unique partial index on domainId+contestId where status != archived', async () => {
       await model.ensureIndexes();
 
+      // partialFilterExpression must use $gt (not $in/$ne) so it works on
+      // MongoDB < 6.0; 'archived' sorts before all active statuses.
       expect(col.createIndex).toHaveBeenCalledWith(
         { domainId: 1, contestId: 1 },
         expect.objectContaining({
           unique: true,
-          partialFilterExpression: { status: { $in: expect.arrayContaining(['pending', 'running', 'completed', 'failed', 'stopped']) } },
+          partialFilterExpression: { status: { $gt: 'archived' } },
         }),
       );
     });

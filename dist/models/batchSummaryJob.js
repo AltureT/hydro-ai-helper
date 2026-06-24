@@ -18,20 +18,32 @@ class BatchSummaryJobModel {
      * 唯一部分索引: 同一域+竞赛只能有一个非归档任务
      */
     async ensureIndexes() {
-        // 清理旧版本索引（v1 使用了不被 partialFilterExpression 支持的 $ne）
-        try {
-            await this.collection.dropIndex('idx_domainId_contestId_active');
+        // 清理旧版本索引（两者都不被 partialFilterExpression 支持，曾导致创建失败）：
+        // v1 用了 $ne；v2 用了 $in（MongoDB < 6.0 报 "unsupported expression in
+        // partial index"）。逐个尝试删除，不存在则忽略。
+        for (const legacy of ['idx_domainId_contestId_active', 'idx_domainId_contestId_active_v2']) {
+            try {
+                await this.collection.dropIndex(legacy);
+            }
+            catch {
+                // 旧索引不存在，忽略
+            }
         }
-        catch {
-            // 旧索引不存在，忽略
-        }
-        // 清理重复的活跃任务（v1 索引从未生效，可能已存入重复数据导致 v2 唯一索引创建失败）
+        // 清理重复的活跃任务（旧唯一索引可能从未生效，存在重复数据会导致唯一索引创建失败）
         await this.deduplicateActiveJobs();
+        // partialFilterExpression 仅支持 等值/$exists/$gt/$gte/$lt/$lte/$type/$and，
+        // 不支持 $in 与 $ne。'archived' 在字典序上小于所有活跃状态，因此用
+        // { $gt: 'archived' } 即可精确选出活跃集（pending/running/completed/failed/
+        // stopped），且在所有 MongoDB 版本上都受支持。下面的不变式校验用于防止将来
+        // 新增的状态破坏该字典序假设。
+        if (exports.ACTIVE_JOB_STATUSES.some((s) => s <= 'archived')) {
+            console.warn('[BatchSummaryJobModel] 状态字典序不变式被破坏：存在 <= "archived" 的活跃状态，部分索引过滤器可能不正确');
+        }
         await this.collection.createIndex({ domainId: 1, contestId: 1 }, {
-            name: 'idx_domainId_contestId_active_v2',
+            name: 'idx_domainId_contestId_active_v3',
             unique: true,
             partialFilterExpression: {
-                status: { $in: [...exports.ACTIVE_JOB_STATUSES] },
+                status: { $gt: 'archived' },
             },
         });
         console.log('[BatchSummaryJobModel] Indexes created successfully');
