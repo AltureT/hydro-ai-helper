@@ -113,7 +113,12 @@ describe('BatchSummaryService', () => {
     };
 
     mockTokenUsageModel = {
-      record: jest.fn().mockResolvedValue(undefined),
+      // Real TokenUsageModel exposes recordUsage (chat-scoped, keyed by
+      // conversationId/messageId); batch jobs do not write to it. Kept only to
+      // satisfy the constructor param. The previous mock had a `record` method
+      // that the real model never had, which hid the runtime "record is not a
+      // function" bug — do not reintroduce it.
+      recordUsage: jest.fn().mockResolvedValue(undefined),
     };
 
     service = new BatchSummaryService(
@@ -200,16 +205,15 @@ describe('BatchSummaryService', () => {
       );
     });
 
-    it('should record token usage', async () => {
+    it('persists token counts on the summary via completeSummary (batch jobs are not chat-scoped TokenUsageModel writes)', async () => {
       const job = makeJob();
       await service.execute(job, problems, () => {});
 
-      expect(mockTokenUsageModel.record).toHaveBeenCalledWith(
-        expect.objectContaining({
-          domainId: 'test-domain',
-          promptTokens: 500,
-          completionTokens: 200,
-        }),
+      expect(mockSummaryModel.completeSummary).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        expect.anything(),
+        { prompt: 500, completion: 200 },
       );
     });
   });

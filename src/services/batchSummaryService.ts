@@ -476,18 +476,12 @@ export class BatchSummaryService {
         { prompt: promptTokens, completion: completionTokens },
       );
 
-      // g. Record token usage
-      try {
-        await this.tokenUsageModel.record({
-          domainId: job.domainId,
-          jobId: job._id,
-          userId: summary.userId,
-          promptTokens,
-          completionTokens,
-        });
-      } catch (tokenErr) {
-        console.warn('[BatchSummaryService] Failed to record token usage:', tokenErr);
-      }
+      // g. Token counts are already persisted on the summary via completeSummary
+      // above. Batch jobs are admin background tasks, not per-student chats, so
+      // they are intentionally NOT written to TokenUsageModel (whose recordUsage
+      // is keyed by conversationId/messageId for per-student budget tracking).
+      // A previous `tokenUsageModel.record(...)` call here was a no-op that threw
+      // "record is not a function" on every student (~870×) — removed.
 
       // g2. Save historical context record (fire-and-forget, non-blocking)
       if (this.historyModel) {
