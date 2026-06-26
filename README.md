@@ -118,6 +118,15 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 
 Generate a random key: `openssl rand -base64 24 | head -c 32`
 
+**Update channel** (optional): the in-app one-click/overwrite update follows `AI_HELPER_UPDATE_CHANNEL`:
+
+- `stable` (default) — updates only to official releases (`git tag vX.Y.Z`), GPG-verified. Recommended for all real-user servers.
+- `edge` — tracks the latest `main` branch code. Set this **only on your own test server**; do not set it on users' servers.
+
+```bash
+export AI_HELPER_UPDATE_CHANNEL=edge   # test server only
+```
+
 ### Admin Setup
 
 Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" tab:

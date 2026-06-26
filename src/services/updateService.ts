@@ -15,6 +15,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import axios from 'axios';
+import { getUpdateChannel, type UpdateChannel } from '../constants/updateChannel';
+import { pickLatestStableTag } from '../utils/semver';
 
 /**
  * 仓库配置（按优先级排序）
@@ -797,6 +799,96 @@ export class UpdateService {
   }
 
   /**
+   * 获取远程标签（stable 通道据此选出最新发布版本）
+   * - 使用 --force：远程若对同名 tag 重新打标，本地也能同步更新
+   */
+  private async fetchTags(onLog?: (msg: string) => void): Promise<{ code: number; stderr: string }> {
+    const log = (msg: string) => onLog?.(msg);
+    log('ai_helper_update_fetching_tags');
+    const result = await this.executeCommand(
+      'git',
+      ['fetch', '--tags', '--force', 'origin'],
+      this.pluginPath,
+      (line) => log(line.trim()),
+      300000
+    );
+    return { code: result.code, stderr: result.stderr };
+  }
+
+  /**
+   * 解析本次更新的目标 commit（按通道）
+   * - edge：origin/main 最新 commit（旧版行为，供开发者测试服务器使用）
+   * - stable：最新稳定发布标签（vX.Y.Z）所指向的 commit；预发布标签会被忽略
+   *
+   * 仅返回具体 commit hash，后续的 GPG 验签与 reset 都只针对该 hash，
+   * 从而避免 TOCTOU（解析与切换之间远程被改动）。
+   */
+  private async resolveUpdateTarget(
+    channel: UpdateChannel,
+    onLog?: (msg: string, ...args: string[]) => void
+  ): Promise<{ ok: boolean; commit?: string; display?: string; messageKey?: string; messageArgs?: string[] }> {
+    const log = (msg: string, ...args: string[]) => onLog?.(msg, ...args);
+
+    if (channel === 'edge') {
+      const r = await this.executeCommand(
+        'git',
+        ['rev-parse', '--verify', 'origin/main'],
+        this.pluginPath,
+        undefined,
+        15000
+      );
+      if (r.code !== 0) {
+        return {
+          ok: false,
+          messageKey: 'ai_helper_update_cannot_resolve_remote',
+          messageArgs: [(r.stderr || r.stdout || '').trim()]
+        };
+      }
+      return { ok: true, commit: r.stdout.trim(), display: 'main (edge)' };
+    }
+
+    // stable：列出本地标签（fetchTags 后已是最新），挑选最新稳定版
+    const tagList = await this.executeCommand(
+      'git',
+      ['tag', '--list', 'v*'],
+      this.pluginPath,
+      undefined,
+      15000
+    );
+    if (tagList.code !== 0) {
+      return {
+        ok: false,
+        messageKey: 'ai_helper_update_cannot_list_tags',
+        messageArgs: [(tagList.stderr || tagList.stdout || '').trim()]
+      };
+    }
+
+    const tags = tagList.stdout.split(/\r?\n/).map((t) => t.trim()).filter(Boolean);
+    const latest = pickLatestStableTag(tags);
+    if (!latest) {
+      return { ok: false, messageKey: 'ai_helper_update_no_release_tag' };
+    }
+    log('ai_helper_update_selected_tag', latest);
+
+    // 解引用到 commit（注解标签需 ^{commit}）
+    const r = await this.executeCommand(
+      'git',
+      ['rev-parse', '--verify', `${latest}^{commit}`],
+      this.pluginPath,
+      undefined,
+      15000
+    );
+    if (r.code !== 0) {
+      return {
+        ok: false,
+        messageKey: 'ai_helper_update_cannot_resolve_tag',
+        messageArgs: [latest, (r.stderr || r.stdout || '').trim()]
+      };
+    }
+    return { ok: true, commit: r.stdout.trim(), display: latest };
+  }
+
+  /**
    * 🔒 验证 GPG 签名并检查指纹白名单
    */
   private async verifyGPGSignature(
@@ -1219,6 +1311,9 @@ export class UpdateService {
       if (onProgress) onProgress(step, messageKey, ...messageArgs);
     };
 
+    // 更新通道：stable（默认，只更新到发布标签）/ edge（跟踪 main，供开发者测试）
+    const channel = getUpdateChannel();
+
     // 用于失败回滚的备份 commit（在函数作用域声明）
     let backupCommit = '';
     // 🔒 成功更新时延后释放文件锁（等待 pm2 restart 完成，避免竞态窗口）
@@ -1244,6 +1339,8 @@ export class UpdateService {
         };
       }
       log('detecting', validation.message, ...(validation.messageArgs || []));
+
+      log('detecting', 'ai_helper_update_channel', channel);
 
       log('detecting', 'ai_helper_update_checking_write_permission');
       const writeCheck = await this.checkWritePermission((msg) => log('detecting', msg));
@@ -1470,31 +1567,57 @@ export class UpdateService {
         log('pulling', 'ai_helper_update_fetch_complete');
       }
 
-      // Step 2.4: 获取远程 main 的具体 commit hash（防止 TOCTOU：后续只对该 hash 做验证和切换）
+      // stable 通道：拉取远程标签，以便选出最新发布版本（vX.Y.Z）
+      if (channel === 'stable') {
+        let tagFetch = await this.fetchTags((msg) => log('pulling', msg));
+        if (tagFetch.code !== 0) {
+          log('pulling', 'ai_helper_update_tags_fetch_failed', tagFetch.stderr);
+          for (const repo of orderedRepos) {
+            if (repo.url === selectedRepo.url) continue;
+            log('pulling', 'ai_helper_update_trying_fallback', repo.name, repo.url);
+            if (!(await this.setRemoteOrigin(repo.url, (m) => log('pulling', m)))) continue;
+            tagFetch = await this.fetchTags((m) => log('pulling', m));
+            if (tagFetch.code === 0) {
+              log('pulling', 'ai_helper_update_fallback_success', repo.name);
+              break;
+            }
+          }
+        }
+        if (tagFetch.code !== 0) {
+          log('failed', 'ai_helper_update_tags_fetch_failed', tagFetch.stderr);
+          return {
+            success: false,
+            step: 'failed',
+            message: 'ai_helper_update_tags_fetch_failed',
+            messageKey: 'ai_helper_update_tags_fetch_failed',
+            messageArgs: [tagFetch.stderr],
+            logs,
+            pluginPath: this.pluginPath,
+            error: tagFetch.stderr
+          };
+        }
+      }
+
+      // Step 2.4: 解析目标 commit（按通道；防止 TOCTOU：后续只对该 hash 做验证和切换）
       log('pulling', 'ai_helper_update_resolving_remote');
-      const revParseResult = await this.executeCommand(
-        'git',
-        ['rev-parse', '--verify', 'origin/main'],
-        this.pluginPath,
-        undefined,
-        15000
-      );
-      if (revParseResult.code !== 0) {
-        const detail = revParseResult.stderr || revParseResult.stdout;
-        log('failed', 'ai_helper_update_cannot_resolve_remote', detail);
+      const target = await this.resolveUpdateTarget(channel, (m, ...a) => log('pulling', m, ...a));
+      if (!target.ok) {
+        log('failed', target.messageKey, ...(target.messageArgs || []));
         return {
           success: false,
           step: 'failed',
-          message: 'ai_helper_update_cannot_resolve_remote',
-          messageKey: 'ai_helper_update_cannot_resolve_remote',
-          messageArgs: [detail],
+          message: target.messageKey,
+          messageKey: target.messageKey,
+          messageArgs: target.messageArgs,
           logs,
           pluginPath: this.pluginPath,
-          error: detail
+          error: target.messageKey,
+          errorKey: target.messageKey,
+          errorArgs: target.messageArgs
         };
       }
-      const targetCommit = revParseResult.stdout.trim();
-      log('pulling', 'ai_helper_update_remote_version', targetCommit.substring(0, 8));
+      const targetCommit = target.commit;
+      log('pulling', 'ai_helper_update_remote_version', `${target.display} (${targetCommit.substring(0, 8)})`);
 
       log('pulling', 'ai_helper_update_verifying_signature');
       const verifyRef = targetCommit;

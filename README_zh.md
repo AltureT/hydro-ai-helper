@@ -118,6 +118,15 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"
 
 生成随机密钥：`openssl rand -base64 24 | head -c 32`
 
+**更新通道**（可选）：应用内"一键更新 / 覆盖更新"由环境变量 `AI_HELPER_UPDATE_CHANNEL` 控制：
+
+- `stable`（默认）— 只更新到正式发布版本（`git tag vX.Y.Z`），并经 GPG 签名校验。所有真实用户的服务器都应使用此通道。
+- `edge` — 跟踪 `main` 分支最新代码。**仅在你自己的测试服务器**设置，不要设到用户服务器上。
+
+```bash
+export AI_HELPER_UPDATE_CHANNEL=edge   # 仅测试服务器
+```
+
 ### 管理员配置
 
 登录后访问 **控制面板 → AI 助手**（`/ai-helper`）→"AI 配置" Tab：
