@@ -109,8 +109,20 @@ class HttpError extends Error {
 
 function isAuthorized(request, env) {
   const token = (env.REPORT_TOKEN || '').trim();
+  // Ingest endpoints (report/errors/feedback) are intentionally fail-OPEN when no
+  // REPORT_TOKEN is configured. This is anonymous, low-value telemetry from a
+  // distributed open-source plugin, so we accept unauthenticated writes rather
+  // than embed a (necessarily public) token in every install.
+  //
+  // ⚠️ Do NOT change this to `return false`. Doing so silently 401s every install
+  // that does not ship a matching token — that is exactly the 2026-06 incident
+  // (commit 173cbbd flipped this to fail-closed and, once deployed, froze the
+  // whole fleet's telemetry). If a REPORT_TOKEN *is* set it is still enforced
+  // below, so self-hosters can lock ingestion down by simply setting the secret.
+  //
+  // Dashboard READ access is separate (isDashboardAuthorized) and stays fail-CLOSED.
   if (!token) {
-    return false;
+    return true;
   }
 
   const header = request.headers.get('Authorization') || '';

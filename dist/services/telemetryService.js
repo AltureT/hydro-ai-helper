@@ -291,7 +291,14 @@ TelemetryService.DEFAULT_FEATURES = {
 // ─── 导出的共享工具函数 ─────────────────────────────
 const DEFAULT_BASE = 'https://stats.how2learns.com';
 /**
- * 获取遥测 token
+ * 获取遥测 token。
+ *
+ * 默认返回空（不在公开插件里内置任何 token）：官方 Worker 的写入端
+ * (/api/report、/api/errors、/api/feedback) 对未配置 REPORT_TOKEN 的情况是
+ * fail-open（匿名上报），无需 token。自建遥测服务若给 Worker 设了 REPORT_TOKEN，
+ * 可通过环境变量 AI_HELPER_TELEMETRY_TOKEN 提供匹配的 token。
+ *
+ * 历史教训：不要在此内置写死 token —— 它会进公开仓库，既非真密钥又增加维护成本。
  */
 function getTelemetryToken() {
     return (process.env.AI_HELPER_TELEMETRY_TOKEN || '').trim();
