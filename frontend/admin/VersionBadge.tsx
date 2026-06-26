@@ -26,6 +26,7 @@ interface VersionCheckResponse {
   checkedAt: string;
   fromCache: boolean;
   source?: string;
+  channel?: 'stable' | 'edge';
 }
 
 interface UpdateInfoResponse {
@@ -315,6 +316,18 @@ export const VersionBadge: React.FC = () => {
                 </ul>
               </div>
 
+              {versionInfo?.channel && (
+                <div style={{
+                  ...getAlertStyle(versionInfo.channel === 'edge' ? 'warning' : 'info'),
+                  marginBottom: SPACING.base,
+                  fontSize: '14px',
+                }}>
+                  {versionInfo.channel === 'edge'
+                    ? i18n('ai_helper_admin_version_target_edge')
+                    : i18n('ai_helper_admin_version_target_stable')}
+                </div>
+              )}
+
               {updateInfo && (
                 <div style={{
                   background: COLORS.bgPage,
@@ -597,6 +610,18 @@ export const VersionBadge: React.FC = () => {
               flexWrap: 'wrap'
             }}>
               <span>{i18n('ai_helper_admin_version_last_checked')}: {formatCheckedAt(versionInfo.checkedAt)}</span>
+              {versionInfo.channel && (
+                <span
+                  style={getBadgeStyle(versionInfo.channel === 'edge' ? 'warning' : 'info')}
+                  title={versionInfo.channel === 'edge'
+                    ? i18n('ai_helper_admin_version_channel_edge_hint')
+                    : i18n('ai_helper_admin_version_channel_stable_hint')}
+                >
+                  {versionInfo.channel === 'edge'
+                    ? i18n('ai_helper_admin_version_channel_edge')
+                    : i18n('ai_helper_admin_version_channel_stable')}
+                </span>
+              )}
               {versionInfo.source && (
                 <span style={getBadgeStyle('info')}>
                   {versionInfo.source}

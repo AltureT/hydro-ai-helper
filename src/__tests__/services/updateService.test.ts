@@ -193,5 +193,69 @@ describe('UpdateService (security)', () => {
       fs.rmSync(pluginDir, { recursive: true, force: true });
     });
   });
+
+  describe('resolveUpdateTarget (channel)', () => {
+    it('edge channel resolves origin/main', async () => {
+      const pluginDir = makeTempPluginDir();
+      const service = new UpdateService(pluginDir) as any;
+
+      service.executeCommand = jest.fn(async (cmd: string, args: string[]) => {
+        if (cmd === 'git' && args[0] === 'rev-parse' && args.includes('origin/main')) {
+          return { code: 0, stdout: 'abc1234567\n', stderr: '' };
+        }
+        return { code: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      });
+
+      const result = await service.resolveUpdateTarget('edge');
+
+      expect(result.ok).toBe(true);
+      expect(result.commit).toBe('abc1234567');
+      expect(result.display).toContain('main');
+
+      fs.rmSync(pluginDir, { recursive: true, force: true });
+    });
+
+    it('stable channel picks the latest stable tag and ignores prereleases', async () => {
+      const pluginDir = makeTempPluginDir();
+      const service = new UpdateService(pluginDir) as any;
+
+      service.executeCommand = jest.fn(async (cmd: string, args: string[]) => {
+        if (cmd === 'git' && args[0] === 'tag') {
+          return { code: 0, stdout: 'v1.0.0\nv2.2.0\nv2.3.0-beta.1\nv2.1.0\n', stderr: '' };
+        }
+        if (cmd === 'git' && args[0] === 'rev-parse' && args[2] === 'v2.2.0^{commit}') {
+          return { code: 0, stdout: 'deadbeef00\n', stderr: '' };
+        }
+        return { code: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      });
+
+      const result = await service.resolveUpdateTarget('stable');
+
+      expect(result.ok).toBe(true);
+      expect(result.commit).toBe('deadbeef00');
+      expect(result.display).toBe('v2.2.0');
+
+      fs.rmSync(pluginDir, { recursive: true, force: true });
+    });
+
+    it('stable channel fails clearly when there is no stable release tag', async () => {
+      const pluginDir = makeTempPluginDir();
+      const service = new UpdateService(pluginDir) as any;
+
+      service.executeCommand = jest.fn(async (cmd: string, args: string[]) => {
+        if (cmd === 'git' && args[0] === 'tag') {
+          return { code: 0, stdout: 'v2.3.0-beta.1\nnightly\n', stderr: '' };
+        }
+        return { code: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      });
+
+      const result = await service.resolveUpdateTarget('stable');
+
+      expect(result.ok).toBe(false);
+      expect(result.messageKey).toBe('ai_helper_update_no_release_tag');
+
+      fs.rmSync(pluginDir, { recursive: true, force: true });
+    });
+  });
 });
 

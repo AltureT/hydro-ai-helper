@@ -100,6 +100,53 @@ git push origin main --tags
 
 ---
 
+## 🚦 版本通道与测试工作流（stable / edge）
+
+插件的"应用内一键更新 / 覆盖更新"按钮通过环境变量 `AI_HELPER_UPDATE_CHANNEL` 区分两个通道：
+
+| 通道 | 更新目标 | 适用对象 |
+| --- | --- | --- |
+| `stable`（默认） | 最新正式发布标签 `git tag vX.Y.Z` | 所有真实用户的生产服务器 |
+| `edge` | `main` 分支最新代码 | **仅你自己的测试服务器** |
+
+**关键点**：
+
+- **不设置即为 `stable`**。普通用户即使点"覆盖更新"，也只会拿到你正式 `git tag` 发布、且经过 GPG 签名校验的版本——推到 `main` 的未测试代码不会影响他们。
+- 版本检测（"有新版本"提示）与一键更新使用**同一套规则**：stable 比较最新发布标签，edge 比较 `main` 的 `package.json`。
+- 预发布标签（如 `v2.3.0-beta.1`）会被 stable 通道忽略，因此 beta 不会推送给普通用户。
+
+### 开发者推荐工作流
+
+1. 日常在 `main`（或 feature 分支）开发并正常推送：
+
+   ```bash
+   git push origin main
+   ```
+
+   → 普通用户**不受影响**（他们在 stable 通道）。
+
+2. 在你的**学校测试服务器**上一次性切到 edge：
+
+   ```bash
+   export AI_HELPER_UPDATE_CHANNEL=edge   # 写入 pm2 ecosystem env 或 shell profile
+   pm2 restart hydrooj --update-env
+   ```
+
+   之后在该服务器点"覆盖更新"即可一键拉取 `main` 最新代码进行测试。
+
+3. 测试通过、准备发布给所有人时，打 tag 发布（详见下方"使用流程"）：
+
+   ```bash
+   npm version patch   # 或 minor / major，自动改 package.json 并打 tag
+   git push origin main --tags
+   ```
+
+   → tag 触发自动发布；所有 stable 用户随后会收到"有新版本"提示，并能安全地一键更新到该发布版本。
+
+> 切换通道后需重启服务（`pm2 restart hydrooj --update-env`）才会生效；版本缓存按通道隔离，最长 24 小时刷新（点"刷新"可立即重查）。
+
+---
+
 ## 📋 版本号规范
 
 遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)：

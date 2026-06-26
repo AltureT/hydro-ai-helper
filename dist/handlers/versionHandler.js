@@ -44,7 +44,8 @@ class VersionCheckHandler extends hydrooj_1.Handler {
                 releaseNotes: result.releaseNotes,
                 checkedAt: result.checkedAt.toISOString(),
                 fromCache: result.fromCache,
-                source: result.source
+                source: result.source,
+                channel: result.channel
             });
         }
         catch (err) {

@@ -16,8 +16,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.VersionService = void 0;
 const axios_1 = __importDefault(require("axios"));
 const versionCache_1 = require("../models/versionCache");
+const updateChannel_1 = require("../constants/updateChannel");
+const semver_1 = require("../utils/semver");
 /**
  * 仓库配置（按优先级排序）
+ *
+ * - packageJsonUrl：main 分支的 package.json（edge 通道据此读取最新代码版本）
+ * - tagsApiUrl：标签列表 API（stable 通道据此选出最新发布版本 vX.Y.Z）
  */
 const REPO_CONFIGS = [
     {
@@ -26,6 +31,7 @@ const REPO_CONFIGS = [
         repo: 'hydro-ai-helper',
         branch: 'main',
         packageJsonUrl: 'https://gitee.com/alture/hydro-ai-helper/raw/main/package.json',
+        tagsApiUrl: 'https://gitee.com/api/v5/repos/alture/hydro-ai-helper/tags?per_page=100',
         releasesUrl: 'https://gitee.com/alture/hydro-ai-helper/releases'
     },
     {
@@ -34,6 +40,7 @@ const REPO_CONFIGS = [
         repo: 'hydro-ai-helper',
         branch: 'main',
         packageJsonUrl: 'https://raw.githubusercontent.com/AltureT/hydro-ai-helper/main/package.json',
+        tagsApiUrl: 'https://api.github.com/repos/AltureT/hydro-ai-helper/tags?per_page=100',
         releasesUrl: 'https://github.com/AltureT/hydro-ai-helper/releases'
     }
 ];
@@ -41,6 +48,12 @@ const REPO_CONFIGS = [
  * 版本服务类
  */
 class VersionService {
+    /**
+     * 按通道生成缓存键（避免 stable/edge 互相污染缓存）
+     */
+    cacheKey(channel) {
+        return `${VersionService.CACHE_KEY_PREFIX}_${channel}`;
+    }
     constructor(versionCacheModel) {
         this.versionCacheModel = versionCacheModel;
         // 从 package.json 读取当前版本（编译时嵌入）
@@ -72,33 +85,63 @@ class VersionService {
     /**
      * 从单个仓库获取版本信息
      * @param config 仓库配置
+     * @param channel 更新通道（stable→最新发布标签；edge→main 的 package.json）
      * @returns 版本信息或 null（失败时）
      */
-    async fetchVersionFromRepo(config) {
+    async fetchVersionFromRepo(config, channel) {
         const startTime = Date.now();
         try {
-            const response = await axios_1.default.get(config.packageJsonUrl, {
+            if (channel === 'edge') {
+                // edge：读取 main 分支 package.json 的版本号（跟踪最新代码）
+                const response = await axios_1.default.get(config.packageJsonUrl, {
+                    timeout: 10000,
+                    headers: { 'Accept': 'application/json' }
+                });
+                const latency = Date.now() - startTime;
+                const packageJson = response.data;
+                let version;
+                if (typeof packageJson === 'object' && packageJson.version) {
+                    version = packageJson.version;
+                }
+                else if (typeof packageJson === 'string') {
+                    const parsed = JSON.parse(packageJson);
+                    version = parsed.version || '0.0.0';
+                }
+                else {
+                    return null;
+                }
+                return {
+                    name: config.name,
+                    version: (0, semver_1.normalizeVersion)(version),
+                    releasesUrl: config.releasesUrl,
+                    latency
+                };
+            }
+            // stable：读取标签列表，选出最新稳定发布版本（与一键更新拉取的目标一致）
+            const response = await axios_1.default.get(config.tagsApiUrl, {
                 timeout: 10000,
                 headers: {
-                    'Accept': 'application/json'
+                    'Accept': 'application/json',
+                    // GitHub API 要求带 User-Agent，否则返回 403
+                    'User-Agent': 'hydro-ai-helper'
                 }
             });
             const latency = Date.now() - startTime;
-            const packageJson = response.data;
-            let version;
-            if (typeof packageJson === 'object' && packageJson.version) {
-                version = packageJson.version;
+            const data = response.data;
+            if (!Array.isArray(data)) {
+                return null;
             }
-            else if (typeof packageJson === 'string') {
-                const parsed = JSON.parse(packageJson);
-                version = parsed.version || '0.0.0';
-            }
-            else {
+            const tagNames = data
+                .map((t) => (t && typeof t.name === 'string' ? t.name : ''))
+                .filter(Boolean);
+            const latest = (0, semver_1.pickLatestStableTag)(tagNames);
+            if (!latest) {
+                // 该仓库尚无任何正式发布标签
                 return null;
             }
             return {
                 name: config.name,
-                version,
+                version: (0, semver_1.normalizeVersion)(latest),
                 releasesUrl: config.releasesUrl,
                 latency
             };
@@ -112,10 +155,10 @@ class VersionService {
      * 从所有仓库获取版本，取最新的
      * @returns 最新版本信息
      */
-    async fetchLatestVersionFromAllRepos() {
-        console.log('[VersionService] Checking versions from all repositories...');
+    async fetchLatestVersionFromAllRepos(channel) {
+        console.log(`[VersionService] Checking versions from all repositories (channel: ${channel})...`);
         // 并行获取所有仓库的版本
-        const results = await Promise.all(REPO_CONFIGS.map(config => this.fetchVersionFromRepo(config)));
+        const results = await Promise.all(REPO_CONFIGS.map(config => this.fetchVersionFromRepo(config, channel)));
         // 过滤掉失败的结果
         const validResults = results.filter((r) => r !== null);
         if (validResults.length === 0) {
@@ -145,12 +188,14 @@ class VersionService {
      * @returns 版本检查结果
      */
     async checkForUpdates(forceRefresh = false) {
-        // T050: 检查缓存
+        // 当前实例的更新通道（stable=发布标签 / edge=main 最新代码）
+        const channel = (0, updateChannel_1.getUpdateChannel)();
+        // T050: 检查缓存（按通道隔离）
         if (!forceRefresh) {
-            const cached = await this.getCachedVersion();
+            const cached = await this.getCachedVersion(channel);
             if (cached) {
                 // 使用实时版本重新计算 hasUpdate，而非使用缓存中的静态值
-                const hasUpdate = this.isNewerVersion(cached.latestVersion, this.currentVersion);
+                const hasUpdate = (0, semver_1.isNewerVersion)(cached.latestVersion, this.currentVersion);
                 return {
                     currentVersion: this.currentVersion,
                     latestVersion: cached.latestVersion,
@@ -159,16 +204,17 @@ class VersionService {
                     releaseNotes: cached.releaseNotes,
                     checkedAt: cached.checkedAt,
                     fromCache: true,
-                    source: cached.source
+                    source: cached.source,
+                    channel
                 };
             }
         }
         // 从所有仓库获取最新版本
         try {
-            const { version: latestVersion, source, releasesUrl } = await this.fetchLatestVersionFromAllRepos();
-            const hasUpdate = this.isNewerVersion(latestVersion, this.currentVersion);
+            const { version: latestVersion, source, releasesUrl } = await this.fetchLatestVersionFromAllRepos(channel);
+            const hasUpdate = (0, semver_1.isNewerVersion)(latestVersion, this.currentVersion);
             // 更新缓存
-            await this.updateCache({
+            await this.updateCache(channel, {
                 currentVersion: this.currentVersion,
                 latestVersion,
                 hasUpdate,
@@ -182,16 +228,17 @@ class VersionService {
                 releaseUrl: releasesUrl,
                 checkedAt: new Date(),
                 fromCache: false,
-                source
+                source,
+                channel
             };
         }
         catch (err) {
             console.error('[VersionService] Failed to check for updates:', err);
             // 如果请求失败，尝试返回过期的缓存数据
-            const expiredCache = await this.versionCacheModel.get(VersionService.CACHE_KEY);
+            const expiredCache = await this.versionCacheModel.get(this.cacheKey(channel));
             if (expiredCache) {
                 // 使用实时版本重新计算 hasUpdate
-                const hasUpdate = this.isNewerVersion(expiredCache.latestVersion, this.currentVersion);
+                const hasUpdate = (0, semver_1.isNewerVersion)(expiredCache.latestVersion, this.currentVersion);
                 return {
                     currentVersion: this.currentVersion,
                     latestVersion: expiredCache.latestVersion,
@@ -199,7 +246,8 @@ class VersionService {
                     releaseUrl: expiredCache.releaseUrl || REPO_CONFIGS[0].releasesUrl,
                     checkedAt: expiredCache.checkedAt,
                     fromCache: true,
-                    source: expiredCache.source
+                    source: expiredCache.source,
+                    channel
                 };
             }
             // 完全失败时返回无更新
@@ -209,7 +257,8 @@ class VersionService {
                 hasUpdate: false,
                 releaseUrl: REPO_CONFIGS[0].releasesUrl,
                 checkedAt: new Date(),
-                fromCache: false
+                fromCache: false,
+                channel
             };
         }
     }
@@ -221,40 +270,15 @@ class VersionService {
      * @returns true 如果 version1 > version2
      */
     isNewerVersion(version1, version2) {
-        const v1Parts = this.parseVersion(version1);
-        const v2Parts = this.parseVersion(version2);
-        for (let i = 0; i < 3; i++) {
-            if (v1Parts[i] > v2Parts[i])
-                return true;
-            if (v1Parts[i] < v2Parts[i])
-                return false;
-        }
-        return false; // 版本相同
-    }
-    /**
-     * 解析版本号为数字数组
-     * @param version 版本字符串（如 "1.2.3"）
-     * @returns [major, minor, patch]
-     */
-    parseVersion(version) {
-        // 移除前缀 v 或 V
-        const clean = version.replace(/^[vV]/, '');
-        // 移除预发布标签（如 -beta.1）
-        const base = clean.split('-')[0];
-        // 解析主版本号
-        const parts = base.split('.').map(p => parseInt(p, 10) || 0);
-        return [
-            parts[0] || 0,
-            parts[1] || 0,
-            parts[2] || 0
-        ];
+        return (0, semver_1.isNewerVersion)(version1, version2);
     }
     /**
      * T050: 获取缓存的版本信息（24小时有效）
+     * @param channel 更新通道
      * @returns 缓存数据或 null
      */
-    async getCachedVersion() {
-        const cache = await this.versionCacheModel.get(VersionService.CACHE_KEY);
+    async getCachedVersion(channel) {
+        const cache = await this.versionCacheModel.get(this.cacheKey(channel));
         if (!cache) {
             return null;
         }
@@ -268,11 +292,12 @@ class VersionService {
     }
     /**
      * 更新版本缓存
+     * @param channel 更新通道
      * @param data 版本数据
      */
-    async updateCache(data) {
+    async updateCache(channel, data) {
         await this.versionCacheModel.set({
-            key: VersionService.CACHE_KEY,
+            key: this.cacheKey(channel),
             currentVersion: data.currentVersion,
             latestVersion: data.latestVersion,
             hasUpdate: data.hasUpdate,
@@ -284,11 +309,13 @@ class VersionService {
     }
     /**
      * 清除版本缓存（用于测试或强制刷新）
+     * 同时清除 stable 与 edge 两个通道的缓存
      */
     async clearCache() {
-        await this.versionCacheModel.delete(VersionService.CACHE_KEY);
+        await this.versionCacheModel.delete(this.cacheKey('stable'));
+        await this.versionCacheModel.delete(this.cacheKey('edge'));
     }
 }
 exports.VersionService = VersionService;
-VersionService.CACHE_KEY = 'latest_version';
+VersionService.CACHE_KEY_PREFIX = 'latest_version';
 //# sourceMappingURL=versionService.js.map
