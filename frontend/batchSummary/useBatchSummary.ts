@@ -9,6 +9,13 @@ export interface StudentSummaryData {
   error?: string;
 }
 
+/** Outcome of a publish-all call — lets the panel warn about skipped students */
+export interface PublishResult {
+  published: number;
+  skippedFailed: number;
+  skippedPending: number;
+}
+
 export interface BatchSummaryState {
   jobId: string | null;
   jobStatus: string | null;
@@ -20,6 +27,7 @@ export interface BatchSummaryState {
   summaries: Map<number, StudentSummaryData>;
   error: string | null;
   loading: boolean;
+  publishResult: PublishResult | null;
 }
 
 const initialState: BatchSummaryState = {
@@ -33,6 +41,7 @@ const initialState: BatchSummaryState = {
   summaries: new Map(),
   error: null,
   loading: false,
+  publishResult: null,
 };
 
 /** Extract a string message from backend error responses ({ error: string | { code, message } }) */
@@ -244,6 +253,7 @@ export function useBatchSummary(domainId: string) {
         summaries,
         error: null,
         loading: false,
+        publishResult: null,
       });
     } catch (err) {
       setState(prev => ({ ...prev, loading: false }));
@@ -261,9 +271,9 @@ export function useBatchSummary(domainId: string) {
 
     // For new_only mode, don't clear existing summaries
     if (mode !== 'new_only') {
-      setState(prev => ({ ...prev, isGenerating: true, error: null, summaries: new Map(), completed: 0, failed: 0 }));
+      setState(prev => ({ ...prev, isGenerating: true, error: null, publishResult: null, summaries: new Map(), completed: 0, failed: 0 }));
     } else {
-      setState(prev => ({ ...prev, isGenerating: true, error: null }));
+      setState(prev => ({ ...prev, isGenerating: true, error: null, publishResult: null }));
     }
 
     try {
@@ -348,7 +358,7 @@ export function useBatchSummary(domainId: string) {
   const continueGeneration = useCallback(async () => {
     if (!state.jobId) return;
 
-    setState(prev => ({ ...prev, isGenerating: true, error: null }));
+    setState(prev => ({ ...prev, isGenerating: true, error: null, publishResult: null }));
 
     try {
       const res = await fetch(buildUrl(domainId, `/${state.jobId}/continue`), {
@@ -385,7 +395,7 @@ export function useBatchSummary(domainId: string) {
   }, [domainId, state.jobId, readSSEStream]);
 
   const loadExisting = useCallback(async (jobId: string) => {
-    setState(prev => ({ ...prev, error: null }));
+    setState(prev => ({ ...prev, error: null, publishResult: null }));
     try {
       const res = await fetch(buildUrl(domainId, `/jobs/${jobId}`), {
         credentials: 'include',
@@ -427,7 +437,7 @@ export function useBatchSummary(domainId: string) {
 
   const publishAll = useCallback(async () => {
     if (!state.jobId) return;
-    setState(prev => ({ ...prev, error: null }));
+    setState(prev => ({ ...prev, error: null, publishResult: null }));
     try {
       const res = await fetch(buildUrl(domainId, `/${state.jobId}/publish`), {
         method: 'POST',
@@ -443,6 +453,14 @@ export function useBatchSummary(domainId: string) {
         setState(prev => ({ ...prev, error: extractErrorMsg(errData, `HTTP ${res.status}`) }));
         return;
       }
+      // Backend reports how many students publishAll skipped (failed/pending) —
+      // surface that instead of implying every student was published.
+      const data = await res.json().catch(() => ({} as any));
+      const publishResult: PublishResult = {
+        published: Number(data.published ?? 0),
+        skippedFailed: Number(data.skippedFailed ?? 0),
+        skippedPending: Number(data.skippedPending ?? 0),
+      };
       // Update all completed summaries to published
       setState(prev => {
         const next = new Map(prev.summaries);
@@ -451,7 +469,7 @@ export function useBatchSummary(domainId: string) {
             next.set(uid, { ...s, publishStatus: 'published' });
           }
         }
-        return { ...prev, summaries: next };
+        return { ...prev, summaries: next, publishResult };
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Unknown error';
@@ -461,7 +479,7 @@ export function useBatchSummary(domainId: string) {
 
   const retryStudent = useCallback(async (userId: number) => {
     if (!state.jobId) return;
-    setState(prev => ({ ...prev, error: null }));
+    setState(prev => ({ ...prev, error: null, publishResult: null }));
     // Optimistically set student to pending
     updateSummary(userId, { status: 'pending', error: undefined });
     try {
@@ -490,7 +508,7 @@ export function useBatchSummary(domainId: string) {
   /** Reset all failed students to pending, then trigger continue generation */
   const retryFailed = useCallback(async () => {
     if (!state.jobId) return;
-    setState(prev => ({ ...prev, error: null }));
+    setState(prev => ({ ...prev, error: null, publishResult: null }));
 
     try {
       // 1. Batch-reset all failed → pending

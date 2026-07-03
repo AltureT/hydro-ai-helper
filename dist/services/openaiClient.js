@@ -547,8 +547,17 @@ class MultiModelClient {
         }
         const errors = [];
         const skippedEndpoints = new Set();
-        // L3: 全 fallback 链总超时 — 取配置值与默认值中的较大者
-        const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, this.clients[0].config.timeoutSeconds * 1000);
+        // L3: 全 fallback 链总超时。预算 = 首端点用满全部重试（含退避上限）+ 其余每个
+        // fallback 端点至少一次完整尝试，下限 TOTAL_TIMEOUT_MS。旧实现固定取
+        // max(60s, 首端点 timeoutSeconds)：默认 30s/请求 + 2 次重试时，第 2 次重试
+        // 中途即被掐断、fallback 端点永远轮不到——慢端点上的长文生成稳定死于
+        // 「AI 服务总超时」，而重试与 fallback 正是为这种场景配置的。
+        const backoffAllowanceMs = Array.from({ length: RETRY.MAX_RETRIES }, (_, attempt) => Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS) * (1 + RETRY.JITTER)).reduce((sum, ms) => sum + ms, 0);
+        const [primary, ...fallbacks] = this.clients;
+        const budgetMs = primary.config.timeoutSeconds * 1000 * (RETRY.MAX_RETRIES + 1)
+            + backoffAllowanceMs
+            + fallbacks.reduce((sum, c) => sum + c.config.timeoutSeconds * 1000, 0);
+        const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
         const totalAc = new AbortController();
         let timedOut = false;
         const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);

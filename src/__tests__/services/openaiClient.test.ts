@@ -368,22 +368,54 @@ describe('MultiModelClient', () => {
   });
 
   describe('total timeout', () => {
-    it('should throw timeout error after 60s total', async () => {
+    // Budget for one 30s endpoint: 3 attempts × 30s + backoff allowance
+    // (1s + 2s, +30% jitter) = 93.9s — enough for the primary endpoint to use
+    // all its retries before the total timer fires.
+    it('should throw timeout error once the retry budget is exhausted', async () => {
       const client = new MultiModelClient([makeResolvedConfig()]);
 
       mockSignalAwareNeverResolve();
       mockedAxios.isCancel.mockReturnValue(true);
 
+      let settled = false;
       const chatPromise = client.chat([{ role: 'user', content: 'Hi' }], 'System');
       // Eagerly attach catch to prevent unhandled rejection during timer advancement
-      const errorPromise = chatPromise.catch((e: unknown) => e);
+      const errorPromise = chatPromise.catch((e: unknown) => { settled = true; return e; });
 
+      // The old fixed 60s budget aborted retries mid-flight — must NOT fire here
       await jest.advanceTimersByTimeAsync(61_000);
+      expect(settled).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(35_000); // past the 93.9s budget
 
       const error = await errorPromise;
       expect(error).toBeInstanceOf(AIServiceError);
       expect((error as AIServiceError).category).toBe('timeout');
       expect((error as AIServiceError).message).toContain('总超时');
+    });
+
+    it('should extend the budget so each fallback endpoint gets one full attempt', async () => {
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+      ]);
+
+      mockSignalAwareNeverResolve();
+      mockedAxios.isCancel.mockReturnValue(true);
+
+      let settled = false;
+      const chatPromise = client.chat([{ role: 'user', content: 'Hi' }], 'System');
+      const errorPromise = chatPromise.catch((e: unknown) => { settled = true; return e; });
+
+      // Single-endpoint budget (93.9s) must not fire — ep-2 still gets its 30s
+      await jest.advanceTimersByTimeAsync(95_000);
+      expect(settled).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(30_000); // past 123.9s total
+
+      const error = await errorPromise;
+      expect(error).toBeInstanceOf(AIServiceError);
+      expect((error as AIServiceError).category).toBe('timeout');
     });
   });
 

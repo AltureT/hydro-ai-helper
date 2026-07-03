@@ -13,6 +13,7 @@ function createMockCollection() {
     find: jest.fn().mockReturnValue(chainMock),
     updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
     updateMany: jest.fn().mockResolvedValue({ modifiedCount: 5 }),
+    countDocuments: jest.fn().mockResolvedValue(0),
     _chain: chainMock,
   };
 }
@@ -259,6 +260,31 @@ describe('StudentSummaryModel', () => {
       coll.updateMany.mockResolvedValue({ modifiedCount: 7 });
       const count = await model.publishAll(new ObjectId());
       expect(count).toBe(7);
+    });
+  });
+
+  // ─── countUnpublishableByJob ─────────────────────────
+
+  describe('countUnpublishableByJob', () => {
+    it('should count failed and pending/generating students separately', async () => {
+      const jobId = new ObjectId();
+      coll.countDocuments
+        .mockResolvedValueOnce(3) // failed
+        .mockResolvedValueOnce(2); // pending + generating
+
+      const result = await model.countUnpublishableByJob(jobId);
+
+      expect(result).toEqual({ failed: 3, pending: 2 });
+      expect(coll.countDocuments).toHaveBeenCalledWith({ jobId, status: 'failed' });
+      expect(coll.countDocuments).toHaveBeenCalledWith({
+        jobId,
+        status: { $in: ['pending', 'generating'] },
+      });
+    });
+
+    it('should return zeros when every summary completed', async () => {
+      const result = await model.countUnpublishableByJob(new ObjectId());
+      expect(result).toEqual({ failed: 0, pending: 0 });
     });
   });
 
