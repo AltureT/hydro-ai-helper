@@ -22,6 +22,12 @@ export interface TeachingFinding {
   aiSuggestion?: string;
   aiAnalysis?: string;
   confidence?: 'high' | 'low' | 'insufficient_data';
+  /** 错误签名（合并自错误聚类维度） */
+  errorSignature?: string;
+  /** 折叠进本发现的关联洞察，展开时展示 */
+  supplements?: string[];
+  /** 次要发现：不单独成卡片，在"其他观察"中一行带过 */
+  isSecondary?: boolean;
 }
 
 export interface TeachingSummary {
@@ -44,6 +50,10 @@ export interface TeachingSummary {
   };
   findings: TeachingFinding[];
   overallSuggestion: string;
+  /** 课后强化训练（挖空作业）markdown；旧文档无此字段（作业拼在 overallSuggestion 末尾） */
+  homeworkText?: string;
+  /** 发现项涉及的学生 uid -> 用户名 */
+  studentNames?: Record<string, string>;
   deepDiveResults: Record<string, string>;
   feedback?: { rating: 'up' | 'down'; comment?: string };
   tokenUsage: { promptTokens: number; completionTokens: number };

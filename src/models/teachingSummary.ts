@@ -72,6 +72,12 @@ export interface TeachingFinding {
   aiAnalysis?: string;
   confidence?: ConfidenceLevel;
   fillInExercise?: FillInExercise;
+  /** 错误签名（来自 errorCluster 维度，合并后随主发现保留） */
+  errorSignature?: string;
+  /** 被折叠进本发现的关联洞察（如交叉关联、错误聚类的补充信息），展开时展示 */
+  supplements?: string[];
+  /** 次要发现：不单独成卡片，前端在"其他观察"中一行带过 */
+  isSecondary?: boolean;
 }
 
 
@@ -95,6 +101,10 @@ export interface TeachingSummary {
   };
   findings: TeachingFinding[];
   overallSuggestion: string;
+  /** 课后强化训练（挖空作业）markdown，独立于 overallSuggestion 存储；旧文档无此字段（作业拼在 overallSuggestion 末尾） */
+  homeworkText?: string;
+  /** 发现项涉及的学生 uid -> 用户名 映射，供前端展示名单 */
+  studentNames?: Record<string, string>;
   deepDiveResults: Record<string, string>;
   feedback?: { rating: 'up' | 'down'; comment?: string };
   tokenUsage: { promptTokens: number; completionTokens: number };
@@ -257,6 +267,8 @@ export class TeachingSummaryModel {
       stats: TeachingSummary['stats'];
       findings: TeachingFinding[];
       overallSuggestion: string;
+      homeworkText?: string;
+      studentNames?: Record<string, string>;
       deepDiveResults?: Record<string, string>;
       tokenUsage: TeachingSummary['tokenUsage'];
       generationTimeMs: number;
@@ -271,6 +283,8 @@ export class TeachingSummaryModel {
           stats: data.stats,
           findings: data.findings,
           overallSuggestion: data.overallSuggestion,
+          homeworkText: data.homeworkText ?? '',
+          studentNames: data.studentNames ?? {},
           deepDiveResults: data.deepDiveResults ?? {},
           tokenUsage: data.tokenUsage,
           generationTimeMs: data.generationTimeMs,
