@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
 import { ZINDEX } from '../utils/styles';
 import { ThinkingBlock } from './ThinkingBlock';

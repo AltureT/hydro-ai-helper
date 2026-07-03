@@ -8,7 +8,7 @@
  */
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { COLORS, SPACING, RADIUS, SHADOWS, LAYOUT, markdownTheme, emptyStateStyle } from '../utils/styles';
 import { renderMarkdown } from '../utils/markdown';
 

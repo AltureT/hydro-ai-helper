@@ -1,5 +1,5 @@
 import { useReducer, useRef, useCallback, useEffect, useMemo } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../../utils/i18n';
 import { buildApiUrl } from '../../utils/domainUtils';
 import {
   clearConversationId as clearStoredConversationId,

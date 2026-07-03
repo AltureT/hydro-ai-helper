@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { Chart, registerables } from 'chart.js';
 import {
   COLORS,

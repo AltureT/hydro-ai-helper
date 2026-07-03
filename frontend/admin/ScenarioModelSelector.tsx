@@ -1,5 +1,5 @@
 import React from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import {
   COLORS, SPACING, RADIUS,
   getInputStyle, getButtonStyle, getBadgeStyle,
@@ -9,9 +9,18 @@ import { AI_SCENARIO_KEYS } from './configTypes';
 
 interface ScenarioModelSelectorProps {
   endpoints: Endpoint[];
+  /** 全局默认模型链（用于展示"跟随全局"场景当前实际生效的模型） */
+  globalModels: SelectedModel[];
   scenarioModels: ScenarioModelsState;
   onChange: (scenario: AIScenarioKey, chain: SelectedModel[]) => void;
   disabled: boolean;
+}
+
+/** 把模型链概括成 "a → b → c" 的短文本（最多 3 个，多余折叠） */
+function summarizeChain(chain: SelectedModel[]): string {
+  const names = chain.map(sm => sm.modelName);
+  const shown = names.slice(0, 3).join(' → ');
+  return names.length > 3 ? `${shown} → +${names.length - 3}` : shown;
 }
 
 const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; icon: string }> = {
@@ -35,7 +44,7 @@ const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; 
 const OPTION_SEPARATOR = '::';
 
 export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
-  endpoints, scenarioModels, onChange, disabled,
+  endpoints, globalModels, scenarioModels, onChange, disabled,
 }) => {
   // 可供选择的 端点×模型 组合（未保存端点的临时 ID 会在保存时由后端重映射为真实 ID）
   const modelOptions: Array<{ endpointId: string; endpointName: string; modelName: string }> = [];
@@ -120,6 +129,17 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
               <p style={{ fontSize: '12px', color: COLORS.textMuted, margin: `0 0 ${SPACING.sm}` }}>
                 {i18n(meta.descKey)}
               </p>
+
+              {isDefault && (
+                <div style={{
+                  fontSize: '12px', marginBottom: SPACING.sm,
+                  color: globalModels.length > 0 ? COLORS.textSecondary : COLORS.warningText,
+                }}>
+                  {globalModels.length > 0
+                    ? i18n('ai_helper_admin_scenario_effective_global', summarizeChain(globalModels))
+                    : i18n('ai_helper_admin_scenario_global_empty')}
+                </div>
+              )}
 
               {!isDefault && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs, marginBottom: SPACING.sm }}>

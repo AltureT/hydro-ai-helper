@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { ScenarioModelSelector } from './ScenarioModelSelector';
@@ -426,6 +426,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           <div style={dsCardStyle}>
             <ScenarioModelSelector
               endpoints={config.endpoints}
+              globalModels={config.selectedModels}
               scenarioModels={config.scenarioModels}
               onChange={updateScenarioModels}
               disabled={isBusy}
@@ -444,6 +445,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
                 onChange={(e) => setConfig({ ...config, timeoutSeconds: e.target.value === '' ? '' : Number(e.target.value) })}
                 placeholder="30" min="1" disabled={isBusy} style={getInputStyle()}
               />
+              <p style={{ fontSize: '12px', color: COLORS.textMuted, margin: `${SPACING.xs} 0 0` }}>
+                {i18n('ai_helper_config_timeout_hint')}
+              </p>
             </div>
             <div>
               <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, color: COLORS.textPrimary }}>{i18n('ai_helper_config_rate_limit_per_minute')}</label>
@@ -451,8 +455,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
                 type="number"
                 value={config.rateLimitPerMinute}
                 onChange={(e) => setConfig({ ...config, rateLimitPerMinute: e.target.value === '' ? '' : Number(e.target.value) })}
-                placeholder="5" min="1" disabled={isBusy} style={getInputStyle()}
+                placeholder="5" min="0" disabled={isBusy} style={getInputStyle()}
               />
+              <p style={{ fontSize: '12px', color: COLORS.textMuted, margin: `${SPACING.xs} 0 0` }}>
+                {i18n('ai_helper_config_rate_limit_hint')}
+              </p>
             </div>
           </div>
         </div>

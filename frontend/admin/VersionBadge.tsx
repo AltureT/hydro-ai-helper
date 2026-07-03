@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { buildApiUrl } from '../utils/domainUtils';
 import {
   COLORS, SPACING, RADIUS, SHADOWS, TRANSITIONS, ANIMATIONS, TYPOGRAPHY, FONT_FAMILY,

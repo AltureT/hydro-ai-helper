@@ -1,5 +1,5 @@
 import React from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { buildPageUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
 import { COLORS, getTableHeaderStyle, getTableRowStyle, TRANSITIONS } from '../utils/styles';

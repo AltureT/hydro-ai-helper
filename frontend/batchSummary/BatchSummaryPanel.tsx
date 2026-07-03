@@ -5,7 +5,7 @@
  */
 
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { COLORS, SPACING, RADIUS, SHADOWS, LAYOUT, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
 
 /** i18n with hardcoded Chinese fallback for keys that may not yet be in lang-*.js */

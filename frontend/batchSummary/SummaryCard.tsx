@@ -5,7 +5,7 @@
  */
 
 import React, { useState } from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import {
   COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle,
 } from '../utils/styles';

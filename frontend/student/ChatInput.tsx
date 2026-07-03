@@ -1,5 +1,5 @@
 import React from 'react';
-import { i18n } from '@hydrooj/ui-default';
+import { i18n } from '../utils/i18n';
 import { TypeIcon, SendIcon, AttachIcon, RefreshIcon, RemoveIcon } from './icons';
 
 // ── 方案 A · 克制蓝 调色 ───────────────────────────────────────────────

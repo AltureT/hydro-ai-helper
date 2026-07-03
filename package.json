@@ -23,6 +23,7 @@
   ],
   "scripts": {
     "build:plugin": "tsc",
+    "gen:locale": "node scripts/generateLocaleFallback.js",
     "dev": "tsc --watch",
     "lint": "eslint src --ext .ts,.tsx",
     "test": "jest"
@@ -51,6 +52,7 @@
     "eslint": "^8.0.0",
     "hydrooj": "^4.0.0",
     "jest": "^30.2.0",
+    "js-yaml": "^4.3.0",
     "ts-jest": "^29.4.6",
     "typescript": "^5.0.0",
     "wrangler": "^4.79.0"
