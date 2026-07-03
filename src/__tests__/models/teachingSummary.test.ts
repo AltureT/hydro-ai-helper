@@ -288,12 +288,30 @@ describe('TeachingSummaryModel', () => {
             stats,
             findings: [sampleFinding],
             overallSuggestion: 'Focus on boundary conditions',
+            homeworkText: '',
+            studentNames: {},
             deepDiveResults: {},
             tokenUsage: { promptTokens: 1000, completionTokens: 500 },
             generationTimeMs: 3200,
           },
         },
       );
+    });
+
+    it('should save homeworkText and studentNames when provided', async () => {
+      await model.saveResults('summary1', {
+        stats: { totalStudents: 10, participatedStudents: 8, aiUserCount: 5, problemCount: 3 },
+        findings: [],
+        overallSuggestion: 'ok',
+        homeworkText: '### 📝 课后巩固作业\n第 1 题…',
+        studentNames: { '101': '张三' },
+        tokenUsage: { promptTokens: 200, completionTokens: 100 },
+        generationTimeMs: 800,
+      });
+
+      const call = col.updateOne.mock.calls[0];
+      expect(call[1].$set.homeworkText).toContain('课后巩固作业');
+      expect(call[1].$set.studentNames).toEqual({ '101': '张三' });
     });
 
     it('should save deepDiveResults when provided', async () => {

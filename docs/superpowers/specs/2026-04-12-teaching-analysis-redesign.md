@@ -4,6 +4,19 @@
 **Scope:** Full redesign (UI, rule engine, LLM prompt)
 **Status:** Approved
 
+> **Addendum 2026-07-03 — 简化修订（teacher-feedback driven）**
+> 教师反馈：发现项重复、报告过长难抓重点、部分卡片展开无内容。此次修订：
+> 1. 新增 `findingConsolidator`：errorCluster 并入同题 commonError（保留错误签名/代码样本），
+>    学生集合被覆盖的 crossCorrelation 折叠为宿主发现的 `supplements`；按严重度+影响面排序，
+>    超出前 5 条标记 `isSecondary`（UI 中"其他观察"一行带过），progress 固定为正向横幅。
+> 2. 主 LLM 报告砍掉 `p0_action_plan` 章节（与发现卡片+深度诊断重复），只保留
+>    一句话诊断 / 下节课回顾清单 / 个体干预建议；深度诊断仅对重点发现执行。
+> 3. 挖空作业独立存储（`homeworkText`），UI 作为"课后强化训练"板块一键复制下发；
+>    只要存在共性错误，保底为影响面最大的题目生成作业。
+> 4. 发现项附带 `studentNames`（uid→用户名），展开卡片可见涉及学生名单；
+>    无实际详情的卡片不再显示展开箭头。
+> 页面结构调整为教师备课工作流：诊断 → 下节课回顾清单 → 学生问题 → 课后强化训练。
+
 ---
 
 ## 1. Overview

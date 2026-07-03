@@ -10,6 +10,7 @@ import { TeachingFinding, FindingDimension } from '../models/teachingSummary';
 import { analyzeErrorClusters } from './analyzers/errorClusterAnalyzer';
 import { analyzeTemporalPatterns } from './analyzers/temporalPatternAnalyzer';
 import { analyzeCorrelations } from './analyzers/correlationAnalyzer';
+import { consolidateFindings } from './analyzers/findingConsolidator';
 import { getClassSizeStrategy } from './analyzers/classSizeStrategy';
 import {
   shouldGenerateFillIn,
@@ -230,10 +231,12 @@ export class TeachingAnalysisService {
       findings.push(f);
     }
 
-    // Filter out findings from disabled dimensions
-    const filteredFindings = findings.filter(
+    // Filter out findings from disabled dimensions, then consolidate:
+    // merge duplicate error findings, fold cross-correlations into hosts,
+    // rank by severity/impact and mark overflow as secondary
+    const filteredFindings = consolidateFindings(findings.filter(
       f => !strategy.disabledDimensions.includes(f.dimension),
-    );
+    ));
 
     // Fill-in exercise candidates
     const fillInCandidates: FillInExercise[] = [];
@@ -264,6 +267,16 @@ export class TeachingAnalysisService {
         avgSubmissionCount: totalSubs / attempted,
       });
       if (trigger) fillInPids.push(pid);
+    }
+
+    // 保底：只要存在共性错误，至少为影响面最大的那道题生成课后强化训练，
+    // 避免教师在明明有共性问题时却拿不到任何作业素材
+    if (fillInPids.length === 0 && errorFindings.length > 0) {
+      const top = [...errorFindings].sort(
+        (a, b) => b.evidence.affectedStudents.length - a.evidence.affectedStudents.length,
+      )[0];
+      const topPid = top.evidence.affectedProblems[0];
+      if (topPid !== undefined) fillInPids.push(topPid);
     }
 
     if (fillInPids.length > 0) {

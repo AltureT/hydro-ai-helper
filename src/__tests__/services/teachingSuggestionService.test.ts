@@ -127,7 +127,6 @@ describe('buildMainPrompt', () => {
     const { system } = buildMainPrompt(input);
     expect(system).toContain('坏例子');
     expect(system).toContain('好例子');
-    expect(system).toContain('问题发现报告');
   });
 
   it('should include edge case handling in system prompt', () => {
@@ -137,14 +136,50 @@ describe('buildMainPrompt', () => {
     expect(system).toContain('AI 使用数据为 0');
   });
 
-  it('should include P0/P1 framework with problem discovery format', () => {
+  it('should include P0/P1 framework and behavior pattern labels', () => {
     const input = makeInput();
     const { system } = buildMainPrompt(input);
     expect(system).toContain('错误模式');
-    expect(system).toContain('数据全景');
-    expect(system).toContain('根因定位');
     expect(system).toContain('持续努力型');
     expect(system).toContain('受挫放弃型');
+  });
+
+  it('should not request the removed p0_action_plan section (deduplicated vs finding cards)', () => {
+    const input = makeInput();
+    const { user, system } = buildMainPrompt(input);
+    expect(user).not.toContain('p0_action_plan');
+    expect(system).not.toContain('p0_action_plan');
+    expect(system).not.toContain('数据全景');
+  });
+
+  it('should send primary findings as JSON and secondary findings as one-line titles', () => {
+    const input = makeInput({
+      findings: [
+        makeFinding(),
+        makeFinding({
+          id: 'f2',
+          title: '次要发现示例',
+          isSecondary: true,
+          evidence: {
+            affectedStudents: [4, 5],
+            affectedProblems: [102],
+            metrics: {},
+          },
+        }),
+      ],
+    });
+    const { user } = buildMainPrompt(input);
+    expect(user).toContain('数组越界错误');
+    expect(user).toContain('## 其他观察');
+    expect(user).toContain('- 次要发现示例');
+    // secondary finding must not be serialized as JSON
+    expect(user).not.toContain('"title": "次要发现示例"');
+  });
+
+  it('should omit the secondary section when all findings are primary', () => {
+    const input = makeInput();
+    const { user } = buildMainPrompt(input);
+    expect(user).not.toContain('## 其他观察');
   });
 
   it('should format user prompt with problem contexts', () => {

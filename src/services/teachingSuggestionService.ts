@@ -8,19 +8,18 @@ import { TeachingFinding } from '../models/teachingSummary';
 
 // ─── 提示词模板 ──────────────────────────────────────────
 
-const MAIN_SYSTEM_PROMPT = `你是一位教龄15年的编程课教师，同时负责教学教研。你将根据规则引擎提供的【带有具体错误诊断和题目信息的】课堂分析数据，为授课教师生成清晰直观的问题发现报告和教学参考素材。报告的核心是回答两个问题：这节课学生的主要问题是什么、下节课开头几分钟该回顾什么。
+const MAIN_SYSTEM_PROMPT = `你是一位教龄15年的编程课教师，同时负责教学教研。你将根据规则引擎提供的【带有具体错误诊断和题目信息的】课堂分析数据，为授课教师提炼一份【一分钟能读完、拿着就能上课】的教学参考。核心回答两个问题：这节课学生的主要问题是什么、下节课开头几分钟该怎么讲。
 
 【核心约束】
-- 聚焦主要问题：P0 发现最多展开 3 个（按影响人数从高到低），其余发现在 p0_action_plan 章节末尾以"**其他观察**："开头用一行列表带过，不展开
-- 每条发现必须清晰呈现"错误是什么/影响多大/根因在哪"，用数据和具体例子说话
-- P0 发现必须锚定在数据中的具体题目、具体错误模式上
-- P1 建议必须锚定具体行为证据（提交次数、AI提问记录等），如有关联题目则引用，不得强行编造错误模式
-- 当某章节主要依据 "low" confidence 数据时，在该章节标题下方加注一次"⚠️ 数据有限，以下建议仅供参考"
-- 当数据标注为 "insufficient_data" 时，跳过该维度不做建议
+- 少而准：除表格外全文不超过 200 字。原始数据的逐条展示由系统界面完成，你只负责结论与课堂动作，不要复述数据清单
+- 聚焦影响人数最多的 1-3 个问题，其余一概不提
+- 每条结论必须锚定数据中的具体题目、具体错误模式，并引用影响人数/比例
+- 建议必须具体到照着就能做；严禁输出"加强练习"/"进行个别辅导"/"注意边界条件"这类空话
+- 当某条主要依据 "low" confidence 数据时，行末加注"（⚠️ 数据有限，仅供参考）"；标注为 "insufficient_data" 的数据直接跳过
 - 必须基于给定数据说话，严禁捏造数据或比例
 
 【优先级框架】
-P0 — 全局知识缺陷：>20%学生犯同一类错误（有具体错误签名和测试点信息）
+P0 — 全局知识缺陷：>20%学生犯同一类错误（有具体错误签名和测试点信息）→ 优先进入回顾清单
 P1 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 / 沉默挣扎型 / 未参与型）
 
 【可推荐的教学干预方法】
@@ -40,12 +39,12 @@ P1 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 
 【边缘情况处理】
 | 条件 | 行动 |
 |---|---|
-| 全班 AC 率 > 90% 且无 commonError | 在 p0_action_plan 章节输出"全班表现优秀"并列出可进一步挑战的方向：时空复杂度优化、进阶变式题等；next_class_review 清单改为 1-2 个值得全班表扬的共性亮点 + 1 个进阶挑战 |
+| 全班 AC 率 > 90% 且无 commonError | diagnosis 输出"全班表现优秀"及依据；next_class_review 清单改为 1-2 个值得全班表扬的共性亮点 + 1 个进阶挑战方向（时空复杂度优化、进阶变式题等） |
 | AI 使用数据为 0（全班未使用 AI） | 聚焦于提交记录分析，不做 AI 有效性对比 |
 
 【质量示例】
 - 坏例子（禁止）："加强对边界条件的练习" / "进行个别辅导" / "注意数组越界问题" / "建议教师在课上演示正确写法"
-- 好例子（要求）："35%的学生（10人）在T2中将循环条件写成 i<=n 而非 i<n，导致testcase #3 (n=0) 时数组越界。根因：未区分'元素个数'与'最大下标'的概念差异" / "错误集中在边界条件判断，错误签名 off_by_one，影响题目 P101、P103"
+- 好例子（要求）："35%的学生（10人）在T2把循环条件写成 i<=n 而非 i<n（错误模式 off_by_one）：给出 n=0 让全班口算循环会执行几次，再对比 i<n，暴露'元素个数'与'最大下标'的概念差异"
 
 【输出章节定义】
 你的报告可能包含以下章节。每次请求的 user prompt 末尾会给出 output_sections 列表，只输出该列表中指定的章节，未指定的章节不得出现在输出中。
@@ -61,32 +60,8 @@ P1 — 个体干预：按行为模式分类（持续努力型 / 受挫放弃型 
 |---|---|---|
 | 1 | {问题一句话，含影响面数据} | {如：给出 n=0 让全班口算 i<=n 的循环会执行几次，再对比 i<n} |
 
-■ p0_action_plan — P0全局错误发现报告
-### 🚨 问题发现报告
-（按影响人数从高到低排列，最多展开 3 个 P0 问题，每个独立一节；其余发现在本章节末尾以"**其他观察**："一行带过）
-
-#### [P0] {问题名称} — 影响 {N}人/{百分比}
-
-**📌 错误模式**：{一句话概括错误模式，引用错误签名}
-
-**🔍 具体表现**：
-- 错误签名：\`{errorSignature}\`，出现在测试点 {testcaseIds}
-- 典型错误代码：\`{学生代码中的关键错误行}\`
-- 学生常见误解："{学生认为的逻辑}" → 实际应为："{正确逻辑}"
-
-**📊 数据全景**：
-| 维度 | 数据 |
-|---|---|
-| 受影响学生数 | {N}人（占参与人数{百分比}） |
-| 涉及题目 | {pid列表} |
-| 错误集中度 | {该错误是分散在多题还是集中在某题} |
-
-**🧠 根因定位**：{用1-2句话说明知识盲点或认知误区，不要给出教学行动指令}
-
-**💡 可选干预方向**：{从【可推荐的教学干预方法】中选择1-2个适合的方法名称，仅列出方法名，不展开具体步骤}
-
-■ p1_behavior_intervention — P1个体干预建议
-#### [P1] 个体干预建议
+■ p1_behavior_intervention — 个体干预建议
+### 👥 个体干预建议
 （仅输出 count > 0 的行为模式，跳过人数为 0 或数据缺失的类别）
 | 行为模式 | 人数 | 建议动作 |
 |---|---|---|
@@ -238,7 +213,16 @@ export function buildMainPrompt(input: MainPromptInput): PromptMessages {
       ].filter(Boolean).join('\n')
     : '教学目标未提供';
 
-  const strippedFindings = stripSamples(findings);
+  // 重点发现给完整 JSON；次要发现只给标题一行，避免 LLM 把注意力分散到长尾
+  const primaryFindings = findings.filter(f => !f.isSecondary);
+  const secondaryFindings = findings.filter(f => f.isSecondary);
+  const strippedFindings = stripSamples(primaryFindings);
+
+  const secondarySection = secondaryFindings.length
+    ? `\n\n## 其他观察（次要发现，不要为其单独产出建议）\n${secondaryFindings
+        .map(f => `- ${f.title}`)
+        .join('\n')}`
+    : '';
 
   const problemSection = input.problemContexts?.length
     ? `\n## 题目内容\n${input.problemContexts
@@ -261,7 +245,7 @@ export function buildMainPrompt(input: MainPromptInput): PromptMessages {
       }, null, 2)}`
     : '';
 
-  const outputSections: string[] = ['diagnosis', 'next_class_review', 'p0_action_plan'];
+  const outputSections: string[] = ['diagnosis', 'next_class_review'];
   if (hasBehavior) outputSections.push('p1_behavior_intervention');
 
   const userPrompt = `## 教学上下文
@@ -275,8 +259,8 @@ ${contextSection}
 - 题目数量：${stats.problemCount}
 ${problemSection}
 
-## 规则引擎发现（JSON）
-${JSON.stringify(strippedFindings, null, 2)}${behaviorSection}
+## 规则引擎重点发现（JSON）
+${JSON.stringify(strippedFindings, null, 2)}${secondarySection}${behaviorSection}
 
 ---
 output_sections: ${JSON.stringify(outputSections)}
