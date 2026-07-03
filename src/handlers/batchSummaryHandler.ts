@@ -213,6 +213,7 @@ export class BatchSummaryGenerateHandler extends Handler {
         tokenUsageModel,
         historyModel,
         this.ctx.get('featureStatsModel') || null,
+        this.ctx.get('errorReporter') || null,
       );
 
       const pendingOnly = effectiveMode === 'new_only';
@@ -393,7 +394,6 @@ export class BatchSummaryPublishHandler extends Handler {
         return;
       }
 
-      let published: number;
       if (userId) {
         const summary = await summaryModel.findByJobAndUser(job._id, parseInt(userId, 10));
         if (!summary) {
@@ -403,12 +403,19 @@ export class BatchSummaryPublishHandler extends Handler {
           return;
         }
         await summaryModel.publishOne(summary._id);
-        published = 1;
+        this.response.body = { published: 1 };
       } else {
-        published = await summaryModel.publishAll(job._id);
+        // publishAll only flips completed drafts — report how many students it
+        // could not reach so the teacher UI can warn instead of implying
+        // everyone will see a summary.
+        const published = await summaryModel.publishAll(job._id);
+        const skipped = await summaryModel.countUnpublishableByJob(job._id);
+        this.response.body = {
+          published,
+          skippedFailed: skipped.failed,
+          skippedPending: skipped.pending,
+        };
       }
-
-      this.response.body = { published };
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[BatchSummaryPublishHandler] error:', err);
@@ -735,6 +742,7 @@ export class BatchSummaryContinueHandler extends Handler {
         tokenUsageModel,
         historyModel,
         this.ctx.get('featureStatsModel') || null,
+        this.ctx.get('errorReporter') || null,
       );
 
       service.execute(job, problems, (event) => {

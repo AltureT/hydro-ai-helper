@@ -387,4 +387,180 @@ describe('BatchSummaryService', () => {
       await expect(service.execute(job, problems, () => {})).resolves.toBeUndefined();
     });
   });
+
+  // ─── Adaptive concurrency ───────────────────────────────────────────────────
+
+  describe('execute - adaptive concurrency', () => {
+    it('should halve concurrency after a round where most students fail', async () => {
+      const TOTAL = 12;
+      const summaries = Array.from({ length: TOTAL }, (_, i) => makePendingSummary(i + 1));
+      mockSummaryModel.findAllByJob.mockResolvedValue(summaries);
+
+      let currentConcurrent = 0;
+      const startLevels: number[] = [];
+      mockAiClient.chat.mockImplementation(
+        () =>
+          new Promise<any>((_resolve, reject) => {
+            currentConcurrent++;
+            startLevels.push(currentConcurrent);
+            setImmediate(() => {
+              currentConcurrent--;
+              reject(new Error('AI 服务总超时'));
+            });
+          }),
+      );
+
+      const job = makeJob({ totalStudents: TOTAL, config: { concurrency: 4, locale: 'zh' } });
+      await service.execute(job, problems, () => {});
+
+      // Round 1 runs at the configured concurrency…
+      expect(Math.max(...startLevels.slice(0, 4))).toBe(4);
+      // …every later round is throttled (halved to 2, the floor) after the all-fail round
+      expect(Math.max(...startLevels.slice(4))).toBeLessThanOrEqual(2);
+      // All students are still processed
+      expect(mockAiClient.chat).toHaveBeenCalledTimes(TOTAL);
+    });
+
+    it('should keep the configured concurrency while rounds succeed', async () => {
+      const TOTAL = 8;
+      const summaries = Array.from({ length: TOTAL }, (_, i) => makePendingSummary(i + 1));
+      mockSummaryModel.findAllByJob.mockResolvedValue(summaries);
+
+      let currentConcurrent = 0;
+      const startLevels: number[] = [];
+      mockAiClient.chat.mockImplementation(
+        () =>
+          new Promise<any>((resolve) => {
+            currentConcurrent++;
+            startLevels.push(currentConcurrent);
+            setImmediate(() => {
+              currentConcurrent--;
+              resolve({ content: 'ok', usage: { prompt_tokens: 1, completion_tokens: 1 } });
+            });
+          }),
+      );
+
+      const job = makeJob({ totalStudents: TOTAL, config: { concurrency: 4, locale: 'zh' } });
+      await service.execute(job, problems, () => {});
+
+      // Both rounds run at the configured concurrency — no throttling
+      expect(Math.max(...startLevels.slice(4))).toBe(4);
+    });
+  });
+
+  // ─── Telemetry (per-student failures) ───────────────────────────────────────
+
+  describe('execute - telemetry', () => {
+    it('should report per-student failures to the errorReporter', async () => {
+      const mockErrorReporter = { capture: jest.fn() };
+      service = new BatchSummaryService(
+        mockDb,
+        mockJobModel,
+        mockSummaryModel,
+        mockAiClient,
+        mockTokenUsageModel,
+        null,
+        null,
+        mockErrorReporter,
+      );
+      mockAiClient.chat.mockRejectedValue(new Error('AI 服务总超时'));
+
+      const job = makeJob();
+      await service.execute(job, problems, () => {});
+
+      expect(mockErrorReporter.capture).toHaveBeenCalledWith(
+        'background_job',
+        'batch_summary',
+        expect.stringContaining('AI 服务总超时'),
+        undefined,
+        expect.any(String),
+        expect.objectContaining({ domainId: 'test-domain' }),
+      );
+    });
+
+    it('should not report anything when all students succeed', async () => {
+      const mockErrorReporter = { capture: jest.fn() };
+      service = new BatchSummaryService(
+        mockDb,
+        mockJobModel,
+        mockSummaryModel,
+        mockAiClient,
+        mockTokenUsageModel,
+        null,
+        null,
+        mockErrorReporter,
+      );
+
+      await service.execute(makeJob(), problems, () => {});
+
+      expect(mockErrorReporter.capture).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Feature health signal ──────────────────────────────────────────────────
+
+  describe('execute - feature health signal', () => {
+    let mockFeatureStats: any;
+
+    beforeEach(() => {
+      mockFeatureStats = {
+        recordAttempt: jest.fn().mockResolvedValue(undefined),
+        recordSuccess: jest.fn().mockResolvedValue(undefined),
+      };
+      service = new BatchSummaryService(
+        mockDb,
+        mockJobModel,
+        mockSummaryModel,
+        mockAiClient,
+        mockTokenUsageModel,
+        null,
+        mockFeatureStats,
+      );
+    });
+
+    it('should record success when every student succeeds', async () => {
+      await service.execute(makeJob(), problems, () => {});
+      expect(mockFeatureStats.recordAttempt).toHaveBeenCalledWith('batch_summary');
+      expect(mockFeatureStats.recordSuccess).toHaveBeenCalledWith('batch_summary');
+    });
+
+    it('should record success when at least half the students succeed', async () => {
+      mockSummaryModel.findAllByJob.mockResolvedValue([
+        makePendingSummary(1),
+        makePendingSummary(2),
+      ]);
+      let call = 0;
+      mockAiClient.chat.mockImplementation(() => {
+        call++;
+        return call === 1
+          ? Promise.resolve({ content: 'ok', usage: { prompt_tokens: 1, completion_tokens: 1 } })
+          : Promise.reject(new Error('boom'));
+      });
+
+      await service.execute(makeJob({ totalStudents: 2 }), problems, () => {});
+
+      expect(mockFeatureStats.recordSuccess).toHaveBeenCalledWith('batch_summary');
+    });
+
+    it('should NOT record success for a degraded run where most students fail', async () => {
+      mockSummaryModel.findAllByJob.mockResolvedValue([
+        makePendingSummary(1),
+        makePendingSummary(2),
+        makePendingSummary(3),
+      ]);
+      let call = 0;
+      mockAiClient.chat.mockImplementation(() => {
+        call++;
+        return call === 1
+          ? Promise.resolve({ content: 'ok', usage: { prompt_tokens: 1, completion_tokens: 1 } })
+          : Promise.reject(new Error('AI 服务总超时'));
+      });
+
+      await service.execute(makeJob({ totalStudents: 3 }), problems, () => {});
+
+      // 1/3 completed is an outage in disguise — attempt yes, success no
+      expect(mockFeatureStats.recordAttempt).toHaveBeenCalledWith('batch_summary');
+      expect(mockFeatureStats.recordSuccess).not.toHaveBeenCalled();
+    });
+  });
 });

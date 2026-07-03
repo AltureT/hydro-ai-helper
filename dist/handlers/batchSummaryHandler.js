@@ -178,7 +178,7 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
             }
             const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
             const historyModel = this.ctx.get('studentHistoryModel') || null;
-            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, this.ctx.get('featureStatsModel') || null);
+            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, this.ctx.get('featureStatsModel') || null, this.ctx.get('errorReporter') || null);
             const pendingOnly = effectiveMode === 'new_only';
             service.execute(job, problems, (event) => {
                 if (!sse.closed) {
@@ -337,7 +337,6 @@ class BatchSummaryPublishHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
-            let published;
             if (userId) {
                 const summary = await summaryModel.findByJobAndUser(job._id, parseInt(userId, 10));
                 if (!summary) {
@@ -347,12 +346,20 @@ class BatchSummaryPublishHandler extends hydrooj_1.Handler {
                     return;
                 }
                 await summaryModel.publishOne(summary._id);
-                published = 1;
+                this.response.body = { published: 1 };
             }
             else {
-                published = await summaryModel.publishAll(job._id);
+                // publishAll only flips completed drafts — report how many students it
+                // could not reach so the teacher UI can warn instead of implying
+                // everyone will see a summary.
+                const published = await summaryModel.publishAll(job._id);
+                const skipped = await summaryModel.countUnpublishableByJob(job._id);
+                this.response.body = {
+                    published,
+                    skippedFailed: skipped.failed,
+                    skippedPending: skipped.pending,
+                };
             }
-            this.response.body = { published };
             this.response.type = 'application/json';
         }
         catch (err) {
@@ -648,7 +655,7 @@ class BatchSummaryContinueHandler extends hydrooj_1.Handler {
             }
             const tokenUsageModel = this.ctx.get('tokenUsageModel') || null;
             const historyModel = this.ctx.get('studentHistoryModel') || null;
-            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, this.ctx.get('featureStatsModel') || null);
+            const service = new batchSummaryService_1.BatchSummaryService(this.ctx.db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, this.ctx.get('featureStatsModel') || null, this.ctx.get('errorReporter') || null);
             service.execute(job, problems, (event) => {
                 if (!sse.closed) {
                     const uid = Number(event.userId);

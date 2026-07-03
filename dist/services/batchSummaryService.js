@@ -22,6 +22,8 @@ const STATUS_MAP = {
     11: 'Compiling',
     12: 'Judging',
 };
+// Adaptive-concurrency floor — never drop below this many parallel AI calls
+const MIN_CONCURRENCY = 2;
 // ─── Prompt builders ──────────────────────────────────────────────────────────
 function buildSystemPrompt(locale, contestTitle, domainId) {
     if (locale === 'zh') {
@@ -212,7 +214,9 @@ function buildUserPrompt(problems, sampleResults) {
 class BatchSummaryService {
     constructor(db, jobModel, summaryModel, aiClient, tokenUsageModel, historyModel, 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    featureStatsModel) {
+    featureStatsModel, 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    errorReporter) {
         this.db = db;
         this.jobModel = jobModel;
         this.summaryModel = summaryModel;
@@ -220,6 +224,7 @@ class BatchSummaryService {
         this.tokenUsageModel = tokenUsageModel;
         this.historyModel = historyModel || null;
         this.featureStatsModel = featureStatsModel || null;
+        this.errorReporter = errorReporter || null;
         this.sampler = new submissionSampler_1.SubmissionSampler();
     }
     /**
@@ -235,14 +240,15 @@ class BatchSummaryService {
             ? await this.summaryModel.findPendingByJob(job._id)
             : await this.summaryModel.findAllByJob(job._id);
         const total = summaries.length;
-        const concurrency = job.config?.concurrency ?? 10;
+        let concurrency = job.config?.concurrency ?? 10;
         let completedCount = 0;
         let failedCount = 0;
         let totalTokens = 0;
         // Build system prompt once (invariant across all students in this job)
         const systemPrompt = buildSystemPrompt(job.config.locale, job.contestTitle, job.domainId);
-        // Step 3: Process in batches of `concurrency`
-        for (let i = 0; i < summaries.length; i += concurrency) {
+        // Step 3: Process in rounds of `concurrency`
+        let cursor = 0;
+        while (cursor < summaries.length) {
             // Check if job was stopped between batches
             const currentJob = await this.jobModel.findById(job._id);
             if (currentJob?.status === 'stopped') {
@@ -255,8 +261,10 @@ class BatchSummaryService {
                 });
                 return;
             }
-            const batch = summaries.slice(i, i + concurrency);
+            const batch = summaries.slice(cursor, cursor + concurrency);
+            cursor += batch.length;
             const results = await Promise.allSettled(batch.map((summary) => this.processStudent(job, summary, problems, systemPrompt, onEvent, userNameMap)));
+            let roundFailed = 0;
             for (const result of results) {
                 if (result.status === 'fulfilled') {
                     completedCount++;
@@ -264,7 +272,17 @@ class BatchSummaryService {
                 }
                 else {
                     failedCount++;
+                    roundFailed++;
                 }
+            }
+            // Adaptive back-off: when most of a round fails (typically the AI
+            // endpoint timing out under load), halve the concurrency instead of
+            // keeping ten parallel calls hammering an endpoint that is already
+            // struggling — fewer in-flight requests give each remaining call a
+            // better shot at finishing inside its timeout budget.
+            if (roundFailed * 2 > batch.length && concurrency > MIN_CONCURRENCY) {
+                concurrency = Math.max(MIN_CONCURRENCY, Math.floor(concurrency / 2));
+                console.warn(`[BatchSummaryService] ${roundFailed}/${batch.length} failed in one round — reducing concurrency to ${concurrency}`);
             }
             // Emit progress after each batch
             onEvent({
@@ -277,8 +295,11 @@ class BatchSummaryService {
         // Step 4: Finalize job status
         const finalStatus = completedCount > 0 || failedCount === 0 ? 'completed' : 'failed';
         await this.jobModel.updateStatus(job._id, finalStatus);
-        // Health signal: a job that produced at least one summary is a success.
-        if (completedCount > 0) {
+        // Health signal: only count the run as a success when at most half the
+        // students failed. The previous "at least one summary" rule marked a run
+        // with 1/50 completions healthy, so an AI outage that failed nearly every
+        // student never surfaced in per-feature health.
+        if (completedCount > 0 && completedCount >= failedCount) {
             this.featureStatsModel?.recordSuccess('batch_summary').catch(() => { });
         }
         onEvent({
@@ -413,6 +434,14 @@ class BatchSummaryService {
                 error: errorMessage,
             });
             console.error(`[BatchSummaryService] Failed for userId=${summary.userId}:`, err);
+            // Telemetry: per-student failures previously only reached Mongo + SSE, so
+            // a batch where every student timed out looked healthy on the platform.
+            // The reporter dedupes by stack fingerprint, so N students failing the
+            // same way become one entry with count=N — no flood risk.
+            try {
+                this.errorReporter?.capture('background_job', 'batch_summary', errorMessage, undefined, err instanceof Error ? err.stack : undefined, { jobId: String(job._id), domainId: job.domainId });
+            }
+            catch { /* best-effort */ }
             // Re-throw so Promise.allSettled registers as 'rejected'
             throw err;
         }

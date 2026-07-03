@@ -60,6 +60,19 @@ class StudentSummaryModel {
         const result = await this.collection.updateMany({ jobId, status: 'completed', publishStatus: 'draft' }, { $set: { publishStatus: 'published', updatedAt: new Date() } });
         return result.modifiedCount;
     }
+    /**
+     * Counts of students in a job that publishAll cannot reach: generation
+     * failed, or not generated yet (pending/generating). Surfaced to the teacher
+     * on publish — otherwise these students are skipped silently and see a blank
+     * learning-summary tab while the teacher believes everything was published.
+     */
+    async countUnpublishableByJob(jobId) {
+        const [failed, pending] = await Promise.all([
+            this.collection.countDocuments({ jobId, status: 'failed' }),
+            this.collection.countDocuments({ jobId, status: { $in: ['pending', 'generating'] } }),
+        ]);
+        return { failed, pending };
+    }
     async publishOne(id) {
         await this.collection.updateOne({ _id: id }, { $set: { publishStatus: 'published', updatedAt: new Date() } });
     }
