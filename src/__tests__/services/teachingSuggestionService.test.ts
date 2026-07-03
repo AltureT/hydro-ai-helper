@@ -196,6 +196,14 @@ describe('buildMainPrompt', () => {
     expect(user).not.toContain('代码挖空候选');
   });
 
+  it('should include next_class_review in output_sections and define it in system prompt', () => {
+    const input = makeInput();
+    const { user, system } = buildMainPrompt(input);
+    expect(user).toContain('next_class_review');
+    expect(system).toContain('下节课回顾清单');
+    expect(system).toContain('建议课堂动作');
+  });
+
   it('should not include uid arrays in behaviorSection, only counts', () => {
     const input = makeInput({
       findings: [],
