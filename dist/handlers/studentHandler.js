@@ -555,7 +555,7 @@ class ChatHandler extends hydrooj_1.Handler {
         // 从数据库配置创建多模型 AI 客户端（支持 fallback）
         let multiModelClient;
         try {
-            multiModelClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, aiConfig ?? undefined);
+            multiModelClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, aiConfig ?? undefined, 'studentChat');
         }
         catch (error) {
             // 配置不存在或不完整

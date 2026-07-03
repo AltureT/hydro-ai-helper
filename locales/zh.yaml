@@ -414,6 +414,22 @@ ai_helper_admin_endpoint_priority_desc: "调用时将按以下顺序尝试模型
 ai_helper_admin_endpoint_no_models_selected: "尚未选择模型。请在上方端点的可用模型列表中点击添加。"
 ai_helper_admin_endpoint_unknown: "未知端点"
 
+# ─── 前端国际化：场景模型分配 ────────────────────────
+ai_helper_admin_scenario_title: "场景模型分配"
+ai_helper_admin_scenario_desc: "为不同功能场景指定专属模型（按顺序 Fallback）。未单独配置的场景将跟随上方的全局模型优先级。可将强模型用于低频的教学分析，性价比模型用于高频的学生对话。"
+ai_helper_admin_scenario_student_chat: "学生对话"
+ai_helper_admin_scenario_student_chat_desc: "学生答疑页面的多轮对话。调用量最大，建议选用响应快、中文自然的性价比模型。"
+ai_helper_admin_scenario_learning_summary: "学习总结"
+ai_helper_admin_scenario_learning_summary_desc: "批量为每位学生生成个性化学习总结。需要稳定遵循表格结构，按班级人数批量调用。"
+ai_helper_admin_scenario_teaching_analysis: "教学分析"
+ai_helper_admin_scenario_teaching_analysis_desc: "生成班级问题发现报告、课后作业与深度诊断。每次作业仅调用数次，建议选用能力更强的模型。"
+ai_helper_admin_scenario_follow_global: "跟随全局"
+ai_helper_admin_scenario_custom: "已自定义"
+ai_helper_admin_scenario_reset: "恢复跟随全局"
+ai_helper_admin_scenario_add_model: "+ 添加备选模型…"
+ai_helper_admin_scenario_add_model_override: "为此场景指定专属模型…"
+ai_helper_admin_scenario_no_models: "暂无可选模型：请先在上方端点中获取并保存模型列表。"
+
 # ─── 前端国际化：预算配置 ────────────────────────────
 ai_helper_admin_budget_title: "Token 预算控制"
 ai_helper_admin_budget_desc: "限制 AI 调用的 Token 用量，防止成本失控。设为 0 或留空表示不限制。"

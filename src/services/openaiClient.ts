@@ -8,7 +8,7 @@ import https from 'https';
 import { Readable } from 'stream';
 import axios, { AxiosError } from 'axios';
 import type { Context } from 'hydrooj';
-import { AIConfigModel, AIConfig } from '../models/aiConfig';
+import { AIConfigModel, AIConfig, AIScenario, SelectedModel } from '../models/aiConfig';
 import { decrypt } from '../lib/crypto';
 import { API_DEFAULTS } from '../constants/limits';
 
@@ -981,12 +981,50 @@ export class MultiModelClient {
 }
 
 /**
+ * 将模型链（endpointId+modelName）解析为可用的 ResolvedModelConfig 列表
+ * 跳过不存在/禁用的端点和解密失败的 Key
+ */
+function resolveModelChain(config: AIConfig, chain: SelectedModel[]): ResolvedModelConfig[] {
+  const resolvedModels: ResolvedModelConfig[] = [];
+
+  for (const selected of chain) {
+    const endpoint = (config.endpoints || []).find(ep => ep.id === selected.endpointId);
+    if (!endpoint || !endpoint.enabled) {
+      continue;
+    }
+
+    let apiKey: string;
+    try {
+      apiKey = decrypt(endpoint.apiKeyEncrypted);
+    } catch {
+      console.warn(`[MultiModelClient] 端点 "${endpoint.name}" 的 API Key 解密失败，跳过`);
+      continue;
+    }
+
+    resolvedModels.push({
+      endpointId: endpoint.id,
+      endpointName: endpoint.name,
+      apiBaseUrl: endpoint.apiBaseUrl,
+      apiKey,
+      modelName: selected.modelName,
+      timeoutSeconds: config.timeoutSeconds || 30
+    });
+  }
+
+  return resolvedModels;
+}
+
+/**
  * 从数据库配置创建 MultiModelClient
  * 支持多端点、多模型 fallback
+ *
+ * @param scenario 可选的调用场景。若管理员为该场景配置了专属模型链则优先使用；
+ *                 未配置（或场景链中的端点均不可用）时回退到全局 selectedModels。
  */
 export async function createMultiModelClientFromConfig(
   ctx: Context,
-  existingConfig?: AIConfig | null
+  existingConfig?: AIConfig | null,
+  scenario?: AIScenario
 ): Promise<MultiModelClient> {
   const aiConfigModel: AIConfigModel = ctx.get('aiConfigModel');
   const config = existingConfig ?? await aiConfigModel.getConfig();
@@ -995,36 +1033,23 @@ export async function createMultiModelClientFromConfig(
     throw new Error('AI 服务尚未配置，请联系管理员在控制面板中完成配置。');
   }
 
-  // 优先使用新版多端点配置
-  if (config.endpoints && config.endpoints.length > 0 && config.selectedModels && config.selectedModels.length > 0) {
-    const resolvedModels: ResolvedModelConfig[] = [];
-
-    for (const selected of config.selectedModels) {
-      const endpoint = config.endpoints.find(ep => ep.id === selected.endpointId);
-      if (!endpoint || !endpoint.enabled) {
-        continue;
+  if (config.endpoints && config.endpoints.length > 0) {
+    // 1) 场景专属模型链（若配置且可解析）
+    const scenarioChain = scenario ? config.scenarioModels?.[scenario] : undefined;
+    if (scenarioChain && scenarioChain.length > 0) {
+      const resolvedScenarioModels = resolveModelChain(config, scenarioChain);
+      if (resolvedScenarioModels.length > 0) {
+        return new MultiModelClient(resolvedScenarioModels);
       }
-
-      let apiKey: string;
-      try {
-        apiKey = decrypt(endpoint.apiKeyEncrypted);
-      } catch {
-        console.warn(`[MultiModelClient] 端点 "${endpoint.name}" 的 API Key 解密失败，跳过`);
-        continue;
-      }
-
-      resolvedModels.push({
-        endpointId: endpoint.id,
-        endpointName: endpoint.name,
-        apiBaseUrl: endpoint.apiBaseUrl,
-        apiKey,
-        modelName: selected.modelName,
-        timeoutSeconds: config.timeoutSeconds || 30
-      });
+      console.warn(`[MultiModelClient] 场景 "${scenario}" 配置的模型均不可用，回退到全局模型配置`);
     }
 
-    if (resolvedModels.length > 0) {
-      return new MultiModelClient(resolvedModels);
+    // 2) 全局多端点配置
+    if (config.selectedModels && config.selectedModels.length > 0) {
+      const resolvedModels = resolveModelChain(config, config.selectedModels);
+      if (resolvedModels.length > 0) {
+        return new MultiModelClient(resolvedModels);
+      }
     }
   }
 

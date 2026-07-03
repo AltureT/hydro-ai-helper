@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { i18n } from '@hydrooj/ui-default';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
+import { ScenarioModelSelector } from './ScenarioModelSelector';
 import { BudgetConfigForm } from './BudgetConfigForm';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
 import { TelemetrySettings } from './TelemetrySettings';
@@ -13,7 +14,20 @@ import {
 } from '../utils/styles';
 import type {
   Endpoint, ConfigState, JailbreakLogPagination, APIConfigResponse, TelemetryStatus,
+  AIScenarioKey, SelectedModel, ScenarioModelsState,
 } from './configTypes';
+
+const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
+  studentChat: [], learningSummary: [], teachingAnalysis: [],
+};
+
+function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]>>): ScenarioModelsState {
+  return {
+    studentChat: raw?.studentChat || [],
+    learningSummary: raw?.learningSummary || [],
+    teachingAnalysis: raw?.teachingAnalysis || [],
+  };
+}
 
 interface ConfigPanelProps {
   embedded?: boolean;
@@ -57,6 +71,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       if (json.config == null) {
         setConfig({
           endpoints: [], selectedModels: [],
+          scenarioModels: { ...EMPTY_SCENARIO_MODELS },
           apiBaseUrl: '', modelName: '',
           rateLimitPerMinute: 5, timeoutSeconds: 30,
           systemPromptTemplate: '', extraJailbreakPatternsText: '',
@@ -67,6 +82,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         setConfig({
           endpoints: (json.config.endpoints || []).map((ep) => ({ ...ep, newApiKey: '' })),
           selectedModels: json.config.selectedModels || [],
+          scenarioModels: parseScenarioModels(json.config.scenarioModels),
           apiBaseUrl: json.config.apiBaseUrl || '',
           modelName: json.config.modelName || '',
           rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
@@ -131,6 +147,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           apiKey: ep.newApiKey || undefined, models: ep.models, enabled: ep.enabled,
         }));
         body.selectedModels = config.selectedModels;
+        body.scenarioModels = config.scenarioModels;
       } else {
         body.apiBaseUrl = config.apiBaseUrl.trim();
         body.modelName = config.modelName.trim();
@@ -152,6 +169,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         setConfig({
           endpoints: (json.config.endpoints || []).map((ep) => ({ ...ep, newApiKey: '' })),
           selectedModels: json.config.selectedModels || [],
+          scenarioModels: parseScenarioModels(json.config.scenarioModels),
           apiBaseUrl: json.config.apiBaseUrl || '',
           modelName: json.config.modelName || '',
           rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
@@ -245,10 +263,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     setConfig(prev => {
       if (!prev) return prev;
       const ep = prev.endpoints[index];
+      const dropEndpoint = (models: typeof prev.selectedModels) =>
+        ep?.id ? models.filter(sm => sm.endpointId !== ep.id) : models;
       return {
         ...prev,
         endpoints: prev.endpoints.filter((_, i) => i !== index),
-        selectedModels: ep?.id ? prev.selectedModels.filter(sm => sm.endpointId !== ep.id) : prev.selectedModels,
+        selectedModels: dropEndpoint(prev.selectedModels),
+        scenarioModels: {
+          studentChat: dropEndpoint(prev.scenarioModels.studentChat),
+          learningSummary: dropEndpoint(prev.scenarioModels.learningSummary),
+          teachingAnalysis: dropEndpoint(prev.scenarioModels.teachingAnalysis),
+        },
       };
     });
   }, []);
@@ -285,6 +310,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       const arr = [...prev.selectedModels];
       [arr[index], arr[ni]] = [arr[ni], arr[index]];
       return { ...prev, selectedModels: arr };
+    });
+  }, []);
+
+  const updateScenarioModels = useCallback((scenario: AIScenarioKey, chain: SelectedModel[]) => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      return { ...prev, scenarioModels: { ...prev.scenarioModels, [scenario]: chain } };
     });
   }, []);
 
@@ -389,6 +421,17 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             }}
           />
         </div>
+
+        {config.endpoints.length > 0 && (
+          <div style={dsCardStyle}>
+            <ScenarioModelSelector
+              endpoints={config.endpoints}
+              scenarioModels={config.scenarioModels}
+              onChange={updateScenarioModels}
+              disabled={isBusy}
+            />
+          </div>
+        )}
 
         <div style={dsCardStyle}>
           <h2 style={cardTitleStyle}>{i18n('ai_helper_admin_general_settings')}</h2>

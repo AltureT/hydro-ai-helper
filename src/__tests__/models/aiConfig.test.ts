@@ -370,6 +370,31 @@ describe('AIConfigModel', () => {
       await expect(model.deleteEndpoint('ep-1'))
         .rejects.toThrow('配置不存在');
     });
+
+    it('should clean scenarioModels references to the deleted endpoint', async () => {
+      const config = makeV2Config({
+        endpoints: [
+          { id: 'ep-1', name: 'A', apiBaseUrl: 'a', apiKeyEncrypted: 'k', models: [], enabled: true },
+          { id: 'ep-2', name: 'B', apiBaseUrl: 'b', apiKeyEncrypted: 'k', models: [], enabled: true },
+        ],
+        selectedModels: [{ endpointId: 'ep-2', modelName: 'm2' }],
+        scenarioModels: {
+          studentChat: [
+            { endpointId: 'ep-1', modelName: 'm1' },
+            { endpointId: 'ep-2', modelName: 'm2' },
+          ],
+          teachingAnalysis: [{ endpointId: 'ep-1', modelName: 'm1' }],
+        },
+      });
+      mockCollection.findOne.mockResolvedValue(config);
+      mockCollection.updateOne.mockResolvedValue({});
+
+      await model.deleteEndpoint('ep-1');
+
+      const setData = mockCollection.updateOne.mock.calls[0][1].$set;
+      expect(setData.scenarioModels.studentChat).toEqual([{ endpointId: 'ep-2', modelName: 'm2' }]);
+      expect(setData.scenarioModels.teachingAnalysis).toEqual([]);
+    });
   });
 
   describe('updateSelectedModels', () => {

@@ -196,7 +196,7 @@ export class BatchSummaryGenerateHandler extends Handler {
       // Create AI client
       let aiClient;
       try {
-        aiClient = await createMultiModelClientFromConfig(this.ctx);
+        aiClient = await createMultiModelClientFromConfig(this.ctx, undefined, 'learningSummary');
       } catch (clientErr) {
         console.error('[BatchSummaryGenerateHandler] Failed to create AI client:', clientErr);
         sse.writeEvent('error', { error: clientErr instanceof Error ? clientErr.message : 'AI service not configured' });
@@ -718,7 +718,7 @@ export class BatchSummaryContinueHandler extends Handler {
       // Create AI client
       let aiClient;
       try {
-        aiClient = await createMultiModelClientFromConfig(this.ctx);
+        aiClient = await createMultiModelClientFromConfig(this.ctx, undefined, 'learningSummary');
       } catch (clientErr) {
         console.error('[BatchSummaryContinueHandler] Failed to create AI client:', clientErr);
         sse.writeEvent('error', { error: clientErr instanceof Error ? clientErr.message : 'AI service not configured' });

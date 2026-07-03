@@ -917,6 +917,70 @@ describe('createMultiModelClientFromConfig', () => {
     await expect(createMultiModelClientFromConfig(makeCtx(config)))
       .rejects.toThrow('API Key 解密失败');
   });
+
+  // ─── 场景模型链（scenarioModels） ───────────────────
+
+  function makeScenarioConfig() {
+    return {
+      endpoints: [
+        { id: 'ep-1', name: 'Cheap', apiBaseUrl: 'https://cheap.com/v1', apiKeyEncrypted: 'enc_k1', models: ['mini'], enabled: true },
+        { id: 'ep-2', name: 'Strong', apiBaseUrl: 'https://strong.com/v1', apiKeyEncrypted: 'enc_k2', models: ['pro'], enabled: true },
+      ],
+      selectedModels: [{ endpointId: 'ep-1', modelName: 'mini' }],
+      scenarioModels: {
+        teachingAnalysis: [
+          { endpointId: 'ep-2', modelName: 'pro' },
+          { endpointId: 'ep-1', modelName: 'mini' },
+        ],
+      },
+      timeoutSeconds: 30,
+    };
+  }
+
+  function usedModelNames(client: MultiModelClient): string[] {
+    return (client as any).clients.map((c: any) => c.config.modelName);
+  }
+
+  it('should use the scenario chain when configured for that scenario', async () => {
+    const client = await createMultiModelClientFromConfig(
+      makeCtx(makeScenarioConfig()), undefined, 'teachingAnalysis',
+    );
+    expect(usedModelNames(client)).toEqual(['pro', 'mini']);
+  });
+
+  it('should fall back to global selectedModels when the scenario has no chain', async () => {
+    const client = await createMultiModelClientFromConfig(
+      makeCtx(makeScenarioConfig()), undefined, 'studentChat',
+    );
+    expect(usedModelNames(client)).toEqual(['mini']);
+  });
+
+  it('should fall back to global selectedModels when no scenario is given', async () => {
+    const client = await createMultiModelClientFromConfig(makeCtx(makeScenarioConfig()));
+    expect(usedModelNames(client)).toEqual(['mini']);
+  });
+
+  it('should fall back to global when scenario chain endpoints are all unavailable', async () => {
+    const config = makeScenarioConfig();
+    config.endpoints[1].enabled = false; // ep-2 (scenario primary) disabled
+
+    const client = await createMultiModelClientFromConfig(
+      makeCtx(config), undefined, 'teachingAnalysis',
+    );
+    // ep-2 skipped → scenario chain still resolves ep-1/mini (its second entry)
+    expect(usedModelNames(client)).toEqual(['mini']);
+  });
+
+  it('should fall back to global when scenario chain references a deleted endpoint', async () => {
+    const config = makeScenarioConfig();
+    config.scenarioModels = { teachingAnalysis: [{ endpointId: 'ep-gone', modelName: 'pro' }] };
+
+    const client = await createMultiModelClientFromConfig(
+      makeCtx(config), undefined, 'teachingAnalysis',
+    );
+    expect(usedModelNames(client)).toEqual(['mini']);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('回退到全局模型配置'));
+  });
 });
 
 // ─── getHttpStatusForCategory ─────────────────────────

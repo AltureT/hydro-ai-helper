@@ -39,6 +39,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
 const hydrooj_1 = require("hydrooj");
+const aiConfig_1 = require("../models/aiConfig");
 const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const csrfHelper_1 = require("../lib/csrfHelper");
@@ -139,6 +140,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 config: {
                     endpoints: endpointsWithMaskedKeys,
                     selectedModels: config.selectedModels || [],
+                    scenarioModels: config.scenarioModels || {},
                     apiBaseUrl: config.apiBaseUrl,
                     modelName: config.modelName,
                     rateLimitPerMinute: config.rateLimitPerMinute,
@@ -229,10 +231,37 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                         endpointId: idMapping[sm.endpointId] || sm.endpointId,
                     }));
                 }
+                // 重映射 scenarioModels 中的临时 ID
+                if (body.scenarioModels !== undefined && Object.keys(idMapping).length > 0) {
+                    const remapped = {};
+                    for (const scenario of aiConfig_1.AI_SCENARIOS) {
+                        const chain = body.scenarioModels[scenario];
+                        if (Array.isArray(chain)) {
+                            remapped[scenario] = chain.map(sm => ({
+                                ...sm,
+                                endpointId: idMapping[sm.endpointId] || sm.endpointId,
+                            }));
+                        }
+                    }
+                    body.scenarioModels = remapped;
+                }
             }
             // 处理选中的模型
             if (body.selectedModels !== undefined) {
                 partial.selectedModels = body.selectedModels;
+            }
+            // 处理按场景覆盖的模型链（仅保留已知场景和合法条目）
+            if (body.scenarioModels !== undefined) {
+                const sanitized = {};
+                for (const scenario of aiConfig_1.AI_SCENARIOS) {
+                    const chain = body.scenarioModels?.[scenario];
+                    if (Array.isArray(chain)) {
+                        sanitized[scenario] = chain
+                            .filter(sm => sm && typeof sm.endpointId === 'string' && typeof sm.modelName === 'string')
+                            .map(sm => ({ endpointId: sm.endpointId, modelName: sm.modelName }));
+                    }
+                }
+                partial.scenarioModels = sanitized;
             }
             // 旧版单端点字段（向后兼容）
             if (body.apiBaseUrl !== undefined) {
@@ -351,6 +380,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 config: {
                     endpoints: endpointsWithMaskedKeys,
                     selectedModels: updatedConfig.selectedModels || [],
+                    scenarioModels: updatedConfig.scenarioModels || {},
                     apiBaseUrl: updatedConfig.apiBaseUrl,
                     modelName: updatedConfig.modelName,
                     rateLimitPerMinute: updatedConfig.rateLimitPerMinute,

@@ -200,7 +200,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             // validated only top-level apiBaseUrl/modelName/apiKeyEncrypted, which are
             // empty under the v2 multi-endpoint config — causing "AI 服务配置不完整"
             // even when chat worked. MultiModelClient also falls back to legacy fields.
-            const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx);
+            const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'teachingAnalysis');
             const suggestionService = new teachingSuggestionService_1.TeachingSuggestionService(aiClient);
             // Extract related findings for fill-in candidates
             const fillInRelatedFindings = fillInCandidatesForPrompt.length > 0

@@ -36,6 +36,22 @@ export interface SelectedModel {
 }
 
 /**
+ * AI 调用场景
+ * - studentChat: 学生答疑对话（调用量大、流式输出）
+ * - learningSummary: 批量学生学习总结
+ * - teachingAnalysis: 教学分析报告（含挖空作业、深度诊断）
+ */
+export type AIScenario = 'studentChat' | 'learningSummary' | 'teachingAnalysis';
+
+export const AI_SCENARIOS: readonly AIScenario[] = ['studentChat', 'learningSummary', 'teachingAnalysis'] as const;
+
+/**
+ * 按场景覆盖的模型链
+ * 某场景为空数组或未设置时，该场景跟随全局 selectedModels
+ */
+export type ScenarioModelConfig = Partial<Record<AIScenario, SelectedModel[]>>;
+
+/**
  * 预算配置
  */
 export interface BudgetConfig {
@@ -52,7 +68,8 @@ export interface AIConfig {
   _id: string;                  // 固定为 'default'
   configVersion: number;        // 配置版本号，用于迁移检测
   endpoints: APIEndpoint[];     // API 端点列表
-  selectedModels: SelectedModel[]; // 选中的模型（��� fallback 顺序）
+  selectedModels: SelectedModel[]; // 选中的模型（按 fallback 顺序）
+  scenarioModels?: ScenarioModelConfig; // 按场景覆盖的模型链（可选，空=跟随全局）
   rateLimitPerMinute: number;   // 频率限制(每分钟最大请求数)
   timeoutSeconds: number;       // 超时时间(秒)
   systemPromptTemplate?: string; // 系统提示词模板(可选)
@@ -291,7 +308,20 @@ export class AIConfigModel {
     // 同时移除引用该端点的 selectedModels
     const selectedModels = config.selectedModels.filter(sm => sm.endpointId !== endpointId);
 
-    await this.updateConfig({ endpoints, selectedModels });
+    // 同时清理各场景模型链中对该端点的引用
+    let scenarioModels = config.scenarioModels;
+    if (scenarioModels) {
+      const cleaned: ScenarioModelConfig = {};
+      for (const scenario of AI_SCENARIOS) {
+        const chain = scenarioModels[scenario];
+        if (chain?.length) {
+          cleaned[scenario] = chain.filter(sm => sm.endpointId !== endpointId);
+        }
+      }
+      scenarioModels = cleaned;
+    }
+
+    await this.updateConfig({ endpoints, selectedModels, ...(scenarioModels ? { scenarioModels } : {}) });
   }
 
   /**

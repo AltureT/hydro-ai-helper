@@ -677,7 +677,7 @@ export class ChatHandler extends Handler {
     // 从数据库配置创建多模型 AI 客户端（支持 fallback）
     let multiModelClient: MultiModelClient;
     try {
-      multiModelClient = await createMultiModelClientFromConfig(this.ctx, aiConfig ?? undefined);
+      multiModelClient = await createMultiModelClientFromConfig(this.ctx, aiConfig ?? undefined, 'studentChat');
     } catch (error) {
       // 配置不存在或不完整
       console.error('[AI Helper] 创建 AI 客户端失败:', error);

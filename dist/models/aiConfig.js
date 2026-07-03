@@ -8,11 +8,12 @@
  * v2 新增：支持多 API 端点配置、模型自动获取、Fallback 机制
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AIConfigModel = exports.CURRENT_CONFIG_VERSION = void 0;
+exports.AIConfigModel = exports.AI_SCENARIOS = exports.CURRENT_CONFIG_VERSION = void 0;
 const crypto_1 = require("crypto");
 const crypto_2 = require("../lib/crypto");
 /** 当前配置版本号 */
 exports.CURRENT_CONFIG_VERSION = 2;
+exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis'];
 /**
  * AI Config Model 操作类
  * 封装 AI 配置的 CRUD 操作
@@ -181,7 +182,19 @@ class AIConfigModel {
         const endpoints = config.endpoints.filter(ep => ep.id !== endpointId);
         // 同时移除引用该端点的 selectedModels
         const selectedModels = config.selectedModels.filter(sm => sm.endpointId !== endpointId);
-        await this.updateConfig({ endpoints, selectedModels });
+        // 同时清理各场景模型链中对该端点的引用
+        let scenarioModels = config.scenarioModels;
+        if (scenarioModels) {
+            const cleaned = {};
+            for (const scenario of exports.AI_SCENARIOS) {
+                const chain = scenarioModels[scenario];
+                if (chain?.length) {
+                    cleaned[scenario] = chain.filter(sm => sm.endpointId !== endpointId);
+                }
+            }
+            scenarioModels = cleaned;
+        }
+        await this.updateConfig({ endpoints, selectedModels, ...(scenarioModels ? { scenarioModels } : {}) });
     }
     /**
      * 更新选中的模型列表

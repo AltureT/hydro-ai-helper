@@ -168,7 +168,7 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
             // Create AI client
             let aiClient;
             try {
-                aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx);
+                aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'learningSummary');
             }
             catch (clientErr) {
                 console.error('[BatchSummaryGenerateHandler] Failed to create AI client:', clientErr);
@@ -638,7 +638,7 @@ class BatchSummaryContinueHandler extends hydrooj_1.Handler {
             // Create AI client
             let aiClient;
             try {
-                aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx);
+                aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'learningSummary');
             }
             catch (clientErr) {
                 console.error('[BatchSummaryContinueHandler] Failed to create AI client:', clientErr);

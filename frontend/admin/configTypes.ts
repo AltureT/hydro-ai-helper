@@ -16,6 +16,13 @@ export interface SelectedModel {
   modelName: string;
 }
 
+export type AIScenarioKey = 'studentChat' | 'learningSummary' | 'teachingAnalysis';
+
+export const AI_SCENARIO_KEYS: readonly AIScenarioKey[] = ['studentChat', 'learningSummary', 'teachingAnalysis'] as const;
+
+/** 每个场景的专属模型链；空数组 = 跟随全局 selectedModels */
+export type ScenarioModelsState = Record<AIScenarioKey, SelectedModel[]>;
+
 export interface BudgetConfigState {
   dailyTokenLimitPerUser: number | '';
   dailyTokenLimitPerDomain: number | '';
@@ -26,6 +33,7 @@ export interface BudgetConfigState {
 export interface ConfigState {
   endpoints: Endpoint[];
   selectedModels: SelectedModel[];
+  scenarioModels: ScenarioModelsState;
   apiBaseUrl: string;
   modelName: string;
   rateLimitPerMinute: number | '';
@@ -73,6 +81,7 @@ export interface APIConfigResponse {
   config: {
     endpoints?: Array<Omit<Endpoint, 'newApiKey' | 'isNew'> & { apiKeyMasked?: string; hasApiKey?: boolean }>;
     selectedModels?: SelectedModel[];
+    scenarioModels?: Partial<Record<AIScenarioKey, SelectedModel[]>>;
     apiBaseUrl?: string;
     modelName?: string;
     rateLimitPerMinute?: number;
