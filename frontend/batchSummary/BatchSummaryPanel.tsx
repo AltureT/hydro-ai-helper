@@ -29,6 +29,9 @@ const I18N_FALLBACK: Record<string, string> = {
   ai_helper_batch_summary_stats_failed: '失败',
   ai_helper_batch_summary_stats_not_generated: '未生成',
   ai_helper_batch_summary_no_new_students: '所有学生已生成总结，无需补充',
+  ai_helper_batch_summary_publish_done: '已发布 {0} 份总结',
+  ai_helper_batch_summary_publish_skipped_failed: '{0} 名学生生成失败，未发布',
+  ai_helper_batch_summary_publish_skipped_pending: '{0} 名学生尚未生成，未发布',
 };
 function t(key: string): string {
   const val = i18n(key);
@@ -226,6 +229,24 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   const handlePublishAll = useCallback(() => {
     publishAll();
   }, [publishAll]);
+
+  // Publish outcome notice — warns when publishAll skipped failed/pending
+  // students (they would otherwise see a blank tab with no one the wiser).
+  const publishNotice = useMemo(() => {
+    const pr = state.publishResult;
+    if (!pr) return null;
+    const parts = [t('ai_helper_batch_summary_publish_done').replace('{0}', String(pr.published))];
+    if (pr.skippedFailed > 0) {
+      parts.push(t('ai_helper_batch_summary_publish_skipped_failed').replace('{0}', String(pr.skippedFailed)));
+    }
+    if (pr.skippedPending > 0) {
+      parts.push(t('ai_helper_batch_summary_publish_skipped_pending').replace('{0}', String(pr.skippedPending)));
+    }
+    return {
+      text: parts.join(' · '),
+      variant: (pr.skippedFailed + pr.skippedPending > 0 ? 'warning' : 'success') as 'warning' | 'success',
+    };
+  }, [state.publishResult]);
 
   // ── Publish single ──────────────────────────────────────────────────────────
 
@@ -450,6 +471,13 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
           fontSize: '13px', color: COLORS.warningText,
         }}>
           {t('ai_helper_batch_summary_stopped_notice')}
+        </div>
+      )}
+
+      {/* Publish outcome */}
+      {publishNotice && (
+        <div style={{ ...getAlertStyle(publishNotice.variant), marginBottom: SPACING.base }}>
+          {publishNotice.text}
         </div>
       )}
 
