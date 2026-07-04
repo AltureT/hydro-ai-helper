@@ -11,7 +11,7 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 
-import { Handler, PRIV, PERM, ProblemModel, db } from 'hydrooj';
+import { Handler, PRIV, PERM, ProblemModel, SystemModel, db } from 'hydrooj';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import {
   TestdataGenService,
@@ -25,6 +25,10 @@ import {
   TESTDATA_GEN_LIMITS,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
+import {
+  GoJudgeSandboxRunner,
+  getTestdataGenerationMode,
+} from '../services/goJudgeSandboxService';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { getDomainId } from '../utils/domainHelper';
@@ -229,7 +233,11 @@ export class TestdataGenGenerateHandler extends Handler {
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
 
       const aiClient = await createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration');
-      const service = new TestdataGenService(aiClient);
+      const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+      const service = new TestdataGenService(aiClient, {
+        sandboxRunner: new GoJudgeSandboxRunner(sandboxHost),
+        mode: getTestdataGenerationMode(),
+      });
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);

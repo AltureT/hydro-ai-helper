@@ -32,6 +32,10 @@ export const ProblemModel = {
   addTestdata: jest.fn(),
 };
 
+export const SystemModel = {
+  get: jest.fn(),
+};
+
 export const STATUS = {
   STATUS_WAITING: 0,
   STATUS_ACCEPTED: 1,

@@ -136,6 +136,16 @@ Generate a random key: `openssl rand -base64 24 | head -c 32`
 export AI_HELPER_UPDATE_CHANNEL=edge   # test server only
 ```
 
+**AI test-data execution** (optional): `AI_HELPER_TESTDATA_GENERATION_MODE` controls whether AI-generated generators run in Hydro's go-judge sandbox (`hydrojudge.sandbox_host`):
+
+- `auto` (default) — use the sandbox when reachable; otherwise fall back to the legacy direct-output mode with a warning.
+- `sandbox` — require the sandbox and fail safely when it is unavailable.
+- `direct` — always use the legacy direct-output mode.
+
+```bash
+export AI_HELPER_TESTDATA_GENERATION_MODE=sandbox
+```
+
 ### Admin Setup
 
 Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" tab:

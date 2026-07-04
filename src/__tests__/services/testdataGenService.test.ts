@@ -16,6 +16,12 @@ import {
   parseTemplateSections,
   getMissingTemplateLanguages,
   findAssignmentStyleCaseInput,
+  extractStatementSamples,
+  buildSandboxBlueprintSystemPrompt,
+  buildSandboxBlueprintUserPrompt,
+  parseSandboxBlueprint,
+  parseGeneratorOutput,
+  materializeSandboxBlueprint,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -30,6 +36,61 @@ const baseOptions: GenerateOptions = {
   caseCount: 3,
   languages: ['py', 'java', 'cc'],
 };
+
+const groupedCoinStatement = `## 输入格式
+
+第一行仅有一个正整数 $T$，表示测试数据的组数，对于每组测试数据包含三行，每行给出一个比较结果。
+
+## 输出格式
+
+依次给出 $T$ 组测试数据的结果，每组测试数据仅有一行。
+`;
+
+const coinStatementWithSample = `${groupedCoinStatement}
+## 输入输出样例
+
+\`\`\`input1
+2
+A>B
+C<B
+A>C
+A<B
+B>C
+C>A
+\`\`\`
+
+\`\`\`output1
+CBA
+ACB
+\`\`\`
+`;
+
+function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
+  const templateSections = problemType === 'function' ? [
+    '@@@TEMPLATE:py@@@',
+    'print(solve(input().strip()))',
+    '@@@TEMPLATE:java@@@',
+    'public class Main { public static void main(String[] args) {} }',
+    '@@@TEMPLATE:cc@@@',
+    '#include "foo.cc"',
+    'int main() { return 0; }',
+  ] : [];
+  return [
+    '@@@META@@@',
+    `problemType: ${problemType}`,
+    'isFillIn: false',
+    '@@@ANALYSIS@@@',
+    '每个文件只放一组数据。',
+    '@@@GENERATOR@@@',
+    'import json',
+    'print(json.dumps({"cases": []}, ensure_ascii=False))',
+    '@@@ORACLE@@@',
+    'print(input())',
+    ...templateSections,
+    '@@@NOTES@@@',
+    '沙箱生成。',
+  ].join('\n');
+}
 
 // ─── validateGenerateOptions ──────────────────────────────────────────────────
 
@@ -488,6 +549,90 @@ describe('函数题生成结果防线', () => {
   });
 });
 
+describe('题面样例提取', () => {
+  it('提取成对的 Hydro inputN/outputN 样例供沙箱校验标程', () => {
+    const samples = extractStatementSamples(coinStatementWithSample);
+    expect(samples).toEqual([{
+      id: '1',
+      input: '2\nA>B\nC<B\nA>C\nA<B\nB>C\nC>A\n',
+      output: 'CBA\nACB\n',
+    }]);
+  });
+});
+
+describe('Hydro 沙箱生成蓝图', () => {
+  it('提示词要求 ACM 每个文件默认 T=1，并由标程实际生成输出', () => {
+    const system = buildSandboxBlueprintSystemPrompt();
+    expect(system).toContain('默认每个文件固定 T=1');
+    expect(system).toContain('GENERATOR 只生成 .in，不生成答案');
+    expect(system).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+    const user = buildSandboxBlueprintUserPrompt({
+      problemTitle: '三枚硬币',
+      statementMarkdown: groupedCoinStatement,
+      options: { problemKind: 'traditional', caseCount: 3, languages: [] },
+    });
+    expect(user).toContain('3 个独立的 .in/.out 文件对');
+    expect(user).toContain('不要直接输出 CASE 或 .out');
+  });
+
+  it('解析生成器、标程与全部函数题模板', () => {
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'],
+    };
+    const blueprint = parseSandboxBlueprint(makeSandboxBlueprint('function'), options);
+    expect(blueprint.generatorCode).toContain('json.dumps');
+    expect(blueprint.oracleCode).toContain('print(input())');
+    expect(blueprint.templates?.java).toContain('public class Main');
+  });
+
+  it('生成器必须返回精确数量的原始输入', () => {
+    expect(parseGeneratorOutput(JSON.stringify({
+      cases: [
+        { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
+        { label: '循环矛盾', input: '1\nA>B\nB>C\nC>A' },
+      ],
+    }), 2)).toEqual([
+      { label: '有效排序', input: '1\nA>B\nC<B\nA>C\n' },
+      { label: '循环矛盾', input: '1\nA>B\nB>C\nC>A\n' },
+    ]);
+    expect(() => parseGeneratorOutput('{"cases":[]}', 2)).toThrow(/期望 2 个/);
+  });
+
+  it('用沙箱标程生成全部 .out，并用题面样例校验标程', async () => {
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
+          { label: '循环矛盾', input: '1\nA>B\nB>C\nC>A' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn().mockResolvedValue([
+        { stdout: 'CBA\n', stderr: '' },
+        { stdout: 'Impossible\n', stderr: '' },
+        { stdout: 'CBA\nACB\n', stderr: '' },
+      ]),
+    };
+    const blueprint = parseSandboxBlueprint(
+      makeSandboxBlueprint('traditional'),
+      { problemKind: 'traditional', caseCount: 2, languages: [] },
+    );
+    const response = await materializeSandboxBlueprint(
+      blueprint,
+      { problemKind: 'traditional', caseCount: 2, languages: [] },
+      coinStatementWithSample,
+      runner,
+    );
+    expect(response.cases.map(item => item.output)).toEqual(['CBA\n', 'Impossible\n']);
+    expect(runner.runPythonBatch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining(['2\nA>B\nC<B\nA>C\nA<B\nB>C\nC>A\n']),
+      undefined,
+    );
+  });
+});
+
 // ─── assemblePlan ─────────────────────────────────────────────────────────────
 
 describe('assemblePlan', () => {
@@ -563,6 +708,9 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(sp).toContain('Solution().xxx(...)');
     expect(sp).toContain('.in 文件是原始标准输入，不是代码');
     expect(sp).toContain('严禁写成 s = "1010101" / k = 2');
+    expect(sp).toContain('Hydro 测试点数量是独立的');
+    expect(sp).toContain('默认每个 Hydro 测试点取 T=1');
+    expect(sp).toContain('默认每个参数占一行');
   });
 
   it('System Prompt 包含填空题、标准答案与数据规模规则', () => {
@@ -585,6 +733,7 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(up).toContain('提莫攻击');
     expect(up).toContain('# 题目');
     expect(up).toContain('5 个');
+    expect(up).toContain('这不是单个输入文件首行的 T');
     expect(up).toContain('Python (template.py)');
     expect(up).toContain('@@@TEMPLATE:py@@@');
     expect(up).toContain('链表用类实现');
@@ -632,6 +781,7 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     });
     expect(withoutHint).not.toContain('疑似含待完善代码');
   });
+
 });
 
 // ─── buildSkeletonPlan（AI 故障降级） ─────────────────────────────────────────
@@ -720,6 +870,105 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
     expect(plan.usedModel).toBe('main/gpt-test');
+  });
+
+  it('沙箱模式运行生成器和标程后再组装文件', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeSandboxBlueprint('traditional'),
+        usage: { promptTokens: 50, completionTokens: 80, totalTokens: 130 },
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
+          { label: '循环矛盾', input: '1\nA>B\nB>C\nC>A' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn().mockResolvedValue([
+        { stdout: 'CBA\n', stderr: '' },
+        { stdout: 'Impossible\n', stderr: '' },
+      ]),
+    };
+    const service = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    });
+    const plan = await service.generate({
+      problemTitle: '三枚硬币',
+      statementMarkdown: groupedCoinStatement,
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+    });
+
+    expect(runner.isAvailable).toHaveBeenCalled();
+    expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\nA>B\nC<B\nA>C\n');
+    expect(plan.files.find(file => file.name === '1.out')?.content).toBe('CBA\n');
+    expect(plan.files.map(file => file.name)).toEqual(expect.arrayContaining([
+      'generator.py', 'std.py', 'config.yaml',
+    ]));
+    expect(plan.notes).toContain('Hydro 沙箱中实际运行');
+  });
+
+  it('沙箱蓝图漏掉 Java 模板时定向补齐后再执行', async () => {
+    const initial = makeSandboxBlueprint('function').replace(
+      /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,
+      '',
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: initial,
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: '@@@TEMPLATE:java@@@\npublic class Main { public static void main(String[] args) {} }',
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ input: 'abc' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn().mockResolvedValue([{ stdout: 'abc\n', stderr: '' }]),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({
+      problemTitle: '函数题', statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('@@@TEMPLATE:java@@@');
+    expect(plan.files.find(file => file.name === 'template.java')?.content).toContain('public class Main');
+  });
+
+  it('auto 模式在沙箱不可达时回退兼容直出并明确提示', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'auto',
+    }).generate({
+      problemTitle: '提莫攻击', statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+    expect(plan.notes).toContain('沙箱当前不可达');
+    expect(runner.runPython).not.toHaveBeenCalled();
   });
 
   it('AI 漏掉 Java 模板时定向补全并保留原测试点', async () => {

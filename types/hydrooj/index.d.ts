@@ -56,6 +56,10 @@ declare module 'hydrooj' {
 
   export const ProblemModel: any;
 
+  export const SystemModel: {
+    get(key: string): any;
+  };
+
   export const ContestModel: {
     get(domainId: string, tid: any): Promise<any>;
     isOngoing(tdoc: any, tsdoc?: any): boolean;

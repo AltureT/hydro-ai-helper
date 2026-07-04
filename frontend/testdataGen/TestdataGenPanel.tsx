@@ -32,7 +32,7 @@ interface ProblemContext {
 interface PlannedFile {
   name: string;
   content: string;
-  kind: 'case-in' | 'case-out' | 'template' | 'compile' | 'config' | 'std';
+  kind: 'case-in' | 'case-out' | 'template' | 'compile' | 'config' | 'std' | 'generator';
 }
 
 interface GenerationPlan {
@@ -64,6 +64,7 @@ const KIND_BADGE_KEYS: Record<string, string> = {
   compile: 'ai_helper_testdata_kind_compile',
   config: 'ai_helper_testdata_kind_config',
   std: 'ai_helper_testdata_kind_std',
+  generator: 'ai_helper_testdata_kind_generator',
 };
 
 const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace";

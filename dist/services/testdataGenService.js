@@ -4,15 +4,15 @@
  *
  * 面向教师/出题人：根据 Markdown 题面生成一套可直接写入 HydroOJ
  * 题目文件（测试数据）的完整文件集，包括：
- * - N.in / N.out 测试点（由 AI 依据题面与标程逐点推演生成）
+ * - N.in / N.out 测试点（AI 编写输入生成器与标程，Hydro 沙箱实跑得到输出）
  * - 函数题（LeetCode 风格）所需的 template.py / template.java / template.cc
  * - compile.sh（服务端确定性生成，覆盖所选语言，非 AI 输出）
  * - config.yaml 评测配置（服务端用 js-yaml 确定性生成，写入后 Hydro
  *   会自动同步到题目的评测设置）
  * - std.py 参考标程（供教师人工校验与后续重造数据）
  *
- * 设计要点：AI 只负责「题目理解相关」的部分（模板、标程、测试点内容），
- * 所有结构性文件（compile.sh / config.yaml）由代码确定性拼装，降低幻觉面。
+ * 设计要点：AI 负责题目理解相关的生成器、标程与模板；AI 代码只进入 Hydro
+ * go-judge 沙箱执行。结构性文件由服务端确定性拼装，兼容模式才接受 AI 直出数据。
  */
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
@@ -26,14 +26,20 @@ exports.buildCompileSh = buildCompileSh;
 exports.buildConfigYaml = buildConfigYaml;
 exports.buildTestdataSystemPrompt = buildTestdataSystemPrompt;
 exports.buildTestdataUserPrompt = buildTestdataUserPrompt;
+exports.buildSandboxBlueprintSystemPrompt = buildSandboxBlueprintSystemPrompt;
+exports.buildSandboxBlueprintUserPrompt = buildSandboxBlueprintUserPrompt;
 exports.extractJsonObject = extractJsonObject;
 exports.normalizeFileContent = normalizeFileContent;
 exports.normalizeGenerationObject = normalizeGenerationObject;
 exports.parseGenerationResponse = parseGenerationResponse;
+exports.parseSandboxBlueprint = parseSandboxBlueprint;
 exports.parseDelimitedResponse = parseDelimitedResponse;
 exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
+exports.extractStatementSamples = extractStatementSamples;
+exports.parseGeneratorOutput = parseGeneratorOutput;
+exports.materializeSandboxBlueprint = materializeSandboxBlueprint;
 exports.parseTemplateSections = parseTemplateSections;
 exports.assemblePlan = assemblePlan;
 exports.isLikelyFunctionProblem = isLikelyFunctionProblem;
@@ -58,6 +64,8 @@ exports.TESTDATA_GEN_LIMITS = {
     MAX_FILE_COUNT: 80,
     /** apply 时所有文件总大小上限（字节） */
     MAX_TOTAL_SIZE: 1024 * 1024,
+    /** 沙箱生成器 stdout（JSON）上限。 */
+    MAX_GENERATOR_OUTPUT_SIZE: 1024 * 1024,
 };
 /** 合法测试数据文件名：字母数字、点、下划线、连字符，不允许路径分隔符 */
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -322,8 +330,14 @@ function buildTestdataSystemPrompt() {
 - 字符串输入通常不带源码中的引号；只有当引号本身就是题目要求的输入字符时才保留。
 - 先确定唯一、语言无关的 stdin 文本格式，再让每一种模板都解析这一格式；不得让不同语言使用不同的 .in。
 
+【按题型确定唯一 I/O 编码】
+- Hydro 测试点数量是独立的 N.in/N.out 文件对数量，不是单个输入文件首行的 T。
+- ACM/传统题：每个 CASE 是一份可独立运行的完整 stdin/stdout。题面含 T 时默认每个 Hydro 测试点取 T=1，并放入恰好一组完整数据；只有教师明确要求批处理时才使用 T>1。
+- LeetCode/函数题：每个 CASE 只表示一次函数调用，不额外添加 T。默认每个参数占一行；一维数组用空格分隔，字符串不用源码引号。矩阵、图、树、链表等结构先确定带尺寸/哨兵的无歧义文本编码，再让所有语言模板严格共用这一编码。
+- 任何输出都必须来自标程逐组推演；一个输入文件含多组数据时，不能只输出第一组答案。
+
 【测试数据设计原则】
-1. 若题面含示例，前几个测试点必须先覆盖题面示例（输入输出与题面一字不差）。
+1. 若题面含示例，优先覆盖示例表达的场景；仍须遵守上面的“一文件一组”默认规则。
 2. 必须包含边界组，并在 label 中写明设计意图：
    - 最小规模：空输入、0、1、单元素（以题面约束允许的最小值为准）；
    - 规模上限：所选数据规模档位允许的上限附近；
@@ -370,7 +384,7 @@ template.cc 原文
 规则：
 - TEMPLATE 节必须逐一输出用户要求的全部语言，一个也不能遗漏；传统题省略全部 TEMPLATE 节与 functionName。
 - 函数题的 STD 节只包含与学生提交形式一致的函数/类定义（教师可用 cat std.py template.py > check.py 本地验证）；传统题的 STD 节是完整的读写标准输入输出的程序；填空题的 STD 节是补全题面代码后的结果；教师已提供标准答案时省略 STD 节。
-- CASE 编号从 1 开始连续递增，数量以用户要求为准；每个编号必须同时给出 IN 与 OUT 两节；IN 标记中最后一段冒号之后是该测试点的设计意图（label，简体中文）。
+- CASE 编号从 1 开始连续递增，数量以用户要求的 Hydro 测试点数为准；每个编号必须同时给出 IN 与 OUT 两节；IN 标记中最后一段冒号之后是该测试点的设计意图（label，简体中文）。题目内部的 T 与 CASE 数量相互独立。
 - CASE:IN 再次强调：只写原始 stdin，禁止出现 s =、k =、arr = [1, 2] 等源码赋值写法。
 - 各节内容为原始文本：换行就是真实换行，引号、反斜杠等一律原样书写；除标记行外不要输出任何额外说明文字；正文行不得以 @@@ 开头。
 - 所有说明性文字（ANALYSIS/NOTES/label）使用简体中文。`;
@@ -411,7 +425,7 @@ function buildTestdataUserPrompt(params) {
         '【生成要求】',
         `- 题型：${kindText}`,
         `- 填空题（完善代码）：${fillInText}`,
-        `- 测试点数量：${options.caseCount} 个`,
+        `- Hydro 测试点数量：${options.caseCount} 个独立的 .in/.out 文件对（这不是单个输入文件首行的 T）`,
         `- 数据规模：${DATA_SCALE_TEXT[options.dataScale || 'small']}`,
         `- 函数题模板语言：${langText}`,
     ];
@@ -429,6 +443,48 @@ function buildTestdataUserPrompt(params) {
     }
     lines.push('', '请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。');
     return lines.join('\n');
+}
+/**
+ * 沙箱模式只让 AI 编写“生成输入的程序”和“可执行标程”。所有 .out 随后由
+ * Hydro go-judge 实跑标程得到，避免模型在长回复中手算或漏算输出。
+ */
+function buildSandboxBlueprintSystemPrompt() {
+    return `你是一位资深 OJ 出题与测试数据专家。请根据题面输出一份可在 Hydro go-judge 中执行的测试数据生成蓝图。
+
+核心规则：
+1. GENERATOR 是自包含 Python 3 程序，不读 stdin，向 stdout 只打印一个 JSON 对象：{"cases":[{"label":"设计意图","input":"原始标准输入"}]}。cases 数量必须与用户要求完全一致；不得打印日志或 Markdown。
+2. GENERATOR 只生成 .in，不生成答案。input 必须是程序真实读取的原始 stdin，禁止 s = "101"、k = 2、arr = [1,2] 等源码赋值写法。
+3. ACM/传统题：每个 input 是一份独立完整的输入文件。若题面首行是 T，默认每个文件固定 T=1，并紧跟恰好一组完整数据；只有教师明确要求批处理时才使用 T>1。
+4. LeetCode/函数题：每个 input 只表示一次函数调用，不额外添加 T。默认每个参数占一行；一维数组用空格分隔，字符串不带源码引号。所有模板与 ORACLE 必须使用完全相同的输入编码。
+5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。
+6. 数据应覆盖样例场景、最小/最大边界、特殊值和多样中间值；所有生成过程必须确定性，固定随机种子。
+7. 若教师提供标准答案，它是算法和输出格式的唯一权威；ORACLE 必须忠实实现它。
+8. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
+
+输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明：
+@@@META@@@
+problemType: traditional 或 function
+isFillIn: false
+functionName: 函数题函数名（传统题省略）
+@@@ANALYSIS@@@
+简要说明输入编码与覆盖策略（不超过 200 字）
+@@@GENERATOR@@@
+完整 Python 3 输入生成器
+@@@ORACLE@@@
+完整 Python 3 标程（stdin → stdout）
+@@@TEMPLATE:py@@@
+函数题 Python 驱动模板
+@@@TEMPLATE:java@@@
+函数题 Java 驱动模板
+@@@TEMPLATE:cc@@@
+函数题 C++ 驱动模板
+@@@NOTES@@@
+给教师的可选注意事项
+
+各节内容按原文输出，正文行不得以 @@@ 开头。所有说明文字与 label 使用简体中文。`;
+}
+function buildSandboxBlueprintUserPrompt(params) {
+    return buildTestdataUserPrompt(params).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '请严格按照 System 中约定的蓝图分节格式输出 GENERATOR、ORACLE 与所需 TEMPLATE；不要直接输出 CASE 或 .out。');
 }
 // ─── AI 响应解析 ──────────────────────────────────────────────────────────────
 /**
@@ -551,6 +607,95 @@ function trimBlankEdges(lines) {
         end--;
     return lines.slice(start, end).join('\n');
 }
+function splitDelimitedSections(raw) {
+    let text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    const fenced = text.match(/^\s*```[a-zA-Z]*\r?\n([\s\S]*?)\r?\n```\s*$/);
+    if (fenced)
+        text = fenced[1];
+    const sections = [];
+    let current = null;
+    for (const line of text.split(/\r?\n/)) {
+        const marker = line.match(SECTION_MARKER_RE);
+        if (marker) {
+            current = { header: marker[1].trim(), content: [] };
+            sections.push(current);
+        }
+        else if (current) {
+            if (line.trimStart().startsWith('@@@')) {
+                throw new Error(`AI 返回中存在疑似损坏的分节标记行：${line.trim().slice(0, 50)}，请重试`);
+            }
+            current.content.push(line);
+        }
+    }
+    return sections;
+}
+function parseSandboxBlueprint(raw, options, parseOptions = {}) {
+    const sections = splitDelimitedSections(raw);
+    if (sections.length === 0)
+        throw new Error('AI 未返回蓝图分节标记');
+    const meta = {};
+    const templates = {};
+    let analysis;
+    let notes;
+    let generatorCode = '';
+    let oracleCode = '';
+    for (const section of sections) {
+        const parts = section.header.split(':');
+        const kind = parts[0].trim().toUpperCase();
+        const content = trimBlankEdges(section.content);
+        if (kind === 'META') {
+            for (const line of section.content) {
+                const index = line.indexOf(':');
+                if (index > 0)
+                    meta[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+            }
+        }
+        else if (kind === 'ANALYSIS')
+            analysis = content;
+        else if (kind === 'NOTES')
+            notes = content;
+        else if (kind === 'GENERATOR')
+            generatorCode = content;
+        else if (kind === 'ORACLE')
+            oracleCode = content;
+        else if (kind === 'TEMPLATE') {
+            const lang = (parts[1] || '').trim().toLowerCase();
+            if (exports.SUPPORTED_TEMPLATE_LANGS.includes(lang) && content.trim()) {
+                templates[lang] = normalizeFileContent(content);
+            }
+        }
+    }
+    const returnedType = meta.problemType === 'function' ? 'function'
+        : meta.problemType === 'traditional' ? 'traditional'
+            : null;
+    if (!returnedType)
+        throw new Error('AI 返回的 problemType 非法（应为 function 或 traditional）');
+    const problemType = options.problemKind === 'auto' ? returnedType : options.problemKind;
+    if (!generatorCode.trim())
+        throw new Error('AI 未返回可执行的 GENERATOR');
+    if (!oracleCode.trim())
+        throw new Error('AI 未返回可执行的 ORACLE');
+    if (problemType === 'function' && !parseOptions.allowMissingTemplates) {
+        const missing = options.languages.filter(lang => !templates[lang]?.trim());
+        if (missing.length > 0) {
+            throw new Error(`AI 未返回 ${missing.map(lang => LANG_DISPLAY[lang]).join('、')} 的评测模板`);
+        }
+    }
+    const fillInMode = options.fillInMode || 'auto';
+    const isFillIn = fillInMode === 'yes' ? true
+        : fillInMode === 'no' ? false
+            : meta.isFillIn?.toLowerCase() === 'true';
+    return {
+        problemType,
+        isFillIn,
+        analysis,
+        functionName: meta.functionName || undefined,
+        templates: problemType === 'function' ? templates : undefined,
+        generatorCode: normalizeFileContent(generatorCode),
+        oracleCode: normalizeFileContent(oracleCode),
+        notes,
+    };
+}
 /**
  * 解析分节标记文本。未发现任何标记时返回 null（调用方回退到 JSON 解析）。
  *
@@ -560,29 +705,7 @@ function trimBlankEdges(lines) {
  * @throws Error 标记存在但结构非法时抛出（消息为中文，直接展示给教师）
  */
 function parseDelimitedResponse(raw, options, parseOptions = {}) {
-    let text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
-    // 模型偶尔会把整个响应包进代码围栏，剥掉最外层
-    const fenced = text.match(/^\s*```[a-zA-Z]*\r?\n([\s\S]*?)\r?\n```\s*$/);
-    if (fenced)
-        text = fenced[1];
-    const lines = text.split(/\r?\n/);
-    const sections = [];
-    let current = null;
-    for (const line of lines) {
-        const m = line.match(SECTION_MARKER_RE);
-        if (m) {
-            current = { header: m[1].trim(), content: [] };
-            sections.push(current);
-        }
-        else if (current) {
-            // 疑似写坏的标记（如缺尾部 @@@）会静默混入上一节内容，直接报错更安全
-            if (line.trimStart().startsWith('@@@')) {
-                throw new Error(`AI 返回中存在疑似损坏的分节标记行：${line.trim().slice(0, 50)}，请重试`);
-            }
-            current.content.push(line);
-        }
-        // 首个标记之前的内容（模型寒暄）忽略
-    }
+    const sections = splitDelimitedSections(raw);
     if (sections.length === 0)
         return null;
     const obj = {};
@@ -695,6 +818,118 @@ function findAssignmentStyleCaseInput(cases) {
     }
     return null;
 }
+/** 提取 Hydro Markdown 中成对的 ```inputN / ```outputN 样例。 */
+function extractStatementSamples(statementMarkdown) {
+    const inputs = [];
+    const outputs = [];
+    const fenceRe = /```(input|output)(\d*)[^\n]*\r?\n([\s\S]*?)```/gi;
+    let match;
+    while ((match = fenceRe.exec(statementMarkdown)) !== null) {
+        let content = match[3].replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        if (content.endsWith('\n'))
+            content = content.slice(0, -1);
+        const entry = { id: match[2], content: normalizeFileContent(content) };
+        if (match[1].toLowerCase() === 'input')
+            inputs.push(entry);
+        else
+            outputs.push(entry);
+    }
+    return inputs.flatMap((input, index) => {
+        const output = input.id
+            ? outputs.find(candidate => candidate.id === input.id)
+            : outputs[index];
+        return output ? [{ id: input.id || String(index + 1), input: input.content, output: output.content }] : [];
+    });
+}
+function comparableFileContent(content) {
+    return content
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map(line => line.trimEnd())
+        .join('\n')
+        .trimEnd();
+}
+/** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
+function parseGeneratorOutput(stdout, expectedCount) {
+    if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
+        throw new Error('GENERATOR 输出超过 1MB 上限');
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(stdout.trim());
+    }
+    catch (err) {
+        throw new Error(`GENERATOR stdout 不是有效 JSON：${err instanceof Error ? err.message : String(err)}`);
+    }
+    const rawCases = Array.isArray(parsed)
+        ? parsed
+        : (parsed && typeof parsed === 'object' ? parsed.cases : undefined);
+    if (!Array.isArray(rawCases))
+        throw new Error('GENERATOR JSON 缺少 cases 数组');
+    if (rawCases.length !== expectedCount) {
+        throw new Error(`GENERATOR 生成 ${rawCases.length} 个测试点，期望 ${expectedCount} 个`);
+    }
+    return rawCases.map((item, index) => {
+        if (!item || typeof item !== 'object' || typeof item.input !== 'string') {
+            throw new Error(`GENERATOR 的第 ${index + 1} 个测试点缺少 input 字符串`);
+        }
+        const input = normalizeFileContent(item.input);
+        if (Buffer.byteLength(input, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
+            throw new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 256KB 上限`);
+        }
+        const label = item.label;
+        return {
+            input,
+            label: typeof label === 'string' ? label.slice(0, 200) : undefined,
+        };
+    });
+}
+async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal) {
+    const generatorResult = await runner.runPython(blueprint.generatorCode, '', signal);
+    const generatedInputs = parseGeneratorOutput(generatorResult.stdout, options.caseCount);
+    if (blueprint.problemType === 'function') {
+        const placeholderCases = generatedInputs.map(item => ({ ...item, output: '' }));
+        const assignment = findAssignmentStyleCaseInput(placeholderCases);
+        if (assignment) {
+            throw new Error(`第 ${assignment.caseNumber} 个 .in 仍是源码赋值写法：${assignment.line}`);
+        }
+    }
+    // 对传统题的标准 Hydro inputN/outputN 样例顺手做标程回归；不强制生成器原样占用样例。
+    const samples = blueprint.problemType === 'traditional'
+        ? extractStatementSamples(statementMarkdown)
+        : [];
+    const allInputs = [...generatedInputs.map(item => item.input), ...samples.map(sample => sample.input)];
+    const oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+    const cases = generatedInputs.map((item, index) => {
+        const output = normalizeFileContent(oracleResults[index].stdout);
+        if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
+            throw new Error(`ORACLE 为第 ${index + 1} 个测试点生成的 .out 超过 256KB 上限`);
+        }
+        return { ...item, output };
+    });
+    for (let i = 0; i < samples.length; i++) {
+        const actual = oracleResults[generatedInputs.length + i]?.stdout || '';
+        if (comparableFileContent(actual) !== comparableFileContent(samples[i].output)) {
+            throw new Error(`ORACLE 未通过题面样例 ${samples[i].id}：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
+                + `，实际 ${JSON.stringify(comparableFileContent(actual))}`);
+        }
+    }
+    return {
+        problemType: blueprint.problemType,
+        isFillIn: blueprint.isFillIn,
+        analysis: blueprint.analysis,
+        functionName: blueprint.functionName,
+        templates: blueprint.templates,
+        stdSolution: { language: 'python', code: blueprint.oracleCode },
+        generatorCode: blueprint.generatorCode,
+        oracleCode: blueprint.oracleCode,
+        cases,
+        notes: [blueprint.notes, '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。']
+            .filter(Boolean)
+            .join('\n'),
+    };
+}
 /**
  * 解析“仅补模板”的 AI 响应。该响应无需重复 META/CASE，避免因完整重生成
  * 再次截断而丢失 Java 等排在后面的模板。
@@ -749,6 +984,9 @@ function assemblePlan(response, options) {
         }
         files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile' });
     }
+    if (response.generatorCode?.trim()) {
+        files.push({ name: 'generator.py', content: response.generatorCode, kind: 'generator' });
+    }
     // 教师提供的标准答案是唯一权威：直接作为 std 文件写入（不使用 AI 复述的版本）
     const providedStd = options.providedStd?.trim();
     if (providedStd) {
@@ -757,6 +995,10 @@ function assemblePlan(response, options) {
             content: normalizeFileContent(providedStd),
             kind: 'std',
         });
+        if (response.oracleCode?.trim()
+            && normalizeFileContent(response.oracleCode) !== normalizeFileContent(providedStd)) {
+            files.push({ name: 'oracle.py', content: response.oracleCode, kind: 'std' });
+        }
     }
     else if (response.stdSolution) {
         files.push({ name: 'std.py', content: response.stdSolution.code, kind: 'std' });
@@ -888,11 +1130,24 @@ function buildCaseInputRepairPrompt(issue, options) {
 function buildTemplateRepairPrompt(missing) {
     const sections = missing.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、');
     return `你上一条函数题结果缺少这些必需模板节：${sections}。
-请只补充上述缺失模板，不要重复 META、STD、CASE 或其他模板。要求：
+请只补充上述缺失模板，不要重复 META、GENERATOR、ORACLE、STD、CASE 或其他模板。要求：
 1. 每个模板节都必须出现且包含完整可编译/可运行的驱动代码。
-2. 模板必须读取你上一条结果中 CASE:IN 的原始 stdin 格式，调用题面要求的学生函数/类，并打印与 CASE:OUT 一致的结果。
+2. 模板必须读取你上一条结果中 GENERATOR 定义的原始 stdin 格式，调用题面要求的学生函数/类，并打印与 ORACLE 一致的结果。
 3. Java 模板必须是 public class Main，并调用学生提交的 class Solution；C++ 模板通过 #include "foo.cc" 引入学生代码；Python 模板只含驱动代码。
 4. 只使用 @@@TEMPLATE:语言@@@ 标记和源码原文，不要输出 JSON、代码围栏或解释文字。`;
+}
+function buildSandboxRepairPrompt(error, options) {
+    const templates = options.languages.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、') || '（传统题无需模板）';
+    const detail = (error instanceof Error ? error.message : String(error)).slice(0, 1600);
+    return `你上一条生成蓝图未通过 Hydro 沙箱验证：
+${detail}
+
+请重新输出【完整蓝图】，修正 GENERATOR、ORACLE 及相关模板：
+1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin。
+2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
+3. ORACLE 必须是可直接运行的 Python 3 完整程序，不得硬编码用例答案，并应通过题面样例。
+4. 函数题必须完整包含：${templates}。
+5. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。`;
 }
 function mergeTokenUsage(usages) {
     const present = usages.filter((usage) => Boolean(usage));
@@ -905,25 +1160,57 @@ function mergeTokenUsage(usages) {
     }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
 }
 class TestdataGenService {
-    constructor(aiClient) {
+    constructor(aiClient, serviceOptions = {}) {
         this.aiClient = aiClient;
+        this.sandboxRunner = serviceOptions.sandboxRunner;
+        this.mode = serviceOptions.mode || (serviceOptions.sandboxRunner ? 'auto' : 'direct');
     }
-    /**
-     * 调用 AI 生成测试数据计划
-     */
     async generate(params) {
-        const systemPrompt = buildTestdataSystemPrompt();
-        const userPrompt = buildTestdataUserPrompt(params);
-        const callOptions = {
-            signal: params.signal,
-            // 正确性优先的长输出场景：不限制 max_tokens，超时放宽到 10 分钟/次
+        if (this.mode !== 'direct' && this.sandboxRunner) {
+            const available = await this.sandboxRunner.isAvailable(params.signal);
+            if (available)
+                return this.generateWithSandbox(params, this.sandboxRunner);
+            if (this.mode === 'sandbox') {
+                throw new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。');
+            }
+        }
+        else if (this.mode === 'sandbox') {
+            throw new Error('未配置 Hydro 沙箱执行器，无法安全执行 AI 生成器。');
+        }
+        const plan = await this.generateDirect(params);
+        if (this.mode === 'auto') {
+            plan.notes = [
+                plan.notes,
+                'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。',
+            ].filter(Boolean).join('\n');
+        }
+        return plan;
+    }
+    getCallOptions(signal) {
+        return {
+            signal,
             maxTokens: null,
             timeoutMs: exports.TESTDATA_GEN_LIMITS.AI_TIMEOUT_MS,
         };
+    }
+    applyResultMetadata(plan, results) {
+        plan.tokenUsage = mergeTokenUsage(results.map(result => result.usage));
+        plan.usedModel = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))].join(' → ');
+        return plan;
+    }
+    useProvidedPythonOracle(blueprint, options) {
+        const provided = options.providedStd?.trim();
+        if (blueprint.problemType === 'traditional' && provided && detectStdFilename(provided) === 'std.py') {
+            return { ...blueprint, oracleCode: normalizeFileContent(provided) };
+        }
+        return blueprint;
+    }
+    async generateDirect(params) {
+        const systemPrompt = buildTestdataSystemPrompt();
+        const userPrompt = buildTestdataUserPrompt(params);
+        const callOptions = this.getCallOptions(params.signal);
         const initialResult = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         const results = [initialResult];
-        // 先宽松解析：完整结果很长，部分模型偶尔会漏掉排在后面的某个语言模板。
-        // 保留已生成的测试点，仅对缺失模板发起小体量补全，避免整份重生成再次截断。
         let response = parseAiResponse(initialResult.content, params.options, { allowMissingTemplates: true });
         const assignmentIssue = response.problemType === 'function'
             ? findAssignmentStyleCaseInput(response.cases)
@@ -938,7 +1225,7 @@ class TestdataGenService {
                 ], systemPrompt, callOptions);
             }
             catch (err) {
-                throw new Error(`AI 生成的 .in 使用了“变量名 = 值”的错误格式，自动修复请求又失败了。`
+                throw new Error('AI 生成的 .in 使用了“变量名 = 值”的错误格式，自动修复请求又失败了。'
                     + `请重试；若 AI 服务持续不可用，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`);
             }
             results.push(repairResult);
@@ -984,10 +1271,58 @@ class TestdataGenService {
                 }
             }
         }
-        const plan = assemblePlan(response, params.options);
-        plan.tokenUsage = mergeTokenUsage(results.map(result => result.usage));
-        plan.usedModel = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))].join(' → ');
-        return plan;
+        return this.applyResultMetadata(assemblePlan(response, params.options), results);
+    }
+    async generateWithSandbox(params, runner) {
+        const systemPrompt = buildSandboxBlueprintSystemPrompt();
+        const userPrompt = buildSandboxBlueprintUserPrompt(params);
+        const callOptions = this.getCallOptions(params.signal);
+        const initialResult = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
+        const results = [initialResult];
+        let blueprint = this.useProvidedPythonOracle(parseSandboxBlueprint(initialResult.content, params.options, { allowMissingTemplates: true }), params.options);
+        if (blueprint.problemType === 'function') {
+            const missing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
+            if (missing.length > 0) {
+                const repairResult = await this.aiClient.chat([
+                    { role: 'user', content: userPrompt },
+                    { role: 'assistant', content: initialResult.content },
+                    { role: 'user', content: buildTemplateRepairPrompt(missing) },
+                ], systemPrompt, callOptions);
+                results.push(repairResult);
+                const repairedTemplates = parseTemplateSections(repairResult.content);
+                blueprint.templates = { ...blueprint.templates, ...repairedTemplates };
+                const stillMissing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
+                if (stillMissing.length > 0) {
+                    throw new Error(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`);
+                }
+            }
+        }
+        let response;
+        try {
+            response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal);
+        }
+        catch (firstError) {
+            let repairResult;
+            try {
+                repairResult = await this.aiClient.chat([
+                    { role: 'user', content: userPrompt },
+                    { role: 'assistant', content: initialResult.content },
+                    { role: 'user', content: buildSandboxRepairPrompt(firstError, params.options) },
+                ], systemPrompt, callOptions);
+            }
+            catch (err) {
+                throw new Error(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`);
+            }
+            results.push(repairResult);
+            try {
+                blueprint = this.useProvidedPythonOracle(parseSandboxBlueprint(repairResult.content, params.options), params.options);
+                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal);
+            }
+            catch (err) {
+                throw new Error(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`);
+            }
+        }
+        return this.applyResultMetadata(assemblePlan(response, params.options), results);
     }
 }
 exports.TestdataGenService = TestdataGenService;

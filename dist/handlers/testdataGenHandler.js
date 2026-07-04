@@ -18,6 +18,7 @@ const hydrooj_1 = require("hydrooj");
 const openaiClient_1 = require("../services/openaiClient");
 const testdataGenService_1 = require("../services/testdataGenService");
 const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
+const goJudgeSandboxService_1 = require("../services/goJudgeSandboxService");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -191,7 +192,11 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
             const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration');
-            const service = new testdataGenService_1.TestdataGenService(aiClient);
+            const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+            const service = new testdataGenService_1.TestdataGenService(aiClient, {
+                sandboxRunner: new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost),
+                mode: (0, goJudgeSandboxService_1.getTestdataGenerationMode)(),
+            });
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
