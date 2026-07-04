@@ -38,6 +38,7 @@ exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
 exports.extractStatementSamples = extractStatementSamples;
+exports.excerpt = excerpt;
 exports.parseGeneratorOutput = parseGeneratorOutput;
 exports.materializeSandboxBlueprint = materializeSandboxBlueprint;
 exports.parseTemplateSections = parseTemplateSections;
@@ -45,6 +46,7 @@ exports.assemblePlan = assemblePlan;
 exports.isLikelyFunctionProblem = isLikelyFunctionProblem;
 exports.buildSkeletonPlan = buildSkeletonPlan;
 const js_yaml_1 = __importDefault(require("js-yaml"));
+const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
@@ -457,11 +459,14 @@ function buildSandboxBlueprintSystemPrompt() {
 3. ACM/传统题：每个 input 是一份独立完整的输入文件。若题面首行是 T，默认每个文件固定 T=1，并紧跟恰好一组完整数据；只有教师明确要求批处理时才使用 T>1。
 4. LeetCode/函数题：每个 input 只表示一次函数调用，不额外添加 T。默认每个参数占一行；一维数组用空格分隔，字符串不带源码引号。所有模板与 ORACLE 必须使用完全相同的输入编码。
 5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。
-6. 数据应覆盖样例场景、最小/最大边界、特殊值和多样中间值；所有生成过程必须确定性，固定随机种子。
-7. 若教师提供标准答案，它是算法和输出格式的唯一权威；ORACLE 必须忠实实现它。
-8. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
+6. BRUTE 是与 ORACLE 相互独立的第二实现（对拍用）：用最朴素的暴力/枚举/模拟写法，宁慢勿错，只需在生成数据规模内跑完即可；它同样是自包含、读同一 stdin 编码、按题面输出的完整 Python 3 程序。严禁 BRUTE 与 ORACLE 共享核心函数或互相调用——它们的一致性是数据正确性的机器证据。
+7. 函数题必须输出 SOLUTION 节：与学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印），它将与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
+8. 鼓励输出 VALIDATOR 节：Python 3 程序，从 stdin 读一份 .in，校验格式与题面约束（数量范围、数值边界、结构合法性）；合法则静默 exit 0，非法则向 stderr 打印原因并 exit 1（可用 sys.exit(1)）。
+9. 数据应覆盖样例场景、最小/最大边界、特殊值和多样中间值；所有生成过程必须确定性，固定随机种子。
+10. 若教师提供标准答案，它是算法和输出格式的唯一权威；ORACLE 必须忠实实现它。
+11. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 
-输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明：
+输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
 @@@META@@@
 problemType: traditional 或 function
 isFillIn: false
@@ -471,7 +476,13 @@ functionName: 函数题函数名（传统题省略）
 @@@GENERATOR@@@
 完整 Python 3 输入生成器
 @@@ORACLE@@@
-完整 Python 3 标程（stdin → stdout）
+完整 Python 3 标程（stdin → stdout，正解算法）
+@@@SOLUTION@@@
+函数题：学生提交形式的函数/类实现（传统题省略）
+@@@BRUTE@@@
+与 ORACLE 独立的暴力解完整 Python 3 程序（对拍用）
+@@@VALIDATOR@@@
+可选：输入合法性校验器（合法 exit 0，非法 stderr+exit 1）
 @@@TEMPLATE:py@@@
 函数题 Python 驱动模板
 @@@TEMPLATE:java@@@
@@ -639,6 +650,9 @@ function parseSandboxBlueprint(raw, options, parseOptions = {}) {
     let notes;
     let generatorCode = '';
     let oracleCode = '';
+    let solutionCode = '';
+    let bruteCode = '';
+    let validatorCode = '';
     for (const section of sections) {
         const parts = section.header.split(':');
         const kind = parts[0].trim().toUpperCase();
@@ -658,6 +672,12 @@ function parseSandboxBlueprint(raw, options, parseOptions = {}) {
             generatorCode = content;
         else if (kind === 'ORACLE')
             oracleCode = content;
+        else if (kind === 'SOLUTION')
+            solutionCode = content;
+        else if (kind === 'BRUTE')
+            bruteCode = content;
+        else if (kind === 'VALIDATOR')
+            validatorCode = content;
         else if (kind === 'TEMPLATE') {
             const lang = (parts[1] || '').trim().toLowerCase();
             if (exports.SUPPORTED_TEMPLATE_LANGS.includes(lang) && content.trim()) {
@@ -693,6 +713,10 @@ function parseSandboxBlueprint(raw, options, parseOptions = {}) {
         templates: problemType === 'function' ? templates : undefined,
         generatorCode: normalizeFileContent(generatorCode),
         oracleCode: normalizeFileContent(oracleCode),
+        // SOLUTION/BRUTE/VALIDATOR 均可缺失（宽容）；缺失后果在 verification 中体现
+        solutionCode: solutionCode.trim() ? normalizeFileContent(solutionCode) : undefined,
+        bruteCode: bruteCode.trim() ? normalizeFileContent(bruteCode) : undefined,
+        validatorCode: validatorCode.trim() ? normalizeFileContent(validatorCode) : undefined,
         notes,
     };
 }
@@ -850,6 +874,22 @@ function comparableFileContent(content) {
         .join('\n')
         .trimEnd();
 }
+/**
+ * 证据摘录：规范化换行、去尾部空白；UTF-8 超过 maxBytes 时按字符安全截断并加省略号，
+ * 保证最终字节数不超过 maxBytes（含省略号）。用于把失败上下文回喂 AI/展示给教师。
+ */
+function excerpt(text, maxBytes = 300) {
+    const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\s+$/, '');
+    if (Buffer.byteLength(normalized, 'utf8') <= maxBytes)
+        return normalized;
+    const ellipsis = '…';
+    const budget = maxBytes - Buffer.byteLength(ellipsis, 'utf8');
+    let cut = normalized;
+    while (cut.length > 0 && Buffer.byteLength(cut, 'utf8') > budget) {
+        cut = cut.slice(0, -1);
+    }
+    return `${cut.replace(/\s+$/, '')}${ellipsis}`;
+}
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
 function parseGeneratorOutput(stdout, expectedCount) {
     if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
@@ -885,9 +925,22 @@ function parseGeneratorOutput(stdout, expectedCount) {
         };
     });
 }
+/**
+ * 双重验证管线（对拍 + 模板实跑 + 输入校验），执行序 a→f。
+ * 各阶段间累计校验总时长预算，避免大批量挤兑沙箱 RAM 盘。
+ */
 async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal) {
+    const startedAt = Date.now();
+    const checkBudget = () => {
+        if (Date.now() - startedAt > goJudgeSandboxService_1.SANDBOX_TOTAL_BUDGET_MS) {
+            throw new Error('沙箱执行总时长超出预算，请减少测试点数量后重试');
+        }
+    };
+    // a. GENERATOR 实跑 → 解析出全部 .in
     const generatorResult = await runner.runPython(blueprint.generatorCode, '', signal);
     const generatedInputs = parseGeneratorOutput(generatorResult.stdout, options.caseCount);
+    const inputs = generatedInputs.map(item => item.input);
+    // b. 函数题伪 stdin 检查（源码赋值写法拦截）
     if (blueprint.problemType === 'function') {
         const placeholderCases = generatedInputs.map(item => ({ ...item, output: '' }));
         const assignment = findAssignmentStyleCaseInput(placeholderCases);
@@ -895,11 +948,25 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             throw new Error(`第 ${assignment.caseNumber} 个 .in 仍是源码赋值写法：${assignment.line}`);
         }
     }
-    // 对传统题的标准 Hydro inputN/outputN 样例顺手做标程回归；不强制生成器原样占用样例。
+    // c. VALIDATOR（可选）：逐份 .in 校验输入合法性，任一不合法即硬失败
+    let validatorRan = false;
+    if (blueprint.validatorCode) {
+        checkBudget();
+        const validatorResults = await runner.runPythonBatchDetailed(blueprint.validatorCode, inputs, { signal });
+        for (let i = 0; i < validatorResults.length; i++) {
+            const detail = validatorResults[i];
+            if (!detail.accepted) {
+                throw new Error(`第 ${i + 1} 个 .in 未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`);
+            }
+        }
+        validatorRan = true;
+    }
+    // d. ORACLE：严格实跑所有 .in + 传统题题面样例 → 产 .out 并做样例回归
+    checkBudget();
     const samples = blueprint.problemType === 'traditional'
         ? extractStatementSamples(statementMarkdown)
         : [];
-    const allInputs = [...generatedInputs.map(item => item.input), ...samples.map(sample => sample.input)];
+    const allInputs = [...inputs, ...samples.map(sample => sample.input)];
     const oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
     const cases = generatedInputs.map((item, index) => {
         const output = normalizeFileContent(oracleResults[index].stdout);
@@ -909,11 +976,107 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         return { ...item, output };
     });
     for (let i = 0; i < samples.length; i++) {
-        const actual = oracleResults[generatedInputs.length + i]?.stdout || '';
+        const actual = oracleResults[inputs.length + i]?.stdout || '';
         if (comparableFileContent(actual) !== comparableFileContent(samples[i].output)) {
             throw new Error(`ORACLE 未通过题面样例 ${samples[i].id}：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
                 + `，实际 ${JSON.stringify(comparableFileContent(actual))}`);
         }
+    }
+    // e. 函数题：solution + template.py 组合实跑，验证模板与输入编码
+    let pyTemplateExecuted = false;
+    let templateCheck;
+    if (blueprint.problemType === 'function'
+        && options.languages.includes('py')
+        && blueprint.solutionCode
+        && blueprint.templates?.py) {
+        checkBudget();
+        const combined = `${blueprint.solutionCode}\n${blueprint.templates.py}`;
+        const templateResults = await runner.runPythonBatchDetailed(combined, inputs, { signal });
+        let passed = 0;
+        const skippedTimeout = [];
+        for (let i = 0; i < templateResults.length; i++) {
+            const detail = templateResults[i];
+            const caseNo = i + 1;
+            if (detail.timedOut) {
+                skippedTimeout.push(caseNo);
+                continue;
+            }
+            if (detail.accepted && comparableFileContent(detail.stdout) === comparableFileContent(cases[i].output)) {
+                passed++;
+                continue;
+            }
+            throw new Error(`template.py 与标程在第 ${caseNo} 个测试点不一致\n`
+                + `输入：${excerpt(inputs[i], 300)}\n`
+                + `模板输出：${excerpt(detail.stdout || detail.stderr || detail.status, 300)}\n`
+                + `标程输出：${excerpt(cases[i].output, 300)}`);
+        }
+        pyTemplateExecuted = true;
+        templateCheck = { lang: 'py', total: inputs.length, passed, skippedTimeout };
+    }
+    // f. BRUTE（可选）：只跑生成的 .in，与 ORACLE 输出对拍
+    const providedStd = options.providedStd?.trim();
+    const oracleIsProvidedStd = !!(providedStd
+        && blueprint.problemType === 'traditional'
+        && detectStdFilename(providedStd) === 'std.py'
+        && comparableFileContent(blueprint.oracleCode) === comparableFileContent(normalizeFileContent(providedStd)));
+    let bruteCheck;
+    if (blueprint.bruteCode) {
+        checkBudget();
+        const bruteResults = await runner.runPythonBatchDetailed(blueprint.bruteCode, inputs, { signal });
+        let agreed = 0;
+        const skippedTimeout = [];
+        const disagreed = [];
+        for (let i = 0; i < bruteResults.length; i++) {
+            const detail = bruteResults[i];
+            const caseNo = i + 1;
+            if (detail.timedOut) {
+                skippedTimeout.push(caseNo);
+                continue;
+            }
+            if (!detail.accepted) {
+                throw new Error(`暴力解在第 ${caseNo} 个测试点执行失败：${excerpt(detail.stderr || detail.error || detail.status, 300)}`);
+            }
+            if (comparableFileContent(detail.stdout) === comparableFileContent(cases[i].output)) {
+                agreed++;
+                continue;
+            }
+            // 不一致：教师 std 为唯一权威时仅记录复核，不拦截；AI 自产标程时硬失败走修复回路
+            if (oracleIsProvidedStd) {
+                disagreed.push(caseNo);
+                continue;
+            }
+            throw new Error(`暴力解与标程在第 ${caseNo} 个测试点不一致（${generatedInputs[i].label || ''}）\n`
+                + `输入：${excerpt(inputs[i], 300)}\n`
+                + `标程输出：${excerpt(cases[i].output, 300)}\n`
+                + `暴力输出：${excerpt(detail.stdout, 300)}`);
+        }
+        bruteCheck = { compared: inputs.length, agreed, skippedTimeout, disagreed };
+    }
+    const verification = {
+        mode: 'sandbox',
+        oracleKind: oracleIsProvidedStd ? 'provided-std' : 'ai-solution',
+        validator: { ran: validatorRan, casesChecked: validatorRan ? inputs.length : 0 },
+    };
+    if (blueprint.problemType === 'traditional') {
+        // 样例不一致已在上面抛出，走到这里即全部通过
+        verification.sampleCheck = { total: samples.length, passed: samples.length };
+    }
+    if (bruteCheck)
+        verification.bruteCheck = bruteCheck;
+    if (templateCheck)
+        verification.templateCheck = templateCheck;
+    const noteParts = [
+        blueprint.notes,
+        '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
+    ];
+    if (bruteCheck && bruteCheck.disagreed.length > 0) {
+        noteParts.push(`暴力解与教师标准答案在测试点 ${bruteCheck.disagreed.join('、')} 不一致，已按教师 std 输出为准，请人工复核。`);
+    }
+    if (bruteCheck && bruteCheck.skippedTimeout.length > 0) {
+        noteParts.push(`暴力解在测试点 ${bruteCheck.skippedTimeout.join('、')} 超时，已跳过对拍。`);
+    }
+    if (templateCheck && templateCheck.skippedTimeout.length > 0) {
+        noteParts.push(`模板实跑在测试点 ${templateCheck.skippedTimeout.join('、')} 超时，已跳过。`);
     }
     return {
         problemType: blueprint.problemType,
@@ -924,10 +1087,13 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         stdSolution: { language: 'python', code: blueprint.oracleCode },
         generatorCode: blueprint.generatorCode,
         oracleCode: blueprint.oracleCode,
+        solutionCode: blueprint.solutionCode,
+        bruteCode: blueprint.bruteCode,
+        validatorCode: blueprint.validatorCode,
+        verification,
+        pyTemplateExecuted,
         cases,
-        notes: [blueprint.notes, '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。']
-            .filter(Boolean)
-            .join('\n'),
+        notes: noteParts.filter(Boolean).join('\n'),
     };
 }
 /**
@@ -968,40 +1134,69 @@ function parseTemplateSections(raw) {
 /**
  * 将解析后的 AI 响应组装为完整的文件计划
  */
-function assemblePlan(response, options) {
+/**
+ * 将解析后的 AI 响应组装为完整的文件计划。
+ * context.mode 决定各文件的 origin 徽章：sandbox（实跑）/ direct（AI 直出）；
+ * 缺省视为 direct（保持旧 2 参调用行为不变）。
+ */
+function assemblePlan(response, options, context = {}) {
+    const sandbox = context.mode === 'sandbox';
+    const dataOrigin = sandbox ? 'executed' : 'ai-only';
     const files = [];
     const caseCount = response.cases.length;
     response.cases.forEach((c, i) => {
-        files.push({ name: `${i + 1}.in`, content: c.input, kind: 'case-in' });
-        files.push({ name: `${i + 1}.out`, content: c.output, kind: 'case-out' });
+        files.push({ name: `${i + 1}.in`, content: c.input, kind: 'case-in', origin: dataOrigin });
+        files.push({ name: `${i + 1}.out`, content: c.output, kind: 'case-out', origin: dataOrigin });
     });
     if (response.problemType === 'function') {
         for (const lang of options.languages) {
             const content = response.templates?.[lang];
             if (content) {
-                files.push({ name: exports.TEMPLATE_FILENAMES[lang], content, kind: 'template' });
+                // template.py 走过步骤 e（solution+模板实跑）才算 executed，其余语言维持 AI 自证
+                const origin = lang === 'py' && sandbox && response.pyTemplateExecuted
+                    ? 'executed'
+                    : 'ai-only';
+                files.push({ name: exports.TEMPLATE_FILENAMES[lang], content, kind: 'template', origin });
             }
         }
-        files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile' });
+        files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile', origin: 'deterministic' });
     }
     if (response.generatorCode?.trim()) {
-        files.push({ name: 'generator.py', content: response.generatorCode, kind: 'generator' });
+        files.push({ name: 'generator.py', content: response.generatorCode, kind: 'generator', origin: 'executed' });
     }
-    // 教师提供的标准答案是唯一权威：直接作为 std 文件写入（不使用 AI 复述的版本）
+    if (sandbox && response.bruteCode?.trim()) {
+        files.push({ name: 'brute.py', content: response.bruteCode, kind: 'brute', origin: 'executed' });
+    }
+    if (sandbox && response.validatorCode?.trim()) {
+        files.push({ name: 'validator.py', content: response.validatorCode, kind: 'validator', origin: 'executed' });
+    }
+    // 教师提供的标准答案是唯一权威：原样写入（deterministic，非实跑制品）
     const providedStd = options.providedStd?.trim();
     if (providedStd) {
         files.push({
             name: detectStdFilename(providedStd),
             content: normalizeFileContent(providedStd),
             kind: 'std',
+            origin: 'deterministic',
         });
         if (response.oracleCode?.trim()
             && normalizeFileContent(response.oracleCode) !== normalizeFileContent(providedStd)) {
-            files.push({ name: 'oracle.py', content: response.oracleCode, kind: 'std' });
+            files.push({ name: 'oracle.py', content: response.oracleCode, kind: 'std', origin: sandbox ? 'executed' : 'ai-only' });
         }
     }
-    else if (response.stdSolution) {
-        files.push({ name: 'std.py', content: response.stdSolution.code, kind: 'std' });
+    else {
+        // 函数题沙箱模式：std.py 用学生提交形式（solutionCode），完整 ORACLE 另存 oracle.py 以闭环重造
+        const stdContent = sandbox && response.problemType === 'function' && response.solutionCode?.trim()
+            ? response.solutionCode
+            : response.stdSolution?.code;
+        if (stdContent) {
+            files.push({ name: 'std.py', content: stdContent, kind: 'std', origin: sandbox ? 'executed' : 'ai-only' });
+            if (sandbox
+                && response.oracleCode?.trim()
+                && normalizeFileContent(response.oracleCode) !== normalizeFileContent(stdContent)) {
+                files.push({ name: 'oracle.py', content: response.oracleCode, kind: 'std', origin: 'executed' });
+            }
+        }
     }
     files.push({
         name: 'config.yaml',
@@ -1011,6 +1206,7 @@ function assemblePlan(response, options) {
             languages: options.languages,
         }),
         kind: 'config',
+        origin: 'deterministic',
     });
     return {
         problemType: response.problemType,
@@ -1019,6 +1215,7 @@ function assemblePlan(response, options) {
         notes: response.notes,
         files,
         caseCount,
+        ...(response.verification ? { verification: response.verification } : {}),
     };
 }
 // ─── 骨架模式（AI 故障降级，不调用 AI） ──────────────────────────────────────
@@ -1075,15 +1272,16 @@ function buildSkeletonPlan(options, statementMarkdown = '') {
         ? 'function'
         : 'traditional';
     const files = [];
+    // 骨架模式全部为确定性生成/空占位，无沙箱实跑制品
     for (let i = 1; i <= options.caseCount; i++) {
-        files.push({ name: `${i}.in`, content: '\n', kind: 'case-in' });
-        files.push({ name: `${i}.out`, content: '\n', kind: 'case-out' });
+        files.push({ name: `${i}.in`, content: '\n', kind: 'case-in', origin: 'deterministic' });
+        files.push({ name: `${i}.out`, content: '\n', kind: 'case-out', origin: 'deterministic' });
     }
     if (problemType === 'function') {
         for (const lang of options.languages) {
-            files.push({ name: exports.TEMPLATE_FILENAMES[lang], content: SKELETON_TEMPLATES[lang], kind: 'template' });
+            files.push({ name: exports.TEMPLATE_FILENAMES[lang], content: SKELETON_TEMPLATES[lang], kind: 'template', origin: 'deterministic' });
         }
-        files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile' });
+        files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile', origin: 'deterministic' });
     }
     const providedStd = options.providedStd?.trim();
     if (providedStd) {
@@ -1091,12 +1289,14 @@ function buildSkeletonPlan(options, statementMarkdown = '') {
             name: detectStdFilename(providedStd),
             content: normalizeFileContent(providedStd),
             kind: 'std',
+            origin: 'deterministic',
         });
     }
     files.push({
         name: 'config.yaml',
         content: buildConfigYaml({ problemType, caseCount: options.caseCount, languages: options.languages }),
         kind: 'config',
+        origin: 'deterministic',
     });
     const noteParts = [
         '骨架模式（未调用 AI）：请在预览中逐个填写各 N.in / N.out 的内容后再写入。',
@@ -1142,12 +1342,14 @@ function buildSandboxRepairPrompt(error, options) {
     return `你上一条生成蓝图未通过 Hydro 沙箱验证：
 ${detail}
 
-请重新输出【完整蓝图】，修正 GENERATOR、ORACLE 及相关模板：
+请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
 1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
 3. ORACLE 必须是可直接运行的 Python 3 完整程序，不得硬编码用例答案，并应通过题面样例。
-4. 函数题必须完整包含：${templates}。
-5. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。`;
+4. BRUTE 必须继续输出，并保持与 ORACLE 相互独立的暴力实现。若失败原因是对拍不一致，先推断 ORACLE 与 BRUTE 谁错并修正错的一方；严禁通过删除 BRUTE 或让两者共享实现来绕过对拍。
+5. 上次输出过 VALIDATOR 的必须继续输出；若失败原因是输入未通过校验，修正 GENERATOR 或 VALIDATOR 中错误的一方。
+6. 函数题必须完整包含 SOLUTION（学生提交形式）与全部模板：${templates}。
+7. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION@@@、@@@BRUTE@@@、@@@VALIDATOR@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。`;
 }
 function mergeTokenUsage(usages) {
     const present = usages.filter((usage) => Boolean(usage));
@@ -1271,7 +1473,13 @@ class TestdataGenService {
                 }
             }
         }
-        return this.applyResultMetadata(assemblePlan(response, params.options), results);
+        const plan = assemblePlan(response, params.options, { mode: 'direct' });
+        // 直出模式未经沙箱验证：给出 direct 验证元数据，前端据此渲染「未验证」提示
+        plan.verification = {
+            mode: 'direct',
+            oracleKind: params.options.providedStd?.trim() ? 'provided-std' : 'ai-solution',
+        };
+        return this.applyResultMetadata(plan, results);
     }
     async generateWithSandbox(params, runner) {
         const systemPrompt = buildSandboxBlueprintSystemPrompt();
@@ -1322,7 +1530,7 @@ class TestdataGenService {
                 throw new Error(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`);
             }
         }
-        return this.applyResultMetadata(assemblePlan(response, params.options), results);
+        return this.applyResultMetadata(assemblePlan(response, params.options, { mode: 'sandbox' }), results);
     }
 }
 exports.TestdataGenService = TestdataGenService;

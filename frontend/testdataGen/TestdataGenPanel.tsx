@@ -32,7 +32,17 @@ interface ProblemContext {
 interface PlannedFile {
   name: string;
   content: string;
-  kind: 'case-in' | 'case-out' | 'template' | 'compile' | 'config' | 'std' | 'generator';
+  kind: 'case-in' | 'case-out' | 'template' | 'compile' | 'config' | 'std' | 'generator' | 'brute' | 'validator';
+  origin?: 'executed' | 'deterministic' | 'ai-only';
+}
+
+interface PlanVerification {
+  mode: 'sandbox' | 'direct';
+  oracleKind: 'provided-std' | 'ai-solution';
+  sampleCheck?: { total: number; passed: number };          // 仅传统题
+  bruteCheck?: { compared: number; agreed: number; skippedTimeout: number[]; disagreed: number[] };
+  validator?: { ran: boolean; casesChecked: number };
+  templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
 }
 
 interface GenerationPlan {
@@ -43,6 +53,7 @@ interface GenerationPlan {
   files: PlannedFile[];
   caseCount: number;
   usedModel?: string;
+  verification?: PlanVerification;
 }
 
 type PanelPhase = 'form' | 'generating' | 'preview' | 'applying' | 'applied';
@@ -65,6 +76,26 @@ const KIND_BADGE_KEYS: Record<string, string> = {
   config: 'ai_helper_testdata_kind_config',
   std: 'ai_helper_testdata_kind_std',
   generator: 'ai_helper_testdata_kind_generator',
+  brute: 'ai_helper_testdata_kind_generator',
+  validator: 'ai_helper_testdata_kind_generator',
+};
+
+const ORIGIN_BADGE_KEYS: Record<string, string> = {
+  executed: 'ai_helper_testdata_badge_executed',
+  'ai-only': 'ai_helper_testdata_badge_ai_only',
+  deterministic: 'ai_helper_testdata_badge_deterministic',
+};
+
+// deterministic 用中性灰：getBadgeStyle 无 neutral 变体，借 info 外形覆盖配色
+const getOriginBadgeStyle = (origin: string): React.CSSProperties => {
+  if (origin === 'executed') return getBadgeStyle('success');
+  if (origin === 'ai-only') return getBadgeStyle('warning');
+  return {
+    ...getBadgeStyle('info'),
+    color: COLORS.textMuted,
+    backgroundColor: COLORS.bgHover,
+    border: `1px solid ${COLORS.border}`,
+  };
 };
 
 const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace";
@@ -533,6 +564,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const orderedFiles = [...otherFiles, ...caseFiles];
     const active = activeFile && plan.files.some(f => f.name === activeFile) ? activeFile : orderedFiles[0]?.name;
     const selectedCount = plan.files.filter(f => selectedFiles[f.name]).length;
+    const verification = plan.verification;
+    const bruteSkipped = verification?.bruteCheck?.skippedTimeout ?? [];
+    const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
+    const templateSkipped = verification?.templateCheck?.skippedTimeout ?? [];
+    const hasAiOnlyCases = plan.files.some(
+      f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
+    );
+    // 全绿门槛：沙箱模式 + 对拍确实执行过（AI 未产出 BRUTE 时不能算全绿）
+    const verificationAllGreen = verification?.mode === 'sandbox'
+      && !hasAiOnlyCases
+      && (verification?.bruteCheck?.compared ?? 0) > 0
+      && bruteDisagreed.length === 0
+      && bruteSkipped.length === 0
+      && templateSkipped.length === 0;
 
     return (
       <div>
@@ -547,6 +592,38 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           {plan.analysis && <div style={{ fontSize: '13px' }}>{plan.analysis}</div>}
           {plan.notes && <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>}
         </div>
+        {verification && (
+          <div style={{ ...getAlertStyle(verificationAllGreen ? 'success' : 'warning'), marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
+              {i18n('ai_helper_testdata_verify_title')}
+            </div>
+            <div style={{ fontSize: '13px' }}>
+              {i18n(verification.mode === 'sandbox' ? 'ai_helper_testdata_verify_mode_sandbox' : 'ai_helper_testdata_verify_mode_direct')}
+            </div>
+            {verification.sampleCheck && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n('ai_helper_testdata_verify_samples')}: {verification.sampleCheck.passed}/{verification.sampleCheck.total}
+              </div>
+            )}
+            {verification.bruteCheck && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n('ai_helper_testdata_verify_brute')}: {verification.bruteCheck.agreed}/{verification.bruteCheck.compared}
+                {bruteSkipped.length > 0 && ` · ${i18n('ai_helper_testdata_verify_brute_skipped')}: [${bruteSkipped.join(', ')}]`}
+                {bruteDisagreed.length > 0 && ` · ${i18n('ai_helper_testdata_verify_brute_disagreed')}: [${bruteDisagreed.join(', ')}]`}
+              </div>
+            )}
+            {verification.validator && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n('ai_helper_testdata_verify_validator')}: {verification.validator.ran ? verification.validator.casesChecked : i18n('ai_helper_testdata_verify_validator_none')}
+              </div>
+            )}
+            {verification.templateCheck && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n('ai_helper_testdata_verify_template')}: {verification.templateCheck.passed}/{verification.templateCheck.total}
+              </div>
+            )}
+          </div>
+        )}
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
           {i18n('ai_helper_testdata_review_warning')}
         </div>
@@ -581,6 +658,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                   <span style={{ fontFamily: MONO_FONT, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {f.name}
                   </span>
+                  {f.origin && (
+                    <span style={getOriginBadgeStyle(f.origin)}>
+                      {i18n(ORIGIN_BADGE_KEYS[f.origin])}
+                    </span>
+                  )}
                   {conflict && (
                     <span style={getBadgeStyle('warning')} title={i18n('ai_helper_testdata_overwrite_hint')}>
                       {i18n('ai_helper_testdata_overwrite_badge')}

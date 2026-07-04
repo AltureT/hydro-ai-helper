@@ -601,6 +601,7 @@ describe('Hydro 沙箱生成蓝图', () => {
   it('用沙箱标程生成全部 .out，并用题面样例校验标程', async () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
       runPython: jest.fn().mockResolvedValue({
         stdout: JSON.stringify({ cases: [
           { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
@@ -882,6 +883,7 @@ describe('TestdataGenService.generate', () => {
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
       runPython: jest.fn().mockResolvedValue({
         stdout: JSON.stringify({ cases: [
           { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
@@ -931,6 +933,7 @@ describe('TestdataGenService.generate', () => {
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
       runPython: jest.fn().mockResolvedValue({
         stdout: JSON.stringify({ cases: [{ input: 'abc' }] }), stderr: '',
       }),
@@ -957,6 +960,7 @@ describe('TestdataGenService.generate', () => {
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
       runPython: jest.fn(),
       runPythonBatch: jest.fn(),
     };
@@ -1045,5 +1049,289 @@ describe('TestdataGenService.generate', () => {
       statementMarkdown: 's',
       options: baseOptions,
     })).rejects.toThrow(/JSON/);
+  });
+});
+
+// ─── 双重验证管线 v2.1（对拍 + 模板实跑 + 输入校验） ──────────────────────────
+
+/** 构造一条宽容明细，默认 Accepted。 */
+function detail(over: Record<string, unknown> = {}) {
+  return { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: '', stderr: '', ...over };
+}
+
+const tradOpts: GenerateOptions = { problemKind: 'traditional', caseCount: 2, languages: [] };
+
+/** 两个测试点的生成器 stdout（label c1/c2，输入 1 / 2）。 */
+function twoCaseGen(): string {
+  return JSON.stringify({ cases: [{ label: 'c1', input: '1' }, { label: 'c2', input: '2' }] });
+}
+
+/** ORACLE 严格批量：回显每份输入作为 .out（1→'1\n'，2→'2\n'）。 */
+function echoOracle() {
+  return jest.fn().mockImplementation((_code: string, inputs: string[]) =>
+    Promise.resolve(inputs.map(input => ({ stdout: input, stderr: '' }))));
+}
+
+describe('parseSandboxBlueprint v2 分节', () => {
+  it('解析 SOLUTION/BRUTE/VALIDATOR 三节', () => {
+    const raw = [
+      '@@@META@@@', 'problemType: traditional',
+      '@@@GENERATOR@@@', 'print(1)',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION@@@', 'def solve(x):', '    return x',
+      '@@@BRUTE@@@', 'print(input())  # brute-force',
+      '@@@VALIDATOR@@@', 'import sys', 'sys.exit(0)',
+    ].join('\n');
+    const bp = parseSandboxBlueprint(raw, tradOpts);
+    expect(bp.solutionCode).toContain('def solve');
+    expect(bp.bruteCode).toContain('brute-force');
+    expect(bp.validatorCode).toContain('sys.exit(0)');
+  });
+
+  it('三节全缺失时宽容解析（向后兼容旧蓝图）', () => {
+    const bp = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), tradOpts);
+    expect(bp.solutionCode).toBeUndefined();
+    expect(bp.bruteCode).toBeUndefined();
+    expect(bp.validatorCode).toBeUndefined();
+  });
+
+  it('ORACLE 仍为必需节', () => {
+    const raw = ['@@@META@@@', 'problemType: traditional', '@@@GENERATOR@@@', 'print(1)'].join('\n');
+    expect(() => parseSandboxBlueprint(raw, tradOpts)).toThrow(/ORACLE/);
+  });
+
+  it('System Prompt 含 BRUTE 独立、SOLUTION、VALIDATOR 规则与分节', () => {
+    const sp = buildSandboxBlueprintSystemPrompt();
+    expect(sp).toContain('@@@SOLUTION@@@');
+    expect(sp).toContain('@@@BRUTE@@@');
+    expect(sp).toContain('@@@VALIDATOR@@@');
+    expect(sp).toContain('相互独立的第二实现');
+    // 既有断言仍需成立
+    expect(sp).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+  });
+});
+
+describe('materializeSandboxBlueprint 双重验证', () => {
+  function tradBlueprint(extra: string[] = []): ReturnType<typeof parseSandboxBlueprint> {
+    return parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: traditional',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      ...extra,
+    ].join('\n'), tradOpts);
+  }
+
+  it('VALIDATOR 拒绝某个 .in 时硬失败并带 stderr，且先于标程执行', async () => {
+    const bp = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: echoOracle(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '' }),
+        detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: '数值超出范围' }),
+      ]),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
+      .rejects.toThrow(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    expect(runner.runPythonBatch).not.toHaveBeenCalled();
+  });
+
+  it('BRUTE 与标程一致：记录 agreed，不拦截', async () => {
+    const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: echoOracle(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]),
+    };
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
+    expect(res.verification?.bruteCheck).toEqual({ compared: 2, agreed: 2, skippedTimeout: [], disagreed: [] });
+  });
+
+  it('BRUTE 与 AI 标程不一致：硬失败并带证据摘录', async () => {
+    const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: echoOracle(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' }), detail({ stdout: '999\n' })]),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
+      .rejects.toThrow(/暴力解与标程在第 2 个测试点不一致/);
+  });
+
+  it('教师 std 为唯一权威时 BRUTE 不一致不拦截，仅记录 disagreed 与复核提示', async () => {
+    const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
+    const opts: GenerateOptions = { ...tradOpts, providedStd: 'print(input())' };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: echoOracle(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' }), detail({ stdout: '999\n' })]),
+    };
+    const res = await materializeSandboxBlueprint(bp, opts, '', runner);
+    expect(res.verification?.oracleKind).toBe('provided-std');
+    expect(res.verification?.bruteCheck).toMatchObject({ agreed: 1, disagreed: [2] });
+    expect(res.notes).toContain('请人工复核');
+  });
+
+  it('BRUTE 超时：记入 skippedTimeout 并继续', async () => {
+    const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: echoOracle(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '1\n' }),
+        detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+      ]),
+    };
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
+    expect(res.verification?.bruteCheck).toMatchObject({ agreed: 1, skippedTimeout: [2], disagreed: [] });
+  });
+
+  it('函数题 solution+template.py 组合实跑，一致则记 templateCheck.passed', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: f',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'a,b=map(int,input().split())', 'print(a+b)',
+      '@@@SOLUTION@@@', 'def f(a, b):', '    return a + b',
+      '@@@TEMPLATE:py@@@', 'a,b=map(int,input().split())', 'print(f(a,b))',
+    ].join('\n'), fnOpts);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: JSON.stringify({ cases: [{ label: 'c1', input: '2 3' }] }), stderr: '' }),
+      runPythonBatch: jest.fn().mockResolvedValue([{ stdout: '5\n', stderr: '' }]),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '5\n' })]),
+    };
+    const res = await materializeSandboxBlueprint(bp, fnOpts, '', runner);
+    expect(res.pyTemplateExecuted).toBe(true);
+    expect(res.verification?.templateCheck).toEqual({ lang: 'py', total: 1, passed: 1, skippedTimeout: [] });
+    // 组合程序 = solution + '\n' + template.py
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
+      expect.stringContaining('def f(a, b):'), ['2 3\n'], expect.anything(),
+    );
+  });
+
+  it('函数题模板与标程输出不一致：硬失败', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: f',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'a,b=map(int,input().split())', 'print(a+b)',
+      '@@@SOLUTION@@@', 'def f(a, b):', '    return a + b',
+      '@@@TEMPLATE:py@@@', 'a,b=map(int,input().split())', 'print(f(a,b))',
+    ].join('\n'), fnOpts);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: JSON.stringify({ cases: [{ label: 'c1', input: '2 3' }] }), stderr: '' }),
+      runPythonBatch: jest.fn().mockResolvedValue([{ stdout: '5\n', stderr: '' }]),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '6\n' })]),
+    };
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner))
+      .rejects.toThrow(/template\.py 与标程在第 1 个测试点不一致/);
+  });
+
+  it('超过总时长预算时在阶段间报错', async () => {
+    const bp = tradBlueprint();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: echoOracle(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+    };
+    // 每次 Date.now 递增 40 万毫秒，任意两个阶段间隔都超 30 万预算
+    let clock = 0;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => { clock += 400_000; return clock; });
+    try {
+      await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
+        .rejects.toThrow(/总时长超出预算/);
+      expect(runner.runPythonBatch).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+describe('assemblePlan origin 矩阵与验证透传', () => {
+  it('沙箱模式：数据/生成器/对拍器 executed，结构文件 deterministic', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      generatorCode: 'print(1)',
+      bruteCode: 'print(input())',
+      validatorCode: 'import sys',
+      oracleCode: 'print(input())',
+      stdSolution: { language: 'python', code: 'print(input())' },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution' },
+    } as never;
+    const opts: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    const byName = (n: string) => plan.files.find(f => f.name === n);
+    expect(byName('1.in')?.origin).toBe('executed');
+    expect(byName('1.out')?.origin).toBe('executed');
+    expect(byName('generator.py')?.origin).toBe('executed');
+    expect(byName('brute.py')).toMatchObject({ kind: 'brute', origin: 'executed' });
+    expect(byName('validator.py')).toMatchObject({ kind: 'validator', origin: 'executed' });
+    expect(byName('config.yaml')?.origin).toBe('deterministic');
+    expect(plan.verification?.mode).toBe('sandbox');
+  });
+
+  it('direct 模式：数据 ai-only，且不写 brute/validator', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      generatorCode: 'print(1)',
+      bruteCode: 'print(input())',
+      validatorCode: 'import sys',
+      stdSolution: { language: 'python', code: 'print(input())' },
+    } as never;
+    const opts: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const plan = assemblePlan(response, opts, { mode: 'direct' });
+    expect(plan.files.find(f => f.name === '1.in')?.origin).toBe('ai-only');
+    expect(plan.files.find(f => f.name === 'brute.py')).toBeUndefined();
+    expect(plan.files.find(f => f.name === 'validator.py')).toBeUndefined();
+  });
+
+  it('函数题沙箱模式：std.py 用学生形式，完整标程另存 oracle.py，template.py executed', () => {
+    const response = {
+      problemType: 'function',
+      cases: [{ input: '2 3\n', output: '5\n' }],
+      templates: { py: 'print(f())' },
+      solutionCode: 'def f():\n    return 5',
+      oracleCode: 'print(5)',
+      stdSolution: { language: 'python', code: 'print(5)' },
+      pyTemplateExecuted: true,
+      generatorCode: 'print(1)',
+    } as never;
+    const opts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    const std = plan.files.find(f => f.name === 'std.py');
+    expect(std?.content).toContain('def f()');
+    expect(std?.origin).toBe('executed');
+    expect(plan.files.find(f => f.name === 'oracle.py')?.content).toContain('print(5)');
+    expect(plan.files.find(f => f.name === 'template.py')?.origin).toBe('executed');
+  });
+
+  it('骨架模式：所有文件 deterministic 且无 verification', () => {
+    const plan = buildSkeletonPlan({ problemKind: 'function', caseCount: 1, languages: ['py'] });
+    expect(plan.files.every(f => f.origin === 'deterministic')).toBe(true);
+    expect(plan.verification).toBeUndefined();
+  });
+
+  it('direct 模式 generate 附带 direct 验证元数据', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson({ problemType: 'traditional' }),
+        usedModel: { endpointId: 'e', endpointName: 'n', modelName: 'm' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+    });
+    expect(plan.verification).toEqual({ mode: 'direct', oracleKind: 'ai-solution' });
   });
 });
