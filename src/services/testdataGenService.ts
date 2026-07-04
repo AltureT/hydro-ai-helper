@@ -100,6 +100,11 @@ export const TESTDATA_GEN_LIMITS = {
   MAX_EXTRA_REQUIREMENTS: 1000,
   MAX_PROVIDED_STD: 10000,
   MAX_STATEMENT_LENGTH: 20000,
+  /**
+   * AI 单次尝试超时（毫秒）。测试数据生成正确性优先、允许长思考，
+   * 故显著高于普通对话；且本次调用不发送 max_tokens（输出长度不设限）。
+   */
+  AI_TIMEOUT_MS: 600_000,
   /** apply 时单文件内容上限（字节） */
   MAX_FILE_SIZE: 256 * 1024,
   /** apply 时文件数量上限 */
@@ -660,6 +665,101 @@ export function assemblePlan(response: GenerationResponse, options: GenerateOpti
   };
 }
 
+// ─── 骨架模式（AI 故障降级，不调用 AI） ──────────────────────────────────────
+
+/** 骨架模板：可直接编译/运行，教师按 TODO 补全输入输出部分 */
+const SKELETON_TEMPLATES: Record<TemplateLang, string> = {
+  py: `# 评测模板（骨架）：请按题目输入格式补全本文件。
+# 评测时本文件会被追加到学生代码末尾：读取输入 → 调用学生函数 → 打印结果。
+# 示例（提莫攻击）：
+# timeSeries = list(map(int, input().split()))
+# duration = int(input())
+# print(findPoisonedDuration(timeSeries, duration))
+`,
+  java: `import java.util.*;
+
+// 评测模板（骨架）：请按题目输入格式补全 main 方法。
+// 学生提交 class Solution；在 main 中读取输入、调用 new Solution().方法(...) 并打印结果。
+public class Main {
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        // TODO: 例如：
+        // int[] arr = Arrays.stream(sc.nextLine().trim().split("\\\\s+"))
+        //         .mapToInt(Integer::parseInt).toArray();
+        // System.out.println(new Solution().yourMethod(arr));
+    }
+}
+`,
+  cc: `#include <bits/stdc++.h>
+using namespace std;
+#include "foo.cc"
+
+// 评测模板（骨架）：请按题目输入格式补全 main 函数。
+// 学生代码通过上方 #include "foo.cc" 引入。
+int main() {
+    // TODO: 例如：
+    // int x; cin >> x;
+    // cout << yourFunction(x) << endl;
+    return 0;
+}
+`,
+};
+
+/**
+ * 构建骨架计划：不调用 AI，确定性生成结构性文件与空白测试点。
+ * 用作 AI 故障时的降级方案——保住最容易出错的 compile.sh / config.yaml /
+ * 模板机制部分，测试数据内容由教师在预览中手动填写。
+ */
+export function buildSkeletonPlan(options: GenerateOptions): GenerationPlan {
+  // 骨架模式无 AI 判断题型：auto 按传统题处理（函数题骨架需教师显式选择）
+  const problemType: 'function' | 'traditional' = options.problemKind === 'function' ? 'function' : 'traditional';
+  const files: PlannedFile[] = [];
+
+  for (let i = 1; i <= options.caseCount; i++) {
+    files.push({ name: `${i}.in`, content: '\n', kind: 'case-in' });
+    files.push({ name: `${i}.out`, content: '\n', kind: 'case-out' });
+  }
+
+  if (problemType === 'function') {
+    for (const lang of options.languages) {
+      files.push({ name: TEMPLATE_FILENAMES[lang], content: SKELETON_TEMPLATES[lang], kind: 'template' });
+    }
+    files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile' });
+  }
+
+  const providedStd = options.providedStd?.trim();
+  if (providedStd) {
+    files.push({
+      name: detectStdFilename(providedStd),
+      content: normalizeFileContent(providedStd),
+      kind: 'std',
+    });
+  }
+
+  files.push({
+    name: 'config.yaml',
+    content: buildConfigYaml({ problemType, caseCount: options.caseCount, languages: options.languages }),
+    kind: 'config',
+  });
+
+  const noteParts = [
+    '骨架模式（未调用 AI）：请在预览中逐个填写各 N.in / N.out 的内容后再写入。',
+  ];
+  if (problemType === 'function') {
+    noteParts.push('请按题目输入格式补全各语言评测模板中的 TODO 部分。');
+  } else if (options.problemKind === 'auto') {
+    noteParts.push('题型未指定，已按传统题生成；如需函数题骨架（模板 + compile.sh），请将题目类型选为"函数题"后重新生成。');
+  }
+
+  return {
+    problemType,
+    analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
+    notes: noteParts.join(''),
+    files,
+    caseCount: options.caseCount,
+  };
+}
+
 // ─── 服务入口 ─────────────────────────────────────────────────────────────────
 
 export interface GenerateTestdataParams {
@@ -685,7 +785,12 @@ export class TestdataGenService {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: userPrompt }],
       systemPrompt,
-      { signal: params.signal },
+      {
+        signal: params.signal,
+        // 正确性优先的长输出场景：不限制 max_tokens，超时放宽到 10 分钟/次
+        maxTokens: null,
+        timeoutMs: TESTDATA_GEN_LIMITS.AI_TIMEOUT_MS,
+      },
     );
 
     const response = parseGenerationResponse(result.content, params.options);

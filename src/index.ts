@@ -77,6 +77,7 @@ console.log('[AI-Helper] updateHandler OK');
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
+  TestdataGenSkeletonHandler,
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
 } from './handlers/testdataGenHandler';
@@ -404,6 +405,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // POST /ai-helper/testdata-gen/generate - AI 生成测试数据计划（仅预览）
     ctx.Route('ai_testdata_gen_generate', '/ai-helper/testdata-gen/generate', TestdataGenGenerateHandler, TestdataGenHandlerPriv);
     ctx.Route('ai_testdata_gen_generate_domain', '/d/:domainId/ai-helper/testdata-gen/generate', TestdataGenGenerateHandler, TestdataGenHandlerPriv);
+    // POST /ai-helper/testdata-gen/skeleton - 骨架模式（AI 故障降级，不调用 AI）
+    ctx.Route('ai_testdata_gen_skeleton', '/ai-helper/testdata-gen/skeleton', TestdataGenSkeletonHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_skeleton_domain', '/d/:domainId/ai-helper/testdata-gen/skeleton', TestdataGenSkeletonHandler, TestdataGenHandlerPriv);
     // POST /ai-helper/testdata-gen/apply - 确认写入题目测试数据
     ctx.Route('ai_testdata_gen_apply', '/ai-helper/testdata-gen/apply', TestdataGenApplyHandler, TestdataGenHandlerPriv);
     ctx.Route('ai_testdata_gen_apply_domain', '/d/:domainId/ai-helper/testdata-gen/apply', TestdataGenApplyHandler, TestdataGenHandlerPriv);

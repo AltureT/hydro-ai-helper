@@ -7,6 +7,7 @@ import {
   isSafeTestdataFilename,
   buildCompileSh,
   buildConfigYaml,
+  buildSkeletonPlan,
   extractJsonObject,
   normalizeFileContent,
   parseGenerationResponse,
@@ -449,6 +450,51 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
   });
 });
 
+// ─── buildSkeletonPlan（AI 故障降级） ─────────────────────────────────────────
+
+describe('buildSkeletonPlan', () => {
+  it('函数题骨架包含模板骨架、compile.sh 与空白测试点', () => {
+    const plan = buildSkeletonPlan({ problemKind: 'function', caseCount: 3, languages: ['py', 'cc'] });
+    const names = plan.files.map(f => f.name);
+    expect(names).toEqual(expect.arrayContaining([
+      '1.in', '1.out', '2.in', '2.out', '3.in', '3.out',
+      'template.py', 'template.cc', 'compile.sh', 'config.yaml',
+    ]));
+    expect(names).not.toContain('template.java');
+    expect(plan.caseCount).toBe(3);
+    expect(plan.problemType).toBe('function');
+    // 模板骨架含 TODO 引导且 java/cc 骨架可编译（结构完整）
+    const py = plan.files.find(f => f.name === 'template.py');
+    expect(py?.content).toContain('骨架');
+    // 空白测试点为单个换行，供教师在预览中填写
+    expect(plan.files.find(f => f.name === '1.in')?.content).toBe('\n');
+  });
+
+  it('传统题骨架只含测试点与 config.yaml', () => {
+    const plan = buildSkeletonPlan({ problemKind: 'traditional', caseCount: 2, languages: [] });
+    const names = plan.files.map(f => f.name);
+    expect(names).toEqual(['1.in', '1.out', '2.in', '2.out', 'config.yaml']);
+    const config = plan.files.find(f => f.name === 'config.yaml');
+    expect(config?.content).not.toContain('user_extra_files');
+  });
+
+  it('auto 题型按传统题处理并在说明中提示', () => {
+    const plan = buildSkeletonPlan({ problemKind: 'auto', caseCount: 1, languages: ['py'] });
+    expect(plan.problemType).toBe('traditional');
+    expect(plan.notes).toContain('题型未指定');
+  });
+
+  it('提供标准答案时随骨架一并写入 std 文件', () => {
+    const plan = buildSkeletonPlan({
+      problemKind: 'traditional', caseCount: 1, languages: [],
+      providedStd: 'print(input())',
+    });
+    const std = plan.files.find(f => f.kind === 'std');
+    expect(std?.name).toBe('std.py');
+    expect(std?.content).toContain('print(input())');
+  });
+});
+
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
@@ -467,10 +513,13 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
     });
     expect(mockClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = mockClient.chat.mock.calls[0];
+    const [messages, systemPrompt, callOptions] = mockClient.chat.mock.calls[0];
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toContain('提莫攻击');
     expect(systemPrompt).toContain('JSON');
+    // 不限输出长度 + 长超时
+    expect(callOptions.maxTokens).toBeNull();
+    expect(callOptions.timeoutMs).toBe(TESTDATA_GEN_LIMITS.AI_TIMEOUT_MS);
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
     expect(plan.usedModel).toBe('main/gpt-test');

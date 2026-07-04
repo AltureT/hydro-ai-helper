@@ -320,6 +320,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // POST /ai-helper/testdata-gen/generate - AI 生成测试数据计划（仅预览）
         ctx.Route('ai_testdata_gen_generate', '/ai-helper/testdata-gen/generate', testdataGenHandler_1.TestdataGenGenerateHandler, testdataGenHandler_1.TestdataGenHandlerPriv);
         ctx.Route('ai_testdata_gen_generate_domain', '/d/:domainId/ai-helper/testdata-gen/generate', testdataGenHandler_1.TestdataGenGenerateHandler, testdataGenHandler_1.TestdataGenHandlerPriv);
+        // POST /ai-helper/testdata-gen/skeleton - 骨架模式（AI 故障降级，不调用 AI）
+        ctx.Route('ai_testdata_gen_skeleton', '/ai-helper/testdata-gen/skeleton', testdataGenHandler_1.TestdataGenSkeletonHandler, testdataGenHandler_1.TestdataGenHandlerPriv);
+        ctx.Route('ai_testdata_gen_skeleton_domain', '/d/:domainId/ai-helper/testdata-gen/skeleton', testdataGenHandler_1.TestdataGenSkeletonHandler, testdataGenHandler_1.TestdataGenHandlerPriv);
         // POST /ai-helper/testdata-gen/apply - 确认写入题目测试数据
         ctx.Route('ai_testdata_gen_apply', '/ai-helper/testdata-gen/apply', testdataGenHandler_1.TestdataGenApplyHandler, testdataGenHandler_1.TestdataGenHandlerPriv);
         ctx.Route('ai_testdata_gen_apply_domain', '/d/:domainId/ai-helper/testdata-gen/apply', testdataGenHandler_1.TestdataGenApplyHandler, testdataGenHandler_1.TestdataGenHandlerPriv);

@@ -12,7 +12,7 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenApplyHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
+exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
 exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
 const openaiClient_1 = require("../services/openaiClient");
@@ -232,6 +232,61 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
     }
 }
 exports.TestdataGenGenerateHandler = TestdataGenGenerateHandler;
+// ─── TestdataGenSkeletonHandler ───────────────────────────────────────────────
+/**
+ * POST /ai-helper/testdata-gen/skeleton
+ * AI 故障降级方案：不调用 AI，确定性生成结构性文件（compile.sh /
+ * config.yaml / 模板骨架）与空白测试点，数据内容由教师在预览中手动填写。
+ * 无需限流（无 AI 开销）、不要求题面非空。
+ */
+class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const body = (this.request.body || {});
+            const problemId = String(body.problemId || '');
+            if (!problemId) {
+                sendError(this, 400, 'INVALID_PROBLEM_ID', 'ai_helper_testdata_err_problem_not_found');
+                return;
+            }
+            const pdoc = await findProblem(domainId, problemId);
+            if (!pdoc) {
+                sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
+                return;
+            }
+            if (!checkEditPermission(this, pdoc))
+                return;
+            const options = {
+                problemKind: (body.problemKind || 'auto'),
+                fillInMode: (body.fillInMode || 'auto'),
+                caseCount: Number(body.caseCount ?? 10),
+                dataScale: (body.dataScale || 'small'),
+                languages: Array.isArray(body.languages)
+                    ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
+                    : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
+                providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
+            };
+            const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
+            if (optionError) {
+                sendError(this, 400, 'INVALID_OPTIONS', optionError);
+                return;
+            }
+            this.ctx.get('featureStatsModel')?.recordAttempt('testdata_skeleton').catch(() => { });
+            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options);
+            this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { });
+            this.response.body = { plan };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[TestdataGenSkeletonHandler.post] error:', err);
+            this.ctx.get('errorReporter')?.capture('api_error', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
+            sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
+        }
+    }
+}
+exports.TestdataGenSkeletonHandler = TestdataGenSkeletonHandler;
 /**
  * POST /ai-helper/testdata-gen/apply
  * 将（教师确认/编辑后的）文件写入题目测试数据。

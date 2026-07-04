@@ -84,6 +84,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [collapsed, setCollapsed] = useState(true);
   const [phase, setPhase] = useState<PanelPhase>('form');
   const [error, setError] = useState<string | null>(null);
+  // 生成请求真正失败（AI 故障/超时）时提示骨架降级；本地校验错误不提示
+  const [showFallbackHint, setShowFallbackHint] = useState(false);
 
   // 表单状态
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
@@ -134,13 +136,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const handleGenerate = useCallback(async () => {
     setError(null);
+    setShowFallbackHint(false);
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
     setPhase('generating');
     const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort(), 300_000); // 5 分钟前端兜底
+    // 生成不设 token 上限、服务端单次超时 10 分钟，前端仅作 15 分钟最终兜底
+    const timeout = setTimeout(() => ac.abort(), 900_000);
     try {
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/generate'), {
         method: 'POST',
@@ -187,11 +191,64 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
+      setShowFallbackHint(true);
       setPhase('form');
     } finally {
       clearTimeout(timeout);
     }
   }, [problemId, problemKind, fillInMode, caseCount, dataScale, languages, providedStd, extraRequirements]);
+
+  // ─── 骨架模式（AI 故障降级） ─────────────────────────────────────────────────
+
+  const handleSkeleton = useCallback(async () => {
+    setError(null);
+    setShowFallbackHint(false);
+    if (problemKind !== 'traditional' && languages.length === 0) {
+      setError(i18n('ai_helper_testdata_err_no_languages'));
+      return;
+    }
+    setPhase('generating');
+    try {
+      const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/skeleton'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          problemId,
+          problemKind,
+          caseCount,
+          languages,
+          providedStd: providedStd.trim() || undefined,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await parseErrorMessage(response));
+      }
+      const data = await response.json() as { plan: GenerationPlan };
+      const newPlan = data.plan;
+      if (!newPlan || !Array.isArray(newPlan.files) || newPlan.files.length === 0) {
+        throw new Error(i18n('ai_helper_testdata_err_empty_plan'));
+      }
+      setPlan(newPlan);
+      const contents: Record<string, string> = {};
+      const selected: Record<string, boolean> = {};
+      for (const f of newPlan.files) {
+        contents[f.name] = f.content;
+        selected[f.name] = true;
+      }
+      setFileContents(contents);
+      setSelectedFiles(selected);
+      setActiveFile(newPlan.files[0].name);
+      setApplyResult(null);
+      setPhase('preview');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setPhase('form');
+    }
+  }, [problemId, problemKind, caseCount, languages, providedStd]);
 
   // ─── 写入 ───────────────────────────────────────────────────────────────────
 
@@ -383,15 +440,34 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         />
       </div>
       {error && (
-        <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.base }}>{error}</div>
+        <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.base }}>
+          <div>{error}</div>
+          {showFallbackHint && (
+            <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs }}>
+              {i18n('ai_helper_testdata_fallback_suggestion')}
+            </div>
+          )}
+        </div>
       )}
-      <button
-        style={getButtonStyle('primary')}
-        onClick={handleGenerate}
-        disabled={!context.problem.hasStatement}
-      >
-        {i18n('ai_helper_testdata_generate_btn')}
-      </button>
+      <div style={{ display: 'flex', gap: SPACING.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button
+          style={getButtonStyle('primary')}
+          onClick={handleGenerate}
+          disabled={!context.problem.hasStatement}
+        >
+          {i18n('ai_helper_testdata_generate_btn')}
+        </button>
+        <button
+          style={getButtonStyle('secondary')}
+          onClick={handleSkeleton}
+          title={i18n('ai_helper_testdata_skeleton_hint')}
+        >
+          {i18n('ai_helper_testdata_skeleton_btn')}
+        </button>
+      </div>
+      <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+        {i18n('ai_helper_testdata_skeleton_hint')}
+      </div>
     </div>
   );
 

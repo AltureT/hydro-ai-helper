@@ -133,6 +133,21 @@ export interface StreamCallbacks {
   onError: (error: AIServiceError) => void;
 }
 
+/**
+ * 单次对话调用的可选覆盖项
+ */
+export interface ChatCallOptions {
+  signal?: AbortSignal;
+  /**
+   * 覆盖本次请求的 max_tokens：
+   * - 未设置：使用全局默认 API_DEFAULTS.MAX_COMPLETION_TOKENS
+   * - null：不发送 max_tokens 字段，由服务商按模型上限决定（长输出场景，如测试数据生成）
+   */
+  maxTokens?: number | null;
+  /** 覆盖本次请求的超时（毫秒）。未设置时使用配置的 timeoutSeconds */
+  timeoutMs?: number;
+}
+
 // ─── 接口定义 ─────────────────────────────────────────
 
 /**
@@ -324,17 +339,21 @@ export class OpenAIClient {
    * @returns AI 回答的文本内容
    * @throws {AIServiceError} 当 API Key 无效、调用频率超限、网络错误或 AI 服务不可用时抛出
    */
-  async chat(messages: ChatMessage[], systemPrompt: string, options?: { signal?: AbortSignal }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], systemPrompt: string, options?: ChatCallOptions): Promise<ChatResult> {
     // 构造 OpenAI 格式请求
-    const payload = {
+    // maxTokens === null 表示不限制（不发送 max_tokens 字段，由服务商按模型上限决定）
+    const payload: Record<string, unknown> = {
       model: this.config.modelName,
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
       ],
       temperature: API_DEFAULTS.DEFAULT_TEMPERATURE,
-      max_tokens: API_DEFAULTS.MAX_COMPLETION_TOKENS
     };
+    if (options?.maxTokens !== null) {
+      payload.max_tokens = options?.maxTokens ?? API_DEFAULTS.MAX_COMPLETION_TOKENS;
+    }
+    const timeoutMs = options?.timeoutMs ?? this.config.timeoutSeconds * 1000;
 
     try {
       // 发送请求
@@ -346,7 +365,7 @@ export class OpenAIClient {
             'Authorization': `Bearer ${this.config.apiKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: this.config.timeoutSeconds * 1000,
+          timeout: timeoutMs,
           signal: options?.signal,
           httpAgent: HTTP_AGENT,
           httpsAgent: HTTPS_AGENT,
@@ -406,7 +425,7 @@ export class OpenAIClient {
             throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${errorMsg}`, 'client', status);
           }
         } else if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
-          throw new AIServiceError(`请求超时 (超过 ${this.config.timeoutSeconds} 秒)`, 'timeout');
+          throw new AIServiceError(`请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`, 'timeout');
         } else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
           throw new AIServiceError('无法连接到 AI 服务', 'network');
         } else if (axiosError.code === 'ECONNRESET' || axiosError.code === 'EPIPE') {
@@ -734,8 +753,9 @@ export class MultiModelClient {
 
   /**
    * 发送对话请求，支持 fallback + 重试 + 总超时
+   * options.maxTokens / options.timeoutMs 会透传给每个端点（见 ChatCallOptions）
    */
-  async chat(messages: ChatMessage[], systemPrompt: string, options?: { signal?: AbortSignal }): Promise<MultiModelChatResult> {
+  async chat(messages: ChatMessage[], systemPrompt: string, options?: ChatCallOptions): Promise<MultiModelChatResult> {
     // 外部 signal 已取消则立即抛出
     if (options?.signal?.aborted) {
       throw new AIServiceError('请求已取消', 'aborted');
@@ -757,9 +777,12 @@ export class MultiModelClient {
       Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS) * (1 + RETRY.JITTER),
     ).reduce((sum, ms) => sum + ms, 0);
     const [primary, ...fallbacks] = this.clients;
-    const budgetMs = primary.config.timeoutSeconds * 1000 * (RETRY.MAX_RETRIES + 1)
+    // 单次尝试的有效超时：调用方覆盖优先（如测试数据生成用长超时）
+    const attemptMs = (c: { config: ResolvedModelConfig }) =>
+      options?.timeoutMs ?? c.config.timeoutSeconds * 1000;
+    const budgetMs = attemptMs(primary) * (RETRY.MAX_RETRIES + 1)
       + backoffAllowanceMs
-      + fallbacks.reduce((sum, c) => sum + c.config.timeoutSeconds * 1000, 0);
+      + fallbacks.reduce((sum, c) => sum + attemptMs(c), 0);
     const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
     const totalAc = new AbortController();
     let timedOut = false;
@@ -782,7 +805,11 @@ export class MultiModelClient {
           }
 
           try {
-            const chatResult = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+            const chatResult = await client.chat(messages, systemPrompt, {
+              signal: totalAc.signal,
+              maxTokens: options?.maxTokens,
+              timeoutMs: options?.timeoutMs,
+            });
             const fallbackErrors = errors.length > 0 ? errors.map(e => ({
               endpoint: e.endpointId, model: e.modelName,
               category: e.category, message: e.error.substring(0, 200),

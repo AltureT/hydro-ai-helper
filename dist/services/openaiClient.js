@@ -197,6 +197,7 @@ class OpenAIClient {
      */
     async chat(messages, systemPrompt, options) {
         // 构造 OpenAI 格式请求
+        // maxTokens === null 表示不限制（不发送 max_tokens 字段，由服务商按模型上限决定）
         const payload = {
             model: this.config.modelName,
             messages: [
@@ -204,8 +205,11 @@ class OpenAIClient {
                 ...messages
             ],
             temperature: limits_1.API_DEFAULTS.DEFAULT_TEMPERATURE,
-            max_tokens: limits_1.API_DEFAULTS.MAX_COMPLETION_TOKENS
         };
+        if (options?.maxTokens !== null) {
+            payload.max_tokens = options?.maxTokens ?? limits_1.API_DEFAULTS.MAX_COMPLETION_TOKENS;
+        }
+        const timeoutMs = options?.timeoutMs ?? this.config.timeoutSeconds * 1000;
         try {
             // 发送请求
             const response = await axios_1.default.post(`${this.config.apiBaseUrl}${limits_1.API_DEFAULTS.CHAT_ENDPOINT}`, payload, {
@@ -213,7 +217,7 @@ class OpenAIClient {
                     'Authorization': `Bearer ${this.config.apiKey}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: this.config.timeoutSeconds * 1000,
+                timeout: timeoutMs,
                 signal: options?.signal,
                 httpAgent: HTTP_AGENT,
                 httpsAgent: HTTPS_AGENT,
@@ -271,7 +275,7 @@ class OpenAIClient {
                     }
                 }
                 else if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
-                    throw new AIServiceError(`请求超时 (超过 ${this.config.timeoutSeconds} 秒)`, 'timeout');
+                    throw new AIServiceError(`请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`, 'timeout');
                 }
                 else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
                     throw new AIServiceError('无法连接到 AI 服务', 'network');
@@ -539,6 +543,7 @@ class MultiModelClient {
     }
     /**
      * 发送对话请求，支持 fallback + 重试 + 总超时
+     * options.maxTokens / options.timeoutMs 会透传给每个端点（见 ChatCallOptions）
      */
     async chat(messages, systemPrompt, options) {
         // 外部 signal 已取消则立即抛出
@@ -554,9 +559,11 @@ class MultiModelClient {
         // 「AI 服务总超时」，而重试与 fallback 正是为这种场景配置的。
         const backoffAllowanceMs = Array.from({ length: RETRY.MAX_RETRIES }, (_, attempt) => Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS) * (1 + RETRY.JITTER)).reduce((sum, ms) => sum + ms, 0);
         const [primary, ...fallbacks] = this.clients;
-        const budgetMs = primary.config.timeoutSeconds * 1000 * (RETRY.MAX_RETRIES + 1)
+        // 单次尝试的有效超时：调用方覆盖优先（如测试数据生成用长超时）
+        const attemptMs = (c) => options?.timeoutMs ?? c.config.timeoutSeconds * 1000;
+        const budgetMs = attemptMs(primary) * (RETRY.MAX_RETRIES + 1)
             + backoffAllowanceMs
-            + fallbacks.reduce((sum, c) => sum + c.config.timeoutSeconds * 1000, 0);
+            + fallbacks.reduce((sum, c) => sum + attemptMs(c), 0);
         const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
         const totalAc = new AbortController();
         let timedOut = false;
@@ -576,7 +583,11 @@ class MultiModelClient {
                             : new AIServiceError('请求已取消', 'aborted');
                     }
                     try {
-                        const chatResult = await client.chat(messages, systemPrompt, { signal: totalAc.signal });
+                        const chatResult = await client.chat(messages, systemPrompt, {
+                            signal: totalAc.signal,
+                            maxTokens: options?.maxTokens,
+                            timeoutMs: options?.timeoutMs,
+                        });
                         const fallbackErrors = errors.length > 0 ? errors.map(e => ({
                             endpoint: e.endpointId, model: e.modelName,
                             category: e.category, message: e.error.substring(0, 200),

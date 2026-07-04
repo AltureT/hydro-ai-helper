@@ -21,6 +21,7 @@ import {
   validateGenerateOptions,
   isSafeTestdataFilename,
   normalizeFileContent,
+  buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
@@ -272,6 +273,69 @@ export class TestdataGenGenerateHandler extends Handler {
         retryable: true,
       };
       this.response.type = 'application/json';
+    }
+  }
+}
+
+// ─── TestdataGenSkeletonHandler ───────────────────────────────────────────────
+
+/**
+ * POST /ai-helper/testdata-gen/skeleton
+ * AI 故障降级方案：不调用 AI，确定性生成结构性文件（compile.sh /
+ * config.yaml / 模板骨架）与空白测试点，数据内容由教师在预览中手动填写。
+ * 无需限流（无 AI 开销）、不要求题面非空。
+ */
+export class TestdataGenSkeletonHandler extends Handler {
+  async post() {
+    try {
+      if (rejectIfCsrfInvalid(this)) return;
+      const domainId = getDomainId(this);
+      const body = (this.request.body || {}) as GenerateRequestBody;
+
+      const problemId = String(body.problemId || '');
+      if (!problemId) {
+        sendError(this, 400, 'INVALID_PROBLEM_ID', 'ai_helper_testdata_err_problem_not_found');
+        return;
+      }
+
+      const pdoc = await findProblem(domainId, problemId);
+      if (!pdoc) {
+        sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
+        return;
+      }
+      if (!checkEditPermission(this, pdoc)) return;
+
+      const options: GenerateOptions = {
+        problemKind: (body.problemKind || 'auto') as GenerateOptions['problemKind'],
+        fillInMode: (body.fillInMode || 'auto') as GenerateOptions['fillInMode'],
+        caseCount: Number(body.caseCount ?? 10),
+        dataScale: (body.dataScale || 'small') as GenerateOptions['dataScale'],
+        languages: Array.isArray(body.languages)
+          ? (body.languages.filter(l => (SUPPORTED_TEMPLATE_LANGS as readonly string[]).includes(l)) as TemplateLang[])
+          : [...SUPPORTED_TEMPLATE_LANGS],
+        providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
+      };
+      const optionError = validateGenerateOptions(options);
+      if (optionError) {
+        sendError(this, 400, 'INVALID_OPTIONS', optionError);
+        return;
+      }
+
+      this.ctx.get('featureStatsModel')?.recordAttempt('testdata_skeleton').catch(() => { /* best-effort */ });
+      const plan = buildSkeletonPlan(options);
+      this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { /* best-effort */ });
+
+      this.response.body = { plan };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[TestdataGenSkeletonHandler.post] error:', err);
+      this.ctx.get('errorReporter')?.capture(
+        'api_error', 'testdata_skeleton',
+        err instanceof Error ? err.message : String(err),
+        undefined,
+        err instanceof Error ? err.stack : undefined,
+      );
+      sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
   }
 }

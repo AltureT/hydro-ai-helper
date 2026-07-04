@@ -7,6 +7,7 @@ import { db, ProblemModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
+  TestdataGenSkeletonHandler,
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
   extractStatementMarkdown,
@@ -211,6 +212,47 @@ describe('TestdataGenGenerateHandler', () => {
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('EMPTY_STATEMENT');
+  });
+});
+
+// ─── SkeletonHandler（AI 故障降级） ──────────────────────────────────────────
+
+describe('TestdataGenSkeletonHandler', () => {
+  it('无权限返回 403', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: false, hasPerm: false,
+      body: { problemId: 'D3102', caseCount: 3 },
+    });
+    await handler.post();
+    expect(handler.response.status).toBe(403);
+  });
+
+  it('不调用 AI 直接返回骨架计划（题面为空也可用）', async () => {
+    mockFindOne({ ...PROBLEM_DOC, content: '' });
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+    await handler.post();
+    expect(handler.response.status).toBeUndefined();
+    const plan = handler.response.body.plan;
+    expect(plan.problemType).toBe('function');
+    const names = plan.files.map((f: { name: string }) => f.name);
+    expect(names).toEqual(expect.arrayContaining(['1.in', '1.out', '2.in', '2.out', 'template.py', 'compile.sh', 'config.yaml']));
+    // 骨架不经过限流（无 AI 开销）
+    expect(handler.limitRate).not.toHaveBeenCalled();
+  });
+
+  it('非法选项返回 400', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: { problemId: 'D3102', caseCount: 0 },
+    });
+    await handler.post();
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 });
 

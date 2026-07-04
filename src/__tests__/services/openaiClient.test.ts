@@ -176,6 +176,28 @@ describe('OpenAIClient', () => {
       );
     });
 
+    it('should send default max_tokens and config timeout when no overrides', async () => {
+      mockSuccessResponse();
+      await client.chat([{ role: 'user', content: 'Hi' }], 'System');
+      const [, payload, config] = mockedAxios.post.mock.calls[0] as any[];
+      expect(payload.max_tokens).toBeDefined();
+      expect(config.timeout).toBe(30_000);
+    });
+
+    it('should omit max_tokens when maxTokens is null (unrestricted output)', async () => {
+      mockSuccessResponse();
+      await client.chat([{ role: 'user', content: 'Hi' }], 'System', { maxTokens: null });
+      const [, payload] = mockedAxios.post.mock.calls[0] as any[];
+      expect('max_tokens' in payload).toBe(false);
+    });
+
+    it('should honor per-call timeoutMs override', async () => {
+      mockSuccessResponse();
+      await client.chat([{ role: 'user', content: 'Hi' }], 'System', { timeoutMs: 600_000 });
+      const [, , config] = mockedAxios.post.mock.calls[0] as any[];
+      expect(config.timeout).toBe(600_000);
+    });
+
     it('should throw AIServiceError with category=auth on 401', async () => {
       mockedAxios.post.mockRejectedValueOnce(createAxiosError(401));
       await expect(client.chat([{ role: 'user', content: 'Hi' }], 'System'))
@@ -261,6 +283,21 @@ describe('MultiModelClient', () => {
     jest.useRealTimers();
     consoleWarnSpy.mockRestore();
     consoleErrorSpy.mockRestore();
+  });
+
+  describe('per-call overrides passthrough', () => {
+    it('should forward maxTokens=null and timeoutMs to the underlying request', async () => {
+      const client = new MultiModelClient([makeResolvedConfig()]);
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] },
+      });
+
+      await client.chat([{ role: 'user', content: 'Hi' }], 'System', { maxTokens: null, timeoutMs: 600_000 });
+
+      const [, payload, config] = mockedAxios.post.mock.calls[0] as any[];
+      expect('max_tokens' in payload).toBe(false);
+      expect(config.timeout).toBe(600_000);
+    });
   });
 
   describe('retry behavior', () => {
