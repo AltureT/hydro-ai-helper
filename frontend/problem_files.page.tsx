@@ -52,6 +52,10 @@ function initTestdataGen() {
   const problemId = extractProblemId();
   if (!problemId) return;
 
+  // 便于排查"面板不出现"：F12 控制台无此日志 = 前端 bundle 未包含本插件
+  // （UI 未重建或插件被回滚到旧版本）
+  console.debug(`[AI-Helper] testdata-gen panel init: problemId=${problemId}`);
+
   const container = insertContainer();
   if (!container) return;
 

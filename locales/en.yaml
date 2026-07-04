@@ -927,3 +927,5 @@ ai_helper_testdata_err_std_too_long: "Reference solution too long (max 10000 cha
 ai_helper_testdata_skeleton_btn: "Generate skeleton files (no AI)"
 ai_helper_testdata_skeleton_hint: "Fallback: build compile.sh, config.yaml, template skeletons and blank test cases deterministically without calling the AI; fill in the data yourself. Useful when the AI service is down or you prefer manual data."
 ai_helper_testdata_fallback_suggestion: "If the AI service stays unavailable, use \"Generate skeleton files (no AI)\" to get the judge config and template skeletons, then fill in the test data manually."
+ai_helper_testdata_context_error: "Failed to load the panel ({0}). Common causes: the plugin backend is not running the latest version (restart Hydro after updating), or the site update rolled back to an older release. Make sure the plugin is >= 2.5.0 and retry."
+ai_helper_testdata_retry_btn: "Retry"

@@ -84,7 +84,7 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 
 - Unified portal: Conversations / Analytics / Configuration tabs
 - Multi-endpoint API management with model auto-discovery, drag-to-reorder priority, and automatic failover
-- Per-scenario model assignment: dedicate different models to student chat / learning summary / teaching analysis, falling back to the global chain when unset
+- Per-scenario model assignment: dedicate different models to student chat / learning summary / teaching analysis / test data generation, falling back to the global chain when unset
 - Cost control: token usage tracking, budget limits, cost dashboard
 - Rate limiting, custom system prompt, one-click plugin update
 
@@ -168,6 +168,20 @@ db.ai_plugin_install.updateOne(
 ## Changelog
 
 <details open>
+<summary><b>v2.5.0</b> — AI Test Data Generation (Beta)</summary>
+
+**AI Test Data Generation (problem files page, NEW)**
+- One-click generation from the Markdown statement: test cases, function-problem judge templates (template.py/java/cc + compile.sh), config.yaml (judge settings sync automatically) and a reference solution
+- Supports traditional problems, LeetCode-style function problems (incl. class Solution signatures and linked lists) and fill-in-the-blank problems
+- Paste an existing reference solution as the single source of truth; adjustable data scale with mandatory sample/boundary coverage
+- Skeleton mode as an AI-outage fallback (no AI call, deterministic scaffolding)
+- Full preview, editable, opt-in writes with overwrite warnings; same permission model as Hydro problem file management
+- New "Test Data Generation" AI scenario with its own model chain; unrestricted output length and a 10-minute per-attempt timeout
+- Sectioned-text output contract (zero escaping for code); the panel shows an actionable error instead of silently disappearing when loading fails
+
+</details>
+
+<details>
 <summary><b>v2.0.0</b> — Teaching Analysis & Design Overhaul</summary>
 
 **Teaching Analysis System (NEW)**

@@ -80,7 +80,10 @@ async function parseErrorMessage(response: Response): Promise<string> {
 
 export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId }) => {
   const [context, setContext] = useState<ProblemContext | null>(null);
-  const [contextDenied, setContextDenied] = useState(false);
+  // 'denied' = 403 无权限（静默隐藏）；字符串 = 其他加载失败原因（显示错误卡，
+  // 避免插件未加载/后端异常时面板"静默消失"无从排查）
+  const [contextError, setContextError] = useState<'denied' | string | null>(null);
+  const [contextReloadKey, setContextReloadKey] = useState(0);
   const [collapsed, setCollapsed] = useState(true);
   const [phase, setPhase] = useState<PanelPhase>('form');
   const [error, setError] = useState<string | null>(null);
@@ -103,28 +106,36 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<{ written: string[]; failed: Array<{ name: string; error: string }> } | null>(null);
 
-  // 加载题目上下文；403 → 无编辑权限，面板不渲染
+  // 加载题目上下文；403 → 无编辑权限静默隐藏，其他失败 → 显示错误卡
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setContextError(null);
       try {
         const response = await fetch(
           buildApiUrl(`/ai-helper/testdata-gen/context/${encodeURIComponent(problemId)}`),
           { credentials: 'include' },
         );
         if (cancelled) return;
+        if (response.status === 403) {
+          setContextError('denied');
+          return;
+        }
         if (!response.ok) {
-          setContextDenied(true);
+          console.warn(`[AI-Helper] testdata-gen context 加载失败: HTTP ${response.status}（插件后端未加载最新版本时通常为 404）`);
+          setContextError(`HTTP ${response.status}`);
           return;
         }
         const data = await response.json() as ProblemContext;
         setContext(data);
-      } catch {
-        if (!cancelled) setContextDenied(true);
+      } catch (err) {
+        if (cancelled) return;
+        console.warn('[AI-Helper] testdata-gen context 加载失败:', err);
+        setContextError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => { cancelled = true; };
-  }, [problemId]);
+  }, [problemId, contextReloadKey]);
 
   const existingFileSet = new Set(context?.existingFiles || []);
 
@@ -293,8 +304,34 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // ─── 渲染 ───────────────────────────────────────────────────────────────────
 
-  // 无权限（或上下文加载失败）时不渲染任何内容
-  if (contextDenied || !context) return null;
+  // 无编辑权限：静默隐藏
+  if (contextError === 'denied') return null;
+
+  // 加载失败（插件未加载/后端异常/网络问题）：显示错误卡便于排查
+  if (contextError) {
+    return (
+      <div style={{
+        background: COLORS.bgCard,
+        border: `1px solid ${COLORS.border}`,
+        borderRadius: RADIUS.md,
+        marginTop: SPACING.base,
+        padding: SPACING.base,
+      }}>
+        <div style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary, marginBottom: SPACING.xs }}>
+          🧪 {i18n('ai_helper_testdata_panel_title')}
+        </div>
+        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.sm }}>
+          {i18n('ai_helper_testdata_context_error', contextError)}
+        </div>
+        <button style={getButtonStyle('secondary')} onClick={() => setContextReloadKey(k => k + 1)}>
+          {i18n('ai_helper_testdata_retry_btn')}
+        </button>
+      </div>
+    );
+  }
+
+  // 加载中
+  if (!context) return null;
 
   const sectionStyle: React.CSSProperties = {
     background: COLORS.bgCard,
