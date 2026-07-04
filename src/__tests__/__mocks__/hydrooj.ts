@@ -13,6 +13,11 @@ export const PRIV = {
   PRIV_EDIT_SYSTEM: 2
 };
 
+export const PERM = {
+  PERM_EDIT_PROBLEM: 1n << 5n,
+  PERM_EDIT_PROBLEM_SELF: 1n << 6n,
+};
+
 export const db = {
   collection: jest.fn(() => ({
     find: jest.fn().mockReturnThis(),
@@ -24,6 +29,7 @@ export const db = {
 
 export const ProblemModel = {
   get: jest.fn(),
+  addTestdata: jest.fn(),
 };
 
 export const STATUS = {

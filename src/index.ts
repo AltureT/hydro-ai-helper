@@ -74,6 +74,14 @@ import { TeachingSummaryModel } from './models/teachingSummary';
 import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerPriv } from './handlers/updateHandler';
 console.log('[AI-Helper] updateHandler OK');
 
+import {
+  TestdataGenContextHandler,
+  TestdataGenGenerateHandler,
+  TestdataGenApplyHandler,
+  TestdataGenHandlerPriv,
+} from './handlers/testdataGenHandler';
+console.log('[AI-Helper] testdataGenHandler OK');
+
 import { ConversationModel } from './models/conversation';
 import { MessageModel } from './models/message';
 import { RateLimitRecordModel } from './models/rateLimitRecord';
@@ -388,6 +396,17 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/batch-summaries/my-summary?contestId=xxx - 学生查看自己的已发布总结
     ctx.Route('ai_batch_summary_my', '/ai-helper/batch-summaries/my-summary', StudentSummaryHandler, PRIV.PRIV_USER_PROFILE);
     ctx.Route('ai_batch_summary_my_domain', '/d/:domainId/ai-helper/batch-summaries/my-summary', StudentSummaryHandler, PRIV.PRIV_USER_PROFILE);
+
+    // 测试数据生成路由（教师/出题人，权限在 Handler 内校验：题目编辑权限）
+    // GET /ai-helper/testdata-gen/context/:problemId - 题目上下文
+    ctx.Route('ai_testdata_gen_context', '/ai-helper/testdata-gen/context/:problemId', TestdataGenContextHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_context_domain', '/d/:domainId/ai-helper/testdata-gen/context/:problemId', TestdataGenContextHandler, TestdataGenHandlerPriv);
+    // POST /ai-helper/testdata-gen/generate - AI 生成测试数据计划（仅预览）
+    ctx.Route('ai_testdata_gen_generate', '/ai-helper/testdata-gen/generate', TestdataGenGenerateHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_generate_domain', '/d/:domainId/ai-helper/testdata-gen/generate', TestdataGenGenerateHandler, TestdataGenHandlerPriv);
+    // POST /ai-helper/testdata-gen/apply - 确认写入题目测试数据
+    ctx.Route('ai_testdata_gen_apply', '/ai-helper/testdata-gen/apply', TestdataGenApplyHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_apply_domain', '/d/:domainId/ai-helper/testdata-gen/apply', TestdataGenApplyHandler, TestdataGenHandlerPriv);
 
     // 教学建议路由
     ctx.Route('ai_teaching_summary', '/ai-helper/teaching-summary/:contestId', TeachingSummaryHandler, TeachingSummaryHandlerPriv);

@@ -15,9 +15,13 @@ declare module 'hydrooj' {
     session?: any;
     translate(str: string, ...params: any[]): string;
     limitRate(op: string, periodSecs: number, maxOperations: number, defaultKey?: string): Promise<void>;
+    checkPerm(...perm: any[]): void;
   }
 
   export const PRIV: Record<string, any>;
+
+  // 域权限位（BigInt），如 PERM_EDIT_PROBLEM / PERM_EDIT_PROBLEM_SELF
+  export const PERM: Record<string, any>;
 
   export function definePlugin<TConfig = any>(options: {
     name?: string;

@@ -39,6 +39,11 @@ const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; 
     descKey: 'ai_helper_admin_scenario_teaching_analysis_desc',
     icon: '📊',
   },
+  testdataGeneration: {
+    labelKey: 'ai_helper_admin_scenario_testdata_generation',
+    descKey: 'ai_helper_admin_scenario_testdata_generation_desc',
+    icon: '🧪',
+  },
 };
 
 const OPTION_SEPARATOR = '::';

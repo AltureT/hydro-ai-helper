@@ -13,7 +13,7 @@ const crypto_1 = require("crypto");
 const crypto_2 = require("../lib/crypto");
 /** 当前配置版本号 */
 exports.CURRENT_CONFIG_VERSION = 2;
-exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis'];
+exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'];
 /**
  * AI Config Model 操作类
  * 封装 AI 配置的 CRUD 操作

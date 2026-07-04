@@ -16,9 +16,9 @@ export interface SelectedModel {
   modelName: string;
 }
 
-export type AIScenarioKey = 'studentChat' | 'learningSummary' | 'teachingAnalysis';
+export type AIScenarioKey = 'studentChat' | 'learningSummary' | 'teachingAnalysis' | 'testdataGeneration';
 
-export const AI_SCENARIO_KEYS: readonly AIScenarioKey[] = ['studentChat', 'learningSummary', 'teachingAnalysis'] as const;
+export const AI_SCENARIO_KEYS: readonly AIScenarioKey[] = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'] as const;
 
 /** 每个场景的专属模型链；空数组 = 跟随全局 selectedModels */
 export type ScenarioModelsState = Record<AIScenarioKey, SelectedModel[]>;
