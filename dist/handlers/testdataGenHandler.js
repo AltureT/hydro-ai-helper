@@ -208,7 +208,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenGenerateHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_error', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
+            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
             if (err instanceof openaiClient_1.AIServiceError) {
                 this.response.status = (0, openaiClient_1.getHttpStatusForCategory)(err.category);
                 this.response.body = {
@@ -281,7 +281,7 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenSkeletonHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_error', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
+            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }
@@ -377,7 +377,7 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenApplyHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_error', 'testdata_apply', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
+            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_apply', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined);
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }

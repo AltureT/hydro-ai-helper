@@ -1,4 +1,4 @@
-import type { Overview, Instance, ErrorGroup, FeedbackItem, FeatureHealth, Alert, TelegramConfig, TelegramConfigInput } from './types';
+import type { Overview, Instance, ErrorGroup, FeedbackItem, FeatureHealth, FeatureUsage, Alert, TelegramConfig, TelegramConfigInput } from './types';
 
 let apiBase = '';
 let token = '';
@@ -44,8 +44,8 @@ export const getErrors = (limit = 50, offset = 0) =>
 export const getFeedback = (limit = 50, offset = 0) =>
   fetchApi<{ feedback: FeedbackItem[] }>(`/api/dashboard/feedback?limit=${limit}&offset=${offset}`);
 
-export const getFeatureHealth = () =>
-  fetchApi<{ features: FeatureHealth[] }>('/api/dashboard/feature-health');
+export const getFeatureHealth = (usageDays = 30) =>
+  fetchApi<{ features: FeatureHealth[]; usage?: FeatureUsage[]; usage_window_days?: number }>(`/api/dashboard/feature-health?days=${usageDays}`);
 
 export const getAlerts = (limit = 50) =>
   fetchApi<{ alerts: Alert[] }>(`/api/dashboard/alerts?limit=${limit}`);

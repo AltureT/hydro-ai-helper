@@ -199,6 +199,14 @@ async function handleReport(request, env) {
     const apiFailureCount24h = typeof stats.api_failure_count_24h === 'number' ? stats.api_failure_count_24h : 0;
     const avgLatencyMs24h = typeof stats.avg_latency_ms_24h === 'number' ? stats.avg_latency_ms_24h : 0;
     const activeEndpointCount = typeof stats.active_endpoint_count === 'number' ? stats.active_endpoint_count : 0;
+    // 更长活跃窗口（可选，向后兼容）：寒暑假后返校的学生仍计入活跃
+    const activeUsers30d = typeof stats.active_users_30d === 'number' ? Math.max(0, Math.floor(stats.active_users_30d)) : 0;
+    const activeUsers90d = typeof stats.active_users_90d === 'number' ? Math.max(0, Math.floor(stats.active_users_90d)) : 0;
+    // 粗粒度来源：Cloudflare 从上报请求 IP 推断的国家/省份（不存储 IP 本身），
+    // 实例级粒度，供教研统计使用
+    const cf = request.cf || {};
+    const geoCountry = typeof cf.country === 'string' ? cf.country.slice(0, 8) : null;
+    const geoRegion = typeof cf.region === 'string' ? cf.region.slice(0, 60) : null;
     const nodeVersion = typeof env_info.node_version === 'string' ? env_info.node_version : null;
     const osPlatform = typeof env_info.os_platform === 'string' ? env_info.os_platform : null;
     const features = body.features ? JSON.stringify(body.features) : null;
@@ -209,17 +217,20 @@ async function handleReport(request, env) {
     await env.DB.prepare(
       `INSERT INTO plugin_stats (
         instance_id, event, version, installed_at, first_used_at,
-        last_report_at, active_users_7d, total_conversations, last_used_at, domain_hash,
+        last_report_at, active_users_7d, active_users_30d, active_users_90d,
+        total_conversations, last_used_at, domain_hash,
         error_count_24h, api_success_count_24h, api_failure_count_24h,
         avg_latency_ms_24h, active_endpoint_count, node_version, os_platform, features,
-        latency_buckets
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        latency_buckets, geo_country, geo_region
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(instance_id) DO UPDATE SET
         event = excluded.event,
         version = excluded.version,
         first_used_at = COALESCE(plugin_stats.first_used_at, excluded.first_used_at),
         last_report_at = excluded.last_report_at,
         active_users_7d = excluded.active_users_7d,
+        active_users_30d = excluded.active_users_30d,
+        active_users_90d = excluded.active_users_90d,
         total_conversations = excluded.total_conversations,
         last_used_at = excluded.last_used_at,
         domain_hash = excluded.domain_hash,
@@ -231,19 +242,21 @@ async function handleReport(request, env) {
         node_version = excluded.node_version,
         os_platform = excluded.os_platform,
         features = excluded.features,
-        latency_buckets = excluded.latency_buckets`,
+        latency_buckets = excluded.latency_buckets,
+        geo_country = COALESCE(excluded.geo_country, plugin_stats.geo_country),
+        geo_region = COALESCE(excluded.geo_region, plugin_stats.geo_region)`,
     )
       .bind(
         instanceId, eventRaw, version,
         installedAt.toISOString(),
         firstUsedAt ? firstUsedAt.toISOString() : null,
         lastReportAt.toISOString(),
-        activeUsers7d, totalConversations,
+        activeUsers7d, activeUsers30d, activeUsers90d, totalConversations,
         lastUsedAt ? lastUsedAt.toISOString() : null,
         domainHash,
         errorCount24h, apiSuccessCount24h, apiFailureCount24h,
         avgLatencyMs24h, activeEndpointCount, nodeVersion, osPlatform, features,
-        latencyBuckets,
+        latencyBuckets, geoCountry, geoRegion,
       )
       .run();
 
@@ -251,9 +264,30 @@ async function handleReport(request, env) {
     // row per (instance_id, feature) holding the latest 24h counters.
     if (Array.isArray(body.feature_stats) && body.feature_stats.length > 0) {
       const reportAt = lastReportAt.toISOString();
-      const featureStmts = [];
-      for (const f of body.feature_stats.slice(0, 50)) {
+      const reportDay = reportAt.slice(0, 10);
+      const entries = [];
+      for (const f of body.feature_stats.slice(0, 100)) {
         if (!isRecord(f) || typeof f.feature !== 'string' || f.feature.trim() === '') continue;
+        const day = typeof f.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.date) ? f.date : reportDay;
+        entries.push({
+          feature: f.feature.slice(0, 60),
+          date: day,
+          attempts: Math.max(0, Math.floor(typeof f.attempts === 'number' ? f.attempts : 0)),
+          successes: Math.max(0, Math.floor(typeof f.successes === 'number' ? f.successes : 0)),
+          lastSuccessAt: typeof f.last_success_at === 'string' ? f.last_success_at.slice(0, 40) : null,
+        });
+      }
+
+      const featureStmts = [];
+
+      // 健康快照表：同一 feature 可能带多天（今天 + 昨天），只用最新一天的
+      // 快照更新（旧行为的等价保持），避免 batch 内后写的旧日期覆盖新日期。
+      const latestByFeature = new Map();
+      for (const e of entries) {
+        const prev = latestByFeature.get(e.feature);
+        if (!prev || e.date > prev.date) latestByFeature.set(e.feature, e);
+      }
+      for (const e of latestByFeature.values()) {
         featureStmts.push(
           env.DB.prepare(
             `INSERT INTO plugin_feature_stats (
@@ -266,17 +300,27 @@ async function handleReport(request, env) {
               version = excluded.version,
               report_at = excluded.report_at,
               received_at = datetime('now')`,
-          ).bind(
-            instanceId,
-            f.feature.slice(0, 60),
-            Math.max(0, Math.floor(typeof f.attempts === 'number' ? f.attempts : 0)),
-            Math.max(0, Math.floor(typeof f.successes === 'number' ? f.successes : 0)),
-            typeof f.last_success_at === 'string' ? f.last_success_at.slice(0, 40) : null,
-            version,
-            reportAt,
-          ),
+          ).bind(instanceId, e.feature, e.attempts, e.successes, e.lastSuccessAt, version, reportAt),
         );
       }
+
+      // 按日累计表：同日计数单调递增，取最大值即最完整快照；跨日多次上报
+      // （今天的中间值 + 次日带来的昨日终值）自动收敛，用于累计用量统计。
+      for (const e of entries) {
+        featureStmts.push(
+          env.DB.prepare(
+            `INSERT INTO plugin_feature_daily (
+              instance_id, feature, date, attempts, successes, version
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instance_id, feature, date) DO UPDATE SET
+              attempts = MAX(plugin_feature_daily.attempts, excluded.attempts),
+              successes = MAX(plugin_feature_daily.successes, excluded.successes),
+              version = excluded.version,
+              updated_at = datetime('now')`,
+          ).bind(instanceId, e.feature, e.date, e.attempts, e.successes, version),
+        );
+      }
+
       if (featureStmts.length > 0) await env.DB.batch(featureStmts);
     }
 
@@ -296,11 +340,18 @@ async function handleBadgeInstalls(env) {
   return badge({ label: 'installations', message: formatCount(count), color: 'blue' });
 }
 
-async function handleBadgeActive(env) {
-  const row = await env.DB.prepare('SELECT COALESCE(SUM(active_users_7d), 0) AS total FROM plugin_stats').first();
+async function handleBadgeActive(env, request) {
+  // ?window=7|30|90 —— 寒暑假期间 7 天窗口会清零，长窗口保持学期间连续性
+  let window = '7';
+  try {
+    const w = new URL(request.url).searchParams.get('window');
+    if (w === '30' || w === '90') window = w;
+  } catch { /* default 7 */ }
+  const column = window === '30' ? 'active_users_30d' : window === '90' ? 'active_users_90d' : 'active_users_7d';
+  const row = await env.DB.prepare(`SELECT COALESCE(SUM(${column}), 0) AS total FROM plugin_stats`).first();
   const total = row ? readFiniteNumber(row.total) : 0;
-  console.info('[badge-active] total', total);
-  return badge({ label: 'active users (7d)', message: formatCount(total), color: 'green' });
+  console.info('[badge-active] window', window, 'total', total);
+  return badge({ label: `active users (${window}d)`, message: formatCount(total), color: 'green' });
 }
 
 async function handleBadgeConversations(env) {
@@ -538,6 +589,8 @@ async function handleDashboardOverview(request, env) {
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS instance_count,
             COALESCE(SUM(active_users_7d), 0) AS active_users_7d,
+            COALESCE(SUM(active_users_30d), 0) AS active_users_30d,
+            COALESCE(SUM(active_users_90d), 0) AS active_users_90d,
             COALESCE(SUM(total_conversations), 0) AS total_conversations,
             COALESCE(SUM(api_failure_count_24h), 0) AS failures,
             COALESCE(SUM(api_success_count_24h), 0) AS successes
@@ -567,6 +620,8 @@ async function handleDashboardOverview(request, env) {
   return json({
     instances: row?.instance_count || 0,
     active_users_7d: row?.active_users_7d || 0,
+    active_users_30d: row?.active_users_30d || 0,
+    active_users_90d: row?.active_users_90d || 0,
     total_conversations: row?.total_conversations || 0,
     error_rate_percent: parseFloat(errorRate),
     latency_p50_ms: percentileFromBuckets(merged, 0.5),
@@ -614,8 +669,9 @@ async function handleDashboardInstances(request, env) {
 
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
-    `SELECT instance_id, version, active_users_7d, total_conversations,
-            error_count_24h, api_failure_count_24h, last_report_at, node_version, os_platform
+    `SELECT instance_id, version, active_users_7d, active_users_30d, total_conversations,
+            error_count_24h, api_failure_count_24h, last_report_at, node_version, os_platform,
+            geo_country, geo_region
      FROM plugin_stats
      WHERE last_report_at >= ?
      ORDER BY last_report_at DESC LIMIT ? OFFSET ?`,
@@ -672,7 +728,47 @@ async function handleDashboardFeatureHealth(request, env) {
      ORDER BY feature`,
   ).bind(cutoff7d).all();
 
-  return json({ features: rows?.results || [] });
+  // 按日累计用量（可选 ?days=N，默认 30，0=全部保留期）：回答
+  // "各功能累计发生了多少次"（测试数据生成/对话/教学分析/学生报告等）
+  let usageDays = 30;
+  try {
+    const d = parseInt(new URL(request.url).searchParams.get('days') || '30', 10);
+    if (Number.isFinite(d) && d >= 0 && d <= 400) usageDays = d;
+  } catch { /* default */ }
+  let usage = [];
+  try {
+    const usageQuery = usageDays > 0
+      ? env.DB.prepare(
+        `SELECT feature,
+                SUM(attempts) AS total_attempts,
+                SUM(successes) AS total_successes,
+                COUNT(DISTINCT instance_id) AS instances,
+                MIN(date) AS since,
+                MAX(date) AS until
+         FROM plugin_feature_daily
+         WHERE date >= ?
+         GROUP BY feature
+         ORDER BY total_attempts DESC`,
+      ).bind(new Date(Date.now() - usageDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10))
+      : env.DB.prepare(
+        `SELECT feature,
+                SUM(attempts) AS total_attempts,
+                SUM(successes) AS total_successes,
+                COUNT(DISTINCT instance_id) AS instances,
+                MIN(date) AS since,
+                MAX(date) AS until
+         FROM plugin_feature_daily
+         GROUP BY feature
+         ORDER BY total_attempts DESC`,
+      );
+    const usageRows = await usageQuery.all();
+    usage = usageRows?.results || [];
+  } catch (e) {
+    // 表尚未创建（migration 未跑）时不阻塞健康数据
+    console.error('[feature-health] usage query failed (migration 0008 applied?)', e);
+  }
+
+  return json({ features: rows?.results || [], usage, usage_window_days: usageDays });
 }
 
 async function handleDashboardFeedback(request, env) {
@@ -1097,7 +1193,7 @@ export default {
       case '/api/badge-installs':
         return handleBadgeInstalls(env);
       case '/api/badge-active':
-        return handleBadgeActive(env);
+        return handleBadgeActive(env, request);
       case '/api/badge-conversations':
         return handleBadgeConversations(env);
       case '/api/badge-version':
@@ -1120,25 +1216,37 @@ export default {
       // Cleanup is heavier and only needs to run once a day.
       if (event && event.cron !== '0 19 * * *') return;
 
+      const cutoff270d = new Date(Date.now() - 270 * 24 * 60 * 60 * 1000).toISOString();
       const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
       const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff400dDate = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-      // Clean up stale plugin stats (90 days)
+      // Clean up stale plugin stats. 270 days（原 90 天）：学校寒暑假可长达
+      // 2-3 个月，服务器假期停机不应导致实例记录被清、活跃统计断档。
       await env.DB.prepare(
         `DELETE FROM plugin_stats
          WHERE last_report_at IS NOT NULL
            AND last_report_at < ?`,
-      ).bind(cutoff90d).run();
+      ).bind(cutoff270d).run();
 
       // Clean up old errors (30 days)
       await env.DB.prepare(
         `DELETE FROM plugin_errors WHERE received_at < ?`,
       ).bind(cutoff30d).run();
 
-      // Clean up feature-health snapshots from instances that stopped reporting (90 days)
+      // Clean up feature-health snapshots from instances that stopped reporting (270 days)
       await env.DB.prepare(
         `DELETE FROM plugin_feature_stats WHERE report_at < ?`,
-      ).bind(cutoff90d).run();
+      ).bind(cutoff270d).run();
+
+      // Per-day feature usage: keep 400 days（一学年出头，供教研统计）
+      try {
+        await env.DB.prepare(
+          `DELETE FROM plugin_feature_daily WHERE date < ?`,
+        ).bind(cutoff400dDate).run();
+      } catch (e) {
+        console.error('[cron] plugin_feature_daily cleanup failed (migration 0008 applied?)', e);
+      }
 
       // Clean up old feedback (90 days)
       await env.DB.prepare(

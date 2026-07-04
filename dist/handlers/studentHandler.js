@@ -49,6 +49,8 @@ class ChatHandler extends hydrooj_1.Handler {
             const prepared = await this.prepareChat();
             if (!prepared)
                 return; // Early exit (response already set)
+            // 功能级用量计数（随心跳上报遥测平台，用于统计对话次数）
+            this.ctx.get('featureStatsModel')?.recordAttempt('student_chat').catch(() => { });
             if (this.isStreamRequested()) {
                 await this.handleStreamResponse(prepared);
             }
@@ -652,6 +654,7 @@ class ChatHandler extends hydrooj_1.Handler {
                 this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs);
             }
             catch { /* non-critical */ }
+            this.ctx.get('featureStatsModel')?.recordSuccess('student_chat').catch(() => { });
             // 降级成功上报
             if (streamResult.fallbackErrors?.length) {
                 try {
@@ -816,6 +819,7 @@ class ChatHandler extends hydrooj_1.Handler {
                 this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs);
             }
             catch { /* non-critical */ }
+            this.ctx.get('featureStatsModel')?.recordSuccess('student_chat').catch(() => { });
             // 降级成功上报
             if (result.fallbackErrors?.length) {
                 try {

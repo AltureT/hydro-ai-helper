@@ -249,7 +249,7 @@ export class TestdataGenGenerateHandler extends Handler {
     } catch (err) {
       console.error('[TestdataGenGenerateHandler.post] error:', err);
       this.ctx.get('errorReporter')?.capture(
-        'api_error', 'testdata_gen',
+        'api_failure', 'testdata_gen',
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
@@ -330,7 +330,7 @@ export class TestdataGenSkeletonHandler extends Handler {
     } catch (err) {
       console.error('[TestdataGenSkeletonHandler.post] error:', err);
       this.ctx.get('errorReporter')?.capture(
-        'api_error', 'testdata_skeleton',
+        'api_failure', 'testdata_skeleton',
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
@@ -446,7 +446,7 @@ export class TestdataGenApplyHandler extends Handler {
     } catch (err) {
       console.error('[TestdataGenApplyHandler.post] error:', err);
       this.ctx.get('errorReporter')?.capture(
-        'api_error', 'testdata_apply',
+        'api_failure', 'testdata_apply',
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,

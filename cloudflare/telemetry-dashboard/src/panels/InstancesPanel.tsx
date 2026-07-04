@@ -62,7 +62,7 @@ export function InstancesPanel() {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
             <thead>
               <tr style={{ borderBottom: '2px solid #e5e7eb' }}>
-                {['实例 ID', '版本', '活跃用户', '对话数', '错误数', '最后上报', '状态'].map(h => (
+                {['实例 ID', '版本', '地区', '活跃用户', '对话数', '错误数', '最后上报', '状态'].map(h => (
                   <th key={h} style={{ padding: '10px 12px', textAlign: 'left', color: '#6b7280', fontWeight: 600 }}>{h}</th>
                 ))}
               </tr>
@@ -74,6 +74,11 @@ export function InstancesPanel() {
                   <tr key={inst.instance_id} style={{ borderBottom: '1px solid #f3f4f6' }}>
                     <td style={cellStyle}><code style={{ fontSize: '12px' }}>...{inst.instance_id.slice(-8)}</code></td>
                     <td style={cellStyle}>v{inst.version}</td>
+                    <td style={cellStyle}>
+                      {inst.geo_region || inst.geo_country
+                        ? `${inst.geo_country || ''}${inst.geo_region ? ` · ${inst.geo_region}` : ''}`
+                        : '—'}
+                    </td>
                     <td style={cellStyle}>{inst.active_users_7d}</td>
                     <td style={cellStyle}>{inst.total_conversations}</td>
                     <td style={cellStyle}>

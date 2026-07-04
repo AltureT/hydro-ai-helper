@@ -115,6 +115,9 @@ export class ChatHandler extends Handler {
       const prepared = await this.prepareChat();
       if (!prepared) return; // Early exit (response already set)
 
+      // 功能级用量计数（随心跳上报遥测平台，用于统计对话次数）
+      this.ctx.get('featureStatsModel')?.recordAttempt('student_chat').catch(() => { /* best-effort */ });
+
       if (this.isStreamRequested()) {
         await this.handleStreamResponse(prepared);
       } else {
@@ -778,6 +781,7 @@ export class ChatHandler extends Handler {
       console.log(`[Perf] AI Stream Response: ${aiLatencyMs}ms`);
       console.log(`[AI Helper] 使用模型 (stream): ${usedModel.endpointName}/${usedModel.modelName}`);
       try { this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs); } catch { /* non-critical */ }
+      this.ctx.get('featureStatsModel')?.recordSuccess('student_chat').catch(() => { /* best-effort */ });
       // 降级成功上报
       if (streamResult.fallbackErrors?.length) {
         try {
@@ -952,6 +956,7 @@ export class ChatHandler extends Handler {
       console.log(`[AI Helper] 使用模型: ${result.usedModel.endpointName}/${result.usedModel.modelName}`);
       // 记录成功请求
       try { this.ctx.get('requestStatsModel')?.recordSuccess(aiLatencyMs); } catch { /* non-critical */ }
+      this.ctx.get('featureStatsModel')?.recordSuccess('student_chat').catch(() => { /* best-effort */ });
       // 降级成功上报
       if (result.fallbackErrors?.length) {
         try {
