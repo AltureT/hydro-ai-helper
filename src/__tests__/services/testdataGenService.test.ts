@@ -11,6 +11,8 @@ import {
   extractJsonObject,
   normalizeFileContent,
   parseGenerationResponse,
+  parseDelimitedResponse,
+  parseAiResponse,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -311,6 +313,144 @@ describe('parseGenerationResponse', () => {
   });
 });
 
+// ─── parseDelimitedResponse / parseAiResponse（分节文本主契约） ───────────────
+
+function makeDelimitedResponse(): string {
+  return [
+    '@@@META@@@',
+    'problemType: function',
+    'isFillIn: false',
+    'functionName: countKConstraintSubstrings',
+    '@@@ANALYSIS@@@',
+    '统计满足 k 约束的子串数量。',
+    '@@@TEMPLATE:py@@@',
+    's = input().strip()',
+    'k = int(input())',
+    'print(Solution().countKConstraintSubstrings(s, k))',
+    '@@@TEMPLATE:java@@@',
+    'import java.util.*;',
+    '',
+    'public class Main {',
+    '    public static void main(String[] args) {',
+    '        Scanner sc = new Scanner(System.in);',
+    '        String s = sc.nextLine().trim();',
+    '        int k = Integer.parseInt(sc.nextLine().trim().split("\\\\s+")[0]);',
+    '        System.out.println(new Solution().countKConstraintSubstrings(s, k));',
+    '    }',
+    '}',
+    '@@@TEMPLATE:cc@@@',
+    '#include <bits/stdc++.h>',
+    'using namespace std;',
+    '#include "foo.cc"',
+    'int main() { string s; int k; cin >> s >> k; cout << Solution().countKConstraintSubstrings(s, k) << endl; }',
+    '@@@STD@@@',
+    'class Solution:',
+    '    def countKConstraintSubstrings(self, s: str, k: int) -> int:',
+    '        return 12',
+    '@@@CASE:1:IN:样例1@@@',
+    '10101',
+    '1',
+    '@@@CASE:1:OUT@@@',
+    '12',
+    '@@@CASE:2:IN:边界-全1@@@',
+    '11111',
+    '1',
+    '@@@CASE:2:OUT@@@',
+    '15',
+  ].join('\n');
+}
+
+describe('parseDelimitedResponse', () => {
+  const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] };
+
+  it('解析完整分节响应（代码含引号与反斜杠，零转义）', () => {
+    const res = parseDelimitedResponse(makeDelimitedResponse(), fnOptions);
+    expect(res).not.toBeNull();
+    expect(res!.problemType).toBe('function');
+    expect(res!.functionName).toBe('countKConstraintSubstrings');
+    expect(res!.analysis).toContain('k 约束');
+    // 关键回归：JSON 契约下这里的 split("\\s+") 曾导致转义解析失败
+    expect(res!.templates?.java).toContain('split("\\\\s+")');
+    expect(res!.templates?.cc).toContain('#include "foo.cc"');
+    expect(res!.stdSolution?.code).toContain('class Solution:');
+    expect(res!.cases).toHaveLength(2);
+    expect(res!.cases[0].label).toBe('样例1');
+    expect(res!.cases[0].input).toBe('10101\n1\n');
+    expect(res!.cases[1].output).toBe('15\n');
+  });
+
+  it('容忍模型把整个响应包进代码围栏', () => {
+    const res = parseDelimitedResponse('```\n' + makeDelimitedResponse() + '\n```', fnOptions);
+    expect(res).not.toBeNull();
+    expect(res!.cases).toHaveLength(2);
+  });
+
+  it('忽略首个标记之前的寒暄文字', () => {
+    const res = parseDelimitedResponse('好的，以下是生成结果：\n' + makeDelimitedResponse(), fnOptions);
+    expect(res).not.toBeNull();
+  });
+
+  it('label 含冒号时完整保留', () => {
+    const raw = makeDelimitedResponse().replace('@@@CASE:1:IN:样例1@@@', '@@@CASE:1:IN:边界:k=1:全串@@@');
+    const res = parseDelimitedResponse(raw, fnOptions);
+    expect(res!.cases[0].label).toBe('边界:k=1:全串');
+  });
+
+  it('无任何标记时返回 null（供回退 JSON）', () => {
+    expect(parseDelimitedResponse('{"problemType":"function"}', fnOptions)).toBeNull();
+  });
+
+  it('测试点缺少 OUT 节时报错并指明编号', () => {
+    const raw = makeDelimitedResponse().replace('@@@CASE:2:OUT@@@\n15', '');
+    expect(() => parseDelimitedResponse(raw, fnOptions)).toThrow(/第 2 个测试点/);
+  });
+
+  it('疑似损坏的标记行（缺尾部 @@@）直接报错而非静默吞数据', () => {
+    const raw = makeDelimitedResponse().replace('@@@CASE:2:OUT@@@', '@@@CASE:2:OUT@@');
+    expect(() => parseDelimitedResponse(raw, fnOptions)).toThrow(/损坏的分节标记/);
+  });
+
+  it('无法识别的 CASE 标记报错', () => {
+    const raw = makeDelimitedResponse().replace('@@@CASE:1:OUT@@@', '@@@CASE:x:OUT@@@');
+    expect(() => parseDelimitedResponse(raw, fnOptions)).toThrow(/无法识别的 CASE 标记/);
+  });
+
+  it('传统题分节响应无 TEMPLATE 节', () => {
+    const raw = [
+      '@@@META@@@',
+      'problemType: traditional',
+      '@@@STD@@@',
+      'print(int(input()) + 1)',
+      '@@@CASE:1:IN:样例@@@',
+      '1',
+      '@@@CASE:1:OUT@@@',
+      '2',
+    ].join('\n');
+    const res = parseDelimitedResponse(raw, { problemKind: 'auto', caseCount: 1, languages: ['py'] });
+    expect(res!.problemType).toBe('traditional');
+    expect(res!.templates).toBeUndefined();
+  });
+});
+
+describe('parseAiResponse', () => {
+  const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] };
+
+  it('优先解析分节文本', () => {
+    const res = parseAiResponse(makeDelimitedResponse(), fnOptions);
+    expect(res.cases).toHaveLength(2);
+  });
+
+  it('无分节标记时回退 JSON（兼容旧契约）', () => {
+    const res = parseAiResponse(makeAiJson(), fnOptions);
+    expect(res.cases).toHaveLength(2);
+  });
+
+  it('两种格式都失败时给出合并的可读错误', () => {
+    expect(() => parseAiResponse('完全无法解析的内容', fnOptions))
+      .toThrow(/未找到分节标记.*骨架/);
+  });
+});
+
 // ─── assemblePlan ─────────────────────────────────────────────────────────────
 
 describe('assemblePlan', () => {
@@ -372,14 +512,18 @@ describe('assemblePlan', () => {
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
 
 describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
-  it('System Prompt 包含机制说明与 JSON 契约', () => {
+  it('System Prompt 包含机制说明与分节输出契约', () => {
     const sp = buildTestdataSystemPrompt();
     expect(sp).toContain('HydroOJ');
     expect(sp).toContain('template.py');
     expect(sp).toContain('#include "foo.cc"');
     expect(sp).toContain('problemType');
-    expect(sp).toContain('stdSolution');
-    expect(sp).toContain('JSON');
+    expect(sp).toContain('@@@META@@@');
+    expect(sp).toContain('@@@STD@@@');
+    expect(sp).toContain('@@@CASE:1:IN:');
+    expect(sp).toContain('禁止 JSON');
+    // 类方法签名（LeetCode class Solution 形式）的调用约定
+    expect(sp).toContain('Solution().xxx(...)');
   });
 
   it('System Prompt 包含填空题、标准答案与数据规模规则', () => {
