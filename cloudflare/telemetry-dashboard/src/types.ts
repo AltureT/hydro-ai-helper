@@ -19,6 +19,7 @@ export interface Instance {
   error_count_24h: number;
   api_failure_count_24h: number;
   last_report_at: string;
+  installed_at?: string | null;
   node_version: string | null;
   os_platform: string | null;
   geo_country?: string | null;

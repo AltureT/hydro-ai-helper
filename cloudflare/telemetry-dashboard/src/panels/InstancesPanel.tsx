@@ -62,7 +62,7 @@ export function InstancesPanel() {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
             <thead>
               <tr style={{ borderBottom: '2px solid #e5e7eb' }}>
-                {['实例 ID', '版本', '地区', '活跃用户', '对话数', '错误数', '最后上报', '状态'].map(h => (
+                {['实例 ID', '版本', '地区', '活跃用户', '对话数', '错误数', '安装于', '最后上报', '状态'].map(h => (
                   <th key={h} style={{ padding: '10px 12px', textAlign: 'left', color: '#6b7280', fontWeight: 600 }}>{h}</th>
                 ))}
               </tr>
@@ -85,6 +85,9 @@ export function InstancesPanel() {
                       {inst.api_failure_count_24h > 0
                         ? <span style={{ color: '#ef4444', fontWeight: 600 }}>{inst.api_failure_count_24h}</span>
                         : '0'}
+                    </td>
+                    <td style={cellStyle}>
+                      {inst.installed_at ? new Date(inst.installed_at).toLocaleDateString() : '—'}
                     </td>
                     <td style={cellStyle}>{timeAgo(inst.last_report_at)}</td>
                     <td style={cellStyle}>

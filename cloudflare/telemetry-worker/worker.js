@@ -670,7 +670,7 @@ async function handleDashboardInstances(request, env) {
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
     `SELECT instance_id, version, active_users_7d, active_users_30d, total_conversations,
-            error_count_24h, api_failure_count_24h, last_report_at, node_version, os_platform,
+            error_count_24h, api_failure_count_24h, last_report_at, installed_at, node_version, os_platform,
             geo_country, geo_region
      FROM plugin_stats
      WHERE last_report_at >= ?
@@ -688,8 +688,13 @@ async function handleDashboardErrors(request, env) {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  // 排序白名单：最近出现（默认）/ 总次数 / 影响实例数
+  const sortParam = url.searchParams.get('sort');
+  const orderBy = sortParam === 'count' ? 'total_count DESC'
+    : sortParam === 'instances' ? 'affected_instances DESC, total_count DESC'
+      : 'last_seen DESC';
 
-  const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
     `SELECT stack_fingerprint, error_type, category, message, metadata,
             COUNT(DISTINCT instance_id) AS affected_instances,
@@ -699,9 +704,9 @@ async function handleDashboardErrors(request, env) {
      FROM plugin_errors
      WHERE received_at >= ?
      GROUP BY stack_fingerprint
-     ORDER BY last_seen DESC
+     ORDER BY ${orderBy}
      LIMIT ? OFFSET ?`,
-  ).bind(cutoff30d, limit, offset).all();
+  ).bind(cutoff90d, limit, offset).all();
 
   return json({ errors: rows?.results || [] });
 }
@@ -1249,10 +1254,11 @@ export default {
            AND last_report_at < ?`,
       ).bind(cutoff270d).run();
 
-      // Clean up old errors (30 days)
+      // Clean up old errors. 90 days（原 30 天）：教研需要更长的故障史，
+      // 且按指纹聚合后行数有限，扩容成本可忽略。
       await env.DB.prepare(
         `DELETE FROM plugin_errors WHERE received_at < ?`,
-      ).bind(cutoff30d).run();
+      ).bind(cutoff90d).run();
 
       // Clean up feature-health snapshots from instances that stopped reporting (270 days)
       await env.DB.prepare(

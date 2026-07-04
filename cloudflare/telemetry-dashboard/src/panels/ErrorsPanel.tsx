@@ -18,18 +18,27 @@ function parseMetadata(raw?: string): Record<string, any> | null {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
+type ErrorSort = 'last_seen' | 'count' | 'instances';
+
+const SORT_LABELS: Record<ErrorSort, string> = {
+  last_seen: '最近出现',
+  count: '总次数',
+  instances: '影响实例数',
+};
+
 export function ErrorsPanel() {
   const [data, setData] = useState<ErrorGroup[]>([]);
+  const [sort, setSort] = useState<ErrorSort>('last_seen');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    getErrors()
+    getErrors(50, 0, sort)
       .then(r => setData(r.errors))
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [sort]);
 
   if (loading) return <p style={{ color: '#6b7280' }}>加载中...</p>;
   if (error) return <p style={{ color: '#ef4444' }}>加载失败: {error}</p>;
@@ -37,7 +46,18 @@ export function ErrorsPanel() {
 
   return (
     <div style={cardStyle}>
-      <h3 style={{ margin: '0 0 16px', fontSize: '16px' }}>错误分诊 ({data.length})</h3>
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
+        <h3 style={{ margin: 0, fontSize: '16px' }}>错误分诊 ({data.length})</h3>
+        <select
+          value={sort}
+          onChange={e => setSort(e.target.value as ErrorSort)}
+          style={{ marginLeft: 'auto', fontSize: '12px', padding: '4px 8px' }}
+        >
+          {(Object.keys(SORT_LABELS) as ErrorSort[]).map(s => (
+            <option key={s} value={s}>按{SORT_LABELS[s]}排序</option>
+          ))}
+        </select>
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {data.map(err => {
           const meta = parseMetadata(err.metadata);

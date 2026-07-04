@@ -38,8 +38,8 @@ export const getOverview = () => fetchApi<Overview>('/api/dashboard/overview');
 export const getInstances = (limit = 50, offset = 0) =>
   fetchApi<{ instances: Instance[] }>(`/api/dashboard/instances?limit=${limit}&offset=${offset}`);
 
-export const getErrors = (limit = 50, offset = 0) =>
-  fetchApi<{ errors: ErrorGroup[] }>(`/api/dashboard/errors?limit=${limit}&offset=${offset}`);
+export const getErrors = (limit = 50, offset = 0, sort: 'last_seen' | 'count' | 'instances' = 'last_seen') =>
+  fetchApi<{ errors: ErrorGroup[] }>(`/api/dashboard/errors?limit=${limit}&offset=${offset}&sort=${sort}`);
 
 export const getFeedback = (limit = 50, offset = 0) =>
   fetchApi<{ feedback: FeedbackItem[] }>(`/api/dashboard/feedback?limit=${limit}&offset=${offset}`);
