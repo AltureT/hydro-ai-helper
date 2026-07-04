@@ -17,6 +17,7 @@ exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
 const openaiClient_1 = require("../services/openaiClient");
 const testdataGenService_1 = require("../services/testdataGenService");
+const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -118,12 +119,15 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                     title: pdoc.title || '',
                     statementPreview: statement.slice(0, 300),
                     hasStatement: statement.trim().length > 0,
+                    // 规则引擎初判：题面疑似含待完善（填空）代码，供前端提示
+                    fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 },
                 existingFiles,
                 limits: {
                     minCases: testdataGenService_1.TESTDATA_GEN_LIMITS.MIN_CASES,
                     maxCases: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_CASES,
                     maxExtraRequirements: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS,
+                    maxProvidedStd: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
                 },
             };
             this.response.type = 'application/json';
@@ -166,10 +170,13 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 return;
             const options = {
                 problemKind: (body.problemKind || 'auto'),
+                fillInMode: (body.fillInMode || 'auto'),
                 caseCount: Number(body.caseCount ?? 10),
+                dataScale: (body.dataScale || 'small'),
                 languages: Array.isArray(body.languages)
                     ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
                     : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
+                providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
                 extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
@@ -193,6 +200,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 statementMarkdown: statement,
                 options,
                 existingFiles,
+                fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             });
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
             this.response.body = { plan };

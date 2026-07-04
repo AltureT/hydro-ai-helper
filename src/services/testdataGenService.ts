@@ -22,6 +22,12 @@ import type { MultiModelClient, TokenUsage } from './openaiClient';
 /** 题型：传统题（标准输入输出）或函数题（学生只写函数/类，LeetCode 风格） */
 export type ProblemKind = 'auto' | 'traditional' | 'function';
 
+/** 填空题（完善代码）：auto 由 AI 根据题面判断 */
+export type FillInMode = 'auto' | 'yes' | 'no';
+
+/** 测试数据规模档位 */
+export type DataScale = 'small' | 'medium' | 'large';
+
 /** 支持的模板语言族（对应 HydroOJ 语言键前缀） */
 export type TemplateLang = 'py' | 'java' | 'cc';
 
@@ -31,10 +37,16 @@ export const SUPPORTED_TEMPLATE_LANGS: readonly TemplateLang[] = ['py', 'java', 
 export interface GenerateOptions {
   /** 题型：auto 由 AI 根据题面判断 */
   problemKind: ProblemKind;
+  /** 是否为填空题（题面含待完善代码）；填空与传统/函数题正交 */
+  fillInMode?: FillInMode;
   /** 期望测试点数量（1-30） */
   caseCount: number;
+  /** 测试数据规模档位（默认 small：人工可校验） */
+  dataScale?: DataScale;
   /** 函数题模板语言（传统题忽略） */
   languages: TemplateLang[];
+  /** 教师已有的标准答案代码（提供后输出以其为唯一权威） */
+  providedStd?: string;
   /** 教师补充要求（如“链表用类实现”“数据范围控制在 100 以内”） */
   extraRequirements?: string;
 }
@@ -49,6 +61,8 @@ export interface GeneratedCase {
 /** AI 返回的 JSON 结构（解析后） */
 export interface GenerationResponse {
   problemType: 'function' | 'traditional';
+  /** 是否为填空题（完善代码） */
+  isFillIn?: boolean;
   analysis?: string;
   functionName?: string;
   templates?: Partial<Record<TemplateLang, string>>;
@@ -68,6 +82,8 @@ export interface PlannedFile {
 /** 完整生成计划（返回给前端预览） */
 export interface GenerationPlan {
   problemType: 'function' | 'traditional';
+  /** 是否为填空题（完善代码） */
+  isFillIn?: boolean;
   analysis?: string;
   notes?: string;
   files: PlannedFile[];
@@ -82,6 +98,7 @@ export const TESTDATA_GEN_LIMITS = {
   MIN_CASES: 1,
   MAX_CASES: 30,
   MAX_EXTRA_REQUIREMENTS: 1000,
+  MAX_PROVIDED_STD: 10000,
   MAX_STATEMENT_LENGTH: 20000,
   /** apply 时单文件内容上限（字节） */
   MAX_FILE_SIZE: 256 * 1024,
@@ -120,10 +137,26 @@ export function validateGenerateOptions(options: GenerateOptions): string | null
   if (options.problemKind !== 'traditional' && options.languages.length === 0) {
     return 'ai_helper_testdata_err_no_languages';
   }
+  if (options.fillInMode !== undefined && !['auto', 'yes', 'no'].includes(options.fillInMode)) {
+    return 'ai_helper_testdata_err_invalid_fill_in';
+  }
+  if (options.dataScale !== undefined && !['small', 'medium', 'large'].includes(options.dataScale)) {
+    return 'ai_helper_testdata_err_invalid_scale';
+  }
+  if ((options.providedStd || '').length > TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD) {
+    return 'ai_helper_testdata_err_std_too_long';
+  }
   if ((options.extraRequirements || '').length > TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS) {
     return 'ai_helper_testdata_err_extra_too_long';
   }
   return null;
+}
+
+/** 根据标准答案代码猜测 std 文件扩展名（教师多用 Python，启发式足够） */
+export function detectStdFilename(code: string): string {
+  if (/#include\s*[<"]/.test(code)) return 'std.cc';
+  if (/\bpublic\s+(static\s+)?class\b|\bpublic\s+class\b|\bSystem\.out\./.test(code)) return 'std.java';
+  return 'std.py';
 }
 
 // ─── 确定性文件生成（不经过 AI） ──────────────────────────────────────────────
@@ -333,6 +366,20 @@ export function buildTestdataSystemPrompt(): string {
 - function（函数题，LeetCode 风格）：题面通常包含"代码写到函数内部"或给出函数签名（如 def xxx(...)），学生只提交函数/类实现，由评测模板负责读输入、调用函数、打印结果。
 若用户指定了题型则以用户为准；用户选择 auto 时由你根据题面判断。
 
+【填空题（完善代码）判定】
+填空题与传统/函数题正交：题面中给出一段待完善的代码，学生补全空缺处后提交完整代码。
+- 判定特征：题面代码含下划线空位（如 ________1________）、"完善代码/补全/代码段自己写/your code here/TODO" 等标记，或标题含"完善代码/填空"。
+- isFillIn 为 true 时的铁律：标程 stdSolution 必须是【将题面代码原样补全】得到的代码——保持题面代码的整体结构、变量名、读入方式与所有 print 语句的格式【完全不变】，只填补空缺处。测试点的 .out 必须与该补全代码的真实输出一致（学生按题面补全后必须能通过全部测试点）。严禁自行改写输出格式、增删打印内容、调整打印顺序。
+- 填空题的题型判定看题面代码本身：是读 stdin 的完整程序 → traditional；只是函数定义、由模板调用 → function。
+- 若题面代码中有注释形式的提示文字（如 print(c)  #"共有...个"），以实际代码为准（该例只输出 c 的值，注释不属于输出）。
+若用户明确指定了是否填空题，以用户为准；否则由你判断并在 isFillIn 字段中给出结论。
+
+【教师提供的标准答案】
+若用户消息中提供了标准答案代码，它就是唯一权威：
+- 每个测试点的 .out 必须通过对该代码的逐行推演得到；输出格式（内容、分隔、行数、顺序）完全以该代码为准，严禁按你自己的理解改写。
+- 此时可省略 stdSolution 字段（系统会直接使用教师提供的代码）。
+- 函数题的模板必须与该标准答案中的函数签名、调用方式兼容。
+
 【函数题评测机制（HydroOJ）】
 - Python：学生代码保存为 foo.py，评测时把 template.py 追加到学生代码末尾后整体运行。因此 template.py 只包含"读输入 → 调用学生函数 → 打印结果"的驱动代码，不包含函数实现本身。
 - Java：学生提交 class Solution（不含 public 修饰的文件级要求），模板 template.java 为 public class Main，负责读输入并调用 new Solution().方法(...)。
@@ -347,26 +394,35 @@ export function buildTestdataSystemPrompt(): string {
 模板中的输入解析必须与你设计的 .in 文件格式严格一致；多语言模板之间的输入解析和输出格式必须完全等价，保证同一份 .in 在三种语言下输出一致。
 
 【测试数据设计原则】
-1. 若题面含示例，前几个测试点必须先覆盖题面示例（输入输出与题面一致）。
-2. 覆盖边界情况：最小规模（如空输入、单元素、0、1）、最大规模附近、特殊结构（全相同、已排序、逆序、负数等，视题意选取）。
-3. 其余测试点使用中小规模的多样化数据；除非教师明确要求大数据，单个 .in 文件不要超过 50 行、每行不超过 200 字符，确保人工可校验。
-4. 输入输出必须与题面的格式要求严格一致；.in 是评测输入文件内容，.out 是标准输出文件内容。
-5. 正确性最重要：先在心中写出标程（stdSolution），然后对每个测试点逐步模拟标程的运行，据此得到 .out 内容。宁可数据小，绝不允许输出错误。
+1. 若题面含示例，前几个测试点必须先覆盖题面示例（输入输出与题面一字不差）。
+2. 必须包含边界组，并在 label 中写明设计意图：
+   - 最小规模：空输入、0、1、单元素（以题面约束允许的最小值为准）；
+   - 规模上限：所选数据规模档位允许的上限附近；
+   - 特殊值：相等、重复、负数、临界值（视题意选取，如闰年 2 月 29 日、恰好越界前后）；
+   - 特殊结构：全相同、已排序、逆序、对称/回文等（视题意选取）。
+3. 其余测试点使用多样化的中间规模数据，避免彼此雷同。
+4. 输入输出必须与题面（或标程）的格式要求严格一致；.in 是评测输入文件内容，.out 是标准输出文件内容。
+5. 数据规模档位（用户指定，默认 small）：
+   - small：所有数据保持人工可快速验算的量级（数值一般 ≤ 100，单个 .in ≤ 30 行）；
+   - medium：在题面约束内取中等量级（如 10^2~10^4，单个 .in ≤ 200 行），仍须保证输出可被可靠推演；
+   - large：接近题面约束上限。此档必须使用【可解析构造】：用有规律的数据（全相同、等差、周期、对称等），使正确输出能由公式/推理直接得出，而不是逐条模拟；无法可靠推出输出时，宁可缩小该测试点规模，也绝不允许猜测输出。
+6. 正确性最重要：先确定标程（教师已提供则以其为准），再对每个测试点逐步推演标程的运行得到 .out。宁可数据小，绝不允许输出错误。
 
 【输出格式（严格 JSON）】
 只输出一个 JSON 对象，不要输出任何解释文字，不要使用 Markdown 代码块围栏。JSON 结构如下：
 {
   "problemType": "function" 或 "traditional",
+  "isFillIn": true 或 false（题面是否为填空/完善代码题）,
   "analysis": "简要说明（不超过 200 字）：题意理解、输入输出格式、数据范围",
   "functionName": "函数题的函数名（传统题省略）",
   "templates": { "py": "template.py 内容", "java": "template.java 内容", "cc": "template.cc 内容" },
   "stdSolution": { "language": "python", "code": "Python 标程代码" },
-  "cases": [ { "label": "样例1", "input": "1 4\\n2\\n", "output": "4\\n" } ],
-  "notes": "给教师的注意事项（可选，如数据范围做了哪些裁剪）"
+  "cases": [ { "label": "边界:单元素", "input": "1 4\\n2\\n", "output": "4\\n" } ],
+  "notes": "给教师的注意事项（可选，如数据范围做了哪些裁剪、填空题输出格式依据）"
 }
 约定：
 - templates 只需包含用户要求的语言；传统题省略 templates 与 functionName。
-- 函数题的 stdSolution.code 只包含与学生提交形式一致的函数/类定义（教师可用 cat std.py template.py > check.py 本地验证）；传统题的 stdSolution.code 是完整的读写标准输入输出的程序。
+- 函数题的 stdSolution.code 只包含与学生提交形式一致的函数/类定义（教师可用 cat std.py template.py > check.py 本地验证）；传统题的 stdSolution.code 是完整的读写标准输入输出的程序；填空题的 stdSolution.code 是补全题面代码后的结果；教师已提供标准答案时可省略 stdSolution。
 - cases 数量以用户要求为准；input/output 中换行用 \\n 表示，文件末尾保留一个换行。
 - 所有说明性文字（analysis/notes/label）使用简体中文。`;
 }
@@ -376,18 +432,33 @@ export interface BuildUserPromptParams {
   statementMarkdown: string;
   options: GenerateOptions;
   existingFiles?: string[];
+  /** 服务端规则引擎对"题面疑似含填空代码"的初判（仅作为参考信号提供给 AI） */
+  fillInDetected?: boolean;
 }
+
+const DATA_SCALE_TEXT: Record<DataScale, string> = {
+  small: 'small（小规模，人工可快速验算）',
+  medium: 'medium（中等规模，题面约束内取中位量级）',
+  large: 'large（接近题面约束上限，必须使用可解析构造保证输出正确）',
+};
 
 /**
  * 构建 User Prompt
  */
 export function buildTestdataUserPrompt(params: BuildUserPromptParams): string {
-  const { problemTitle, statementMarkdown, options, existingFiles } = params;
+  const { problemTitle, statementMarkdown, options, existingFiles, fillInDetected } = params;
   const kindText = {
     auto: '自动判断（根据题面）',
     traditional: '传统题（标准输入输出）',
     function: '函数题（LeetCode 风格，学生只写函数）',
   }[options.problemKind];
+  const fillInText = {
+    auto: fillInDetected
+      ? '自动判断（系统规则初判：题面疑似含待完善代码，请你复核）'
+      : '自动判断（根据题面）',
+    yes: '是（题面含待完善代码，标程必须是补全后的题面代码）',
+    no: '否',
+  }[options.fillInMode || 'auto'];
   const langText = options.languages.map(l => LANG_DISPLAY[l]).join('、') || '（无）';
 
   const statement = statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
@@ -402,11 +473,22 @@ export function buildTestdataUserPrompt(params: BuildUserPromptParams): string {
     '',
     '【生成要求】',
     `- 题型：${kindText}`,
+    `- 填空题（完善代码）：${fillInText}`,
     `- 测试点数量：${options.caseCount} 个`,
+    `- 数据规模：${DATA_SCALE_TEXT[options.dataScale || 'small']}`,
     `- 函数题模板语言：${langText}`,
   ];
   if (options.extraRequirements?.trim()) {
     lines.push(`- 教师补充要求：${options.extraRequirements.trim()}`);
+  }
+  if (options.providedStd?.trim()) {
+    lines.push(
+      '',
+      '【教师提供的标准答案（唯一权威，所有 .out 必须由它推演得到，输出格式以它为准）】',
+      '```',
+      options.providedStd.trim(),
+      '```',
+    );
   }
   if (existingFiles && existingFiles.length > 0) {
     lines.push('', `【题目已有文件（将可能被覆盖，仅供参考）】${existingFiles.join(', ')}`);
@@ -504,8 +586,15 @@ export function parseGenerationResponse(raw: string, options: GenerateOptions): 
     };
   }
 
+  // 填空题判定：用户显式指定时以用户为准，auto 时采纳 AI 结论
+  const fillInMode = options.fillInMode || 'auto';
+  const isFillIn = fillInMode === 'yes' ? true
+    : fillInMode === 'no' ? false
+      : obj.isFillIn === true;
+
   return {
     problemType: effectiveType,
+    isFillIn,
     analysis: typeof obj.analysis === 'string' ? obj.analysis : undefined,
     functionName: typeof obj.functionName === 'string' ? obj.functionName : undefined,
     templates,
@@ -539,7 +628,15 @@ export function assemblePlan(response: GenerationResponse, options: GenerateOpti
     files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile' });
   }
 
-  if (response.stdSolution) {
+  // 教师提供的标准答案是唯一权威：直接作为 std 文件写入（不使用 AI 复述的版本）
+  const providedStd = options.providedStd?.trim();
+  if (providedStd) {
+    files.push({
+      name: detectStdFilename(providedStd),
+      content: normalizeFileContent(providedStd),
+      kind: 'std',
+    });
+  } else if (response.stdSolution) {
     files.push({ name: 'std.py', content: response.stdSolution.code, kind: 'std' });
   }
 
@@ -555,6 +652,7 @@ export function assemblePlan(response: GenerationResponse, options: GenerateOpti
 
   return {
     problemType: response.problemType,
+    isFillIn: response.isFillIn,
     analysis: response.analysis,
     notes: response.notes,
     files,
@@ -569,6 +667,8 @@ export interface GenerateTestdataParams {
   statementMarkdown: string;
   options: GenerateOptions;
   existingFiles?: string[];
+  /** 服务端规则引擎的填空题初判信号 */
+  fillInDetected?: boolean;
   signal?: AbortSignal;
 }
 

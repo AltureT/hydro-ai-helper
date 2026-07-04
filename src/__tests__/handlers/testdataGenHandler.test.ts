@@ -146,6 +146,20 @@ describe('TestdataGenContextHandler', () => {
     await handler.get();
     expect(handler.response.body.problem.statementPreview).toBe('中文题面内容');
   });
+
+  it('题面含填空标记时返回 fillInDetected=true', async () => {
+    mockFindOne({ ...PROBLEM_DOC, content: '完善代码：\n```python\nk = ________1________\n```' });
+    const handler = setupHandler(TestdataGenContextHandler, { own: true });
+    await handler.get();
+    expect(handler.response.body.problem.fillInDetected).toBe(true);
+  });
+
+  it('普通题面 fillInDetected=false', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenContextHandler, { own: true });
+    await handler.get();
+    expect(handler.response.body.problem.fillInDetected).toBe(false);
+  });
 });
 
 // ─── GenerateHandler ──────────────────────────────────────────────────────────
@@ -171,6 +185,17 @@ describe('TestdataGenGenerateHandler', () => {
     const handler = setupHandler(TestdataGenGenerateHandler, {
       own: true,
       body: { problemId: 'D3102', caseCount: 999 },
+    });
+    await handler.post();
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body.code).toBe('INVALID_OPTIONS');
+  });
+
+  it('非法数据规模返回 400', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', caseCount: 5, dataScale: 'huge' },
     });
     await handler.post();
     expect(handler.response.status).toBe(400);

@@ -23,6 +23,7 @@ import {
   normalizeFileContent,
   TESTDATA_GEN_LIMITS,
 } from '../services/testdataGenService';
+import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { getDomainId } from '../utils/domainHelper';
@@ -139,12 +140,15 @@ export class TestdataGenContextHandler extends Handler {
           title: pdoc.title || '',
           statementPreview: statement.slice(0, 300),
           hasStatement: statement.trim().length > 0,
+          // 规则引擎初判：题面疑似含待完善（填空）代码，供前端提示
+          fillInDetected: isFillInBlankProblem(statement),
         },
         existingFiles,
         limits: {
           minCases: TESTDATA_GEN_LIMITS.MIN_CASES,
           maxCases: TESTDATA_GEN_LIMITS.MAX_CASES,
           maxExtraRequirements: TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS,
+          maxProvidedStd: TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
         },
       };
       this.response.type = 'application/json';
@@ -160,8 +164,11 @@ export class TestdataGenContextHandler extends Handler {
 interface GenerateRequestBody {
   problemId?: string;
   problemKind?: string;
+  fillInMode?: string;
   caseCount?: number;
+  dataScale?: string;
   languages?: string[];
+  providedStd?: string;
   extraRequirements?: string;
 }
 
@@ -197,10 +204,13 @@ export class TestdataGenGenerateHandler extends Handler {
 
       const options: GenerateOptions = {
         problemKind: (body.problemKind || 'auto') as GenerateOptions['problemKind'],
+        fillInMode: (body.fillInMode || 'auto') as GenerateOptions['fillInMode'],
         caseCount: Number(body.caseCount ?? 10),
+        dataScale: (body.dataScale || 'small') as GenerateOptions['dataScale'],
         languages: Array.isArray(body.languages)
           ? (body.languages.filter(l => (SUPPORTED_TEMPLATE_LANGS as readonly string[]).includes(l)) as TemplateLang[])
           : [...SUPPORTED_TEMPLATE_LANGS],
+        providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
         extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
       };
       const optionError = validateGenerateOptions(options);
@@ -228,6 +238,7 @@ export class TestdataGenGenerateHandler extends Handler {
         statementMarkdown: statement,
         options,
         existingFiles,
+        fillInDetected: isFillInBlankProblem(statement),
       });
 
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });

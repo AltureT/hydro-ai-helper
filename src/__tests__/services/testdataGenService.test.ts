@@ -13,6 +13,7 @@ import {
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
+  detectStdFilename,
   TestdataGenService,
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
@@ -65,6 +66,36 @@ describe('validateGenerateOptions', () => {
       ...baseOptions,
       extraRequirements: 'x'.repeat(TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS + 1),
     })).toBe('ai_helper_testdata_err_extra_too_long');
+  });
+
+  it('接受合法的填空/规模/标准答案选项', () => {
+    expect(validateGenerateOptions({
+      ...baseOptions, fillInMode: 'yes', dataScale: 'large', providedStd: 'print(1)',
+    })).toBeNull();
+  });
+
+  it('拒绝非法填空模式与数据规模', () => {
+    expect(validateGenerateOptions({ ...baseOptions, fillInMode: 'maybe' as GenerateOptions['fillInMode'] }))
+      .toBe('ai_helper_testdata_err_invalid_fill_in');
+    expect(validateGenerateOptions({ ...baseOptions, dataScale: 'huge' as GenerateOptions['dataScale'] }))
+      .toBe('ai_helper_testdata_err_invalid_scale');
+  });
+
+  it('拒绝过长的标准答案', () => {
+    expect(validateGenerateOptions({
+      ...baseOptions, providedStd: 'x'.repeat(TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD + 1),
+    })).toBe('ai_helper_testdata_err_std_too_long');
+  });
+});
+
+// ─── detectStdFilename ────────────────────────────────────────────────────────
+
+describe('detectStdFilename', () => {
+  it('按代码特征选择扩展名', () => {
+    expect(detectStdFilename('#include <bits/stdc++.h>\nint main(){}')).toBe('std.cc');
+    expect(detectStdFilename('public class Main { }')).toBe('std.java');
+    expect(detectStdFilename('import java.util.*;\nclass X { void f(){ System.out.println(1); } }')).toBe('std.java');
+    expect(detectStdFilename('def solve():\n    pass')).toBe('std.py');
   });
 });
 
@@ -260,6 +291,23 @@ describe('parseGenerationResponse', () => {
   it('problemType 非法时抛错', () => {
     expect(() => parseGenerationResponse(makeAiJson({ problemType: 'other' }), fnOptions)).toThrow(/problemType/);
   });
+
+  it('auto 模式采纳 AI 的 isFillIn 结论', () => {
+    expect(parseGenerationResponse(makeAiJson({ isFillIn: true }), fnOptions).isFillIn).toBe(true);
+    expect(parseGenerationResponse(makeAiJson({ isFillIn: false }), fnOptions).isFillIn).toBe(false);
+    expect(parseGenerationResponse(makeAiJson({}), fnOptions).isFillIn).toBe(false);
+  });
+
+  it('用户显式指定填空模式时覆盖 AI 结论', () => {
+    expect(parseGenerationResponse(
+      makeAiJson({ isFillIn: false }),
+      { ...fnOptions, fillInMode: 'yes' },
+    ).isFillIn).toBe(true);
+    expect(parseGenerationResponse(
+      makeAiJson({ isFillIn: true }),
+      { ...fnOptions, fillInMode: 'no' },
+    ).isFillIn).toBe(false);
+  });
 });
 
 // ─── assemblePlan ─────────────────────────────────────────────────────────────
@@ -301,6 +349,23 @@ describe('assemblePlan', () => {
     expect(config?.content).toContain('input: 2.in');
     expect(config?.content).not.toContain('input: 3.in');
   });
+
+  it('教师提供标准答案时以其为准（内容与扩展名），忽略 AI 版本', () => {
+    const options: GenerateOptions = { ...fnOptions, providedStd: '#include <cstdio>\nint main(){return 0;}' };
+    const response = parseGenerationResponse(makeAiJson(), options);
+    const plan = assemblePlan(response, options);
+    const stdFiles = plan.files.filter(f => f.kind === 'std');
+    expect(stdFiles).toHaveLength(1);
+    expect(stdFiles[0].name).toBe('std.cc');
+    expect(stdFiles[0].content).toContain('#include <cstdio>');
+    expect(stdFiles[0].content).not.toContain('def solve');
+  });
+
+  it('isFillIn 透传到计划', () => {
+    const response = parseGenerationResponse(makeAiJson({ isFillIn: true }), fnOptions);
+    const plan = assemblePlan(response, fnOptions);
+    expect(plan.isFillIn).toBe(true);
+  });
 });
 
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
@@ -314,6 +379,16 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(sp).toContain('problemType');
     expect(sp).toContain('stdSolution');
     expect(sp).toContain('JSON');
+  });
+
+  it('System Prompt 包含填空题、标准答案与数据规模规则', () => {
+    const sp = buildTestdataSystemPrompt();
+    expect(sp).toContain('填空题');
+    expect(sp).toContain('isFillIn');
+    expect(sp).toContain('教师提供的标准答案');
+    expect(sp).toContain('可解析构造');
+    expect(sp).toContain('small');
+    expect(sp).toContain('large');
   });
 
   it('User Prompt 包含题面、选项与已有文件', () => {
@@ -338,6 +413,39 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
       options: baseOptions,
     });
     expect(up).toContain('题面过长已截断');
+  });
+
+  it('User Prompt 包含填空指定、数据规模与标准答案', () => {
+    const up = buildTestdataUserPrompt({
+      problemTitle: '回文日期',
+      statementMarkdown: '题面',
+      options: {
+        ...baseOptions,
+        fillInMode: 'yes',
+        dataScale: 'large',
+        providedStd: 'def judge(a, b):\n    return 0',
+      },
+    });
+    expect(up).toContain('填空题（完善代码）：是');
+    expect(up).toContain('large');
+    expect(up).toContain('可解析构造');
+    expect(up).toContain('教师提供的标准答案');
+    expect(up).toContain('def judge(a, b):');
+  });
+
+  it('auto 模式下携带规则引擎的填空初判信号', () => {
+    const withHint = buildTestdataUserPrompt({
+      problemTitle: 't', statementMarkdown: 's',
+      options: { ...baseOptions, fillInMode: 'auto' },
+      fillInDetected: true,
+    });
+    expect(withHint).toContain('疑似含待完善代码');
+    const withoutHint = buildTestdataUserPrompt({
+      problemTitle: 't', statementMarkdown: 's',
+      options: { ...baseOptions, fillInMode: 'auto' },
+      fillInDetected: false,
+    });
+    expect(withoutHint).not.toContain('疑似含待完善代码');
   });
 });
 

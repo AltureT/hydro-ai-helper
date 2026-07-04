@@ -23,9 +23,10 @@ interface ProblemContext {
     title: string;
     statementPreview: string;
     hasStatement: boolean;
+    fillInDetected?: boolean;
   };
   existingFiles: string[];
-  limits: { minCases: number; maxCases: number; maxExtraRequirements: number };
+  limits: { minCases: number; maxCases: number; maxExtraRequirements: number; maxProvidedStd?: number };
 }
 
 interface PlannedFile {
@@ -36,6 +37,7 @@ interface PlannedFile {
 
 interface GenerationPlan {
   problemType: 'function' | 'traditional';
+  isFillIn?: boolean;
   analysis?: string;
   notes?: string;
   files: PlannedFile[];
@@ -85,8 +87,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // 表单状态
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
+  const [fillInMode, setFillInMode] = useState<'auto' | 'yes' | 'no'>('auto');
   const [caseCount, setCaseCount] = useState(10);
+  const [dataScale, setDataScale] = useState<'small' | 'medium' | 'large'>('small');
   const [languages, setLanguages] = useState<string[]>(['py', 'java', 'cc']);
+  const [providedStd, setProvidedStd] = useState('');
   const [extraRequirements, setExtraRequirements] = useState('');
 
   // 生成结果状态
@@ -148,8 +153,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         body: JSON.stringify({
           problemId,
           problemKind,
+          fillInMode,
           caseCount,
+          dataScale,
           languages,
+          providedStd: providedStd.trim() || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
         }),
       });
@@ -183,7 +191,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     } finally {
       clearTimeout(timeout);
     }
-  }, [problemId, problemKind, caseCount, languages, extraRequirements]);
+  }, [problemId, problemKind, fillInMode, caseCount, dataScale, languages, providedStd, extraRequirements]);
 
   // ─── 写入 ───────────────────────────────────────────────────────────────────
 
@@ -281,19 +289,55 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         </div>
       </div>
       <div style={fieldStyle}>
-        <label style={labelStyle}>{i18n('ai_helper_testdata_case_count_label')}</label>
-        <input
-          type="number"
-          min={context.limits.minCases}
-          max={context.limits.maxCases}
-          value={caseCount}
-          onChange={e => {
-            const v = parseInt(e.target.value, 10);
-            if (!Number.isNaN(v)) setCaseCount(v);
-          }}
-          style={{ ...getInputStyle(), maxWidth: '120px' }}
-        />
+        <label style={labelStyle}>{i18n('ai_helper_testdata_fill_in_label')}</label>
+        <select
+          value={fillInMode}
+          onChange={e => setFillInMode(e.target.value as typeof fillInMode)}
+          style={{ ...getInputStyle(), maxWidth: '320px' }}
+        >
+          <option value="auto">{i18n('ai_helper_testdata_fill_in_auto')}</option>
+          <option value="yes">{i18n('ai_helper_testdata_fill_in_yes')}</option>
+          <option value="no">{i18n('ai_helper_testdata_fill_in_no')}</option>
+        </select>
+        <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+          {context.problem.fillInDetected
+            ? i18n('ai_helper_testdata_fill_in_detected')
+            : i18n('ai_helper_testdata_fill_in_hint')}
+        </div>
       </div>
+      <div style={{ display: 'flex', gap: SPACING.lg, flexWrap: 'wrap' }}>
+        <div style={fieldStyle}>
+          <label style={labelStyle}>{i18n('ai_helper_testdata_case_count_label')}</label>
+          <input
+            type="number"
+            min={context.limits.minCases}
+            max={context.limits.maxCases}
+            value={caseCount}
+            onChange={e => {
+              const v = parseInt(e.target.value, 10);
+              if (!Number.isNaN(v)) setCaseCount(v);
+            }}
+            style={{ ...getInputStyle(), maxWidth: '120px' }}
+          />
+        </div>
+        <div style={fieldStyle}>
+          <label style={labelStyle}>{i18n('ai_helper_testdata_scale_label')}</label>
+          <select
+            value={dataScale}
+            onChange={e => setDataScale(e.target.value as typeof dataScale)}
+            style={{ ...getInputStyle(), maxWidth: '260px' }}
+          >
+            <option value="small">{i18n('ai_helper_testdata_scale_small')}</option>
+            <option value="medium">{i18n('ai_helper_testdata_scale_medium')}</option>
+            <option value="large">{i18n('ai_helper_testdata_scale_large')}</option>
+          </select>
+        </div>
+      </div>
+      {dataScale === 'large' && (
+        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
+          {i18n('ai_helper_testdata_scale_large_warning')}
+        </div>
+      )}
       {problemKind !== 'traditional' && (
         <div style={fieldStyle}>
           <label style={labelStyle}>{i18n('ai_helper_testdata_languages_label')}</label>
@@ -314,6 +358,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           </div>
         </div>
       )}
+      <div style={fieldStyle}>
+        <label style={labelStyle}>{i18n('ai_helper_testdata_std_label')}</label>
+        <textarea
+          value={providedStd}
+          onChange={e => setProvidedStd(e.target.value.slice(0, context.limits.maxProvidedStd ?? 10000))}
+          placeholder={i18n('ai_helper_testdata_std_placeholder')}
+          rows={providedStd ? 8 : 3}
+          spellCheck={false}
+          style={{ ...getInputStyle(), resize: 'vertical', fontFamily: MONO_FONT, fontSize: '13px' }}
+        />
+        <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+          {i18n('ai_helper_testdata_std_hint')}
+        </div>
+      </div>
       <div style={fieldStyle}>
         <label style={labelStyle}>{i18n('ai_helper_testdata_extra_label')}</label>
         <textarea
@@ -367,6 +425,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
           <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
             {i18n(plan.problemType === 'function' ? 'ai_helper_testdata_type_function' : 'ai_helper_testdata_type_traditional')}
+            {plan.isFillIn ? ` · ${i18n('ai_helper_testdata_type_fill_in')}` : ''}
             {' · '}
             {i18n('ai_helper_testdata_case_count_result', plan.caseCount)}
             {plan.usedModel ? ` · ${plan.usedModel}` : ''}

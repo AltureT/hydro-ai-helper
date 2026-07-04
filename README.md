@@ -69,8 +69,11 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
   - Draft/publish workflow with real-time SSE progress, stop/continue/retry controls
 - **AI Test Data Generation (Beta)** — generate a full test data set from the Markdown statement on the problem files page (`/p/:pid/files`)
   - Supports traditional problems and LeetCode-style function problems (incl. linked-list problems via class or plain-list implementations); generates `template.py` / `template.java` / `template.cc` and `compile.sh`
+  - Fill-in-the-blank (complete-the-code) problems: auto-detects scaffold code in the statement (manual override available); reference solution and test outputs strictly match the scaffold's print format
+  - Paste an existing reference solution to make it the single source of truth for all test outputs; it is written alongside as the std file
+  - Adjustable data scale (small/medium/large); cases must cover statement samples and a boundary group (min scale, scale limits, special values, special structures), each labeled with its intent
   - `config.yaml` judge config (`user_extra_files` / `subtasks` / `langs`) is built deterministically by the plugin; judge settings sync automatically once written
-  - Ships a `std.py` reference solution; every file is previewed, editable and opt-in before writing, with explicit overwrite warnings
+  - Ships a reference solution; every file is previewed, editable and opt-in before writing, with explicit overwrite warnings
   - Same permission model as Hydro problem file management (problem owner or problem-edit permission) — inaccessible to students
 - Browse student conversations with filters (time / problem / class / student / userId)
 - Autocomplete search for class and problem filters
