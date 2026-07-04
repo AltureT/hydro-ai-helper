@@ -7,7 +7,7 @@
 import { Handler, PRIV, db } from 'hydrooj';
 import { ObjectId, ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
-import { createMultiModelClientFromConfig } from '../services/openaiClient';
+import { createMultiModelClientFromConfig, extractAiErrorMetadata } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
@@ -403,7 +403,7 @@ export class TeachingSummaryHandler extends Handler {
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
-        { summaryId: String(summaryId), domainId },
+        { summaryId: String(summaryId), domainId, ...extractAiErrorMetadata(err) },
       );
       try {
         await model.updateStatus(summaryId, 'failed');

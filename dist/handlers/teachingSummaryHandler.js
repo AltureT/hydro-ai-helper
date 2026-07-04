@@ -343,7 +343,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TeachingSummaryHandler] generateAsync failed for summaryId=%s:', summaryId, err);
-            this.ctx.get('errorReporter')?.capture('background_job', 'teaching_summary', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { summaryId: String(summaryId), domainId });
+            this.ctx.get('errorReporter')?.capture('background_job', 'teaching_summary', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { summaryId: String(summaryId), domainId, ...(0, openaiClient_1.extractAiErrorMetadata)(err) });
             try {
                 await model.updateStatus(summaryId, 'failed');
             }

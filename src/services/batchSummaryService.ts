@@ -9,6 +9,7 @@ import { BatchSummaryJobModel, BatchSummaryJob } from '../models/batchSummaryJob
 import { StudentSummaryModel, StudentSummary, ProblemSnapshot } from '../models/studentSummary';
 import { StudentHistoryRecord, ErrorDistribution } from '../models/studentHistory';
 import { SubmissionSampler, RawSubmission, SampleResult } from './submissionSampler';
+import { extractAiErrorMetadata } from './openaiClient';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -575,7 +576,9 @@ export class BatchSummaryService {
           errorMessage,
           undefined,
           err instanceof Error ? err.stack : undefined,
-          { jobId: String(job._id), domainId: job.domainId },
+          // AI 失败时附带各端点尝试详情（HTTP 状态/服务商消息），
+          // 否则错误面板只有 "All models failed" 一句话无从定位
+          { jobId: String(job._id), domainId: job.domainId, ...extractAiErrorMetadata(err) },
         );
       } catch { /* best-effort */ }
 

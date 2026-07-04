@@ -7,6 +7,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BatchSummaryService = void 0;
 const submissionSampler_1 = require("./submissionSampler");
+const openaiClient_1 = require("./openaiClient");
 // ─── HydroOJ record status mapping ───────────────────────────────────────────
 const STATUS_MAP = {
     1: 'AC',
@@ -451,7 +452,10 @@ class BatchSummaryService {
             // The reporter dedupes by stack fingerprint, so N students failing the
             // same way become one entry with count=N — no flood risk.
             try {
-                this.errorReporter?.capture('background_job', 'batch_summary', errorMessage, undefined, err instanceof Error ? err.stack : undefined, { jobId: String(job._id), domainId: job.domainId });
+                this.errorReporter?.capture('background_job', 'batch_summary', errorMessage, undefined, err instanceof Error ? err.stack : undefined, 
+                // AI 失败时附带各端点尝试详情（HTTP 状态/服务商消息），
+                // 否则错误面板只有 "All models failed" 一句话无从定位
+                { jobId: String(job._id), domainId: job.domainId, ...(0, openaiClient_1.extractAiErrorMetadata)(err) });
             }
             catch { /* best-effort */ }
             // Re-throw so Promise.allSettled registers as 'rejected'

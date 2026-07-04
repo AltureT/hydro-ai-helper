@@ -16,6 +16,7 @@ import {
   createMultiModelClientFromConfig,
   createOpenAIClientFromConfig,
   getHttpStatusForCategory,
+  extractAiErrorMetadata,
 } from '../../services/openaiClient';
 
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -588,7 +589,9 @@ describe('MultiModelClient', () => {
       const error = await errorPromise;
       expect(error).toBeInstanceOf(AIServiceError);
       expect((error as AIServiceError).category).toBe('server');
-      expect((error as AIServiceError).message).toBe('All models failed (dominant: server)');
+      // 消息带上首个失败样本的简要原因，便于错误面板直接定位
+      expect((error as AIServiceError).message).toContain('All models failed (dominant: server)');
+      expect((error as AIServiceError).message).toContain('HTTP 503');
     });
 
     it('should include skipped endpoints in structured log', async () => {
@@ -1132,5 +1135,45 @@ describe('createOpenAIClientFromConfig', () => {
 
     await expect(createOpenAIClientFromConfig(makeCtx(config)))
       .rejects.toThrow('API Key 解密失败');
+  });
+});
+
+// ─── extractAiErrorMetadata ───────────────────────────
+
+describe('extractAiErrorMetadata', () => {
+  it('returns undefined for non-AIServiceError', () => {
+    expect(extractAiErrorMetadata(new Error('boom'))).toBeUndefined();
+    expect(extractAiErrorMetadata('str')).toBeUndefined();
+  });
+
+  it('extracts category, attempts and skipped endpoints', () => {
+    const err = new AIServiceError('All models failed (dominant: client)', 'client', undefined, {
+      totalAttempts: 3,
+      skippedEndpoints: ['ep-2'],
+      attempts: [
+        { endpoint: 'ep-1', model: 'gpt-a', category: 'client', message: 'HTTP 400 bad model '.repeat(20), httpStatus: 400 },
+        { endpoint: 'ep-1', model: 'gpt-b', category: 'server', message: 'HTTP 503', httpStatus: 503 },
+      ],
+    });
+    const meta = extractAiErrorMetadata(err);
+    expect(meta).toBeDefined();
+    expect(meta!.aiCategory).toBe('client');
+    expect(meta!.totalAttempts).toBe(3);
+    expect(meta!.skippedEndpoints).toBe('ep-2');
+    const attempts = meta!.attempts as Array<Record<string, unknown>>;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ endpoint: 'ep-1', model: 'gpt-a', httpStatus: 400 });
+    // 消息截断到 100 字符内
+    expect((attempts[0].message as string).length).toBeLessThanOrEqual(100);
+  });
+
+  it('caps attempts at 5 entries', () => {
+    const err = new AIServiceError('x', 'server', undefined, {
+      attempts: Array.from({ length: 9 }, (_, i) => ({
+        endpoint: `ep-${i}`, model: 'm', category: 'server' as const, message: 'e',
+      })),
+    });
+    const meta = extractAiErrorMetadata(err);
+    expect((meta!.attempts as unknown[]).length).toBe(5);
   });
 });
