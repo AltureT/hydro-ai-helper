@@ -909,7 +909,13 @@ export class MultiModelClient {
         })),
       }));
 
-      throw new AIServiceError(`All models failed (dominant: ${dominantCategory})`, dominantCategory, undefined, {
+      // 消息中附带首个主导类别错误的简要原因：错误面板/教师界面不再只有
+      // "All models failed" 一行——具体端点、HTTP 状态与服务商消息可直接定位
+      const sampleError = errors.find(e => e.category === dominantCategory) || errors[0];
+      const reason = sampleError
+        ? `: ${sampleError.model}${sampleError.httpStatus ? ` HTTP ${sampleError.httpStatus}` : ''} ${sampleError.error}`.substring(0, 180)
+        : '';
+      throw new AIServiceError(`All models failed (dominant: ${dominantCategory})${reason}`, dominantCategory, undefined, {
         totalAttempts: errors.length,
         skippedEndpoints: [...skippedEndpoints],
         attempts: errors.map(e => ({
@@ -1016,6 +1022,39 @@ export class MultiModelClient {
       })),
     });
   }
+}
+
+/**
+ * 从 AI 调用错误中提取可上报遥测的失败详情（各端点尝试的类别/HTTP 状态/
+ * 消息摘要）。非 AIServiceError 或无上下文时返回 undefined。
+ * 字段限额与 errorReporter.sanitizeMetadata 匹配（attempts ≤5 条、字符串截断），
+ * 供各功能的 errorReporter.capture 调用点合并进 metadata——否则错误面板只有
+ * "All models failed" 一句话，无法定位是哪个端点/模型/什么 HTTP 状态。
+ */
+export function extractAiErrorMetadata(err: unknown): Record<string, unknown> | undefined {
+  if (!(err instanceof AIServiceError)) return undefined;
+  const meta: Record<string, unknown> = { aiCategory: err.category };
+  if (err.httpStatus !== undefined) meta.httpStatus = err.httpStatus;
+  const ctx = err.context;
+  if (ctx) {
+    if (typeof ctx.totalAttempts === 'number') meta.totalAttempts = ctx.totalAttempts;
+    if (ctx.endpointName) meta.endpointName = ctx.endpointName;
+    if (ctx.modelName) meta.modelName = ctx.modelName;
+    if (ctx.retryAfterSec !== undefined) meta.retryAfterSec = ctx.retryAfterSec;
+    if (Array.isArray(ctx.attempts) && ctx.attempts.length > 0) {
+      meta.attempts = ctx.attempts.slice(0, 5).map(a => ({
+        endpoint: a.endpoint,
+        model: a.model,
+        category: a.category,
+        httpStatus: a.httpStatus,
+        message: (a.message || '').substring(0, 100),
+      }));
+    }
+    if (Array.isArray(ctx.skippedEndpoints) && ctx.skippedEndpoints.length > 0) {
+      meta.skippedEndpoints = ctx.skippedEndpoints.slice(0, 5).join(',');
+    }
+  }
+  return meta;
 }
 
 /**

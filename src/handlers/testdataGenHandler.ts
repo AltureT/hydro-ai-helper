@@ -12,7 +12,7 @@
  */
 
 import { Handler, PRIV, PERM, ProblemModel, db } from 'hydrooj';
-import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory } from '../services/openaiClient';
+import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import {
   TestdataGenService,
   GenerateOptions,
@@ -253,6 +253,7 @@ export class TestdataGenGenerateHandler extends Handler {
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
+        { problemId: String((this.request.body as GenerateRequestBody)?.problemId || ''), ...extractAiErrorMetadata(err) },
       );
       if (err instanceof AIServiceError) {
         this.response.status = getHttpStatusForCategory(err.category);
@@ -334,6 +335,7 @@ export class TestdataGenSkeletonHandler extends Handler {
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
+        { problemId: String((this.request.body as GenerateRequestBody)?.problemId || '') },
       );
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
@@ -450,6 +452,7 @@ export class TestdataGenApplyHandler extends Handler {
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
+        { problemId: String((this.request.body as ApplyRequestBody)?.problemId || '') },
       );
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }

@@ -914,6 +914,26 @@ async function evaluateAlerts(env) {
     }
   } catch (e) { console.error('[alerts] rule C failed', e); }
 
+  // Rule D — startup failures are release canaries: a broken build shows up on
+  // the FIRST instance that updates, long before Rule C's >=3-instance bar.
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT category, SUM(count) AS total, COUNT(DISTINCT instance_id) AS instances,
+              GROUP_CONCAT(DISTINCT version) AS versions, MAX(message) AS sample
+       FROM plugin_errors
+       WHERE error_type = 'startup_failure' AND received_at >= ?
+       GROUP BY category`,
+    ).bind(cutoff24h).all();
+    for (const r of (rows?.results || [])) {
+      candidates.push({
+        alert_key: `startup_failure:${r.category}`,
+        severity: 'critical',
+        title: `启动失败: ${r.category} (${r.versions || '?'})`,
+        detail: `近 24h ${r.instances} 实例 / ${r.total} 次 · ${(r.sample || '').slice(0, 160)}`,
+      });
+    }
+  } catch (e) { console.error('[alerts] rule D failed', e); }
+
   if (candidates.length === 0) return;
 
   // Dedup against alerts raised within the cooldown window.
