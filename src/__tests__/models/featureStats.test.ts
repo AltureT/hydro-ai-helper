@@ -80,4 +80,28 @@ describe('FeatureStatsModel', () => {
       expect(await model.getStats24h()).toEqual([]);
     });
   });
+
+  describe('getStatsRecentDays', () => {
+    it('should query the last N UTC dates and include the date in results', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      mockColl.find.mockReturnValue({
+        toArray: jest.fn().mockResolvedValue([
+          { date: today, feature: 'student_chat', attemptCount: 4, successCount: 4, lastSuccessAt: null },
+          { date: yesterday, feature: 'student_chat', attemptCount: 20, successCount: 19, lastSuccessAt: null },
+          { date: yesterday, feature: 'testdata_generation', attemptCount: 2, successCount: 2, lastSuccessAt: null },
+        ]),
+      });
+
+      const stats = await model.getStatsRecentDays(2);
+
+      // 查询条件覆盖今天与昨天两个 UTC 日期
+      const [filter] = mockColl.find.mock.calls[0];
+      expect(filter.date.$in).toEqual([today, yesterday]);
+      // 结果按日区分（供平台按 (date, feature) 取最大值累计）
+      expect(stats).toHaveLength(3);
+      expect(stats[0]).toMatchObject({ date: today, feature: 'student_chat', attempts: 4 });
+      expect(stats[1]).toMatchObject({ date: yesterday, feature: 'student_chat', attempts: 20, successes: 19 });
+    });
+  });
 });

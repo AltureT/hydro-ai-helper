@@ -147,10 +147,11 @@ Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" t
 
 ## Telemetry & Privacy
 
-Collects **anonymous statistics** (installation count, active users, conversations, version) for GitHub badges and development.
+Collects **anonymous statistics** (installation count, active users over 7/30/90-day windows, conversations, per-day feature usage counters, version) for GitHub badges and development.
 
 - Fully anonymous (random UUID, no PII); domain IDs are SHA-256 hashed
-- No code, conversations, or personal data; auto-cleanup after 90 days
+- Records the **country and region** of the reporting request (coarse-grained, inferred by Cloudflare from the server's egress IP; **the IP itself is never stored**), instance-level only
+- No code, conversations, or personal data; instance records auto-clean after 270 days without reports (covers school vacations), per-day feature usage kept for 400 days
 
 <details>
 <summary><b>Disable telemetry</b></summary>

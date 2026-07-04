@@ -25,6 +25,9 @@ export function OverviewPanel() {
   const cards: { label: string; value: string | number; color: string }[] = [
     { label: '部署实例', value: data.instances, color: '#2563eb' },
     { label: '活跃用户 (7天)', value: data.active_users_7d, color: '#059669' },
+    // 30/90 天窗口：学生寒暑假后返校仍计入活跃，避免假期把统计清零
+    { label: '活跃用户 (30天)', value: data.active_users_30d ?? '—', color: '#059669' },
+    { label: '活跃用户 (90天)', value: data.active_users_90d ?? '—', color: '#059669' },
     { label: '总对话数', value: data.total_conversations.toLocaleString(), color: '#7c3aed' },
     { label: 'API 错误率', value: `${data.error_rate_percent}%`, color: data.error_rate_percent > 5 ? '#ef4444' : '#059669' },
     { label: '延迟 P50', value: fmtMs(data.latency_p50_ms), color: latencyColor(data.latency_p50_ms) },

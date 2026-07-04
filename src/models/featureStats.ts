@@ -28,6 +28,15 @@ export interface FeatureStats24h {
   lastSuccessAt: Date | null;
 }
 
+/** 按日的功能计数（随心跳上报，供遥测平台做跨日累计统计） */
+export interface FeatureStatsDaily {
+  date: string; // YYYY-MM-DD (UTC)
+  feature: string;
+  attempts: number;
+  successes: number;
+  lastSuccessAt: Date | null;
+}
+
 const TTL_DAYS = 14;
 
 export class FeatureStatsModel {
@@ -92,6 +101,29 @@ export class FeatureStatsModel {
     const today = FeatureStatsModel.getDateKey();
     const docs = await this.collection.find({ date: today }).toArray();
     return docs.map((doc) => ({
+      feature: doc.feature,
+      attempts: doc.attemptCount || 0,
+      successes: doc.successCount || 0,
+      lastSuccessAt: doc.lastSuccessAt || null,
+    }));
+  }
+
+  /**
+   * 近 N 天（含今天）的按日计数。
+   *
+   * 心跳每 24 小时触发一次，只带"今天"的快照会系统性丢失上次心跳之后到
+   * 当天结束之间的计数；带上最近两天，让平台按 (date, feature) 取最大值
+   * 累计，即可得到完整的按日用量。
+   */
+  async getStatsRecentDays(days: number): Promise<FeatureStatsDaily[]> {
+    const dates: string[] = [];
+    const now = Date.now();
+    for (let i = 0; i < days; i++) {
+      dates.push(new Date(now - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+    }
+    const docs = await this.collection.find({ date: { $in: dates } }).toArray();
+    return docs.map((doc) => ({
+      date: doc.date,
       feature: doc.feature,
       attempts: doc.attemptCount || 0,
       successes: doc.successCount || 0,

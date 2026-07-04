@@ -11,7 +11,7 @@ import type { PluginInstallModel } from '../models/pluginInstall';
 import type { ConversationModel } from '../models/conversation';
 import type { AIConfigModel } from '../models/aiConfig';
 import type { RequestStatsModel } from '../models/requestStats';
-import type { FeatureStatsModel, FeatureStats24h } from '../models/featureStats';
+import type { FeatureStatsModel, FeatureStatsDaily } from '../models/featureStats';
 import type { ErrorReporter } from './errorReporter';
 
 /**
@@ -24,6 +24,8 @@ export type TelemetryEvent = 'install' | 'heartbeat' | 'error' | 'feedback';
  */
 interface TelemetryData {
   activeUsers7d: number;
+  activeUsers30d: number;
+  activeUsers90d: number;
   totalConversations: number;
   lastUsedAt: Date | null;
   apiSuccessCount24h: number;
@@ -33,7 +35,7 @@ interface TelemetryData {
   suppressedErrorCount: number;
   droppedErrorCount: number;
   activeEndpointCount: number;
-  featureStats: FeatureStats24h[];
+  featureStats: FeatureStatsDaily[];
   latencyBuckets: Record<string, number>;
 }
 
@@ -44,6 +46,8 @@ interface TelemetryData {
  */
 interface FeatureStatPayload {
   feature: string;
+  /** 计数所属的 UTC 日期（YYYY-MM-DD），平台据此做跨日累计 */
+  date?: string;
   attempts: number;
   successes: number;
   last_success_at?: string;
@@ -78,6 +82,9 @@ interface ReportPayload {
   first_used_at?: string;
   stats: {
     active_users_7d: number;
+    /** 更长的活跃窗口：覆盖寒暑假后返校的学生（30/90 天） */
+    active_users_30d?: number;
+    active_users_90d?: number;
     total_conversations: number;
     last_used_at?: string;
     api_success_count_24h?: number;
@@ -206,19 +213,24 @@ export class TelemetryService {
    */
   private async collect(): Promise<TelemetryData> {
     // Parallelize independent queries
-    const [activeUsers7d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats] = await Promise.all([
+    const [activeUsers7d, activeUsers30d, activeUsers90d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats] = await Promise.all([
       this.conversationModel.countActiveUsers(7),
+      this.conversationModel.countActiveUsers(30),
+      this.conversationModel.countActiveUsers(90),
       this.conversationModel.getTotalConversations(),
       this.conversationModel.getLastConversationTime(),
       this.requestStatsModel?.getStats24h().catch(() => null),
       this.aiConfigModel?.getConfig().catch(() => null),
-      this.featureStatsModel?.getStats24h().catch(() => null),
+      // 近 2 天按日计数：次日心跳会带上前一天的最终值，平台按 (date, feature) 取最大累计
+      this.featureStatsModel?.getStatsRecentDays(2).catch(() => null),
     ]);
 
     const selfStats = this.errorReporter?.getSelfStats();
 
     return {
       activeUsers7d,
+      activeUsers30d,
+      activeUsers90d,
       totalConversations,
       lastUsedAt,
       apiSuccessCount24h: requestStats?.successCount ?? 0,
@@ -280,6 +292,8 @@ export class TelemetryService {
         first_used_at: config.firstUsedAt?.toISOString(),
         stats: {
           active_users_7d: stats.activeUsers7d,
+          active_users_30d: stats.activeUsers30d,
+          active_users_90d: stats.activeUsers90d,
           total_conversations: stats.totalConversations,
           last_used_at: stats.lastUsedAt?.toISOString(),
           api_success_count_24h: stats.apiSuccessCount24h,
@@ -299,6 +313,7 @@ export class TelemetryService {
         features,
         feature_stats: stats.featureStats.map((f) => ({
           feature: f.feature,
+          date: f.date,
           attempts: f.attempts,
           successes: f.successes,
           last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
