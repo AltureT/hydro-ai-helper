@@ -28,7 +28,10 @@ exports.buildTestdataSystemPrompt = buildTestdataSystemPrompt;
 exports.buildTestdataUserPrompt = buildTestdataUserPrompt;
 exports.extractJsonObject = extractJsonObject;
 exports.normalizeFileContent = normalizeFileContent;
+exports.normalizeGenerationObject = normalizeGenerationObject;
 exports.parseGenerationResponse = parseGenerationResponse;
+exports.parseDelimitedResponse = parseDelimitedResponse;
+exports.parseAiResponse = parseAiResponse;
 exports.assemblePlan = assemblePlan;
 exports.buildSkeletonPlan = buildSkeletonPlan;
 const js_yaml_1 = __importDefault(require("js-yaml"));
@@ -305,6 +308,7 @@ function buildTestdataSystemPrompt() {
 链表类函数题的 Python 模板参考（题目为"反转链表"，学生实现 reverseList(head)，链表用类实现）：
 --- template.py（链表） ---${REF_TEMPLATE_PY_LINKEDLIST}
 若题面或教师要求"链表用列表（数组）实现"，模板则直接以 Python 列表传参，不构建节点类。
+若题面给出的是类方法签名（LeetCode 常见形式，如 class Solution: def xxx(self, s, k)），学生提交的是完整的 Solution 类：Python 模板通过 Solution().xxx(...) 调用；Java 模板本就调用 new Solution().xxx(...)；C++ 模板相应以 Solution().xxx(...) 调用。此时标程也必须写成同样的类形式。
 模板中的输入解析必须与你设计的 .in 文件格式严格一致；多语言模板之间的输入解析和输出格式必须完全等价，保证同一份 .in 在三种语言下输出一致。
 
 【测试数据设计原则】
@@ -322,23 +326,42 @@ function buildTestdataSystemPrompt() {
    - large：接近题面约束上限。此档必须使用【可解析构造】：用有规律的数据（全相同、等差、周期、对称等），使正确输出能由公式/推理直接得出，而不是逐条模拟；无法可靠推出输出时，宁可缩小该测试点规模，也绝不允许猜测输出。
 6. 正确性最重要：先确定标程（教师已提供则以其为准），再对每个测试点逐步推演标程的运行得到 .out。宁可数据小，绝不允许输出错误。
 
-【输出格式（严格 JSON）】
-只输出一个 JSON 对象，不要输出任何解释文字，不要使用 Markdown 代码块围栏。JSON 结构如下：
-{
-  "problemType": "function" 或 "traditional",
-  "isFillIn": true 或 false（题面是否为填空/完善代码题）,
-  "analysis": "简要说明（不超过 200 字）：题意理解、输入输出格式、数据范围",
-  "functionName": "函数题的函数名（传统题省略）",
-  "templates": { "py": "template.py 内容", "java": "template.java 内容", "cc": "template.cc 内容" },
-  "stdSolution": { "language": "python", "code": "Python 标程代码" },
-  "cases": [ { "label": "边界:单元素", "input": "1 4\\n2\\n", "output": "4\\n" } ],
-  "notes": "给教师的注意事项（可选，如数据范围做了哪些裁剪、填空题输出格式依据）"
-}
-约定：
-- templates 只需包含用户要求的语言；传统题省略 templates 与 functionName。
-- 函数题的 stdSolution.code 只包含与学生提交形式一致的函数/类定义（教师可用 cat std.py template.py > check.py 本地验证）；传统题的 stdSolution.code 是完整的读写标准输入输出的程序；填空题的 stdSolution.code 是补全题面代码后的结果；教师已提供标准答案时可省略 stdSolution。
-- cases 数量以用户要求为准；input/output 中换行用 \\n 表示，文件末尾保留一个换行。
-- 所有说明性文字（analysis/notes/label）使用简体中文。`;
+【输出格式（分节文本，禁止 JSON）】
+代码与数据必须以原文直出，因此使用分节标记格式，不要输出 JSON、不要做任何转义、不要用代码围栏包裹任何内容。标记行独占一行、顶格书写，形如 @@@标记@@@。整体结构如下（不适用的节直接省略）：
+
+@@@META@@@
+problemType: function
+isFillIn: false
+functionName: countKConstraintSubstrings
+@@@ANALYSIS@@@
+简要说明（不超过 200 字）：题意理解、输入输出格式、数据范围
+@@@NOTES@@@
+给教师的注意事项（可选节，如数据范围裁剪说明、填空题输出格式依据）
+@@@TEMPLATE:py@@@
+template.py 原文
+@@@TEMPLATE:java@@@
+template.java 原文
+@@@TEMPLATE:cc@@@
+template.cc 原文
+@@@STD@@@
+标程代码原文
+@@@CASE:1:IN:样例1@@@
+10101
+1
+@@@CASE:1:OUT@@@
+12
+@@@CASE:2:IN:边界-最小规模@@@
+0
+1
+@@@CASE:2:OUT@@@
+1
+
+规则：
+- TEMPLATE 节只输出用户要求的语言；传统题省略全部 TEMPLATE 节与 functionName。
+- 函数题的 STD 节只包含与学生提交形式一致的函数/类定义（教师可用 cat std.py template.py > check.py 本地验证）；传统题的 STD 节是完整的读写标准输入输出的程序；填空题的 STD 节是补全题面代码后的结果；教师已提供标准答案时省略 STD 节。
+- CASE 编号从 1 开始连续递增，数量以用户要求为准；每个编号必须同时给出 IN 与 OUT 两节；IN 标记中最后一段冒号之后是该测试点的设计意图（label，简体中文）。
+- 各节内容为原始文本：换行就是真实换行，引号、反斜杠等一律原样书写；除标记行外不要输出任何额外说明文字；正文行不得以 @@@ 开头。
+- 所有说明性文字（ANALYSIS/NOTES/label）使用简体中文。`;
 }
 const DATA_SCALE_TEXT = {
     small: 'small（小规模，人工可快速验算）',
@@ -388,7 +411,7 @@ function buildTestdataUserPrompt(params) {
     if (existingFiles && existingFiles.length > 0) {
         lines.push('', `【题目已有文件（将可能被覆盖，仅供参考）】${existingFiles.join(', ')}`);
     }
-    lines.push('', '请按照 System 中约定的 JSON 结构输出。');
+    lines.push('', '请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。');
     return lines.join('\n');
 }
 // ─── AI 响应解析 ──────────────────────────────────────────────────────────────
@@ -418,18 +441,10 @@ function normalizeFileContent(content) {
     return lf.endsWith('\n') ? lf : `${lf}\n`;
 }
 /**
- * 解析并校验 AI 返回的生成结果
+ * 校验并规范化「已解析为对象」的生成结果（JSON 与分节文本两条解析路径共用）
  * @throws Error 结构非法时抛出（消息为中文，直接展示给教师）
  */
-function parseGenerationResponse(raw, options) {
-    let parsed;
-    try {
-        parsed = JSON.parse(extractJsonObject(raw));
-    }
-    catch (err) {
-        throw new Error(`AI 返回内容不是有效的 JSON（可能因输出过长被截断，可尝试减少测试点数量或模板语言后重试）：${err instanceof Error ? err.message : String(err)}`);
-    }
-    const obj = parsed;
+function normalizeGenerationObject(obj, options) {
     const problemType = obj.problemType === 'function' ? 'function'
         : obj.problemType === 'traditional' ? 'traditional'
             : null;
@@ -489,6 +504,153 @@ function parseGenerationResponse(raw, options) {
         cases,
         notes: typeof obj.notes === 'string' ? obj.notes : undefined,
     };
+}
+/**
+ * JSON 解析路径（旧契约，作为分节文本失败时的回退保留）
+ * @throws Error 结构非法时抛出
+ */
+function parseGenerationResponse(raw, options) {
+    let parsed;
+    try {
+        parsed = JSON.parse(extractJsonObject(raw));
+    }
+    catch (err) {
+        throw new Error(`AI 返回内容不是有效的 JSON：${err instanceof Error ? err.message : String(err)}`);
+    }
+    return normalizeGenerationObject(parsed, options);
+}
+// ─── 分节文本解析（当前主契约） ──────────────────────────────────────────────
+/** 分节标记：独占一行、顶格，形如 @@@META@@@ / @@@CASE:1:IN:标签@@@ */
+const SECTION_MARKER_RE = /^\s*@@@(.+?)@@@\s*$/;
+/** 去除段落首尾的空行（保留内部空行），供代码/数据节使用 */
+function trimBlankEdges(lines) {
+    let start = 0;
+    let end = lines.length;
+    while (start < end && lines[start].trim() === '')
+        start++;
+    while (end > start && lines[end - 1].trim() === '')
+        end--;
+    return lines.slice(start, end).join('\n');
+}
+/**
+ * 解析分节标记文本。未发现任何标记时返回 null（调用方回退到 JSON 解析）。
+ *
+ * 采用分节文本而非 JSON 的原因：AI 需要输出多段含引号/反斜杠/换行的代码，
+ * 嵌入 JSON 字符串时转义极易出错（实测出现过 Expected ',' or '}' 一类的
+ * 解析失败）；分节原文直出从根上消除了转义问题。
+ * @throws Error 标记存在但结构非法时抛出（消息为中文，直接展示给教师）
+ */
+function parseDelimitedResponse(raw, options) {
+    let text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    // 模型偶尔会把整个响应包进代码围栏，剥掉最外层
+    const fenced = text.match(/^\s*```[a-zA-Z]*\r?\n([\s\S]*?)\r?\n```\s*$/);
+    if (fenced)
+        text = fenced[1];
+    const lines = text.split(/\r?\n/);
+    const sections = [];
+    let current = null;
+    for (const line of lines) {
+        const m = line.match(SECTION_MARKER_RE);
+        if (m) {
+            current = { header: m[1].trim(), content: [] };
+            sections.push(current);
+        }
+        else if (current) {
+            // 疑似写坏的标记（如缺尾部 @@@）会静默混入上一节内容，直接报错更安全
+            if (line.trimStart().startsWith('@@@')) {
+                throw new Error(`AI 返回中存在疑似损坏的分节标记行：${line.trim().slice(0, 50)}，请重试`);
+            }
+            current.content.push(line);
+        }
+        // 首个标记之前的内容（模型寒暄）忽略
+    }
+    if (sections.length === 0)
+        return null;
+    const obj = {};
+    const templates = {};
+    const caseMap = new Map();
+    for (const section of sections) {
+        const parts = section.header.split(':');
+        const kind = parts[0].trim().toUpperCase();
+        if (kind === 'META') {
+            for (const line of section.content) {
+                const idx = line.indexOf(':');
+                if (idx <= 0)
+                    continue;
+                const key = line.slice(0, idx).trim();
+                const value = line.slice(idx + 1).trim();
+                if (key === 'problemType')
+                    obj.problemType = value;
+                else if (key === 'isFillIn')
+                    obj.isFillIn = value.toLowerCase() === 'true';
+                else if (key === 'functionName')
+                    obj.functionName = value;
+            }
+        }
+        else if (kind === 'ANALYSIS') {
+            obj.analysis = trimBlankEdges(section.content);
+        }
+        else if (kind === 'NOTES') {
+            obj.notes = trimBlankEdges(section.content);
+        }
+        else if (kind === 'TEMPLATE') {
+            const lang = (parts[1] || '').trim().toLowerCase();
+            if (lang)
+                templates[lang] = trimBlankEdges(section.content);
+        }
+        else if (kind === 'STD') {
+            const code = trimBlankEdges(section.content);
+            if (code)
+                obj.stdSolution = { language: 'python', code };
+        }
+        else if (kind === 'CASE') {
+            const num = parseInt((parts[1] || '').trim(), 10);
+            const direction = (parts[2] || '').trim().toUpperCase();
+            if (!Number.isInteger(num) || num < 1 || (direction !== 'IN' && direction !== 'OUT')) {
+                throw new Error(`AI 返回中存在无法识别的 CASE 标记：@@@${section.header}@@@`);
+            }
+            const entry = caseMap.get(num) || {};
+            if (direction === 'IN') {
+                entry.input = trimBlankEdges(section.content);
+                const label = parts.slice(3).join(':').trim();
+                if (label)
+                    entry.label = label;
+            }
+            else {
+                entry.output = trimBlankEdges(section.content);
+            }
+            caseMap.set(num, entry);
+        }
+        // 未知节名：忽略（向前兼容）
+    }
+    const caseNumbers = [...caseMap.keys()].sort((a, b) => a - b);
+    const cases = [];
+    for (const num of caseNumbers) {
+        const entry = caseMap.get(num);
+        if (entry.input === undefined || entry.output === undefined) {
+            throw new Error(`第 ${num} 个测试点缺少 ${entry.input === undefined ? 'IN' : 'OUT'} 节，请重试`);
+        }
+        cases.push({ label: entry.label, input: entry.input, output: entry.output });
+    }
+    obj.cases = cases;
+    if (Object.keys(templates).length > 0)
+        obj.templates = templates;
+    return normalizeGenerationObject(obj, options);
+}
+/**
+ * 解析 AI 响应：优先分节文本（当前契约），无标记时回退 JSON（兼容旧契约/
+ * 忽略格式指令的模型）。两者都失败时抛出合并后的可读错误。
+ */
+function parseAiResponse(raw, options) {
+    const delimited = parseDelimitedResponse(raw, options);
+    if (delimited)
+        return delimited;
+    try {
+        return parseGenerationResponse(raw, options);
+    }
+    catch (err) {
+        throw new Error(`AI 返回格式无法解析（未找到分节标记，回退 JSON 也失败）。请重试一次；若持续失败，可减少测试点数量，或改用「生成骨架文件」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`);
+    }
 }
 // ─── 计划组装 ─────────────────────────────────────────────────────────────────
 /**
@@ -643,7 +805,7 @@ class TestdataGenService {
             maxTokens: null,
             timeoutMs: exports.TESTDATA_GEN_LIMITS.AI_TIMEOUT_MS,
         });
-        const response = parseGenerationResponse(result.content, params.options);
+        const response = parseAiResponse(result.content, params.options);
         const plan = assemblePlan(response, params.options);
         plan.tokenUsage = result.usage;
         plan.usedModel = `${result.usedModel.endpointName}/${result.usedModel.modelName}`;
