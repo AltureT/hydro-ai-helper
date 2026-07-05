@@ -111,6 +111,16 @@ function unwrapResults(data: unknown): GoJudgeResult[] {
   throw new Error('Hydro 沙箱返回了无法识别的响应格式');
 }
 
+/** 截断保留尾部：Python traceback 的关键错误行在最后一行。 */
+function truncateTail(text: string, max: number): string {
+  return text.length > max ? `…${text.slice(-max)}` : text;
+}
+
+/** 截断保留头部：用于摘录出错任务的输入内容。 */
+function truncateHead(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 /** 把 go-judge 原始结果映射为宽容明细，按 status 分类而不抛异常。 */
 function toRunDetail(result: GoJudgeResult): PythonRunDetail {
   const status = result.status || '';
@@ -160,7 +170,10 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     return details.map((detail, index) => {
       if (!detail.accepted) {
         const info = detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`;
-        throw new Error(`第 ${index + 1} 个沙箱任务执行失败（${detail.status || 'Unknown'}）：${info.slice(0, 1000)}`);
+        throw new Error(
+          `第 ${index + 1} 个沙箱任务执行失败（${detail.status || 'Unknown'}）：${truncateTail(info, 1000)}\n`
+          + `该任务的输入内容：${truncateHead(inputs[index] ?? '', 300) || '（空）'}`,
+        );
       }
       return { stdout: detail.stdout, stderr: detail.stderr };
     });

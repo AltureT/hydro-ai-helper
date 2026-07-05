@@ -3,6 +3,18 @@
   body_path). Auto-generation is disabled on purpose. Keep it user-facing and
   update it before each release tag.
 -->
+## v3.0.0
+
+- **「AI 生成测试数据」升级为沙箱实跑 + 双重验证（本版本核心）**：
+  - 测试数据不再由 AI 直接给出：数据生成器与标程（ORACLE）在 Hydro 判题沙箱（go-judge）中实际运行产出 `.in`/`.out`，AI 只提供"蓝图"
+  - 三道机器关卡：独立暴力解对拍、函数题 solution+模板组合实跑比对、输入校验器逐点校验；传统题标程必须先通过题面样例回归
+  - 验证失败时自动把失败阶段、出错测试点、输入内容与 traceback 关键行回喂 AI 修复一轮；教师中途取消不再误报为验证失败
+  - 生成的 `std.py` / `oracle.py` / `generator.py` / `brute.py` / `validator.py` / `template.*` 首行自带用途注释，方便识别与复验
+  - 沙箱不可达时自动降级为兼容直出模式并明确标注"未验证"（可用 `AI_HELPER_TESTDATA_GENERATION_MODE=sandbox` 强制要求沙箱）；骨架模式继续可用
+- 强模型提醒：题目文件页与管理端「场景模型」页醒目提示为该场景配置最强模型——弱模型生成的生成器与标程常自相矛盾，反复无法通过沙箱验证
+- 遥测与告警增强：错误上报携带 AI 失败详情、启动失败金丝雀告警、功能用量累计、长活跃窗口与实例来源省份
+- 升级注意：沙箱验证依赖 `hydrojudge.sandbox_host`（默认 `http://localhost:5050/`）可达；更新插件后需重启 Hydro 重建前端资源
+
 ## v2.5.0
 
 - **新增「AI 生成测试数据」（Beta）**：在题目文件页（`/p/:pid/files`）根据 Markdown 题面一键生成完整测试数据集——测试点 `N.in`/`N.out`、函数题评测模板（`template.py`/`template.java`/`template.cc` 与 `compile.sh`）、评测配置 `config.yaml`（写入后评测设置自动同步）与参考标程。所有文件先预览、可编辑、勾选确认后才写入，覆盖已有文件前明确提示。

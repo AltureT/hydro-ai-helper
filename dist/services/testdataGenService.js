@@ -926,6 +926,15 @@ function parseGeneratorOutput(stdout, expectedCount) {
     });
 }
 /**
+ * 用户中止/请求取消类错误：必须原样上抛，包装成阶段失败会误导修复回路重试。
+ * 覆盖 DOM/axios 取消形态与 openaiClient 的 AIServiceError(category='aborted')。
+ */
+function isCancellation(err) {
+    const e = err;
+    return !!e && (e.name === 'AbortError' || e.name === 'CanceledError'
+        || e.code === 'ERR_CANCELED' || e.category === 'aborted');
+}
+/**
  * 双重验证管线（对拍 + 模板实跑 + 输入校验），执行序 a→f。
  * 各阶段间累计校验总时长预算，避免大批量挤兑沙箱 RAM 盘。
  */
@@ -937,7 +946,15 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
     };
     // a. GENERATOR 实跑 → 解析出全部 .in
-    const generatorResult = await runner.runPython(blueprint.generatorCode, '', signal);
+    let generatorResult;
+    try {
+        generatorResult = await runner.runPython(blueprint.generatorCode, '', signal);
+    }
+    catch (err) {
+        if (isCancellation(err))
+            throw err;
+        throw new Error(`GENERATOR 实跑失败：${err instanceof Error ? err.message : String(err)}`);
+    }
     const generatedInputs = parseGeneratorOutput(generatorResult.stdout, options.caseCount);
     const inputs = generatedInputs.map(item => item.input);
     // b. 函数题伪 stdin 检查（源码赋值写法拦截）
@@ -967,7 +984,18 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         ? extractStatementSamples(statementMarkdown)
         : [];
     const allInputs = [...inputs, ...samples.map(sample => sample.input)];
-    const oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+    let oracleResults;
+    try {
+        oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+    }
+    catch (err) {
+        if (isCancellation(err))
+            throw err;
+        const layout = samples.length > 0
+            ? `任务 1-${inputs.length} 对应生成的第 1-${inputs.length} 个测试点，任务 ${inputs.length + 1}-${allInputs.length} 对应题面样例`
+            : `全部 ${inputs.length} 个任务依次对应生成的第 1-${inputs.length} 个测试点`;
+        throw new Error(`ORACLE（标程）实跑失败，未能产出 .out（${layout}）：${err instanceof Error ? err.message : String(err)}`);
+    }
     const cases = generatedInputs.map((item, index) => {
         const output = normalizeFileContent(oracleResults[index].stdout);
         if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
@@ -1139,6 +1167,23 @@ function parseTemplateSections(raw) {
  * context.mode 决定各文件的 origin 徽章：sandbox（实跑）/ direct（AI 直出）；
  * 缺省视为 direct（保持旧 2 参调用行为不变）。
  */
+/**
+ * AI 生成代码文件的首行用途注释（.py 用 #，.cc/.java 用 //），供教师快速识别文件职责。
+ * 教师提供的 std 是唯一权威，原样写入不加注释。
+ */
+function prependPurposeComment(name, content, purpose) {
+    const marker = /\.(cc|cpp|java)$/i.test(name) ? '//' : '#';
+    return `${marker} ${purpose}\n${content}`;
+}
+const FILE_PURPOSES = {
+    generator: '数据生成器（AI 生成）：运行后向 stdout 输出 JSON，cases[].input 即各测试点 .in，可重跑重造数据',
+    brute: '暴力对拍解（AI 生成）：与标程相互独立的第二实现，用于与 .out 交叉验证',
+    validator: '输入校验器（AI 生成）：从 stdin 读取单个 .in 校验题面约束，不合法时非零退出',
+    oracle: '完整标程 ORACLE（AI 生成）：读取 .in 输出 .out，本次测试数据的输出由它实跑产出',
+    stdSolutionForm: '参考解（学生提交形式，AI 生成）：可与 template.* 组合后本地运行复验',
+    stdProgram: '参考标程（AI 生成）：读取 stdin 输出答案，用于人工复验与重造数据',
+    template: '函数题评测模板（AI 生成）：读取 stdin、调用学生实现并输出结果，学生代码与本文件组合评测',
+};
 function assemblePlan(response, options, context = {}) {
     const sandbox = context.mode === 'sandbox';
     const dataOrigin = sandbox ? 'executed' : 'ai-only';
@@ -1156,19 +1201,39 @@ function assemblePlan(response, options, context = {}) {
                 const origin = lang === 'py' && sandbox && response.pyTemplateExecuted
                     ? 'executed'
                     : 'ai-only';
-                files.push({ name: exports.TEMPLATE_FILENAMES[lang], content, kind: 'template', origin });
+                files.push({
+                    name: exports.TEMPLATE_FILENAMES[lang],
+                    content: prependPurposeComment(exports.TEMPLATE_FILENAMES[lang], content, FILE_PURPOSES.template),
+                    kind: 'template',
+                    origin,
+                });
             }
         }
         files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile', origin: 'deterministic' });
     }
     if (response.generatorCode?.trim()) {
-        files.push({ name: 'generator.py', content: response.generatorCode, kind: 'generator', origin: 'executed' });
+        files.push({
+            name: 'generator.py',
+            content: prependPurposeComment('generator.py', response.generatorCode, FILE_PURPOSES.generator),
+            kind: 'generator',
+            origin: 'executed',
+        });
     }
     if (sandbox && response.bruteCode?.trim()) {
-        files.push({ name: 'brute.py', content: response.bruteCode, kind: 'brute', origin: 'executed' });
+        files.push({
+            name: 'brute.py',
+            content: prependPurposeComment('brute.py', response.bruteCode, FILE_PURPOSES.brute),
+            kind: 'brute',
+            origin: 'executed',
+        });
     }
     if (sandbox && response.validatorCode?.trim()) {
-        files.push({ name: 'validator.py', content: response.validatorCode, kind: 'validator', origin: 'executed' });
+        files.push({
+            name: 'validator.py',
+            content: prependPurposeComment('validator.py', response.validatorCode, FILE_PURPOSES.validator),
+            kind: 'validator',
+            origin: 'executed',
+        });
     }
     // 教师提供的标准答案是唯一权威：原样写入（deterministic，非实跑制品）
     const providedStd = options.providedStd?.trim();
@@ -1181,20 +1246,34 @@ function assemblePlan(response, options, context = {}) {
         });
         if (response.oracleCode?.trim()
             && normalizeFileContent(response.oracleCode) !== normalizeFileContent(providedStd)) {
-            files.push({ name: 'oracle.py', content: response.oracleCode, kind: 'std', origin: sandbox ? 'executed' : 'ai-only' });
+            files.push({
+                name: 'oracle.py',
+                content: prependPurposeComment('oracle.py', response.oracleCode, FILE_PURPOSES.oracle),
+                kind: 'std',
+                origin: sandbox ? 'executed' : 'ai-only',
+            });
         }
     }
     else {
         // 函数题沙箱模式：std.py 用学生提交形式（solutionCode），完整 ORACLE 另存 oracle.py 以闭环重造
-        const stdContent = sandbox && response.problemType === 'function' && response.solutionCode?.trim()
-            ? response.solutionCode
-            : response.stdSolution?.code;
+        const useSolutionForm = sandbox && response.problemType === 'function' && response.solutionCode?.trim();
+        const stdContent = useSolutionForm ? response.solutionCode : response.stdSolution?.code;
         if (stdContent) {
-            files.push({ name: 'std.py', content: stdContent, kind: 'std', origin: sandbox ? 'executed' : 'ai-only' });
+            files.push({
+                name: 'std.py',
+                content: prependPurposeComment('std.py', stdContent, useSolutionForm ? FILE_PURPOSES.stdSolutionForm : FILE_PURPOSES.stdProgram),
+                kind: 'std',
+                origin: sandbox ? 'executed' : 'ai-only',
+            });
             if (sandbox
                 && response.oracleCode?.trim()
                 && normalizeFileContent(response.oracleCode) !== normalizeFileContent(stdContent)) {
-                files.push({ name: 'oracle.py', content: response.oracleCode, kind: 'std', origin: 'executed' });
+                files.push({
+                    name: 'oracle.py',
+                    content: prependPurposeComment('oracle.py', response.oracleCode, FILE_PURPOSES.oracle),
+                    kind: 'std',
+                    origin: 'executed',
+                });
             }
         }
     }
@@ -1510,6 +1589,8 @@ class TestdataGenService {
             response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal);
         }
         catch (firstError) {
+            if (isCancellation(firstError))
+                throw firstError;
             let repairResult;
             try {
                 repairResult = await this.aiClient.chat([
@@ -1519,6 +1600,8 @@ class TestdataGenService {
                 ], systemPrompt, callOptions);
             }
             catch (err) {
+                if (isCancellation(err))
+                    throw err;
                 throw new Error(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`);
             }
             results.push(repairResult);
@@ -1527,6 +1610,8 @@ class TestdataGenService {
                 response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal);
             }
             catch (err) {
+                if (isCancellation(err))
+                    throw err;
                 throw new Error(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`);
             }
         }

@@ -915,6 +915,53 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('Hydro 沙箱中实际运行');
   });
 
+  it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeSandboxBlueprint('traditional'),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const cancelErr = Object.assign(new Error('canceled'), { name: 'CanceledError', code: 'ERR_CANCELED' });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+      runPython: jest.fn().mockRejectedValue(cancelErr),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, { sandboxRunner: runner, mode: 'sandbox' });
+    await expect(service.generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+    })).rejects.toBe(cancelErr);
+    // 中止不应再烧一次修复请求
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('修复请求本身被中止（AIServiceError aborted 形态）：原样上抛不包装', async () => {
+    const abortedErr = Object.assign(new Error('请求已取消'), { category: 'aborted' });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSandboxBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockRejectedValueOnce(abortedErr),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+      // 生成器 stdout 非法 JSON → 真实失败，进入修复回路
+      runPython: jest.fn().mockResolvedValue({ stdout: 'not json', stderr: '' }),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, { sandboxRunner: runner, mode: 'sandbox' });
+    await expect(service.generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+    })).rejects.toBe(abortedErr);
+  });
+
   it('沙箱蓝图漏掉 Java 模板时定向补齐后再执行', async () => {
     const initial = makeSandboxBlueprint('function').replace(
       /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,
@@ -1137,6 +1184,58 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
+  it('GENERATOR 实跑失败时报错标明阶段', async () => {
+    const bp = tradBlueprint();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(
+        new Error('第 1 个沙箱任务执行失败（Nonzero Exit Status）：NameError: name \'gen\' is not defined'),
+      ),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
+      .rejects.toThrow(/GENERATOR 实跑失败：.*NameError/);
+  });
+
+  it('ORACLE 实跑失败时报错标明阶段与任务-测试点对应关系', async () => {
+    const bp = tradBlueprint();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn().mockRejectedValue(
+        new Error('第 1 个沙箱任务执行失败（Nonzero Exit Status）：IndexError: string index out of range'),
+      ),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    const err: Error = await materializeSandboxBlueprint(bp, tradOpts, '', runner).catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/ORACLE（标程）实跑失败/);
+    // 无样例：说明全部任务对应生成的测试点
+    expect(err.message).toContain('对应生成的第 1-2 个测试点');
+    expect(err.message).toContain('IndexError');
+  });
+
+  it('用户中止（CanceledError）原样上抛，不包装为 GENERATOR/ORACLE 阶段失败', async () => {
+    const bp = tradBlueprint();
+    const cancelErr = Object.assign(new Error('canceled'), { name: 'CanceledError', code: 'ERR_CANCELED' });
+    const genCancelRunner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(cancelErr),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', genCancelRunner)).rejects.toBe(cancelErr);
+
+    const oracleCancelRunner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn().mockRejectedValue(cancelErr),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', oracleCancelRunner)).rejects.toBe(cancelErr);
+  });
+
   it('BRUTE 与标程一致：记录 agreed，不拦截', async () => {
     const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
     const runner = {
@@ -1313,6 +1412,47 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
     expect(std?.origin).toBe('executed');
     expect(plan.files.find(f => f.name === 'oracle.py')?.content).toContain('print(5)');
     expect(plan.files.find(f => f.name === 'template.py')?.origin).toBe('executed');
+  });
+
+  it('AI 生成的代码文件首行带用途注释（.py 用 #，.cc 模板用 //），数据文件不加', () => {
+    const response = {
+      problemType: 'function',
+      cases: [{ input: '2 3\n', output: '5\n' }],
+      templates: { py: 'print(f())', cc: 'int main(){}' },
+      solutionCode: 'def f():\n    return 5',
+      oracleCode: 'print(5)',
+      stdSolution: { language: 'python', code: 'print(5)' },
+      pyTemplateExecuted: true,
+      generatorCode: 'print(1)',
+      bruteCode: 'print(0)',
+      validatorCode: 'import sys',
+    } as never;
+    const opts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'cc'] };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    const content = (n: string) => plan.files.find(f => f.name === n)?.content || '';
+    for (const name of ['std.py', 'oracle.py', 'generator.py', 'brute.py', 'validator.py', 'template.py']) {
+      expect(content(name)).toMatch(/^# \S/);
+    }
+    expect(content('template.cc')).toMatch(/^\/\/ \S/);
+    // 原有代码内容保留在注释之后
+    expect(content('std.py')).toContain('def f()');
+    expect(content('template.py')).toContain('print(f())');
+    // 数据文件与确定性文件不受影响
+    expect(content('1.in')).toBe('2 3\n');
+  });
+
+  it('教师提供的 std 原样写入，不加注释头', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      generatorCode: 'print(1)',
+      stdSolution: { language: 'python', code: 'print(input())' },
+    } as never;
+    const opts: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 1, languages: [], providedStd: 'print(input())',
+    };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    expect(plan.files.find(f => f.name === 'std.py')?.content).toBe('print(input())\n');
   });
 
   it('骨架模式：所有文件 deterministic 且无 verification', () => {

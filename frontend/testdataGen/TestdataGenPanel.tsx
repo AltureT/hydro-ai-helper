@@ -394,6 +394,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const renderForm = () => (
     <div>
+      <div style={{ ...getAlertStyle('warning'), fontWeight: 600, marginBottom: SPACING.base }}>
+        {i18n('ai_helper_testdata_strong_model_notice')}
+      </div>
       {!context.problem.hasStatement && (
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
           {i18n('ai_helper_testdata_warn_no_statement')}

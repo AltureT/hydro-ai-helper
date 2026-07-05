@@ -129,6 +129,27 @@ describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
       .rejects.toThrow(/第 2 个沙箱任务执行失败（Nonzero Exit Status）：boom/);
   });
 
+  it('严格版报错保留 stderr 尾部（长 traceback 不丢关键行）并附带该任务输入', async () => {
+    const longTrace = `Traceback (most recent call last):\n${'  File "/w/main.py", line 5\n'.repeat(60)}IndexError: string index out of range`;
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [
+          goJudgeResult({ status: 'Nonzero Exit Status', exitStatus: 1, files: { stdout: '', stderr: longTrace } }),
+          goJudgeResult({ files: { stdout: 'ok\n', stderr: '' } }),
+        ],
+      }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const err: Error = await runner.runPythonBatch('print(1)', ['A>B\nB<C\n', '1 2\n']).catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    // 尾部关键行必须保留（旧实现取头部 1000 字符会把它截掉）
+    expect(err.message).toContain('IndexError: string index out of range');
+    // 出错任务的输入内容要一并给出，供 AI 修复回路判断 GENERATOR/ORACLE 谁错
+    expect(err.message).toContain('该任务的输入内容');
+    expect(err.message).toContain('A>B');
+  });
+
   it('严格版全部 Accepted 时返回 stdout/stderr 列表', async () => {
     const http = {
       get: jest.fn(),
