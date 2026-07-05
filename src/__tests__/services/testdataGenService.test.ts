@@ -915,6 +915,53 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('Hydro 沙箱中实际运行');
   });
 
+  it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeSandboxBlueprint('traditional'),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const cancelErr = Object.assign(new Error('canceled'), { name: 'CanceledError', code: 'ERR_CANCELED' });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+      runPython: jest.fn().mockRejectedValue(cancelErr),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, { sandboxRunner: runner, mode: 'sandbox' });
+    await expect(service.generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+    })).rejects.toBe(cancelErr);
+    // 中止不应再烧一次修复请求
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('修复请求本身被中止（AIServiceError aborted 形态）：原样上抛不包装', async () => {
+    const abortedErr = Object.assign(new Error('请求已取消'), { category: 'aborted' });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSandboxBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockRejectedValueOnce(abortedErr),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+      // 生成器 stdout 非法 JSON → 真实失败，进入修复回路
+      runPython: jest.fn().mockResolvedValue({ stdout: 'not json', stderr: '' }),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, { sandboxRunner: runner, mode: 'sandbox' });
+    await expect(service.generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+    })).rejects.toBe(abortedErr);
+  });
+
   it('沙箱蓝图漏掉 Java 模板时定向补齐后再执行', async () => {
     const initial = makeSandboxBlueprint('function').replace(
       /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,

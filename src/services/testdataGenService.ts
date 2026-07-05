@@ -1128,10 +1128,16 @@ export function parseGeneratorOutput(stdout: string, expectedCount: number): Gen
   });
 }
 
-/** 用户中止/请求取消类错误：必须原样上抛，包装成阶段失败会误导修复回路重试。 */
+/**
+ * 用户中止/请求取消类错误：必须原样上抛，包装成阶段失败会误导修复回路重试。
+ * 覆盖 DOM/axios 取消形态与 openaiClient 的 AIServiceError(category='aborted')。
+ */
 function isCancellation(err: unknown): boolean {
-  const e = err as { name?: string; code?: string } | null;
-  return !!e && (e.name === 'AbortError' || e.name === 'CanceledError' || e.code === 'ERR_CANCELED');
+  const e = err as { name?: string; code?: string; category?: string } | null;
+  return !!e && (
+    e.name === 'AbortError' || e.name === 'CanceledError'
+    || e.code === 'ERR_CANCELED' || e.category === 'aborted'
+  );
 }
 
 /**
@@ -1912,6 +1918,7 @@ export class TestdataGenService {
         blueprint, params.options, params.statementMarkdown, runner, params.signal,
       );
     } catch (firstError) {
+      if (isCancellation(firstError)) throw firstError;
       let repairResult;
       try {
         repairResult = await this.aiClient.chat(
@@ -1924,6 +1931,7 @@ export class TestdataGenService {
           callOptions,
         );
       } catch (err) {
+        if (isCancellation(err)) throw err;
         throw new Error(
           `AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`,
         );
@@ -1938,6 +1946,7 @@ export class TestdataGenService {
           blueprint, params.options, params.statementMarkdown, runner, params.signal,
         );
       } catch (err) {
+        if (isCancellation(err)) throw err;
         throw new Error(
           `AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`,
         );

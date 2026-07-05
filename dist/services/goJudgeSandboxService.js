@@ -120,7 +120,7 @@ class GoJudgeSandboxRunner {
             if (!detail.accepted) {
                 const info = detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`;
                 throw new Error(`第 ${index + 1} 个沙箱任务执行失败（${detail.status || 'Unknown'}）：${truncateTail(info, 1000)}\n`
-                    + `该任务的输入内容：${truncateHead(inputs[index], 300) || '（空）'}`);
+                    + `该任务的输入内容：${truncateHead(inputs[index] ?? '', 300) || '（空）'}`);
             }
             return { stdout: detail.stdout, stderr: detail.stderr };
         });
