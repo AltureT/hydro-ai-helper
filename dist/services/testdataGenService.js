@@ -937,7 +937,13 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
     };
     // a. GENERATOR 实跑 → 解析出全部 .in
-    const generatorResult = await runner.runPython(blueprint.generatorCode, '', signal);
+    let generatorResult;
+    try {
+        generatorResult = await runner.runPython(blueprint.generatorCode, '', signal);
+    }
+    catch (err) {
+        throw new Error(`GENERATOR 实跑失败：${err instanceof Error ? err.message : String(err)}`);
+    }
     const generatedInputs = parseGeneratorOutput(generatorResult.stdout, options.caseCount);
     const inputs = generatedInputs.map(item => item.input);
     // b. 函数题伪 stdin 检查（源码赋值写法拦截）
@@ -967,7 +973,16 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         ? extractStatementSamples(statementMarkdown)
         : [];
     const allInputs = [...inputs, ...samples.map(sample => sample.input)];
-    const oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+    let oracleResults;
+    try {
+        oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+    }
+    catch (err) {
+        const layout = samples.length > 0
+            ? `任务 1-${inputs.length} 对应生成的第 1-${inputs.length} 个测试点，任务 ${inputs.length + 1}-${allInputs.length} 对应题面样例`
+            : `全部 ${inputs.length} 个任务依次对应生成的第 1-${inputs.length} 个测试点`;
+        throw new Error(`ORACLE（标程）实跑失败，未能产出 .out（${layout}）：${err instanceof Error ? err.message : String(err)}`);
+    }
     const cases = generatedInputs.map((item, index) => {
         const output = normalizeFileContent(oracleResults[index].stdout);
         if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {

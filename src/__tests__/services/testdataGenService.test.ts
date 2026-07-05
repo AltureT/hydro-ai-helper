@@ -1137,6 +1137,38 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
+  it('GENERATOR 实跑失败时报错标明阶段', async () => {
+    const bp = tradBlueprint();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(
+        new Error('第 1 个沙箱任务执行失败（Nonzero Exit Status）：NameError: name \'gen\' is not defined'),
+      ),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
+      .rejects.toThrow(/GENERATOR 实跑失败：.*NameError/);
+  });
+
+  it('ORACLE 实跑失败时报错标明阶段与任务-测试点对应关系', async () => {
+    const bp = tradBlueprint();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn().mockRejectedValue(
+        new Error('第 1 个沙箱任务执行失败（Nonzero Exit Status）：IndexError: string index out of range'),
+      ),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    const err: Error = await materializeSandboxBlueprint(bp, tradOpts, '', runner).catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/ORACLE（标程）实跑失败/);
+    // 无样例：说明全部任务对应生成的测试点
+    expect(err.message).toContain('对应生成的第 1-2 个测试点');
+    expect(err.message).toContain('IndexError');
+  });
+
   it('BRUTE 与标程一致：记录 agreed，不拦截', async () => {
     const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
     const runner = {
