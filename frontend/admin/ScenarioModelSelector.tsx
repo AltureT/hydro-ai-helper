@@ -2,7 +2,7 @@ import React from 'react';
 import { i18n } from '../utils/i18n';
 import {
   COLORS, SPACING, RADIUS,
-  getInputStyle, getButtonStyle, getBadgeStyle,
+  getInputStyle, getButtonStyle, getBadgeStyle, getAlertStyle,
 } from '../utils/styles';
 import type { Endpoint, SelectedModel, AIScenarioKey, ScenarioModelsState } from './configTypes';
 import { AI_SCENARIO_KEYS } from './configTypes';
@@ -23,7 +23,7 @@ function summarizeChain(chain: SelectedModel[]): string {
   return names.length > 3 ? `${shown} → +${names.length - 3}` : shown;
 }
 
-const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; icon: string }> = {
+const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; icon: string; warnKey?: string }> = {
   studentChat: {
     labelKey: 'ai_helper_admin_scenario_student_chat',
     descKey: 'ai_helper_admin_scenario_student_chat_desc',
@@ -43,6 +43,7 @@ const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; 
     labelKey: 'ai_helper_admin_scenario_testdata_generation',
     descKey: 'ai_helper_admin_scenario_testdata_generation_desc',
     icon: '🧪',
+    warnKey: 'ai_helper_admin_scenario_testdata_strong_model_warning',
   },
 };
 
@@ -134,6 +135,12 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
               <p style={{ fontSize: '12px', color: COLORS.textMuted, margin: `0 0 ${SPACING.sm}` }}>
                 {i18n(meta.descKey)}
               </p>
+
+              {meta.warnKey && (
+                <div style={{ ...getAlertStyle('warning'), fontSize: '12px', fontWeight: 600, marginBottom: SPACING.sm }}>
+                  {i18n(meta.warnKey)}
+                </div>
+              )}
 
               {isDefault && (
                 <div style={{
