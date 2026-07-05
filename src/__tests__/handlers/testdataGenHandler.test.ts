@@ -12,6 +12,8 @@ import {
   TestdataGenHandlerPriv,
   extractStatementMarkdown,
 } from '../../handlers/testdataGenHandler';
+import * as openaiClient from '../../services/openaiClient';
+import { TestdataGenService } from '../../services/testdataGenService';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -201,6 +203,43 @@ describe('TestdataGenGenerateHandler', () => {
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
+  });
+
+  it('请求级 AbortSignal 传入服务；客户端断开触发取消 → 499 且不上报错误', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    let capturedSignal: AbortSignal | undefined;
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockImplementation(
+      (params: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        capturedSignal = params.signal;
+        params.signal?.addEventListener('abort', () =>
+          reject(Object.assign(new Error('canceled'), { name: 'AbortError' })));
+      }) as never,
+    );
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (name === 'errorReporter' ? { capture } : undefined));
+    const listeners: Record<string, () => void> = {};
+    const removeListener = jest.fn();
+    (handler as unknown as { context: unknown }).context = {
+      req: { on: (ev: string, cb: () => void) => { listeners[ev] = cb; }, removeListener },
+    };
+    try {
+      const done = handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(capturedSignal).toBeDefined();
+      listeners.close?.();
+      await done;
+      expect(handler.response.status).toBe(499);
+      expect(capture).not.toHaveBeenCalled();
+      expect(removeListener).toHaveBeenCalledWith('close', listeners.close);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
   });
 
   it('题面为空返回 400', async () => {

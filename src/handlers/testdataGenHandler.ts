@@ -20,6 +20,7 @@ import {
   SUPPORTED_TEMPLATE_LANGS,
   validateGenerateOptions,
   isSafeTestdataFilename,
+  isCancellation,
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
@@ -242,19 +243,38 @@ export class TestdataGenGenerateHandler extends Handler {
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
 
-      const plan = await service.generate({
-        problemTitle: pdoc.title || problemId,
-        statementMarkdown: statement,
-        options,
-        existingFiles,
-        fillInDetected: isFillInBlankProblem(statement),
-      });
+      // 请求级取消：客户端断开时中止 AI 调用与沙箱管线，避免白跑
+      const requestAc = new AbortController();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawReq = (this as any).context?.req;
+      const onClose = () => requestAc.abort();
+      rawReq?.on?.('close', onClose);
+      let plan;
+      try {
+        plan = await service.generate({
+          problemTitle: pdoc.title || problemId,
+          statementMarkdown: statement,
+          options,
+          existingFiles,
+          fillInDetected: isFillInBlankProblem(statement),
+          signal: requestAc.signal,
+        });
+      } finally {
+        rawReq?.removeListener?.('close', onClose);
+      }
 
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });
 
       this.response.body = { plan };
       this.response.type = 'application/json';
     } catch (err) {
+      // 客户端主动断开：非故障，不上报也不打 error 日志
+      if (isCancellation(err)) {
+        this.response.status = 499;
+        this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+        this.response.type = 'application/json';
+        return;
+      }
       console.error('[TestdataGenGenerateHandler.post] error:', err);
       this.ctx.get('errorReporter')?.capture(
         'api_failure', 'testdata_gen',

@@ -609,12 +609,13 @@ describe('Hydro 沙箱生成蓝图', () => {
         ] }),
         stderr: '',
       }),
-      runPythonBatch: jest.fn().mockResolvedValue([
-        { stdout: 'CBA\n', stderr: '' },
-        { stdout: 'Impossible\n', stderr: '' },
-        { stdout: 'CBA\nACB\n', stderr: '' },
-      ]),
+      runPythonBatch: jest.fn(),
     };
+    runner.runPythonBatchDetailed = jest.fn().mockResolvedValue([
+      { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'CBA\n', stderr: '' },
+      { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'Impossible\n', stderr: '' },
+      { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'CBA\nACB\n', stderr: '' },
+    ]);
     const blueprint = parseSandboxBlueprint(
       makeSandboxBlueprint('traditional'),
       { problemKind: 'traditional', caseCount: 2, languages: [] },
@@ -626,10 +627,10 @@ describe('Hydro 沙箱生成蓝图', () => {
       runner,
     );
     expect(response.cases.map(item => item.output)).toEqual(['CBA\n', 'Impossible\n']);
-    expect(runner.runPythonBatch).toHaveBeenCalledWith(
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
       expect.any(String),
       expect.arrayContaining(['2\nA>B\nC<B\nA>C\nA<B\nB>C\nC>A\n']),
-      undefined,
+      expect.anything(),
     );
   });
 });
@@ -883,7 +884,10 @@ describe('TestdataGenService.generate', () => {
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'CBA\n', stderr: '' },
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'Impossible\n', stderr: '' },
+      ]),
       runPython: jest.fn().mockResolvedValue({
         stdout: JSON.stringify({ cases: [
           { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
@@ -891,10 +895,7 @@ describe('TestdataGenService.generate', () => {
         ] }),
         stderr: '',
       }),
-      runPythonBatch: jest.fn().mockResolvedValue([
-        { stdout: 'CBA\n', stderr: '' },
-        { stdout: 'Impossible\n', stderr: '' },
-      ]),
+      runPythonBatch: jest.fn(),
     };
     const service = new TestdataGenService(mockClient as never, {
       sandboxRunner: runner,
@@ -980,11 +981,15 @@ describe('TestdataGenService.generate', () => {
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
+      // 各阶段（ORACLE/模板实跑等）统一回显输入作为输出
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, ins: string[]) =>
+        Promise.resolve(ins.map(input => ({
+          status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '',
+        })))),
       runPython: jest.fn().mockResolvedValue({
         stdout: JSON.stringify({ cases: [{ input: 'abc' }] }), stderr: '',
       }),
-      runPythonBatch: jest.fn().mockResolvedValue([{ stdout: 'abc\n', stderr: '' }]),
+      runPythonBatch: jest.fn(),
     };
     const plan = await new TestdataGenService(mockClient as never, {
       sandboxRunner: runner, mode: 'sandbox',
@@ -1198,22 +1203,44 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       .rejects.toThrow(/GENERATOR 实跑失败：.*NameError/);
   });
 
-  it('ORACLE 实跑失败时报错标明阶段与任务-测试点对应关系', async () => {
+  it('ORACLE 在生成的测试点上崩溃：直接点名测试点并附输入与 stderr 尾部', async () => {
     const bp = tradBlueprint();
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: jest.fn().mockRejectedValue(
-        new Error('第 1 个沙箱任务执行失败（Nonzero Exit Status）：IndexError: string index out of range'),
-      ),
-      runPythonBatchDetailed: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({
+          accepted: false, status: 'Nonzero Exit Status', exitStatus: 1,
+          stderr: 'Traceback (most recent call last):\nIndexError: string index out of range',
+        }),
+        detail({ stdout: '2\n' }),
+      ]),
     };
     const err: Error = await materializeSandboxBlueprint(bp, tradOpts, '', runner).catch(e => e);
     expect(err).toBeInstanceOf(Error);
-    expect(err.message).toMatch(/ORACLE（标程）实跑失败/);
-    // 无样例：说明全部任务对应生成的测试点
-    expect(err.message).toContain('对应生成的第 1-2 个测试点');
-    expect(err.message).toContain('IndexError');
+    expect(err.message).toMatch(/ORACLE（标程）在第 1 个测试点上执行失败/);
+    expect(err.message).toContain('输入：1');
+    expect(err.message).toContain('IndexError: string index out of range');
+  });
+
+  it('ORACLE 在题面样例上崩溃：直接点名样例编号', async () => {
+    const bp = tradBlueprint();
+    const statement = ['## 样例', '```input1', '9 9', '```', '```output1', '18', '```'].join('\n');
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '1\n' }),
+        detail({ stdout: '2\n' }),
+        detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: 'ValueError: bad sample' }),
+      ]),
+    };
+    const err: Error = await materializeSandboxBlueprint(bp, tradOpts, statement, runner).catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/ORACLE（标程）在题面样例 1 上执行失败/);
+    expect(err.message).toContain('ValueError: bad sample');
   });
 
   it('用户中止（CanceledError）原样上抛，不包装为 GENERATOR/ORACLE 阶段失败', async () => {
@@ -1230,8 +1257,8 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const oracleCancelRunner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: jest.fn().mockRejectedValue(cancelErr),
-      runPythonBatchDetailed: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockRejectedValue(cancelErr),
     };
     await expect(materializeSandboxBlueprint(bp, tradOpts, '', oracleCancelRunner)).rejects.toBe(cancelErr);
   });
@@ -1241,8 +1268,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: echoOracle(),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]) // ORACLE
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]), // BRUTE
     };
     const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
     expect(res.verification?.bruteCheck).toEqual({ compared: 2, agreed: 2, skippedTimeout: [], disagreed: [] });
@@ -1253,8 +1282,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: echoOracle(),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' }), detail({ stdout: '999\n' })]),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]) // ORACLE
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '999\n' })]), // BRUTE
     };
     await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
       .rejects.toThrow(/暴力解与标程在第 2 个测试点不一致/);
@@ -1266,8 +1297,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: echoOracle(),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' }), detail({ stdout: '999\n' })]),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]) // ORACLE
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '999\n' })]), // BRUTE
     };
     const res = await materializeSandboxBlueprint(bp, opts, '', runner);
     expect(res.verification?.oracleKind).toBe('provided-std');
@@ -1280,11 +1313,13 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: echoOracle(),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([
-        detail({ stdout: '1\n' }),
-        detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
-      ]),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' }), detail({ stdout: '2\n' })]) // ORACLE
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }),
+          detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+        ]), // BRUTE
     };
     const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
     expect(res.verification?.bruteCheck).toMatchObject({ agreed: 1, skippedTimeout: [2], disagreed: [] });
@@ -1326,8 +1361,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: JSON.stringify({ cases: [{ label: 'c1', input: '2 3' }] }), stderr: '' }),
-      runPythonBatch: jest.fn().mockResolvedValue([{ stdout: '5\n', stderr: '' }]),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '6\n' })]),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '5\n' })]) // ORACLE
+        .mockResolvedValueOnce([detail({ stdout: '6\n' })]), // solution+template 实跑
     };
     await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner))
       .rejects.toThrow(/template\.py 与标程在第 1 个测试点不一致/);
@@ -1338,7 +1375,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: echoOracle(),
+      runPythonBatch: jest.fn(),
       runPythonBatchDetailed: jest.fn().mockResolvedValue([]),
     };
     // 每次 Date.now 递增 40 万毫秒，任意两个阶段间隔都超 30 万预算
@@ -1347,7 +1384,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     try {
       await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
         .rejects.toThrow(/总时长超出预算/);
-      expect(runner.runPythonBatch).not.toHaveBeenCalled();
+      expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();
     }

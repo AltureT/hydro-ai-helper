@@ -200,18 +200,38 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
-            const plan = await service.generate({
-                problemTitle: pdoc.title || problemId,
-                statementMarkdown: statement,
-                options,
-                existingFiles,
-                fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
-            });
+            // 请求级取消：客户端断开时中止 AI 调用与沙箱管线，避免白跑
+            const requestAc = new AbortController();
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const rawReq = this.context?.req;
+            const onClose = () => requestAc.abort();
+            rawReq?.on?.('close', onClose);
+            let plan;
+            try {
+                plan = await service.generate({
+                    problemTitle: pdoc.title || problemId,
+                    statementMarkdown: statement,
+                    options,
+                    existingFiles,
+                    fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
+                    signal: requestAc.signal,
+                });
+            }
+            finally {
+                rawReq?.removeListener?.('close', onClose);
+            }
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
             this.response.body = { plan };
             this.response.type = 'application/json';
         }
         catch (err) {
+            // 客户端主动断开：非故障，不上报也不打 error 日志
+            if ((0, testdataGenService_1.isCancellation)(err)) {
+                this.response.status = 499;
+                this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                this.response.type = 'application/json';
+                return;
+            }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
             this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || ''), ...(0, openaiClient_1.extractAiErrorMetadata)(err) });
             if (err instanceof openaiClient_1.AIServiceError) {

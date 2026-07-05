@@ -11,6 +11,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.GoJudgeSandboxRunner = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_CHUNK_SIZE = void 0;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
+const textTruncate_1 = require("../lib/textTruncate");
 const CPU_LIMIT_NS = 5000000000;
 const CLOCK_LIMIT_NS = 10000000000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -66,14 +67,6 @@ function unwrapResults(data) {
     }
     throw new Error('Hydro 沙箱返回了无法识别的响应格式');
 }
-/** 截断保留尾部：Python traceback 的关键错误行在最后一行。 */
-function truncateTail(text, max) {
-    return text.length > max ? `…${text.slice(-max)}` : text;
-}
-/** 截断保留头部：用于摘录出错任务的输入内容。 */
-function truncateHead(text, max) {
-    return text.length > max ? `${text.slice(0, max)}…` : text;
-}
 /** 把 go-judge 原始结果映射为宽容明细，按 status 分类而不抛异常。 */
 function toRunDetail(result) {
     const status = result.status || '';
@@ -119,8 +112,8 @@ class GoJudgeSandboxRunner {
         return details.map((detail, index) => {
             if (!detail.accepted) {
                 const info = detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`;
-                throw new Error(`第 ${index + 1} 个沙箱任务执行失败（${detail.status || 'Unknown'}）：${truncateTail(info, 1000)}\n`
-                    + `该任务的输入内容：${truncateHead(inputs[index] ?? '', 300) || '（空）'}`);
+                throw new Error(`第 ${index + 1} 个沙箱任务执行失败（${detail.status || 'Unknown'}）：${(0, textTruncate_1.excerptTail)(info, 1000)}\n`
+                    + `该任务的输入内容：${(0, textTruncate_1.excerpt)(inputs[index] ?? '', 300) || '（空）'}`);
             }
             return { stdout: detail.stdout, stderr: detail.stderr };
         });

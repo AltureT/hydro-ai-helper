@@ -18,7 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
+exports.TestdataGenService = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = exports.excerpt = void 0;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.detectStdFilename = detectStdFilename;
@@ -38,8 +38,8 @@ exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
 exports.extractStatementSamples = extractStatementSamples;
-exports.excerpt = excerpt;
 exports.parseGeneratorOutput = parseGeneratorOutput;
+exports.isCancellation = isCancellation;
 exports.materializeSandboxBlueprint = materializeSandboxBlueprint;
 exports.parseTemplateSections = parseTemplateSections;
 exports.assemblePlan = assemblePlan;
@@ -47,6 +47,9 @@ exports.isLikelyFunctionProblem = isLikelyFunctionProblem;
 exports.buildSkeletonPlan = buildSkeletonPlan;
 const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
+const textTruncate_1 = require("../lib/textTruncate");
+var textTruncate_2 = require("../lib/textTruncate");
+Object.defineProperty(exports, "excerpt", { enumerable: true, get: function () { return textTruncate_2.excerpt; } });
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
@@ -874,22 +877,6 @@ function comparableFileContent(content) {
         .join('\n')
         .trimEnd();
 }
-/**
- * 证据摘录：规范化换行、去尾部空白；UTF-8 超过 maxBytes 时按字符安全截断并加省略号，
- * 保证最终字节数不超过 maxBytes（含省略号）。用于把失败上下文回喂 AI/展示给教师。
- */
-function excerpt(text, maxBytes = 300) {
-    const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\s+$/, '');
-    if (Buffer.byteLength(normalized, 'utf8') <= maxBytes)
-        return normalized;
-    const ellipsis = '…';
-    const budget = maxBytes - Buffer.byteLength(ellipsis, 'utf8');
-    let cut = normalized;
-    while (cut.length > 0 && Buffer.byteLength(cut, 'utf8') > budget) {
-        cut = cut.slice(0, -1);
-    }
-    return `${cut.replace(/\s+$/, '')}${ellipsis}`;
-}
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
 function parseGeneratorOutput(stdout, expectedCount) {
     if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
@@ -973,12 +960,12 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         for (let i = 0; i < validatorResults.length; i++) {
             const detail = validatorResults[i];
             if (!detail.accepted) {
-                throw new Error(`第 ${i + 1} 个 .in 未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`);
+                throw new Error(`第 ${i + 1} 个 .in 未通过输入校验：${(0, textTruncate_1.excerpt)(detail.stderr || detail.error || detail.status, 300)}`);
             }
         }
         validatorRan = true;
     }
-    // d. ORACLE：严格实跑所有 .in + 传统题题面样例 → 产 .out 并做样例回归
+    // d. ORACLE：实跑所有 .in + 传统题题面样例 → 产 .out 并做样例回归
     checkBudget();
     const samples = blueprint.problemType === 'traditional'
         ? extractStatementSamples(statementMarkdown)
@@ -986,15 +973,22 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     const allInputs = [...inputs, ...samples.map(sample => sample.input)];
     let oracleResults;
     try {
-        oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+        oracleResults = await runner.runPythonBatchDetailed(blueprint.oracleCode, allInputs, { signal });
     }
     catch (err) {
         if (isCancellation(err))
             throw err;
-        const layout = samples.length > 0
-            ? `任务 1-${inputs.length} 对应生成的第 1-${inputs.length} 个测试点，任务 ${inputs.length + 1}-${allInputs.length} 对应题面样例`
-            : `全部 ${inputs.length} 个任务依次对应生成的第 1-${inputs.length} 个测试点`;
-        throw new Error(`ORACLE（标程）实跑失败，未能产出 .out（${layout}）：${err instanceof Error ? err.message : String(err)}`);
+        throw new Error(`ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+    for (let i = 0; i < oracleResults.length; i++) {
+        const detail = oracleResults[i];
+        if (detail.accepted)
+            continue;
+        // 直接点名失败位置：生成的测试点或题面样例，附输入与 traceback 尾部，供修复回路与教师定位
+        const target = i < inputs.length ? `第 ${i + 1} 个测试点` : `题面样例 ${samples[i - inputs.length].id} `;
+        throw new Error(`ORACLE（标程）在${target}上执行失败（${detail.status || 'Unknown'}）\n`
+            + `输入：${(0, textTruncate_1.excerpt)(allInputs[i] ?? '', 300) || '（空）'}\n`
+            + `错误：${(0, textTruncate_1.excerptTail)(detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`, 1000)}`);
     }
     const cases = generatedInputs.map((item, index) => {
         const output = normalizeFileContent(oracleResults[index].stdout);
@@ -1034,9 +1028,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 continue;
             }
             throw new Error(`template.py 与标程在第 ${caseNo} 个测试点不一致\n`
-                + `输入：${excerpt(inputs[i], 300)}\n`
-                + `模板输出：${excerpt(detail.stdout || detail.stderr || detail.status, 300)}\n`
-                + `标程输出：${excerpt(cases[i].output, 300)}`);
+                + `输入：${(0, textTruncate_1.excerpt)(inputs[i], 300)}\n`
+                + `模板输出：${(0, textTruncate_1.excerpt)(detail.stdout || detail.stderr || detail.status, 300)}\n`
+                + `标程输出：${(0, textTruncate_1.excerpt)(cases[i].output, 300)}`);
         }
         pyTemplateExecuted = true;
         templateCheck = { lang: 'py', total: inputs.length, passed, skippedTimeout };
@@ -1062,7 +1056,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 continue;
             }
             if (!detail.accepted) {
-                throw new Error(`暴力解在第 ${caseNo} 个测试点执行失败：${excerpt(detail.stderr || detail.error || detail.status, 300)}`);
+                throw new Error(`暴力解在第 ${caseNo} 个测试点执行失败：${(0, textTruncate_1.excerpt)(detail.stderr || detail.error || detail.status, 300)}`);
             }
             if (comparableFileContent(detail.stdout) === comparableFileContent(cases[i].output)) {
                 agreed++;
@@ -1074,9 +1068,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 continue;
             }
             throw new Error(`暴力解与标程在第 ${caseNo} 个测试点不一致（${generatedInputs[i].label || ''}）\n`
-                + `输入：${excerpt(inputs[i], 300)}\n`
-                + `标程输出：${excerpt(cases[i].output, 300)}\n`
-                + `暴力输出：${excerpt(detail.stdout, 300)}`);
+                + `输入：${(0, textTruncate_1.excerpt)(inputs[i], 300)}\n`
+                + `标程输出：${(0, textTruncate_1.excerpt)(cases[i].output, 300)}\n`
+                + `暴力输出：${(0, textTruncate_1.excerpt)(detail.stdout, 300)}`);
         }
         bruteCheck = { compared: inputs.length, agreed, skippedTimeout, disagreed };
     }
@@ -1189,6 +1183,8 @@ function assemblePlan(response, options, context = {}) {
     const dataOrigin = sandbox ? 'executed' : 'ai-only';
     const files = [];
     const caseCount = response.cases.length;
+    /** AI 生成代码文件统一入口：文件名只写一处，注释符由文件名推导。 */
+    const pushCode = (name, code, kind, origin, purpose) => files.push({ name, content: prependPurposeComment(name, code, purpose), kind, origin });
     response.cases.forEach((c, i) => {
         files.push({ name: `${i + 1}.in`, content: c.input, kind: 'case-in', origin: dataOrigin });
         files.push({ name: `${i + 1}.out`, content: c.output, kind: 'case-out', origin: dataOrigin });
@@ -1201,39 +1197,19 @@ function assemblePlan(response, options, context = {}) {
                 const origin = lang === 'py' && sandbox && response.pyTemplateExecuted
                     ? 'executed'
                     : 'ai-only';
-                files.push({
-                    name: exports.TEMPLATE_FILENAMES[lang],
-                    content: prependPurposeComment(exports.TEMPLATE_FILENAMES[lang], content, FILE_PURPOSES.template),
-                    kind: 'template',
-                    origin,
-                });
+                pushCode(exports.TEMPLATE_FILENAMES[lang], content, 'template', origin, FILE_PURPOSES.template);
             }
         }
         files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile', origin: 'deterministic' });
     }
     if (response.generatorCode?.trim()) {
-        files.push({
-            name: 'generator.py',
-            content: prependPurposeComment('generator.py', response.generatorCode, FILE_PURPOSES.generator),
-            kind: 'generator',
-            origin: 'executed',
-        });
+        pushCode('generator.py', response.generatorCode, 'generator', 'executed', FILE_PURPOSES.generator);
     }
     if (sandbox && response.bruteCode?.trim()) {
-        files.push({
-            name: 'brute.py',
-            content: prependPurposeComment('brute.py', response.bruteCode, FILE_PURPOSES.brute),
-            kind: 'brute',
-            origin: 'executed',
-        });
+        pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
     }
     if (sandbox && response.validatorCode?.trim()) {
-        files.push({
-            name: 'validator.py',
-            content: prependPurposeComment('validator.py', response.validatorCode, FILE_PURPOSES.validator),
-            kind: 'validator',
-            origin: 'executed',
-        });
+        pushCode('validator.py', response.validatorCode, 'validator', 'executed', FILE_PURPOSES.validator);
     }
     // 教师提供的标准答案是唯一权威：原样写入（deterministic，非实跑制品）
     const providedStd = options.providedStd?.trim();
@@ -1246,12 +1222,7 @@ function assemblePlan(response, options, context = {}) {
         });
         if (response.oracleCode?.trim()
             && normalizeFileContent(response.oracleCode) !== normalizeFileContent(providedStd)) {
-            files.push({
-                name: 'oracle.py',
-                content: prependPurposeComment('oracle.py', response.oracleCode, FILE_PURPOSES.oracle),
-                kind: 'std',
-                origin: sandbox ? 'executed' : 'ai-only',
-            });
+            pushCode('oracle.py', response.oracleCode, 'std', sandbox ? 'executed' : 'ai-only', FILE_PURPOSES.oracle);
         }
     }
     else {
@@ -1259,21 +1230,11 @@ function assemblePlan(response, options, context = {}) {
         const useSolutionForm = sandbox && response.problemType === 'function' && response.solutionCode?.trim();
         const stdContent = useSolutionForm ? response.solutionCode : response.stdSolution?.code;
         if (stdContent) {
-            files.push({
-                name: 'std.py',
-                content: prependPurposeComment('std.py', stdContent, useSolutionForm ? FILE_PURPOSES.stdSolutionForm : FILE_PURPOSES.stdProgram),
-                kind: 'std',
-                origin: sandbox ? 'executed' : 'ai-only',
-            });
+            pushCode('std.py', stdContent, 'std', sandbox ? 'executed' : 'ai-only', useSolutionForm ? FILE_PURPOSES.stdSolutionForm : FILE_PURPOSES.stdProgram);
             if (sandbox
                 && response.oracleCode?.trim()
                 && normalizeFileContent(response.oracleCode) !== normalizeFileContent(stdContent)) {
-                files.push({
-                    name: 'oracle.py',
-                    content: prependPurposeComment('oracle.py', response.oracleCode, FILE_PURPOSES.oracle),
-                    kind: 'std',
-                    origin: 'executed',
-                });
+                pushCode('oracle.py', response.oracleCode, 'std', 'executed', FILE_PURPOSES.oracle);
             }
         }
     }

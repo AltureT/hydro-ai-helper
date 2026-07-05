@@ -17,7 +17,11 @@
 import yaml from 'js-yaml';
 import type { ChatCallOptions, MultiModelClient, TokenUsage } from './openaiClient';
 import { SANDBOX_TOTAL_BUDGET_MS } from './goJudgeSandboxService';
+import { excerpt, excerptTail } from '../lib/textTruncate';
+
+export { excerpt } from '../lib/textTruncate';
 import type {
+  PythonRunDetail,
   PythonRunResult,
   TestdataGenerationMode,
   TestdataSandboxRunner,
@@ -1072,22 +1076,6 @@ function comparableFileContent(content: string): string {
     .trimEnd();
 }
 
-/**
- * 证据摘录：规范化换行、去尾部空白；UTF-8 超过 maxBytes 时按字符安全截断并加省略号，
- * 保证最终字节数不超过 maxBytes（含省略号）。用于把失败上下文回喂 AI/展示给教师。
- */
-export function excerpt(text: string, maxBytes = 300): string {
-  const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\s+$/, '');
-  if (Buffer.byteLength(normalized, 'utf8') <= maxBytes) return normalized;
-  const ellipsis = '…';
-  const budget = maxBytes - Buffer.byteLength(ellipsis, 'utf8');
-  let cut = normalized;
-  while (cut.length > 0 && Buffer.byteLength(cut, 'utf8') > budget) {
-    cut = cut.slice(0, -1);
-  }
-  return `${cut.replace(/\s+$/, '')}${ellipsis}`;
-}
-
 interface GeneratedInputCase {
   label?: string;
   input: string;
@@ -1132,7 +1120,7 @@ export function parseGeneratorOutput(stdout: string, expectedCount: number): Gen
  * 用户中止/请求取消类错误：必须原样上抛，包装成阶段失败会误导修复回路重试。
  * 覆盖 DOM/axios 取消形态与 openaiClient 的 AIServiceError(category='aborted')。
  */
-function isCancellation(err: unknown): boolean {
+export function isCancellation(err: unknown): boolean {
   const e = err as { name?: string; code?: string; category?: string } | null;
   return !!e && (
     e.name === 'AbortError' || e.name === 'CanceledError'
@@ -1192,22 +1180,28 @@ export async function materializeSandboxBlueprint(
     validatorRan = true;
   }
 
-  // d. ORACLE：严格实跑所有 .in + 传统题题面样例 → 产 .out 并做样例回归
+  // d. ORACLE：实跑所有 .in + 传统题题面样例 → 产 .out 并做样例回归
   checkBudget();
   const samples = blueprint.problemType === 'traditional'
     ? extractStatementSamples(statementMarkdown)
     : [];
   const allInputs = [...inputs, ...samples.map(sample => sample.input)];
-  let oracleResults: PythonRunResult[];
+  let oracleResults: PythonRunDetail[];
   try {
-    oracleResults = await runner.runPythonBatch(blueprint.oracleCode, allInputs, signal);
+    oracleResults = await runner.runPythonBatchDetailed(blueprint.oracleCode, allInputs, { signal });
   } catch (err) {
     if (isCancellation(err)) throw err;
-    const layout = samples.length > 0
-      ? `任务 1-${inputs.length} 对应生成的第 1-${inputs.length} 个测试点，任务 ${inputs.length + 1}-${allInputs.length} 对应题面样例`
-      : `全部 ${inputs.length} 个任务依次对应生成的第 1-${inputs.length} 个测试点`;
+    throw new Error(`ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`);
+  }
+  for (let i = 0; i < oracleResults.length; i++) {
+    const detail = oracleResults[i];
+    if (detail.accepted) continue;
+    // 直接点名失败位置：生成的测试点或题面样例，附输入与 traceback 尾部，供修复回路与教师定位
+    const target = i < inputs.length ? `第 ${i + 1} 个测试点` : `题面样例 ${samples[i - inputs.length].id} `;
     throw new Error(
-      `ORACLE（标程）实跑失败，未能产出 .out（${layout}）：${err instanceof Error ? err.message : String(err)}`,
+      `ORACLE（标程）在${target}上执行失败（${detail.status || 'Unknown'}）\n`
+      + `输入：${excerpt(allInputs[i] ?? '', 300) || '（空）'}\n`
+      + `错误：${excerptTail(detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`, 1000)}`,
     );
   }
 
@@ -1425,6 +1419,10 @@ export function assemblePlan(
   const dataOrigin: PlannedFileOrigin = sandbox ? 'executed' : 'ai-only';
   const files: PlannedFile[] = [];
   const caseCount = response.cases.length;
+  /** AI 生成代码文件统一入口：文件名只写一处，注释符由文件名推导。 */
+  const pushCode = (
+    name: string, code: string, kind: PlannedFile['kind'], origin: PlannedFileOrigin, purpose: string,
+  ) => files.push({ name, content: prependPurposeComment(name, code, purpose), kind, origin });
 
   response.cases.forEach((c, i) => {
     files.push({ name: `${i + 1}.in`, content: c.input, kind: 'case-in', origin: dataOrigin });
@@ -1439,40 +1437,20 @@ export function assemblePlan(
         const origin: PlannedFileOrigin = lang === 'py' && sandbox && response.pyTemplateExecuted
           ? 'executed'
           : 'ai-only';
-        files.push({
-          name: TEMPLATE_FILENAMES[lang],
-          content: prependPurposeComment(TEMPLATE_FILENAMES[lang], content, FILE_PURPOSES.template),
-          kind: 'template',
-          origin,
-        });
+        pushCode(TEMPLATE_FILENAMES[lang], content, 'template', origin, FILE_PURPOSES.template);
       }
     }
     files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile', origin: 'deterministic' });
   }
 
   if (response.generatorCode?.trim()) {
-    files.push({
-      name: 'generator.py',
-      content: prependPurposeComment('generator.py', response.generatorCode, FILE_PURPOSES.generator),
-      kind: 'generator',
-      origin: 'executed',
-    });
+    pushCode('generator.py', response.generatorCode, 'generator', 'executed', FILE_PURPOSES.generator);
   }
   if (sandbox && response.bruteCode?.trim()) {
-    files.push({
-      name: 'brute.py',
-      content: prependPurposeComment('brute.py', response.bruteCode, FILE_PURPOSES.brute),
-      kind: 'brute',
-      origin: 'executed',
-    });
+    pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
   }
   if (sandbox && response.validatorCode?.trim()) {
-    files.push({
-      name: 'validator.py',
-      content: prependPurposeComment('validator.py', response.validatorCode, FILE_PURPOSES.validator),
-      kind: 'validator',
-      origin: 'executed',
-    });
+    pushCode('validator.py', response.validatorCode, 'validator', 'executed', FILE_PURPOSES.validator);
   }
 
   // 教师提供的标准答案是唯一权威：原样写入（deterministic，非实跑制品）
@@ -1488,37 +1466,23 @@ export function assemblePlan(
       response.oracleCode?.trim()
       && normalizeFileContent(response.oracleCode) !== normalizeFileContent(providedStd)
     ) {
-      files.push({
-        name: 'oracle.py',
-        content: prependPurposeComment('oracle.py', response.oracleCode, FILE_PURPOSES.oracle),
-        kind: 'std',
-        origin: sandbox ? 'executed' : 'ai-only',
-      });
+      pushCode('oracle.py', response.oracleCode, 'std', sandbox ? 'executed' : 'ai-only', FILE_PURPOSES.oracle);
     }
   } else {
     // 函数题沙箱模式：std.py 用学生提交形式（solutionCode），完整 ORACLE 另存 oracle.py 以闭环重造
     const useSolutionForm = sandbox && response.problemType === 'function' && response.solutionCode?.trim();
     const stdContent = useSolutionForm ? response.solutionCode : response.stdSolution?.code;
     if (stdContent) {
-      files.push({
-        name: 'std.py',
-        content: prependPurposeComment(
-          'std.py', stdContent, useSolutionForm ? FILE_PURPOSES.stdSolutionForm : FILE_PURPOSES.stdProgram,
-        ),
-        kind: 'std',
-        origin: sandbox ? 'executed' : 'ai-only',
-      });
+      pushCode(
+        'std.py', stdContent, 'std', sandbox ? 'executed' : 'ai-only',
+        useSolutionForm ? FILE_PURPOSES.stdSolutionForm : FILE_PURPOSES.stdProgram,
+      );
       if (
         sandbox
         && response.oracleCode?.trim()
         && normalizeFileContent(response.oracleCode) !== normalizeFileContent(stdContent)
       ) {
-        files.push({
-          name: 'oracle.py',
-          content: prependPurposeComment('oracle.py', response.oracleCode, FILE_PURPOSES.oracle),
-          kind: 'std',
-          origin: 'executed',
-        });
+        pushCode('oracle.py', response.oracleCode, 'std', 'executed', FILE_PURPOSES.oracle);
       }
     }
   }
