@@ -22,6 +22,13 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 <img src="assets/screenshots/1.png" alt="Student panel - AI chat" width="800">
 
 <details>
+<summary><b>AI Test Data Generation</b></summary>
+
+<img src="assets/screenshots/10.png" alt="Problem files page - AI test data generation panel" width="800">
+
+</details>
+
+<details>
 <summary><b>Batch AI Learning Summary</b></summary>
 
 <img src="assets/screenshots/8.png" alt="Batch summary - scoreboard integration" width="800">
@@ -54,37 +61,25 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 
 ### Teachers
 
-- **Teaching Analysis** — class-level insights from collective submission data, helping teachers discover teaching problems and take action
-  - 8-dimension rule-engine analysis: common errors, comprehension gaps, learning strategies, at-risk students, difficulty anomalies, progress trends, cognitive paths, AI tutoring effectiveness
-  - Error signature clustering: groups similar compile/runtime errors across students to surface shared misconceptions
-  - Temporal behavior patterns: classifies students into 5 patterns (strategic solver, disengaged, burst-then-quit, stuck-silent, persistent learner)
-  - Cross-dimensional correlation: detects compound risk patterns (e.g., high AI usage + low AC rate)
-  - Code fill-in exercises: auto-generates blanked-code exercises from AC submissions for targeted practice
-  - LLM-powered actionable suggestions with priority framework (P0/P1/P2) — specific classroom actions, not generic advice
-  - 60/40 split layout with sticky AI suggestion sidebar, skeleton loading, confidence badges
+- **AI Test Data Generation** — generate a full test data set from the statement on the problem files page (`/p/:pid/files`)
+  - **Sandbox execution + double verification**: the generator and reference solution actually run in Hydro's judge sandbox to produce `.in`/`.out`, then pass four machine gates — independent brute-force cross-check, input validation, template execution, and statement-sample regression; on failure the AI gets one automatic repair round with full context
+  - Supports traditional problems, LeetCode-style function problems (auto-generates `template.py/java/cc` and `compile.sh`) and fill-in-the-blank problems
+  - Paste an existing reference solution as the single source of truth; `config.yaml` is built deterministically and judge settings sync automatically
+  - Every generated code file (std.py, generator.py, validator.py, …) starts with a purpose comment; everything is previewed, editable and opt-in before writing
+  - ⚠️ Highly sensitive to model capability: assign your strongest model to the Test Data Generation scenario; a skeleton mode (no AI) is available as fallback
+- **Teaching Analysis** — class-level insights from collective submission data
+  - 8-dimension rule engine (common errors / comprehension gaps / at-risk students / progress trends, …) + error-signature clustering + temporal behavior patterns
+  - LLM-powered P0/P1/P2 prioritized suggestions — specific classroom actions, not generic advice; auto-generates fill-in exercises from AC code
 - **Batch AI Summary** — one-click personalized learning summaries for all students on scoreboard pages
-  - Longitudinal student history tracking: records error trends, struggle indicators, and actionable advice across assignments
-  - Smart submission sampling based on milestones (first submit, first AC, score improvements, status changes)
-  - Supplemental generation for late-arriving students without regenerating existing summaries
-  - Draft/publish workflow with real-time SSE progress, stop/continue/retry controls
-- **AI Test Data Generation (Beta)** — generate a full test data set from the Markdown statement on the problem files page (`/p/:pid/files`)
-  - Supports traditional problems and LeetCode-style function problems (incl. linked-list problems via class or plain-list implementations); generates `template.py` / `template.java` / `template.cc` and `compile.sh`
-  - Fill-in-the-blank (complete-the-code) problems: auto-detects scaffold code in the statement (manual override available); reference solution and test outputs strictly match the scaffold's print format
-  - Paste an existing reference solution to make it the single source of truth for all test outputs; it is written alongside as the std file
-  - Adjustable data scale (small/medium/large); cases must cover statement samples and a boundary group (min scale, scale limits, special values, special structures), each labeled with its intent
-  - `config.yaml` judge config (`user_extra_files` / `subtasks` / `langs`) is built deterministically by the plugin; judge settings sync automatically once written
-  - Ships a reference solution; every file is previewed, editable and opt-in before writing, with explicit overwrite warnings
-  - Same permission model as Hydro problem file management (problem owner or problem-edit permission) — inaccessible to students
-- Browse student conversations with filters (time / problem / class / student / userId)
-- Autocomplete search for class and problem filters
-- Multi-dimensional effectiveness metrics and question-type distribution
-- CSV export with optional anonymization and metrics columns
+  - Longitudinal history tracking + milestone-based submission sampling; supplemental generation for late-arriving students
+  - Draft/publish workflow with real-time SSE progress and stop/continue/retry controls
+- Conversation browsing (time / problem / class / student filters with autocomplete), effectiveness metrics, CSV export with optional anonymization
 
 ### Admins
 
 - Unified portal: Conversations / Analytics / Configuration tabs
 - Multi-endpoint API management with model auto-discovery, drag-to-reorder priority, and automatic failover
-- Per-scenario model assignment: dedicate different models to student chat / learning summary / teaching analysis / test data generation, falling back to the global chain when unset
+- Per-scenario model assignment: student chat / learning summary / teaching analysis / test data generation
 - Cost control: token usage tracking, budget limits, cost dashboard
 - Rate limiting, custom system prompt, one-click plugin update
 
@@ -93,6 +88,7 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 
 - Multi-layer jailbreak detection (input / prompt / output) with cross-turn protection
 - CSRF token validation, SSRF prevention, AES-256-GCM encrypted API key storage
+- AI-generated code runs only inside the go-judge sandbox, never in the web process
 - Paginated jailbreak audit logs
 
 </details>
@@ -119,32 +115,22 @@ Verify: visit `/ai-helper/hello` — a JSON response means success.
 
 ### Environment Variables
 
-Set `ENCRYPTION_KEY` (32 characters) to encrypt API keys:
+`ENCRYPTION_KEY` (required, 32 characters) — encrypts API keys:
 
 ```bash
-export ENCRYPTION_KEY="your-32-character-secret-key!!!"
+export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # generate: openssl rand -base64 24 | head -c 32
 ```
 
-Generate a random key: `openssl rand -base64 24 | head -c 32`
+`AI_HELPER_UPDATE_CHANNEL` (optional) — in-app update channel:
 
-**Update channel** (optional): the in-app one-click/overwrite update follows `AI_HELPER_UPDATE_CHANNEL`:
+- `stable` (default) — updates only to official releases (`vX.Y.Z` tags), GPG-verified. Use on all real-user servers.
+- `edge` — tracks the latest `main` branch code; for the maintainer's own test server only.
 
-- `stable` (default) — updates only to official releases (`git tag vX.Y.Z`), GPG-verified. Recommended for all real-user servers.
-- `edge` — tracks the latest `main` branch code. Set this **only on your own test server**; do not set it on users' servers.
+`AI_HELPER_TESTDATA_GENERATION_MODE` (optional) — whether test data generation requires the sandbox (`hydrojudge.sandbox_host`):
 
-```bash
-export AI_HELPER_UPDATE_CHANNEL=edge   # test server only
-```
-
-**AI test-data execution** (optional): `AI_HELPER_TESTDATA_GENERATION_MODE` controls whether AI-generated generators run in Hydro's go-judge sandbox (`hydrojudge.sandbox_host`):
-
-- `auto` (default) — use the sandbox when reachable; otherwise fall back to the legacy direct-output mode with a warning.
-- `sandbox` — require the sandbox and fail safely when it is unavailable.
-- `direct` — always use the legacy direct-output mode.
-
-```bash
-export AI_HELPER_TESTDATA_GENERATION_MODE=sandbox
-```
+- `auto` (default) — verify in the sandbox when reachable; otherwise fall back to direct output clearly marked "unverified"
+- `sandbox` — require the sandbox and fail safely when unavailable
+- `direct` — always use direct output (not recommended)
 
 ### Admin Setup
 
@@ -152,16 +138,12 @@ Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" t
 
 1. **Add API endpoints** — endpoint name, API Base URL, API Key → click "Fetch Models"
 2. **Select models & priority** — pick models, drag to reorder; failover is automatic
-3. **Adjust settings** — rate limit (default 5/min/user), custom system prompt
+3. **Scenario models** — assign dedicated models per scenario (use your strongest model for Test Data Generation)
 4. **Test & save** — "Test Connection" to verify, then save
 
 ## Telemetry & Privacy
 
-Collects **anonymous statistics** (installation count, active users over 7/30/90-day windows, conversations, per-day feature usage counters, version) for GitHub badges and development.
-
-- Fully anonymous (random UUID, no PII); domain IDs are SHA-256 hashed
-- Records the **country and region** of the reporting request (coarse-grained, inferred by Cloudflare from the server's egress IP; **the IP itself is never stored**), instance-level only
-- No code, conversations, or personal data; instance records auto-clean after 270 days without reports (covers school vacations), per-day feature usage kept for 400 days
+Collects **anonymous statistics** (installations, active-user windows, conversations, per-day feature usage, version) for GitHub badges and development. Fully anonymous (random UUID, no PII, IPs never stored); no code, conversations or personal data — only a coarse country/region inferred by Cloudflare for distribution stats.
 
 <details>
 <summary><b>Disable telemetry</b></summary>
@@ -179,124 +161,48 @@ db.ai_plugin_install.updateOne(
 ## Changelog
 
 <details open>
+<summary><b>v3.0.0</b> — Test data generation: sandbox execution + double verification</summary>
+
+- Test data is no longer emitted directly by the AI: the generator and reference solution actually run in the go-judge sandbox to produce `.in`/`.out`
+- Four machine gates: independent brute-force cross-check, per-case input validation, function-template execution, statement-sample regression
+- On failure, the failing stage, test case, input and traceback tail are fed back to the AI for one automatic repair round; teacher cancellation is no longer misreported
+- Generated code files start with purpose comments; prominent strongest-model reminders on both the files page and the scenario-model page
+- Telemetry: error reports carry AI failure details, startup-failure canary alerts, cumulative feature usage and instance region
+
+</details>
+
+<details>
 <summary><b>v2.5.0</b> — AI Test Data Generation (Beta)</summary>
 
-**AI Test Data Generation (problem files page, NEW)**
-- One-click generation from the Markdown statement: test cases, function-problem judge templates (template.py/java/cc + compile.sh), config.yaml (judge settings sync automatically) and a reference solution
-- Supports traditional problems, LeetCode-style function problems (incl. class Solution signatures and linked lists) and fill-in-the-blank problems
-- Paste an existing reference solution as the single source of truth; adjustable data scale with mandatory sample/boundary coverage
-- Skeleton mode as an AI-outage fallback (no AI call, deterministic scaffolding)
-- Full preview, editable, opt-in writes with overwrite warnings; same permission model as Hydro problem file management
-- New "Test Data Generation" AI scenario with its own model chain; unrestricted output length and a 10-minute per-attempt timeout
-- Sectioned-text output contract (zero escaping for code); the panel shows an actionable error instead of silently disappearing when loading fails
+- One-click generation of test cases, judge templates, config.yaml and a reference solution from the statement (direct-output mode)
+- Traditional / function / fill-in-the-blank problems; paste a reference solution as the single source of truth; skeleton-mode fallback
+- New "Test Data Generation" AI scenario with its own model chain
 
 </details>
 
 <details>
 <summary><b>v2.0.0</b> — Teaching Analysis & Design Overhaul</summary>
 
-**Teaching Analysis System (NEW)**
-- 8-dimension class-level analysis: common errors, comprehension gaps, learning strategies, at-risk students, difficulty anomalies, progress trends, cognitive paths, AI tutoring effectiveness
-- Rule-engine-first architecture: anomaly detection via data pipeline, LLM for actionable suggestions — 1/30 cost of pure-LLM approach
-- Error signature clustering with compiler error normalization
-- Temporal behavior pattern analyzer (5-way student classification)
-- Cross-dimensional correlation detection (3 priority pairs)
-- Auto-generated code fill-in exercises from AC submissions
-- Adaptive class-size strategy (<10 / 10-20 / 20-100+ students)
-- 60/40 split layout with sticky suggestion sidebar, skeleton loading, confidence badges
-
-**Batch Summary Enhancement**
-- Student history tracking across assignments (error trends, struggle indicators, prior advice)
-- Supplemental generation mode for late-arriving students
-- Rewritten prompts with educational psychology principles and historical context injection
-- Smart primary button state machine (generate new / retry failed / continue)
-
-**Frontend Redesign**
-- Unified design token system with green accent theme for teacher features
-- Tab restyling with ARIA accessibility attributes and keyboard navigation
-- Finding cards with severity-based color coding (high/medium/low)
-- Responsive 60/40 → vertical layout below 768px
+- 8-dimension class analysis + error-signature clustering + temporal behavior patterns (rule-engine first, ~1/30 the cost of pure LLM)
+- LLM-generated P0/P1/P2 teaching suggestions; auto-generated fill-in exercises from AC code
+- Longitudinal summary tracking with supplemental generation; unified frontend design tokens
 
 </details>
 
 <details>
-<summary><b>v1.21.0</b> — Batch AI Learning Summary</summary>
+<summary><b>Earlier versions</b></summary>
 
-- One-click AI summary generation for all students on homework/contest scoreboard pages
-- Smart submission sampling based on milestones (first submit, first AC, score improvements, status changes)
-- Real-time SSE progress with stop / continue / retry-failed controls
-- Draft → publish workflow; teachers can edit summaries before publishing
-- Student view: auto-displays published summary on scoreboard with periodic polling
-- Submission reference links in summaries clickable to view code details
-- CSV export for generated summaries
-
-</details>
-
-<details>
-<summary><b>v1.20.0</b> — Teacher Analytics Enhancement</summary>
-
-- Autocomplete search for class, problem, and student filters
-- UserId filtering and unified filter layout
-- SVG icon set replacing emoji indicators
-- Cost analytics period accuracy fixes
-
-</details>
-
-<details>
-<summary><b>v1.19.0</b> — i18n & Effectiveness Metrics</summary>
-
-- Full English/Chinese internationalization (frontend + backend)
-- Multi-dimensional conversation effectiveness metrics replacing simple binary flag
-- Metrics columns in analytics tables and CSV export
-
-</details>
-
-<details>
-<summary><b>v1.18.0</b> — Telemetry Dashboard & Error Diagnostics</summary>
-
-- Telemetry dashboard SPA for monitoring plugin installations
-- Enhanced error diagnostics with endpoint-level context
-- Admin feedback collection UI
-
-</details>
-
-<details>
-<summary><b>v1.16.x</b> — Stability & Security</summary>
-
-- Stabilize telemetry instanceId for Docker environments
-- Upgrade DOMPurify to address XSS vulnerabilities
-- Collapse jailbreak logs by default
-
-</details>
-
-<details>
-<summary><b>v1.14.x</b> — SSE Streaming & Cost Control</summary>
-
-- SSE streaming output — real-time character-by-character display
-- Token usage tracking, budget limits, cost dashboard
-- CSRF protection, SSRF prevention, 3-layer prompt injection defense
-- Homework/contest mode support
-
-</details>
-
-<details>
-<summary><b>v1.12.0 and earlier</b></summary>
-
-- v1.12.0: Judge data integration, contest mode, ~45% token reduction
-- v1.11.0: Improved guided response style, cross-turn jailbreak defense
-- v1.10.x: Anonymous telemetry, one-click update
-- v1.9.0: Security audit and hardening
-- v1.8.x: "Code Optimization" question type (AC-only)
-- v1.6.0: Unified admin portal with tabs
-- v1.4.0: Multi-endpoint config with failover
-- v1.2.0: Differentiated question types
-- v1.0.0: Initial release
+- v1.21.0: batch AI learning summaries (milestone sampling, SSE progress, draft/publish)
+- v1.19.0–v1.20.0: full i18n, multi-dimensional effectiveness metrics, filter autocomplete
+- v1.18.0: telemetry dashboard SPA, richer error diagnostics
+- v1.14.x–v1.16.x: SSE streaming, cost control, CSRF/SSRF/prompt-injection defenses, security fixes
+- v1.0.0–v1.12.0: initial release, question types, multi-endpoint failover, judge-data integration, contest mode
 
 </details>
 
 ## About
 
-A third-party plugin for [HydroOJ](https://github.com/hydro-dev/Hydro). Feel free to open an Issue for questions or suggestions.
+A third-party plugin for the [HydroOJ](https://github.com/hydro-dev/Hydro) open-source online judge. Issues and suggestions welcome.
 
 ## License
 
