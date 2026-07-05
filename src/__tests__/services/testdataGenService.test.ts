@@ -1169,6 +1169,26 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(err.message).toContain('IndexError');
   });
 
+  it('用户中止（CanceledError）原样上抛，不包装为 GENERATOR/ORACLE 阶段失败', async () => {
+    const bp = tradBlueprint();
+    const cancelErr = Object.assign(new Error('canceled'), { name: 'CanceledError', code: 'ERR_CANCELED' });
+    const genCancelRunner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(cancelErr),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', genCancelRunner)).rejects.toBe(cancelErr);
+
+    const oracleCancelRunner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn().mockRejectedValue(cancelErr),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', oracleCancelRunner)).rejects.toBe(cancelErr);
+  });
+
   it('BRUTE 与标程一致：记录 agreed，不拦截', async () => {
     const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
     const runner = {
@@ -1345,6 +1365,47 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
     expect(std?.origin).toBe('executed');
     expect(plan.files.find(f => f.name === 'oracle.py')?.content).toContain('print(5)');
     expect(plan.files.find(f => f.name === 'template.py')?.origin).toBe('executed');
+  });
+
+  it('AI 生成的代码文件首行带用途注释（.py 用 #，.cc 模板用 //），数据文件不加', () => {
+    const response = {
+      problemType: 'function',
+      cases: [{ input: '2 3\n', output: '5\n' }],
+      templates: { py: 'print(f())', cc: 'int main(){}' },
+      solutionCode: 'def f():\n    return 5',
+      oracleCode: 'print(5)',
+      stdSolution: { language: 'python', code: 'print(5)' },
+      pyTemplateExecuted: true,
+      generatorCode: 'print(1)',
+      bruteCode: 'print(0)',
+      validatorCode: 'import sys',
+    } as never;
+    const opts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'cc'] };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    const content = (n: string) => plan.files.find(f => f.name === n)?.content || '';
+    for (const name of ['std.py', 'oracle.py', 'generator.py', 'brute.py', 'validator.py', 'template.py']) {
+      expect(content(name)).toMatch(/^# \S/);
+    }
+    expect(content('template.cc')).toMatch(/^\/\/ \S/);
+    // 原有代码内容保留在注释之后
+    expect(content('std.py')).toContain('def f()');
+    expect(content('template.py')).toContain('print(f())');
+    // 数据文件与确定性文件不受影响
+    expect(content('1.in')).toBe('2 3\n');
+  });
+
+  it('教师提供的 std 原样写入，不加注释头', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      generatorCode: 'print(1)',
+      stdSolution: { language: 'python', code: 'print(input())' },
+    } as never;
+    const opts: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 1, languages: [], providedStd: 'print(input())',
+    };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    expect(plan.files.find(f => f.name === 'std.py')?.content).toBe('print(input())\n');
   });
 
   it('骨架模式：所有文件 deterministic 且无 verification', () => {
