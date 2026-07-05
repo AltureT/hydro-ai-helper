@@ -204,6 +204,13 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const requestAc = new AbortController();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const rawReq = this.context?.req;
+            // close 事件可能在前序 DB/配置操作期间已触发，挂监听前先补一次检查
+            if (rawReq?.destroyed || rawReq?.aborted) {
+                this.response.status = 499;
+                this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                this.response.type = 'application/json';
+                return;
+            }
             const onClose = () => requestAc.abort();
             rawReq?.on?.('close', onClose);
             let plan;

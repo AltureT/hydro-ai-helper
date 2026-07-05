@@ -18,7 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = exports.excerpt = void 0;
+exports.TestdataGenService = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.detectStdFilename = detectStdFilename;
@@ -48,8 +48,6 @@ exports.buildSkeletonPlan = buildSkeletonPlan;
 const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
-var textTruncate_2 = require("../lib/textTruncate");
-Object.defineProperty(exports, "excerpt", { enumerable: true, get: function () { return textTruncate_2.excerpt; } });
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {

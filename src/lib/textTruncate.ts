@@ -16,7 +16,8 @@ export function excerpt(text: string, maxBytes = 300): string {
   const normalized = normalize(text);
   if (Buffer.byteLength(normalized, 'utf8') <= maxBytes) return normalized;
   const budget = maxBytes - Buffer.byteLength(ELLIPSIS, 'utf8');
-  let cut = normalized;
+  // 先按字符粗切一刀避免对超长文本逐字符收敛（budget 个字符的字节数必然 ≥ budget）
+  let cut = normalized.slice(0, budget);
   while (cut.length > 0 && Buffer.byteLength(cut, 'utf8') > budget) {
     cut = cut.slice(0, -1);
   }
@@ -33,5 +34,5 @@ export function excerptTail(text: string, maxBytes = 1000): string {
   while (cut.length > 0 && Buffer.byteLength(cut, 'utf8') > budget) {
     cut = cut.slice(1);
   }
-  return `${ELLIPSIS}${cut}`;
+  return `${ELLIPSIS}${cut.replace(/^\s+/, '')}`;
 }

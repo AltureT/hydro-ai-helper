@@ -242,6 +242,27 @@ describe('TestdataGenGenerateHandler', () => {
     }
   });
 
+  it('挂监听前客户端已断开：直接 499，不再调用生成服务', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({} as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    (handler as unknown as { context: unknown }).context = {
+      req: { destroyed: true, on: jest.fn(), removeListener: jest.fn() },
+    };
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(499);
+      expect(genSpy).not.toHaveBeenCalled();
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
   it('题面为空返回 400', async () => {
     mockFindOne({ ...PROBLEM_DOC, content: '   ' });
     const handler = setupHandler(TestdataGenGenerateHandler, {

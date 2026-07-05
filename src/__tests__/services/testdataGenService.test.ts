@@ -1118,12 +1118,6 @@ function twoCaseGen(): string {
   return JSON.stringify({ cases: [{ label: 'c1', input: '1' }, { label: 'c2', input: '2' }] });
 }
 
-/** ORACLE 严格批量：回显每份输入作为 .out（1→'1\n'，2→'2\n'）。 */
-function echoOracle() {
-  return jest.fn().mockImplementation((_code: string, inputs: string[]) =>
-    Promise.resolve(inputs.map(input => ({ stdout: input, stderr: '' }))));
-}
-
 describe('parseSandboxBlueprint v2 分节', () => {
   it('解析 SOLUTION/BRUTE/VALIDATOR 三节', () => {
     const raw = [
@@ -1178,7 +1172,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
-      runPythonBatch: echoOracle(),
+      runPythonBatch: jest.fn(),
       runPythonBatchDetailed: jest.fn().mockResolvedValue([
         detail({ stdout: '' }),
         detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: '数值超出范围' }),

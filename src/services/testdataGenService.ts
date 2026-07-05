@@ -18,8 +18,6 @@ import yaml from 'js-yaml';
 import type { ChatCallOptions, MultiModelClient, TokenUsage } from './openaiClient';
 import { SANDBOX_TOTAL_BUDGET_MS } from './goJudgeSandboxService';
 import { excerpt, excerptTail } from '../lib/textTruncate';
-
-export { excerpt } from '../lib/textTruncate';
 import type {
   PythonRunDetail,
   PythonRunResult,
