@@ -243,19 +243,25 @@ export class TestdataGenGenerateHandler extends Handler {
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
 
-      // 请求级取消：客户端断开时中止 AI 调用与沙箱管线，避免白跑
+      // 请求级取消：客户端断开时中止 AI 调用与沙箱管线，避免白跑。
+      // 关键：不能用 req 的 'close'/destroyed 判断断开——POST body 被 body-parser
+      // 读完后，请求可读流会按正常生命周期置 destroyed=true 并触发 'close'，此时
+      // 客户端仍在等响应。真实断开只能看响应连接：res 'close' 且响应尚未写完。
       const requestAc = new AbortController();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rawReq = (this as any).context?.req;
-      // close 事件可能在前序 DB/配置操作期间已触发，挂监听前先补一次检查
-      if (rawReq?.destroyed || rawReq?.aborted) {
+      const koaCtx = (this as any).context;
+      const rawReq = koaCtx?.req;
+      const rawRes = koaCtx?.res;
+      // 挂监听前补一次检查：前序 DB/配置操作期间客户端可能已真实断开
+      // （aborted / 底层 socket 已销毁），此时直接 499，不白跑整条管线。
+      if (rawReq?.aborted || rawReq?.socket?.destroyed) {
         this.response.status = 499;
         this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
         this.response.type = 'application/json';
         return;
       }
-      const onClose = () => requestAc.abort();
-      rawReq?.on?.('close', onClose);
+      const onClose = () => { if (!rawRes?.writableEnded) requestAc.abort(); };
+      rawRes?.on?.('close', onClose);
       let plan;
       try {
         plan = await service.generate({
@@ -267,7 +273,7 @@ export class TestdataGenGenerateHandler extends Handler {
           signal: requestAc.signal,
         });
       } finally {
-        rawReq?.removeListener?.('close', onClose);
+        rawRes?.removeListener?.('close', onClose);
       }
 
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });

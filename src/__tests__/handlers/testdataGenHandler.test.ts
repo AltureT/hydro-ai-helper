@@ -205,7 +205,34 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 
-  it('请求级 AbortSignal 传入服务；客户端断开触发取消 → 499 且不上报错误', async () => {
+  it('body 读完后 req.destroyed=true 属正常态，不得误判为断开：仍调用生成、不返回 499', async () => {
+    // body-parser 读完 POST body 后，请求可读流按正常生命周期置 destroyed=true 并触发
+    // 'close'，但连接仍活着（res 未写完）。这不是客户端断开，必须继续生成。
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const planStub = { problemType: 'traditional', files: [{ name: '1.in', content: '1', kind: 'case-in' }], caseCount: 1 };
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockResolvedValue(planStub as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    (handler as unknown as { context: unknown }).context = {
+      req: { destroyed: true, aborted: false, socket: { destroyed: false }, on: jest.fn(), removeListener: jest.fn() },
+      res: { writableEnded: false, on: jest.fn(), removeListener: jest.fn() },
+    };
+    try {
+      await handler.post();
+      expect(genSpy).toHaveBeenCalled();
+      expect(handler.response.status).not.toBe(499);
+      expect(handler.response.body.plan).toEqual(planStub);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('请求级 AbortSignal 传入服务；响应连接提前关闭触发取消 → 499 且不上报错误', async () => {
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);
@@ -222,16 +249,18 @@ describe('TestdataGenGenerateHandler', () => {
       own: true, body: { problemId: 'D3102', caseCount: 5 },
     });
     handler.ctx.get = jest.fn((name: string) => (name === 'errorReporter' ? { capture } : undefined));
+    // 断开检测挂在响应上：res 'close' 且响应尚未写完（writableEnded=false）才算真实断开
     const listeners: Record<string, () => void> = {};
     const removeListener = jest.fn();
     (handler as unknown as { context: unknown }).context = {
-      req: { on: (ev: string, cb: () => void) => { listeners[ev] = cb; }, removeListener },
+      req: { on: jest.fn(), removeListener: jest.fn() },
+      res: { writableEnded: false, on: (ev: string, cb: () => void) => { listeners[ev] = cb; }, removeListener },
     };
     try {
       const done = handler.post();
       await new Promise(resolve => setImmediate(resolve));
       expect(capturedSignal).toBeDefined();
-      listeners.close?.();
+      listeners.close?.();   // 响应连接提前关闭 = 真实客户端断开
       await done;
       expect(handler.response.status).toBe(499);
       expect(capture).not.toHaveBeenCalled();
@@ -242,7 +271,7 @@ describe('TestdataGenGenerateHandler', () => {
     }
   });
 
-  it('挂监听前客户端已断开：直接 499，不再调用生成服务', async () => {
+  it('挂监听前客户端已真实断开（req.aborted）：直接 499，不再调用生成服务', async () => {
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);
@@ -251,7 +280,8 @@ describe('TestdataGenGenerateHandler', () => {
       own: true, body: { problemId: 'D3102', caseCount: 5 },
     });
     (handler as unknown as { context: unknown }).context = {
-      req: { destroyed: true, on: jest.fn(), removeListener: jest.fn() },
+      req: { aborted: true, on: jest.fn(), removeListener: jest.fn() },
+      res: { writableEnded: false, on: jest.fn(), removeListener: jest.fn() },
     };
     try {
       await handler.post();
