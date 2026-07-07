@@ -194,6 +194,25 @@ describe('ChatHandler', () => {
     expect(handler.response.type).toBe('application/json');
   });
 
+  it('JSON 路径：body 读完后 context.req.destroyed=true 属正常态，不得误判为断开', async () => {
+    // body-parser 读完 POST body 后，Node 会按正常流生命周期置 req.destroyed=true
+    // 并触发 'close'，但连接仍活着。此前 handleJsonResponse 的 req.destroyed 预检查
+    // 会把它误判为客户端断开而直接 499，导致非 SSE 客户端聊天必现「请求已取消」。
+    const handler = createMockHandler();
+    jest.spyOn(console, 'log').mockImplementation();
+    jest.spyOn(console, 'error').mockImplementation();
+    (handler as unknown as { context: unknown }).context = {
+      req: { destroyed: true, aborted: false, socket: { destroyed: false }, on: jest.fn(), removeListener: jest.fn() },
+      res: { writableEnded: false, on: jest.fn(), removeListener: jest.fn() },
+    };
+
+    await handler.post();
+
+    expect(handler.response.status).not.toBe(499);
+    expect(handler.response.body.message.content).toBe('AI response');
+    expect(handler.response.type).toBe('application/json');
+  });
+
   it('should block during ongoing contest', async () => {
     const handler = createMockHandler();
     const contestId = new ObjectId().toHexString();

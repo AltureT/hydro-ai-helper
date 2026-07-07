@@ -793,16 +793,22 @@ class ChatHandler extends hydrooj_1.Handler {
         // L4 请求级 AbortController
         const requestAc = new AbortController();
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawReq = this.context?.req;
-        // 提前检查客户端是否已断开（close 事件可能在前序 DB 操作期间已触发）
-        if (rawReq?.destroyed || rawReq?.aborted) {
+        const koaCtx = this.context;
+        const rawReq = koaCtx?.req;
+        const rawRes = koaCtx?.res;
+        // 提前检查客户端是否已真实断开：只认 aborted / 底层 socket 已销毁。
+        // 不能用 req.destroyed/'close'——POST body 被 body-parser 读完后，请求可读流会
+        // 按正常生命周期置 destroyed=true 并触发 'close'，此时客户端仍在等响应。
+        if (rawReq?.aborted || rawReq?.socket?.destroyed) {
             this.response.status = 499;
             this.response.body = { error: this.translate('ai_helper_err_ai_aborted') };
             this.response.type = 'application/json';
             return;
         }
-        const onClose = () => requestAc.abort();
-        rawReq?.on?.('close', onClose);
+        // 真实断开检测挂在响应连接上：res 'close' 且响应尚未写完才中止
+        const onClose = () => { if (!rawRes?.writableEnded)
+            requestAc.abort(); };
+        rawRes?.on?.('close', onClose);
         // L4: 请求级超时 — 基于配置值 + 10s buffer，确保比 L3 晚触发
         const configTimeoutMs = (p.aiConfig?.timeoutSeconds || 30) * 1000;
         const requestTimer = setTimeout(() => requestAc.abort(), configTimeoutMs + 10000);
@@ -867,7 +873,7 @@ class ChatHandler extends hydrooj_1.Handler {
         }
         finally {
             clearTimeout(requestTimer);
-            rawReq?.removeListener?.('close', onClose);
+            rawRes?.removeListener?.('close', onClose);
         }
         // P0-2: 输出安全后处理（AI 响应返回后、保存到数据库前）
         const outputSafetyService = new outputSafetyService_1.OutputSafetyService();
