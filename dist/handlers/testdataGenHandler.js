@@ -173,7 +173,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 problemKind: (body.problemKind || 'auto'),
                 fillInMode: (body.fillInMode || 'auto'),
                 caseCount: Number(body.caseCount ?? 10),
-                dataScale: (body.dataScale || 'small'),
+                dataScale: (body.dataScale || 'auto'),
                 languages: Array.isArray(body.languages)
                     ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
                     : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
@@ -301,7 +301,7 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
                 problemKind: (body.problemKind || 'auto'),
                 fillInMode: (body.fillInMode || 'auto'),
                 caseCount: Number(body.caseCount ?? 10),
-                dataScale: (body.dataScale || 'small'),
+                dataScale: (body.dataScale || 'auto'),
                 languages: Array.isArray(body.languages)
                     ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
                     : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
@@ -313,7 +313,10 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
                 return;
             }
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_skeleton').catch(() => { });
-            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(pdoc.content));
+            const existingFiles = (pdoc.data || [])
+                .map(f => String(f._id ?? f.name ?? ''))
+                .filter(Boolean);
+            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(pdoc.content), existingFiles);
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { });
             this.response.body = { plan };
             this.response.type = 'application/json';

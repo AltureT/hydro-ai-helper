@@ -9,6 +9,10 @@ import {
   mapTelegramError,
   testThrottled,
 } from './alertConfig.mjs';
+import {
+  buildFeatureDegradationCandidates,
+  buildTestdataBurstCandidates,
+} from './alertRules.mjs';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -880,6 +884,18 @@ async function evaluateAlerts(env) {
     }
   } catch (e) { console.error('[alerts] rule A failed', e); }
 
+  // Rule A2 — partial feature degradation. A non-zero success count avoids the
+  // outage rule, but sustained <80% reliability is still actionable.
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT feature, SUM(attempts) AS attempts, SUM(successes) AS successes
+       FROM plugin_feature_stats
+       WHERE report_at >= ?
+       GROUP BY feature`,
+    ).bind(cutoff7d).all();
+    candidates.push(...buildFeatureDegradationCandidates(rows?.results || []));
+  } catch (e) { console.error('[alerts] rule A2 failed', e); }
+
   // Rule B — background-job features are throwing.
   try {
     const rows = await env.DB.prepare(
@@ -918,6 +934,21 @@ async function evaluateAlerts(env) {
       });
     }
   } catch (e) { console.error('[alerts] rule C failed', e); }
+
+  // Rule C2 — repeated test-data generation failures concentrated on one
+  // instance. This catches severe single-site breakage before Rule C reaches
+  // its three-instance threshold.
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT instance_id, SUM(count) AS total,
+              COUNT(DISTINCT stack_fingerprint) AS fingerprints, MAX(message) AS sample
+       FROM plugin_errors
+       WHERE received_at >= ? AND category = 'testdata_gen' AND error_type != 'background_job'
+       GROUP BY instance_id
+       HAVING SUM(count) >= 3`,
+    ).bind(cutoff24h).all();
+    candidates.push(...buildTestdataBurstCandidates(rows?.results || []));
+  } catch (e) { console.error('[alerts] rule C2 failed', e); }
 
   // Rule D — startup failures are release canaries: a broken build shows up on
   // the FIRST instance that updates, long before Rule C's >=3-instance bar.

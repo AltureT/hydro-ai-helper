@@ -62,7 +62,8 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 ### Teachers
 
 - **AI Test Data Generation** — generate a full test data set from the statement on the problem files page (`/p/:pid/files`)
-  - **Sandbox execution + double verification**: the generator and reference solution actually run in Hydro's judge sandbox to produce `.in`/`.out`, then pass four machine gates — independent brute-force cross-check, input validation, template execution, and statement-sample regression; on failure the AI gets one automatic repair round with full context
+  - **Sandbox execution + double verification**: the generator and reference solution actually run in Hydro's judge sandbox to produce `.in`/`.out`, then pass four machine gates — independent brute-force cross-check, input validation, template execution, and statement-sample regression; failures trigger targeted generator/oracle/template repair
+  - Automatically mixes small, medium, and boundary cases from statement constraints by default, with explicit single-scale modes still available. New numeric cases avoid existing files and are merged into `config.yaml`
   - Supports traditional problems, LeetCode-style function problems (auto-generates `template.py/java/cc` and `compile.sh`) and fill-in-the-blank problems
   - Paste an existing reference solution as the single source of truth; `config.yaml` is built deterministically and judge settings sync automatically
   - Every generated code file (std.py, generator.py, validator.py, …) starts with a purpose comment; everything is previewed, editable and opt-in before writing

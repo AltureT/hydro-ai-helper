@@ -7,6 +7,9 @@ import {
   isSafeTestdataFilename,
   buildCompileSh,
   buildConfigYaml,
+  buildCoveragePlan,
+  allocateCaseNumbers,
+  getExistingNumericCases,
   buildSkeletonPlan,
   extractJsonObject,
   normalizeFileContent,
@@ -22,6 +25,9 @@ import {
   parseSandboxBlueprint,
   parseGeneratorOutput,
   materializeSandboxBlueprint,
+  classifySandboxRepairScope,
+  buildSandboxRepairPrompt,
+  mergeSandboxBlueprintRepair,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -139,6 +145,7 @@ describe('validateGenerateOptions', () => {
     expect(validateGenerateOptions({
       ...baseOptions, fillInMode: 'yes', dataScale: 'large', providedStd: 'print(1)',
     })).toBeNull();
+    expect(validateGenerateOptions({ ...baseOptions, dataScale: 'auto' })).toBeNull();
   });
 
   it('拒绝非法填空模式与数据规模', () => {
@@ -152,6 +159,28 @@ describe('validateGenerateOptions', () => {
     expect(validateGenerateOptions({
       ...baseOptions, providedStd: 'x'.repeat(TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD + 1),
     })).toBe('ai_helper_testdata_err_std_too_long');
+  });
+});
+
+describe('buildCoveragePlan / numeric case allocation', () => {
+  it('auto 对 10 个测试点按 30/40/30 分配并保证三档覆盖', () => {
+    const scales = buildCoveragePlan(10, 'auto').map(item => item.dataScale);
+    expect(scales.filter(value => value === 'small')).toHaveLength(3);
+    expect(scales.filter(value => value === 'medium')).toHaveLength(4);
+    expect(scales.filter(value => value === 'large')).toHaveLength(3);
+  });
+
+  it('少量测试点优先保留最小与临界覆盖，显式模式保持单一档位', () => {
+    expect(buildCoveragePlan(2, 'auto').map(item => item.dataScale)).toEqual(['small', 'large']);
+    expect(buildCoveragePlan(3, 'auto').map(item => item.dataScale)).toEqual(['small', 'medium', 'large']);
+    expect(buildCoveragePlan(3, 'medium').every(item => item.dataScale === 'medium')).toBe(true);
+  });
+
+  it('任一侧存在即保留编号，只有完整数字对进入 config', () => {
+    const state = getExistingNumericCases(['1.in', '1.out', '2.in', '3.out', 'named.in']);
+    expect([...state.reserved]).toEqual([1, 2, 3]);
+    expect(state.complete).toEqual([1]);
+    expect(allocateCaseNumbers(['1.in', '1.out', '2.in', '3.out'], 2)).toEqual([4, 5]);
   });
 });
 
@@ -249,6 +278,16 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('- template.py');
     expect(yamlText).not.toContain('template.java');
     expect(yamlText).not.toContain('- java');
+  });
+
+  it('指定文件编号时按实际完整数字对生成配置', () => {
+    const yamlText = buildConfigYaml({
+      problemType: 'traditional', caseCount: 3, languages: [], caseNumbers: [5, 1, 3, 3],
+    });
+    expect(yamlText).toContain('input: 1.in');
+    expect(yamlText).toContain('input: 3.in');
+    expect(yamlText).toContain('input: 5.in');
+    expect(yamlText).not.toContain('input: 2.in');
   });
 });
 
@@ -691,6 +730,25 @@ describe('assemblePlan', () => {
     const plan = assemblePlan(response, fnOptions);
     expect(plan.isFillIn).toBe(true);
   });
+
+  it('避开已有或残缺数字测试点，并将完整旧数据合并进 config', () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] };
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    const plan = assemblePlan(response, options, {
+      existingFiles: ['1.in', '1.out', '2.in'],
+    });
+    const names = plan.files.map(file => file.name);
+    expect(names).toEqual(expect.arrayContaining(['3.in', '3.out', '4.in', '4.out']));
+    expect(names).not.toContain('2.out');
+    expect(plan.totalCaseCount).toBe(3);
+    expect(plan.caseCoverage?.map(item => item.fileNumber)).toEqual([3, 4]);
+    expect(plan.caseCoverage?.map(item => item.dataScale)).toEqual(['small', 'large']);
+    const config = plan.files.find(file => file.name === 'config.yaml')?.content || '';
+    expect(config).toContain('input: 1.in');
+    expect(config).toContain('input: 3.in');
+    expect(config).toContain('input: 4.in');
+    expect(config).not.toContain('input: 2.in');
+  });
 });
 
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
@@ -740,6 +798,9 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(up).toContain('@@@TEMPLATE:py@@@');
     expect(up).toContain('链表用类实现');
     expect(up).toContain('1.in, config.yaml');
+    expect(up).toContain('逐测试点覆盖计划');
+    expect(up).toContain('CASE 1: small');
+    expect(up).toContain('CASE 5: large');
   });
 
   it('超长题面被截断', () => {
@@ -784,6 +845,42 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(withoutHint).not.toContain('疑似含待完善代码');
   });
 
+});
+
+describe('stage-specific sandbox repair', () => {
+  const options: GenerateOptions = { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] };
+
+  it('按错误阶段分类并生成定向提示词', () => {
+    expect(classifySandboxRepairScope(new Error('GENERATOR 实跑失败：Output Limit Exceeded'))).toBe('generator');
+    expect(classifySandboxRepairScope(new Error('ORACLE 未通过题面样例 1'))).toBe('oracle');
+    expect(classifySandboxRepairScope(new Error('暴力解与标程不一致'))).toBe('brute');
+    expect(classifySandboxRepairScope(new Error('template.py 与标程不一致'))).toBe('template-py');
+    expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
+    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
+  });
+
+  it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases": []}, separators=(",", ":")))',
+      'generator',
+    );
+    expect(merged.generatorCode).toContain('separators');
+    expect(merged.oracleCode).toBe(original.oracleCode);
+  });
+
+  it('Python 模板修复必须成对替换 SOLUTION 与 TEMPLATE:py', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions, { allowMissingTemplates: true });
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@SOLUTION@@@\ndef solve(x):\n    return x\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
+      'template-py',
+    );
+    expect(merged.solutionCode).toContain('def solve');
+    expect(merged.templates?.py).toContain('print(solve');
+  });
 });
 
 // ─── buildSkeletonPlan（AI 故障降级） ─────────────────────────────────────────
@@ -1001,6 +1098,73 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(2);
     expect(mockClient.chat.mock.calls[1][0][2].content).toContain('@@@TEMPLATE:java@@@');
     expect(plan.files.find(file => file.name === 'template.java')?.content).toContain('public class Main');
+  });
+
+  it('GENERATOR 沙箱失败时只请求并合并生成器分节', async () => {
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSandboxBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"label":"修复","input":"1"}]}, separators=(",", ":")))',
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockRejectedValueOnce(new Error('第 1 个沙箱任务执行失败（Output Limit Exceeded）'))
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ label: '修复', input: '1' }] }), stderr: '' }),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, ins: string[]) => Promise.resolve(
+        ins.map(input => ({ status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '' })),
+      )),
+      runPythonBatch: jest.fn(),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(plan.files.find(file => file.name === 'generator.py')?.content).toContain('separators');
+    expect(plan.files.find(file => file.name === 'std.py')?.content).toContain('print(input())');
+  });
+
+  it('初始蓝图分节损坏时请求完整蓝图后继续验证', async () => {
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: `${makeSandboxBlueprint('traditional')}\n@@@损坏`,
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeSandboxBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: '合法', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, ins: string[]) => Promise.resolve(
+        ins.map(input => ({ status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '' })),
+      )),
+      runPythonBatch: jest.fn(),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('完整蓝图');
+    expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
 
   it('auto 模式在沙箱不可达时回退兼容直出并明确提示', async () => {

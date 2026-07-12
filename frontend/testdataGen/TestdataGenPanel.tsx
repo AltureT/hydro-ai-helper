@@ -52,6 +52,13 @@ interface GenerationPlan {
   notes?: string;
   files: PlannedFile[];
   caseCount: number;
+  totalCaseCount?: number;
+  caseCoverage?: Array<{
+    caseNumber: number;
+    fileNumber: number;
+    dataScale: 'small' | 'medium' | 'large';
+    target: string;
+  }>;
   usedModel?: string;
   verification?: PlanVerification;
 }
@@ -126,7 +133,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
   const [fillInMode, setFillInMode] = useState<'auto' | 'yes' | 'no'>('auto');
   const [caseCount, setCaseCount] = useState(10);
-  const [dataScale, setDataScale] = useState<'small' | 'medium' | 'large'>('small');
+  const [dataScale, setDataScale] = useState<'auto' | 'small' | 'medium' | 'large'>('auto');
   const [languages, setLanguages] = useState<string[]>(['py', 'java', 'cc']);
   const [providedStd, setProvidedStd] = useState('');
   const [extraRequirements, setExtraRequirements] = useState('');
@@ -263,6 +270,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           problemId,
           problemKind,
           caseCount,
+          dataScale,
           languages,
           providedStd: providedStd.trim() || undefined,
         }),
@@ -291,7 +299,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(err instanceof Error ? err.message : String(err));
       setPhase('form');
     }
-  }, [problemId, problemKind, caseCount, languages, providedStd]);
+  }, [problemId, problemKind, caseCount, dataScale, languages, providedStd]);
 
   // ─── 写入 ───────────────────────────────────────────────────────────────────
 
@@ -456,6 +464,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             onChange={e => setDataScale(e.target.value as typeof dataScale)}
             style={{ ...getInputStyle(), maxWidth: '260px' }}
           >
+            <option value="auto">{i18n('ai_helper_testdata_scale_auto')}</option>
             <option value="small">{i18n('ai_helper_testdata_scale_small')}</option>
             <option value="medium">{i18n('ai_helper_testdata_scale_medium')}</option>
             <option value="large">{i18n('ai_helper_testdata_scale_large')}</option>
@@ -590,11 +599,32 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {plan.isFillIn ? ` · ${i18n('ai_helper_testdata_type_fill_in')}` : ''}
             {' · '}
             {i18n('ai_helper_testdata_case_count_result', plan.caseCount)}
+            {plan.totalCaseCount && plan.totalCaseCount !== plan.caseCount
+              ? ` · ${i18n('ai_helper_testdata_total_case_count', plan.totalCaseCount)}`
+              : ''}
             {plan.usedModel ? ` · ${plan.usedModel}` : ''}
           </div>
           {plan.analysis && <div style={{ fontSize: '13px' }}>{plan.analysis}</div>}
           {plan.notes && <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>}
         </div>
+        {plan.caseCoverage && plan.caseCoverage.length > 0 && (
+          <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.sm }}>
+              {i18n('ai_helper_testdata_coverage_title')}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs }}>
+              {plan.caseCoverage.map(item => (
+                <div key={item.caseNumber} style={{ fontSize: '13px', display: 'flex', gap: SPACING.sm, alignItems: 'baseline' }}>
+                  <code>{item.fileNumber}.in/.out</code>
+                  <span style={getBadgeStyle('info')}>
+                    {i18n(`ai_helper_testdata_scale_${item.dataScale}`)}
+                  </span>
+                  <span style={{ color: COLORS.textSecondary }}>{item.target}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {verification && (
           <div style={{ ...getAlertStyle(verificationAllGreen ? 'success' : 'warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>

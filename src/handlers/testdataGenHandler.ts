@@ -212,7 +212,7 @@ export class TestdataGenGenerateHandler extends Handler {
         problemKind: (body.problemKind || 'auto') as GenerateOptions['problemKind'],
         fillInMode: (body.fillInMode || 'auto') as GenerateOptions['fillInMode'],
         caseCount: Number(body.caseCount ?? 10),
-        dataScale: (body.dataScale || 'small') as GenerateOptions['dataScale'],
+        dataScale: (body.dataScale || 'auto') as GenerateOptions['dataScale'],
         languages: Array.isArray(body.languages)
           ? (body.languages.filter(l => (SUPPORTED_TEMPLATE_LANGS as readonly string[]).includes(l)) as TemplateLang[])
           : [...SUPPORTED_TEMPLATE_LANGS],
@@ -351,7 +351,7 @@ export class TestdataGenSkeletonHandler extends Handler {
         problemKind: (body.problemKind || 'auto') as GenerateOptions['problemKind'],
         fillInMode: (body.fillInMode || 'auto') as GenerateOptions['fillInMode'],
         caseCount: Number(body.caseCount ?? 10),
-        dataScale: (body.dataScale || 'small') as GenerateOptions['dataScale'],
+        dataScale: (body.dataScale || 'auto') as GenerateOptions['dataScale'],
         languages: Array.isArray(body.languages)
           ? (body.languages.filter(l => (SUPPORTED_TEMPLATE_LANGS as readonly string[]).includes(l)) as TemplateLang[])
           : [...SUPPORTED_TEMPLATE_LANGS],
@@ -364,7 +364,10 @@ export class TestdataGenSkeletonHandler extends Handler {
       }
 
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_skeleton').catch(() => { /* best-effort */ });
-      const plan = buildSkeletonPlan(options, extractStatementMarkdown(pdoc.content));
+      const existingFiles = (pdoc.data || [])
+        .map(f => String(f._id ?? f.name ?? ''))
+        .filter(Boolean);
+      const plan = buildSkeletonPlan(options, extractStatementMarkdown(pdoc.content), existingFiles);
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { /* best-effort */ });
 
       this.response.body = { plan };

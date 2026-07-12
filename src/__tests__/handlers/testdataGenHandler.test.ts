@@ -224,6 +224,7 @@ describe('TestdataGenGenerateHandler', () => {
     try {
       await handler.post();
       expect(genSpy).toHaveBeenCalled();
+      expect(genSpy.mock.calls[0][0].options.dataScale).toBe('auto');
       expect(handler.response.status).not.toBe(499);
       expect(handler.response.body.plan).toEqual(planStub);
     } finally {
@@ -329,7 +330,9 @@ describe('TestdataGenSkeletonHandler', () => {
     const plan = handler.response.body.plan;
     expect(plan.problemType).toBe('function');
     const names = plan.files.map((f: { name: string }) => f.name);
-    expect(names).toEqual(expect.arrayContaining(['1.in', '1.out', '2.in', '2.out', 'template.py', 'compile.sh', 'config.yaml']));
+    expect(names).toEqual(expect.arrayContaining(['2.in', '2.out', '3.in', '3.out', 'template.py', 'compile.sh', 'config.yaml']));
+    expect(names).not.toContain('1.out');
+    expect(plan.totalCaseCount).toBe(2);
     // 骨架不经过限流（无 AI 开销）
     expect(handler.limitRate).not.toHaveBeenCalled();
   });
