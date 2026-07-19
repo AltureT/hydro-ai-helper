@@ -57,7 +57,11 @@ test('tampered ciphertext fails to decrypt', async () => {
 test('tampered IV fails to decrypt', async () => {
   const key = await deriveAesKey(SECRET);
   const { cipher, iv } = await encryptConfig(key, PLAIN, AAD);
-  const badIv = iv.slice(0, -2) + (iv.endsWith('A') ? 'B' : 'A') + iv.slice(-1);
+  // Mutate a decoded byte rather than a trailing base64 character: the latter
+  // can alter padding bits only and occasionally decode to the original IV.
+  const badIvBytes = Buffer.from(iv, 'base64');
+  badIvBytes[0] ^= 0x01;
+  const badIv = badIvBytes.toString('base64');
   await assert.rejects(() => decryptConfig(key, cipher, badIv, AAD));
 });
 
