@@ -103,9 +103,21 @@ export interface FeatureUsage {
   until: string | null;
 }
 
+/** 按场景、模型累计的完整请求结果（成功与失败都有分母）。 */
+export interface ModelUsage {
+  scenario: string;
+  model_name: string;
+  total_attempts: number;
+  total_successes: number;
+  instances: number;
+  since: string | null;
+  until: string | null;
+}
+
 export interface FeatureHealthResponse {
   features: FeatureHealth[];
   usage?: FeatureUsage[];
+  model_usage?: ModelUsage[];
   usage_window_days?: number;
   snapshot_max_age_hours?: number;
 }

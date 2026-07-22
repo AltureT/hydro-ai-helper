@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import type { Db, Collection } from 'mongodb';
 
 /**
@@ -19,6 +20,10 @@ export interface FeatureDailyStats {
   successCount: number;
   lastSuccessAt: Date | null;
   updatedAt: Date;
+  /** model 文档与普通 feature 文档共用轻量计数集合，但查询时严格分开。 */
+  kind?: 'model';
+  scenario?: string;
+  modelName?: string;
 }
 
 export interface FeatureStats24h {
@@ -35,6 +40,15 @@ export interface FeatureStatsDaily {
   attempts: number;
   successes: number;
   lastSuccessAt: Date | null;
+}
+
+/** 按日、场景、模型统计一次完整业务请求的结果。 */
+export interface ModelUsageStatsDaily {
+  date: string;
+  scenario: string;
+  modelName: string;
+  attempts: number;
+  successes: number;
 }
 
 const TTL_DAYS = 14;
@@ -61,6 +75,11 @@ export class FeatureStatsModel {
 
   private docId(feature: string): string {
     return `${FeatureStatsModel.getDateKey()}:${feature}`;
+  }
+
+  private modelDocId(scenario: string, modelName: string): string {
+    const digest = createHash('sha256').update(`${scenario}\0${modelName}`).digest('hex').slice(0, 24);
+    return `${FeatureStatsModel.getDateKey()}:model:${digest}`;
   }
 
   /** Record that a feature ran (regardless of outcome). Best-effort. */
@@ -96,10 +115,41 @@ export class FeatureStatsModel {
     );
   }
 
+  /**
+   * 记录一次已完成的模型业务请求。模型维度与功能健康计数分开，避免动态模型名
+   * 污染 feature 列表；失败与成功都计 attempts，成功额外计 successes。
+   */
+  async recordModelOutcome(scenario: string, modelName: string, succeeded: boolean): Promise<void> {
+    const safeScenario = scenario.trim().slice(0, 60);
+    const safeModelName = modelName.trim().slice(0, 160);
+    if (!safeScenario || !safeModelName) return;
+    const date = FeatureStatsModel.getDateKey();
+    const now = new Date();
+    await this.collection.updateOne(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { _id: this.modelDocId(safeScenario, safeModelName) } as any,
+      {
+        $inc: { attemptCount: 1, successCount: succeeded ? 1 : 0 },
+        $set: {
+          date,
+          feature: '__model_usage__',
+          kind: 'model',
+          scenario: safeScenario,
+          modelName: safeModelName,
+          updatedAt: now,
+          ...(succeeded ? { lastSuccessAt: now } : {}),
+        },
+        ...(succeeded ? {} : { $setOnInsert: { lastSuccessAt: null } }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      { upsert: true },
+    );
+  }
+
   /** Today's per-feature counters, one entry per feature seen today. */
   async getStats24h(): Promise<FeatureStats24h[]> {
     const today = FeatureStatsModel.getDateKey();
-    const docs = await this.collection.find({ date: today }).toArray();
+    const docs = await this.collection.find({ date: today, kind: { $ne: 'model' } }).toArray();
     return docs.map((doc) => ({
       feature: doc.feature,
       attempts: doc.attemptCount || 0,
@@ -121,7 +171,7 @@ export class FeatureStatsModel {
     for (let i = 0; i < days; i++) {
       dates.push(new Date(now - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
     }
-    const docs = await this.collection.find({ date: { $in: dates } }).toArray();
+    const docs = await this.collection.find({ date: { $in: dates }, kind: { $ne: 'model' } }).toArray();
     return docs.map((doc) => ({
       date: doc.date,
       feature: doc.feature,
@@ -129,5 +179,29 @@ export class FeatureStatsModel {
       successes: doc.successCount || 0,
       lastSuccessAt: doc.lastSuccessAt || null,
     }));
+  }
+
+  /** 最近 N 天的模型业务结果，供心跳补齐成功侧模型维度。 */
+  async getModelStatsRecentDays(days: number): Promise<ModelUsageStatsDaily[]> {
+    const dates: string[] = [];
+    const now = Date.now();
+    for (let i = 0; i < days; i++) {
+      dates.push(new Date(now - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+    }
+    const docs = await this.collection.find({
+      date: { $in: dates },
+      kind: 'model',
+    }).toArray();
+    return docs.flatMap(doc => (
+      doc.scenario && doc.modelName
+        ? [{
+          date: doc.date,
+          scenario: doc.scenario,
+          modelName: doc.modelName,
+          attempts: doc.attemptCount || 0,
+          successes: doc.successCount || 0,
+        }]
+        : []
+    ));
   }
 }

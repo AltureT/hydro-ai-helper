@@ -328,6 +328,43 @@ async function handleReport(request, env) {
       if (featureStmts.length > 0) await env.DB.batch(featureStmts);
     }
 
+    // Per-scenario model outcomes (optional, backward compatible). Unlike error
+    // metadata this includes successful requests, enabling a real success rate.
+    if (Array.isArray(body.model_stats) && body.model_stats.length > 0) {
+      const reportDay = lastReportAt.toISOString().slice(0, 10);
+      const modelStmts = [];
+      for (const item of body.model_stats.slice(0, 100)) {
+        if (!isRecord(item)) continue;
+        const scenario = typeof item.scenario === 'string' ? item.scenario.trim().slice(0, 60) : '';
+        const modelName = typeof item.model_name === 'string' ? item.model_name.trim().slice(0, 160) : '';
+        if (!scenario || !modelName) continue;
+        const day = typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date)
+          ? item.date : reportDay;
+        const attempts = Math.max(0, Math.floor(typeof item.attempts === 'number' ? item.attempts : 0));
+        const successes = Math.min(
+          attempts,
+          Math.max(0, Math.floor(typeof item.successes === 'number' ? item.successes : 0)),
+        );
+        modelStmts.push(env.DB.prepare(
+          `INSERT INTO plugin_model_daily (
+            instance_id, scenario, model_name, date, attempts, successes, version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(instance_id, scenario, model_name, date) DO UPDATE SET
+            attempts = MAX(plugin_model_daily.attempts, excluded.attempts),
+            successes = MAX(plugin_model_daily.successes, excluded.successes),
+            version = excluded.version,
+            updated_at = datetime('now')`,
+        ).bind(instanceId, scenario, modelName, day, attempts, successes, version));
+      }
+      if (modelStmts.length > 0) {
+        try {
+          await env.DB.batch(modelStmts);
+        } catch (e) {
+          console.error('[report] model usage ingest failed (migration 0009 applied?)', e);
+        }
+      }
+    }
+
     return json({ success: true }, { status: 200 });
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 500;
@@ -850,9 +887,46 @@ async function handleDashboardFeatureHealth(request, env) {
     console.error('[feature-health] usage query failed (migration 0008 applied?)', e);
   }
 
+  // 同一时间窗口的模型效果。只有完成业务请求后才计数；成功率可直接比较，
+  // 不再用“某模型出现在多少错误里”替代分母。
+  let modelUsage = [];
+  try {
+    const modelQuery = usageDays > 0
+      ? env.DB.prepare(
+        `SELECT scenario,
+                model_name,
+                SUM(attempts) AS total_attempts,
+                SUM(successes) AS total_successes,
+                COUNT(DISTINCT instance_id) AS instances,
+                MIN(date) AS since,
+                MAX(date) AS until
+         FROM plugin_model_daily
+         WHERE date >= ?
+         GROUP BY scenario, model_name
+         ORDER BY total_attempts DESC`,
+      ).bind(new Date(Date.now() - usageDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10))
+      : env.DB.prepare(
+        `SELECT scenario,
+                model_name,
+                SUM(attempts) AS total_attempts,
+                SUM(successes) AS total_successes,
+                COUNT(DISTINCT instance_id) AS instances,
+                MIN(date) AS since,
+                MAX(date) AS until
+         FROM plugin_model_daily
+         GROUP BY scenario, model_name
+         ORDER BY total_attempts DESC`,
+      );
+    const modelRows = await modelQuery.all();
+    modelUsage = modelRows?.results || [];
+  } catch (e) {
+    console.error('[feature-health] model usage query failed (migration 0009 applied?)', e);
+  }
+
   return json({
     features: rows?.results || [],
     usage,
+    model_usage: modelUsage,
     usage_window_days: usageDays,
     snapshot_max_age_hours: snapshotMaxAgeHours,
   });
@@ -1381,6 +1455,13 @@ export default {
         ).bind(cutoff400dDate).run();
       } catch (e) {
         console.error('[cron] plugin_feature_daily cleanup failed (migration 0008 applied?)', e);
+      }
+      try {
+        await env.DB.prepare(
+          `DELETE FROM plugin_model_daily WHERE date < ?`,
+        ).bind(cutoff400dDate).run();
+      } catch (e) {
+        console.error('[cron] plugin_model_daily cleanup failed (migration 0009 applied?)', e);
       }
 
       // Clean up old feedback (90 days)

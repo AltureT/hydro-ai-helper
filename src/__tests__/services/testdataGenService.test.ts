@@ -37,6 +37,7 @@ import {
   TestdataGenService,
   TestdataGenerationError,
   extractTestdataErrorMetadata,
+  shouldRecommendDeeperReasoning,
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
@@ -228,7 +229,17 @@ describe('buildCompileSh', () => {
     expect(sh).toContain('cat template.py >>foo.py');
     expect(sh).toContain('mv Main.java Solution.java');
     expect(sh).toContain('g++ -x c++ template.cc -o foo');
+    expect(sh).toContain('cc.cc17|cc.cc17o2) CPP_STD=c++17');
+    expect(sh).toContain('cc.cc20|cc.cc20o2) CPP_STD=c++20');
+    expect(sh).toContain('if [[ "$HYDRO_LANG" == *o2 ]]');
     expect(sh.trim().endsWith('fi')).toBe(true);
+  });
+
+  it('PyPy3 保留源码作为执行目标，不生成 CPython pyc', () => {
+    const sh = buildCompileSh(['py']);
+    expect(sh).toContain('if [[ "$HYDRO_LANG" == "py.pypy3" ]]');
+    expect(sh).toContain('mv foo.py /w/foo');
+    expect(sh).toContain('py_compile.compile');
   });
 
   it('仅生成所选语言的分支', () => {
@@ -264,7 +275,10 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('output: 2.out');
     expect(yamlText).toContain('langs:');
     expect(yamlText).toContain('- py.py3');
+    expect(yamlText).toContain('- py.pypy3');
     expect(yamlText).toContain('- cc.cc14o2');
+    expect(yamlText).toContain('- cc.cc17o2');
+    expect(yamlText).toContain('- cc.cc20o2');
     expect(yamlText).toContain('score: 100');
     expect(yamlText).toContain('type: sum');
   });
@@ -1006,14 +1020,17 @@ describe('stage-specific sandbox repair', () => {
     const err = new TestdataGenerationError('failed', 'oracle', [{
       content: 'x',
       usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
-    }] as never);
+    }] as never, true);
     expect(extractTestdataErrorMetadata(err)).toEqual(expect.objectContaining({
       failureStage: 'oracle',
       endpointName: 'main',
       modelName: 'gpt-test',
       usedModels: ['main/gpt-test'],
       aiAttemptCount: 1,
+      recommendDeeperReasoning: true,
     }));
+    expect(shouldRecommendDeeperReasoning(err)).toBe(true);
+    expect(shouldRecommendDeeperReasoning(new Error('network'))).toBe(false);
   });
 });
 

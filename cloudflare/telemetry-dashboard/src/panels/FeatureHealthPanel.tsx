@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getFeatureHealth } from '../api';
-import type { FeatureHealth, FeatureUsage } from '../types';
+import type { FeatureHealth, FeatureUsage, ModelUsage } from '../types';
 
 const FEATURE_LABELS: Record<string, string> = {
   effectiveness_analyze: '效果分析（即时）',
@@ -41,6 +41,7 @@ function rateColor(f: FeatureHealth): string {
 export function FeatureHealthPanel() {
   const [data, setData] = useState<FeatureHealth[]>([]);
   const [usage, setUsage] = useState<FeatureUsage[]>([]);
+  const [modelUsage, setModelUsage] = useState<ModelUsage[]>([]);
   const [usageDays, setUsageDays] = useState<number>(30);
   const [snapshotMaxAgeHours, setSnapshotMaxAgeHours] = useState(48);
   const [error, setError] = useState('');
@@ -52,6 +53,7 @@ export function FeatureHealthPanel() {
       .then(r => {
         setData(r.features);
         setUsage(r.usage || []);
+        setModelUsage(r.model_usage || []);
         setSnapshotMaxAgeHours(r.snapshot_max_age_hours ?? 48);
       })
       .catch(e => setError(e.message))
@@ -60,7 +62,7 @@ export function FeatureHealthPanel() {
 
   if (loading) return <p style={{ color: '#6b7280' }}>加载中...</p>;
   if (error) return <p style={{ color: '#ef4444' }}>加载失败: {error}</p>;
-  if (data.length === 0 && usage.length === 0) {
+  if (data.length === 0 && usage.length === 0 && modelUsage.length === 0) {
     return <p style={{ color: '#6b7280', textAlign: 'center', padding: 40 }}>暂无功能健康数据（需安装新版插件的实例上报后出现）</p>;
   }
 
@@ -111,6 +113,53 @@ export function FeatureHealthPanel() {
                 <td style={{ ...tdStyle, color: '#6b7280', fontSize: '12px' }}>{u.since || '?'} ~ {u.until || '?'}</td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+    <div style={cardStyle}>
+      <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>场景模型效果</h3>
+      <p style={{ margin: '0 0 12px', fontSize: '12px', color: '#6b7280' }}>
+        使用与上方相同的时间窗口；统计完整业务请求的成功率。至少 10 次请求后才给出能力判断，避免小样本误导。
+      </p>
+      {modelUsage.length === 0 ? (
+        <p style={{ color: '#6b7280', fontSize: '13px' }}>暂无成功侧模型数据（需新版插件上报，且平台已应用 migration 0009）</p>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+          <thead>
+            <tr style={{ textAlign: 'left', color: '#6b7280', fontSize: '12px' }}>
+              <th style={thStyle}>场景</th>
+              <th style={thStyle}>模型</th>
+              <th style={thStyle}>成功率</th>
+              <th style={thStyle}>成功/尝试</th>
+              <th style={thStyle}>实例数</th>
+              <th style={thStyle}>判断</th>
+            </tr>
+          </thead>
+          <tbody>
+            {modelUsage.map(item => {
+              const attempts = Number(item.total_attempts) || 0;
+              const successes = Number(item.total_successes) || 0;
+              const rate = attempts > 0 ? successes / attempts : 0;
+              const enoughSamples = attempts >= 10;
+              const capabilityConcern = enoughSamples && rate < 0.7;
+              return (
+                <tr key={`${item.scenario}:${item.model_name}`} style={{ borderTop: '1px solid #f3f4f6' }}>
+                  <td style={tdStyle}>{FEATURE_LABELS[item.scenario] || item.scenario}</td>
+                  <td style={tdStyle}><code style={{ fontSize: '12px' }}>{item.model_name}</code></td>
+                  <td style={{ ...tdStyle, fontWeight: 700, color: capabilityConcern ? '#dc2626' : enoughSamples ? '#16a34a' : '#6b7280' }}>
+                    {(rate * 100).toFixed(1)}%
+                  </td>
+                  <td style={tdStyle}>{successes}/{attempts}</td>
+                  <td style={tdStyle}>{item.instances}</td>
+                  <td style={{ ...tdStyle, color: capabilityConcern ? '#dc2626' : '#6b7280' }}>
+                    {capabilityConcern
+                      ? '能力可能不足，建议改用思考能力更深的模型'
+                      : enoughSamples ? '当前表现稳定' : '样本不足'}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

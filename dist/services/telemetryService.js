@@ -106,7 +106,7 @@ class TelemetryService {
      */
     async collect() {
         // Parallelize independent queries
-        const [activeUsers7d, activeUsers30d, activeUsers90d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats] = await Promise.all([
+        const [activeUsers7d, activeUsers30d, activeUsers90d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats, modelStats,] = await Promise.all([
             this.conversationModel.countActiveUsers(7),
             this.conversationModel.countActiveUsers(30),
             this.conversationModel.countActiveUsers(90),
@@ -116,6 +116,7 @@ class TelemetryService {
             this.aiConfigModel?.getConfig().catch(() => null),
             // 近 2 天按日计数：次日心跳会带上前一天的最终值，平台按 (date, feature) 取最大累计
             this.featureStatsModel?.getStatsRecentDays(2).catch(() => null),
+            this.featureStatsModel?.getModelStatsRecentDays?.(2).catch(() => null),
         ]);
         const selfStats = this.errorReporter?.getSelfStats();
         return {
@@ -132,6 +133,7 @@ class TelemetryService {
             droppedErrorCount: selfStats?.droppedCount ?? 0,
             activeEndpointCount: aiConfig?.endpoints.filter(e => e.enabled).length ?? 0,
             featureStats: featureStats ?? [],
+            modelStats: modelStats ?? [],
             latencyBuckets: requestStats?.latencyBuckets ?? {},
         };
     }
@@ -203,6 +205,13 @@ class TelemetryService {
                     attempts: f.attempts,
                     successes: f.successes,
                     last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
+                })),
+                model_stats: stats.modelStats.map((item) => ({
+                    scenario: item.scenario,
+                    model_name: item.modelName,
+                    date: item.date,
+                    attempts: item.attempts,
+                    successes: item.successes,
                 })),
                 domain_hash: domainHash,
                 timestamp: new Date().toISOString()

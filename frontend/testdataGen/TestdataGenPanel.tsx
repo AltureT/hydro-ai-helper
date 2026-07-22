@@ -107,12 +107,29 @@ const getOriginBadgeStyle = (origin: string): React.CSSProperties => {
 
 const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace";
 
-async function parseErrorMessage(response: Response): Promise<string> {
+interface ApiErrorDetails {
+  message: string;
+  recommendDeeperReasoning: boolean;
+}
+
+class TestdataRequestError extends Error {
+  constructor(message: string, readonly recommendDeeperReasoning = false) {
+    super(message);
+    this.name = 'TestdataRequestError';
+  }
+}
+
+async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
   try {
     const data = await response.json();
-    if (data?.error) return String(data.error);
+    if (data?.error) {
+      return {
+        message: String(data.error),
+        recommendDeeperReasoning: data.recommendDeeperReasoning === true,
+      };
+    }
   } catch { /* ignore */ }
-  return `HTTP ${response.status}`;
+  return { message: `HTTP ${response.status}`, recommendDeeperReasoning: false };
 }
 
 // ─── 组件 ─────────────────────────────────────────────────────────────────────
@@ -128,6 +145,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [error, setError] = useState<string | null>(null);
   // 生成请求真正失败（AI 故障/超时）时提示骨架降级；本地校验错误不提示
   const [showFallbackHint, setShowFallbackHint] = useState(false);
+  // 仅后端确认“自动修复后仍未通过解析/机器验证”时提示换用更深思考模型。
+  const [showDeeperReasoningHint, setShowDeeperReasoningHint] = useState(false);
 
   // 表单状态
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
@@ -187,6 +206,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const handleGenerate = useCallback(async () => {
     setError(null);
     setShowFallbackHint(false);
+    setShowDeeperReasoningHint(false);
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
@@ -216,7 +236,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         }),
       });
       if (!response.ok) {
-        throw new Error(await parseErrorMessage(response));
+        const details = await parseErrorDetails(response);
+        throw new TestdataRequestError(details.message, details.recommendDeeperReasoning);
       }
       const data = await response.json() as { plan: GenerationPlan };
       const newPlan = data.plan;
@@ -241,6 +262,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
+      setShowDeeperReasoningHint(
+        err instanceof TestdataRequestError && err.recommendDeeperReasoning,
+      );
       setShowFallbackHint(true);
       setPhase('form');
     } finally {
@@ -253,6 +277,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const handleSkeleton = useCallback(async () => {
     setError(null);
     setShowFallbackHint(false);
+    setShowDeeperReasoningHint(false);
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
@@ -276,7 +301,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         }),
       });
       if (!response.ok) {
-        throw new Error(await parseErrorMessage(response));
+        throw new Error((await parseErrorDetails(response)).message);
       }
       const data = await response.json() as { plan: GenerationPlan };
       const newPlan = data.plan;
@@ -331,7 +356,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         body: JSON.stringify({ problemId, files }),
       });
       if (!response.ok) {
-        throw new Error(await parseErrorMessage(response));
+        throw new Error((await parseErrorDetails(response)).message);
       }
       const data = await response.json() as { written: string[]; failed: Array<{ name: string; error: string }> };
       setApplyResult(data);
@@ -523,6 +548,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       {error && (
         <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.base }}>
           <div>{error}</div>
+          {showDeeperReasoningHint && (
+            <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs, fontWeight: 600 }}>
+              {i18n('ai_helper_testdata_deeper_reasoning_suggestion')}
+            </div>
+          )}
           {showFallbackHint && (
             <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs }}>
               {i18n('ai_helper_testdata_fallback_suggestion')}

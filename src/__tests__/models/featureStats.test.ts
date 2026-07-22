@@ -57,6 +57,26 @@ describe('FeatureStatsModel', () => {
     });
   });
 
+  describe('recordModelOutcome', () => {
+    it('records completed success/failure counters separately from feature health', async () => {
+      await model.recordModelOutcome('testdata_generation', 'primary/model-x', true);
+      const [filter, update] = mockColl.updateOne.mock.calls[0];
+      expect(String(filter._id)).toMatch(/:model:[a-f0-9]{24}$/);
+      expect(update.$inc).toEqual({ attemptCount: 1, successCount: 1 });
+      expect(update.$set).toMatchObject({
+        feature: '__model_usage__',
+        kind: 'model',
+        scenario: 'testdata_generation',
+        modelName: 'primary/model-x',
+      });
+    });
+
+    it('ignores an empty model name', async () => {
+      await model.recordModelOutcome('testdata_generation', '  ', false);
+      expect(mockColl.updateOne).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getStats24h', () => {
     it('should map today’s docs to the wire shape', async () => {
       const lastSuccess = new Date('2026-06-24T10:00:00Z');
@@ -98,10 +118,34 @@ describe('FeatureStatsModel', () => {
       // 查询条件覆盖今天与昨天两个 UTC 日期
       const [filter] = mockColl.find.mock.calls[0];
       expect(filter.date.$in).toEqual([today, yesterday]);
+      expect(filter.kind).toEqual({ $ne: 'model' });
       // 结果按日区分（供平台按 (date, feature) 取最大值累计）
       expect(stats).toHaveLength(3);
       expect(stats[0]).toMatchObject({ date: today, feature: 'student_chat', attempts: 4 });
       expect(stats[1]).toMatchObject({ date: yesterday, feature: 'student_chat', attempts: 20, successes: 19 });
+    });
+  });
+
+  describe('getModelStatsRecentDays', () => {
+    it('returns only model outcome documents in heartbeat shape', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      mockColl.find.mockReturnValue({
+        toArray: jest.fn().mockResolvedValue([{
+          date: today,
+          scenario: 'testdata_generation',
+          modelName: 'primary/model-x',
+          attemptCount: 12,
+          successCount: 9,
+        }]),
+      });
+      await expect(model.getModelStatsRecentDays(2)).resolves.toEqual([{
+        date: today,
+        scenario: 'testdata_generation',
+        modelName: 'primary/model-x',
+        attempts: 12,
+        successes: 9,
+      }]);
+      expect(mockColl.find.mock.calls[0][0].kind).toBe('model');
     });
   });
 });

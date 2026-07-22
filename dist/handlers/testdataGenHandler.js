@@ -236,6 +236,10 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 rawRes?.removeListener?.('close', onClose);
             }
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
+            const successfulModel = typeof plan.usedModel === 'string'
+                ? plan.usedModel.split(' → ').pop()?.trim()
+                : undefined;
+            this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', successfulModel || '', true).catch(() => { });
             this.response.body = { plan };
             this.response.type = 'application/json';
         }
@@ -248,10 +252,18 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 return;
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
+            const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+            const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
+            const usedModels = Array.isArray(testdataMetadata?.usedModels)
+                ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
+                : [];
+            const failedModel = usedModels[usedModels.length - 1]
+                || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
+            this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
             this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, {
                 problemId: String(this.request.body?.problemId || ''),
-                ...(0, testdataGenService_1.extractTestdataErrorMetadata)(err),
-                ...(0, openaiClient_1.extractAiErrorMetadata)(err),
+                ...testdataMetadata,
+                ...aiMetadata,
             });
             if (err instanceof openaiClient_1.AIServiceError) {
                 this.response.status = (0, openaiClient_1.getHttpStatusForCategory)(err.category);
@@ -270,6 +282,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
+                recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
             };
             this.response.type = 'application/json';
         }
