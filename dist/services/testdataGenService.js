@@ -51,6 +51,7 @@ exports.assemblePlan = assemblePlan;
 exports.isLikelyFunctionProblem = isLikelyFunctionProblem;
 exports.buildSkeletonPlan = buildSkeletonPlan;
 exports.extractTestdataErrorMetadata = extractTestdataErrorMetadata;
+exports.shouldRecommendDeeperReasoning = shouldRecommendDeeperReasoning;
 exports.classifySandboxRepairScope = classifySandboxRepairScope;
 exports.buildSandboxRepairPrompt = buildSandboxRepairPrompt;
 exports.mergeSandboxBlueprintRepair = mergeSandboxBlueprintRepair;
@@ -218,9 +219,11 @@ function detectStdFilename(code) {
 // ─── 确定性文件生成（不经过 AI） ──────────────────────────────────────────────
 /** HydroOJ 语言族 → config.yaml langs 白名单条目 */
 const LANG_FAMILY_CODES = {
-    py: ['py', 'py.py3'],
+    // 保留 Hydro 的通用键，同时覆盖当前主流运行时；Python 2 已在 Hydro 默认配置中禁用。
+    py: ['py', 'py.py3', 'py.pypy3'],
     java: ['java'],
-    cc: ['cc', 'cc.cc14o2'],
+    // 函数题模板统一为 C++，开放仍在主流使用的 C++14/17/20 及 O2 变体。
+    cc: ['cc', 'cc.cc14', 'cc.cc14o2', 'cc.cc17', 'cc.cc17o2', 'cc.cc20', 'cc.cc20o2'],
 };
 /** 语言族 → 模板文件名 */
 exports.TEMPLATE_FILENAMES = {
@@ -247,7 +250,11 @@ function buildCompileSh(languages) {
     if (languages.includes('py')) {
         branches.push(`if [[ "$HYDRO_LANG" == py* ]]; then
   cat template.py >>foo.py
-  python3 -c "import py_compile; py_compile.compile('/w/foo.py', '/w/foo', doraise=True)"`);
+  if [[ "$HYDRO_LANG" == "py.pypy3" ]]; then
+    mv foo.py /w/foo
+  else
+    python3 -c "import py_compile; py_compile.compile('/w/foo.py', '/w/foo', doraise=True)"
+  fi`);
     }
     if (languages.includes('java')) {
         branches.push(`if [[ "$HYDRO_LANG" == java* ]]; then
@@ -258,7 +265,14 @@ function buildCompileSh(languages) {
     }
     if (languages.includes('cc')) {
         branches.push(`if [[ "$HYDRO_LANG" == cc* ]]; then
-  g++ -x c++ template.cc -o foo -lm -fno-stack-limit -std=c++14 -O2 -I/include`);
+  CPP_STD=c++14
+  CPP_OPT=""
+  case "$HYDRO_LANG" in
+    cc.cc17|cc.cc17o2) CPP_STD=c++17 ;;
+    cc.cc20|cc.cc20o2) CPP_STD=c++20 ;;
+  esac
+  if [[ "$HYDRO_LANG" == *o2 ]]; then CPP_OPT="-O2"; fi
+  g++ -x c++ template.cc -o foo -lm -fno-stack-limit -std="$CPP_STD" $CPP_OPT -I/include`);
     }
     // 将多个 if 块拼成 if/elif 链
     const chain = branches
@@ -1573,9 +1587,10 @@ function buildTemplateRepairPrompt(missing) {
 }
 /** 携带匿名模型/阶段信息的业务错误，供遥测判断失败是否与模型相关。 */
 class TestdataGenerationError extends Error {
-    constructor(message, failureStage, results = []) {
+    constructor(message, failureStage, results = [], recommendDeeperReasoning = false) {
         super(message);
         this.name = 'TestdataGenerationError';
+        this.recommendDeeperReasoning = recommendDeeperReasoning;
         const usedModels = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
         const lastModel = results[results.length - 1]?.usedModel;
         this.telemetryMetadata = {
@@ -1586,12 +1601,17 @@ class TestdataGenerationError extends Error {
             } : {}),
             ...(usedModels.length > 0 ? { usedModels } : {}),
             aiAttemptCount: results.length,
+            recommendDeeperReasoning,
         };
     }
 }
 exports.TestdataGenerationError = TestdataGenerationError;
 function extractTestdataErrorMetadata(err) {
     return err instanceof TestdataGenerationError ? err.telemetryMetadata : undefined;
+}
+/** 仅在模型已经自动修复、但产物仍未通过解析/机器验证时建议换用更深思考模型。 */
+function shouldRecommendDeeperReasoning(err) {
+    return err instanceof TestdataGenerationError && err.recommendDeeperReasoning;
 }
 function classifySandboxRepairScope(error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -1867,7 +1887,7 @@ class TestdataGenService {
                 blueprint = this.useProvidedPythonOracle(parseSandboxBlueprint(repairResult.content, params.options, { allowMissingTemplates: true }), params.options);
             }
             catch (repairParseError) {
-                throw new TestdataGenerationError(`AI 自动修复蓝图格式后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'blueprint_parse', results);
+                throw new TestdataGenerationError(`AI 自动修复蓝图格式后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'blueprint_parse', results, true);
             }
         }
         if (blueprint.problemType === 'function') {
@@ -1884,7 +1904,7 @@ class TestdataGenService {
                 blueprintSourceContent = `${blueprintSourceContent}\n${repairResult.content}`;
                 const stillMissing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
                 if (stillMissing.length > 0) {
-                    throw new Error(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`);
+                    throw new TestdataGenerationError(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`, 'template_missing', results, true);
                 }
             }
         }
@@ -1938,7 +1958,7 @@ class TestdataGenService {
             catch (err) {
                 if (isCancellation(err))
                     throw err;
-                throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, classifySandboxRepairScope(err), results);
+                throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, classifySandboxRepairScope(err), results, true);
             }
         }
         return this.applyResultMetadata(assemblePlan(response, params.options, {

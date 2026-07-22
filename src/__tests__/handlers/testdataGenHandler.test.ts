@@ -13,7 +13,7 @@ import {
   extractStatementMarkdown,
 } from '../../handlers/testdataGenHandler';
 import * as openaiClient from '../../services/openaiClient';
-import { TestdataGenService } from '../../services/testdataGenService';
+import { TestdataGenService, TestdataGenerationError } from '../../services/testdataGenService';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -303,6 +303,46 @@ describe('TestdataGenGenerateHandler', () => {
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('EMPTY_STATEMENT');
+  });
+
+  it('自动修复后仍未通过机器验证时返回深度思考模型建议标记', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const generationError = new TestdataGenerationError('verification failed', 'oracle', [{
+      content: 'x',
+      usedModel: { endpointId: 'ep1', endpointName: 'primary', modelName: 'model-a' },
+    }] as never, true);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(generationError);
+    const capture = jest.fn();
+    const recordAttempt = jest.fn().mockResolvedValue(undefined);
+    const recordModelOutcome = jest.fn().mockResolvedValue(undefined);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'errorReporter') return { capture };
+      if (name === 'featureStatsModel') return { recordAttempt, recordModelOutcome };
+      return undefined;
+    });
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(502);
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'GENERATION_FAILED',
+        recommendDeeperReasoning: true,
+      }));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure', 'testdata_gen', expect.any(String), undefined, expect.any(String),
+        expect.objectContaining({ recommendDeeperReasoning: true, failureStage: 'oracle' }),
+      );
+      expect(recordModelOutcome).toHaveBeenCalledWith(
+        'testdata_generation', 'primary/model-a', false,
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
   });
 });
 

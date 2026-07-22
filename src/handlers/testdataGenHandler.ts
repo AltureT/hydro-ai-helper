@@ -22,6 +22,7 @@ import {
   isSafeTestdataFilename,
   isCancellation,
   extractTestdataErrorMetadata,
+  shouldRecommendDeeperReasoning,
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
@@ -279,6 +280,12 @@ export class TestdataGenGenerateHandler extends Handler {
       }
 
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });
+      const successfulModel = typeof plan.usedModel === 'string'
+        ? plan.usedModel.split(' → ').pop()?.trim()
+        : undefined;
+      this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
+        'testdata_generation', successfulModel || '', true,
+      ).catch(() => { /* best-effort */ });
 
       this.response.body = { plan };
       this.response.type = 'application/json';
@@ -291,6 +298,16 @@ export class TestdataGenGenerateHandler extends Handler {
         return;
       }
       console.error('[TestdataGenGenerateHandler.post] error:', err);
+      const testdataMetadata = extractTestdataErrorMetadata(err);
+      const aiMetadata = extractAiErrorMetadata(err);
+      const usedModels = Array.isArray(testdataMetadata?.usedModels)
+        ? testdataMetadata.usedModels.filter((item): item is string => typeof item === 'string')
+        : [];
+      const failedModel = usedModels[usedModels.length - 1]
+        || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
+      this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
+        'testdata_generation', failedModel, false,
+      ).catch(() => { /* best-effort */ });
       this.ctx.get('errorReporter')?.capture(
         'api_failure', 'testdata_gen',
         err instanceof Error ? err.message : String(err),
@@ -298,8 +315,8 @@ export class TestdataGenGenerateHandler extends Handler {
         err instanceof Error ? err.stack : undefined,
         {
           problemId: String((this.request.body as GenerateRequestBody)?.problemId || ''),
-          ...extractTestdataErrorMetadata(err),
-          ...extractAiErrorMetadata(err),
+          ...testdataMetadata,
+          ...aiMetadata,
         },
       );
       if (err instanceof AIServiceError) {
@@ -319,6 +336,7 @@ export class TestdataGenGenerateHandler extends Handler {
         error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
         retryable: true,
+        recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
       };
       this.response.type = 'application/json';
     }

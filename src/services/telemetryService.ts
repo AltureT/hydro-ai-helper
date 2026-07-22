@@ -11,7 +11,7 @@ import type { PluginInstallModel } from '../models/pluginInstall';
 import type { ConversationModel } from '../models/conversation';
 import type { AIConfigModel } from '../models/aiConfig';
 import type { RequestStatsModel } from '../models/requestStats';
-import type { FeatureStatsModel, FeatureStatsDaily } from '../models/featureStats';
+import type { FeatureStatsModel, FeatureStatsDaily, ModelUsageStatsDaily } from '../models/featureStats';
 import type { ErrorReporter } from './errorReporter';
 
 /**
@@ -36,6 +36,7 @@ interface TelemetryData {
   droppedErrorCount: number;
   activeEndpointCount: number;
   featureStats: FeatureStatsDaily[];
+  modelStats: ModelUsageStatsDaily[];
   latencyBuckets: Record<string, number>;
 }
 
@@ -51,6 +52,14 @@ interface FeatureStatPayload {
   attempts: number;
   successes: number;
   last_success_at?: string;
+}
+
+interface ModelStatPayload {
+  scenario: string;
+  model_name: string;
+  date: string;
+  attempts: number;
+  successes: number;
 }
 
 /**
@@ -99,6 +108,7 @@ interface ReportPayload {
   environment?: EnvironmentInfo;
   features?: FeatureFlags;
   feature_stats?: FeatureStatPayload[];
+  model_stats?: ModelStatPayload[];
   domain_hash: string;
   timestamp: string;
 }
@@ -213,7 +223,10 @@ export class TelemetryService {
    */
   private async collect(): Promise<TelemetryData> {
     // Parallelize independent queries
-    const [activeUsers7d, activeUsers30d, activeUsers90d, totalConversations, lastUsedAt, requestStats, aiConfig, featureStats] = await Promise.all([
+    const [
+      activeUsers7d, activeUsers30d, activeUsers90d, totalConversations, lastUsedAt,
+      requestStats, aiConfig, featureStats, modelStats,
+    ] = await Promise.all([
       this.conversationModel.countActiveUsers(7),
       this.conversationModel.countActiveUsers(30),
       this.conversationModel.countActiveUsers(90),
@@ -223,6 +236,7 @@ export class TelemetryService {
       this.aiConfigModel?.getConfig().catch(() => null),
       // 近 2 天按日计数：次日心跳会带上前一天的最终值，平台按 (date, feature) 取最大累计
       this.featureStatsModel?.getStatsRecentDays(2).catch(() => null),
+      this.featureStatsModel?.getModelStatsRecentDays?.(2).catch(() => null),
     ]);
 
     const selfStats = this.errorReporter?.getSelfStats();
@@ -241,6 +255,7 @@ export class TelemetryService {
       droppedErrorCount: selfStats?.droppedCount ?? 0,
       activeEndpointCount: aiConfig?.endpoints.filter(e => e.enabled).length ?? 0,
       featureStats: featureStats ?? [],
+      modelStats: modelStats ?? [],
       latencyBuckets: requestStats?.latencyBuckets ?? {},
     };
   }
@@ -317,6 +332,13 @@ export class TelemetryService {
           attempts: f.attempts,
           successes: f.successes,
           last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
+        })),
+        model_stats: stats.modelStats.map((item) => ({
+          scenario: item.scenario,
+          model_name: item.modelName,
+          date: item.date,
+          attempts: item.attempts,
+          successes: item.successes,
         })),
         domain_hash: domainHash,
         timestamp: new Date().toISOString()
