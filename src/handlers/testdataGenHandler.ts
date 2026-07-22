@@ -21,6 +21,7 @@ import {
   validateGenerateOptions,
   isSafeTestdataFilename,
   isCancellation,
+  extractTestdataErrorMetadata,
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
@@ -269,6 +270,7 @@ export class TestdataGenGenerateHandler extends Handler {
           statementMarkdown: statement,
           options,
           existingFiles,
+          existingConfig: pdoc.config,
           fillInDetected: isFillInBlankProblem(statement),
           signal: requestAc.signal,
         });
@@ -294,7 +296,11 @@ export class TestdataGenGenerateHandler extends Handler {
         err instanceof Error ? err.message : String(err),
         undefined,
         err instanceof Error ? err.stack : undefined,
-        { problemId: String((this.request.body as GenerateRequestBody)?.problemId || ''), ...extractAiErrorMetadata(err) },
+        {
+          problemId: String((this.request.body as GenerateRequestBody)?.problemId || ''),
+          ...extractTestdataErrorMetadata(err),
+          ...extractAiErrorMetadata(err),
+        },
       );
       if (err instanceof AIServiceError) {
         this.response.status = getHttpStatusForCategory(err.category);
@@ -367,7 +373,7 @@ export class TestdataGenSkeletonHandler extends Handler {
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
-      const plan = buildSkeletonPlan(options, extractStatementMarkdown(pdoc.content), existingFiles);
+      const plan = buildSkeletonPlan(options, extractStatementMarkdown(pdoc.content), existingFiles, pdoc.config);
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { /* best-effort */ });
 
       this.response.body = { plan };

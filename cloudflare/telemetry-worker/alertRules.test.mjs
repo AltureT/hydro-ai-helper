@@ -11,6 +11,7 @@ test('partial feature degradation alerts below 80% with enough volume', () => {
   ]);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].alert_key, 'feature_degraded:testdata_generation');
+  assert.match(alerts[0].detail, /活跃实例最新日快照/);
   assert.match(alerts[0].detail, /61%/);
 });
 

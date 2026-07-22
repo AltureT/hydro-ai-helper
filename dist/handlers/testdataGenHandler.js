@@ -227,6 +227,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     statementMarkdown: statement,
                     options,
                     existingFiles,
+                    existingConfig: pdoc.config,
                     fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                     signal: requestAc.signal,
                 });
@@ -247,7 +248,11 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 return;
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || ''), ...(0, openaiClient_1.extractAiErrorMetadata)(err) });
+            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, {
+                problemId: String(this.request.body?.problemId || ''),
+                ...(0, testdataGenService_1.extractTestdataErrorMetadata)(err),
+                ...(0, openaiClient_1.extractAiErrorMetadata)(err),
+            });
             if (err instanceof openaiClient_1.AIServiceError) {
                 this.response.status = (0, openaiClient_1.getHttpStatusForCategory)(err.category);
                 this.response.body = {
@@ -316,7 +321,7 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
-            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(pdoc.content), existingFiles);
+            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(pdoc.content), existingFiles, pdoc.config);
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { });
             this.response.body = { plan };
             this.response.type = 'application/json';

@@ -1,5 +1,6 @@
 export interface Overview {
   instances: number;
+  reporting_instances?: number;
   active_users_7d: number;
   active_users_30d?: number;
   active_users_90d?: number;
@@ -8,6 +9,8 @@ export interface Overview {
   latency_p50_ms: number | null;
   latency_p95_ms: number | null;
   latency_p99_ms: number | null;
+  api_metric_window_hours?: number;
+  health_freshness_hours?: number;
 }
 
 export interface Instance {
@@ -15,6 +18,7 @@ export interface Instance {
   version: string;
   active_users_7d: number;
   active_users_30d?: number;
+  active_users_90d?: number;
   total_conversations: number;
   error_count_24h: number;
   api_failure_count_24h: number;
@@ -24,6 +28,20 @@ export interface Instance {
   os_platform: string | null;
   geo_country?: string | null;
   geo_region?: string | null;
+  degraded_features?: number;
+}
+
+export interface VersionDistribution {
+  version: string;
+  count: number;
+}
+
+export interface InstancesResponse {
+  instances: Instance[];
+  total: number;
+  limit: number;
+  offset: number;
+  version_distribution: VersionDistribution[];
 }
 
 export interface ErrorGroup {
@@ -36,6 +54,13 @@ export interface ErrorGroup {
   last_seen: string;
   metadata?: string;
   versions?: string;
+}
+
+export interface ErrorsResponse {
+  errors: ErrorGroup[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface RelatedError {
@@ -76,6 +101,13 @@ export interface FeatureUsage {
   instances: number;
   since: string | null;
   until: string | null;
+}
+
+export interface FeatureHealthResponse {
+  features: FeatureHealth[];
+  usage?: FeatureUsage[];
+  usage_window_days?: number;
+  snapshot_max_age_hours?: number;
 }
 
 export interface Alert {

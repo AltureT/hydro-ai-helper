@@ -13,6 +13,7 @@ import {
   buildSkeletonPlan,
   extractJsonObject,
   normalizeFileContent,
+  normalizeExecutableContent,
   parseGenerationResponse,
   parseDelimitedResponse,
   parseAiResponse,
@@ -28,11 +29,14 @@ import {
   classifySandboxRepairScope,
   buildSandboxRepairPrompt,
   mergeSandboxBlueprintRepair,
+  hasCustomChecker,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
   detectStdFilename,
   TestdataGenService,
+  TestdataGenerationError,
+  extractTestdataErrorMetadata,
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
@@ -289,6 +293,38 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('input: 5.in');
     expect(yamlText).not.toContain('input: 2.in');
   });
+
+  it('更新测试点时保留现有 checker、时限与额外文件配置', () => {
+    const existingConfig = [
+      'type: default',
+      'time: 2500ms',
+      'memory: 512m',
+      'checker_type: testlib',
+      'checker: checker.cc',
+      'judge_extra_files:',
+      '  - checker.cc',
+      'subtasks:',
+      '  - score: 100',
+      '    cases:',
+      '      - input: old.in',
+      '        output: old.out',
+    ].join('\n');
+    const yamlText = buildConfigYaml({
+      problemType: 'traditional', caseCount: 1, languages: [], existingConfig,
+    });
+    expect(hasCustomChecker(existingConfig)).toBe(true);
+    expect(yamlText).toContain('checker_type: testlib');
+    expect(yamlText).toContain('checker: checker.cc');
+    expect(yamlText).toContain('time: 2500ms');
+    expect(yamlText).toContain('memory: 512m');
+    expect(yamlText).toContain('input: 1.in');
+    expect(yamlText).not.toContain('old.in');
+  });
+
+  it('default/strict checker 不按自定义 checker 处理', () => {
+    expect(hasCustomChecker('checker_type: default')).toBe(false);
+    expect(hasCustomChecker('checker_type: strict')).toBe(false);
+  });
 });
 
 // ─── extractJsonObject / normalizeFileContent ────────────────────────────────
@@ -316,6 +352,18 @@ describe('normalizeFileContent', () => {
     expect(normalizeFileContent('a\r\nb')).toBe('a\nb\n');
     expect(normalizeFileContent('a\n')).toBe('a\n');
     expect(normalizeFileContent('')).toBe('\n');
+  });
+});
+
+describe('normalizeExecutableContent', () => {
+  it('剥离完整包裹单个代码节的 Markdown 围栏', () => {
+    expect(normalizeExecutableContent('```python\r\nprint(1)\r\n```'))
+      .toBe('print(1)\n');
+  });
+
+  it('不删除代码内部的反引号内容', () => {
+    expect(normalizeExecutableContent('print("```")'))
+      .toBe('print("```")\n');
   });
 });
 
@@ -605,6 +653,8 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(system).toContain('默认每个文件固定 T=1');
     expect(system).toContain('GENERATOR 只生成 .in，不生成答案');
     expect(system).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+    expect(system).toContain('每个 input 的 UTF-8 内容必须小于 256KB');
+    expect(system).toContain('全部 .in/.out 与辅助文件合计必须小于 1MB');
     const user = buildSandboxBlueprintUserPrompt({
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
@@ -622,6 +672,27 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(blueprint.generatorCode).toContain('json.dumps');
     expect(blueprint.oracleCode).toContain('print(input())');
     expect(blueprint.templates?.java).toContain('public class Main');
+  });
+
+  it('剥离每个蓝图代码节各自携带的 Markdown 围栏', () => {
+    const raw = [
+      '@@@META@@@',
+      'problemType: traditional',
+      '@@@GENERATOR@@@',
+      '```python',
+      'print("generator")',
+      '```',
+      '@@@ORACLE@@@',
+      '```python',
+      'print(input())',
+      '```',
+    ].join('\n');
+    const blueprint = parseSandboxBlueprint(
+      raw,
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+    );
+    expect(blueprint.generatorCode).toBe('print("generator")\n');
+    expect(blueprint.oracleCode).toBe('print(input())\n');
   });
 
   it('生成器必须返回精确数量的原始输入', () => {
@@ -671,6 +742,35 @@ describe('Hydro 沙箱生成蓝图', () => {
       expect.arrayContaining(['2\nA>B\nC<B\nA>C\nA<B\nB>C\nC>A\n']),
       expect.anything(),
     );
+  });
+
+  it('自定义 checker 题只验证标程可运行，不用纯文本相等误拒多解输出', async () => {
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'case', input: '1\n' }] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'answer\n', stderr: '' },
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'different but valid\n', stderr: '' },
+      ]),
+    };
+    const blueprint = parseSandboxBlueprint(
+      makeSandboxBlueprint('traditional'),
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+    );
+    const response = await materializeSandboxBlueprint(
+      blueprint,
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+      coinStatementWithSample,
+      runner,
+      undefined,
+      true,
+    );
+    expect(response.verification?.sampleCheck).toBeUndefined();
+    expect(response.notes).toContain('自定义 checker');
   });
 });
 
@@ -852,11 +952,14 @@ describe('stage-specific sandbox repair', () => {
 
   it('按错误阶段分类并生成定向提示词', () => {
     expect(classifySandboxRepairScope(new Error('GENERATOR 实跑失败：Output Limit Exceeded'))).toBe('generator');
+    expect(classifySandboxRepairScope(new Error('第 3 个 .in 未通过输入校验'))).toBe('validator');
     expect(classifySandboxRepairScope(new Error('ORACLE 未通过题面样例 1'))).toBe('oracle');
     expect(classifySandboxRepairScope(new Error('暴力解与标程不一致'))).toBe('brute');
     expect(classifySandboxRepairScope(new Error('template.py 与标程不一致'))).toBe('template-py');
     expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('第 3 个 .in 未通过输入校验'), options))
+      .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
   });
 
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
@@ -880,6 +983,37 @@ describe('stage-specific sandbox repair', () => {
     );
     expect(merged.solutionCode).toContain('def solve');
     expect(merged.templates?.py).toContain('print(solve');
+  });
+
+  it('输入校验修复必须同时替换 GENERATOR 与 VALIDATOR', () => {
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
+    expect(() => mergeSandboxBlueprintRepair(
+      original,
+      '@@@GENERATOR@@@\nprint("{}")',
+      'validator',
+    )).toThrow(/未返回 VALIDATOR/);
+
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@GENERATOR@@@\nprint("{}")\n@@@VALIDATOR@@@\nimport sys\nsys.exit(0)',
+      'validator',
+    );
+    expect(merged.generatorCode).toContain('print');
+    expect(merged.validatorCode).toContain('sys.exit');
+  });
+
+  it('最终失败携带模型与阶段遥测元数据', () => {
+    const err = new TestdataGenerationError('failed', 'oracle', [{
+      content: 'x',
+      usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+    }] as never);
+    expect(extractTestdataErrorMetadata(err)).toEqual(expect.objectContaining({
+      failureStage: 'oracle',
+      endpointName: 'main',
+      modelName: 'gpt-test',
+      usedModels: ['main/gpt-test'],
+      aiAttemptCount: 1,
+    }));
   });
 });
 

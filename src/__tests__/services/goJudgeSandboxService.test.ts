@@ -2,6 +2,7 @@ import {
   GoJudgeSandboxRunner,
   getTestdataGenerationMode,
   SANDBOX_CHUNK_SIZE,
+  SANDBOX_RESPONSE_LIMIT_BYTES,
 } from '../../services/goJudgeSandboxService';
 
 /** 构造一条 go-judge 结果，便于用最小样板覆盖各类 status。 */
@@ -47,8 +48,12 @@ describe('GoJudgeSandboxRunner', () => {
         })],
       }),
       // 分块批量：块请求 timeout = SANDBOX_CHUNK_SIZE(4) × clockLimit(10s) + 15s = 55s
-      expect.objectContaining({ timeout: 55000 }),
+      expect.objectContaining({
+        timeout: 55000,
+        maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
+      }),
     );
+    expect(SANDBOX_RESPONSE_LIMIT_BYTES).toBeGreaterThan(4 * 1024 * 1024);
   });
 
   it('沙箱非零退出时返回可读错误', async () => {
@@ -183,4 +188,3 @@ describe('getTestdataGenerationMode', () => {
     expect(getTestdataGenerationMode('unexpected')).toBe('auto');
   });
 });
-

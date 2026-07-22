@@ -20,31 +20,40 @@ function successRate(f: FeatureHealth): number {
   return f.successes / f.attempts;
 }
 
-// A feature is "down" when instances attempted it but produced zero successes —
-// the outage the aggregate error rate hides.
-function isDown(f: FeatureHealth): boolean {
-  return f.attempts > 0 && f.successes === 0;
+type HealthLevel = 'unknown' | 'critical' | 'warning' | 'healthy';
+
+function healthLevel(f: FeatureHealth): HealthLevel {
+  if (f.attempts === 0) return 'unknown';
+  const rate = successRate(f);
+  if ((f.attempts >= 5 && f.successes === 0) || (f.attempts >= 10 && rate < 0.5)) return 'critical';
+  if (f.attempts >= 10 && rate < 0.8) return 'warning';
+  return 'healthy';
 }
 
 function rateColor(f: FeatureHealth): string {
-  if (f.attempts === 0) return '#6b7280';
-  const r = successRate(f);
-  if (r === 0) return '#ef4444';
-  if (r < 0.8) return '#f59e0b';
-  return '#16a34a';
+  const level = healthLevel(f);
+  if (level === 'critical') return '#ef4444';
+  if (level === 'warning') return '#f59e0b';
+  if (level === 'healthy') return '#16a34a';
+  return '#6b7280';
 }
 
 export function FeatureHealthPanel() {
   const [data, setData] = useState<FeatureHealth[]>([]);
   const [usage, setUsage] = useState<FeatureUsage[]>([]);
   const [usageDays, setUsageDays] = useState<number>(30);
+  const [snapshotMaxAgeHours, setSnapshotMaxAgeHours] = useState(48);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
     getFeatureHealth(usageDays)
-      .then(r => { setData(r.features); setUsage(r.usage || []); })
+      .then(r => {
+        setData(r.features);
+        setUsage(r.usage || []);
+        setSnapshotMaxAgeHours(r.snapshot_max_age_hours ?? 48);
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, [usageDays]);
@@ -55,7 +64,8 @@ export function FeatureHealthPanel() {
     return <p style={{ color: '#6b7280', textAlign: 'center', padding: 40 }}>暂无功能健康数据（需安装新版插件的实例上报后出现）</p>;
   }
 
-  const downCount = data.filter(isDown).length;
+  const criticalCount = data.filter(f => healthLevel(f) === 'critical').length;
+  const warningCount = data.filter(f => healthLevel(f) === 'warning').length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -107,28 +117,39 @@ export function FeatureHealthPanel() {
     </div>
     <div style={cardStyle}>
       <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>功能健康 ({data.length})</h3>
-      <p style={{ margin: '0 0 16px', fontSize: '12px', color: downCount > 0 ? '#ef4444' : '#6b7280' }}>
-        {downCount > 0
-          ? `⚠ ${downCount} 个功能疑似瘫痪（有尝试但零成功）`
-          : '所有上报功能均有成功记录'}
+      <p style={{ margin: '0 0 6px', fontSize: '12px', color: criticalCount > 0 ? '#ef4444' : warningCount > 0 ? '#d97706' : '#6b7280' }}>
+        {criticalCount > 0
+          ? `⚠ ${criticalCount} 个功能严重降级${warningCount > 0 ? `，另有 ${warningCount} 个功能降级` : ''}`
+          : warningCount > 0
+            ? `⚠ ${warningCount} 个功能成功率低于 80%`
+            : '当前活跃实例未发现功能降级'}
+      </p>
+      <p style={{ margin: '0 0 16px', fontSize: '12px', color: '#6b7280' }}>
+        这是各实例最新上报日快照，仅纳入最近 {snapshotMaxAgeHours} 小时仍有心跳的实例；累计趋势请查看上方“累计用量”。
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {data.map(f => {
-          const down = isDown(f);
+          const level = healthLevel(f);
           const rate = successRate(f);
+          const failed = Math.max(0, f.attempts - f.successes);
           return (
-            <div key={f.feature} style={{ ...rowStyle, ...(down ? { borderColor: '#fecaca', background: '#fef2f2' } : {}) }}>
+            <div key={f.feature} style={{
+              ...rowStyle,
+              ...(level === 'critical' ? { borderColor: '#fecaca', background: '#fef2f2' } : {}),
+              ...(level === 'warning' ? { borderColor: '#fde68a', background: '#fffbeb' } : {}),
+            }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <span style={{ fontSize: '14px', fontWeight: 600 }}>
                   {FEATURE_LABELS[f.feature] || f.feature}
                 </span>
                 <code style={{ fontSize: '11px', color: '#6b7280' }}>{f.feature}</code>
-                {down && (
+                {(level === 'critical' || level === 'warning') && (
                   <span style={{
                     padding: '2px 8px', borderRadius: 4, fontSize: '11px', fontWeight: 700,
-                    background: '#fee2e2', color: '#b91c1c',
+                    background: level === 'critical' ? '#fee2e2' : '#fef3c7',
+                    color: level === 'critical' ? '#b91c1c' : '#b45309',
                   }}>
-                    瘫痪
+                    {level === 'critical' ? '严重降级' : '降级'}
                   </span>
                 )}
                 <span style={{ marginLeft: 'auto', fontSize: '13px', fontWeight: 600, color: rateColor(f) }}>
@@ -138,6 +159,7 @@ export function FeatureHealthPanel() {
               <div style={{ display: 'flex', gap: 16, fontSize: '12px', color: '#6b7280', flexWrap: 'wrap' }}>
                 <span>尝试: <strong style={{ color: '#1f2937' }}>{f.attempts}</strong></span>
                 <span>成功: <strong style={{ color: '#16a34a' }}>{f.successes}</strong></span>
+                <span>失败: <strong style={{ color: failed > 0 ? '#dc2626' : '#1f2937' }}>{failed}</strong></span>
                 <span>上报实例: <strong style={{ color: '#1f2937' }}>{f.reporting_instances}</strong></span>
                 {f.broken_instances > 0 && (
                   <span>瘫痪实例: <strong style={{ color: '#ef4444' }}>{f.broken_instances}</strong></span>

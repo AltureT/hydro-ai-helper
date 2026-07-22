@@ -19,7 +19,7 @@ export function buildFeatureDegradationCandidates(rows = []) {
       alert_key: `feature_degraded:${row.feature}`,
       severity: 'warning',
       title: `功能降级: ${row.feature}`,
-      detail: `近 7 天 ${attempts} 次尝试、${successes} 次成功（成功率 ${rate}%）`,
+      detail: `活跃实例最新日快照：${attempts} 次尝试、${successes} 次成功（成功率 ${rate}%）`,
     }];
   });
 }

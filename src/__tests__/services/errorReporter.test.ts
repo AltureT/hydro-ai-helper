@@ -124,6 +124,45 @@ describe('ErrorReporter', () => {
       reporter.capture('api_failure', 'timeout', 'err2', undefined, 'same stack');
       // Should be deduplicated to one entry
     });
+
+    it('deduplicates dynamic error messages from the same code path', () => {
+      const stack1 = [
+        'Error: 第 1 个测试点输入 123 失败',
+        '    at TestdataGenService.generate (dist/services/testdataGenService.js:100:20)',
+        '    at Handler.post (dist/handlers/testdataGenHandler.js:50:10)',
+      ].join('\n');
+      const stack2 = [
+        'Error: 第 8 个测试点输入 999 失败',
+        '    at TestdataGenService.generate (dist/services/testdataGenService.js:100:20)',
+        '    at Handler.post (dist/handlers/testdataGenHandler.js:50:10)',
+      ].join('\n');
+      reporter.capture('api_failure', 'testdata_gen', 'first', undefined, stack1, { failureStage: 'oracle' });
+      reporter.capture('api_failure', 'testdata_gen', 'second', undefined, stack2, { failureStage: 'oracle' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((reporter as any).buffer.size).toBe(1);
+    });
+
+    it('keeps different testdata failure stages separate', () => {
+      const stack = [
+        'Error: dynamic',
+        '    at TestdataGenService.generate (dist/services/testdataGenService.js:100:20)',
+      ].join('\n');
+      reporter.capture('api_failure', 'testdata_gen', 'generator', undefined, stack, { failureStage: 'generator' });
+      reporter.capture('api_failure', 'testdata_gen', 'oracle', undefined, stack, { failureStage: 'oracle' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((reporter as any).buffer.size).toBe(2);
+    });
+
+    it('keeps different categories separate even when stack frames match', () => {
+      const stack = [
+        'Error: dynamic',
+        '    at Handler.post (dist/handlers/sharedHandler.js:50:10)',
+      ].join('\n');
+      reporter.capture('api_failure', 'testdata_gen', 'generation failed', undefined, stack);
+      reporter.capture('api_failure', 'student_chat', 'chat failed', undefined, stack);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((reporter as any).buffer.size).toBe(2);
+    });
   });
 
   describe('sanitized stack frames + runtime env (P1)', () => {

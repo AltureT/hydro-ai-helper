@@ -123,7 +123,9 @@ export class ErrorReporter {
   ): void {
     // Check telemetry asynchronously — but capture is sync/fire-and-forget
     // We check lazily on flush instead of on every capture for performance
-    const discriminator = metadata?.endpointId as string | undefined;
+    const discriminator = [metadata?.endpointId, metadata?.failureStage]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .join(':') || undefined;
     const fingerprint = this.computeFingerprint(errorType, category, stack, discriminator);
     const key = `${errorType}:${category}:${fingerprint}`;
     const now = new Date();
@@ -309,7 +311,14 @@ export class ErrorReporter {
   }
 
   private computeFingerprint(errorType: string, category: string, stack?: string, discriminator?: string): string {
-    let source = stack || `${errorType}:${category}`;
+    // Error.stack 第一行包含动态 message（测试点编号、输入摘要等）。直接哈希
+    // 整段 stack 会把同一代码路径拆成大量指纹，淹没错误面板与告警规则。
+    // 只使用脱敏后的调用帧；无可用帧时按错误类型/类别稳定聚合。
+    const frames = this.sanitizeStack(stack) || [];
+    // errorType/category 必须始终参与哈希：不同业务类别可能经过同一个
+    // Handler catch 路径，若只哈希调用帧会在平台端被错误合并。
+    let source = `${errorType}:${category}`;
+    if (frames.length > 0) source += `:${frames.join('\n')}`;
     if (discriminator) source += `:${discriminator}`;
     return createHash('sha256')
       .update(source)

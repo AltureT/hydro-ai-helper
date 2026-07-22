@@ -61,6 +61,14 @@ const STDERR_LIMIT_BYTES = 64 * 1024;
  * 故大批量按块串行：每块最多 4 条，块间等待上一块返回后再发下一块。
  */
 export const SANDBOX_CHUNK_SIZE = 4;
+/**
+ * Axios 的响应上限必须覆盖整批 go-judge 结果，而不是单条 stdout。
+ * stdout/stderr 会被 JSON 转义，最坏情况下体积接近原始内容的两倍；
+ * 额外预留 1MB 给状态、fileError 与 JSON 结构开销。
+ */
+export const SANDBOX_RESPONSE_LIMIT_BYTES = (
+  SANDBOX_CHUNK_SIZE * (STDOUT_LIMIT_BYTES + STDERR_LIMIT_BYTES) * 2
+) + 1024 * 1024;
 /** 沙箱执行总时长预算（毫秒），由 materialize 层在各阶段间累计校验。 */
 export const SANDBOX_TOTAL_BUDGET_MS = 300_000;
 
@@ -192,7 +200,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
       const response = await this.http.post(
         `${this.host}/run`,
         { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) },
-        { timeout: chunkTimeout, signal: opts.signal, maxContentLength: 4 * 1024 * 1024, proxy: false },
+        { timeout: chunkTimeout, signal: opts.signal, maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES, proxy: false },
       );
       const results = unwrapResults(response.data);
       if (results.length !== chunk.length) {

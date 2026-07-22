@@ -8,7 +8,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GoJudgeSandboxRunner = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_CHUNK_SIZE = void 0;
+exports.GoJudgeSandboxRunner = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = void 0;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
 const textTruncate_1 = require("../lib/textTruncate");
@@ -22,6 +22,12 @@ const STDERR_LIMIT_BYTES = 64 * 1024;
  * 故大批量按块串行：每块最多 4 条，块间等待上一块返回后再发下一块。
  */
 exports.SANDBOX_CHUNK_SIZE = 4;
+/**
+ * Axios 的响应上限必须覆盖整批 go-judge 结果，而不是单条 stdout。
+ * stdout/stderr 会被 JSON 转义，最坏情况下体积接近原始内容的两倍；
+ * 额外预留 1MB 给状态、fileError 与 JSON 结构开销。
+ */
+exports.SANDBOX_RESPONSE_LIMIT_BYTES = (exports.SANDBOX_CHUNK_SIZE * (STDOUT_LIMIT_BYTES + STDERR_LIMIT_BYTES) * 2) + 1024 * 1024;
 /** 沙箱执行总时长预算（毫秒），由 materialize 层在各阶段间累计校验。 */
 exports.SANDBOX_TOTAL_BUDGET_MS = 300000;
 function normalizeHost(host) {
@@ -133,7 +139,7 @@ class GoJudgeSandboxRunner {
         const details = [];
         for (let offset = 0; offset < inputs.length; offset += exports.SANDBOX_CHUNK_SIZE) {
             const chunk = inputs.slice(offset, offset + exports.SANDBOX_CHUNK_SIZE);
-            const response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) }, { timeout: chunkTimeout, signal: opts.signal, maxContentLength: 4 * 1024 * 1024, proxy: false });
+            const response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) }, { timeout: chunkTimeout, signal: opts.signal, maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES, proxy: false });
             const results = unwrapResults(response.data);
             if (results.length !== chunk.length) {
                 throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);

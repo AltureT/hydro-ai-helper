@@ -161,6 +161,8 @@ db.ai_plugin_install.updateOne(
 
 ## Changelog
 
+See [CHANGELOG.md](CHANGELOG.md) for the complete version history. Each GitHub Release contains notes for that version only.
+
 <details open>
 <summary><b>v3.0.0</b> — Test data generation: sandbox execution + double verification</summary>
 

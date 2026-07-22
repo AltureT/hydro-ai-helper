@@ -590,26 +590,37 @@ async function handleDashboardOverview(request, env) {
   }
 
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  const row = await env.DB.prepare(
+  // API 请求统计和延迟桶都是实例上报的“最近 24h 快照”。只纳入最近
+  // 48h 仍有心跳的实例，避免把数周前离线实例的旧快照混进当前健康度。
+  const healthFreshnessHours = 48;
+  const cutoffFresh = new Date(Date.now() - healthFreshnessHours * 60 * 60 * 1000).toISOString();
+  const activityRow = await env.DB.prepare(
     `SELECT COUNT(*) AS instance_count,
             COALESCE(SUM(active_users_7d), 0) AS active_users_7d,
             COALESCE(SUM(active_users_30d), 0) AS active_users_30d,
             COALESCE(SUM(active_users_90d), 0) AS active_users_90d,
-            COALESCE(SUM(total_conversations), 0) AS total_conversations,
+            COALESCE(SUM(total_conversations), 0) AS total_conversations
+     FROM plugin_stats
+     WHERE last_report_at >= ?`,
+  ).bind(cutoff90d).first();
+  const healthRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS reporting_instances,
             COALESCE(SUM(api_failure_count_24h), 0) AS failures,
             COALESCE(SUM(api_success_count_24h), 0) AS successes
      FROM plugin_stats
      WHERE last_report_at >= ?`,
-  ).bind(cutoff90d).first();
+  ).bind(cutoffFresh).first();
 
-  const totalRequests = (row?.successes || 0) + (row?.failures || 0);
-  const errorRate = totalRequests > 0 ? ((row?.failures || 0) / totalRequests * 100).toFixed(2) : '0.00';
+  const totalRequests = (healthRow?.successes || 0) + (healthRow?.failures || 0);
+  const errorRate = totalRequests > 0
+    ? ((healthRow?.failures || 0) / totalRequests * 100).toFixed(2)
+    : '0.00';
 
   // Merge per-instance latency histograms and interpolate global percentiles.
   const latRows = await env.DB.prepare(
     `SELECT latency_buckets FROM plugin_stats
      WHERE last_report_at >= ? AND latency_buckets IS NOT NULL`,
-  ).bind(cutoff90d).all();
+  ).bind(cutoffFresh).all();
   const merged = {};
   for (const r of (latRows?.results || [])) {
     let buckets;
@@ -622,15 +633,18 @@ async function handleDashboardOverview(request, env) {
   }
 
   return json({
-    instances: row?.instance_count || 0,
-    active_users_7d: row?.active_users_7d || 0,
-    active_users_30d: row?.active_users_30d || 0,
-    active_users_90d: row?.active_users_90d || 0,
-    total_conversations: row?.total_conversations || 0,
+    instances: activityRow?.instance_count || 0,
+    reporting_instances: healthRow?.reporting_instances || 0,
+    active_users_7d: activityRow?.active_users_7d || 0,
+    active_users_30d: activityRow?.active_users_30d || 0,
+    active_users_90d: activityRow?.active_users_90d || 0,
+    total_conversations: activityRow?.total_conversations || 0,
     error_rate_percent: parseFloat(errorRate),
     latency_p50_ms: percentileFromBuckets(merged, 0.5),
     latency_p95_ms: percentileFromBuckets(merged, 0.95),
     latency_p99_ms: percentileFromBuckets(merged, 0.99),
+    api_metric_window_hours: 24,
+    health_freshness_hours: healthFreshnessHours,
   });
 }
 
@@ -668,20 +682,47 @@ async function handleDashboardInstances(request, env) {
   }
 
   const url = new URL(request.url);
-  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
-  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const requestedLimit = parseInt(url.searchParams.get('limit') || '50', 10);
+  const requestedOffset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 100)) : 50;
+  const offset = Number.isFinite(requestedOffset) ? Math.max(0, requestedOffset) : 0;
 
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  const rows = await env.DB.prepare(
-    `SELECT instance_id, version, active_users_7d, active_users_30d, total_conversations,
-            error_count_24h, api_failure_count_24h, last_report_at, installed_at, node_version, os_platform,
-            geo_country, geo_region
-     FROM plugin_stats
-     WHERE last_report_at >= ?
-     ORDER BY last_report_at DESC LIMIT ? OFFSET ?`,
-  ).bind(cutoff90d, limit, offset).all();
+  const cutoffFresh = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const [rows, totalRows, versionRows] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT ps.instance_id, ps.version, ps.active_users_7d, ps.active_users_30d,
+              ps.active_users_90d, ps.total_conversations, ps.error_count_24h,
+              ps.api_failure_count_24h, ps.last_report_at, ps.installed_at,
+              ps.node_version, ps.os_platform, ps.geo_country, ps.geo_region,
+              COALESCE((
+                SELECT COUNT(*) FROM plugin_feature_stats pfs
+                WHERE pfs.instance_id = ps.instance_id
+                  AND pfs.report_at >= ?
+                  AND pfs.attempts >= 10
+                  AND (pfs.successes * 1.0 / pfs.attempts) < 0.8
+              ), 0) AS degraded_features
+       FROM plugin_stats ps
+       WHERE ps.last_report_at >= ?
+       ORDER BY ps.last_report_at DESC LIMIT ? OFFSET ?`,
+    ).bind(cutoffFresh, cutoff90d, limit, offset),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM plugin_stats WHERE last_report_at >= ?`,
+    ).bind(cutoff90d),
+    env.DB.prepare(
+      `SELECT version, COUNT(*) AS count
+       FROM plugin_stats WHERE last_report_at >= ?
+       GROUP BY version ORDER BY count DESC, version DESC`,
+    ).bind(cutoff90d),
+  ]);
 
-  return json({ instances: rows?.results || [] });
+  return json({
+    instances: rows?.results || [],
+    total: totalRows?.results?.[0]?.total || 0,
+    limit,
+    offset,
+    version_distribution: versionRows?.results || [],
+  });
 }
 
 async function handleDashboardErrors(request, env) {
@@ -690,8 +731,10 @@ async function handleDashboardErrors(request, env) {
   }
 
   const url = new URL(request.url);
-  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
-  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const requestedLimit = parseInt(url.searchParams.get('limit') || '50', 10);
+  const requestedOffset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 100)) : 50;
+  const offset = Number.isFinite(requestedOffset) ? Math.max(0, requestedOffset) : 0;
   // 排序白名单：最近出现（默认）/ 总次数 / 影响实例数
   const sortParam = url.searchParams.get('sort');
   const orderBy = sortParam === 'count' ? 'total_count DESC'
@@ -699,20 +742,49 @@ async function handleDashboardErrors(request, env) {
       : 'last_seen DESC';
 
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  const rows = await env.DB.prepare(
-    `SELECT stack_fingerprint, error_type, category, message, metadata,
-            COUNT(DISTINCT instance_id) AS affected_instances,
-            SUM(count) AS total_count,
-            MAX(last_seen) AS last_seen,
-            GROUP_CONCAT(DISTINCT version) AS versions
-     FROM plugin_errors
-     WHERE received_at >= ?
-     GROUP BY stack_fingerprint
-     ORDER BY ${orderBy}
-     LIMIT ? OFFSET ?`,
-  ).bind(cutoff90d, limit, offset).all();
+  const [rows, totalRows] = await env.DB.batch([
+    env.DB.prepare(
+      `WITH recent AS (
+         SELECT * FROM plugin_errors WHERE received_at >= ?
+       ), grouped AS (
+         SELECT stack_fingerprint, error_type, category,
+                COUNT(DISTINCT instance_id) AS affected_instances,
+                SUM(count) AS total_count,
+                MAX(last_seen) AS last_seen,
+                GROUP_CONCAT(DISTINCT version) AS versions
+         FROM recent
+         GROUP BY stack_fingerprint, error_type, category
+       )
+       SELECT grouped.*,
+              (SELECT message FROM recent sample
+               WHERE sample.stack_fingerprint = grouped.stack_fingerprint
+                 AND sample.error_type = grouped.error_type
+                 AND sample.category = grouped.category
+               ORDER BY sample.last_seen DESC LIMIT 1) AS message,
+              (SELECT metadata FROM recent sample
+               WHERE sample.stack_fingerprint = grouped.stack_fingerprint
+                 AND sample.error_type = grouped.error_type
+                 AND sample.category = grouped.category
+               ORDER BY sample.last_seen DESC LIMIT 1) AS metadata
+       FROM grouped
+       ORDER BY ${orderBy}
+       LIMIT ? OFFSET ?`,
+    ).bind(cutoff90d, limit, offset),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM (
+         SELECT 1 FROM plugin_errors
+         WHERE received_at >= ?
+         GROUP BY stack_fingerprint, error_type, category
+       )`,
+    ).bind(cutoff90d),
+  ]);
 
-  return json({ errors: rows?.results || [] });
+  return json({
+    errors: rows?.results || [],
+    total: totalRows?.results?.[0]?.total || 0,
+    limit,
+    offset,
+  });
 }
 
 async function handleDashboardFeatureHealth(request, env) {
@@ -720,10 +792,11 @@ async function handleDashboardFeatureHealth(request, env) {
     return json({ success: false, error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Aggregate the latest per-instance snapshots across instances that reported
-  // in the last 7 days. broken_instances = instances that attempted the feature
-  // but produced zero successes (the "100% broken, error rate 0%" signal).
-  const cutoff7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  // Aggregate the latest daily snapshot for instances that reported recently.
+  // A 48h freshness budget tolerates one missed daily heartbeat without mixing
+  // week-old snapshots into the current feature-health signal.
+  const snapshotMaxAgeHours = 48;
+  const cutoffFresh = new Date(Date.now() - snapshotMaxAgeHours * 60 * 60 * 1000).toISOString();
   const rows = await env.DB.prepare(
     `SELECT feature,
             SUM(attempts) AS attempts,
@@ -735,7 +808,7 @@ async function handleDashboardFeatureHealth(request, env) {
      WHERE report_at >= ?
      GROUP BY feature
      ORDER BY feature`,
-  ).bind(cutoff7d).all();
+  ).bind(cutoffFresh).all();
 
   // 按日累计用量（可选 ?days=N，默认 30，0=全部保留期）：回答
   // "各功能累计发生了多少次"（测试数据生成/对话/教学分析/学生报告等）
@@ -777,7 +850,12 @@ async function handleDashboardFeatureHealth(request, env) {
     console.error('[feature-health] usage query failed (migration 0008 applied?)', e);
   }
 
-  return json({ features: rows?.results || [], usage, usage_window_days: usageDays });
+  return json({
+    features: rows?.results || [],
+    usage,
+    usage_window_days: usageDays,
+    snapshot_max_age_hours: snapshotMaxAgeHours,
+  });
 }
 
 async function handleDashboardFeedback(request, env) {
@@ -862,7 +940,7 @@ const ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000; // don't re-raise the same key wit
 async function evaluateAlerts(env) {
   const now = Date.now();
   const cutoff24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  const cutoff7d = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const cutoffFresh = new Date(now - 48 * 60 * 60 * 1000).toISOString();
   const candidates = [];
 
   // Rule A — a whole feature is down (attempted but zero successes).
@@ -873,13 +951,13 @@ async function evaluateAlerts(env) {
        WHERE report_at >= ?
        GROUP BY feature
        HAVING SUM(attempts) >= 5 AND SUM(successes) = 0`,
-    ).bind(cutoff7d).all();
+    ).bind(cutoffFresh).all();
     for (const r of (rows?.results || [])) {
       candidates.push({
         alert_key: `feature_outage:${r.feature}`,
         severity: 'critical',
         title: `功能瘫痪: ${r.feature}`,
-        detail: `近 7 天 ${r.attempts} 次尝试、0 次成功（错误率聚合无法体现）`,
+        detail: `活跃实例最新日快照：${r.attempts} 次尝试、0 次成功（错误率聚合无法体现）`,
       });
     }
   } catch (e) { console.error('[alerts] rule A failed', e); }
@@ -892,7 +970,7 @@ async function evaluateAlerts(env) {
        FROM plugin_feature_stats
        WHERE report_at >= ?
        GROUP BY feature`,
-    ).bind(cutoff7d).all();
+    ).bind(cutoffFresh).all();
     candidates.push(...buildFeatureDegradationCandidates(rows?.results || []));
   } catch (e) { console.error('[alerts] rule A2 failed', e); }
 

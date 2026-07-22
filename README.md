@@ -161,6 +161,8 @@ db.ai_plugin_install.updateOne(
 
 ## 更新日志
 
+完整版本记录见 [CHANGELOG.md](CHANGELOG.md)，GitHub Release 仅展示对应版本的更新内容。
+
 <details open>
 <summary><b>v3.0.0</b> — 测试数据生成：沙箱实跑 + 双重验证</summary>
 

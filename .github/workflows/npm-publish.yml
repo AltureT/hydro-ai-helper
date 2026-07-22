@@ -11,6 +11,7 @@ jobs:
 
     permissions:
       contents: write  # 需要写入权限以创建 Release
+      actions: write   # 创建 Release 后显式触发 Gitee 镜像同步
 
     steps:
       - name: Checkout 代码
@@ -40,6 +41,23 @@ jobs:
 
           echo "✅ 版本验证通过：$TAG_VERSION"
 
+      - name: 提取当前版本发布说明
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          awk -v heading="## ${TAG_NAME}" '
+            $0 == heading { found = 1; next }
+            found && /^## v[0-9]+\.[0-9]+\.[0-9]+/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > /tmp/release-notes.md
+
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "❌ 错误：CHANGELOG.md 中未找到 ${TAG_NAME} 的发布说明"
+            exit 1
+          fi
+
+          echo "✅ 已提取 ${TAG_NAME} 的独立发布说明"
+
       - name: 发布到 npm
         run: npm publish --access public
         env:
@@ -50,13 +68,18 @@ jobs:
         with:
           # Curated, user-facing notes only. Auto-generation is OFF so internal
           # commit titles (infra/telemetry/etc.) are never surfaced publicly.
-          # Update .github/RELEASE_NOTES.md before each release tag.
-          body_path: .github/RELEASE_NOTES.md
+          # The extraction step selects only the section matching the current tag.
+          body_path: /tmp/release-notes.md
           generate_release_notes: false
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 触发 Gitee Release 同步
+        run: gh workflow run sync-releases-to-gitee.yml --ref main -f tag_name="${GITHUB_REF_NAME}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 发布成功通知
         if: success()
