@@ -1,6 +1,9 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { i18n } from '../utils/i18n';
-import { COLORS, SPACING, TYPOGRAPHY, getAlertStyle, getButtonStyle } from '../utils/styles';
+import {
+  COLORS, RADIUS, SPACING, TYPOGRAPHY,
+  getAlertStyle, getButtonStyle, modalContentStyle, modalOverlayStyle,
+} from '../utils/styles';
 
 interface BenchmarkCaseOption {
   id: string;
@@ -130,7 +133,13 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
   const [caseResults, setCaseResults] = useState<Array<Pick<BenchmarkCaseResult, 'id' | 'title' | 'passed' | 'durationMs' | 'failureStage'>>>([]);
   const [payload, setPayload] = useState<BenchmarkPayload | null>(null);
   const [error, setError] = useState('');
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (confirmOpen) confirmButtonRef.current?.focus();
+  }, [confirmOpen]);
 
   const toggleCase = (id: string) => {
     setSelected(current => current.includes(id)
@@ -138,12 +147,16 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
       : [...current, id]);
   };
 
-  const run = async () => {
+  const requestRun = () => {
     if (selected.length === 0) {
       setError(i18n('ai_helper_testdata_benchmark_select_case'));
       return;
     }
-    if (!window.confirm(i18n('ai_helper_testdata_benchmark_confirm', selected.length))) return;
+    setConfirmOpen(true);
+  };
+
+  const run = async () => {
+    setConfirmOpen(false);
     setRunning(true);
     setError('');
     setPayload(null);
@@ -278,23 +291,25 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
         </div>
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm }}>
-        <button style={getButtonStyle('primary')} disabled={running || disabled || selected.length === 0} onClick={run}>
+        <button type="button" style={getButtonStyle('primary')} disabled={running || disabled || selected.length === 0} onClick={requestRun}>
           {running ? i18n('ai_helper_testdata_benchmark_running') : i18n('ai_helper_testdata_benchmark_run')}
         </button>
         {running && (
-          <button style={getButtonStyle('secondary')} onClick={() => abortRef.current?.abort()}>
+          <button type="button" style={getButtonStyle('secondary')} onClick={() => abortRef.current?.abort()}>
             {i18n('ai_helper_testdata_benchmark_cancel')}
           </button>
         )}
         {payload && !running && (
           <>
             <button
+              type="button"
               style={getButtonStyle('secondary')}
               onClick={() => downloadJson(`testdata-benchmark-${payload.report.runId}.json`, payload.report)}
             >
               {i18n('ai_helper_testdata_benchmark_download_full')}
             </button>
             <button
+              type="button"
               style={getButtonStyle('secondary')}
               onClick={() => downloadJson(`testdata-benchmark-aggregate-${payload.report.runId}.json`, payload.aggregate)}
             >
@@ -306,6 +321,90 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
       <p style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, margin: `${SPACING.sm} 0 0` }}>
         {i18n('ai_helper_testdata_benchmark_privacy')}
       </p>
+      {confirmOpen && (
+        <div
+          style={{ ...modalOverlayStyle, padding: SPACING.base, boxSizing: 'border-box' }}
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setConfirmOpen(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setConfirmOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="testdata-benchmark-confirm-title"
+            aria-describedby="testdata-benchmark-confirm-description"
+            style={{
+              ...modalContentStyle,
+              maxWidth: '520px',
+              border: `1px solid ${COLORS.border}`,
+              padding: SPACING.xl,
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: SPACING.base }}>
+              <div
+                aria-hidden="true"
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  flex: '0 0 40px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: RADIUS.full,
+                  color: COLORS.warningText,
+                  background: COLORS.warningBg,
+                  border: `1px solid ${COLORS.warningBorder}`,
+                  fontSize: '21px',
+                  fontWeight: 700,
+                }}
+              >
+                !
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <h3
+                  id="testdata-benchmark-confirm-title"
+                  style={{ ...TYPOGRAPHY.lg, color: COLORS.textPrimary, margin: `0 0 ${SPACING.sm}` }}
+                >
+                  {i18n('ai_helper_testdata_benchmark_confirm_title')}
+                </h3>
+                <p
+                  id="testdata-benchmark-confirm-description"
+                  style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary, margin: 0 }}
+                >
+                  {i18n('ai_helper_testdata_benchmark_confirm', selected.length)}
+                </p>
+              </div>
+            </div>
+
+            <div style={{ ...getAlertStyle('warning'), margin: `${SPACING.lg} 0` }}>
+              {i18n('ai_helper_testdata_benchmark_cost_warning')}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: SPACING.md }}>
+              <button
+                type="button"
+                style={getButtonStyle('secondary')}
+                onClick={() => setConfirmOpen(false)}
+              >
+                {i18n('ai_helper_testdata_benchmark_confirm_cancel')}
+              </button>
+              <button
+                ref={confirmButtonRef}
+                type="button"
+                style={getButtonStyle('primary')}
+                onClick={run}
+              >
+                {i18n('ai_helper_testdata_benchmark_confirm_accept')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
