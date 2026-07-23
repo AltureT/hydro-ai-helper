@@ -57,10 +57,14 @@ describe('JailbreakLogModel', () => {
   describe('ensureIndexes', () => {
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(7);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(9);
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, userId: 1, createdAt: -1 },
         { name: 'idx_domain_user_createdAt' }
+      );
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { domainId: 1, createdAt: -1 },
+        { name: 'idx_domain_createdAt' }
       );
       expect(console.log).toHaveBeenCalledWith('[JailbreakLogModel] Indexes ensured');
       expect(mockColl.createIndex).toHaveBeenCalledWith(
@@ -74,6 +78,10 @@ describe('JailbreakLogModel', () => {
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, studentAppealedAt: -1, createdAt: -1 },
         { name: 'idx_domain_appealed_createdAt' }
+      );
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { domainId: 1, problemId: 1, createdAt: -1 },
+        { name: 'idx_domain_problem_createdAt' }
       );
     });
   });
@@ -503,6 +511,45 @@ describe('JailbreakLogModel', () => {
       expect(mockColl.find).toHaveBeenCalledWith(expectedFilter);
       expect(mockColl.countDocuments).toHaveBeenCalledWith(expectedFilter);
     });
+
+    it('should combine exact identity, action, source and UTC date filters', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      mockColl.countDocuments.mockResolvedValue(0);
+      const createdFrom = new Date('2026-07-01T00:00:00.000Z');
+      const createdTo = new Date('2026-07-23T23:59:59.999Z');
+
+      await model.listWithPagination(1, 20, 'domain-a', {
+        userId: 42,
+        problemId: 'P1001',
+        actionTaken: 'cooldown_5m',
+        detectionSource: 'conversation',
+        createdFrom,
+        createdTo,
+      });
+
+      expect(mockColl.find).toHaveBeenCalledWith({
+        domainId: 'domain-a',
+        userId: 42,
+        problemId: 'P1001',
+        actionTaken: 'cooldown_5m',
+        detectionSource: 'conversation',
+        createdAt: { $gte: createdFrom, $lte: createdTo },
+      });
+    });
+
+    it('should cap CSV export queries and preserve domain filters', async () => {
+      mockColl._chain.toArray.mockResolvedValue([{ _id: '1' }]);
+      mockColl.countDocuments.mockResolvedValue(6000);
+
+      await expect(model.listForExport('domain-a', { userId: 42 }, 99999)).resolves.toEqual({
+        logs: [{ _id: '1' }],
+        total: 6000,
+        truncated: true,
+      });
+      expect(mockColl.find).toHaveBeenCalledWith({ domainId: 'domain-a', userId: 42 });
+      expect(mockColl.countDocuments).toHaveBeenCalledWith({ domainId: 'domain-a', userId: 42 });
+      expect(mockColl._chain.limit).toHaveBeenCalledWith(5000);
+    });
   });
 
   describe('getReviewSummary', () => {
@@ -574,6 +621,58 @@ describe('JailbreakLogModel', () => {
       }]);
       expect(mockColl.aggregate.mock.calls[0][0][0]).toEqual({ $match: { domainId: 'domain-a' } });
       expect(mockColl.aggregate.mock.calls[0][0]).toContainEqual({ $limit: 10 });
+    });
+  });
+
+  describe('getOperationalMetrics', () => {
+    it('returns domain-scoped trends and review latency in minutes', async () => {
+      mockColl._aggregateChain.toArray.mockResolvedValue([{
+        summary: [{
+          total: 12,
+          cooldown: 3,
+          appealed: 2,
+          pendingAppeals: 1,
+          reviewed: 7,
+          averageReviewMs: 180000,
+          averageAppealReviewMs: 90000,
+        }],
+        dailyTrend: [{ date: '2026-07-23', total: 4, cooldown: 1, appealed: 1, falsePositive: 1 }],
+      }]);
+      const now = new Date('2026-07-23T12:00:00.000Z');
+
+      const metrics = await model.getOperationalMetrics('domain-a', 14, now);
+
+      expect(metrics).toEqual({
+        windowDays: 14,
+        total: 12,
+        cooldown: 3,
+        appealed: 2,
+        pendingAppeals: 1,
+        reviewed: 7,
+        averageReviewMinutes: 3,
+        averageAppealReviewMinutes: 1.5,
+        dailyTrend: [{ date: '2026-07-23', total: 4, cooldown: 1, appealed: 1, falsePositive: 1 }],
+      });
+      expect(mockColl.aggregate.mock.calls[0][0][0]).toEqual({
+        $match: {
+          domainId: 'domain-a',
+          createdAt: {
+            $gte: new Date('2026-07-09T12:00:00.000Z'),
+            $lte: now,
+          },
+        },
+      });
+    });
+
+    it('returns zero-safe defaults when the window has no events', async () => {
+      mockColl._aggregateChain.toArray.mockResolvedValue([{ summary: [], dailyTrend: [] }]);
+
+      await expect(model.getOperationalMetrics('domain-a')).resolves.toEqual(expect.objectContaining({
+        total: 0,
+        averageReviewMinutes: null,
+        averageAppealReviewMinutes: null,
+        dailyTrend: [],
+      }));
     });
   });
 });

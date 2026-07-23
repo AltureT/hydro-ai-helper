@@ -37,12 +37,14 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.JailbreakLogBulkReviewHandlerPriv = exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogBulkReviewHandler = exports.JailbreakLogReviewHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
+exports.JailbreakLogBulkReviewHandlerPriv = exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsExportHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogBulkReviewHandler = exports.JailbreakLogReviewHandler = exports.JailbreakLogsExportHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
+exports.serializeSafetyLogsCsv = serializeSafetyLogsCsv;
 const hydrooj_1 = require("hydrooj");
 const aiConfig_1 = require("../models/aiConfig");
 const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const csrfHelper_1 = require("../lib/csrfHelper");
+const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
 const domainHelper_1 = require("../utils/domainHelper");
 const mongo_1 = require("../utils/mongo");
@@ -428,19 +430,8 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
             const query = this.request.query || {};
             const page = parseInt(String(query.page || '1'), 10) || 1;
             const limit = parseInt(String(query.limit || '20'), 10) || 20;
-            const reviewStatusRaw = String(query.reviewStatus || '').trim();
-            const categoryRaw = String(query.category || '').trim();
-            const appealedRaw = String(query.appealed || '').trim();
-            const validReviewStatuses = ['pending', 'confirmed', 'false_positive'];
-            const validCategories = [
-                'answer_seeking',
-                'prompt_injection',
-                'prompt_exfiltration',
-                'obfuscated_injection',
-            ];
-            if ((reviewStatusRaw && !validReviewStatuses.includes(reviewStatusRaw))
-                || (categoryRaw && !validCategories.includes(categoryRaw))
-                || (appealedRaw && appealedRaw !== '1')) {
+            const parsedFilters = parseJailbreakLogFilters(query);
+            if (!parsedFilters) {
                 this.response.status = 400;
                 this.response.body = {
                     error: this.translate('ai_helper_admin_jailbreak_filter_invalid'),
@@ -449,16 +440,13 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
-            const filters = {
-                reviewStatus: reviewStatusRaw ? reviewStatusRaw : undefined,
-                category: categoryRaw ? categoryRaw : undefined,
-                ...(appealedRaw === '1' ? { appealedOnly: true } : {}),
-            };
+            const filters = parsedFilters;
             const domainId = (0, domainHelper_1.getDomainId)(this);
-            const [logResult, summary, ruleMetrics] = await Promise.all([
+            const [logResult, summary, ruleMetrics, operationalMetrics] = await Promise.all([
                 jailbreakLogModel.listWithPagination(page, limit, domainId, filters),
                 jailbreakLogModel.getReviewSummary(domainId),
                 jailbreakLogModel.getRuleMetrics(domainId, 10),
+                jailbreakLogModel.getOperationalMetrics(domainId, 14),
             ]);
             this.response.body = {
                 logs: logResult.logs.map(formatJailbreakLog),
@@ -467,6 +455,7 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
                 totalPages: logResult.totalPages,
                 summary,
                 ruleMetrics,
+                operationalMetrics,
                 filters,
             };
             this.response.type = 'application/json';
@@ -480,6 +469,55 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
     }
 }
 exports.JailbreakLogsHandler = JailbreakLogsHandler;
+/**
+ * JailbreakLogsExportHandler - 导出当前域内、按当前筛选条件命中的脱敏安全事件
+ * GET /ai-helper/admin/jailbreak-logs/export
+ */
+class JailbreakLogsExportHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_safety_log_export',
+                periodSecs: 60,
+                maxOps: 3,
+                failOpen: true,
+                errorMessage: 'ai_helper_export_rate_limited',
+            }))
+                return;
+            const parsedFilters = parseJailbreakLogFilters(this.request.query || {});
+            if (!parsedFilters) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_filter_invalid'),
+                    code: 'INVALID_JAILBREAK_LOG_FILTER',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const result = await jailbreakLogModel.listForExport((0, domainHelper_1.getDomainId)(this), parsedFilters, 5000);
+            const filename = `ai-safety-events-${new Date().toISOString().slice(0, 10)}.csv`;
+            this.response.type = 'text/csv; charset=utf-8';
+            this.response.addHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            this.response.addHeader('X-AI-Helper-Export-Total', String(result.total));
+            this.response.addHeader('X-AI-Helper-Export-Truncated', String(result.truncated));
+            this.response.body = serializeSafetyLogsCsv(result.logs, {
+                total: result.total,
+                truncated: result.truncated,
+            });
+        }
+        catch (err) {
+            console.error('[AI Helper] JailbreakLogsExportHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = {
+                error: this.translate('ai_helper_admin_jailbreak_export_failed'),
+                code: 'JAILBREAK_LOG_EXPORT_FAILED',
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.JailbreakLogsExportHandler = JailbreakLogsExportHandler;
 /**
  * JailbreakLogReviewHandler - 教师/管理员复核安全拦截记录
  * POST /ai-helper/admin/jailbreak-logs/:id/review
@@ -584,6 +622,7 @@ exports.JailbreakLogBulkReviewHandler = JailbreakLogBulkReviewHandler;
 // 导出路由权限配置（使用系统管理员权限）
 exports.AdminConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.JailbreakLogsExportHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogBulkReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 function formatJailbreakLog(log) {
@@ -610,5 +649,107 @@ function formatJailbreakLog(log) {
         expiresAt: log.expiresAt?.toISOString(),
         createdAt: log.createdAt.toISOString()
     };
+}
+const VALID_REVIEW_STATUSES = ['pending', 'confirmed', 'false_positive'];
+const VALID_CATEGORIES = [
+    'answer_seeking',
+    'prompt_injection',
+    'prompt_exfiltration',
+    'obfuscated_injection',
+];
+const VALID_ACTIONS = ['blocked', 'cooldown_60s', 'cooldown_5m'];
+const VALID_DETECTION_SOURCES = [
+    'plain',
+    'compacted',
+    'base64',
+    'hex',
+    'conversation',
+    'custom',
+];
+function parseDateFilter(value, endOfDay) {
+    if (!value)
+        return undefined;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+        return null;
+    const suffix = endOfDay ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
+    const parsed = new Date(`${value}${suffix}`);
+    return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value
+        ? null
+        : parsed;
+}
+function parseJailbreakLogFilters(query) {
+    const reviewStatusRaw = String(query.reviewStatus || '').trim();
+    const categoryRaw = String(query.category || '').trim();
+    const appealedRaw = String(query.appealed || '').trim();
+    const userIdRaw = String(query.userId || '').trim();
+    const problemIdRaw = String(query.problemId || '').trim();
+    const actionRaw = String(query.actionTaken || '').trim();
+    const detectionSourceRaw = String(query.detectionSource || '').trim();
+    const dateFromRaw = String(query.dateFrom || '').trim();
+    const dateToRaw = String(query.dateTo || '').trim();
+    const createdFrom = parseDateFilter(dateFromRaw, false);
+    const createdTo = parseDateFilter(dateToRaw, true);
+    const userId = userIdRaw ? Number(userIdRaw) : undefined;
+    if ((reviewStatusRaw && !VALID_REVIEW_STATUSES.includes(reviewStatusRaw))
+        || (categoryRaw && !VALID_CATEGORIES.includes(categoryRaw))
+        || (appealedRaw && appealedRaw !== '1')
+        || (userIdRaw && (!Number.isSafeInteger(userId) || userId < 0))
+        || problemIdRaw.length > 128
+        || (actionRaw && !VALID_ACTIONS.includes(actionRaw))
+        || (detectionSourceRaw && !VALID_DETECTION_SOURCES.includes(detectionSourceRaw))
+        || createdFrom === null
+        || createdTo === null
+        || (createdFrom && createdTo && createdFrom > createdTo)) {
+        return null;
+    }
+    return {
+        ...(reviewStatusRaw ? { reviewStatus: reviewStatusRaw } : {}),
+        ...(categoryRaw ? { category: categoryRaw } : {}),
+        ...(appealedRaw === '1' ? { appealedOnly: true } : {}),
+        ...(userId !== undefined ? { userId } : {}),
+        ...(problemIdRaw ? { problemId: problemIdRaw } : {}),
+        ...(actionRaw ? { actionTaken: actionRaw } : {}),
+        ...(detectionSourceRaw ? { detectionSource: detectionSourceRaw } : {}),
+        ...(createdFrom ? { createdFrom } : {}),
+        ...(createdTo ? { createdTo } : {}),
+    };
+}
+function escapeCsvCell(value) {
+    let text = value === undefined || value === null ? '' : String(value);
+    if (/^\s*[=+\-@]/u.test(text))
+        text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+}
+function serializeSafetyLogsCsv(logs, metadata = { total: logs.length, truncated: false }) {
+    const columns = [
+        { header: 'createdAt', value: (log) => log.createdAt.toISOString() },
+        { header: 'eventId', value: (log) => log._id.toHexString() },
+        { header: 'userId', value: (log) => log.userId },
+        { header: 'problemId', value: (log) => log.problemId },
+        { header: 'category', value: (log) => log.category },
+        { header: 'confidence', value: (log) => log.confidence },
+        { header: 'riskScore', value: (log) => log.riskScore },
+        { header: 'detectionSource', value: (log) => log.detectionSource },
+        { header: 'actionTaken', value: (log) => log.actionTaken },
+        { header: 'reviewStatus', value: (log) => log.reviewStatus || 'pending' },
+        { header: 'studentAppealedAt', value: (log) => log.studentAppealedAt?.toISOString() },
+        { header: 'reviewedAt', value: (log) => log.reviewedAt?.toISOString() },
+        { header: 'matchedPattern', value: (log) => log.matchedPattern },
+    ];
+    const metadataColumns = ['recordType', 'exportedCount', 'totalMatched', 'truncated'];
+    const rows = [
+        [...metadataColumns, ...columns.map((column) => column.header)].map(escapeCsvCell).join(','),
+        [
+            'metadata',
+            logs.length,
+            metadata.total,
+            metadata.truncated,
+            ...columns.map(() => ''),
+        ].map(escapeCsvCell).join(','),
+        ...logs.map((log) => [
+            'event', '', '', '', ...columns.map((column) => column.value(log)),
+        ].map(escapeCsvCell).join(',')),
+    ];
+    return `\uFEFF${rows.join('\r\n')}`;
 }
 //# sourceMappingURL=adminConfigHandler.js.map

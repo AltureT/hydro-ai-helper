@@ -275,6 +275,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', adminConfigHandler_1.AdminConfigHandler, adminConfigHandler_1.AdminConfigHandlerPriv);
         // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
         ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
+        ctx.Route('ai_helper_admin_jailbreak_logs_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
+        ctx.Route('ai_helper_admin_jailbreak_logs_export', '/ai-helper/admin/jailbreak-logs/export', adminConfigHandler_1.JailbreakLogsExportHandler, adminConfigHandler_1.JailbreakLogsExportHandlerPriv);
+        ctx.Route('ai_helper_admin_jailbreak_logs_export_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/export', adminConfigHandler_1.JailbreakLogsExportHandler, adminConfigHandler_1.JailbreakLogsExportHandlerPriv);
         // POST /ai-helper/admin/jailbreak-logs/:id/review - 复核拦截记录
         ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review', '/ai-helper/admin/jailbreak-logs/bulk-review', adminConfigHandler_1.JailbreakLogBulkReviewHandler, adminConfigHandler_1.JailbreakLogBulkReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/bulk-review', adminConfigHandler_1.JailbreakLogBulkReviewHandler, adminConfigHandler_1.JailbreakLogBulkReviewHandlerPriv);

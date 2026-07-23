@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { i18n } from '../utils/i18n';
+import { buildApiUrl } from '../utils/domainUtils';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { ScenarioModelSelector } from './ScenarioModelSelector';
@@ -90,7 +91,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [builtinJailbreakPatterns, setBuiltinJailbreakPatterns] = useState<string[]>([]);
   const [logPagination, setLogPagination] = useState<JailbreakLogPagination>({
     logs: [], total: 0, page: 1, totalPages: 0,
-    summary: { total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0, falsePositiveRate: 0 },
+    summary: {
+      total: 0, pending: 0, confirmed: 0, falsePositive: 0,
+      reviewed: 0, falsePositiveRate: 0, appealedPending: 0,
+    },
     ruleMetrics: [],
   });
   const [logFilters, setLogFilters] = useState<JailbreakLogFilters>({});
@@ -145,7 +149,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       if (filters.reviewStatus) params.set('reviewStatus', filters.reviewStatus);
       if (filters.category) params.set('category', filters.category);
       if (filters.appealedOnly) params.set('appealed', '1');
-      const res = await fetch(`/ai-helper/admin/jailbreak-logs?${params.toString()}`, {
+      if (filters.userId) params.set('userId', filters.userId);
+      if (filters.problemId) params.set('problemId', filters.problemId);
+      if (filters.actionTaken) params.set('actionTaken', filters.actionTaken);
+      if (filters.detectionSource) params.set('detectionSource', filters.detectionSource);
+      if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+      if (filters.dateTo) params.set('dateTo', filters.dateTo);
+      const res = await fetch(`${buildApiUrl('/ai-helper/admin/jailbreak-logs')}?${params.toString()}`, {
         method: 'GET', credentials: 'include',
       });
       if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_load_failed')}: ${res.status}`);
@@ -357,7 +367,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     reviewStatus: 'confirmed' | 'false_positive'
   ) => {
     try {
-      const res = await fetch(`/ai-helper/admin/jailbreak-logs/${encodeURIComponent(id)}/review`, {
+      const res = await fetch(buildApiUrl(`/ai-helper/admin/jailbreak-logs/${encodeURIComponent(id)}/review`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -380,7 +390,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     reviewStatus: 'confirmed' | 'false_positive'
   ): Promise<boolean> => {
     try {
-      const res = await fetch('/ai-helper/admin/jailbreak-logs/bulk-review', {
+      const res = await fetch(buildApiUrl('/ai-helper/admin/jailbreak-logs/bulk-review'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -397,6 +407,36 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       console.error('Bulk review jailbreak logs error:', err);
       showToast(err.message || i18n('ai_helper_admin_jailbreak_bulk_failed'), 'error');
       return false;
+    }
+  };
+
+  const exportJailbreakLogs = async (filters: JailbreakLogFilters): Promise<void> => {
+    try {
+      const params = new URLSearchParams();
+      if (filters.reviewStatus) params.set('reviewStatus', filters.reviewStatus);
+      if (filters.category) params.set('category', filters.category);
+      if (filters.appealedOnly) params.set('appealed', '1');
+      if (filters.userId) params.set('userId', filters.userId);
+      if (filters.problemId) params.set('problemId', filters.problemId);
+      if (filters.actionTaken) params.set('actionTaken', filters.actionTaken);
+      if (filters.detectionSource) params.set('detectionSource', filters.detectionSource);
+      if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+      if (filters.dateTo) params.set('dateTo', filters.dateTo);
+      const url = `${buildApiUrl('/ai-helper/admin/jailbreak-logs/export')}?${params.toString()}`;
+      const res = await fetch(url, { method: 'GET', credentials: 'include' });
+      if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_export_failed')}: ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `ai-safety-events-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err: any) {
+      console.error('Export jailbreak logs error:', err);
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_export_failed'), 'error');
     }
   };
 
@@ -681,6 +721,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           onAppendPattern={appendPatternToCustomRules}
           onReview={reviewJailbreakLog}
           onBulkReview={bulkReviewJailbreakLogs}
+          onExport={exportJailbreakLogs}
           filters={logFilters}
           onChangeFilters={changeLogFilters}
         />

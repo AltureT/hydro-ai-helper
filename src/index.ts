@@ -44,6 +44,8 @@ import {
   AdminConfigHandlerPriv,
   JailbreakLogsHandler,
   JailbreakLogsHandlerPriv,
+  JailbreakLogsExportHandler,
+  JailbreakLogsExportHandlerPriv,
   JailbreakLogReviewHandler,
   JailbreakLogReviewHandlerPriv,
   JailbreakLogBulkReviewHandler,
@@ -364,6 +366,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
 
     // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
     ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
+    ctx.Route('ai_helper_admin_jailbreak_logs_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
+    ctx.Route('ai_helper_admin_jailbreak_logs_export', '/ai-helper/admin/jailbreak-logs/export', JailbreakLogsExportHandler, JailbreakLogsExportHandlerPriv);
+    ctx.Route('ai_helper_admin_jailbreak_logs_export_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/export', JailbreakLogsExportHandler, JailbreakLogsExportHandlerPriv);
 
     // POST /ai-helper/admin/jailbreak-logs/:id/review - 复核拦截记录
     ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review', '/ai-helper/admin/jailbreak-logs/bulk-review', JailbreakLogBulkReviewHandler, JailbreakLogBulkReviewHandlerPriv);

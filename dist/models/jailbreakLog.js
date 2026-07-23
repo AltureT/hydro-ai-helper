@@ -39,10 +39,12 @@ class JailbreakLogModel {
     async ensureIndexes() {
         await this.collection.createIndex({ createdAt: -1 }, { name: 'idx_createdAt' });
         await this.collection.createIndex({ domainId: 1, userId: 1, createdAt: -1 }, { name: 'idx_domain_user_createdAt' });
+        await this.collection.createIndex({ domainId: 1, createdAt: -1 }, { name: 'idx_domain_createdAt' });
         await this.penaltyCounterCollection.createIndex({ expiresAt: 1 }, { name: 'idx_safety_penalty_counter_ttl', expireAfterSeconds: 0 });
         await this.collection.createIndex({ domainId: 1, userId: 1, blockedUntil: -1 }, { name: 'idx_domain_user_blockedUntil' });
         await this.collection.createIndex({ domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 }, { name: 'idx_domain_review_category_createdAt' });
         await this.collection.createIndex({ domainId: 1, studentAppealedAt: -1, createdAt: -1 }, { name: 'idx_domain_appealed_createdAt' });
+        await this.collection.createIndex({ domainId: 1, problemId: 1, createdAt: -1 }, { name: 'idx_domain_problem_createdAt' });
         await this.collection.createIndex({ expiresAt: 1 }, { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 });
         console.log('[JailbreakLogModel] Indexes ensured');
     }
@@ -226,26 +228,7 @@ class JailbreakLogModel {
         const safePage = Math.max(1, Math.floor(page));
         const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
         const skip = (safePage - 1) * safeLimit;
-        const filter = domainId ? { domainId } : {};
-        if (filters.category)
-            filter.category = filters.category;
-        if (filters.appealedOnly) {
-            filter.studentAppealedAt = { $exists: true };
-            filter.$or = [
-                { reviewStatus: 'pending' },
-                { reviewStatus: { $exists: false } },
-            ];
-        }
-        else if (filters.reviewStatus === 'pending') {
-            // 旧版日志没有 reviewStatus，在管理端兼容视为待复核。
-            filter.$or = [
-                { reviewStatus: 'pending' },
-                { reviewStatus: { $exists: false } },
-            ];
-        }
-        else if (filters.reviewStatus) {
-            filter.reviewStatus = filters.reviewStatus;
-        }
+        const filter = this.buildListFilter(domainId, filters);
         // 并行查询数据和总数
         const [logs, total] = await Promise.all([
             this.collection
@@ -263,6 +246,19 @@ class JailbreakLogModel {
             page: safePage,
             totalPages
         };
+    }
+    async listForExport(domainId, filters = {}, limit = 5000) {
+        const safeLimit = Math.min(5000, Math.max(1, Math.floor(limit)));
+        const filter = this.buildListFilter(domainId, filters);
+        const [logs, total] = await Promise.all([
+            this.collection
+                .find(filter)
+                .sort({ createdAt: -1 })
+                .limit(safeLimit)
+                .toArray(),
+            this.collection.countDocuments(filter),
+        ]);
+        return { logs, total, truncated: total > logs.length };
     }
     async getReviewSummary(domainId) {
         const baseFilter = domainId ? { domainId } : {};
@@ -331,6 +327,133 @@ class JailbreakLogModel {
                     : 0,
             };
         });
+    }
+    async getOperationalMetrics(domainId, windowDays = 14, now = new Date()) {
+        const safeWindowDays = Math.min(90, Math.max(1, Math.floor(windowDays)));
+        const since = new Date(now.getTime() - safeWindowDays * 24 * 60 * 60 * 1000);
+        const rows = await this.collection.aggregate([
+            { $match: { domainId, createdAt: { $gte: since, $lte: now } } },
+            {
+                $facet: {
+                    summary: [{
+                            $group: {
+                                _id: null,
+                                total: { $sum: 1 },
+                                cooldown: {
+                                    $sum: { $cond: [{ $in: ['$actionTaken', ['cooldown_60s', 'cooldown_5m']] }, 1, 0] },
+                                },
+                                appealed: {
+                                    $sum: { $cond: [{ $ne: [{ $ifNull: ['$studentAppealedAt', null] }, null] }, 1, 0] },
+                                },
+                                pendingAppeals: {
+                                    $sum: {
+                                        $cond: [{
+                                                $and: [
+                                                    { $ne: [{ $ifNull: ['$studentAppealedAt', null] }, null] },
+                                                    { $eq: [{ $ifNull: ['$reviewStatus', 'pending'] }, 'pending'] },
+                                                ],
+                                            }, 1, 0],
+                                    },
+                                },
+                                reviewed: {
+                                    $sum: { $cond: [{ $in: ['$reviewStatus', ['confirmed', 'false_positive']] }, 1, 0] },
+                                },
+                                averageReviewMs: {
+                                    $avg: {
+                                        $cond: [
+                                            { $in: ['$reviewStatus', ['confirmed', 'false_positive']] },
+                                            { $subtract: ['$reviewedAt', '$createdAt'] },
+                                            null,
+                                        ],
+                                    },
+                                },
+                                averageAppealReviewMs: {
+                                    $avg: {
+                                        $cond: [{
+                                                $and: [
+                                                    { $ne: [{ $ifNull: ['$studentAppealedAt', null] }, null] },
+                                                    { $in: ['$reviewStatus', ['confirmed', 'false_positive']] },
+                                                ],
+                                            }, { $subtract: ['$reviewedAt', '$studentAppealedAt'] }, null],
+                                    },
+                                },
+                            },
+                        }],
+                    dailyTrend: [
+                        {
+                            $group: {
+                                _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'UTC' } },
+                                total: { $sum: 1 },
+                                cooldown: {
+                                    $sum: { $cond: [{ $in: ['$actionTaken', ['cooldown_60s', 'cooldown_5m']] }, 1, 0] },
+                                },
+                                appealed: {
+                                    $sum: { $cond: [{ $ne: [{ $ifNull: ['$studentAppealedAt', null] }, null] }, 1, 0] },
+                                },
+                                falsePositive: {
+                                    $sum: { $cond: [{ $eq: ['$reviewStatus', 'false_positive'] }, 1, 0] },
+                                },
+                            },
+                        },
+                        { $sort: { _id: 1 } },
+                        { $project: { _id: 0, date: '$_id', total: 1, cooldown: 1, appealed: 1, falsePositive: 1 } },
+                    ],
+                },
+            },
+        ]).toArray();
+        const result = rows[0];
+        const summary = result?.summary?.[0];
+        const toMinutes = (milliseconds) => (typeof milliseconds === 'number' && Number.isFinite(milliseconds)
+            ? Math.round((milliseconds / 60000) * 10) / 10
+            : null);
+        return {
+            windowDays: safeWindowDays,
+            total: summary?.total || 0,
+            cooldown: summary?.cooldown || 0,
+            appealed: summary?.appealed || 0,
+            pendingAppeals: summary?.pendingAppeals || 0,
+            reviewed: summary?.reviewed || 0,
+            averageReviewMinutes: toMinutes(summary?.averageReviewMs),
+            averageAppealReviewMinutes: toMinutes(summary?.averageAppealReviewMs),
+            dailyTrend: result?.dailyTrend || [],
+        };
+    }
+    buildListFilter(domainId, filters = {}) {
+        const filter = domainId ? { domainId } : {};
+        if (filters.category)
+            filter.category = filters.category;
+        if (filters.userId !== undefined)
+            filter.userId = filters.userId;
+        if (filters.problemId)
+            filter.problemId = filters.problemId;
+        if (filters.actionTaken)
+            filter.actionTaken = filters.actionTaken;
+        if (filters.detectionSource)
+            filter.detectionSource = filters.detectionSource;
+        if (filters.createdFrom || filters.createdTo) {
+            filter.createdAt = {
+                ...(filters.createdFrom ? { $gte: filters.createdFrom } : {}),
+                ...(filters.createdTo ? { $lte: filters.createdTo } : {}),
+            };
+        }
+        if (filters.appealedOnly) {
+            filter.studentAppealedAt = { $exists: true };
+            filter.$or = [
+                { reviewStatus: 'pending' },
+                { reviewStatus: { $exists: false } },
+            ];
+        }
+        else if (filters.reviewStatus === 'pending') {
+            // 旧版日志没有 reviewStatus，在管理端兼容视为待复核。
+            filter.$or = [
+                { reviewStatus: 'pending' },
+                { reviewStatus: { $exists: false } },
+            ];
+        }
+        else if (filters.reviewStatus) {
+            filter.reviewStatus = filters.reviewStatus;
+        }
+        return filter;
     }
     getExpiryDate(base) {
         return new Date(base.getTime() + this.retentionDays * 24 * 60 * 60 * 1000);

@@ -57,6 +57,12 @@ export interface JailbreakLogFilters {
   reviewStatus?: JailbreakReviewStatus;
   category?: JailbreakCategory;
   appealedOnly?: boolean;
+  userId?: string;
+  problemId?: string;
+  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom';
+  dateFrom?: string;
+  dateTo?: string;
 }
 
 export interface JailbreakReviewSummary {
@@ -78,6 +84,24 @@ export interface JailbreakRuleMetric {
   falsePositive: number;
   reviewed: number;
   falsePositiveRate: number;
+}
+
+export interface JailbreakOperationalMetrics {
+  windowDays: number;
+  total: number;
+  cooldown: number;
+  appealed: number;
+  pendingAppeals: number;
+  reviewed: number;
+  averageReviewMinutes: number | null;
+  averageAppealReviewMinutes: number | null;
+  dailyTrend: Array<{
+    date: string;
+    total: number;
+    cooldown: number;
+    appealed: number;
+    falsePositive: number;
+  }>;
 }
 
 export interface JailbreakLogEntry {
@@ -111,6 +135,7 @@ export interface JailbreakLogPagination {
   totalPages: number;
   summary: JailbreakReviewSummary;
   ruleMetrics: JailbreakRuleMetric[];
+  operationalMetrics?: JailbreakOperationalMetrics;
   filters?: JailbreakLogFilters;
 }
 

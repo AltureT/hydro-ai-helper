@@ -3,12 +3,18 @@ jest.mock('../../lib/crypto', () => ({
   encrypt: jest.fn((value: string) => value),
   maskApiKey: jest.fn(() => '***'),
 }));
+jest.mock('../../lib/rateLimitHelper', () => ({
+  applyRateLimit: jest.fn().mockResolvedValue(false),
+}));
 
 import { ObjectId } from 'mongodb';
+import { applyRateLimit } from '../../lib/rateLimitHelper';
 import {
   JailbreakLogBulkReviewHandler,
   JailbreakLogReviewHandler,
+  JailbreakLogsExportHandler,
   JailbreakLogsHandler,
+  serializeSafetyLogsCsv,
 } from '../../handlers/adminConfigHandler';
 
 function createLogsHandler(query: Record<string, string> = {}) {
@@ -20,15 +26,26 @@ function createLogsHandler(query: Record<string, string> = {}) {
     total: 10, pending: 4, confirmed: 4, falsePositive: 2, reviewed: 6, falsePositiveRate: 33.3,
   });
   const getRuleMetrics = jest.fn().mockResolvedValue([]);
+  const getOperationalMetrics = jest.fn().mockResolvedValue({
+    windowDays: 14,
+    total: 10,
+    cooldown: 2,
+    appealed: 1,
+    pendingAppeals: 1,
+    reviewed: 6,
+    averageReviewMinutes: 3,
+    averageAppealReviewMinutes: 2,
+    dailyTrend: [],
+  });
   handler.args = { domainId: 'domain-a' };
   handler.request = { headers: {}, query };
   handler.response = {};
   handler.translate = jest.fn((key: string) => key);
   handler.ctx = {
     Route: jest.fn(),
-    get: jest.fn(() => ({ listWithPagination, getReviewSummary, getRuleMetrics })),
+    get: jest.fn(() => ({ listWithPagination, getReviewSummary, getRuleMetrics, getOperationalMetrics })),
   };
-  return { handler, listWithPagination, getReviewSummary, getRuleMetrics };
+  return { handler, listWithPagination, getReviewSummary, getRuleMetrics, getOperationalMetrics };
 }
 
 function createReviewHandler() {
@@ -95,7 +112,7 @@ describe('JailbreakLogReviewHandler', () => {
 
 describe('JailbreakLogsHandler', () => {
   it('applies validated domain-scoped filters and returns review summary', async () => {
-    const { handler, listWithPagination, getReviewSummary, getRuleMetrics } = createLogsHandler({
+    const { handler, listWithPagination, getReviewSummary, getRuleMetrics, getOperationalMetrics } = createLogsHandler({
       page: '2',
       limit: '10',
       reviewStatus: 'pending',
@@ -110,7 +127,31 @@ describe('JailbreakLogsHandler', () => {
     });
     expect(getReviewSummary).toHaveBeenCalledWith('domain-a');
     expect(getRuleMetrics).toHaveBeenCalledWith('domain-a', 10);
+    expect(getOperationalMetrics).toHaveBeenCalledWith('domain-a', 14);
     expect(handler.response.body.summary).toEqual(expect.objectContaining({ falsePositiveRate: 33.3 }));
+    expect(handler.response.body.operationalMetrics).toEqual(expect.objectContaining({ windowDays: 14 }));
+  });
+
+  it('parses exact identity, action, source and UTC date filters', async () => {
+    const { handler, listWithPagination } = createLogsHandler({
+      userId: '42',
+      problemId: 'P1001',
+      actionTaken: 'cooldown_5m',
+      detectionSource: 'conversation',
+      dateFrom: '2026-07-01',
+      dateTo: '2026-07-23',
+    });
+
+    await handler.get();
+
+    expect(listWithPagination).toHaveBeenCalledWith(1, 20, 'domain-a', {
+      userId: 42,
+      problemId: 'P1001',
+      actionTaken: 'cooldown_5m',
+      detectionSource: 'conversation',
+      createdFrom: new Date('2026-07-01T00:00:00.000Z'),
+      createdTo: new Date('2026-07-23T23:59:59.999Z'),
+    });
   });
 
   it('rejects unsupported filters before querying the database', async () => {
@@ -125,6 +166,95 @@ describe('JailbreakLogsHandler', () => {
     expect(listWithPagination).not.toHaveBeenCalled();
     expect(getReviewSummary).not.toHaveBeenCalled();
     expect(getRuleMetrics).not.toHaveBeenCalled();
+  });
+
+  it('rejects impossible or reversed UTC date ranges', async () => {
+    const invalid = createLogsHandler({ dateFrom: '2026-02-30' });
+    await invalid.handler.get();
+    expect(invalid.handler.response.status).toBe(400);
+    expect(invalid.listWithPagination).not.toHaveBeenCalled();
+
+    const reversed = createLogsHandler({ dateFrom: '2026-07-23', dateTo: '2026-07-01' });
+    await reversed.handler.get();
+    expect(reversed.handler.response.status).toBe(400);
+    expect(reversed.listWithPagination).not.toHaveBeenCalled();
+  });
+});
+
+describe('JailbreakLogsExportHandler', () => {
+  it('exports at most 5000 domain-scoped filtered rows', async () => {
+    const handler = new JailbreakLogsExportHandler();
+    const log = {
+      _id: new ObjectId(),
+      matchedPattern: 'answer',
+      matchedText: 'matched',
+      createdAt: new Date('2026-07-23T00:00:00.000Z'),
+    };
+    const listForExport = jest.fn().mockResolvedValue({
+      logs: [log], total: 6001, truncated: true,
+    });
+    handler.args = { domainId: 'domain-a' };
+    handler.request = { headers: {}, query: { userId: '42' } };
+    handler.response = { addHeader: jest.fn() };
+    handler.translate = jest.fn((key: string) => key);
+    handler.ctx = { Route: jest.fn(), get: jest.fn(() => ({ listForExport })) };
+
+    await handler.get();
+
+    expect(listForExport).toHaveBeenCalledWith('domain-a', { userId: 42 }, 5000);
+    expect(handler.response.type).toBe('text/csv; charset=utf-8');
+    expect(handler.response.body).toContain('"eventId"');
+    expect(handler.response.body).toContain('"metadata","1","6001","true"');
+    expect(handler.response.addHeader).toHaveBeenCalledWith('X-AI-Helper-Export-Total', '6001');
+    expect(handler.response.addHeader).toHaveBeenCalledWith('X-AI-Helper-Export-Truncated', 'true');
+    expect(handler.response.addHeader).toHaveBeenCalledWith(
+      'Content-Disposition',
+      expect.stringContaining('ai-safety-events-')
+    );
+  });
+
+  it('neutralizes spreadsheet formulas in exported cells', () => {
+    const csv = serializeSafetyLogsCsv([{
+      _id: new ObjectId(),
+      matchedPattern: '=HYPERLINK("bad")',
+      matchedText: ' +SUM(1,1)',
+      createdAt: new Date('2026-07-23T00:00:00.000Z'),
+    }]);
+
+    expect(csv).toContain("'=HYPERLINK");
+    expect(csv).not.toContain(' +SUM(1,1)');
+  });
+
+  it('never exports stored matched text, including legacy unsanitized values', () => {
+    const csv = serializeSafetyLogsCsv([{
+      _id: new ObjectId(),
+      matchedPattern: 'safe-pattern',
+      matchedText: 'legacy student secret test@example.com sk-abcdefghijklmnop',
+      createdAt: new Date('2026-07-23T00:00:00.000Z'),
+    }]);
+
+    expect(csv).not.toContain('legacy student secret');
+    expect(csv).not.toContain('test@example.com');
+    expect(csv).not.toContain('sk-abcdefghijklmnop');
+    expect(csv).not.toContain('matchedText');
+  });
+
+  it('stops before querying when the export rate limit is exceeded', async () => {
+    const handler = new JailbreakLogsExportHandler();
+    const listForExport = jest.fn();
+    (applyRateLimit as jest.Mock).mockResolvedValueOnce(true);
+    handler.args = { domainId: 'domain-a' };
+    handler.request = { headers: {}, query: {} };
+    handler.response = { addHeader: jest.fn() };
+    handler.translate = jest.fn((key: string) => key);
+    handler.ctx = { Route: jest.fn(), get: jest.fn(() => ({ listForExport })) };
+
+    await handler.get();
+
+    expect(applyRateLimit).toHaveBeenCalledWith(handler, expect.objectContaining({
+      op: 'ai_safety_log_export', maxOps: 3, periodSecs: 60,
+    }));
+    expect(listForExport).not.toHaveBeenCalled();
   });
 });
 
