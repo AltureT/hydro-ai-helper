@@ -244,6 +244,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_chat', '/ai-helper/chat', studentHandler_1.ChatHandler, studentHandler_1.ChatHandlerPriv);
         // 域前缀路由: /d/:domainId/ai-helper/chat
         ctx.Route('ai_helper_chat_domain', '/d/:domainId/ai-helper/chat', studentHandler_1.ChatHandler, studentHandler_1.ChatHandlerPriv);
+        // POST /ai-helper/safety-events/:id/appeal - 学生申请复核自己的安全拦截记录
+        ctx.Route('ai_helper_safety_appeal', '/ai-helper/safety-events/:id/appeal', studentHandler_1.SafetyAppealHandler, studentHandler_1.SafetyAppealHandlerPriv);
+        ctx.Route('ai_helper_safety_appeal_domain', '/d/:domainId/ai-helper/safety-events/:id/appeal', studentHandler_1.SafetyAppealHandler, studentHandler_1.SafetyAppealHandlerPriv);
         // GET /ai-helper/problem-status/:problemId - 查询用户在该题的提交状态（是否已 AC）
         ctx.Route('ai_helper_problem_status', '/ai-helper/problem-status/:problemId', studentHandler_1.ProblemStatusHandler, studentHandler_1.ProblemStatusHandlerPriv);
         ctx.Route('ai_helper_problem_status_domain', '/d/:domainId/ai-helper/problem-status/:problemId', studentHandler_1.ProblemStatusHandler, studentHandler_1.ProblemStatusHandlerPriv);

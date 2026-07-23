@@ -454,6 +454,7 @@ export class JailbreakLogsHandler extends Handler {
       const limit = parseInt(String(query.limit || '20'), 10) || 20;
       const reviewStatusRaw = String(query.reviewStatus || '').trim();
       const categoryRaw = String(query.category || '').trim();
+      const appealedRaw = String(query.appealed || '').trim();
       const validReviewStatuses: SafetyReviewStatus[] = ['pending', 'confirmed', 'false_positive'];
       const validCategories: SafetyViolationCategory[] = [
         'answer_seeking',
@@ -463,7 +464,8 @@ export class JailbreakLogsHandler extends Handler {
       ];
 
       if ((reviewStatusRaw && !validReviewStatuses.includes(reviewStatusRaw as SafetyReviewStatus))
-          || (categoryRaw && !validCategories.includes(categoryRaw as SafetyViolationCategory))) {
+          || (categoryRaw && !validCategories.includes(categoryRaw as SafetyViolationCategory))
+          || (appealedRaw && appealedRaw !== '1')) {
         this.response.status = 400;
         this.response.body = {
           error: this.translate('ai_helper_admin_jailbreak_filter_invalid'),
@@ -476,6 +478,7 @@ export class JailbreakLogsHandler extends Handler {
       const filters: JailbreakLogListFilters = {
         reviewStatus: reviewStatusRaw ? reviewStatusRaw as SafetyReviewStatus : undefined,
         category: categoryRaw ? categoryRaw as SafetyViolationCategory : undefined,
+        ...(appealedRaw === '1' ? { appealedOnly: true } : {}),
       };
       const domainId = getDomainId(this);
       const [logResult, summary, ruleMetrics] = await Promise.all([
@@ -642,6 +645,8 @@ function formatJailbreakLog(log: JailbreakLog) {
     reviewStatus: log.reviewStatus || 'pending',
     reviewedAt: log.reviewedAt?.toISOString(),
     reviewedBy: log.reviewedBy,
+    studentAppealedAt: log.studentAppealedAt?.toISOString(),
+    studentAppealReason: log.studentAppealReason,
     expiresAt: log.expiresAt?.toISOString(),
     createdAt: log.createdAt.toISOString()
   };

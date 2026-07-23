@@ -2,11 +2,16 @@ import type { JailbreakLogModel } from '../models/jailbreakLog';
 import type { SafetyAction, SafetyViolationCategory } from '../types/safety';
 
 const PENALTY_WINDOW_MS = 10 * 60 * 1000;
+export const SAFETY_PENALTY_WINDOW_MS = PENALTY_WINDOW_MS;
 
 export interface SafetyPenaltyDecision {
   action: SafetyAction;
   blockedUntil?: Date;
   retryAfterSeconds?: number;
+  currentCount: number;
+  threshold: number;
+  remainingBeforeCooldown: number;
+  windowSeconds: number;
 }
 
 /**
@@ -37,9 +42,19 @@ export async function decideSafetyPenalty(
         action: 'cooldown_60s',
         retryAfterSeconds,
         blockedUntil: new Date(now.getTime() + retryAfterSeconds * 1000),
+        currentCount: recentCount + 1,
+        threshold: 3,
+        remainingBeforeCooldown: 0,
+        windowSeconds: PENALTY_WINDOW_MS / 1000,
       };
     }
-    return { action: 'blocked' };
+    return {
+      action: 'blocked',
+      currentCount: recentCount + 1,
+      threshold: 3,
+      remainingBeforeCooldown: 2 - recentCount,
+      windowSeconds: PENALTY_WINDOW_MS / 1000,
+    };
   }
 
   const recentHighRiskCount = await model.countRecentByCategories(
@@ -54,8 +69,49 @@ export async function decideSafetyPenalty(
       action: 'cooldown_5m',
       retryAfterSeconds,
       blockedUntil: new Date(now.getTime() + retryAfterSeconds * 1000),
+      currentCount: recentHighRiskCount + 1,
+      threshold: 2,
+      remainingBeforeCooldown: 0,
+      windowSeconds: PENALTY_WINDOW_MS / 1000,
     };
   }
 
-  return { action: 'blocked' };
+  return {
+    action: 'blocked',
+    currentCount: 1,
+    threshold: 2,
+    remainingBeforeCooldown: 1,
+    windowSeconds: PENALTY_WINDOW_MS / 1000,
+  };
+}
+
+/**
+ * 根据模型层原子递增后返回的当前序号决定处置，避免并发请求同时读到旧计数。
+ */
+export function decideSafetyPenaltyFromCount(
+  category: SafetyViolationCategory,
+  currentCount: number,
+  now: Date = new Date()
+): SafetyPenaltyDecision {
+  const normalizedCount = Math.max(1, Math.floor(currentCount));
+  const threshold = category === 'answer_seeking' ? 3 : 2;
+  const retryAfterSeconds = normalizedCount >= threshold
+    ? category === 'answer_seeking' ? 60 : 5 * 60
+    : undefined;
+
+  return {
+    action: retryAfterSeconds
+      ? category === 'answer_seeking' ? 'cooldown_60s' : 'cooldown_5m'
+      : 'blocked',
+    ...(retryAfterSeconds
+      ? {
+          retryAfterSeconds,
+          blockedUntil: new Date(now.getTime() + retryAfterSeconds * 1000),
+        }
+      : {}),
+    currentCount: normalizedCount,
+    threshold,
+    remainingBeforeCooldown: Math.max(0, threshold - normalizedCount),
+    windowSeconds: PENALTY_WINDOW_MS / 1000,
+  };
 }

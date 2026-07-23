@@ -249,10 +249,23 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
         }
       };
 
-      const createCategorizedError = (msg: string, category?: string, retryable?: boolean): Error => {
-        const e = new Error(msg) as Error & { _category?: string; _retryable?: boolean };
+      const createCategorizedError = (
+        msg: string,
+        category?: string,
+        retryable?: boolean,
+        safetyEventId?: string,
+        safetyProgress?: ChatApiErrorPayload['safetyProgress']
+      ): Error => {
+        const e = new Error(msg) as Error & {
+          _category?: string;
+          _retryable?: boolean;
+          _safetyEventId?: string;
+          _safetyProgress?: ChatApiErrorPayload['safetyProgress'];
+        };
         if (category) e._category = category;
         if (retryable !== undefined) e._retryable = retryable;
+        if (safetyEventId) e._safetyEventId = safetyEventId;
+        if (safetyProgress) e._safetyProgress = safetyProgress;
         return e;
       };
 
@@ -271,10 +284,22 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           response = await sendChatRequest(null);
           if (!response.ok) {
             errorData = await parseErrorPayload(response);
-            throw createCategorizedError(errorData.error || i18n('ai_helper_student_err_request_failed'), errorData.category, errorData.retryable);
+            throw createCategorizedError(
+              errorData.error || i18n('ai_helper_student_err_request_failed'),
+              errorData.category,
+              errorData.retryable,
+              errorData.appealAllowed ? errorData.safetyEventId : undefined,
+              errorData.safetyProgress
+            );
           }
         } else {
-          throw createCategorizedError(errorData.error || i18n('ai_helper_student_err_request_failed'), errorData.category, errorData.retryable);
+          throw createCategorizedError(
+            errorData.error || i18n('ai_helper_student_err_request_failed'),
+            errorData.category,
+            errorData.retryable,
+            errorData.appealAllowed ? errorData.safetyEventId : undefined,
+            errorData.safetyProgress
+          );
         }
       }
 
@@ -377,8 +402,22 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           dispatch({ type: 'SET_ERROR', payload: { error: i18n('ai_helper_student_err_cancelled'), category: 'aborted', retryable: false } });
         }
       } else {
-        const errObj = err as Error & { _category?: string; _retryable?: boolean };
-        dispatch({ type: 'SET_ERROR', payload: { error: errObj.message || i18n('ai_helper_student_unknown_error'), category: errObj._category, retryable: errObj._retryable } });
+        const errObj = err as Error & {
+          _category?: string;
+          _retryable?: boolean;
+          _safetyEventId?: string;
+          _safetyProgress?: ChatApiErrorPayload['safetyProgress'];
+        };
+        dispatch({
+          type: 'SET_ERROR',
+          payload: {
+            error: errObj.message || i18n('ai_helper_student_unknown_error'),
+            category: errObj._category,
+            retryable: errObj._retryable,
+            safetyEventId: errObj._safetyEventId,
+            safetyProgress: errObj._safetyProgress,
+          },
+        });
       }
       console.error('[AI Helper] 提交失败:', err);
       dispatch({ type: 'SET_USER_THINKING', payload: savedUserThinking });
@@ -496,6 +535,36 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
     abortControllerRef.current?.abort();
   }, []);
 
+  const appealSafetyEvent = useCallback(async () => {
+    if (!state.safetyEventId || state.safetyAppealStatus === 'submitting') return;
+    dispatch({ type: 'SET_SAFETY_APPEAL', payload: { status: 'submitting' } });
+    try {
+      const response = await fetch(buildApiUrl(`/ai-helper/safety-events/${state.safetyEventId}/appeal`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        credentials: 'include',
+        body: JSON.stringify({}),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || i18n('ai_helper_err_safety_appeal_failed'));
+      dispatch({
+        type: 'SET_SAFETY_APPEAL',
+        payload: { status: 'submitted', message: data.message || i18n('ai_helper_safety_appeal_submitted') },
+      });
+    } catch (error) {
+      dispatch({
+        type: 'SET_SAFETY_APPEAL',
+        payload: {
+          status: 'error',
+          message: error instanceof Error ? error.message : i18n('ai_helper_err_safety_appeal_failed'),
+        },
+      });
+    }
+  }, [state.safetyEventId, state.safetyAppealStatus]);
+
   return {
     state,
     dispatch,
@@ -510,5 +579,6 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
     scrollToBottom,
     handleSubmitRef,
     cancelRequest,
+    appealSafetyEvent,
   };
 }

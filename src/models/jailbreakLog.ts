@@ -3,7 +3,7 @@
  */
 
 import type { Collection, Db, Filter, UpdateFilter } from 'mongodb';
-import { type ObjectIdType } from '../utils/mongo';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 import type {
   SafetyAction,
@@ -12,6 +12,25 @@ import type {
   SafetyReviewStatus,
   SafetyViolationCategory,
 } from '../types/safety';
+import { SAFETY_PENALTY_WINDOW_MS } from '../services/safetyPenaltyService';
+
+type SafetyPenaltyGroup = 'answer_seeking' | 'high_risk';
+
+interface SafetyPenaltyCounter {
+  _id: string;
+  domainId: string;
+  userId: number;
+  group: SafetyPenaltyGroup;
+  events: Array<{ id: string; at: Date }>;
+  count: number;
+  expiresAt: Date;
+}
+
+export interface SafetyPenaltySequence {
+  counterId: string;
+  eventId: string;
+  currentCount: number;
+}
 
 export type JailbreakQuestionType = 'understand' | 'think' | 'debug' | 'review' | 'clarify' | 'optimize';
 
@@ -33,6 +52,10 @@ export interface JailbreakLog {
   reviewStatus?: SafetyReviewStatus;
   reviewedAt?: Date;
   reviewedBy?: number;
+  studentAppealedAt?: Date;
+  studentAppealReason?: string;
+  penaltyCounterId?: string;
+  penaltyEventId?: string;
   expiresAt?: Date;
   createdAt: Date;
 }
@@ -52,11 +75,14 @@ export interface JailbreakLogCreateInput {
   actionTaken?: SafetyAction;
   blockedUntil?: Date;
   createdAt?: Date;
+  penaltyCounterId?: string;
+  penaltyEventId?: string;
 }
 
 export interface JailbreakLogListFilters {
   reviewStatus?: SafetyReviewStatus;
   category?: SafetyViolationCategory;
+  appealedOnly?: boolean;
 }
 
 export interface JailbreakReviewSummary {
@@ -66,6 +92,7 @@ export interface JailbreakReviewSummary {
   falsePositive: number;
   reviewed: number;
   falsePositiveRate: number;
+  appealedPending: number;
 }
 
 export interface JailbreakRuleMetric {
@@ -113,10 +140,12 @@ export function sanitizeSafetyLogSnippet(value: string): string {
 
 export class JailbreakLogModel {
   private collection: Collection<JailbreakLog>;
+  private penaltyCounterCollection: Collection<SafetyPenaltyCounter>;
   private retentionDays: number;
 
   constructor(db: Db, retentionDays: number = resolveJailbreakLogRetentionDays()) {
     this.collection = db.collection<JailbreakLog>('ai_jailbreak_logs');
+    this.penaltyCounterCollection = db.collection<SafetyPenaltyCounter>('ai_safety_penalty_counters');
     this.retentionDays = retentionDays;
   }
 
@@ -126,6 +155,10 @@ export class JailbreakLogModel {
       { domainId: 1, userId: 1, createdAt: -1 },
       { name: 'idx_domain_user_createdAt' }
     );
+    await this.penaltyCounterCollection.createIndex(
+      { expiresAt: 1 },
+      { name: 'idx_safety_penalty_counter_ttl', expireAfterSeconds: 0 }
+    );
     await this.collection.createIndex(
       { domainId: 1, userId: 1, blockedUntil: -1 },
       { name: 'idx_domain_user_blockedUntil' }
@@ -133,6 +166,10 @@ export class JailbreakLogModel {
     await this.collection.createIndex(
       { domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 },
       { name: 'idx_domain_review_category_createdAt' }
+    );
+    await this.collection.createIndex(
+      { domainId: 1, studentAppealedAt: -1, createdAt: -1 },
+      { name: 'idx_domain_appealed_createdAt' }
     );
     await this.collection.createIndex(
       { expiresAt: 1 },
@@ -161,12 +198,82 @@ export class JailbreakLogModel {
       actionTaken: data.actionTaken,
       blockedUntil: data.blockedUntil,
       reviewStatus: 'pending',
+      penaltyCounterId: data.penaltyCounterId,
+      penaltyEventId: data.penaltyEventId,
       expiresAt: this.getExpiryDate(createdAt),
       createdAt
     };
 
     const result = await this.collection.insertOne(insertDoc as JailbreakLog);
     return result.insertedId;
+  }
+
+  async nextPenaltySequence(
+    domainId: string,
+    userId: number,
+    category: SafetyViolationCategory,
+    now: Date = new Date()
+  ): Promise<SafetyPenaltySequence> {
+    const group: SafetyPenaltyGroup = category === 'answer_seeking' ? 'answer_seeking' : 'high_risk';
+    const counterId = [encodeURIComponent(domainId), userId, group].join(':');
+    const eventId = new ObjectId().toHexString();
+    const since = new Date(now.getTime() - SAFETY_PENALTY_WINDOW_MS);
+    const expiresAt = new Date(now.getTime() + SAFETY_PENALTY_WINDOW_MS * 2);
+    const rawResult = await this.penaltyCounterCollection.findOneAndUpdate(
+      { _id: counterId },
+      [
+        {
+          $set: {
+            domainId,
+            userId,
+            group,
+            expiresAt,
+            events: {
+              $concatArrays: [
+                {
+                  $filter: {
+                    input: { $ifNull: ['$events', []] },
+                    as: 'event',
+                    cond: { $gte: ['$$event.at', since] },
+                  },
+                },
+                [{ id: eventId, at: now }],
+              ],
+            },
+          },
+        },
+        { $set: { count: { $size: '$events' } } },
+      ],
+      { upsert: true, returnDocument: 'after' }
+    );
+    const counter = rawResult && 'value' in rawResult
+      ? rawResult.value as SafetyPenaltyCounter | null
+      : rawResult as SafetyPenaltyCounter | null;
+    if (!counter || typeof counter.count !== 'number') {
+      throw new Error('Failed to atomically increment safety penalty counter');
+    }
+    return { counterId, eventId, currentCount: counter.count };
+  }
+
+  async rollbackPenaltySequence(counterId: string, eventIds: string | string[]): Promise<void> {
+    const normalizedEventIds = Array.isArray(eventIds) ? eventIds : [eventIds];
+    await this.penaltyCounterCollection.updateOne(
+      { _id: counterId },
+      [
+        {
+          $set: {
+            events: {
+              $filter: {
+                input: { $ifNull: ['$events', []] },
+                as: 'event',
+                cond: { $not: [{ $in: ['$$event.id', normalizedEventIds] }] },
+              },
+            },
+          },
+        },
+        { $set: { count: { $size: '$events' } } },
+      ]
+    );
   }
 
   async listRecent(limit: number = 20, domainId?: string): Promise<JailbreakLog[]> {
@@ -220,11 +327,26 @@ export class JailbreakLogModel {
       update.$unset = { blockedUntil: '' };
     }
 
-    const result = await this.collection.updateOne(
-      { _id: ensureObjectId(id), domainId },
-      update
+    const rawResult = await this.collection.findOneAndUpdate(
+      {
+        _id: ensureObjectId(id),
+        domainId,
+        $or: [
+          { reviewStatus: 'pending' },
+          { reviewStatus: { $exists: false } },
+        ],
+      },
+      update,
+      { returnDocument: 'before' }
     );
-    return result.matchedCount > 0;
+    const previous = rawResult && 'value' in rawResult
+      ? rawResult.value as JailbreakLog | null
+      : rawResult as JailbreakLog | null;
+    if (!previous) return false;
+    if (reviewStatus === 'false_positive' && previous.penaltyCounterId && previous.penaltyEventId) {
+      await this.rollbackPenaltySequence(previous.penaltyCounterId, previous.penaltyEventId);
+    }
+    return true;
   }
 
   async reviewMany(
@@ -235,17 +357,51 @@ export class JailbreakLogModel {
     reviewedAt: Date = new Date()
   ): Promise<JailbreakBulkReviewResult> {
     if (ids.length === 0) return { matchedCount: 0, modifiedCount: 0 };
-    const update: UpdateFilter<JailbreakLog> = {
-      $set: { reviewStatus, reviewedAt, reviewedBy },
-    };
-    if (reviewStatus === 'false_positive') {
-      update.$unset = { blockedUntil: '' };
-    }
-    const result = await this.collection.updateMany(
-      { _id: { $in: ids.map((id) => ensureObjectId(id)) }, domainId },
-      update
+    const results = await Promise.all(
+      ids.map((id) => this.review(id, domainId, reviewStatus, reviewedBy, reviewedAt))
     );
-    return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+    const matchedCount = results.filter(Boolean).length;
+    return { matchedCount, modifiedCount: matchedCount };
+  }
+
+  async appealByStudent(
+    id: string | ObjectIdType,
+    domainId: string,
+    userId: number,
+    reason?: string,
+    appealedAt: Date = new Date()
+  ): Promise<'submitted' | 'already_submitted' | 'unavailable'> {
+    const pendingReviewFilter = {
+      $or: [
+        { reviewStatus: 'pending' as const },
+        { reviewStatus: { $exists: false } },
+      ],
+    };
+    const result = await this.collection.updateOne(
+      {
+        _id: ensureObjectId(id),
+        domainId,
+        userId,
+        ...pendingReviewFilter,
+        studentAppealedAt: { $exists: false },
+      },
+      {
+        $set: {
+          studentAppealedAt: appealedAt,
+          ...(reason?.trim() ? { studentAppealReason: sanitizeSafetyLogSnippet(reason.trim()) } : {}),
+        },
+      }
+    );
+    if (result.matchedCount > 0) return 'submitted';
+
+    const existingAppeal = await this.collection.findOne({
+      _id: ensureObjectId(id),
+      domainId,
+      userId,
+      ...pendingReviewFilter,
+      studentAppealedAt: { $exists: true },
+    });
+    return existingAppeal ? 'already_submitted' : 'unavailable';
   }
 
   async backfillExpiry(now: Date = new Date()): Promise<number> {
@@ -279,7 +435,13 @@ export class JailbreakLogModel {
     const skip = (safePage - 1) * safeLimit;
     const filter: Filter<JailbreakLog> = domainId ? { domainId } : {};
     if (filters.category) filter.category = filters.category;
-    if (filters.reviewStatus === 'pending') {
+    if (filters.appealedOnly) {
+      filter.studentAppealedAt = { $exists: true };
+      filter.$or = [
+        { reviewStatus: 'pending' },
+        { reviewStatus: { $exists: false } },
+      ];
+    } else if (filters.reviewStatus === 'pending') {
       // 旧版日志没有 reviewStatus，在管理端兼容视为待复核。
       filter.$or = [
         { reviewStatus: 'pending' },
@@ -312,7 +474,7 @@ export class JailbreakLogModel {
 
   async getReviewSummary(domainId?: string): Promise<JailbreakReviewSummary> {
     const baseFilter: Filter<JailbreakLog> = domainId ? { domainId } : {};
-    const [total, pending, confirmed, falsePositive] = await Promise.all([
+    const [total, pending, confirmed, falsePositive, appealedPending] = await Promise.all([
       this.collection.countDocuments(baseFilter),
       this.collection.countDocuments({
         ...baseFilter,
@@ -323,13 +485,21 @@ export class JailbreakLogModel {
       }),
       this.collection.countDocuments({ ...baseFilter, reviewStatus: 'confirmed' }),
       this.collection.countDocuments({ ...baseFilter, reviewStatus: 'false_positive' }),
+      this.collection.countDocuments({
+        ...baseFilter,
+        studentAppealedAt: { $exists: true },
+        $or: [
+          { reviewStatus: 'pending' },
+          { reviewStatus: { $exists: false } },
+        ],
+      }),
     ]);
     const reviewed = confirmed + falsePositive;
     const falsePositiveRate = reviewed > 0
       ? Math.round((falsePositive / reviewed) * 1000) / 10
       : 0;
 
-    return { total, pending, confirmed, falsePositive, reviewed, falsePositiveRate };
+    return { total, pending, confirmed, falsePositive, reviewed, falsePositiveRate, appealedPending };
   }
 
   async getRuleMetrics(domainId: string, limit: number = 20): Promise<JailbreakRuleMetric[]> {

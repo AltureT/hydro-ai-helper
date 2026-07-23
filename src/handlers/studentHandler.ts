@@ -12,7 +12,7 @@ import { PROMPT_LIMITS, API_DEFAULTS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { EffectivenessService } from '../services/effectivenessService';
-import { decideSafetyPenalty } from '../services/safetyPenaltyService';
+import { decideSafetyPenalty, decideSafetyPenaltyFromCount } from '../services/safetyPenaltyService';
 import { OutputSafetyService } from '../services/outputSafetyService';
 import { TopicGuardService } from '../services/topicGuardService';
 import { ConversationModel } from '../models/conversation';
@@ -156,26 +156,62 @@ export class ChatHandler extends Handler {
     let actionTaken: 'blocked' | 'cooldown_60s' | 'cooldown_5m' = 'blocked';
     let blockedUntil: Date | undefined;
     let retryAfterSeconds: number | undefined;
+    let penaltyCounterId: string | undefined;
+    let penaltyEventId: string | undefined;
+    let safetyProgress: {
+      currentCount: number;
+      threshold: number;
+      remainingBeforeCooldown: number;
+      windowSeconds: number;
+    } | undefined;
 
     if (validation.category) {
       try {
-        const penalty = await decideSafetyPenalty(
-          jailbreakLogModel,
+        const sequence = await jailbreakLogModel.nextPenaltySequence(
           domainId,
           userId,
           validation.category
         );
+        penaltyCounterId = sequence.counterId;
+        penaltyEventId = sequence.eventId;
+        const penalty = decideSafetyPenaltyFromCount(validation.category, sequence.currentCount);
         actionTaken = penalty.action;
         blockedUntil = penalty.blockedUntil;
         retryAfterSeconds = penalty.retryAfterSeconds;
+        safetyProgress = {
+          currentCount: penalty.currentCount,
+          threshold: penalty.threshold,
+          remainingBeforeCooldown: penalty.remainingBeforeCooldown,
+          windowSeconds: penalty.windowSeconds,
+        };
       } catch (penaltyErr) {
-        console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', penaltyErr);
+        console.warn('[ChatHandler] 原子安全计数失败，回退到日志计数:', penaltyErr);
+        try {
+          const penalty = await decideSafetyPenalty(
+            jailbreakLogModel,
+            domainId,
+            userId,
+            validation.category
+          );
+          actionTaken = penalty.action;
+          blockedUntil = penalty.blockedUntil;
+          retryAfterSeconds = penalty.retryAfterSeconds;
+          safetyProgress = {
+            currentCount: penalty.currentCount,
+            threshold: penalty.threshold,
+            remainingBeforeCooldown: penalty.remainingBeforeCooldown,
+            windowSeconds: penalty.windowSeconds,
+          };
+        } catch (fallbackErr) {
+          console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', fallbackErr);
+        }
       }
     }
 
+    let safetyEventId: string | undefined;
     try {
       const effectivenessService = new EffectivenessService(this.ctx);
-      await effectivenessService.logJailbreakAttempt({
+      const logId = await effectivenessService.logJailbreakAttempt({
         domainId,
         userId,
         conversationId,
@@ -189,9 +225,26 @@ export class ChatHandler extends Handler {
         detectionSource: validation.detectionSource,
         actionTaken,
         blockedUntil,
+        penaltyCounterId,
+        penaltyEventId,
       });
+      safetyEventId = logId?.toHexString();
+      if (!logId && penaltyCounterId && penaltyEventId) {
+        const counterToRollback = penaltyCounterId;
+        const eventToRollback = penaltyEventId;
+        penaltyCounterId = undefined;
+        penaltyEventId = undefined;
+        await jailbreakLogModel.rollbackPenaltySequence(counterToRollback, eventToRollback);
+      }
     } catch (logErr) {
       console.error('[ChatHandler] 记录越狱日志失败', logErr);
+      if (penaltyCounterId && penaltyEventId) {
+        try {
+          await jailbreakLogModel.rollbackPenaltySequence(penaltyCounterId, penaltyEventId);
+        } catch (rollbackErr) {
+          console.error('[ChatHandler] 回滚安全计数失败', rollbackErr);
+        }
+      }
     }
 
     const isCooldown = Boolean(retryAfterSeconds);
@@ -206,6 +259,8 @@ export class ChatHandler extends Handler {
       category: validation.category || 'input_validation',
       retryable: isCooldown,
       ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+      ...(safetyEventId ? { safetyEventId, appealAllowed: true } : {}),
+      ...(safetyProgress ? { safetyProgress } : {}),
     };
     this.response.type = 'application/json';
   }
@@ -323,6 +378,8 @@ export class ChatHandler extends Handler {
           category: 'safety',
           retryable: true,
           retryAfterSeconds,
+          safetyEventId: activeCooldown._id.toHexString(),
+          appealAllowed: activeCooldown.reviewStatus !== 'confirmed',
         };
         this.response.type = 'application/json';
         return null;
@@ -1274,6 +1331,73 @@ export class ChatHandler extends Handler {
 
 // 导出路由权限配置 - 需要用户登录
 export const ChatHandlerPriv = PRIV.PRIV_USER_PROFILE;
+
+/**
+ * 学生可对自己的待复核安全记录申请人工复核；申诉本身不会解除冷却。
+ */
+export class SafetyAppealHandler extends Handler {
+  async post({ id }: { id: string }) {
+    try {
+      if (rejectIfCsrfInvalid(this)) return;
+      if (!ObjectId.isValid(id)) {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_err_safety_appeal_invalid'),
+          code: 'INVALID_SAFETY_EVENT_ID',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const reason = typeof this.request.body?.reason === 'string'
+        ? this.request.body.reason.trim()
+        : '';
+      if (reason.length > 300) {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_err_safety_appeal_reason_too_long'),
+          code: 'SAFETY_APPEAL_REASON_TOO_LONG',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      const appealResult = await jailbreakLogModel.appealByStudent(
+        id,
+        getDomainId(this),
+        Number(this.user._id),
+        reason || undefined
+      );
+      if (appealResult === 'unavailable') {
+        this.response.status = 404;
+        this.response.body = {
+          error: this.translate('ai_helper_err_safety_appeal_unavailable'),
+          code: 'SAFETY_APPEAL_UNAVAILABLE',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      this.response.body = {
+        success: true,
+        alreadySubmitted: appealResult === 'already_submitted',
+        message: this.translate('ai_helper_safety_appeal_submitted'),
+      };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[AI Helper] SafetyAppealHandler error:', err instanceof Error ? err.message : 'unknown');
+      this.response.status = 500;
+      this.response.body = {
+        error: this.translate('ai_helper_err_safety_appeal_failed'),
+        code: 'SAFETY_APPEAL_FAILED',
+      };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
+export const SafetyAppealHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
 function hasUnsafeCustomRegexStructure(patternText: string): boolean {
   // 回溯型 JS RegExp 无法设置执行超时，因此仅接受可线性扫描的保守子集：

@@ -4,7 +4,7 @@
  * 处理学生的 AI 对话请求
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ProblemStatusHandlerPriv = exports.ProblemStatusHandler = exports.ChatHandlerPriv = exports.ChatHandler = void 0;
+exports.ProblemStatusHandlerPriv = exports.ProblemStatusHandler = exports.SafetyAppealHandlerPriv = exports.SafetyAppealHandler = exports.ChatHandlerPriv = exports.ChatHandler = void 0;
 exports.parseExtraJailbreakPatterns = parseExtraJailbreakPatterns;
 const hydrooj_1 = require("hydrooj");
 const judgeInfoService_1 = require("../services/judgeInfoService");
@@ -72,20 +72,48 @@ class ChatHandler extends hydrooj_1.Handler {
         let actionTaken = 'blocked';
         let blockedUntil;
         let retryAfterSeconds;
+        let penaltyCounterId;
+        let penaltyEventId;
+        let safetyProgress;
         if (validation.category) {
             try {
-                const penalty = await (0, safetyPenaltyService_1.decideSafetyPenalty)(jailbreakLogModel, domainId, userId, validation.category);
+                const sequence = await jailbreakLogModel.nextPenaltySequence(domainId, userId, validation.category);
+                penaltyCounterId = sequence.counterId;
+                penaltyEventId = sequence.eventId;
+                const penalty = (0, safetyPenaltyService_1.decideSafetyPenaltyFromCount)(validation.category, sequence.currentCount);
                 actionTaken = penalty.action;
                 blockedUntil = penalty.blockedUntil;
                 retryAfterSeconds = penalty.retryAfterSeconds;
+                safetyProgress = {
+                    currentCount: penalty.currentCount,
+                    threshold: penalty.threshold,
+                    remainingBeforeCooldown: penalty.remainingBeforeCooldown,
+                    windowSeconds: penalty.windowSeconds,
+                };
             }
             catch (penaltyErr) {
-                console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', penaltyErr);
+                console.warn('[ChatHandler] 原子安全计数失败，回退到日志计数:', penaltyErr);
+                try {
+                    const penalty = await (0, safetyPenaltyService_1.decideSafetyPenalty)(jailbreakLogModel, domainId, userId, validation.category);
+                    actionTaken = penalty.action;
+                    blockedUntil = penalty.blockedUntil;
+                    retryAfterSeconds = penalty.retryAfterSeconds;
+                    safetyProgress = {
+                        currentCount: penalty.currentCount,
+                        threshold: penalty.threshold,
+                        remainingBeforeCooldown: penalty.remainingBeforeCooldown,
+                        windowSeconds: penalty.windowSeconds,
+                    };
+                }
+                catch (fallbackErr) {
+                    console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', fallbackErr);
+                }
             }
         }
+        let safetyEventId;
         try {
             const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
-            await effectivenessService.logJailbreakAttempt({
+            const logId = await effectivenessService.logJailbreakAttempt({
                 domainId,
                 userId,
                 conversationId,
@@ -99,10 +127,28 @@ class ChatHandler extends hydrooj_1.Handler {
                 detectionSource: validation.detectionSource,
                 actionTaken,
                 blockedUntil,
+                penaltyCounterId,
+                penaltyEventId,
             });
+            safetyEventId = logId?.toHexString();
+            if (!logId && penaltyCounterId && penaltyEventId) {
+                const counterToRollback = penaltyCounterId;
+                const eventToRollback = penaltyEventId;
+                penaltyCounterId = undefined;
+                penaltyEventId = undefined;
+                await jailbreakLogModel.rollbackPenaltySequence(counterToRollback, eventToRollback);
+            }
         }
         catch (logErr) {
             console.error('[ChatHandler] 记录越狱日志失败', logErr);
+            if (penaltyCounterId && penaltyEventId) {
+                try {
+                    await jailbreakLogModel.rollbackPenaltySequence(penaltyCounterId, penaltyEventId);
+                }
+                catch (rollbackErr) {
+                    console.error('[ChatHandler] 回滚安全计数失败', rollbackErr);
+                }
+            }
         }
         const isCooldown = Boolean(retryAfterSeconds);
         this.response.status = isCooldown ? 429 : 422;
@@ -116,6 +162,8 @@ class ChatHandler extends hydrooj_1.Handler {
             category: validation.category || 'input_validation',
             retryable: isCooldown,
             ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+            ...(safetyEventId ? { safetyEventId, appealAllowed: true } : {}),
+            ...(safetyProgress ? { safetyProgress } : {}),
         };
         this.response.type = 'application/json';
     }
@@ -223,6 +271,8 @@ class ChatHandler extends hydrooj_1.Handler {
                     category: 'safety',
                     retryable: true,
                     retryAfterSeconds,
+                    safetyEventId: activeCooldown._id.toHexString(),
+                    appealAllowed: activeCooldown.reviewStatus !== 'confirmed',
                 };
                 this.response.type = 'application/json';
                 return null;
@@ -1085,6 +1135,66 @@ class ChatHandler extends hydrooj_1.Handler {
 exports.ChatHandler = ChatHandler;
 // 导出路由权限配置 - 需要用户登录
 exports.ChatHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
+/**
+ * 学生可对自己的待复核安全记录申请人工复核；申诉本身不会解除冷却。
+ */
+class SafetyAppealHandler extends hydrooj_1.Handler {
+    async post({ id }) {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            if (!mongo_1.ObjectId.isValid(id)) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_safety_appeal_invalid'),
+                    code: 'INVALID_SAFETY_EVENT_ID',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const reason = typeof this.request.body?.reason === 'string'
+                ? this.request.body.reason.trim()
+                : '';
+            if (reason.length > 300) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_safety_appeal_reason_too_long'),
+                    code: 'SAFETY_APPEAL_REASON_TOO_LONG',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const appealResult = await jailbreakLogModel.appealByStudent(id, (0, domainHelper_1.getDomainId)(this), Number(this.user._id), reason || undefined);
+            if (appealResult === 'unavailable') {
+                this.response.status = 404;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_safety_appeal_unavailable'),
+                    code: 'SAFETY_APPEAL_UNAVAILABLE',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            this.response.body = {
+                success: true,
+                alreadySubmitted: appealResult === 'already_submitted',
+                message: this.translate('ai_helper_safety_appeal_submitted'),
+            };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] SafetyAppealHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = {
+                error: this.translate('ai_helper_err_safety_appeal_failed'),
+                code: 'SAFETY_APPEAL_FAILED',
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.SafetyAppealHandler = SafetyAppealHandler;
+exports.SafetyAppealHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 function hasUnsafeCustomRegexStructure(patternText) {
     // 回溯型 JS RegExp 无法设置执行超时，因此仅接受可线性扫描的保守子集：
     // 不允许分组、回溯引用、通配符和一般量词；只允许由确定非空白字面量分隔的 \s+ / \s*。

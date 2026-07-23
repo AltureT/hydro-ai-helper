@@ -51,11 +51,13 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   };
 
   const summary = logPagination.summary || {
-    total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0, falsePositiveRate: 0,
+    total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0,
+    falsePositiveRate: 0, appealedPending: 0,
   };
   const summaryItems = [
     { label: i18n('ai_helper_admin_jailbreak_summary_total'), value: summary.total },
     { label: i18n('ai_helper_admin_jailbreak_summary_pending'), value: summary.pending },
+    { label: i18n('ai_helper_admin_jailbreak_summary_appealed'), value: summary.appealedPending },
     { label: i18n('ai_helper_admin_jailbreak_summary_reviewed'), value: summary.reviewed },
     { label: i18n('ai_helper_admin_jailbreak_summary_confirmed'), value: summary.confirmed },
     { label: i18n('ai_helper_admin_jailbreak_summary_false_positive'), value: summary.falsePositive },
@@ -83,7 +85,9 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   };
 
   const toggleCurrentPage = () => {
-    const pageIds = logPagination.logs.map((log) => log.id);
+    const pageIds = logPagination.logs
+      .filter((log) => (log.reviewStatus || 'pending') === 'pending')
+      .map((log) => log.id);
     const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
     setSelectedIds(allSelected ? [] : pageIds);
   };
@@ -166,6 +170,21 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
               <option value="prompt_exfiltration">{i18n('ai_helper_admin_jailbreak_category_prompt_exfiltration')}</option>
               <option value="obfuscated_injection">{i18n('ai_helper_admin_jailbreak_category_obfuscated_injection')}</option>
             </select>
+          </label>
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: SPACING.sm,
+            fontSize: '13px', color: COLORS.textSecondary, alignSelf: 'flex-end', paddingBottom: '8px',
+          }}>
+            <input
+              type="checkbox"
+              checked={Boolean(filters.appealedOnly)}
+              disabled={loading}
+              onChange={(event) => onChangeFilters({
+                ...filters,
+                appealedOnly: event.target.checked || undefined,
+              })}
+            />
+            {i18n('ai_helper_admin_jailbreak_filter_appealed')}
           </label>
         </div>
         {logPagination.ruleMetrics?.length > 0 && (
@@ -266,6 +285,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
               `${i18n('ai_helper_admin_jailbreak_expires_at')}${new Date(log.expiresAt).toLocaleDateString()}`
             );
             const reviewStatus = log.reviewStatus || 'pending';
+            const isPendingReview = reviewStatus === 'pending';
             contextPieces.push(
               `${i18n('ai_helper_admin_jailbreak_review_status')}${i18n(`ai_helper_admin_jailbreak_review_${reviewStatus}`)}`
             );
@@ -280,6 +300,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                   <input
                     type="checkbox"
                     checked={selectedIds.includes(log.id)}
+                    disabled={!isPendingReview}
                     onChange={() => toggleSelected(log.id)}
                     aria-label={i18n('ai_helper_admin_jailbreak_select_record')}
                   />
@@ -301,6 +322,16 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                     {contextText}
                   </div>
                 )}
+                {log.studentAppealedAt && (
+                  <div style={{
+                    marginTop: '8px', padding: '8px 10px', borderRadius: RADIUS.sm,
+                    backgroundColor: '#fff7ed', color: '#9a3412', fontSize: '12px',
+                  }}>
+                    {i18n('ai_helper_admin_jailbreak_student_appealed')}
+                    {new Date(log.studentAppealedAt).toLocaleString()}
+                    {log.studentAppealReason ? ` · ${log.studentAppealReason}` : ''}
+                  </div>
+                )}
                 <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                   <button type="button" onClick={() => onCopyToClipboard(log.matchedText)} style={getButtonStyle('secondary')}>
                     {i18n('ai_helper_admin_jailbreak_copy_text')}
@@ -317,22 +348,22 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                   </button>
                   <button
                     type="button"
-                    disabled={isReviewing || reviewStatus === 'confirmed'}
+                    disabled={isReviewing || !isPendingReview}
                     onClick={() => submitReview(log, 'confirmed')}
                     style={{
                       ...getButtonStyle('secondary'),
-                      opacity: isReviewing || reviewStatus === 'confirmed' ? 0.5 : 1,
+                      opacity: isReviewing || !isPendingReview ? 0.5 : 1,
                     }}
                   >
                     {i18n('ai_helper_admin_jailbreak_confirm_violation')}
                   </button>
                   <button
                     type="button"
-                    disabled={isReviewing || reviewStatus === 'false_positive'}
+                    disabled={isReviewing || !isPendingReview}
                     onClick={() => submitReview(log, 'false_positive')}
                     style={{
                       ...getButtonStyle('secondary'),
-                      opacity: isReviewing || reviewStatus === 'false_positive' ? 0.5 : 1,
+                      opacity: isReviewing || !isPendingReview ? 0.5 : 1,
                     }}
                   >
                     {i18n('ai_helper_admin_jailbreak_mark_false_positive')}

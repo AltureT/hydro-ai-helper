@@ -18,7 +18,14 @@ console.log('[AI-Helper] hydrooj imports OK');
 import { HelloHandler, HelloHandlerPriv } from './handlers/testHandler';
 console.log('[AI-Helper] testHandler OK');
 
-import { ChatHandler, ChatHandlerPriv, ProblemStatusHandler, ProblemStatusHandlerPriv } from './handlers/studentHandler';
+import {
+  ChatHandler,
+  ChatHandlerPriv,
+  ProblemStatusHandler,
+  ProblemStatusHandlerPriv,
+  SafetyAppealHandler,
+  SafetyAppealHandlerPriv,
+} from './handlers/studentHandler';
 console.log('[AI-Helper] studentHandler OK');
 
 import {
@@ -315,6 +322,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_helper_chat', '/ai-helper/chat', ChatHandler, ChatHandlerPriv);
     // 域前缀路由: /d/:domainId/ai-helper/chat
     ctx.Route('ai_helper_chat_domain', '/d/:domainId/ai-helper/chat', ChatHandler, ChatHandlerPriv);
+
+    // POST /ai-helper/safety-events/:id/appeal - 学生申请复核自己的安全拦截记录
+    ctx.Route('ai_helper_safety_appeal', '/ai-helper/safety-events/:id/appeal', SafetyAppealHandler, SafetyAppealHandlerPriv);
+    ctx.Route('ai_helper_safety_appeal_domain', '/d/:domainId/ai-helper/safety-events/:id/appeal', SafetyAppealHandler, SafetyAppealHandlerPriv);
 
     // GET /ai-helper/problem-status/:problemId - 查询用户在该题的提交状态（是否已 AC）
     ctx.Route('ai_helper_problem_status', '/ai-helper/problem-status/:problemId', ProblemStatusHandler, ProblemStatusHandlerPriv);

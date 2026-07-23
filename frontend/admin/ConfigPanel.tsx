@@ -144,6 +144,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       const params = new URLSearchParams({ page: String(page), limit: '20' });
       if (filters.reviewStatus) params.set('reviewStatus', filters.reviewStatus);
       if (filters.category) params.set('category', filters.category);
+      if (filters.appealedOnly) params.set('appealed', '1');
       const res = await fetch(`/ai-helper/admin/jailbreak-logs?${params.toString()}`, {
         method: 'GET', credentials: 'include',
       });

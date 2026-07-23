@@ -29,6 +29,16 @@ export interface ChatApiErrorPayload {
   code?: string;
   category?: string;
   retryable?: boolean;
+  safetyEventId?: string;
+  appealAllowed?: boolean;
+  safetyProgress?: SafetyProgress;
+}
+
+export interface SafetyProgress {
+  currentCount: number;
+  threshold: number;
+  remainingBeforeCooldown: number;
+  windowSeconds: number;
 }
 
 export interface Message {
@@ -52,6 +62,10 @@ export interface ChatState {
   error: string;
   errorCategory: string;
   errorRetryable: boolean;
+  safetyEventId: string;
+  safetyProgress: SafetyProgress | null;
+  safetyAppealStatus: 'idle' | 'submitting' | 'submitted' | 'error';
+  safetyAppealMessage: string;
   scratchpadAvailable: boolean;
   hasAccepted: boolean;
   acCode: string | null;
@@ -74,7 +88,8 @@ export type ChatAction =
   | { type: 'SET_STREAMING_CONTENT'; payload: string }
   | { type: 'SET_IS_STREAMING'; payload: boolean }
   | { type: 'SET_IS_LOADING'; payload: boolean }
-  | { type: 'SET_ERROR'; payload: { error: string; category?: string; retryable?: boolean } }
+  | { type: 'SET_ERROR'; payload: { error: string; category?: string; retryable?: boolean; safetyEventId?: string; safetyProgress?: SafetyProgress } }
+  | { type: 'SET_SAFETY_APPEAL'; payload: { status: ChatState['safetyAppealStatus']; message?: string } }
   | { type: 'CLEAR_ERROR' }
   | { type: 'SET_SCRATCHPAD_AVAILABLE'; payload: boolean }
   | { type: 'SET_HAS_ACCEPTED'; payload: boolean }
@@ -101,8 +116,27 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'SET_STREAMING_CONTENT': return { ...state, streamingContent: action.payload };
     case 'SET_IS_STREAMING': return { ...state, isStreaming: action.payload };
     case 'SET_IS_LOADING': return { ...state, isLoading: action.payload };
-    case 'SET_ERROR': return { ...state, error: action.payload.error, errorCategory: action.payload.category || '', errorRetryable: action.payload.retryable ?? false };
-    case 'CLEAR_ERROR': return { ...state, error: '', errorCategory: '', errorRetryable: false };
+    case 'SET_ERROR': return {
+      ...state,
+      error: action.payload.error,
+      errorCategory: action.payload.category || '',
+      errorRetryable: action.payload.retryable ?? false,
+      safetyEventId: action.payload.safetyEventId || '',
+      safetyProgress: action.payload.safetyProgress || null,
+      safetyAppealStatus: 'idle',
+      safetyAppealMessage: '',
+    };
+    case 'SET_SAFETY_APPEAL': return {
+      ...state,
+      safetyAppealStatus: action.payload.status,
+      safetyAppealMessage: action.payload.message || '',
+    };
+    case 'CLEAR_ERROR': return {
+      ...state,
+      error: '', errorCategory: '', errorRetryable: false,
+      safetyEventId: '', safetyProgress: null,
+      safetyAppealStatus: 'idle', safetyAppealMessage: '',
+    };
     case 'SET_SCRATCHPAD_AVAILABLE': return { ...state, scratchpadAvailable: action.payload };
     case 'SET_HAS_ACCEPTED': return { ...state, hasAccepted: action.payload };
     case 'SET_AC_CODE': return { ...state, acCode: action.payload };
@@ -118,9 +152,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversationId: null, conversationHistory: [],
         streamingContent: '', isStreaming: false, isLoading: false,
         error: '', errorCategory: '', errorRetryable: false,
+        safetyEventId: '', safetyProgress: null,
+        safetyAppealStatus: 'idle', safetyAppealMessage: '',
       };
     case 'SUBMIT_START':
-      return { ...state, userThinking: '', error: '', errorCategory: '', errorRetryable: false, isLoading: true };
+      return {
+        ...state,
+        userThinking: '', error: '', errorCategory: '', errorRetryable: false,
+        safetyEventId: '', safetyProgress: null,
+        safetyAppealStatus: 'idle', safetyAppealMessage: '', isLoading: true,
+      };
     case 'SUBMIT_FINISH_STREAM':
       return { ...state, isLoading: false, isStreaming: false, streamingContent: '' };
     default: return state;
@@ -140,6 +181,10 @@ export const initialChatState: ChatState = {
   error: '',
   errorCategory: '',
   errorRetryable: false,
+  safetyEventId: '',
+  safetyProgress: null,
+  safetyAppealStatus: 'idle',
+  safetyAppealMessage: '',
   scratchpadAvailable: false,
   hasAccepted: false,
   acCode: null,

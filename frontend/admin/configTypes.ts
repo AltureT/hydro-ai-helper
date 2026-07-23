@@ -56,6 +56,7 @@ export type JailbreakReviewStatus = 'pending' | 'confirmed' | 'false_positive';
 export interface JailbreakLogFilters {
   reviewStatus?: JailbreakReviewStatus;
   category?: JailbreakCategory;
+  appealedOnly?: boolean;
 }
 
 export interface JailbreakReviewSummary {
@@ -65,6 +66,7 @@ export interface JailbreakReviewSummary {
   falsePositive: number;
   reviewed: number;
   falsePositiveRate: number;
+  appealedPending: number;
 }
 
 export interface JailbreakRuleMetric {
@@ -96,6 +98,8 @@ export interface JailbreakLogEntry {
   reviewStatus?: JailbreakReviewStatus;
   reviewedAt?: string;
   reviewedBy?: number;
+  studentAppealedAt?: string;
+  studentAppealReason?: string;
   expiresAt?: string;
   createdAt: string;
 }

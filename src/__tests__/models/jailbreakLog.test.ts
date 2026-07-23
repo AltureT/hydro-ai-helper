@@ -29,6 +29,7 @@ function createMockCollection() {
     countDocuments: jest.fn(),
     updateOne: jest.fn(),
     updateMany: jest.fn(),
+    findOneAndUpdate: jest.fn(),
     aggregate: jest.fn().mockReturnValue(aggregateChain),
     _chain: chainMock,
     _aggregateChain: aggregateChain,
@@ -56,7 +57,7 @@ describe('JailbreakLogModel', () => {
   describe('ensureIndexes', () => {
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(5);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(7);
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, userId: 1, createdAt: -1 },
         { name: 'idx_domain_user_createdAt' }
@@ -69,6 +70,10 @@ describe('JailbreakLogModel', () => {
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { expiresAt: 1 },
         { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 }
+      );
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { domainId: 1, studentAppealedAt: -1, createdAt: -1 },
+        { name: 'idx_domain_appealed_createdAt' }
       );
     });
   });
@@ -214,6 +219,24 @@ describe('JailbreakLogModel', () => {
   });
 
   describe('penalty queries', () => {
+    it('should atomically keep a sliding ten-minute window across wall-clock boundaries', async () => {
+      const now = new Date('2026-07-23T10:01:00Z');
+      mockColl.findOneAndUpdate.mockResolvedValue({
+        _id: 'domain-a:42:answer_seeking',
+        count: 2,
+      });
+
+      const sequence = await model.nextPenaltySequence('domain-a', 42, 'answer_seeking', now);
+
+      expect(sequence.currentCount).toBe(2);
+      const [filter, pipeline, options] = mockColl.findOneAndUpdate.mock.calls[0];
+      expect(filter).toEqual({ _id: 'domain-a:42:answer_seeking' });
+      expect(pipeline[0].$set.events.$concatArrays[0].$filter.cond).toEqual({
+        $gte: ['$$event.at', new Date('2026-07-23T09:51:00Z')],
+      });
+      expect(options).toEqual({ upsert: true, returnDocument: 'after' });
+    });
+
     it('should count high-confidence events by domain, user and category', async () => {
       mockColl.countDocuments.mockResolvedValue(2);
       const since = new Date('2026-07-23T00:00:00Z');
@@ -257,39 +280,68 @@ describe('JailbreakLogModel', () => {
 
   describe('review', () => {
     it('should confirm a log only within the requested domain', async () => {
-      mockColl.updateOne.mockResolvedValue({ matchedCount: 1 });
+      mockColl.findOneAndUpdate.mockResolvedValue({ _id: 'log-1' });
       const reviewedAt = new Date('2026-07-23T01:00:00Z');
 
       const result = await model.review('log-1', 'domain-a', 'confirmed', 7, reviewedAt);
 
       expect(result).toBe(true);
-      expect(mockColl.updateOne).toHaveBeenCalledWith(
-        { _id: 'log-1', domainId: 'domain-a' },
-        { $set: { reviewStatus: 'confirmed', reviewedAt, reviewedBy: 7 } }
+      expect(mockColl.findOneAndUpdate).toHaveBeenCalledWith(
+        {
+          _id: 'log-1',
+          domainId: 'domain-a',
+          $or: [
+            { reviewStatus: 'pending' },
+            { reviewStatus: { $exists: false } },
+          ],
+        },
+        { $set: { reviewStatus: 'confirmed', reviewedAt, reviewedBy: 7 } },
+        { returnDocument: 'before' }
       );
     });
 
     it('should cancel the cooldown when a log is marked false positive', async () => {
+      mockColl.findOneAndUpdate.mockResolvedValue({ _id: 'log-2' });
+
+      await model.review('log-2', 'domain-a', 'false_positive', 7);
+
+      expect(mockColl.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: 'log-2', domainId: 'domain-a' }),
+        expect.objectContaining({
+          $set: expect.objectContaining({ reviewStatus: 'false_positive', reviewedBy: 7 }),
+          $unset: { blockedUntil: '' },
+        }),
+        { returnDocument: 'before' }
+      );
+    });
+
+    it('should roll back the atomic penalty counter when a log is marked false positive', async () => {
+      mockColl.findOneAndUpdate.mockResolvedValue({
+        _id: 'log-2',
+        penaltyCounterId: 'counter-1',
+        penaltyEventId: 'event-1',
+      });
       mockColl.updateOne.mockResolvedValue({ matchedCount: 1 });
 
       await model.review('log-2', 'domain-a', 'false_positive', 7);
 
-      expect(mockColl.updateOne).toHaveBeenCalledWith(
-        { _id: 'log-2', domainId: 'domain-a' },
-        expect.objectContaining({
-          $set: expect.objectContaining({ reviewStatus: 'false_positive', reviewedBy: 7 }),
-          $unset: { blockedUntil: '' },
-        })
+      expect(mockColl.updateOne).toHaveBeenLastCalledWith(
+        { _id: 'counter-1' },
+        expect.arrayContaining([
+          expect.objectContaining({ $set: expect.objectContaining({ events: expect.any(Object) }) }),
+        ])
       );
     });
 
-    it('should report when no domain-scoped log was found', async () => {
-      mockColl.updateOne.mockResolvedValue({ matchedCount: 0 });
+    it('should report when no pending domain-scoped log was found', async () => {
+      mockColl.findOneAndUpdate.mockResolvedValue(null);
       await expect(model.review('missing', 'domain-a', 'confirmed', 7)).resolves.toBe(false);
     });
 
-    it('should bulk review only IDs from one domain', async () => {
-      mockColl.updateMany.mockResolvedValue({ matchedCount: 2, modifiedCount: 2 });
+    it('should bulk review each pending ID through an atomic terminal transition', async () => {
+      mockColl.findOneAndUpdate
+        .mockResolvedValueOnce({ _id: 'log-1' })
+        .mockResolvedValueOnce({ _id: 'log-2' });
       const reviewedAt = new Date('2026-07-23T01:00:00Z');
 
       const result = await model.reviewMany(
@@ -301,13 +353,53 @@ describe('JailbreakLogModel', () => {
       );
 
       expect(result).toEqual({ matchedCount: 2, modifiedCount: 2 });
-      expect(mockColl.updateMany).toHaveBeenCalledWith(
-        { _id: { $in: ['log-1', 'log-2'] }, domainId: 'domain-a' },
+      expect(mockColl.findOneAndUpdate).toHaveBeenCalledTimes(2);
+    });
+
+    it('should allow a student to appeal only their own pending unappealed log', async () => {
+      mockColl.updateOne.mockResolvedValue({ matchedCount: 1 });
+      const appealedAt = new Date('2026-07-23T02:00:00Z');
+
+      const result = await model.appealByStudent(
+        'log-3',
+        'domain-a',
+        42,
+        'contact test@example.com',
+        appealedAt
+      );
+
+      expect(result).toBe('submitted');
+      expect(mockColl.updateOne).toHaveBeenCalledWith(
         {
-          $set: { reviewStatus: 'false_positive', reviewedAt, reviewedBy: 7 },
-          $unset: { blockedUntil: '' },
+          _id: 'log-3',
+          domainId: 'domain-a',
+          userId: 42,
+          $or: [
+            { reviewStatus: 'pending' },
+            { reviewStatus: { $exists: false } },
+          ],
+          studentAppealedAt: { $exists: false },
+        },
+        {
+          $set: {
+            studentAppealedAt: appealedAt,
+            studentAppealReason: 'contact [email]',
+          },
         }
       );
+    });
+
+    it('should treat retrying an existing own pending appeal as idempotent success', async () => {
+      mockColl.updateOne.mockResolvedValue({ matchedCount: 0 });
+      mockColl.findOne.mockResolvedValue({ _id: 'log-4', studentAppealedAt: new Date() });
+
+      await expect(model.appealByStudent('log-4', 'domain-a', 42)).resolves.toBe('already_submitted');
+      expect(mockColl.findOne).toHaveBeenCalledWith(expect.objectContaining({
+        _id: 'log-4',
+        domainId: 'domain-a',
+        userId: 42,
+        studentAppealedAt: { $exists: true },
+      }));
     });
   });
 
@@ -393,6 +485,24 @@ describe('JailbreakLogModel', () => {
         reviewStatus: 'confirmed',
       });
     });
+
+    it('should expose a queue containing only pending student appeals', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      mockColl.countDocuments.mockResolvedValue(0);
+
+      await model.listWithPagination(1, 20, 'domain-a', { appealedOnly: true });
+
+      const expectedFilter = {
+        domainId: 'domain-a',
+        studentAppealedAt: { $exists: true },
+        $or: [
+          { reviewStatus: 'pending' },
+          { reviewStatus: { $exists: false } },
+        ],
+      };
+      expect(mockColl.find).toHaveBeenCalledWith(expectedFilter);
+      expect(mockColl.countDocuments).toHaveBeenCalledWith(expectedFilter);
+    });
   });
 
   describe('getReviewSummary', () => {
@@ -401,7 +511,8 @@ describe('JailbreakLogModel', () => {
         .mockResolvedValueOnce(20)
         .mockResolvedValueOnce(8)
         .mockResolvedValueOnce(9)
-        .mockResolvedValueOnce(3);
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(2);
 
       const summary = await model.getReviewSummary('domain-a');
 
@@ -412,6 +523,7 @@ describe('JailbreakLogModel', () => {
         falsePositive: 3,
         reviewed: 12,
         falsePositiveRate: 25,
+        appealedPending: 2,
       });
       expect(mockColl.countDocuments).toHaveBeenNthCalledWith(1, { domainId: 'domain-a' });
       expect(mockColl.countDocuments).toHaveBeenNthCalledWith(2, {

@@ -51,21 +51,56 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
         gap: compact ? '6px' : SPACING.sm,
         ...(compact ? { marginBottom: '10px' } : {}),
       }}>
-        <span>{state.error}</span>
-        {state.errorRetryable && (
-          <button
-            onClick={() => chat.handleSubmit()}
-            style={{
-              ...getButtonStyle('secondary'),
-              padding: compact ? '3px 10px' : '4px 12px',
-              fontSize: compact ? '11px' : '12px',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            {i18n('ai_helper_student_retry')}
-          </button>
-        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+          <span>{state.error}</span>
+          {state.safetyProgress && state.safetyProgress.remainingBeforeCooldown > 0 && (
+            <span style={{ fontSize: compact ? '11px' : '12px', opacity: 0.85 }}>
+              {i18n(
+                'ai_helper_safety_progress',
+                state.safetyProgress.currentCount,
+                state.safetyProgress.threshold,
+                state.safetyProgress.remainingBeforeCooldown
+              )}
+            </span>
+          )}
+          {state.safetyAppealMessage && (
+            <span style={{ fontSize: compact ? '11px' : '12px', opacity: 0.9 }}>
+              {state.safetyAppealMessage}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+          {state.safetyEventId && state.safetyAppealStatus !== 'submitted' && (
+            <button
+              onClick={chat.appealSafetyEvent}
+              disabled={state.safetyAppealStatus === 'submitting'}
+              style={{
+                ...getButtonStyle('secondary'),
+                padding: compact ? '3px 10px' : '4px 12px',
+                fontSize: compact ? '11px' : '12px',
+                whiteSpace: 'nowrap',
+                opacity: state.safetyAppealStatus === 'submitting' ? 0.65 : 1,
+              }}
+            >
+              {i18n(state.safetyAppealStatus === 'submitting'
+                ? 'ai_helper_safety_appeal_submitting'
+                : 'ai_helper_safety_appeal')}
+            </button>
+          )}
+          {isRetryable && (
+            <button
+              onClick={() => chat.handleSubmit()}
+              style={{
+                ...getButtonStyle('secondary'),
+                padding: compact ? '3px 10px' : '4px 12px',
+                fontSize: compact ? '11px' : '12px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {i18n('ai_helper_student_retry')}
+            </button>
+          )}
+        </div>
       </div>
     );
   };

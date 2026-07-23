@@ -266,8 +266,10 @@ export class EffectivenessService {
     detectionSource?: SafetyDetectionSource;
     actionTaken?: SafetyAction;
     blockedUntil?: Date;
+    penaltyCounterId?: string;
+    penaltyEventId?: string;
     createdAt?: Date;
-  }): Promise<void> {
+  }): Promise<ObjectIdType | undefined> {
     try {
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
       const formattedConversationId =
@@ -277,7 +279,7 @@ export class EffectivenessService {
             ? new ObjectId(payload.conversationId)
             : payload.conversationId;
 
-      await jailbreakLogModel.create({
+      return await jailbreakLogModel.create({
         domainId: payload.domainId,
         userId: payload.userId,
         problemId: payload.problemId,
@@ -291,10 +293,13 @@ export class EffectivenessService {
         detectionSource: payload.detectionSource,
         actionTaken: payload.actionTaken,
         blockedUntil: payload.blockedUntil,
+        penaltyCounterId: payload.penaltyCounterId,
+        penaltyEventId: payload.penaltyEventId,
         createdAt: payload.createdAt ?? new Date()
       });
     } catch (err) {
       this.ctx.logger.error('EffectivenessService logJailbreakAttempt error', err);
+      return undefined;
     }
   }
 
