@@ -2,9 +2,15 @@ import React from 'react';
 import { i18n } from '../utils/i18n';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
-  cardStyle, getButtonStyle,
+  cardStyle, getButtonStyle, getInputStyle,
 } from '../utils/styles';
-import type { JailbreakLogEntry, JailbreakLogPagination } from './configTypes';
+import type {
+  JailbreakCategory,
+  JailbreakLogEntry,
+  JailbreakLogFilters,
+  JailbreakLogPagination,
+  JailbreakReviewStatus,
+} from './configTypes';
 
 interface JailbreakLogsViewerProps {
   logPagination: JailbreakLogPagination;
@@ -13,10 +19,13 @@ interface JailbreakLogsViewerProps {
   onCopyToClipboard: (text: string) => void;
   onAppendPattern: (pattern: string) => void;
   onReview: (id: string, reviewStatus: 'confirmed' | 'false_positive') => Promise<void>;
+  filters: JailbreakLogFilters;
+  onChangeFilters: (filters: JailbreakLogFilters) => void;
 }
 
 export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern, onReview,
+  filters, onChangeFilters,
 }) => {
   const [collapsed, setCollapsed] = React.useState(true);
   const [reviewingId, setReviewingId] = React.useState<string | null>(null);
@@ -31,6 +40,32 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
     } finally {
       setReviewingId(null);
     }
+  };
+
+  const summary = logPagination.summary || {
+    total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0, falsePositiveRate: 0,
+  };
+  const summaryItems = [
+    { label: i18n('ai_helper_admin_jailbreak_summary_total'), value: summary.total },
+    { label: i18n('ai_helper_admin_jailbreak_summary_pending'), value: summary.pending },
+    { label: i18n('ai_helper_admin_jailbreak_summary_reviewed'), value: summary.reviewed },
+    { label: i18n('ai_helper_admin_jailbreak_summary_confirmed'), value: summary.confirmed },
+    { label: i18n('ai_helper_admin_jailbreak_summary_false_positive'), value: summary.falsePositive },
+    { label: i18n('ai_helper_admin_jailbreak_summary_false_positive_rate'), value: `${summary.falsePositiveRate}%` },
+  ];
+
+  const updateReviewStatusFilter = (value: string) => {
+    onChangeFilters({
+      ...filters,
+      reviewStatus: value ? value as JailbreakReviewStatus : undefined,
+    });
+  };
+
+  const updateCategoryFilter = (value: string) => {
+    onChangeFilters({
+      ...filters,
+      category: value ? value as JailbreakCategory : undefined,
+    });
   };
 
   return (
@@ -52,6 +87,58 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
         </span>
       )}
     </div>
+
+    {!collapsed && (
+      <>
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+          gap: SPACING.sm, marginTop: SPACING.base,
+        }}>
+          {summaryItems.map((item) => (
+            <div key={item.label} style={{
+              padding: SPACING.md, borderRadius: RADIUS.md, backgroundColor: COLORS.bgPage,
+              border: `1px solid ${COLORS.border}`,
+            }}>
+              <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{item.label}</div>
+              <div style={{ marginTop: '4px', fontSize: '20px', fontWeight: 600, color: COLORS.textPrimary }}>
+                {item.value}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.md, margin: `${SPACING.base} 0` }}>
+          <label style={{ minWidth: '180px', fontSize: '13px', color: COLORS.textSecondary }}>
+            {i18n('ai_helper_admin_jailbreak_filter_review_status')}
+            <select
+              value={filters.reviewStatus || ''}
+              disabled={loading}
+              onChange={(event) => updateReviewStatusFilter(event.target.value)}
+              style={{ ...getInputStyle(), marginTop: '6px' }}
+            >
+              <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
+              <option value="pending">{i18n('ai_helper_admin_jailbreak_review_pending')}</option>
+              <option value="confirmed">{i18n('ai_helper_admin_jailbreak_review_confirmed')}</option>
+              <option value="false_positive">{i18n('ai_helper_admin_jailbreak_review_false_positive')}</option>
+            </select>
+          </label>
+          <label style={{ minWidth: '210px', fontSize: '13px', color: COLORS.textSecondary }}>
+            {i18n('ai_helper_admin_jailbreak_filter_category')}
+            <select
+              value={filters.category || ''}
+              disabled={loading}
+              onChange={(event) => updateCategoryFilter(event.target.value)}
+              style={{ ...getInputStyle(), marginTop: '6px' }}
+            >
+              <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
+              <option value="answer_seeking">{i18n('ai_helper_admin_jailbreak_category_answer_seeking')}</option>
+              <option value="prompt_injection">{i18n('ai_helper_admin_jailbreak_category_prompt_injection')}</option>
+              <option value="prompt_exfiltration">{i18n('ai_helper_admin_jailbreak_category_prompt_exfiltration')}</option>
+              <option value="obfuscated_injection">{i18n('ai_helper_admin_jailbreak_category_obfuscated_injection')}</option>
+            </select>
+          </label>
+        </div>
+      </>
+    )}
 
     {collapsed ? null : logPagination.logs.length === 0 ? (
       <div style={{

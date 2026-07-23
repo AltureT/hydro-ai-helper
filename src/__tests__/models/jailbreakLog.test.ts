@@ -48,12 +48,16 @@ describe('JailbreakLogModel', () => {
   describe('ensureIndexes', () => {
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(3);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(4);
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, userId: 1, createdAt: -1 },
         { name: 'idx_domain_user_createdAt' }
       );
       expect(console.log).toHaveBeenCalledWith('[JailbreakLogModel] Indexes ensured');
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 },
+        { name: 'idx_domain_review_category_createdAt' }
+      );
     });
   });
 
@@ -270,6 +274,80 @@ describe('JailbreakLogModel', () => {
 
       expect(mockColl.find).toHaveBeenCalledWith({ domainId: 'domain-a' });
       expect(mockColl.countDocuments).toHaveBeenCalledWith({ domainId: 'domain-a' });
+    });
+
+    it('should filter pending legacy and current logs by category', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      mockColl.countDocuments.mockResolvedValue(0);
+
+      await model.listWithPagination(1, 20, 'domain-a', {
+        reviewStatus: 'pending',
+        category: 'prompt_injection',
+      });
+
+      const expectedFilter = {
+        domainId: 'domain-a',
+        category: 'prompt_injection',
+        $or: [
+          { reviewStatus: 'pending' },
+          { reviewStatus: { $exists: false } },
+        ],
+      };
+      expect(mockColl.find).toHaveBeenCalledWith(expectedFilter);
+      expect(mockColl.countDocuments).toHaveBeenCalledWith(expectedFilter);
+    });
+
+    it('should filter confirmed logs directly', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      mockColl.countDocuments.mockResolvedValue(0);
+
+      await model.listWithPagination(1, 20, 'domain-a', { reviewStatus: 'confirmed' });
+
+      expect(mockColl.find).toHaveBeenCalledWith({
+        domainId: 'domain-a',
+        reviewStatus: 'confirmed',
+      });
+    });
+  });
+
+  describe('getReviewSummary', () => {
+    it('should calculate a domain-scoped false-positive rate from reviewed logs', async () => {
+      mockColl.countDocuments
+        .mockResolvedValueOnce(20)
+        .mockResolvedValueOnce(8)
+        .mockResolvedValueOnce(9)
+        .mockResolvedValueOnce(3);
+
+      const summary = await model.getReviewSummary('domain-a');
+
+      expect(summary).toEqual({
+        total: 20,
+        pending: 8,
+        confirmed: 9,
+        falsePositive: 3,
+        reviewed: 12,
+        falsePositiveRate: 25,
+      });
+      expect(mockColl.countDocuments).toHaveBeenNthCalledWith(1, { domainId: 'domain-a' });
+      expect(mockColl.countDocuments).toHaveBeenNthCalledWith(2, {
+        domainId: 'domain-a',
+        $or: [
+          { reviewStatus: 'pending' },
+          { reviewStatus: { $exists: false } },
+        ],
+      });
+    });
+
+    it('should return zero rate when no logs have been reviewed', async () => {
+      mockColl.countDocuments
+        .mockResolvedValueOnce(4)
+        .mockResolvedValueOnce(4)
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(0);
+
+      await expect(model.getReviewSummary('domain-a')).resolves.toEqual(
+        expect.objectContaining({ reviewed: 0, falsePositiveRate: 0 })
+      );
     });
   });
 });

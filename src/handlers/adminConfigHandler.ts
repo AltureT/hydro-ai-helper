@@ -8,12 +8,13 @@ import { AIConfig, AIConfigModel, APIEndpoint, SelectedModel, BudgetConfig, Scen
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
-import type { JailbreakLog } from '../models/jailbreakLog';
+import type { JailbreakLog, JailbreakLogListFilters } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { translateWithParams } from '../utils/i18nHelper';
 import { getDomainId } from '../utils/domainHelper';
 import type { PluginInstallModel } from '../models/pluginInstall';
 import { ObjectId } from '../utils/mongo';
+import type { SafetyReviewStatus, SafetyViolationCategory } from '../types/safety';
 
 /**
  * 更新配置请求接口（兼容旧版 + 新版多端点）
@@ -448,15 +449,47 @@ export class JailbreakLogsHandler extends Handler {
   async get() {
     try {
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
-      const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
-      const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
-      const logResult = await jailbreakLogModel.listWithPagination(page, limit, getDomainId(this));
+      const query = this.request.query || {};
+      const page = parseInt(String(query.page || '1'), 10) || 1;
+      const limit = parseInt(String(query.limit || '20'), 10) || 20;
+      const reviewStatusRaw = String(query.reviewStatus || '').trim();
+      const categoryRaw = String(query.category || '').trim();
+      const validReviewStatuses: SafetyReviewStatus[] = ['pending', 'confirmed', 'false_positive'];
+      const validCategories: SafetyViolationCategory[] = [
+        'answer_seeking',
+        'prompt_injection',
+        'prompt_exfiltration',
+        'obfuscated_injection',
+      ];
+
+      if ((reviewStatusRaw && !validReviewStatuses.includes(reviewStatusRaw as SafetyReviewStatus))
+          || (categoryRaw && !validCategories.includes(categoryRaw as SafetyViolationCategory))) {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_filter_invalid'),
+          code: 'INVALID_JAILBREAK_LOG_FILTER',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const filters: JailbreakLogListFilters = {
+        reviewStatus: reviewStatusRaw ? reviewStatusRaw as SafetyReviewStatus : undefined,
+        category: categoryRaw ? categoryRaw as SafetyViolationCategory : undefined,
+      };
+      const domainId = getDomainId(this);
+      const [logResult, summary] = await Promise.all([
+        jailbreakLogModel.listWithPagination(page, limit, domainId, filters),
+        jailbreakLogModel.getReviewSummary(domainId),
+      ]);
 
       this.response.body = {
         logs: logResult.logs.map(formatJailbreakLog),
         total: logResult.total,
         page: logResult.page,
         totalPages: logResult.totalPages,
+        summary,
+        filters,
       };
       this.response.type = 'application/json';
     } catch (err) {

@@ -53,6 +53,20 @@ export interface JailbreakLogCreateInput {
   createdAt?: Date;
 }
 
+export interface JailbreakLogListFilters {
+  reviewStatus?: SafetyReviewStatus;
+  category?: SafetyViolationCategory;
+}
+
+export interface JailbreakReviewSummary {
+  total: number;
+  pending: number;
+  confirmed: number;
+  falsePositive: number;
+  reviewed: number;
+  falsePositiveRate: number;
+}
+
 export class JailbreakLogModel {
   private collection: Collection<JailbreakLog>;
 
@@ -69,6 +83,10 @@ export class JailbreakLogModel {
     await this.collection.createIndex(
       { domainId: 1, userId: 1, blockedUntil: -1 },
       { name: 'idx_domain_user_blockedUntil' }
+    );
+    await this.collection.createIndex(
+      { domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 },
+      { name: 'idx_domain_review_category_createdAt' }
     );
     console.log('[JailbreakLogModel] Indexes ensured');
   }
@@ -166,7 +184,8 @@ export class JailbreakLogModel {
   async listWithPagination(
     page: number = 1,
     limit: number = 20,
-    domainId?: string
+    domainId?: string,
+    filters: JailbreakLogListFilters = {}
   ): Promise<{
     logs: JailbreakLog[];
     total: number;
@@ -178,6 +197,16 @@ export class JailbreakLogModel {
     const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
     const skip = (safePage - 1) * safeLimit;
     const filter: Filter<JailbreakLog> = domainId ? { domainId } : {};
+    if (filters.category) filter.category = filters.category;
+    if (filters.reviewStatus === 'pending') {
+      // 旧版日志没有 reviewStatus，在管理端兼容视为待复核。
+      filter.$or = [
+        { reviewStatus: 'pending' },
+        { reviewStatus: { $exists: false } },
+      ];
+    } else if (filters.reviewStatus) {
+      filter.reviewStatus = filters.reviewStatus;
+    }
 
     // 并行查询数据和总数
     const [logs, total] = await Promise.all([
@@ -198,5 +227,27 @@ export class JailbreakLogModel {
       page: safePage,
       totalPages
     };
+  }
+
+  async getReviewSummary(domainId?: string): Promise<JailbreakReviewSummary> {
+    const baseFilter: Filter<JailbreakLog> = domainId ? { domainId } : {};
+    const [total, pending, confirmed, falsePositive] = await Promise.all([
+      this.collection.countDocuments(baseFilter),
+      this.collection.countDocuments({
+        ...baseFilter,
+        $or: [
+          { reviewStatus: 'pending' },
+          { reviewStatus: { $exists: false } },
+        ],
+      }),
+      this.collection.countDocuments({ ...baseFilter, reviewStatus: 'confirmed' }),
+      this.collection.countDocuments({ ...baseFilter, reviewStatus: 'false_positive' }),
+    ]);
+    const reviewed = confirmed + falsePositive;
+    const falsePositiveRate = reviewed > 0
+      ? Math.round((falsePositive / reviewed) * 1000) / 10
+      : 0;
+
+    return { total, pending, confirmed, falsePositive, reviewed, falsePositiveRate };
   }
 }

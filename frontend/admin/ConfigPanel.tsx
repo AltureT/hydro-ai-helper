@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { i18n } from '../utils/i18n';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
@@ -15,7 +15,7 @@ import {
 } from '../utils/styles';
 import type {
   Endpoint, ConfigState, JailbreakLogPagination, APIConfigResponse, TelemetryStatus,
-  AIScenarioKey, SelectedModel, ScenarioModelsState,
+  AIScenarioKey, SelectedModel, ScenarioModelsState, JailbreakLogFilters,
 } from './configTypes';
 
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
@@ -90,11 +90,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [builtinJailbreakPatterns, setBuiltinJailbreakPatterns] = useState<string[]>([]);
   const [logPagination, setLogPagination] = useState<JailbreakLogPagination>({
     logs: [], total: 0, page: 1, totalPages: 0,
+    summary: { total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0, falsePositiveRate: 0 },
   });
+  const [logFilters, setLogFilters] = useState<JailbreakLogFilters>({});
 
   const { toasts, showToast, dismissToast } = useToast();
 
   const [logsLoading, setLogsLoading] = useState(false);
+  const logsRequestId = useRef(0);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
 
   useEffect(() => {
@@ -130,20 +133,29 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     }
   }, []);
 
-  const loadJailbreakLogs = useCallback(async (page: number = 1) => {
+  const loadJailbreakLogs = useCallback(async (
+    page: number = 1,
+    filters: JailbreakLogFilters = {}
+  ) => {
+    const requestId = ++logsRequestId.current;
     setLogsLoading(true);
     try {
-      const res = await fetch(`/ai-helper/admin/jailbreak-logs?page=${page}&limit=20`, {
+      const params = new URLSearchParams({ page: String(page), limit: '20' });
+      if (filters.reviewStatus) params.set('reviewStatus', filters.reviewStatus);
+      if (filters.category) params.set('category', filters.category);
+      const res = await fetch(`/ai-helper/admin/jailbreak-logs?${params.toString()}`, {
         method: 'GET', credentials: 'include',
       });
       if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_load_failed')}: ${res.status}`);
       const json: JailbreakLogPagination = await res.json();
+      if (requestId !== logsRequestId.current) return;
       setLogPagination(json);
     } catch (err: any) {
+      if (requestId !== logsRequestId.current) return;
       console.error('Load jailbreak logs error:', err);
       showToast(err.message || i18n('ai_helper_admin_jailbreak_load_failed'), 'error');
     } finally {
-      setLogsLoading(false);
+      if (requestId === logsRequestId.current) setLogsLoading(false);
     }
   }, []);
 
@@ -330,7 +342,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const changePage = (newPage: number) => {
     if (newPage < 1 || newPage > logPagination.totalPages) return;
-    loadJailbreakLogs(newPage);
+    loadJailbreakLogs(newPage, logFilters);
+  };
+
+  const changeLogFilters = (filters: JailbreakLogFilters) => {
+    setLogFilters(filters);
+    loadJailbreakLogs(1, filters);
   };
 
   const reviewJailbreakLog = async (
@@ -349,7 +366,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         throw new Error(json.error || i18n('ai_helper_admin_jailbreak_review_failed'));
       }
       showToast(i18n('ai_helper_admin_jailbreak_review_success'), 'success');
-      await loadJailbreakLogs(logPagination.page);
+      await loadJailbreakLogs(logPagination.page, logFilters);
     } catch (err: any) {
       console.error('Review jailbreak log error:', err);
       showToast(err.message || i18n('ai_helper_admin_jailbreak_review_failed'), 'error');
@@ -636,6 +653,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           onCopyToClipboard={copyToClipboard}
           onAppendPattern={appendPatternToCustomRules}
           onReview={reviewJailbreakLog}
+          filters={logFilters}
+          onChangeFilters={changeLogFilters}
         />
 
         <TelemetrySettings

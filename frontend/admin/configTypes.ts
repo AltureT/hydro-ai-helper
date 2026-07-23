@@ -45,6 +45,28 @@ export interface ConfigState {
   budgetConfig: BudgetConfigState;
 }
 
+export type JailbreakCategory =
+  | 'answer_seeking'
+  | 'prompt_injection'
+  | 'prompt_exfiltration'
+  | 'obfuscated_injection';
+
+export type JailbreakReviewStatus = 'pending' | 'confirmed' | 'false_positive';
+
+export interface JailbreakLogFilters {
+  reviewStatus?: JailbreakReviewStatus;
+  category?: JailbreakCategory;
+}
+
+export interface JailbreakReviewSummary {
+  total: number;
+  pending: number;
+  confirmed: number;
+  falsePositive: number;
+  reviewed: number;
+  falsePositiveRate: number;
+}
+
 export interface JailbreakLogEntry {
   id: string;
   domainId?: string;
@@ -54,13 +76,13 @@ export interface JailbreakLogEntry {
   questionType?: string;
   matchedPattern: string;
   matchedText: string;
-  category?: 'answer_seeking' | 'prompt_injection' | 'prompt_exfiltration' | 'obfuscated_injection';
+  category?: JailbreakCategory;
   confidence?: 'medium' | 'high';
   riskScore?: number;
   detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'custom';
   actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
   blockedUntil?: string;
-  reviewStatus?: 'pending' | 'confirmed' | 'false_positive';
+  reviewStatus?: JailbreakReviewStatus;
   reviewedAt?: string;
   reviewedBy?: number;
   createdAt: string;
@@ -71,6 +93,8 @@ export interface JailbreakLogPagination {
   total: number;
   page: number;
   totalPages: number;
+  summary: JailbreakReviewSummary;
+  filters?: JailbreakLogFilters;
 }
 
 export interface TelemetryStatus {

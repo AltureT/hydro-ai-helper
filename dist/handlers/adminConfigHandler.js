@@ -425,14 +425,44 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
     async get() {
         try {
             const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
-            const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
-            const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
-            const logResult = await jailbreakLogModel.listWithPagination(page, limit, (0, domainHelper_1.getDomainId)(this));
+            const query = this.request.query || {};
+            const page = parseInt(String(query.page || '1'), 10) || 1;
+            const limit = parseInt(String(query.limit || '20'), 10) || 20;
+            const reviewStatusRaw = String(query.reviewStatus || '').trim();
+            const categoryRaw = String(query.category || '').trim();
+            const validReviewStatuses = ['pending', 'confirmed', 'false_positive'];
+            const validCategories = [
+                'answer_seeking',
+                'prompt_injection',
+                'prompt_exfiltration',
+                'obfuscated_injection',
+            ];
+            if ((reviewStatusRaw && !validReviewStatuses.includes(reviewStatusRaw))
+                || (categoryRaw && !validCategories.includes(categoryRaw))) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_filter_invalid'),
+                    code: 'INVALID_JAILBREAK_LOG_FILTER',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const filters = {
+                reviewStatus: reviewStatusRaw ? reviewStatusRaw : undefined,
+                category: categoryRaw ? categoryRaw : undefined,
+            };
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const [logResult, summary] = await Promise.all([
+                jailbreakLogModel.listWithPagination(page, limit, domainId, filters),
+                jailbreakLogModel.getReviewSummary(domainId),
+            ]);
             this.response.body = {
                 logs: logResult.logs.map(formatJailbreakLog),
                 total: logResult.total,
                 page: logResult.page,
                 totalPages: logResult.totalPages,
+                summary,
+                filters,
             };
             this.response.type = 'application/json';
         }

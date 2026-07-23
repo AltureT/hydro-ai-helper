@@ -5,7 +5,26 @@ jest.mock('../../lib/crypto', () => ({
 }));
 
 import { ObjectId } from 'mongodb';
-import { JailbreakLogReviewHandler } from '../../handlers/adminConfigHandler';
+import { JailbreakLogReviewHandler, JailbreakLogsHandler } from '../../handlers/adminConfigHandler';
+
+function createLogsHandler(query: Record<string, string> = {}) {
+  const handler = new JailbreakLogsHandler();
+  const listWithPagination = jest.fn().mockResolvedValue({
+    logs: [], total: 0, page: 1, totalPages: 0,
+  });
+  const getReviewSummary = jest.fn().mockResolvedValue({
+    total: 10, pending: 4, confirmed: 4, falsePositive: 2, reviewed: 6, falsePositiveRate: 33.3,
+  });
+  handler.args = { domainId: 'domain-a' };
+  handler.request = { headers: {}, query };
+  handler.response = {};
+  handler.translate = jest.fn((key: string) => key);
+  handler.ctx = {
+    Route: jest.fn(),
+    get: jest.fn(() => ({ listWithPagination, getReviewSummary })),
+  };
+  return { handler, listWithPagination, getReviewSummary };
+}
 
 function createReviewHandler() {
   const handler = new JailbreakLogReviewHandler();
@@ -66,5 +85,38 @@ describe('JailbreakLogReviewHandler', () => {
 
     expect(handler.response.status).toBe(404);
     expect(handler.response.body.code).toBe('JAILBREAK_LOG_NOT_FOUND');
+  });
+});
+
+describe('JailbreakLogsHandler', () => {
+  it('applies validated domain-scoped filters and returns review summary', async () => {
+    const { handler, listWithPagination, getReviewSummary } = createLogsHandler({
+      page: '2',
+      limit: '10',
+      reviewStatus: 'pending',
+      category: 'prompt_injection',
+    });
+
+    await handler.get();
+
+    expect(listWithPagination).toHaveBeenCalledWith(2, 10, 'domain-a', {
+      reviewStatus: 'pending',
+      category: 'prompt_injection',
+    });
+    expect(getReviewSummary).toHaveBeenCalledWith('domain-a');
+    expect(handler.response.body.summary).toEqual(expect.objectContaining({ falsePositiveRate: 33.3 }));
+  });
+
+  it('rejects unsupported filters before querying the database', async () => {
+    const { handler, listWithPagination, getReviewSummary } = createLogsHandler({
+      reviewStatus: 'deleted',
+    });
+
+    await handler.get();
+
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body.code).toBe('INVALID_JAILBREAK_LOG_FILTER');
+    expect(listWithPagination).not.toHaveBeenCalled();
+    expect(getReviewSummary).not.toHaveBeenCalled();
   });
 });
