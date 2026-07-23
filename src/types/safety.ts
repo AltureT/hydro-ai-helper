@@ -11,6 +11,7 @@ export type SafetyDetectionSource =
   | 'compacted'
   | 'base64'
   | 'hex'
+  | 'conversation'
   | 'custom';
 
 export type SafetyAction = 'blocked' | 'cooldown_60s' | 'cooldown_5m';

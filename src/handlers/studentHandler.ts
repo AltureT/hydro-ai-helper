@@ -133,6 +133,83 @@ export class ChatHandler extends Handler {
     }
   }
 
+  private async rejectSafetyViolation(params: {
+    validation: ValidateInputResult;
+    jailbreakLogModel: JailbreakLogModel;
+    domainId: string;
+    userId: number;
+    conversationId?: string;
+    problemId: string;
+    questionType: QuestionType;
+    fallbackMatchedText: string;
+  }): Promise<void> {
+    const {
+      validation,
+      jailbreakLogModel,
+      domainId,
+      userId,
+      conversationId,
+      problemId,
+      questionType,
+      fallbackMatchedText,
+    } = params;
+    let actionTaken: 'blocked' | 'cooldown_60s' | 'cooldown_5m' = 'blocked';
+    let blockedUntil: Date | undefined;
+    let retryAfterSeconds: number | undefined;
+
+    if (validation.category) {
+      try {
+        const penalty = await decideSafetyPenalty(
+          jailbreakLogModel,
+          domainId,
+          userId,
+          validation.category
+        );
+        actionTaken = penalty.action;
+        blockedUntil = penalty.blockedUntil;
+        retryAfterSeconds = penalty.retryAfterSeconds;
+      } catch (penaltyErr) {
+        console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', penaltyErr);
+      }
+    }
+
+    try {
+      const effectivenessService = new EffectivenessService(this.ctx);
+      await effectivenessService.logJailbreakAttempt({
+        domainId,
+        userId,
+        conversationId,
+        problemId,
+        questionType,
+        matchedPattern: validation.matchedPattern,
+        matchedText: validation.matchedText || fallbackMatchedText.substring(0, 120),
+        category: validation.category,
+        confidence: validation.confidence,
+        riskScore: validation.riskScore,
+        detectionSource: validation.detectionSource,
+        actionTaken,
+        blockedUntil,
+      });
+    } catch (logErr) {
+      console.error('[ChatHandler] 记录越狱日志失败', logErr);
+    }
+
+    const isCooldown = Boolean(retryAfterSeconds);
+    this.response.status = isCooldown ? 429 : 422;
+    this.response.body = {
+      error: isCooldown
+        ? translateWithParams(this, 'ai_helper_err_safety_cooldown', retryAfterSeconds as number)
+        : validation.errorKey
+          ? translateWithParams(this, validation.errorKey, ...(validation.errorParams || []))
+          : (validation.error || this.translate('ai_helper_err_input_validation_failed')),
+      code: isCooldown ? 'SAFETY_COOLDOWN' : 'SAFETY_POLICY_VIOLATION',
+      category: validation.category || 'input_validation',
+      retryable: isCooldown,
+      ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+    };
+    this.response.type = 'application/json';
+  }
+
   private isStreamRequested(): boolean {
     const body = this.request.body as ChatRequest;
     if (body.stream === true) return true;
@@ -414,61 +491,16 @@ export class ChatHandler extends Handler {
     );
     if (!validation.valid) {
       if (validation.matchedPattern) {
-        let actionTaken: 'blocked' | 'cooldown_60s' | 'cooldown_5m' = 'blocked';
-        let blockedUntil: Date | undefined;
-        let retryAfterSeconds: number | undefined;
-
-        if (validation.category) {
-          try {
-            const penalty = await decideSafetyPenalty(
-              jailbreakLogModel,
-              domainId,
-              userId,
-              validation.category
-            );
-            actionTaken = penalty.action;
-            blockedUntil = penalty.blockedUntil;
-            retryAfterSeconds = penalty.retryAfterSeconds;
-          } catch (penaltyErr) {
-            console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', penaltyErr);
-          }
-        }
-
-        try {
-          const effectivenessService = new EffectivenessService(this.ctx);
-          await effectivenessService.logJailbreakAttempt({
-            domainId,
-            userId,
-            conversationId,
-            problemId,
-            questionType,
-            matchedPattern: validation.matchedPattern,
-            matchedText: validation.matchedText || userThinking.substring(0, 120),
-            category: validation.category,
-            confidence: validation.confidence,
-            riskScore: validation.riskScore,
-            detectionSource: validation.detectionSource,
-            actionTaken,
-            blockedUntil,
-          });
-        } catch (logErr) {
-          console.error('[ChatHandler] 记录越狱日志失败', logErr);
-        }
-
-        const isCooldown = Boolean(retryAfterSeconds);
-        this.response.status = isCooldown ? 429 : 422;
-        this.response.body = {
-          error: isCooldown
-            ? translateWithParams(this, 'ai_helper_err_safety_cooldown', retryAfterSeconds as number)
-            : validation.errorKey
-              ? translateWithParams(this, validation.errorKey, ...(validation.errorParams || []))
-              : (validation.error || this.translate('ai_helper_err_input_validation_failed')),
-          code: isCooldown ? 'SAFETY_COOLDOWN' : 'SAFETY_POLICY_VIOLATION',
-          category: validation.category || 'input_validation',
-          retryable: isCooldown,
-          ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
-        };
-        this.response.type = 'application/json';
+        await this.rejectSafetyViolation({
+          validation,
+          jailbreakLogModel,
+          domainId,
+          userId,
+          conversationId,
+          problemId,
+          questionType,
+          fallbackMatchedText: userThinking,
+        });
         return null;
       }
 
@@ -551,6 +583,31 @@ export class ChatHandler extends Handler {
           offTopicStrike: 0
         }
       });
+    }
+
+    // P0-3: 组合最近三条学生消息，拦截跨轮次拆分的注入/答案索取指令。
+    // 此查询也复用于后续历史提示词构造，避免同一请求重复读取消息。
+    const priorConversationMessages = await messageModel.findRecentByConversationId(currentConversationId, 6);
+    const sequenceValidation = promptService.validateConversationSequence(
+      priorConversationMessages
+        .filter((message) => message.role === 'student')
+        .map((message) => message.content || ''),
+      userThinking,
+      extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined,
+      processedProblemContent
+    );
+    if (!sequenceValidation.valid && sequenceValidation.matchedPattern) {
+      await this.rejectSafetyViolation({
+        validation: sequenceValidation,
+        jailbreakLogModel,
+        domainId,
+        userId,
+        conversationId: currentConversationId.toHexString(),
+        problemId,
+        questionType,
+        fallbackMatchedText: userThinking,
+      });
+      return null;
     }
 
     // P0-1: Clarify 锚点校验
@@ -731,18 +788,12 @@ export class ChatHandler extends Handler {
 
     // 历史上下文净化：已重写/偏题的消息不再进入模型；
     // 旧版已存储的学生输入也重新经过当前安全规则，但不重复记录或惩罚。
-    const historyMessages = (await messageModel.findRecentByConversationId(currentConversationId, 7))
-      .slice(0, -1)
-      .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM)
-      .filter((msg) => {
-        if (msg.role !== 'student') return true;
-        return promptService.validateInput(
-          msg.content || '',
-          undefined,
-          extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined,
-          processedProblemContent
-        ).valid;
-      })
+    const historyMessages = promptService.filterSafeConversationHistory(
+      priorConversationMessages
+        .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM),
+      extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined,
+      processedProblemContent
+    )
       .map((msg) => ({
         role: msg.role,
         content: msg.content
@@ -1224,6 +1275,77 @@ export class ChatHandler extends Handler {
 // 导出路由权限配置 - 需要用户登录
 export const ChatHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
+function hasUnsafeCustomRegexStructure(patternText: string): boolean {
+  // 回溯型 JS RegExp 无法设置执行超时，因此仅接受可线性扫描的保守子集：
+  // 不允许分组、回溯引用、通配符和一般量词；只允许由确定非空白字面量分隔的 \s+ / \s*。
+  if (/[()]/.test(patternText) || /\\[1-9]/.test(patternText)) return true;
+
+  let escaped = false;
+  let inCharacterClass = false;
+  let branchRequiresCharacter = false;
+  let separatorSinceWhitespaceRepeat = true;
+
+  for (let index = 0; index < patternText.length; index += 1) {
+    const char = patternText[index];
+    if (inCharacterClass) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === ']') {
+        inCharacterClass = false;
+        branchRequiresCharacter = true;
+      }
+      continue;
+    }
+
+    if (char === '\\') {
+      const token = patternText[index + 1];
+      if (!token || /[1-9]/.test(token)) return true;
+      const quantifier = patternText[index + 2];
+      if (quantifier === '+' || quantifier === '*') {
+        if (token !== 's' || !separatorSinceWhitespaceRepeat) return true;
+        branchRequiresCharacter ||= quantifier === '+';
+        separatorSinceWhitespaceRepeat = false;
+        index += 2;
+        continue;
+      }
+      const safeConsumingEscapes = new Set(['s', 'd', 'w', 'S', 'n', 'r', 't', 'f', 'v']);
+      const escapedLiterals = new Set(['\\', '.', '-', '/', '^', '$', '|', '[', ']', '{', '}', '?', '*', '+']);
+      if (!safeConsumingEscapes.has(token) && !escapedLiterals.has(token)) return true;
+      branchRequiresCharacter = true;
+      if (['d', 'w', 'S'].includes(token) || escapedLiterals.has(token)) {
+        separatorSinceWhitespaceRepeat = true;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === '|') {
+      if (!branchRequiresCharacter) return true;
+      branchRequiresCharacter = false;
+      separatorSinceWhitespaceRepeat = true;
+      continue;
+    }
+    if (char === '[') {
+      inCharacterClass = true;
+      continue;
+    }
+
+    if (char === '.' || char === '?' || char === '+' || char === '*' || char === '{' || char === '}') return true;
+
+    if (char === '^' || char === '$') continue;
+
+    branchRequiresCharacter = true;
+    if (!/\s/.test(char)) separatorSinceWhitespaceRepeat = true;
+  }
+
+  return escaped || inCharacterClass || !branchRequiresCharacter;
+}
+
 export function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
   if (!raw) {
     return [];
@@ -1232,15 +1354,14 @@ export function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
   const MAX_CUSTOM_RULES = 50;
   const MAX_PATTERN_LENGTH = 200;
   const MAX_RULE_TEXT_LENGTH = 10_000;
-  const NESTED_QUANTIFIER = /\((?:\\.|[^()])*(?:[+*]|\{\d+,?\d*\})(?:\\.|[^()])*\)(?:[+*]|\{\d+,?\d*\})/;
   const patterns: RegExp[] = [];
   const lines = raw.slice(0, MAX_RULE_TEXT_LENGTH).split(/\r?\n/).slice(0, MAX_CUSTOM_RULES);
 
   for (const line of lines) {
     const patternText = line.trim();
     if (!patternText) continue;
-    if (patternText.length > MAX_PATTERN_LENGTH || NESTED_QUANTIFIER.test(patternText)) {
-      console.warn('[ChatHandler] 自定义越狱规则过长或包含嵌套量词，已跳过:', patternText.slice(0, 80));
+    if (patternText.length > MAX_PATTERN_LENGTH || hasUnsafeCustomRegexStructure(patternText)) {
+      console.warn('[ChatHandler] 自定义越狱规则过长或可能导致高开销回溯，已跳过:', patternText.slice(0, 80));
       continue;
     }
     try {

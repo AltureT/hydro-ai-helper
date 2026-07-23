@@ -90,7 +90,7 @@ export interface JailbreakLogEntry {
   category?: JailbreakCategory;
   confidence?: 'medium' | 'high';
   riskScore?: number;
-  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'custom';
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom';
   actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
   blockedUntil?: string;
   reviewStatus?: JailbreakReviewStatus;

@@ -87,7 +87,7 @@ export interface ValidateInputResult {
 
 interface DetectionCandidate {
   text: string;
-  source: Exclude<SafetyDetectionSource, 'custom'>;
+  source: Exclude<SafetyDetectionSource, 'custom' | 'conversation'>;
 }
 
 /**
@@ -420,91 +420,171 @@ ${sanitizeForPrompt(clarifySelectedText)}
       return { valid: false, error: `代码片段过长(最多 ${PROMPT_LIMITS.MAX_CODE_LENGTH} 字符)`, errorKey: 'ai_helper_err_code_too_long', errorParams: [PROMPT_LIMITS.MAX_CODE_LENGTH] };
     }
 
-    // 标准化白名单内容（用于匹配比对），设置长度上限避免性能问题
-    const MAX_WHITELIST_LENGTH = PROMPT_LIMITS.MAX_WHITELIST_LENGTH;
-    const normalizedWhitelist = problemContentWhitelist
-      ? this.normalizeForComparison(problemContentWhitelist.slice(0, MAX_WHITELIST_LENGTH))
-      : '';
-
-    // 安全策略检测：内置规则带类别与风险分值；管理员规则默认视为注入规则。
-    const builtinRules = getBuiltinJailbreakRules();
-    const customRules: SafetyRuleDefinition[] = (extraJailbreakPatterns ?? []).map((pattern) => ({
-      pattern,
-      category: 'prompt_injection',
-      riskScore: 75,
-    }));
-    const allRules = [...builtinRules, ...customRules];
-    const detectJailbreak = (text: string) => {
-      const candidates = this.buildDetectionCandidates(text);
-      for (const candidate of candidates) {
-        for (const rule of allRules) {
-          const pattern = new RegExp(rule.pattern.source, rule.pattern.flags);
-          pattern.lastIndex = 0;
-          const match = pattern.exec(candidate.text);
-          if (match) {
-            // 只有普通文本命中才应用题面白名单；编码/插空后的内容不能借题面绕过。
-            if (candidate.source === 'plain'
-                && normalizedWhitelist
-                && this.isMatchFromWhitelist(match[0], normalizedWhitelist)) {
-              continue;
-            }
-
-            const isCustomRule = customRules.some((custom) => custom.pattern.source === rule.pattern.source);
-            const detectionSource: SafetyDetectionSource = isCustomRule && candidate.source === 'plain'
-              ? 'custom'
-              : candidate.source;
-            const category: SafetyViolationCategory = candidate.source === 'plain'
-              ? rule.category
-              : rule.category === 'answer_seeking'
-                ? 'answer_seeking'
-                : 'obfuscated_injection';
-
-            return { rule, match, candidate, category, detectionSource };
-          }
-        }
-      }
-      return null;
-    };
-    const jailbreakError =
-      '当前输入中包含与系统规则冲突的指令。请专注描述你对题目的理解、思路或遇到的具体错误，而不要尝试修改系统设定。';
-    const jailbreakErrorKey = 'ai_helper_err_jailbreak_detected';
-
     if (userThinking) {
-      const result = detectJailbreak(userThinking);
-      if (result) {
-        const { rule, match, candidate, category, detectionSource } = result;
-        return {
-          valid: false,
-          error: category === 'answer_seeking'
-            ? '我不能直接提供完整答案或可提交代码。请说明你已经想到哪一步，我会给你下一条提示。'
-            : jailbreakError,
-          errorKey: category === 'answer_seeking' ? 'ai_helper_err_answer_seeking' : jailbreakErrorKey,
-          matchedPattern: rule.pattern.source,
-          matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
-          category,
-          confidence: 'high',
-          riskScore: candidate.source === 'plain'
-            ? rule.riskScore
-            : category === 'answer_seeking'
-              ? Math.max(60, rule.riskScore)
-              : Math.max(95, rule.riskScore),
-          detectionSource,
-        };
-      }
+      const result = this.detectSafetyViolation(userThinking, extraJailbreakPatterns, problemContentWhitelist);
+      if (!result.valid) return result;
     }
 
     const normalizedCode = typeof code === 'string' ? code : '';
     const hasCodeInput = normalizedCode.trim().length > 0;
     if (hasCodeInput) {
-      const result = detectJailbreak(normalizedCode);
-      if (result) {
-        const { rule, match, candidate, category, detectionSource } = result;
+      const result = this.detectSafetyViolation(normalizedCode, extraJailbreakPatterns, problemContentWhitelist);
+      if (!result.valid) return result;
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * 检测把一条危险指令拆到多轮学生消息中的规避方式。
+   * 仅在“历史片段、当前输入分别安全，但组合后命中”时拦截，避免旧版脏数据误伤当前请求。
+   */
+  validateConversationSequence(
+    previousStudentInputs: string[],
+    currentInput: string,
+    extraJailbreakPatterns?: RegExp[],
+    problemContentWhitelist?: string
+  ): ValidateInputResult {
+    const previousFragments = previousStudentInputs
+      .filter((text) => typeof text === 'string' && text.trim().length > 0)
+      .slice(-3)
+      // buildUserPrompt 对每条历史消息取前 500 字；检测视图与实际送模内容保持一致。
+      .map((text) => text.slice(0, 500))
+      .filter((text) => this.detectSafetyViolation(
+        text,
+        extraJailbreakPatterns,
+        problemContentWhitelist
+      ).valid);
+
+    if (previousFragments.length === 0 || !currentInput.trim()) {
+      return { valid: true };
+    }
+
+    const currentValidation = this.detectSafetyViolation(
+      currentInput,
+      extraJailbreakPatterns,
+      problemContentWhitelist
+    );
+    if (!currentValidation.valid) {
+      return currentValidation;
+    }
+
+    // 从最近一条开始扫描所有历史后缀。若某个后缀在加入当前输入前已经违规，
+    // 只跳过该后缀，继续检查更短组合，避免一条旧脏数据关闭整个跨轮防护。
+    for (let start = previousFragments.length - 1; start >= 0; start -= 1) {
+      const previousOnly = previousFragments.slice(start).join('\n');
+      const previousValidation = this.detectSafetyViolation(
+        previousOnly,
+        extraJailbreakPatterns,
+        problemContentWhitelist
+      );
+      if (!previousValidation.valid) continue;
+
+      const combinedValidation = this.detectSafetyViolation(
+        `${previousOnly}\n${currentInput}`,
+        extraJailbreakPatterns,
+        problemContentWhitelist
+      );
+      if (combinedValidation.valid || !combinedValidation.matchedPattern) continue;
+
+      return {
+        ...combinedValidation,
+        detectionSource: 'conversation',
+        riskScore: combinedValidation.category === 'answer_seeking'
+          ? Math.max(60, combinedValidation.riskScore ?? 0)
+          : Math.max(90, combinedValidation.riskScore ?? 0),
+      };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * 净化旧会话上下文：单条违规直接删除；多条单独安全但组合违规时，删除触发组合的后续片段。
+   * 该过程只影响送给模型的上下文，不生成日志，也不处罚当前请求。
+   */
+  filterSafeConversationHistory<T extends { role: string; content: string }>(
+    historyMessages: T[],
+    extraJailbreakPatterns?: RegExp[],
+    problemContentWhitelist?: string
+  ): T[] {
+    const safeMessages: T[] = [];
+    const safeStudentInputs: string[] = [];
+
+    for (const message of historyMessages) {
+      if (message.role !== 'student') {
+        safeMessages.push(message);
+        continue;
+      }
+
+      const individualValidation = this.validateInput(
+        message.content || '',
+        undefined,
+        extraJailbreakPatterns,
+        problemContentWhitelist
+      );
+      if (!individualValidation.valid) continue;
+
+      const sequenceValidation = this.validateConversationSequence(
+        safeStudentInputs,
+        message.content || '',
+        extraJailbreakPatterns,
+        problemContentWhitelist
+      );
+      if (!sequenceValidation.valid) continue;
+
+      safeStudentInputs.push(message.content || '');
+      safeMessages.push(message);
+    }
+
+    return safeMessages;
+  }
+
+  private detectSafetyViolation(
+    text: string,
+    extraJailbreakPatterns?: RegExp[],
+    problemContentWhitelist?: string
+  ): ValidateInputResult {
+    const normalizedWhitelist = problemContentWhitelist
+      ? this.normalizeForComparison(problemContentWhitelist.slice(0, PROMPT_LIMITS.MAX_WHITELIST_LENGTH))
+      : '';
+    const customRules: SafetyRuleDefinition[] = (extraJailbreakPatterns ?? []).map((pattern) => ({
+      pattern,
+      category: 'prompt_injection',
+      riskScore: 75,
+    }));
+    const allRules = [...getBuiltinJailbreakRules(), ...customRules];
+
+    for (const candidate of this.buildDetectionCandidates(text)) {
+      for (const rule of allRules) {
+        const pattern = new RegExp(rule.pattern.source, rule.pattern.flags);
+        pattern.lastIndex = 0;
+        const match = pattern.exec(candidate.text);
+        if (!match) continue;
+        if (candidate.source === 'plain'
+            && normalizedWhitelist
+            && this.isMatchFromWhitelist(match[0], normalizedWhitelist)) {
+          continue;
+        }
+
+        const isCustomRule = customRules.some((custom) => custom.pattern.source === rule.pattern.source);
+        const detectionSource: SafetyDetectionSource = isCustomRule && candidate.source === 'plain'
+          ? 'custom'
+          : candidate.source;
+        const category: SafetyViolationCategory = candidate.source === 'plain'
+          ? rule.category
+          : rule.category === 'answer_seeking'
+            ? 'answer_seeking'
+            : 'obfuscated_injection';
+
         return {
           valid: false,
           error: category === 'answer_seeking'
             ? '我不能直接提供完整答案或可提交代码。请说明你已经想到哪一步，我会给你下一条提示。'
-            : jailbreakError,
-          errorKey: category === 'answer_seeking' ? 'ai_helper_err_answer_seeking' : jailbreakErrorKey,
+            : '当前输入中包含与系统规则冲突的指令。请专注描述你对题目的理解、思路或遇到的具体错误，而不要尝试修改系统设定。',
+          errorKey: category === 'answer_seeking'
+            ? 'ai_helper_err_answer_seeking'
+            : 'ai_helper_err_jailbreak_detected',
           matchedPattern: rule.pattern.source,
           matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
           category,
