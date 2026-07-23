@@ -106,6 +106,7 @@ interface JailbreakDoc {
   domainId?: string;
   userId?: number;
   category?: string;
+  reviewStatus?: string;
   createdAt: Date;
 }
 
@@ -402,6 +403,7 @@ export class TeachingAnalysisService {
       domainId: input.domainId,
       userId: { $in: input.studentUids },
       category: { $in: ['prompt_injection', 'prompt_exfiltration', 'obfuscated_injection'] },
+      reviewStatus: { $ne: 'false_positive' },
     };
     if (input.contestStartTime || input.contestEndTime) {
       filter.createdAt = {};

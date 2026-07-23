@@ -15,6 +15,8 @@ export type SafetyDetectionSource =
 
 export type SafetyAction = 'blocked' | 'cooldown_60s' | 'cooldown_5m';
 
+export type SafetyReviewStatus = 'pending' | 'confirmed' | 'false_positive';
+
 export interface SafetyRuleDefinition {
   pattern: RegExp;
   category: Exclude<SafetyViolationCategory, 'obfuscated_injection'>;

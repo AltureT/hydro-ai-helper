@@ -22,6 +22,7 @@ function createMockCollection() {
     find: jest.fn().mockReturnValue(chainMock),
     findOne: jest.fn(),
     countDocuments: jest.fn(),
+    updateOne: jest.fn(),
     _chain: chainMock,
   };
 }
@@ -66,6 +67,7 @@ describe('JailbreakLogModel', () => {
       });
       expect(result).toBe('log-1');
       expect(mockColl.insertOne).toHaveBeenCalledTimes(1);
+      expect(mockColl.insertOne.mock.calls[0][0].reviewStatus).toBe('pending');
     });
 
     it('should include optional fields when provided', async () => {
@@ -162,6 +164,7 @@ describe('JailbreakLogModel', () => {
         userId: 42,
         category: { $in: ['prompt_injection', 'prompt_exfiltration'] },
         confidence: 'high',
+        reviewStatus: { $ne: 'false_positive' },
         createdAt: { $gte: since },
       });
     });
@@ -174,9 +177,48 @@ describe('JailbreakLogModel', () => {
 
       expect(result).toBeTruthy();
       expect(mockColl.findOne).toHaveBeenCalledWith(
-        { domainId: 'domain-a', userId: 42, blockedUntil: { $gt: now } },
+        {
+          domainId: 'domain-a',
+          userId: 42,
+          blockedUntil: { $gt: now },
+          reviewStatus: { $ne: 'false_positive' },
+        },
         { sort: { blockedUntil: -1 } }
       );
+    });
+  });
+
+  describe('review', () => {
+    it('should confirm a log only within the requested domain', async () => {
+      mockColl.updateOne.mockResolvedValue({ matchedCount: 1 });
+      const reviewedAt = new Date('2026-07-23T01:00:00Z');
+
+      const result = await model.review('log-1', 'domain-a', 'confirmed', 7, reviewedAt);
+
+      expect(result).toBe(true);
+      expect(mockColl.updateOne).toHaveBeenCalledWith(
+        { _id: 'log-1', domainId: 'domain-a' },
+        { $set: { reviewStatus: 'confirmed', reviewedAt, reviewedBy: 7 } }
+      );
+    });
+
+    it('should cancel the cooldown when a log is marked false positive', async () => {
+      mockColl.updateOne.mockResolvedValue({ matchedCount: 1 });
+
+      await model.review('log-2', 'domain-a', 'false_positive', 7);
+
+      expect(mockColl.updateOne).toHaveBeenCalledWith(
+        { _id: 'log-2', domainId: 'domain-a' },
+        expect.objectContaining({
+          $set: expect.objectContaining({ reviewStatus: 'false_positive', reviewedBy: 7 }),
+          $unset: { blockedUntil: '' },
+        })
+      );
+    });
+
+    it('should report when no domain-scoped log was found', async () => {
+      mockColl.updateOne.mockResolvedValue({ matchedCount: 0 });
+      await expect(model.review('missing', 'domain-a', 'confirmed', 7)).resolves.toBe(false);
     });
   });
 

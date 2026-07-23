@@ -32,7 +32,14 @@ console.log('[AI-Helper] teacherHandler OK');
 import { AnalyticsHandler, AnalyticsHandlerPriv, AnalyticsFilterOptionsHandler, AnalyticsFilterOptionsHandlerPriv } from './handlers/analyticsHandler';
 console.log('[AI-Helper] analyticsHandler OK');
 
-import { AdminConfigHandler, AdminConfigHandlerPriv, JailbreakLogsHandler, JailbreakLogsHandlerPriv } from './handlers/adminConfigHandler';
+import {
+  AdminConfigHandler,
+  AdminConfigHandlerPriv,
+  JailbreakLogsHandler,
+  JailbreakLogsHandlerPriv,
+  JailbreakLogReviewHandler,
+  JailbreakLogReviewHandlerPriv,
+} from './handlers/adminConfigHandler';
 import { TestdataBenchmarkHandler, TestdataBenchmarkHandlerPriv } from './handlers/testdataBenchmarkHandler';
 console.log('[AI-Helper] adminConfigHandler OK');
 
@@ -326,6 +333,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
 
     // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
     ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
+
+    // POST /ai-helper/admin/jailbreak-logs/:id/review - 复核拦截记录
+    ctx.Route('ai_helper_admin_jailbreak_log_review', '/ai-helper/admin/jailbreak-logs/:id/review', JailbreakLogReviewHandler, JailbreakLogReviewHandlerPriv);
+    ctx.Route('ai_helper_admin_jailbreak_log_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/:id/review', JailbreakLogReviewHandler, JailbreakLogReviewHandlerPriv);
 
     // POST /ai-helper/admin/testdata-benchmark - 管理员显式确认费用后运行真实模型难题基准
     ctx.Route('ai_helper_admin_testdata_benchmark', '/ai-helper/admin/testdata-benchmark', TestdataBenchmarkHandler, TestdataBenchmarkHandlerPriv);

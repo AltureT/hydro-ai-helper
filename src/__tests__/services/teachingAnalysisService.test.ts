@@ -30,6 +30,7 @@ function createMockDb(overrides: Record<string, any[]> = {}) {
               if (val && typeof val === 'object' && !Array.isArray(val)) {
                 const op = val as any;
                 if (op.$in && !op.$in.includes(docVal)) return false;
+                if (op.$ne !== undefined && docVal === op.$ne) return false;
                 if (op.$gte && docVal < op.$gte) return false;
                 if (op.$lte && docVal > op.$lte) return false;
               } else {
@@ -267,6 +268,26 @@ describe('TeachingAnalysisService', () => {
       const strategy = result.findings.filter(
         (f) => f.dimension === 'strategy' && f.title.includes('越狱'),
       );
+      expect(strategy).toHaveLength(0);
+    });
+
+    it('should exclude events reviewed as false positives', async () => {
+      const falsePositives = [101, 102, 103, 104, 105].map((uid) => ({
+        ...makeJailbreak(uid),
+        reviewStatus: 'false_positive',
+      }));
+      const conversations = [101, 102, 103, 104, 105].map((uid) => makeConversation(uid, '1'));
+      const db = createMockDb({
+        ai_conversations: conversations,
+        ai_jailbreak_logs: falsePositives,
+      });
+
+      const service = new TeachingAnalysisService(db);
+      const result = await service.analyze(baseInput());
+      const strategy = result.findings.filter(
+        (f) => f.dimension === 'strategy' && f.title.includes('越狱'),
+      );
+
       expect(strategy).toHaveLength(0);
     });
   });

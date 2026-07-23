@@ -13,6 +13,7 @@ import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { translateWithParams } from '../utils/i18nHelper';
 import { getDomainId } from '../utils/domainHelper';
 import type { PluginInstallModel } from '../models/pluginInstall';
+import { ObjectId } from '../utils/mongo';
 
 /**
  * 更新配置请求接口（兼容旧版 + 新版多端点）
@@ -467,9 +468,70 @@ export class JailbreakLogsHandler extends Handler {
   }
 }
 
+/**
+ * JailbreakLogReviewHandler - 教师/管理员复核安全拦截记录
+ * POST /ai-helper/admin/jailbreak-logs/:id/review
+ */
+export class JailbreakLogReviewHandler extends Handler {
+  async post({ id }: { id: string }) {
+    try {
+      if (rejectIfCsrfInvalid(this)) return;
+      if (!ObjectId.isValid(id)) {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_review_invalid_id'),
+          code: 'INVALID_JAILBREAK_LOG_ID',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const { reviewStatus } = (this.request.body || {}) as { reviewStatus?: string };
+      if (reviewStatus !== 'confirmed' && reviewStatus !== 'false_positive') {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_review_invalid_status'),
+          code: 'INVALID_REVIEW_STATUS',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      const updated = await jailbreakLogModel.review(
+        id,
+        getDomainId(this),
+        reviewStatus,
+        Number(this.user._id)
+      );
+      if (!updated) {
+        this.response.status = 404;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_review_not_found'),
+          code: 'JAILBREAK_LOG_NOT_FOUND',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      this.response.body = { success: true, reviewStatus };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[AI Helper] JailbreakLogReviewHandler error:', err instanceof Error ? err.message : 'unknown');
+      this.response.status = 500;
+      this.response.body = {
+        error: this.translate('ai_helper_admin_jailbreak_review_failed'),
+        code: 'JAILBREAK_LOG_REVIEW_FAILED',
+      };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
 // 导出路由权限配置（使用系统管理员权限）
 export const AdminConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const JailbreakLogReviewHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 
 function formatJailbreakLog(log: JailbreakLog) {
   return {
@@ -487,6 +549,9 @@ function formatJailbreakLog(log: JailbreakLog) {
     detectionSource: log.detectionSource,
     actionTaken: log.actionTaken,
     blockedUntil: log.blockedUntil?.toISOString(),
+    reviewStatus: log.reviewStatus || 'pending',
+    reviewedAt: log.reviewedAt?.toISOString(),
+    reviewedBy: log.reviewedBy,
     createdAt: log.createdAt.toISOString()
   };
 }

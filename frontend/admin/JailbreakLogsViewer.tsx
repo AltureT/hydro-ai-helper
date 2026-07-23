@@ -4,7 +4,7 @@ import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   cardStyle, getButtonStyle,
 } from '../utils/styles';
-import type { JailbreakLogPagination } from './configTypes';
+import type { JailbreakLogEntry, JailbreakLogPagination } from './configTypes';
 
 interface JailbreakLogsViewerProps {
   logPagination: JailbreakLogPagination;
@@ -12,12 +12,26 @@ interface JailbreakLogsViewerProps {
   onChangePage: (page: number) => void;
   onCopyToClipboard: (text: string) => void;
   onAppendPattern: (pattern: string) => void;
+  onReview: (id: string, reviewStatus: 'confirmed' | 'false_positive') => Promise<void>;
 }
 
 export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
-  logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern,
+  logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern, onReview,
 }) => {
   const [collapsed, setCollapsed] = React.useState(true);
+  const [reviewingId, setReviewingId] = React.useState<string | null>(null);
+
+  const submitReview = async (
+    log: JailbreakLogEntry,
+    reviewStatus: 'confirmed' | 'false_positive'
+  ) => {
+    setReviewingId(log.id);
+    try {
+      await onReview(log.id, reviewStatus);
+    } finally {
+      setReviewingId(null);
+    }
+  };
 
   return (
   <div style={{
@@ -59,7 +73,12 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             if (log.riskScore !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_risk_score')}${log.riskScore}`);
             if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${log.actionTaken}`);
             if (log.detectionSource) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_detection_source')}${log.detectionSource}`);
+            const reviewStatus = log.reviewStatus || 'pending';
+            contextPieces.push(
+              `${i18n('ai_helper_admin_jailbreak_review_status')}${i18n(`ai_helper_admin_jailbreak_review_${reviewStatus}`)}`
+            );
             const contextText = contextPieces.join(' \u00b7 ');
+            const isReviewing = reviewingId === log.id;
 
             return (
               <div key={log.id} style={{
@@ -95,6 +114,28 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                     style={getButtonStyle('ghost')}
                   >
                     {i18n('ai_helper_admin_jailbreak_append_rule')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isReviewing || reviewStatus === 'confirmed'}
+                    onClick={() => submitReview(log, 'confirmed')}
+                    style={{
+                      ...getButtonStyle('secondary'),
+                      opacity: isReviewing || reviewStatus === 'confirmed' ? 0.5 : 1,
+                    }}
+                  >
+                    {i18n('ai_helper_admin_jailbreak_confirm_violation')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isReviewing || reviewStatus === 'false_positive'}
+                    onClick={() => submitReview(log, 'false_positive')}
+                    style={{
+                      ...getButtonStyle('secondary'),
+                      opacity: isReviewing || reviewStatus === 'false_positive' ? 0.5 : 1,
+                    }}
+                  >
+                    {i18n('ai_helper_admin_jailbreak_mark_false_positive')}
                   </button>
                 </div>
               </div>

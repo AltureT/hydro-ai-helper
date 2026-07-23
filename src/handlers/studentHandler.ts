@@ -729,10 +729,20 @@ export class ChatHandler extends Handler {
     // 增加会话的消息计数
     await conversationModel.incrementMessageCount(currentConversationId);
 
-    // P2: 历史上下文净化 - 过滤掉被标记为 off-topic 的消息
+    // 历史上下文净化：已重写/偏题的消息不再进入模型；
+    // 旧版已存储的学生输入也重新经过当前安全规则，但不重复记录或惩罚。
     const historyMessages = (await messageModel.findRecentByConversationId(currentConversationId, 7))
       .slice(0, -1)
       .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM)
+      .filter((msg) => {
+        if (msg.role !== 'student') return true;
+        return promptService.validateInput(
+          msg.content || '',
+          undefined,
+          extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined,
+          processedProblemContent
+        ).valid;
+      })
       .map((msg) => ({
         role: msg.role,
         content: msg.content

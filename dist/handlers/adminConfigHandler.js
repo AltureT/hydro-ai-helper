@@ -37,7 +37,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
+exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogReviewHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const aiConfig_1 = require("../models/aiConfig");
 const crypto_1 = require("../lib/crypto");
@@ -45,6 +45,7 @@ const jailbreakRules_1 = require("../constants/jailbreakRules");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
 const domainHelper_1 = require("../utils/domainHelper");
+const mongo_1 = require("../utils/mongo");
 /**
  * AdminConfigHandler - AI 配置页面
  * GET /ai-helper/admin/config
@@ -444,9 +445,64 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
     }
 }
 exports.JailbreakLogsHandler = JailbreakLogsHandler;
+/**
+ * JailbreakLogReviewHandler - 教师/管理员复核安全拦截记录
+ * POST /ai-helper/admin/jailbreak-logs/:id/review
+ */
+class JailbreakLogReviewHandler extends hydrooj_1.Handler {
+    async post({ id }) {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            if (!mongo_1.ObjectId.isValid(id)) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_review_invalid_id'),
+                    code: 'INVALID_JAILBREAK_LOG_ID',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const { reviewStatus } = (this.request.body || {});
+            if (reviewStatus !== 'confirmed' && reviewStatus !== 'false_positive') {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_review_invalid_status'),
+                    code: 'INVALID_REVIEW_STATUS',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const updated = await jailbreakLogModel.review(id, (0, domainHelper_1.getDomainId)(this), reviewStatus, Number(this.user._id));
+            if (!updated) {
+                this.response.status = 404;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_review_not_found'),
+                    code: 'JAILBREAK_LOG_NOT_FOUND',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            this.response.body = { success: true, reviewStatus };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] JailbreakLogReviewHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = {
+                error: this.translate('ai_helper_admin_jailbreak_review_failed'),
+                code: 'JAILBREAK_LOG_REVIEW_FAILED',
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.JailbreakLogReviewHandler = JailbreakLogReviewHandler;
 // 导出路由权限配置（使用系统管理员权限）
 exports.AdminConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.JailbreakLogReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 function formatJailbreakLog(log) {
     return {
         id: log._id.toHexString(),
@@ -463,6 +519,9 @@ function formatJailbreakLog(log) {
         detectionSource: log.detectionSource,
         actionTaken: log.actionTaken,
         blockedUntil: log.blockedUntil?.toISOString(),
+        reviewStatus: log.reviewStatus || 'pending',
+        reviewedAt: log.reviewedAt?.toISOString(),
+        reviewedBy: log.reviewedBy,
         createdAt: log.createdAt.toISOString()
     };
 }

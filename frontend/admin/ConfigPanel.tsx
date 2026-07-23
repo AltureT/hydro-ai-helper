@@ -333,6 +333,29 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     loadJailbreakLogs(newPage);
   };
 
+  const reviewJailbreakLog = async (
+    id: string,
+    reviewStatus: 'confirmed' | 'false_positive'
+  ) => {
+    try {
+      const res = await fetch(`/ai-helper/admin/jailbreak-logs/${encodeURIComponent(id)}/review`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ reviewStatus }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || i18n('ai_helper_admin_jailbreak_review_failed'));
+      }
+      showToast(i18n('ai_helper_admin_jailbreak_review_success'), 'success');
+      await loadJailbreakLogs(logPagination.page);
+    } catch (err: any) {
+      console.error('Review jailbreak log error:', err);
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_review_failed'), 'error');
+    }
+  };
+
   const copyToClipboard = async (text: string) => {
     try {
       if (navigator?.clipboard?.writeText) {
@@ -612,6 +635,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           onChangePage={changePage}
           onCopyToClipboard={copyToClipboard}
           onAppendPattern={appendPatternToCustomRules}
+          onReview={reviewJailbreakLog}
         />
 
         <TelemetrySettings

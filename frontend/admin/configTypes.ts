@@ -60,6 +60,9 @@ export interface JailbreakLogEntry {
   detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'custom';
   actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
   blockedUntil?: string;
+  reviewStatus?: 'pending' | 'confirmed' | 'false_positive';
+  reviewedAt?: string;
+  reviewedBy?: number;
   createdAt: string;
 }
 

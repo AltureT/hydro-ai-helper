@@ -2,13 +2,14 @@
  * JailbreakLog Model - 越狱尝试记录
  */
 
-import type { Collection, Db, Filter } from 'mongodb';
+import type { Collection, Db, Filter, UpdateFilter } from 'mongodb';
 import { type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 import type {
   SafetyAction,
   SafetyConfidence,
   SafetyDetectionSource,
+  SafetyReviewStatus,
   SafetyViolationCategory,
 } from '../types/safety';
 
@@ -29,6 +30,9 @@ export interface JailbreakLog {
   detectionSource?: SafetyDetectionSource;
   actionTaken?: SafetyAction;
   blockedUntil?: Date;
+  reviewStatus?: SafetyReviewStatus;
+  reviewedAt?: Date;
+  reviewedBy?: number;
   createdAt: Date;
 }
 
@@ -87,6 +91,7 @@ export class JailbreakLogModel {
       detectionSource: data.detectionSource,
       actionTaken: data.actionTaken,
       blockedUntil: data.blockedUntil,
+      reviewStatus: 'pending',
       createdAt: data.createdAt ?? new Date()
     };
 
@@ -110,6 +115,7 @@ export class JailbreakLogModel {
       userId,
       category: { $in: categories },
       confidence: 'high',
+      reviewStatus: { $ne: 'false_positive' },
       createdAt: { $gte: since },
     });
   }
@@ -120,9 +126,35 @@ export class JailbreakLogModel {
     now: Date = new Date()
   ): Promise<JailbreakLog | null> {
     return this.collection.findOne(
-      { domainId, userId, blockedUntil: { $gt: now } },
+      {
+        domainId,
+        userId,
+        blockedUntil: { $gt: now },
+        reviewStatus: { $ne: 'false_positive' },
+      },
       { sort: { blockedUntil: -1 } }
     );
+  }
+
+  async review(
+    id: string | ObjectIdType,
+    domainId: string,
+    reviewStatus: Exclude<SafetyReviewStatus, 'pending'>,
+    reviewedBy: number,
+    reviewedAt: Date = new Date()
+  ): Promise<boolean> {
+    const update: UpdateFilter<JailbreakLog> = {
+      $set: { reviewStatus, reviewedAt, reviewedBy },
+    };
+    if (reviewStatus === 'false_positive') {
+      update.$unset = { blockedUntil: '' };
+    }
+
+    const result = await this.collection.updateOne(
+      { _id: ensureObjectId(id), domainId },
+      update
+    );
+    return result.matchedCount > 0;
   }
 
   /**

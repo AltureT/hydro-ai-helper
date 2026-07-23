@@ -32,6 +32,7 @@ class JailbreakLogModel {
             detectionSource: data.detectionSource,
             actionTaken: data.actionTaken,
             blockedUntil: data.blockedUntil,
+            reviewStatus: 'pending',
             createdAt: data.createdAt ?? new Date()
         };
         const result = await this.collection.insertOne(insertDoc);
@@ -47,11 +48,27 @@ class JailbreakLogModel {
             userId,
             category: { $in: categories },
             confidence: 'high',
+            reviewStatus: { $ne: 'false_positive' },
             createdAt: { $gte: since },
         });
     }
     async findActiveCooldown(domainId, userId, now = new Date()) {
-        return this.collection.findOne({ domainId, userId, blockedUntil: { $gt: now } }, { sort: { blockedUntil: -1 } });
+        return this.collection.findOne({
+            domainId,
+            userId,
+            blockedUntil: { $gt: now },
+            reviewStatus: { $ne: 'false_positive' },
+        }, { sort: { blockedUntil: -1 } });
+    }
+    async review(id, domainId, reviewStatus, reviewedBy, reviewedAt = new Date()) {
+        const update = {
+            $set: { reviewStatus, reviewedAt, reviewedBy },
+        };
+        if (reviewStatus === 'false_positive') {
+            update.$unset = { blockedUntil: '' };
+        }
+        const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), domainId }, update);
+        return result.matchedCount > 0;
     }
     /**
      * 分页查询越狱记录
