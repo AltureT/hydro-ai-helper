@@ -23,6 +23,22 @@ function safeModelsFromResults(results) {
     return [...new Set(results.flatMap(result => (result.usedModel || '').split(' → ').map(model => model.trim()).filter(Boolean)))];
 }
 class TestdataBenchmarkHandler extends hydrooj_1.Handler {
+    /**
+     * 免费就绪检查：只读取已保存模型配置并探测 Hydro 沙箱，
+     * 不向付费模型发起任何请求。
+     */
+    async get() {
+        const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+        const runner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
+        const [modelConfigured, sandboxAvailable] = await Promise.all([
+            (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration')
+                .then(() => true)
+                .catch(() => false),
+            runner.isAvailable().catch(() => false),
+        ]);
+        this.response.body = { modelConfigured, sandboxAvailable };
+        this.response.type = 'application/json';
+    }
     async post() {
         let progressStream;
         let keepaliveTimer;

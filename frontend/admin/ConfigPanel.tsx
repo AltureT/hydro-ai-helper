@@ -21,6 +21,7 @@ import type {
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
   studentChat: [], learningSummary: [], teachingAnalysis: [], testdataGeneration: [],
 };
+const BENCHMARK_GUIDE_STORAGE_KEY = 'ai-helper:testdata-benchmark-guide:v1';
 
 function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]>>): ScenarioModelsState {
   return {
@@ -29,6 +30,46 @@ function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]
     teachingAnalysis: raw?.teachingAnalysis || [],
     testdataGeneration: raw?.testdataGeneration || [],
   };
+}
+
+function toConfigState(raw: APIConfigResponse['config']): ConfigState {
+  if (!raw) {
+    return {
+      endpoints: [], selectedModels: [],
+      scenarioModels: { ...EMPTY_SCENARIO_MODELS },
+      apiBaseUrl: '', modelName: '',
+      rateLimitPerMinute: 5, timeoutSeconds: 30,
+      systemPromptTemplate: '', extraJailbreakPatternsText: '',
+      apiKeyMasked: '', hasApiKey: false,
+      budgetConfig: {
+        dailyTokenLimitPerUser: '', dailyTokenLimitPerDomain: '',
+        monthlyTokenLimitPerDomain: '', softLimitPercent: 80,
+      },
+    };
+  }
+  return {
+    endpoints: (raw.endpoints || []).map((endpoint) => ({ ...endpoint, newApiKey: '' })),
+    selectedModels: raw.selectedModels || [],
+    scenarioModels: parseScenarioModels(raw.scenarioModels),
+    apiBaseUrl: raw.apiBaseUrl || '',
+    modelName: raw.modelName || '',
+    rateLimitPerMinute: raw.rateLimitPerMinute ?? 5,
+    timeoutSeconds: raw.timeoutSeconds ?? 30,
+    systemPromptTemplate: raw.systemPromptTemplate || '',
+    extraJailbreakPatternsText: raw.extraJailbreakPatternsText || '',
+    apiKeyMasked: raw.apiKeyMasked || '',
+    hasApiKey: Boolean(raw.hasApiKey),
+    budgetConfig: {
+      dailyTokenLimitPerUser: raw.budgetConfig?.dailyTokenLimitPerUser || '',
+      dailyTokenLimitPerDomain: raw.budgetConfig?.dailyTokenLimitPerDomain || '',
+      monthlyTokenLimitPerDomain: raw.budgetConfig?.monthlyTokenLimitPerDomain || '',
+      softLimitPercent: raw.budgetConfig?.softLimitPercent ?? 80,
+    },
+  };
+}
+
+function configSignature(config: ConfigState, legacyNewApiKey: string): string {
+  return JSON.stringify({ config, legacyNewApiKey });
 }
 
 interface ConfigPanelProps {
@@ -41,6 +82,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [fetchingModels, setFetchingModels] = useState<string | null>(null);
+  const [savedConfigSignature, setSavedConfigSignature] = useState('');
+  const [showBenchmarkGuide, setShowBenchmarkGuide] = useState(false);
 
   const [newApiKey, setNewApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -54,7 +97,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [logsLoading, setLogsLoading] = useState(false);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
 
-  useEffect(() => { loadConfig(); loadJailbreakLogs(1); }, []);
+  useEffect(() => {
+    loadConfig();
+    loadJailbreakLogs(1);
+    try {
+      setShowBenchmarkGuide(localStorage.getItem(BENCHMARK_GUIDE_STORAGE_KEY) !== 'dismissed');
+    } catch { setShowBenchmarkGuide(true); }
+  }, []);
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -70,37 +119,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       setBuiltinJailbreakPatterns(json.builtinJailbreakPatterns || []);
       if (json.telemetry) setTelemetry(json.telemetry);
 
-      if (json.config == null) {
-        setConfig({
-          endpoints: [], selectedModels: [],
-          scenarioModels: { ...EMPTY_SCENARIO_MODELS },
-          apiBaseUrl: '', modelName: '',
-          rateLimitPerMinute: 5, timeoutSeconds: 30,
-          systemPromptTemplate: '', extraJailbreakPatternsText: '',
-          apiKeyMasked: '', hasApiKey: false,
-          budgetConfig: { dailyTokenLimitPerUser: '', dailyTokenLimitPerDomain: '', monthlyTokenLimitPerDomain: '', softLimitPercent: 80 },
-        });
-      } else {
-        setConfig({
-          endpoints: (json.config.endpoints || []).map((ep) => ({ ...ep, newApiKey: '' })),
-          selectedModels: json.config.selectedModels || [],
-          scenarioModels: parseScenarioModels(json.config.scenarioModels),
-          apiBaseUrl: json.config.apiBaseUrl || '',
-          modelName: json.config.modelName || '',
-          rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
-          timeoutSeconds: json.config.timeoutSeconds ?? 30,
-          systemPromptTemplate: json.config.systemPromptTemplate || '',
-          extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
-          apiKeyMasked: json.config.apiKeyMasked || '',
-          hasApiKey: Boolean(json.config.hasApiKey),
-          budgetConfig: {
-            dailyTokenLimitPerUser: json.config.budgetConfig?.dailyTokenLimitPerUser || '',
-            dailyTokenLimitPerDomain: json.config.budgetConfig?.dailyTokenLimitPerDomain || '',
-            monthlyTokenLimitPerDomain: json.config.budgetConfig?.monthlyTokenLimitPerDomain || '',
-            softLimitPercent: json.config.budgetConfig?.softLimitPercent ?? 80,
-          },
-        });
-      }
+      const nextConfig = toConfigState(json.config);
+      setConfig(nextConfig);
+      setSavedConfigSignature(configSignature(nextConfig, ''));
     } catch (err: any) {
       console.error('Load config error:', err);
       showToast(err.message || i18n('ai_helper_config_error_load_failed', ''), 'error');
@@ -168,25 +189,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
       const json: APIConfigResponse = await res.json();
       if (json.config) {
-        setConfig({
-          endpoints: (json.config.endpoints || []).map((ep) => ({ ...ep, newApiKey: '' })),
-          selectedModels: json.config.selectedModels || [],
-          scenarioModels: parseScenarioModels(json.config.scenarioModels),
-          apiBaseUrl: json.config.apiBaseUrl || '',
-          modelName: json.config.modelName || '',
-          rateLimitPerMinute: json.config.rateLimitPerMinute ?? 5,
-          timeoutSeconds: json.config.timeoutSeconds ?? 30,
-          systemPromptTemplate: json.config.systemPromptTemplate || '',
-          extraJailbreakPatternsText: json.config.extraJailbreakPatternsText || '',
-          apiKeyMasked: json.config.apiKeyMasked || '',
-          hasApiKey: Boolean(json.config.hasApiKey),
-          budgetConfig: {
-            dailyTokenLimitPerUser: json.config.budgetConfig?.dailyTokenLimitPerUser || '',
-            dailyTokenLimitPerDomain: json.config.budgetConfig?.dailyTokenLimitPerDomain || '',
-            monthlyTokenLimitPerDomain: json.config.budgetConfig?.monthlyTokenLimitPerDomain || '',
-            softLimitPercent: json.config.budgetConfig?.softLimitPercent ?? 80,
-          },
-        });
+        const nextConfig = toConfigState(json.config);
+        setConfig(nextConfig);
+        setSavedConfigSignature(configSignature(nextConfig, ''));
       }
       setNewApiKey('');
       showToast(i18n('ai_helper_config_save_success'), 'success');
@@ -355,6 +360,22 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const isBusy = saving || testing;
 
+  const dismissBenchmarkGuide = () => {
+    setShowBenchmarkGuide(false);
+    try { localStorage.setItem(BENCHMARK_GUIDE_STORAGE_KEY, 'dismissed'); } catch { /* best effort */ }
+  };
+
+  const scrollToBenchmark = () => {
+    document.getElementById('testdata-benchmark-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const scrollToModelSettings = () => {
+    const target = config?.endpoints.length
+      ? 'testdata-scenario-models-section'
+      : 'api-endpoint-config-section';
+    document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   const cardTitleStyle: React.CSSProperties = {
     ...TYPOGRAPHY.md,
     color: COLORS.textPrimary,
@@ -383,6 +404,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   if (!config) return null;
 
+  const configuredGenerationChain = config.scenarioModels.testdataGeneration.length > 0
+    ? config.scenarioModels.testdataGeneration
+    : config.selectedModels;
+  const modelChainLabels = configuredGenerationChain.map((selected) => {
+    const endpoint = config.endpoints.find(item => item.id === selected.endpointId);
+    return endpoint ? `${endpoint.name} / ${selected.modelName}` : selected.modelName;
+  });
+  if (modelChainLabels.length === 0 && config.modelName) modelChainLabels.push(config.modelName);
+  const usesGlobalModelChain = config.endpoints.length > 0
+    && config.scenarioModels.testdataGeneration.length === 0;
+  const hasUnsavedChanges = savedConfigSignature !== ''
+    && configSignature(config, newApiKey) !== savedConfigSignature;
+
   return (
     <div style={outerStyle}>
       <Toast messages={toasts} onDismiss={dismissToast} />
@@ -397,7 +431,39 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.lg }}>
         <VersionBadge />
 
-        <div style={dsCardStyle}>
+        {showBenchmarkGuide && (
+          <div style={{
+            ...dsCardStyle,
+            borderColor: COLORS.infoBorder,
+            background: `linear-gradient(135deg, ${COLORS.infoBg}, ${COLORS.bgCard})`,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: SPACING.base }}>
+              <span style={{
+                display: 'inline-flex', padding: `3px ${SPACING.sm}`,
+                borderRadius: RADIUS.full, background: COLORS.primary,
+                color: '#fff', fontSize: '11px', fontWeight: 700, lineHeight: 1.4,
+              }}>NEW</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h2 style={{ ...TYPOGRAPHY.md, color: COLORS.textPrimary, margin: `0 0 ${SPACING.xs}` }}>
+                  {i18n('ai_helper_testdata_benchmark_onboarding_title')}
+                </h2>
+                <p style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary, margin: 0 }}>
+                  {i18n('ai_helper_testdata_benchmark_onboarding_desc')}
+                </p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm, marginTop: SPACING.md }}>
+                  <button type="button" style={getButtonStyle('primary')} onClick={scrollToBenchmark}>
+                    {i18n('ai_helper_testdata_benchmark_onboarding_action')}
+                  </button>
+                  <button type="button" style={getButtonStyle('ghost')} onClick={dismissBenchmarkGuide}>
+                    {i18n('ai_helper_testdata_benchmark_onboarding_dismiss')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div id="api-endpoint-config-section" style={dsCardStyle}>
           <EndpointManager
             endpoints={config.endpoints}
             selectedModels={config.selectedModels}
@@ -426,7 +492,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         </div>
 
         {config.endpoints.length > 0 && (
-          <div style={dsCardStyle}>
+          <div id="testdata-scenario-models-section" style={dsCardStyle}>
             <ScenarioModelSelector
               endpoints={config.endpoints}
               globalModels={config.selectedModels}
@@ -437,8 +503,16 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           </div>
         )}
 
-        <div style={dsCardStyle}>
-          <TestdataBenchmarkPanel disabled={isBusy} />
+        <div id="testdata-benchmark-section" style={{ ...dsCardStyle, scrollMarginTop: SPACING.lg }}>
+          <TestdataBenchmarkPanel
+            disabled={isBusy}
+            saving={saving}
+            modelChainLabels={modelChainLabels}
+            usesGlobalModelChain={usesGlobalModelChain}
+            hasUnsavedChanges={hasUnsavedChanges}
+            onOpenModelSettings={scrollToModelSettings}
+            onSaveConfig={saveConfig}
+          />
         </div>
 
         <div style={dsCardStyle}>

@@ -1,17 +1,35 @@
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { i18n } from '../utils/i18n';
-import { COLORS, SPACING, TYPOGRAPHY, getAlertStyle, getButtonStyle } from '../utils/styles';
+import {
+  COLORS, RADIUS, SPACING, TYPOGRAPHY,
+  getAlertStyle, getBadgeStyle, getButtonStyle, getPillStyle,
+  modalContentStyle, modalOverlayStyle,
+} from '../utils/styles';
 
 interface BenchmarkCaseOption {
   id: string;
   titleKey: string;
+  purposeKey: string;
 }
 
 const BENCHMARK_CASES: BenchmarkCaseOption[] = [
-  { id: 'xor-subarrays-less-than-k', titleKey: 'ai_helper_testdata_benchmark_case_xor' },
-  { id: 'dynamic-connectivity-offline', titleKey: 'ai_helper_testdata_benchmark_case_connectivity' },
-  { id: 'range-flip-longest-ones', titleKey: 'ai_helper_testdata_benchmark_case_segment' },
+  {
+    id: 'xor-subarrays-less-than-k',
+    titleKey: 'ai_helper_testdata_benchmark_case_xor',
+    purposeKey: 'ai_helper_testdata_benchmark_case_xor_purpose',
+  },
+  {
+    id: 'dynamic-connectivity-offline',
+    titleKey: 'ai_helper_testdata_benchmark_case_connectivity',
+    purposeKey: 'ai_helper_testdata_benchmark_case_connectivity_purpose',
+  },
+  {
+    id: 'range-flip-longest-ones',
+    titleKey: 'ai_helper_testdata_benchmark_case_segment',
+    purposeKey: 'ai_helper_testdata_benchmark_case_segment_purpose',
+  },
 ];
+const QUICK_CASE_ID = BENCHMARK_CASES[0].id;
 
 interface BenchmarkCaseResult {
   id: string;
@@ -58,6 +76,19 @@ interface ProgressState {
 
 interface TestdataBenchmarkPanelProps {
   disabled?: boolean;
+  saving?: boolean;
+  modelChainLabels: string[];
+  usesGlobalModelChain: boolean;
+  hasUnsavedChanges: boolean;
+  onOpenModelSettings: () => void;
+  onSaveConfig: () => Promise<void>;
+}
+
+interface PreflightState {
+  checking: boolean;
+  modelConfigured?: boolean;
+  sandboxAvailable?: boolean;
+  error?: string;
 }
 
 async function consumeBenchmarkStream(
@@ -123,14 +154,56 @@ function downloadJson(filename: string, value: unknown) {
   URL.revokeObjectURL(url);
 }
 
-export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ disabled = false }) => {
-  const [selected, setSelected] = useState(BENCHMARK_CASES.map(item => item.id));
+export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({
+  disabled = false,
+  saving = false,
+  modelChainLabels,
+  usesGlobalModelChain,
+  hasUnsavedChanges,
+  onOpenModelSettings,
+  onSaveConfig,
+}) => {
+  const [selected, setSelected] = useState([QUICK_CASE_ID]);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<ProgressState>({ index: 0, total: 0, casePercent: 0 });
   const [caseResults, setCaseResults] = useState<Array<Pick<BenchmarkCaseResult, 'id' | 'title' | 'passed' | 'durationMs' | 'failureStage'>>>([]);
   const [payload, setPayload] = useState<BenchmarkPayload | null>(null);
   const [error, setError] = useState('');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [preflight, setPreflight] = useState<PreflightState>({ checking: true });
   const abortRef = useRef<AbortController | null>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  const checkReadiness = useCallback(async () => {
+    setPreflight({ checking: true });
+    try {
+      const response = await fetch('/ai-helper/admin/testdata-benchmark', {
+        method: 'GET',
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      setPreflight({
+        checking: false,
+        modelConfigured: Boolean(data.modelConfigured),
+        sandboxAvailable: Boolean(data.sandboxAvailable),
+      });
+    } catch (err) {
+      setPreflight({
+        checking: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) checkReadiness();
+  }, [checkReadiness, hasUnsavedChanges]);
+
+  useEffect(() => {
+    if (confirmOpen) confirmButtonRef.current?.focus();
+  }, [confirmOpen]);
 
   const toggleCase = (id: string) => {
     setSelected(current => current.includes(id)
@@ -138,12 +211,34 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
       : [...current, id]);
   };
 
-  const run = async () => {
+  const selectQuickMode = () => setSelected([QUICK_CASE_ID]);
+  const selectFullMode = () => setSelected(BENCHMARK_CASES.map(item => item.id));
+  const selectionMode = selected.length === 1 && selected[0] === QUICK_CASE_ID
+    ? 'quick'
+    : selected.length === BENCHMARK_CASES.length ? 'full' : 'custom';
+  const canRun = !preflight.checking
+    && preflight.modelConfigured === true
+    && preflight.sandboxAvailable === true
+    && !hasUnsavedChanges;
+
+  const saveAndRecheck = async () => {
+    await onSaveConfig();
+  };
+
+  const requestRun = () => {
     if (selected.length === 0) {
       setError(i18n('ai_helper_testdata_benchmark_select_case'));
       return;
     }
-    if (!window.confirm(i18n('ai_helper_testdata_benchmark_confirm', selected.length))) return;
+    if (!canRun) {
+      setError(i18n('ai_helper_testdata_benchmark_not_ready'));
+      return;
+    }
+    setConfirmOpen(true);
+  };
+
+  const run = async () => {
+    setConfirmOpen(false);
     setRunning(true);
     setError('');
     setPayload(null);
@@ -207,6 +302,17 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
   const totalProgress = progress.total > 0
     ? Math.round((((Math.max(1, progress.index) - 1) + progress.casePercent / 100) / progress.total) * 100)
     : 0;
+  const assessment = payload
+    ? payload.report.summary.total === 1 && payload.report.summary.passed === 1
+      ? { variant: 'info' as const, key: 'ai_helper_testdata_benchmark_assessment_quick_pass' }
+      : payload.report.summary.total < BENCHMARK_CASES.length && payload.report.summary.failed === 0
+        ? { variant: 'info' as const, key: 'ai_helper_testdata_benchmark_assessment_subset_pass' }
+        : payload.report.summary.failed === 0
+          ? { variant: 'success' as const, key: 'ai_helper_testdata_benchmark_assessment_full_pass' }
+        : payload.report.summary.passRate >= 2 / 3
+          ? { variant: 'warning' as const, key: 'ai_helper_testdata_benchmark_assessment_partial' }
+          : { variant: 'error' as const, key: 'ai_helper_testdata_benchmark_assessment_fail' }
+    : null;
 
   return (
     <div>
@@ -216,9 +322,190 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
       <p style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary, margin: `0 0 ${SPACING.md}` }}>
         {i18n('ai_helper_testdata_benchmark_desc')}
       </p>
+
+      <details style={{
+        marginBottom: SPACING.md,
+        border: `1px solid ${COLORS.border}`,
+        borderRadius: RADIUS.md,
+        background: COLORS.bgPage,
+      }}>
+        <summary style={{
+          padding: `${SPACING.md} ${SPACING.base}`,
+          cursor: 'pointer',
+          color: COLORS.primary,
+          fontWeight: 600,
+          fontSize: '14px',
+        }}>
+          {i18n('ai_helper_testdata_benchmark_explainer_title')}
+        </summary>
+        <div style={{ padding: `0 ${SPACING.base} ${SPACING.base}` }}>
+          <p style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary, margin: `0 0 ${SPACING.md}` }}>
+            {i18n('ai_helper_testdata_benchmark_explainer_purpose')}
+          </p>
+          <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
+            {i18n('ai_helper_testdata_benchmark_explainer_process')}
+          </div>
+          <div style={{ display: 'grid', gap: SPACING.sm }}>
+            {BENCHMARK_CASES.map(item => (
+              <div key={`explain-${item.id}`} style={{
+                padding: SPACING.md,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: RADIUS.md,
+                background: COLORS.bgCard,
+              }}>
+                <div style={{ ...TYPOGRAPHY.sm, color: COLORS.textPrimary, fontWeight: 600 }}>
+                  {i18n(item.titleKey)}
+                </div>
+                <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textSecondary, marginTop: SPACING.xs }}>
+                  {i18n(item.purposeKey)}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...getAlertStyle('warning'), marginTop: SPACING.md }}>
+            {i18n('ai_helper_testdata_benchmark_explainer_limit')}
+          </div>
+        </div>
+      </details>
+
+      <div style={{
+        padding: SPACING.base,
+        marginBottom: SPACING.md,
+        border: `1px solid ${COLORS.border}`,
+        borderRadius: RADIUS.md,
+        background: COLORS.bgCard,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.md, marginBottom: SPACING.md }}>
+          <div style={{ ...TYPOGRAPHY.sm, color: COLORS.textPrimary, fontWeight: 600 }}>
+            {i18n('ai_helper_testdata_benchmark_readiness_title')}
+          </div>
+          <button
+            type="button"
+            style={{ ...getButtonStyle('secondary'), padding: `5px ${SPACING.md}`, fontSize: '12px' }}
+            disabled={preflight.checking || running}
+            onClick={checkReadiness}
+          >
+            {preflight.checking
+              ? i18n('ai_helper_testdata_benchmark_readiness_checking')
+              : i18n('ai_helper_testdata_benchmark_readiness_recheck')}
+          </button>
+        </div>
+
+        <div style={{
+          padding: SPACING.md,
+          marginBottom: SPACING.md,
+          borderRadius: RADIUS.md,
+          background: COLORS.bgPage,
+        }}>
+          <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>
+            {i18n('ai_helper_testdata_benchmark_model_chain_label')}
+          </div>
+          <div style={{ ...TYPOGRAPHY.sm, color: modelChainLabels.length ? COLORS.textPrimary : COLORS.errorText, fontWeight: 600 }}>
+            {modelChainLabels.length
+              ? modelChainLabels.join(' → ')
+              : i18n('ai_helper_testdata_benchmark_model_chain_empty')}
+          </div>
+          {usesGlobalModelChain && (
+            <div style={{ ...TYPOGRAPHY.xs, color: COLORS.warningText, marginTop: SPACING.xs }}>
+              {i18n('ai_helper_testdata_benchmark_model_chain_global')}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gap: SPACING.sm }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.md }}>
+            <span style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>
+              {i18n('ai_helper_testdata_benchmark_readiness_model')}
+            </span>
+            <span style={getBadgeStyle(preflight.checking ? 'info' : preflight.modelConfigured ? 'success' : 'error')}>
+              {preflight.checking
+                ? i18n('ai_helper_testdata_benchmark_readiness_checking')
+                : preflight.modelConfigured
+                  ? i18n('ai_helper_testdata_benchmark_readiness_ready')
+                  : i18n('ai_helper_testdata_benchmark_readiness_missing')}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.md }}>
+            <span style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>
+              {i18n('ai_helper_testdata_benchmark_readiness_saved')}
+            </span>
+            <span style={getBadgeStyle(hasUnsavedChanges ? 'warning' : 'success')}>
+              {hasUnsavedChanges
+                ? i18n('ai_helper_testdata_benchmark_readiness_unsaved')
+                : i18n('ai_helper_testdata_benchmark_readiness_ready')}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.md }}>
+            <span style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>
+              {i18n('ai_helper_testdata_benchmark_readiness_sandbox')}
+            </span>
+            <span style={getBadgeStyle(preflight.checking ? 'info' : preflight.sandboxAvailable ? 'success' : 'error')}>
+              {preflight.checking
+                ? i18n('ai_helper_testdata_benchmark_readiness_checking')
+                : preflight.sandboxAvailable
+                  ? i18n('ai_helper_testdata_benchmark_readiness_ready')
+                  : i18n('ai_helper_testdata_benchmark_readiness_unavailable')}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.md }}>
+            <span style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary }}>
+              {i18n('ai_helper_testdata_benchmark_readiness_fallback')}
+            </span>
+            <span style={getBadgeStyle(modelChainLabels.length >= 2 ? 'success' : 'warning')}>
+              {modelChainLabels.length >= 2
+                ? i18n('ai_helper_testdata_benchmark_readiness_configured')
+                : i18n('ai_helper_testdata_benchmark_readiness_recommended')}
+            </span>
+          </div>
+        </div>
+
+        {preflight.error && (
+          <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>
+            {i18n('ai_helper_testdata_benchmark_readiness_failed', preflight.error)}
+          </div>
+        )}
+
+        {!canRun && !preflight.checking && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm, marginTop: SPACING.md }}>
+            <button type="button" style={getButtonStyle('secondary')} onClick={onOpenModelSettings}>
+              {i18n('ai_helper_testdata_benchmark_open_settings')}
+            </button>
+            {hasUnsavedChanges && (
+              <button type="button" style={getButtonStyle('primary')} disabled={saving} onClick={saveAndRecheck}>
+                {saving
+                  ? i18n('ai_helper_config_saving')
+                  : i18n('ai_helper_testdata_benchmark_save_and_recheck')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
       <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
         {i18n('ai_helper_testdata_benchmark_cost_warning')}
       </div>
+
+      <div style={{ marginBottom: SPACING.md }}>
+        <div style={{ ...TYPOGRAPHY.sm, color: COLORS.textPrimary, fontWeight: 600, marginBottom: SPACING.sm }}>
+          {i18n('ai_helper_testdata_benchmark_mode_title')}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm, marginBottom: SPACING.sm }}>
+          <button type="button" style={getPillStyle(selectionMode === 'quick')} disabled={running || disabled} onClick={selectQuickMode}>
+            {i18n('ai_helper_testdata_benchmark_mode_quick')}
+          </button>
+          <button type="button" style={getPillStyle(selectionMode === 'full')} disabled={running || disabled} onClick={selectFullMode}>
+            {i18n('ai_helper_testdata_benchmark_mode_full')}
+          </button>
+        </div>
+        <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted }}>
+          {i18n(selectionMode === 'quick'
+            ? 'ai_helper_testdata_benchmark_mode_quick_hint'
+            : selectionMode === 'full'
+              ? 'ai_helper_testdata_benchmark_mode_full_hint'
+              : 'ai_helper_testdata_benchmark_mode_custom_hint')}
+        </div>
+      </div>
+
       <div style={{ display: 'grid', gap: SPACING.sm, marginBottom: SPACING.md }}>
         {BENCHMARK_CASES.map(item => (
           <label key={item.id} style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, color: COLORS.textPrimary }}>
@@ -257,8 +544,8 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
         </div>
       )}
       {error && <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.md }}>{error}</div>}
-      {payload && (
-        <div style={{ ...getAlertStyle(payload.report.summary.failed === 0 ? 'success' : 'warning'), marginBottom: SPACING.md }}>
+      {payload && assessment && (
+        <div style={{ ...getAlertStyle(assessment.variant), marginBottom: SPACING.md }}>
           <div style={{ fontWeight: 700 }}>
             {i18n(
               'ai_helper_testdata_benchmark_summary',
@@ -275,26 +562,49 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
               payload.report.models.join(' → '),
             )}
           </div>
+          <div style={{ marginTop: SPACING.sm, paddingTop: SPACING.sm, borderTop: '1px solid currentColor', ...TYPOGRAPHY.sm }}>
+            {i18n(assessment.key)}
+          </div>
+          {payload.report.summary.total < BENCHMARK_CASES.length && payload.report.summary.failed === 0 && (
+            <button
+              type="button"
+              style={{ ...getButtonStyle('secondary'), marginTop: SPACING.md }}
+              onClick={selectFullMode}
+            >
+              {i18n('ai_helper_testdata_benchmark_run_full_next')}
+            </button>
+          )}
         </div>
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm }}>
-        <button style={getButtonStyle('primary')} disabled={running || disabled || selected.length === 0} onClick={run}>
+        <button
+          type="button"
+          style={{
+            ...getButtonStyle('primary'),
+            opacity: running || disabled || selected.length === 0 || !canRun ? 0.55 : 1,
+            cursor: running || disabled || selected.length === 0 || !canRun ? 'not-allowed' : 'pointer',
+          }}
+          disabled={running || disabled || selected.length === 0 || !canRun}
+          onClick={requestRun}
+        >
           {running ? i18n('ai_helper_testdata_benchmark_running') : i18n('ai_helper_testdata_benchmark_run')}
         </button>
         {running && (
-          <button style={getButtonStyle('secondary')} onClick={() => abortRef.current?.abort()}>
+          <button type="button" style={getButtonStyle('secondary')} onClick={() => abortRef.current?.abort()}>
             {i18n('ai_helper_testdata_benchmark_cancel')}
           </button>
         )}
         {payload && !running && (
           <>
             <button
+              type="button"
               style={getButtonStyle('secondary')}
               onClick={() => downloadJson(`testdata-benchmark-${payload.report.runId}.json`, payload.report)}
             >
               {i18n('ai_helper_testdata_benchmark_download_full')}
             </button>
             <button
+              type="button"
               style={getButtonStyle('secondary')}
               onClick={() => downloadJson(`testdata-benchmark-aggregate-${payload.report.runId}.json`, payload.aggregate)}
             >
@@ -306,6 +616,90 @@ export const TestdataBenchmarkPanel: React.FC<TestdataBenchmarkPanelProps> = ({ 
       <p style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, margin: `${SPACING.sm} 0 0` }}>
         {i18n('ai_helper_testdata_benchmark_privacy')}
       </p>
+      {confirmOpen && (
+        <div
+          style={{ ...modalOverlayStyle, padding: SPACING.base, boxSizing: 'border-box' }}
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setConfirmOpen(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setConfirmOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="testdata-benchmark-confirm-title"
+            aria-describedby="testdata-benchmark-confirm-description"
+            style={{
+              ...modalContentStyle,
+              maxWidth: '520px',
+              border: `1px solid ${COLORS.border}`,
+              padding: SPACING.xl,
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: SPACING.base }}>
+              <div
+                aria-hidden="true"
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  flex: '0 0 40px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: RADIUS.full,
+                  color: COLORS.warningText,
+                  background: COLORS.warningBg,
+                  border: `1px solid ${COLORS.warningBorder}`,
+                  fontSize: '21px',
+                  fontWeight: 700,
+                }}
+              >
+                !
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <h3
+                  id="testdata-benchmark-confirm-title"
+                  style={{ ...TYPOGRAPHY.lg, color: COLORS.textPrimary, margin: `0 0 ${SPACING.sm}` }}
+                >
+                  {i18n('ai_helper_testdata_benchmark_confirm_title')}
+                </h3>
+                <p
+                  id="testdata-benchmark-confirm-description"
+                  style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary, margin: 0 }}
+                >
+                  {i18n('ai_helper_testdata_benchmark_confirm', selected.length)}
+                </p>
+              </div>
+            </div>
+
+            <div style={{ ...getAlertStyle('warning'), margin: `${SPACING.lg} 0` }}>
+              {i18n('ai_helper_testdata_benchmark_cost_warning')}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: SPACING.md }}>
+              <button
+                type="button"
+                style={getButtonStyle('secondary')}
+                onClick={() => setConfirmOpen(false)}
+              >
+                {i18n('ai_helper_testdata_benchmark_confirm_cancel')}
+              </button>
+              <button
+                ref={confirmButtonRef}
+                type="button"
+                style={getButtonStyle('primary')}
+                onClick={run}
+              >
+                {i18n('ai_helper_testdata_benchmark_confirm_accept')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

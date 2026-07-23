@@ -37,6 +37,23 @@ function safeModelsFromResults(results: Array<{ usedModel?: string }>): string[]
 }
 
 export class TestdataBenchmarkHandler extends Handler {
+  /**
+   * 免费就绪检查：只读取已保存模型配置并探测 Hydro 沙箱，
+   * 不向付费模型发起任何请求。
+   */
+  async get() {
+    const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+    const runner = new GoJudgeSandboxRunner(sandboxHost);
+    const [modelConfigured, sandboxAvailable] = await Promise.all([
+      createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration')
+        .then(() => true)
+        .catch(() => false),
+      runner.isAvailable().catch(() => false),
+    ]);
+    this.response.body = { modelConfigured, sandboxAvailable };
+    this.response.type = 'application/json';
+  }
+
   async post() {
     let progressStream: SSEWriter | undefined;
     let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
