@@ -21,7 +21,7 @@ import type {
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
   studentChat: [], learningSummary: [], teachingAnalysis: [], testdataGeneration: [],
 };
-const BENCHMARK_GUIDE_STORAGE_KEY = 'ai-helper:testdata-benchmark-guide:v1';
+const BENCHMARK_GUIDE_STORAGE_KEY = 'ai-helper:testdata-benchmark-guide:v2';
 
 function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]>>): ScenarioModelsState {
   return {
@@ -407,10 +407,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const configuredGenerationChain = config.scenarioModels.testdataGeneration.length > 0
     ? config.scenarioModels.testdataGeneration
     : config.selectedModels;
-  const modelChainLabels = configuredGenerationChain.map((selected) => {
-    const endpoint = config.endpoints.find(item => item.id === selected.endpointId);
-    return endpoint ? `${endpoint.name} / ${selected.modelName}` : selected.modelName;
-  });
+  const modelChainLabels = configuredGenerationChain.map(selected => selected.modelName);
   if (modelChainLabels.length === 0 && config.modelName) modelChainLabels.push(config.modelName);
   const usesGlobalModelChain = config.endpoints.length > 0
     && config.scenarioModels.testdataGeneration.length === 0;
@@ -489,6 +486,26 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
               onShowApiKeyToggle: () => setShowApiKey(prev => !prev),
             }}
           />
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            flexWrap: 'wrap', gap: SPACING.md, marginTop: SPACING.lg,
+            paddingTop: SPACING.base, borderTop: `1px solid ${COLORS.border}`,
+          }}>
+            <span style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted }}>
+              {i18n('ai_helper_config_test_connection_hint')}
+            </span>
+            <button
+              onClick={testConnection}
+              disabled={isBusy || loading}
+              style={{
+                ...getButtonStyle('secondary'),
+                opacity: isBusy || loading ? 0.5 : 1,
+                cursor: isBusy || loading ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {testing ? i18n('ai_helper_config_testing') : i18n('ai_helper_config_test_connection')}
+            </button>
+          </div>
         </div>
 
         {config.endpoints.length > 0 && (
@@ -622,30 +639,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         position: 'fixed',
         bottom: SPACING.xl,
         right: SPACING.xl,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'flex-end',
-        gap: SPACING.md,
         zIndex: 1000,
       }}>
         <div style={{
-          display: 'flex', gap: '10px', padding: '10px',
+          display: 'flex', padding: '10px',
           backgroundColor: COLORS.bgCard, borderRadius: RADIUS.lg,
           boxShadow: SHADOWS.lg,
           border: `1px solid ${COLORS.border}`,
         }}>
-          <button
-            onClick={testConnection}
-            disabled={isBusy || loading}
-            style={{
-              ...getButtonStyle('secondary'),
-              padding: '10px 20px',
-              opacity: isBusy || loading ? 0.5 : 1,
-              cursor: isBusy || loading ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {testing ? i18n('ai_helper_config_testing') : i18n('ai_helper_config_test_connection')}
-          </button>
           <button
             onClick={saveConfig}
             disabled={isBusy || loading}
