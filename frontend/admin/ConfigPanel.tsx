@@ -91,6 +91,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [logPagination, setLogPagination] = useState<JailbreakLogPagination>({
     logs: [], total: 0, page: 1, totalPages: 0,
     summary: { total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0, falsePositiveRate: 0 },
+    ruleMetrics: [],
   });
   const [logFilters, setLogFilters] = useState<JailbreakLogFilters>({});
 
@@ -370,6 +371,31 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     } catch (err: any) {
       console.error('Review jailbreak log error:', err);
       showToast(err.message || i18n('ai_helper_admin_jailbreak_review_failed'), 'error');
+    }
+  };
+
+  const bulkReviewJailbreakLogs = async (
+    ids: string[],
+    reviewStatus: 'confirmed' | 'false_positive'
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch('/ai-helper/admin/jailbreak-logs/bulk-review', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ ids, reviewStatus }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || i18n('ai_helper_admin_jailbreak_bulk_failed'));
+      }
+      showToast(i18n('ai_helper_admin_jailbreak_bulk_success', json.modifiedCount || 0), 'success');
+      await loadJailbreakLogs(logPagination.page, logFilters);
+      return true;
+    } catch (err: any) {
+      console.error('Bulk review jailbreak logs error:', err);
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_bulk_failed'), 'error');
+      return false;
     }
   };
 
@@ -653,6 +679,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           onCopyToClipboard={copyToClipboard}
           onAppendPattern={appendPatternToCustomRules}
           onReview={reviewJailbreakLog}
+          onBulkReview={bulkReviewJailbreakLogs}
           filters={logFilters}
           onChangeFilters={changeLogFilters}
         />

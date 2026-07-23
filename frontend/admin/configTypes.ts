@@ -67,6 +67,17 @@ export interface JailbreakReviewSummary {
   falsePositiveRate: number;
 }
 
+export interface JailbreakRuleMetric {
+  matchedPattern: string;
+  category?: JailbreakCategory;
+  total: number;
+  pending: number;
+  confirmed: number;
+  falsePositive: number;
+  reviewed: number;
+  falsePositiveRate: number;
+}
+
 export interface JailbreakLogEntry {
   id: string;
   domainId?: string;
@@ -85,6 +96,7 @@ export interface JailbreakLogEntry {
   reviewStatus?: JailbreakReviewStatus;
   reviewedAt?: string;
   reviewedBy?: number;
+  expiresAt?: string;
   createdAt: string;
 }
 
@@ -94,6 +106,7 @@ export interface JailbreakLogPagination {
   page: number;
   totalPages: number;
   summary: JailbreakReviewSummary;
+  ruleMetrics: JailbreakRuleMetric[];
   filters?: JailbreakLogFilters;
 }
 

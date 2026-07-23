@@ -2,7 +2,11 @@ jest.mock('../../utils/ensureObjectId', () => ({
   ensureObjectId: jest.fn((id: any) => id),
 }));
 
-import { JailbreakLogModel } from '../../models/jailbreakLog';
+import {
+  JailbreakLogModel,
+  resolveJailbreakLogRetentionDays,
+  sanitizeSafetyLogSnippet,
+} from '../../models/jailbreakLog';
 
 function createChainMock() {
   const mock: any = {
@@ -16,6 +20,7 @@ function createChainMock() {
 
 function createMockCollection() {
   const chainMock = createChainMock();
+  const aggregateChain = { toArray: jest.fn().mockResolvedValue([]) };
   return {
     createIndex: jest.fn(),
     insertOne: jest.fn(),
@@ -23,7 +28,10 @@ function createMockCollection() {
     findOne: jest.fn(),
     countDocuments: jest.fn(),
     updateOne: jest.fn(),
+    updateMany: jest.fn(),
+    aggregate: jest.fn().mockReturnValue(aggregateChain),
     _chain: chainMock,
+    _aggregateChain: aggregateChain,
   };
 }
 
@@ -48,7 +56,7 @@ describe('JailbreakLogModel', () => {
   describe('ensureIndexes', () => {
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(4);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(5);
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, userId: 1, createdAt: -1 },
         { name: 'idx_domain_user_createdAt' }
@@ -57,6 +65,10 @@ describe('JailbreakLogModel', () => {
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 },
         { name: 'idx_domain_review_category_createdAt' }
+      );
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { expiresAt: 1 },
+        { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 }
       );
     });
   });
@@ -72,6 +84,7 @@ describe('JailbreakLogModel', () => {
       expect(result).toBe('log-1');
       expect(mockColl.insertOne).toHaveBeenCalledTimes(1);
       expect(mockColl.insertOne.mock.calls[0][0].reviewStatus).toBe('pending');
+      expect(mockColl.insertOne.mock.calls[0][0].expiresAt).toBeInstanceOf(Date);
     });
 
     it('should include optional fields when provided', async () => {
@@ -124,6 +137,56 @@ describe('JailbreakLogModel', () => {
       await model.create({ matchedPattern: 'p', matchedText: 't' });
       const inserted = mockColl.insertOne.mock.calls[0][0];
       expect(inserted.createdAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+    });
+  });
+
+  describe('privacy and retention', () => {
+    it('redacts common sensitive values and caps stored snippets', () => {
+      const snippet = sanitizeSafetyLogSnippet(
+        `mail test@example.com phone 13812345678 id 330106199001011234 key sk-abcdefghijklmnop ${'x'.repeat(400)}`
+      );
+
+      expect(snippet).toContain('[email]');
+      expect(snippet).toContain('[phone]');
+      expect(snippet).toContain('[id]');
+      expect(snippet).toContain('[secret]');
+      expect(snippet.length).toBeLessThanOrEqual(256);
+    });
+
+    it('resolves retention days with safe defaults and bounds', () => {
+      expect(resolveJailbreakLogRetentionDays(undefined)).toBe(180);
+      expect(resolveJailbreakLogRetentionDays('invalid')).toBe(180);
+      expect(resolveJailbreakLogRetentionDays('1')).toBe(7);
+      expect(resolveJailbreakLogRetentionDays('5000')).toBe(3650);
+      expect(resolveJailbreakLogRetentionDays('45.9')).toBe(45);
+    });
+
+    it('stores a redacted snippet and expiry based on creation time', async () => {
+      const retentionModel = new JailbreakLogModel(createMockDb(mockColl), 30);
+      const createdAt = new Date('2026-07-01T00:00:00Z');
+      mockColl.insertOne.mockResolvedValue({ insertedId: 'retained-log' });
+
+      await retentionModel.create({
+        matchedPattern: 'pattern',
+        matchedText: 'contact test@example.com',
+        createdAt,
+      });
+
+      const inserted = mockColl.insertOne.mock.calls[0][0];
+      expect(inserted.matchedText).toBe('contact [email]');
+      expect(inserted.expiresAt).toEqual(new Date('2026-07-31T00:00:00Z'));
+    });
+
+    it('backfills one gradual expiry for legacy logs', async () => {
+      const retentionModel = new JailbreakLogModel(createMockDb(mockColl), 30);
+      const now = new Date('2026-07-01T00:00:00Z');
+      mockColl.updateMany.mockResolvedValue({ modifiedCount: 4 });
+
+      await expect(retentionModel.backfillExpiry(now)).resolves.toBe(4);
+      expect(mockColl.updateMany).toHaveBeenCalledWith(
+        { expiresAt: { $exists: false } },
+        { $set: { expiresAt: new Date('2026-07-31T00:00:00Z') } }
+      );
     });
   });
 
@@ -223,6 +286,28 @@ describe('JailbreakLogModel', () => {
     it('should report when no domain-scoped log was found', async () => {
       mockColl.updateOne.mockResolvedValue({ matchedCount: 0 });
       await expect(model.review('missing', 'domain-a', 'confirmed', 7)).resolves.toBe(false);
+    });
+
+    it('should bulk review only IDs from one domain', async () => {
+      mockColl.updateMany.mockResolvedValue({ matchedCount: 2, modifiedCount: 2 });
+      const reviewedAt = new Date('2026-07-23T01:00:00Z');
+
+      const result = await model.reviewMany(
+        ['log-1', 'log-2'],
+        'domain-a',
+        'false_positive',
+        7,
+        reviewedAt
+      );
+
+      expect(result).toEqual({ matchedCount: 2, modifiedCount: 2 });
+      expect(mockColl.updateMany).toHaveBeenCalledWith(
+        { _id: { $in: ['log-1', 'log-2'] }, domainId: 'domain-a' },
+        {
+          $set: { reviewStatus: 'false_positive', reviewedAt, reviewedBy: 7 },
+          $unset: { blockedUntil: '' },
+        }
+      );
     });
   });
 
@@ -348,6 +433,35 @@ describe('JailbreakLogModel', () => {
       await expect(model.getReviewSummary('domain-a')).resolves.toEqual(
         expect.objectContaining({ reviewed: 0, falsePositiveRate: 0 })
       );
+    });
+  });
+
+  describe('getRuleMetrics', () => {
+    it('should calculate rule-level false-positive rates for one domain', async () => {
+      mockColl._aggregateChain.toArray.mockResolvedValue([
+        {
+          _id: { matchedPattern: 'ignore.*prompt', category: 'prompt_injection' },
+          total: 10,
+          pending: 2,
+          confirmed: 6,
+          falsePositive: 2,
+        },
+      ]);
+
+      const metrics = await model.getRuleMetrics('domain-a', 10);
+
+      expect(metrics).toEqual([{
+        matchedPattern: 'ignore.*prompt',
+        category: 'prompt_injection',
+        total: 10,
+        pending: 2,
+        confirmed: 6,
+        falsePositive: 2,
+        reviewed: 8,
+        falsePositiveRate: 25,
+      }]);
+      expect(mockColl.aggregate.mock.calls[0][0][0]).toEqual({ $match: { domainId: 'domain-a' } });
+      expect(mockColl.aggregate.mock.calls[0][0]).toContainEqual({ $limit: 10 });
     });
   });
 });

@@ -168,6 +168,18 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // 执行数据迁移（为历史数据添加 domainId）
         const migrationService = new migrationService_1.MigrationService(db);
         await migrationService.runAllMigrations();
+        // 历史安全日志没有 expiresAt：从本次升级起按保留期渐进清理，
+        // 避免部署时立即删除旧审计记录。新日志则从创建时开始计算保留期。
+        try {
+            const backfilledExpiryCount = await jailbreakLogModel.backfillExpiry();
+            if (backfilledExpiryCount > 0) {
+                console.log(`[AI-Helper] Added retention expiry to ${backfilledExpiryCount} legacy safety log(s)`);
+            }
+        }
+        catch (err) {
+            console.warn('[AI-Helper] 安全日志保留期回填失败（非致命）:', err instanceof Error ? err.message : String(err));
+            errorReporter.capture('startup_failure', 'db', `Safety log retention backfill failed: ${err instanceof Error ? err.message : String(err)}`, undefined, err instanceof Error ? err.stack : undefined);
+        }
         // 初始化插件安装记录
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const packageJson = require('../package.json');
@@ -261,6 +273,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
         ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
         // POST /ai-helper/admin/jailbreak-logs/:id/review - 复核拦截记录
+        ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review', '/ai-helper/admin/jailbreak-logs/bulk-review', adminConfigHandler_1.JailbreakLogBulkReviewHandler, adminConfigHandler_1.JailbreakLogBulkReviewHandlerPriv);
+        ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/bulk-review', adminConfigHandler_1.JailbreakLogBulkReviewHandler, adminConfigHandler_1.JailbreakLogBulkReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_log_review', '/ai-helper/admin/jailbreak-logs/:id/review', adminConfigHandler_1.JailbreakLogReviewHandler, adminConfigHandler_1.JailbreakLogReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_log_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/:id/review', adminConfigHandler_1.JailbreakLogReviewHandler, adminConfigHandler_1.JailbreakLogReviewHandlerPriv);
         // POST /ai-helper/admin/testdata-benchmark - 管理员显式确认费用后运行真实模型难题基准

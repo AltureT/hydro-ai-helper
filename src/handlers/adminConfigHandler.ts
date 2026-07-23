@@ -478,9 +478,10 @@ export class JailbreakLogsHandler extends Handler {
         category: categoryRaw ? categoryRaw as SafetyViolationCategory : undefined,
       };
       const domainId = getDomainId(this);
-      const [logResult, summary] = await Promise.all([
+      const [logResult, summary, ruleMetrics] = await Promise.all([
         jailbreakLogModel.listWithPagination(page, limit, domainId, filters),
         jailbreakLogModel.getReviewSummary(domainId),
+        jailbreakLogModel.getRuleMetrics(domainId, 10),
       ]);
 
       this.response.body = {
@@ -489,6 +490,7 @@ export class JailbreakLogsHandler extends Handler {
         page: logResult.page,
         totalPages: logResult.totalPages,
         summary,
+        ruleMetrics,
         filters,
       };
       this.response.type = 'application/json';
@@ -561,10 +563,65 @@ export class JailbreakLogReviewHandler extends Handler {
   }
 }
 
+/**
+ * JailbreakLogBulkReviewHandler - 批量复核当前域的安全拦截记录
+ * POST /ai-helper/admin/jailbreak-logs/bulk-review
+ */
+export class JailbreakLogBulkReviewHandler extends Handler {
+  async post() {
+    try {
+      if (rejectIfCsrfInvalid(this)) return;
+      const { ids, reviewStatus } = (this.request.body || {}) as {
+        ids?: unknown;
+        reviewStatus?: string;
+      };
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100
+          || ids.some((id) => typeof id !== 'string' || !ObjectId.isValid(id))) {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_bulk_invalid_ids'),
+          code: 'INVALID_JAILBREAK_LOG_IDS',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+      if (reviewStatus !== 'confirmed' && reviewStatus !== 'false_positive') {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_review_invalid_status'),
+          code: 'INVALID_REVIEW_STATUS',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      const uniqueIds = [...new Set(ids as string[])];
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      const result = await jailbreakLogModel.reviewMany(
+        uniqueIds,
+        getDomainId(this),
+        reviewStatus,
+        Number(this.user._id)
+      );
+      this.response.body = { success: true, ...result, reviewStatus };
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error('[AI Helper] JailbreakLogBulkReviewHandler error:', err instanceof Error ? err.message : 'unknown');
+      this.response.status = 500;
+      this.response.body = {
+        error: this.translate('ai_helper_admin_jailbreak_bulk_failed'),
+        code: 'JAILBREAK_LOG_BULK_REVIEW_FAILED',
+      };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
 // 导出路由权限配置（使用系统管理员权限）
 export const AdminConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogReviewHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const JailbreakLogBulkReviewHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 
 function formatJailbreakLog(log: JailbreakLog) {
   return {
@@ -585,6 +642,7 @@ function formatJailbreakLog(log: JailbreakLog) {
     reviewStatus: log.reviewStatus || 'pending',
     reviewedAt: log.reviewedAt?.toISOString(),
     reviewedBy: log.reviewedBy,
+    expiresAt: log.expiresAt?.toISOString(),
     createdAt: log.createdAt.toISOString()
   };
 }

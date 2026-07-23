@@ -19,16 +19,24 @@ interface JailbreakLogsViewerProps {
   onCopyToClipboard: (text: string) => void;
   onAppendPattern: (pattern: string) => void;
   onReview: (id: string, reviewStatus: 'confirmed' | 'false_positive') => Promise<void>;
+  onBulkReview: (ids: string[], reviewStatus: 'confirmed' | 'false_positive') => Promise<boolean>;
   filters: JailbreakLogFilters;
   onChangeFilters: (filters: JailbreakLogFilters) => void;
 }
 
 export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
-  logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern, onReview,
+  logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern, onReview, onBulkReview,
   filters, onChangeFilters,
 }) => {
   const [collapsed, setCollapsed] = React.useState(true);
   const [reviewingId, setReviewingId] = React.useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
+  const [bulkReviewing, setBulkReviewing] = React.useState(false);
+
+  React.useEffect(() => {
+    const visibleIds = new Set(logPagination.logs.map((log) => log.id));
+    setSelectedIds((current) => current.filter((id) => visibleIds.has(id)));
+  }, [logPagination.logs]);
 
   const submitReview = async (
     log: JailbreakLogEntry,
@@ -66,6 +74,29 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
       ...filters,
       category: value ? value as JailbreakCategory : undefined,
     });
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((current) => current.includes(id)
+      ? current.filter((item) => item !== id)
+      : [...current, id]);
+  };
+
+  const toggleCurrentPage = () => {
+    const pageIds = logPagination.logs.map((log) => log.id);
+    const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.includes(id));
+    setSelectedIds(allSelected ? [] : pageIds);
+  };
+
+  const submitBulkReview = async (reviewStatus: 'confirmed' | 'false_positive') => {
+    if (selectedIds.length === 0) return;
+    setBulkReviewing(true);
+    try {
+      const succeeded = await onBulkReview(selectedIds, reviewStatus);
+      if (succeeded) setSelectedIds([]);
+    } finally {
+      setBulkReviewing(false);
+    }
   };
 
   return (
@@ -137,6 +168,77 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             </select>
           </label>
         </div>
+        {logPagination.ruleMetrics?.length > 0 && (
+          <div style={{ marginBottom: SPACING.base, overflowX: 'auto' }}>
+            <div style={{ marginBottom: SPACING.sm, fontWeight: 600, color: COLORS.textPrimary }}>
+              {i18n('ai_helper_admin_jailbreak_rule_quality_title')}
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+              <thead>
+                <tr style={{ color: COLORS.textSecondary, textAlign: 'left' }}>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_rule')}</th>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_filter_category')}</th>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_total')}</th>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_pending')}</th>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_confirmed')}</th>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_false_positive')}</th>
+                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_false_positive_rate')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logPagination.ruleMetrics.map((metric) => (
+                  <tr key={`${metric.category || ''}:${metric.matchedPattern}`} style={{ borderTop: `1px solid ${COLORS.border}` }}>
+                    <td style={{ padding: SPACING.sm, maxWidth: '280px', wordBreak: 'break-all' }}>
+                      <code>{metric.matchedPattern}</code>
+                    </td>
+                    <td style={{ padding: SPACING.sm }}>{metric.category || '-'}</td>
+                    <td style={{ padding: SPACING.sm }}>{metric.total}</td>
+                    <td style={{ padding: SPACING.sm }}>{metric.pending}</td>
+                    <td style={{ padding: SPACING.sm }}>{metric.confirmed}</td>
+                    <td style={{ padding: SPACING.sm }}>{metric.falsePositive}</td>
+                    <td style={{ padding: SPACING.sm }}>{metric.falsePositiveRate}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {logPagination.logs.length > 0 && (
+          <div style={{
+            display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: SPACING.sm,
+            marginBottom: SPACING.base, padding: SPACING.md,
+            border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
+            backgroundColor: COLORS.bgPage,
+          }}>
+            <button type="button" onClick={toggleCurrentPage} disabled={loading || bulkReviewing} style={getButtonStyle('secondary')}>
+              {i18n('ai_helper_admin_jailbreak_select_page')}
+            </button>
+            <span style={{ color: COLORS.textSecondary, fontSize: '13px' }}>
+              {i18n('ai_helper_admin_jailbreak_selected_count', selectedIds.length)}
+            </span>
+            <button
+              type="button"
+              onClick={() => submitBulkReview('confirmed')}
+              disabled={selectedIds.length === 0 || bulkReviewing}
+              style={{ ...getButtonStyle('secondary'), opacity: selectedIds.length === 0 ? 0.5 : 1 }}
+            >
+              {i18n('ai_helper_admin_jailbreak_bulk_confirm')}
+            </button>
+            <button
+              type="button"
+              onClick={() => submitBulkReview('false_positive')}
+              disabled={selectedIds.length === 0 || bulkReviewing}
+              style={{ ...getButtonStyle('secondary'), opacity: selectedIds.length === 0 ? 0.5 : 1 }}
+            >
+              {i18n('ai_helper_admin_jailbreak_bulk_false_positive')}
+            </button>
+            {selectedIds.length > 0 && (
+              <button type="button" onClick={() => setSelectedIds([])} disabled={bulkReviewing} style={getButtonStyle('ghost')}>
+                {i18n('ai_helper_admin_jailbreak_clear_selection')}
+              </button>
+            )}
+          </div>
+        )}
       </>
     )}
 
@@ -160,6 +262,9 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             if (log.riskScore !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_risk_score')}${log.riskScore}`);
             if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${log.actionTaken}`);
             if (log.detectionSource) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_detection_source')}${log.detectionSource}`);
+            if (log.expiresAt) contextPieces.push(
+              `${i18n('ai_helper_admin_jailbreak_expires_at')}${new Date(log.expiresAt).toLocaleDateString()}`
+            );
             const reviewStatus = log.reviewStatus || 'pending';
             contextPieces.push(
               `${i18n('ai_helper_admin_jailbreak_review_status')}${i18n(`ai_helper_admin_jailbreak_review_${reviewStatus}`)}`
@@ -171,8 +276,16 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
               <div key={log.id} style={{
                 ...cardStyle,
               }}>
-                <div style={{ fontSize: '14px', color: COLORS.textPrimary, fontWeight: 500 }}>
-                  {i18n('ai_helper_admin_jailbreak_time')}{new Date(log.createdAt).toLocaleString()}
+                <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(log.id)}
+                    onChange={() => toggleSelected(log.id)}
+                    aria-label={i18n('ai_helper_admin_jailbreak_select_record')}
+                  />
+                  <div style={{ fontSize: '14px', color: COLORS.textPrimary, fontWeight: 500 }}>
+                    {i18n('ai_helper_admin_jailbreak_time')}{new Date(log.createdAt).toLocaleString()}
+                  </div>
                 </div>
                 <div style={{ marginTop: '6px', fontSize: '13px', color: COLORS.textSecondary }}>
                   {i18n('ai_helper_admin_jailbreak_matched_rule')}<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>

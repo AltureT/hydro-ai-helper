@@ -127,6 +127,11 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # generate: openssl ra
 - `stable` (default) — updates only to official releases (`vX.Y.Z` tags), GPG-verified. Use on all real-user servers.
 - `edge` — tracks the latest `main` branch code; for the maintainer's own test server only.
 
+`AI_HELPER_JAILBREAK_LOG_RETENTION_DAYS` (optional) — safety-interception log retention:
+
+- Defaults to `180` days; accepted range is `7`–`3650` days
+- New logs expire from creation time; legacy logs expire gradually from upgrade time instead of being deleted immediately during deployment
+
 `AI_HELPER_TESTDATA_GENERATION_MODE` (optional) — whether test data generation requires the sandbox (`hydrojudge.sandbox_host`):
 
 - `auto` (default) — verify in the sandbox when reachable; otherwise fall back to direct output clearly marked "unverified"

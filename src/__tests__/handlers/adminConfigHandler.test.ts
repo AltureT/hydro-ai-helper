@@ -5,7 +5,11 @@ jest.mock('../../lib/crypto', () => ({
 }));
 
 import { ObjectId } from 'mongodb';
-import { JailbreakLogReviewHandler, JailbreakLogsHandler } from '../../handlers/adminConfigHandler';
+import {
+  JailbreakLogBulkReviewHandler,
+  JailbreakLogReviewHandler,
+  JailbreakLogsHandler,
+} from '../../handlers/adminConfigHandler';
 
 function createLogsHandler(query: Record<string, string> = {}) {
   const handler = new JailbreakLogsHandler();
@@ -15,15 +19,16 @@ function createLogsHandler(query: Record<string, string> = {}) {
   const getReviewSummary = jest.fn().mockResolvedValue({
     total: 10, pending: 4, confirmed: 4, falsePositive: 2, reviewed: 6, falsePositiveRate: 33.3,
   });
+  const getRuleMetrics = jest.fn().mockResolvedValue([]);
   handler.args = { domainId: 'domain-a' };
   handler.request = { headers: {}, query };
   handler.response = {};
   handler.translate = jest.fn((key: string) => key);
   handler.ctx = {
     Route: jest.fn(),
-    get: jest.fn(() => ({ listWithPagination, getReviewSummary })),
+    get: jest.fn(() => ({ listWithPagination, getReviewSummary, getRuleMetrics })),
   };
-  return { handler, listWithPagination, getReviewSummary };
+  return { handler, listWithPagination, getReviewSummary, getRuleMetrics };
 }
 
 function createReviewHandler() {
@@ -90,7 +95,7 @@ describe('JailbreakLogReviewHandler', () => {
 
 describe('JailbreakLogsHandler', () => {
   it('applies validated domain-scoped filters and returns review summary', async () => {
-    const { handler, listWithPagination, getReviewSummary } = createLogsHandler({
+    const { handler, listWithPagination, getReviewSummary, getRuleMetrics } = createLogsHandler({
       page: '2',
       limit: '10',
       reviewStatus: 'pending',
@@ -104,11 +109,12 @@ describe('JailbreakLogsHandler', () => {
       category: 'prompt_injection',
     });
     expect(getReviewSummary).toHaveBeenCalledWith('domain-a');
+    expect(getRuleMetrics).toHaveBeenCalledWith('domain-a', 10);
     expect(handler.response.body.summary).toEqual(expect.objectContaining({ falsePositiveRate: 33.3 }));
   });
 
   it('rejects unsupported filters before querying the database', async () => {
-    const { handler, listWithPagination, getReviewSummary } = createLogsHandler({
+    const { handler, listWithPagination, getReviewSummary, getRuleMetrics } = createLogsHandler({
       reviewStatus: 'deleted',
     });
 
@@ -118,5 +124,67 @@ describe('JailbreakLogsHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_JAILBREAK_LOG_FILTER');
     expect(listWithPagination).not.toHaveBeenCalled();
     expect(getReviewSummary).not.toHaveBeenCalled();
+    expect(getRuleMetrics).not.toHaveBeenCalled();
+  });
+});
+
+function createBulkReviewHandler() {
+  const handler = new JailbreakLogBulkReviewHandler();
+  const reviewMany = jest.fn().mockResolvedValue({ matchedCount: 2, modifiedCount: 2 });
+  handler.user = { _id: 7 };
+  handler.args = { domainId: 'domain-a' };
+  handler.request = {
+    headers: { 'x-requested-with': 'XMLHttpRequest' },
+    body: {
+      ids: [new ObjectId().toHexString(), new ObjectId().toHexString()],
+      reviewStatus: 'confirmed',
+    },
+  };
+  handler.response = {};
+  handler.translate = jest.fn((key: string) => key);
+  handler.ctx = {
+    Route: jest.fn(),
+    get: jest.fn(() => ({ reviewMany })),
+  };
+  return { handler, reviewMany };
+}
+
+describe('JailbreakLogBulkReviewHandler', () => {
+  it('bulk reviews unique IDs within the active domain', async () => {
+    const { handler, reviewMany } = createBulkReviewHandler();
+    const firstId = handler.request.body.ids[0];
+    handler.request.body.ids.push(firstId);
+
+    await handler.post();
+
+    expect(reviewMany).toHaveBeenCalledWith(
+      expect.arrayContaining(handler.request.body.ids.slice(0, 2)),
+      'domain-a',
+      'confirmed',
+      7
+    );
+    expect(reviewMany.mock.calls[0][0]).toHaveLength(2);
+    expect(handler.response.body).toEqual(expect.objectContaining({ success: true, modifiedCount: 2 }));
+  });
+
+  it('rejects invalid or oversized ID batches', async () => {
+    const { handler, reviewMany } = createBulkReviewHandler();
+    handler.request.body.ids = ['invalid-id'];
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body.code).toBe('INVALID_JAILBREAK_LOG_IDS');
+    expect(reviewMany).not.toHaveBeenCalled();
+  });
+
+  it('requires the CSRF header', async () => {
+    const { handler, reviewMany } = createBulkReviewHandler();
+    handler.request.headers = {};
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(403);
+    expect(reviewMany).not.toHaveBeenCalled();
   });
 });

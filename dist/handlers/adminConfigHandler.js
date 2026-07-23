@@ -37,7 +37,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogReviewHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
+exports.JailbreakLogBulkReviewHandlerPriv = exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogBulkReviewHandler = exports.JailbreakLogReviewHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const aiConfig_1 = require("../models/aiConfig");
 const crypto_1 = require("../lib/crypto");
@@ -452,9 +452,10 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
                 category: categoryRaw ? categoryRaw : undefined,
             };
             const domainId = (0, domainHelper_1.getDomainId)(this);
-            const [logResult, summary] = await Promise.all([
+            const [logResult, summary, ruleMetrics] = await Promise.all([
                 jailbreakLogModel.listWithPagination(page, limit, domainId, filters),
                 jailbreakLogModel.getReviewSummary(domainId),
+                jailbreakLogModel.getRuleMetrics(domainId, 10),
             ]);
             this.response.body = {
                 logs: logResult.logs.map(formatJailbreakLog),
@@ -462,6 +463,7 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
                 page: logResult.page,
                 totalPages: logResult.totalPages,
                 summary,
+                ruleMetrics,
                 filters,
             };
             this.response.type = 'application/json';
@@ -529,10 +531,58 @@ class JailbreakLogReviewHandler extends hydrooj_1.Handler {
     }
 }
 exports.JailbreakLogReviewHandler = JailbreakLogReviewHandler;
+/**
+ * JailbreakLogBulkReviewHandler - 批量复核当前域的安全拦截记录
+ * POST /ai-helper/admin/jailbreak-logs/bulk-review
+ */
+class JailbreakLogBulkReviewHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            const { ids, reviewStatus } = (this.request.body || {});
+            if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100
+                || ids.some((id) => typeof id !== 'string' || !mongo_1.ObjectId.isValid(id))) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_bulk_invalid_ids'),
+                    code: 'INVALID_JAILBREAK_LOG_IDS',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            if (reviewStatus !== 'confirmed' && reviewStatus !== 'false_positive') {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_review_invalid_status'),
+                    code: 'INVALID_REVIEW_STATUS',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const uniqueIds = [...new Set(ids)];
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const result = await jailbreakLogModel.reviewMany(uniqueIds, (0, domainHelper_1.getDomainId)(this), reviewStatus, Number(this.user._id));
+            this.response.body = { success: true, ...result, reviewStatus };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] JailbreakLogBulkReviewHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = {
+                error: this.translate('ai_helper_admin_jailbreak_bulk_failed'),
+                code: 'JAILBREAK_LOG_BULK_REVIEW_FAILED',
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.JailbreakLogBulkReviewHandler = JailbreakLogBulkReviewHandler;
 // 导出路由权限配置（使用系统管理员权限）
 exports.AdminConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.JailbreakLogBulkReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 function formatJailbreakLog(log) {
     return {
         id: log._id.toHexString(),
@@ -552,6 +602,7 @@ function formatJailbreakLog(log) {
         reviewStatus: log.reviewStatus || 'pending',
         reviewedAt: log.reviewedAt?.toISOString(),
         reviewedBy: log.reviewedBy,
+        expiresAt: log.expiresAt?.toISOString(),
         createdAt: log.createdAt.toISOString()
     };
 }
