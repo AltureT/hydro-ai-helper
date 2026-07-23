@@ -616,6 +616,39 @@ describe('MultiModelClient', () => {
     it('should throw if no models provided', () => {
       expect(() => new MultiModelClient([])).toThrow('至少需要配置一个模型');
     });
+
+    it('should create a clean semantic fallback chain after the model that returned a bad artifact', async () => {
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+        makeResolvedConfig({ endpointId: 'ep-3', modelName: 'model-c' }),
+      ]);
+      const semanticFallback = client.createClientStartingAfter({
+        endpointId: 'ep-1', endpointName: 'TestEndpoint', modelName: 'model-a',
+      });
+      expect(semanticFallback).not.toBeNull();
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { choices: [{ message: { role: 'assistant', content: 'from-b' }, finish_reason: 'stop' }] },
+      });
+      const result = await semanticFallback!.chat([{ role: 'user', content: 'Hi' }], 'System');
+      expect(result.usedModel.modelName).toBe('model-b');
+      const [, payload] = mockedAxios.post.mock.calls[0] as any[];
+      expect(payload.model).toBe('model-b');
+    });
+
+    it('should not create a semantic fallback when the used model is last or unknown', () => {
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+      ]);
+      expect(client.createClientStartingAfter({
+        endpointId: 'ep-2', endpointName: 'TestEndpoint', modelName: 'model-b',
+      })).toBeNull();
+      expect(client.createClientStartingAfter({
+        endpointId: 'missing', endpointName: 'Missing', modelName: 'model-x',
+      })).toBeNull();
+    });
   });
 
   // ─── chatStream ───────────────────────────────────

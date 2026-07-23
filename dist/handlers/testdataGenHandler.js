@@ -21,9 +21,101 @@ const codeSelectionService_1 = require("../services/analyzers/codeSelectionServi
 const goJudgeSandboxService_1 = require("../services/goJudgeSandboxService");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const csrfHelper_1 = require("../lib/csrfHelper");
+const sseHelper_1 = require("../lib/sseHelper");
+const limits_1 = require("../constants/limits");
 const domainHelper_1 = require("../utils/domainHelper");
+const mongo_1 = require("../utils/mongo");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
+const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
+const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
+function canReadAllRecordCodes(handler) {
+    const user = handler.user;
+    const hasPriv = typeof user?.hasPriv === 'function'
+        && hydrooj_1.PRIV.PRIV_READ_RECORD_CODE !== undefined
+        && user.hasPriv(hydrooj_1.PRIV.PRIV_READ_RECORD_CODE);
+    const hasPerm = typeof user?.hasPerm === 'function'
+        && hydrooj_1.PERM.PERM_READ_RECORD_CODE !== undefined
+        && user.hasPerm(hydrooj_1.PERM.PERM_READ_RECORD_CODE);
+    return hasPriv || hasPerm;
+}
+function acceptedStdRecordQuery(handler, domainId, problemDocId) {
+    return {
+        domainId,
+        pid: problemDocId,
+        status: hydrooj_1.STATUS.STATUS_ACCEPTED,
+        lang: { $in: PYTHON3_RECORD_LANGUAGES },
+        code: { $type: 'string', $ne: '' },
+        // 未结束竞赛中的 AC 不能成为题目文件页的隐式源码入口。
+        $or: [{ contest: { $exists: false } }, { contest: null }],
+        ...(canReadAllRecordCodes(handler) ? {} : { uid: handler.user?._id }),
+    };
+}
+async function listAcceptedStdCandidates(handler, domainId, problemDocId) {
+    const records = await hydrooj_1.db.collection('record')
+        .find(acceptedStdRecordQuery(handler, domainId, problemDocId), {
+        projection: { _id: 1, uid: 1, lang: 1, code: 1 },
+    })
+        .sort({ _id: -1 })
+        .limit(ACCEPTED_STD_CANDIDATE_LIMIT * 2)
+        .toArray();
+    const seenCode = new Set();
+    const candidates = [];
+    for (const record of records) {
+        const code = typeof record.code === 'string' ? record.code.trim() : '';
+        if (!code
+            || code.startsWith('@@hydro_submission_file@@')
+            || code.length > testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD
+            || seenCode.has(code))
+            continue;
+        seenCode.add(code);
+        candidates.push({
+            recordId: record._id.toHexString(),
+            lang: record.lang,
+            submittedAt: record._id.getTimestamp().toISOString(),
+            isOwn: record.uid === handler.user?._id,
+        });
+        if (candidates.length >= ACCEPTED_STD_CANDIDATE_LIMIT)
+            break;
+    }
+    return candidates;
+}
+async function loadAcceptedStdCode(handler, domainId, problemDocId, recordId) {
+    if (!mongo_1.ObjectId.isValid(recordId))
+        return null;
+    const record = await hydrooj_1.db.collection('record').findOne({
+        ...acceptedStdRecordQuery(handler, domainId, problemDocId),
+        _id: new mongo_1.ObjectId(recordId),
+    }, {
+        projection: { code: 1, lang: 1, uid: 1 },
+    });
+    const code = typeof record?.code === 'string' ? record.code.trim() : '';
+    if (!code
+        || code.startsWith('@@hydro_submission_file@@')
+        || code.length > testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD)
+        return null;
+    return code;
+}
+async function resolveRequestedStd(handler, domainId, pdoc, body) {
+    const manual = typeof body.providedStd === 'string' ? body.providedStd.trim() : '';
+    const recordId = typeof body.acceptedStdRecordId === 'string' ? body.acceptedStdRecordId.trim() : '';
+    if (manual && recordId) {
+        return { errorCode: 'STD_SOURCE_CONFLICT', errorKey: 'ai_helper_testdata_err_std_source_conflict' };
+    }
+    if (!recordId)
+        return {
+            providedStd: manual || undefined,
+            ...(manual ? { providedStdSource: 'manual' } : {}),
+        };
+    if (body.problemKind !== 'traditional') {
+        return { errorCode: 'AC_STD_TRADITIONAL_ONLY', errorKey: 'ai_helper_testdata_err_ac_std_traditional_only' };
+    }
+    const acceptedCode = await loadAcceptedStdCode(handler, domainId, pdoc.docId, recordId);
+    if (!acceptedCode) {
+        return { errorCode: 'AC_STD_UNAVAILABLE', errorKey: 'ai_helper_testdata_err_ac_std_unavailable' };
+    }
+    return { providedStd: acceptedCode, providedStdSource: 'accepted-record' };
+}
 /**
  * 题目定位：支持数字 docId 与字符串 pid（如 D3102）
  */
@@ -113,6 +205,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
+            const acceptedSolutions = await listAcceptedStdCandidates(this, domainId, pdoc.docId);
             this.response.body = {
                 problem: {
                     docId: pdoc.docId,
@@ -124,6 +217,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                     fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 },
                 existingFiles,
+                acceptedSolutions,
                 limits: {
                     minCases: testdataGenService_1.TESTDATA_GEN_LIMITS.MIN_CASES,
                     maxCases: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_CASES,
@@ -146,6 +240,10 @@ exports.TestdataGenContextHandler = TestdataGenContextHandler;
  */
 class TestdataGenGenerateHandler extends hydrooj_1.Handler {
     async post() {
+        let progressStream;
+        let keepaliveTimer;
+        let streamRawRes;
+        let streamCloseListener;
         try {
             if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
                 return;
@@ -169,6 +267,11 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 errorMessage: 'ai_helper_testdata_err_rate_limited',
             }))
                 return;
+            const resolvedStd = await resolveRequestedStd(this, domainId, pdoc, body);
+            if (resolvedStd.errorCode && resolvedStd.errorKey) {
+                sendError(this, 400, resolvedStd.errorCode, resolvedStd.errorKey);
+                return;
+            }
             const options = {
                 problemKind: (body.problemKind || 'auto'),
                 fillInMode: (body.fillInMode || 'auto'),
@@ -177,7 +280,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 languages: Array.isArray(body.languages)
                     ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
                     : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
-                providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
+                providedStd: resolvedStd.providedStd,
+                providedStdSource: resolvedStd.providedStdSource,
                 extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
@@ -209,6 +313,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const koaCtx = this.context;
             const rawReq = koaCtx?.req;
             const rawRes = koaCtx?.res;
+            streamRawRes = rawRes;
             // 挂监听前补一次检查：前序 DB/配置操作期间客户端可能已真实断开
             // （aborted / 底层 socket 已销毁），此时直接 499，不白跑整条管线。
             if (rawReq?.aborted || rawReq?.socket?.destroyed) {
@@ -217,38 +322,65 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
-            const onClose = () => { if (!rawRes?.writableEnded)
+            streamCloseListener = () => { if (!rawRes?.writableEnded)
                 requestAc.abort(); };
-            rawRes?.on?.('close', onClose);
-            let plan;
-            try {
-                plan = await service.generate({
-                    problemTitle: pdoc.title || problemId,
-                    statementMarkdown: statement,
-                    options,
-                    existingFiles,
-                    existingConfig: pdoc.config,
-                    fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
-                    signal: requestAc.signal,
-                });
+            rawRes?.on?.('close', streamCloseListener);
+            const accept = String(this.request.headers?.accept || '').toLowerCase();
+            if (accept.includes('text/event-stream') && rawRes) {
+                koaCtx.respond = false;
+                if ('compress' in koaCtx)
+                    koaCtx.compress = false;
+                rawReq?.socket?.setNoDelay?.(true);
+                rawReq?.socket?.setTimeout?.(0);
+                progressStream = (0, sseHelper_1.createSSEWriter)(rawRes);
+                keepaliveTimer = setInterval(() => {
+                    progressStream?.writeComment('keepalive');
+                }, limits_1.API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
             }
-            finally {
-                rawRes?.removeListener?.('close', onClose);
-            }
+            const plan = await service.generate({
+                problemTitle: pdoc.title || problemId,
+                statementMarkdown: statement,
+                options,
+                existingFiles,
+                existingConfig: pdoc.config,
+                fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
+                signal: requestAc.signal,
+                onProgress: progress => progressStream?.writeEvent('progress', progress),
+            });
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
             const successfulModel = typeof plan.usedModel === 'string'
                 ? plan.usedModel.split(' → ').pop()?.trim()
                 : undefined;
+            const escalatedFromModel = plan.verification?.modelEscalation?.fromModel;
+            if (escalatedFromModel) {
+                this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', escalatedFromModel, false).catch(() => { });
+            }
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', successfulModel || '', true).catch(() => { });
-            this.response.body = { plan };
-            this.response.type = 'application/json';
+            if (progressStream) {
+                progressStream.writeEvent('result', { plan });
+                progressStream.end();
+            }
+            else {
+                this.response.body = { plan };
+                this.response.type = 'application/json';
+            }
         }
         catch (err) {
             // 客户端主动断开：非故障，不上报也不打 error 日志
             if ((0, testdataGenService_1.isCancellation)(err)) {
-                this.response.status = 499;
-                this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
-                this.response.type = 'application/json';
+                if (progressStream) {
+                    progressStream.writeEvent('error', {
+                        error: this.translate('ai_helper_err_ai_aborted'),
+                        code: 'CLIENT_ABORTED',
+                        retryable: true,
+                    });
+                    progressStream.end();
+                }
+                else {
+                    this.response.status = 499;
+                    this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                    this.response.type = 'application/json';
+                }
                 return;
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
@@ -266,25 +398,46 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 ...aiMetadata,
             });
             if (err instanceof openaiClient_1.AIServiceError) {
-                this.response.status = (0, openaiClient_1.getHttpStatusForCategory)(err.category);
-                this.response.body = {
+                const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
                     code: 'AI_SERVICE_ERROR',
                     category: err.category,
                     retryable: err.isRetryable,
                 };
-                this.response.type = 'application/json';
+                if (progressStream) {
+                    progressStream.writeEvent('error', errorBody);
+                    progressStream.end();
+                }
+                else {
+                    this.response.status = (0, openaiClient_1.getHttpStatusForCategory)(err.category);
+                    this.response.body = errorBody;
+                    this.response.type = 'application/json';
+                }
                 return;
             }
             // 解析/校验失败等业务错误：消息为中文可直接展示
-            this.response.status = 502;
-            this.response.body = {
+            const errorBody = {
                 error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
             };
-            this.response.type = 'application/json';
+            if (progressStream) {
+                progressStream.writeEvent('error', errorBody);
+                progressStream.end();
+            }
+            else {
+                this.response.status = 502;
+                this.response.body = errorBody;
+                this.response.type = 'application/json';
+            }
+        }
+        finally {
+            if (keepaliveTimer)
+                clearInterval(keepaliveTimer);
+            if (streamRawRes && streamCloseListener) {
+                streamRawRes.removeListener?.('close', streamCloseListener);
+            }
         }
     }
 }
@@ -315,6 +468,11 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
             }
             if (!checkEditPermission(this, pdoc))
                 return;
+            const resolvedStd = await resolveRequestedStd(this, domainId, pdoc, body);
+            if (resolvedStd.errorCode && resolvedStd.errorKey) {
+                sendError(this, 400, resolvedStd.errorCode, resolvedStd.errorKey);
+                return;
+            }
             const options = {
                 problemKind: (body.problemKind || 'auto'),
                 fillInMode: (body.fillInMode || 'auto'),
@@ -323,7 +481,8 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
                 languages: Array.isArray(body.languages)
                     ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
                     : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
-                providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
+                providedStd: resolvedStd.providedStd,
+                providedStdSource: resolvedStd.providedStdSource,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
             if (optionError) {

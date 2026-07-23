@@ -11,7 +11,8 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 
-import { Handler, PRIV, PERM, ProblemModel, SystemModel, db } from 'hydrooj';
+import { Handler, PRIV, PERM, ProblemModel, SystemModel, STATUS, db } from 'hydrooj';
+import type { ServerResponse } from 'http';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import {
   TestdataGenService,
@@ -34,7 +35,10 @@ import {
 } from '../services/goJudgeSandboxService';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
+import { createSSEWriter, type SSEWriter } from '../lib/sseHelper';
+import { API_DEFAULTS } from '../constants/limits';
 import { getDomainId } from '../utils/domainHelper';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 
 export const TestdataGenHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
@@ -48,6 +52,139 @@ interface ProblemDocLite {
   owner?: number;
   config?: string;
   data?: Array<{ _id?: string; name?: string; size?: number }>;
+}
+
+interface AcceptedStdRecordLite {
+  _id: ObjectIdType;
+  uid: number;
+  lang: string;
+  code: string;
+}
+
+interface AcceptedStdCandidate {
+  recordId: string;
+  lang: string;
+  submittedAt: string;
+  isOwn: boolean;
+}
+
+const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
+const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
+
+function canReadAllRecordCodes(handler: Handler): boolean {
+  const user = handler.user;
+  const hasPriv = typeof user?.hasPriv === 'function'
+    && PRIV.PRIV_READ_RECORD_CODE !== undefined
+    && user.hasPriv(PRIV.PRIV_READ_RECORD_CODE);
+  const hasPerm = typeof user?.hasPerm === 'function'
+    && PERM.PERM_READ_RECORD_CODE !== undefined
+    && user.hasPerm(PERM.PERM_READ_RECORD_CODE);
+  return hasPriv || hasPerm;
+}
+
+function acceptedStdRecordQuery(
+  handler: Handler,
+  domainId: string,
+  problemDocId: number,
+): Record<string, unknown> {
+  return {
+    domainId,
+    pid: problemDocId,
+    status: STATUS.STATUS_ACCEPTED,
+    lang: { $in: PYTHON3_RECORD_LANGUAGES },
+    code: { $type: 'string', $ne: '' },
+    // 未结束竞赛中的 AC 不能成为题目文件页的隐式源码入口。
+    $or: [{ contest: { $exists: false } }, { contest: null }],
+    ...(canReadAllRecordCodes(handler) ? {} : { uid: handler.user?._id }),
+  };
+}
+
+async function listAcceptedStdCandidates(
+  handler: Handler,
+  domainId: string,
+  problemDocId: number,
+): Promise<AcceptedStdCandidate[]> {
+  const records = await db.collection<AcceptedStdRecordLite>('record')
+    .find(acceptedStdRecordQuery(handler, domainId, problemDocId), {
+      projection: { _id: 1, uid: 1, lang: 1, code: 1 },
+    })
+    .sort({ _id: -1 })
+    .limit(ACCEPTED_STD_CANDIDATE_LIMIT * 2)
+    .toArray();
+  const seenCode = new Set<string>();
+  const candidates: AcceptedStdCandidate[] = [];
+  for (const record of records) {
+    const code = typeof record.code === 'string' ? record.code.trim() : '';
+    if (!code
+      || code.startsWith('@@hydro_submission_file@@')
+      || code.length > TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD
+      || seenCode.has(code)) continue;
+    seenCode.add(code);
+    candidates.push({
+      recordId: record._id.toHexString(),
+      lang: record.lang,
+      submittedAt: record._id.getTimestamp().toISOString(),
+      isOwn: record.uid === handler.user?._id,
+    });
+    if (candidates.length >= ACCEPTED_STD_CANDIDATE_LIMIT) break;
+  }
+  return candidates;
+}
+
+async function loadAcceptedStdCode(
+  handler: Handler,
+  domainId: string,
+  problemDocId: number,
+  recordId: string,
+): Promise<string | null> {
+  if (!ObjectId.isValid(recordId)) return null;
+  const record = await db.collection<AcceptedStdRecordLite>('record').findOne({
+    ...acceptedStdRecordQuery(handler, domainId, problemDocId),
+    _id: new ObjectId(recordId),
+  }, {
+    projection: { code: 1, lang: 1, uid: 1 },
+  });
+  const code = typeof record?.code === 'string' ? record.code.trim() : '';
+  if (!code
+    || code.startsWith('@@hydro_submission_file@@')
+    || code.length > TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD) return null;
+  return code;
+}
+
+interface ResolveStdRequestBody {
+  problemKind?: string;
+  providedStd?: string;
+  acceptedStdRecordId?: string;
+}
+
+async function resolveRequestedStd(
+  handler: Handler,
+  domainId: string,
+  pdoc: ProblemDocLite,
+  body: ResolveStdRequestBody,
+): Promise<{
+  providedStd?: string;
+  providedStdSource?: GenerateOptions['providedStdSource'];
+  errorCode?: string;
+  errorKey?: string;
+}> {
+  const manual = typeof body.providedStd === 'string' ? body.providedStd.trim() : '';
+  const recordId = typeof body.acceptedStdRecordId === 'string' ? body.acceptedStdRecordId.trim() : '';
+  if (manual && recordId) {
+    return { errorCode: 'STD_SOURCE_CONFLICT', errorKey: 'ai_helper_testdata_err_std_source_conflict' };
+  }
+  if (!recordId) return {
+    providedStd: manual || undefined,
+    ...(manual ? { providedStdSource: 'manual' as const } : {}),
+  };
+  if (body.problemKind !== 'traditional') {
+    return { errorCode: 'AC_STD_TRADITIONAL_ONLY', errorKey: 'ai_helper_testdata_err_ac_std_traditional_only' };
+  }
+  const acceptedCode = await loadAcceptedStdCode(handler, domainId, pdoc.docId, recordId);
+  if (!acceptedCode) {
+    return { errorCode: 'AC_STD_UNAVAILABLE', errorKey: 'ai_helper_testdata_err_ac_std_unavailable' };
+  }
+  return { providedStd: acceptedCode, providedStdSource: 'accepted-record' as const };
 }
 
 /**
@@ -140,6 +277,7 @@ export class TestdataGenContextHandler extends Handler {
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
+      const acceptedSolutions = await listAcceptedStdCandidates(this, domainId, pdoc.docId);
 
       this.response.body = {
         problem: {
@@ -152,6 +290,7 @@ export class TestdataGenContextHandler extends Handler {
           fillInDetected: isFillInBlankProblem(statement),
         },
         existingFiles,
+        acceptedSolutions,
         limits: {
           minCases: TESTDATA_GEN_LIMITS.MIN_CASES,
           maxCases: TESTDATA_GEN_LIMITS.MAX_CASES,
@@ -177,6 +316,7 @@ interface GenerateRequestBody {
   dataScale?: string;
   languages?: string[];
   providedStd?: string;
+  acceptedStdRecordId?: string;
   extraRequirements?: string;
 }
 
@@ -186,6 +326,10 @@ interface GenerateRequestBody {
  */
 export class TestdataGenGenerateHandler extends Handler {
   async post() {
+    let progressStream: SSEWriter | undefined;
+    let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
+    let streamRawRes: ServerResponse | undefined;
+    let streamCloseListener: (() => void) | undefined;
     try {
       if (rejectIfCsrfInvalid(this)) return;
       const domainId = getDomainId(this);
@@ -210,6 +354,11 @@ export class TestdataGenGenerateHandler extends Handler {
         errorMessage: 'ai_helper_testdata_err_rate_limited',
       })) return;
 
+      const resolvedStd = await resolveRequestedStd(this, domainId, pdoc, body);
+      if (resolvedStd.errorCode && resolvedStd.errorKey) {
+        sendError(this, 400, resolvedStd.errorCode, resolvedStd.errorKey);
+        return;
+      }
       const options: GenerateOptions = {
         problemKind: (body.problemKind || 'auto') as GenerateOptions['problemKind'],
         fillInMode: (body.fillInMode || 'auto') as GenerateOptions['fillInMode'],
@@ -218,7 +367,8 @@ export class TestdataGenGenerateHandler extends Handler {
         languages: Array.isArray(body.languages)
           ? (body.languages.filter(l => (SUPPORTED_TEMPLATE_LANGS as readonly string[]).includes(l)) as TemplateLang[])
           : [...SUPPORTED_TEMPLATE_LANGS],
-        providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
+        providedStd: resolvedStd.providedStd,
+        providedStdSource: resolvedStd.providedStdSource,
         extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
       };
       const optionError = validateGenerateOptions(options);
@@ -253,7 +403,8 @@ export class TestdataGenGenerateHandler extends Handler {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const koaCtx = (this as any).context;
       const rawReq = koaCtx?.req;
-      const rawRes = koaCtx?.res;
+      const rawRes: ServerResponse | undefined = koaCtx?.res;
+      streamRawRes = rawRes;
       // 挂监听前补一次检查：前序 DB/配置操作期间客户端可能已真实断开
       // （aborted / 底层 socket 已销毁），此时直接 499，不白跑整条管线。
       if (rawReq?.aborted || rawReq?.socket?.destroyed) {
@@ -262,39 +413,68 @@ export class TestdataGenGenerateHandler extends Handler {
         this.response.type = 'application/json';
         return;
       }
-      const onClose = () => { if (!rawRes?.writableEnded) requestAc.abort(); };
-      rawRes?.on?.('close', onClose);
-      let plan;
-      try {
-        plan = await service.generate({
-          problemTitle: pdoc.title || problemId,
-          statementMarkdown: statement,
-          options,
-          existingFiles,
-          existingConfig: pdoc.config,
-          fillInDetected: isFillInBlankProblem(statement),
-          signal: requestAc.signal,
-        });
-      } finally {
-        rawRes?.removeListener?.('close', onClose);
+      streamCloseListener = () => { if (!rawRes?.writableEnded) requestAc.abort(); };
+      rawRes?.on?.('close', streamCloseListener);
+
+      const accept = String(this.request.headers?.accept || '').toLowerCase();
+      if (accept.includes('text/event-stream') && rawRes) {
+        koaCtx.respond = false;
+        if ('compress' in koaCtx) koaCtx.compress = false;
+        rawReq?.socket?.setNoDelay?.(true);
+        rawReq?.socket?.setTimeout?.(0);
+        progressStream = createSSEWriter(rawRes);
+        keepaliveTimer = setInterval(() => {
+          progressStream?.writeComment('keepalive');
+        }, API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
       }
+
+      const plan = await service.generate({
+        problemTitle: pdoc.title || problemId,
+        statementMarkdown: statement,
+        options,
+        existingFiles,
+        existingConfig: pdoc.config,
+        fillInDetected: isFillInBlankProblem(statement),
+        signal: requestAc.signal,
+        onProgress: progress => progressStream?.writeEvent('progress', progress),
+      });
 
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });
       const successfulModel = typeof plan.usedModel === 'string'
         ? plan.usedModel.split(' → ').pop()?.trim()
         : undefined;
+      const escalatedFromModel = plan.verification?.modelEscalation?.fromModel;
+      if (escalatedFromModel) {
+        this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
+          'testdata_generation', escalatedFromModel, false,
+        ).catch(() => { /* best-effort */ });
+      }
       this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
         'testdata_generation', successfulModel || '', true,
       ).catch(() => { /* best-effort */ });
 
-      this.response.body = { plan };
-      this.response.type = 'application/json';
+      if (progressStream) {
+        progressStream.writeEvent('result', { plan });
+        progressStream.end();
+      } else {
+        this.response.body = { plan };
+        this.response.type = 'application/json';
+      }
     } catch (err) {
       // 客户端主动断开：非故障，不上报也不打 error 日志
       if (isCancellation(err)) {
-        this.response.status = 499;
-        this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
-        this.response.type = 'application/json';
+        if (progressStream) {
+          progressStream.writeEvent('error', {
+            error: this.translate('ai_helper_err_ai_aborted'),
+            code: 'CLIENT_ABORTED',
+            retryable: true,
+          });
+          progressStream.end();
+        } else {
+          this.response.status = 499;
+          this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+          this.response.type = 'application/json';
+        }
         return;
       }
       console.error('[TestdataGenGenerateHandler.post] error:', err);
@@ -320,25 +500,42 @@ export class TestdataGenGenerateHandler extends Handler {
         },
       );
       if (err instanceof AIServiceError) {
-        this.response.status = getHttpStatusForCategory(err.category);
-        this.response.body = {
+        const errorBody = {
           error: this.translate(USER_ERROR_MESSAGE_KEYS[err.category]),
           code: 'AI_SERVICE_ERROR',
           category: err.category,
           retryable: err.isRetryable,
         };
-        this.response.type = 'application/json';
+        if (progressStream) {
+          progressStream.writeEvent('error', errorBody);
+          progressStream.end();
+        } else {
+          this.response.status = getHttpStatusForCategory(err.category);
+          this.response.body = errorBody;
+          this.response.type = 'application/json';
+        }
         return;
       }
       // 解析/校验失败等业务错误：消息为中文可直接展示
-      this.response.status = 502;
-      this.response.body = {
+      const errorBody = {
         error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
         retryable: true,
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
       };
-      this.response.type = 'application/json';
+      if (progressStream) {
+        progressStream.writeEvent('error', errorBody);
+        progressStream.end();
+      } else {
+        this.response.status = 502;
+        this.response.body = errorBody;
+        this.response.type = 'application/json';
+      }
+    } finally {
+      if (keepaliveTimer) clearInterval(keepaliveTimer);
+      if (streamRawRes && streamCloseListener) {
+        streamRawRes.removeListener?.('close', streamCloseListener);
+      }
     }
   }
 }
@@ -371,6 +568,11 @@ export class TestdataGenSkeletonHandler extends Handler {
       }
       if (!checkEditPermission(this, pdoc)) return;
 
+      const resolvedStd = await resolveRequestedStd(this, domainId, pdoc, body);
+      if (resolvedStd.errorCode && resolvedStd.errorKey) {
+        sendError(this, 400, resolvedStd.errorCode, resolvedStd.errorKey);
+        return;
+      }
       const options: GenerateOptions = {
         problemKind: (body.problemKind || 'auto') as GenerateOptions['problemKind'],
         fillInMode: (body.fillInMode || 'auto') as GenerateOptions['fillInMode'],
@@ -379,7 +581,8 @@ export class TestdataGenSkeletonHandler extends Handler {
         languages: Array.isArray(body.languages)
           ? (body.languages.filter(l => (SUPPORTED_TEMPLATE_LANGS as readonly string[]).includes(l)) as TemplateLang[])
           : [...SUPPORTED_TEMPLATE_LANGS],
-        providedStd: typeof body.providedStd === 'string' ? body.providedStd : undefined,
+        providedStd: resolvedStd.providedStd,
+        providedStdSource: resolvedStd.providedStdSource,
       };
       const optionError = validateGenerateOptions(options);
       if (optionError) {

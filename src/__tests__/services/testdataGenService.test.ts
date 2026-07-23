@@ -21,11 +21,21 @@ import {
   getMissingTemplateLanguages,
   findAssignmentStyleCaseInput,
   extractStatementSamples,
+  buildSolutionBlueprintSystemPrompt,
+  buildSolutionBlueprintUserPrompt,
+  buildGenerationArtifactsSystemPrompt,
+  buildGenerationArtifactsUserPrompt,
   buildSandboxBlueprintSystemPrompt,
   buildSandboxBlueprintUserPrompt,
+  buildIndependentVerifierSystemPrompt,
+  buildIndependentVerifierUserPrompt,
   parseSandboxBlueprint,
+  parseSolutionBlueprint,
+  parseGenerationArtifacts,
+  parseIndependentVerifierBlueprint,
   parseGeneratorOutput,
   materializeSandboxBlueprint,
+  verifySolutionBlueprintSamples,
   classifySandboxRepairScope,
   buildSandboxRepairPrompt,
   mergeSandboxBlueprintRepair,
@@ -77,6 +87,11 @@ ACB
 `;
 
 function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
+  const solutionSections = problemType === 'function' ? [
+    '@@@SOLUTION@@@',
+    'def solve(value):',
+    '    return value',
+  ] : [];
   const templateSections = problemType === 'function' ? [
     '@@@TEMPLATE:py@@@',
     'print(solve(input().strip()))',
@@ -97,10 +112,79 @@ function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditi
     'print(json.dumps({"cases": []}, ensure_ascii=False))',
     '@@@ORACLE@@@',
     'print(input())',
+    ...solutionSections,
     ...templateSections,
     '@@@NOTES@@@',
     '沙箱生成。',
   ].join('\n');
+}
+
+function makeSolutionBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
+  const solutionSections = problemType === 'function' ? [
+    '@@@SOLUTION@@@',
+    'def solve(value):',
+    '    return value',
+  ] : [];
+  return [
+    '@@@META@@@',
+    `problemType: ${problemType}`,
+    'isFillIn: false',
+    '@@@ANALYSIS@@@',
+    '每个文件只放一组数据。',
+    '@@@ORACLE@@@',
+    'print(input())',
+    ...solutionSections,
+    '@@@NOTES@@@',
+    '解题蓝图。',
+  ].join('\n');
+}
+
+function makeGenerationArtifactsBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
+  const templateSections = problemType === 'function' ? [
+    '@@@TEMPLATE:py@@@',
+    'print(solve(input().strip()))',
+    '@@@TEMPLATE:java@@@',
+    'public class Main { public static void main(String[] args) {} }',
+    '@@@TEMPLATE:cc@@@',
+    '#include "foo.cc"',
+    'int main() { return 0; }',
+  ] : [];
+  return [
+    '@@@GENERATOR@@@',
+    'import json',
+    'print(json.dumps({"cases": []}, ensure_ascii=False))',
+    ...templateSections,
+    '@@@NOTES@@@',
+    '外围制品。',
+  ].join('\n');
+}
+
+function makeIndependentVerifierBlueprint(
+  functionSampleInputs: Array<{ id: string; input: string }> = [],
+): string {
+  return [
+    '@@@BRUTE@@@',
+    'print(input())  # independent brute',
+    '@@@STRESS_GENERATOR@@@',
+    'import json  # stress generator',
+    `print(json.dumps({"cases": [{"label": "stress", "input": str(i)} for i in range(${TESTDATA_GEN_LIMITS.STRESS_CASES})]}, separators=(",", ":")))`,
+    '@@@VALIDATOR@@@',
+    'import sys',
+    'sys.exit(0)',
+    ...(functionSampleInputs.length > 0 ? [
+      '@@@SAMPLE_INPUTS@@@',
+      JSON.stringify({ samples: functionSampleInputs }),
+    ] : []),
+  ].join('\n');
+}
+
+function stressGeneratorStdout(): string {
+  return JSON.stringify({
+    cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => ({
+      label: `stress-${i + 1}`,
+      input: String(i + 1),
+    })),
+  });
 }
 
 // ─── validateGenerateOptions ──────────────────────────────────────────────────
@@ -659,6 +743,22 @@ describe('题面样例提取', () => {
       output: 'CBA\nACB\n',
     }]);
   });
+
+  it('提取常见 LeetCode 单行输入/输出展示，供独立调用转换 stdin', () => {
+    const samples = extractStatementSamples([
+      '### 示例 1',
+      '输入：nums = [2, 7, 11, 15], target = 9',
+      '输出： [0, 1]',
+      '解释：因为 nums[0] + nums[1] = 9。',
+      '### Example 2',
+      'Input: nums = [3, 2, 4], target = 6',
+      'Output: [1, 2]',
+    ].join('\n'));
+    expect(samples).toEqual([
+      { id: '1', input: 'nums = [2, 7, 11, 15], target = 9\n', output: '[0, 1]\n' },
+      { id: '2', input: 'nums = [3, 2, 4], target = 6\n', output: '[1, 2]\n' },
+    ]);
+  });
 });
 
 describe('Hydro 沙箱生成蓝图', () => {
@@ -944,6 +1044,19 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(up).toContain('def judge(a, b):');
   });
 
+  it('历史 AC 在 Prompt 中明确标为非权威候选解', () => {
+    const up = buildTestdataUserPrompt({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+        providedStd: 'print(input())', providedStdSource: 'accepted-record',
+      },
+    });
+    expect(up).toContain('历史 AC 候选解');
+    expect(up).toContain('不是权威');
+    expect(up).toContain('独立 BRUTE 压力验证');
+  });
+
   it('auto 模式下携带规则引擎的填空初判信号', () => {
     const withHint = buildTestdataUserPrompt({
       problemTitle: 't', statementMarkdown: 's',
@@ -966,13 +1079,20 @@ describe('stage-specific sandbox repair', () => {
 
   it('按错误阶段分类并生成定向提示词', () => {
     expect(classifySandboxRepairScope(new Error('GENERATOR 实跑失败：Output Limit Exceeded'))).toBe('generator');
-    expect(classifySandboxRepairScope(new Error('第 3 个 .in 未通过输入校验'))).toBe('validator');
+    expect(classifySandboxRepairScope(new Error('STRESS_GENERATOR 输出无效'))).toBe('stress-generator');
+    expect(classifySandboxRepairScope(new Error('STRESS_GENERATOR 压力数据多样性不足'))).toBe('stress-generator');
+    expect(classifySandboxRepairScope(new Error('第 3 个 .in 未通过输入校验'))).toBe('generator');
+    expect(classifySandboxRepairScope(new Error('第 3 个压力 .in 未通过输入校验'))).toBe('validator');
     expect(classifySandboxRepairScope(new Error('ORACLE 未通过题面样例 1'))).toBe('oracle');
+    expect(classifySandboxRepairScope(new Error('函数题样例 1 转码后仍是源码赋值写法'))).toBe('function-samples');
+    expect(classifySandboxRepairScope(new Error('ORACLE 未通过函数题样例 1'))).toBe('oracle');
     expect(classifySandboxRepairScope(new Error('暴力解与标程不一致'))).toBe('brute');
+    expect(classifySandboxRepairScope(new Error('压力对拍 BRUTE 与 ORACLE 不一致'))).toBe('brute');
+    expect(classifySandboxRepairScope(new Error('AC 候选标程与独立 BRUTE 不一致'))).toBe('accepted-std');
     expect(classifySandboxRepairScope(new Error('template.py 与标程不一致'))).toBe('template-py');
     expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
-    expect(buildSandboxRepairPrompt(new Error('第 3 个 .in 未通过输入校验'), options))
+    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
   });
 
@@ -1096,6 +1216,7 @@ describe('buildSkeletonPlan', () => {
 
 describe('TestdataGenService.generate', () => {
   it('调用 AI 客户端并返回组装后的计划', async () => {
+    const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
     const mockClient = {
       chat: jest.fn().mockResolvedValue({
         content: makeAiJson(),
@@ -1108,6 +1229,7 @@ describe('TestdataGenService.generate', () => {
       problemTitle: '提莫攻击',
       statementMarkdown: '题面',
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      onProgress: event => progress.push(event),
     });
     expect(mockClient.chat).toHaveBeenCalledTimes(1);
     const [messages, systemPrompt, callOptions] = mockClient.chat.mock.calls[0];
@@ -1120,29 +1242,54 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
     expect(plan.usedModel).toBe('main/gpt-test');
+    expect(progress.map(event => event.stage)).toEqual(expect.arrayContaining([
+      'preparing', 'blueprint', 'assembling', 'complete',
+    ]));
+    expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
   });
 
   it('沙箱模式运行生成器和标程后再组装文件', async () => {
+    const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
     const mockClient = {
-      chat: jest.fn().mockResolvedValue({
-        content: makeSandboxBlueprint('traditional'),
-        usage: { promptTokens: 50, completionTokens: 80, totalTokens: 130 },
-        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
-      }),
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'),
+          usage: { promptTokens: 50, completionTokens: 80, totalTokens: 130 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
+          usage: { promptTokens: 30, completionTokens: 50, totalTokens: 80 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
     };
+    const stressInputs = Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => `${i + 1}\n`);
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([
-        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'CBA\n', stderr: '' },
-        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'Impossible\n', stderr: '' },
-      ]),
-      runPython: jest.fn().mockResolvedValue({
-        stdout: JSON.stringify({ cases: [
-          { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
-          { label: '循环矛盾', input: '1\nA>B\nB>C\nC>A' },
-        ] }),
-        stderr: '',
-      }),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: 'CBA\n' }),
+          detail({ stdout: 'Impossible\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce(stressInputs.map(input => detail({ stdout: input }))),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [
+            { label: '有效排序', input: '1\nA>B\nC<B\nA>C' },
+            { label: '循环矛盾', input: '1\nA>B\nB>C\nC>A' },
+          ] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
     };
     const service = new TestdataGenService(mockClient as never, {
@@ -1153,23 +1300,151 @@ describe('TestdataGenService.generate', () => {
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
+      onProgress: event => progress.push(event),
     });
 
     expect(runner.isAvailable).toHaveBeenCalled();
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat.mock.calls[0][1]).toContain('本阶段只解决题目');
+    expect(mockClient.chat.mock.calls[0][1]).not.toContain('@@@GENERATOR@@@');
+    expect(mockClient.chat.mock.calls[1][1]).toContain('本阶段不得修改算法');
+    expect(mockClient.chat.mock.calls[1][1]).not.toContain('@@@ORACLE@@@');
+    expect(mockClient.chat.mock.calls[2][0]).toHaveLength(1);
+    expect(mockClient.chat.mock.calls[2][0][0].content).not.toContain('print(input())');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\nA>B\nC<B\nA>C\n');
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('CBA\n');
     expect(plan.files.map(file => file.name)).toEqual(expect.arrayContaining([
       'generator.py', 'std.py', 'config.yaml',
     ]));
     expect(plan.notes).toContain('Hydro 沙箱中实际运行');
+    expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
+    expect(runner.runPython.mock.calls.every(call => typeof call[3] === 'number')).toBe(true);
+    expect(runner.runPythonBatchDetailed.mock.calls.every(call => typeof call[2]?.deadlineAt === 'number')).toBe(true);
+    expect(progress.map(event => event.stage)).toEqual(expect.arrayContaining([
+      'sandbox_check', 'blueprint', 'solution_verification', 'artifacts',
+      'independent_verifier', 'generating_inputs',
+      'validating_inputs', 'running_oracle', 'stress_testing', 'assembling', 'complete',
+    ]));
+  });
+
+  it('第一阶段样例预验证连续失败时不生成外围制品或独立验证器', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '错误答案\n' }),
+      ]),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '样例硬闸门',
+      statementMarkdown: '```input1\n1\n```\n```output1\n2\n```',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      telemetryMetadata: expect.objectContaining({ failureStage: 'solution_blueprint' }),
+    });
+    await expect(promise).rejects.toThrow(/第一阶段题面样例/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('样例预验证');
+    expect(runner.runPython).not.toHaveBeenCalled();
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalled();
+  });
+
+  it('自动修复仍失败时从下一配置模型完整重跑一次', async () => {
+    const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
+    const brokenBlueprint = makeSolutionBlueprint('traditional').replace(
+      'print(input())',
+      'raise RuntimeError("broken oracle")',
+    );
+    const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
+    const primaryModel = { endpointId: 'ep1', endpointName: 'primary', modelName: 'model-a' };
+    const deeperModel = { endpointId: 'ep2', endpointName: 'deeper', modelName: 'model-b' };
+    const fallbackClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usage, usedModel: deeperModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: deeperModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: deeperModel }),
+    };
+    const primaryClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: brokenBlueprint, usage, usedModel: primaryModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: primaryModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: primaryModel })
+        .mockResolvedValueOnce({
+          content: '@@@ORACLE@@@\nraise RuntimeError("still broken")',
+          usage,
+          usedModel: primaryModel,
+        }),
+      createClientStartingAfter: jest.fn().mockReturnValue(fallbackClient),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, ins: string[]) => Promise.resolve(
+        ins.map(input => code.includes('RuntimeError')
+          ? detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: 'broken oracle' })
+          : detail({ stdout: input })),
+      )),
+    };
+
+    const plan = await new TestdataGenService(primaryClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      onProgress: event => progress.push(event),
+    });
+
+    expect(primaryClient.chat).toHaveBeenCalledTimes(4);
+    expect(primaryClient.createClientStartingAfter).toHaveBeenCalledWith(primaryModel);
+    expect(fallbackClient.chat).toHaveBeenCalledTimes(3);
+    expect(plan.verification?.modelEscalation).toEqual({
+      fromModel: 'primary/model-a',
+      toModel: 'deeper/model-b',
+    });
+    expect(plan.notes).toContain('下一配置模型');
+    expect(plan.usedModel).toBe('primary/model-a → deeper/model-b');
+    expect(plan.tokenUsage?.totalTokens).toBe(14);
+    expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
+    expect(progress.some(event => event.attempt === 2 && event.stage === 'blueprint')).toBe(true);
+    expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 2 });
   });
 
   it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
     const mockClient = {
-      chat: jest.fn().mockResolvedValue({
-        content: makeSandboxBlueprint('traditional'),
-        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
-      }),
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
     };
     const cancelErr = Object.assign(new Error('canceled'), { name: 'CanceledError', code: 'ERR_CANCELED' });
     const runner = {
@@ -1184,7 +1459,44 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     })).rejects.toBe(cancelErr);
     // 中止不应再烧一次修复请求
-    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+  });
+
+  it('沙箱总预算耗尽时直接停止，不触发 AI 修复或模型升级', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ input: '1' }] }), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockRejectedValue(
+        new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'),
+      ),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      recommendDeeperReasoning: false,
+      telemetryMetadata: expect.objectContaining({ failureStage: 'sandbox_budget' }),
+    });
+    await expect(promise).rejects.toThrow(/停止后续修复与模型升级/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
   it('修复请求本身被中止（AIServiceError aborted 形态）：原样上抛不包装', async () => {
@@ -1192,7 +1504,15 @@ describe('TestdataGenService.generate', () => {
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
-          content: makeSandboxBlueprint('traditional'),
+          content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockRejectedValueOnce(abortedErr),
@@ -1212,14 +1532,22 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('沙箱蓝图漏掉 Java 模板时定向补齐后再执行', async () => {
-    const initial = makeSandboxBlueprint('function').replace(
+    const artifacts = makeGenerationArtifactsBlueprint('function').replace(
       /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,
       '',
     );
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
-          content: initial,
+          content: makeSolutionBlueprint('function'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: artifacts,
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1234,9 +1562,11 @@ describe('TestdataGenService.generate', () => {
         Promise.resolve(ins.map(input => ({
           status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '',
         })))),
-      runPython: jest.fn().mockResolvedValue({
-        stdout: JSON.stringify({ cases: [{ input: 'abc' }] }), stderr: '',
-      }),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ input: 'abc' }] }), stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
     };
     const plan = await new TestdataGenService(mockClient as never, {
@@ -1246,8 +1576,9 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] },
     });
 
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
-    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('@@@TEMPLATE:java@@@');
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[3][0][2].content).toContain('@@@TEMPLATE:java@@@');
+    expect(mockClient.chat.mock.calls[2][0]).toHaveLength(1);
     expect(plan.files.find(file => file.name === 'template.java')?.content).toContain('public class Main');
   });
 
@@ -1255,7 +1586,15 @@ describe('TestdataGenService.generate', () => {
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
-          content: makeSandboxBlueprint('traditional'),
+          content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1267,7 +1606,8 @@ describe('TestdataGenService.generate', () => {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn()
         .mockRejectedValueOnce(new Error('第 1 个沙箱任务执行失败（Output Limit Exceeded）'))
-        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ label: '修复', input: '1' }] }), stderr: '' }),
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ label: '修复', input: '1' }] }), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, ins: string[]) => Promise.resolve(
         ins.map(input => ({ status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '' })),
       )),
@@ -1279,29 +1619,90 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
-    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[3][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(plan.files.find(file => file.name === 'generator.py')?.content).toContain('separators');
     expect(plan.files.find(file => file.name === 'std.py')?.content).toContain('print(input())');
+  });
+
+  it('压力对拍失败时只重生成独立验证器，不把 ORACLE 源码放入修复上下文', async () => {
+    const brokenVerifier = makeIndependentVerifierBlueprint().replace(
+      'print(input())  # independent brute',
+      'print("wrong")  # broken independent brute',
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: brokenVerifier,
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, ins: string[]) => Promise.resolve(
+        ins.map(input => detail({ stdout: code.includes('broken independent brute') ? 'wrong\n' : input })),
+      )),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    const repairMessages = mockClient.chat.mock.calls[3][0];
+    expect(repairMessages[2].content).toContain('独立验证制品未通过');
+    expect(repairMessages[0].content).not.toContain('print(input())');
+    expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
+    expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
   });
 
   it('初始蓝图分节损坏时请求完整蓝图后继续验证', async () => {
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
-          content: `${makeSandboxBlueprint('traditional')}\n@@@损坏`,
+          content: `${makeSolutionBlueprint('traditional')}\n@@@损坏`,
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
-          content: makeSandboxBlueprint('traditional'),
+          content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         }),
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
-      runPython: jest.fn().mockResolvedValue({
-        stdout: JSON.stringify({ cases: [{ label: '合法', input: '1' }] }), stderr: '',
-      }),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: '合法', input: '1' }] }), stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, ins: string[]) => Promise.resolve(
         ins.map(input => ({ status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '' })),
       )),
@@ -1313,8 +1714,8 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
-    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('完整蓝图');
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 META');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
 
@@ -1340,6 +1741,88 @@ describe('TestdataGenService.generate', () => {
     });
     expect(plan.notes).toContain('沙箱当前不可达');
     expect(runner.runPython).not.toHaveBeenCalled();
+  });
+
+  it('历史 AC 候选解在沙箱不可达时拒绝降级直出', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'auto',
+    });
+
+    await expect(service.generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+        providedStd: 'print(input())', providedStdSource: 'accepted-record',
+      },
+    })).rejects.toThrow(/无法验证所选历史 AC 候选解.*拒绝降级生成/);
+    expect(mockClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('历史 AC 与独立 BRUTE 冲突时直接拒绝，不发起修复或模型升级', async () => {
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 1 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce([
+          detail({ stdout: 'wrong\n' }),
+          ...stressInputs.slice(1).map(input => detail({ stdout: input })),
+        ]),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 't', statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+        providedStd: 'print(input())', providedStdSource: 'accepted-record',
+      },
+    });
+    await expect(promise).rejects.toMatchObject({
+      telemetryMetadata: expect.objectContaining({ failureStage: 'accepted_std_verification' }),
+    });
+    await expect(promise).rejects.toThrow(/系统不会修复 BRUTE 来迁就它/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
   it('AI 漏掉 Java 模板时定向补全并保留原测试点', async () => {
@@ -1433,6 +1916,91 @@ function twoCaseGen(): string {
   return JSON.stringify({ cases: [{ label: 'c1', input: '1' }, { label: 'c2', input: '2' }] });
 }
 
+describe('两阶段沙箱蓝图', () => {
+  it('第一阶段 Prompt 只要求解题，第二阶段只要求外围制品', () => {
+    const params = {
+      problemTitle: '两数之和',
+      statementMarkdown: '输入两个整数，输出它们的和。',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] } as GenerateOptions,
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), params.options);
+    const solutionSystem = buildSolutionBlueprintSystemPrompt();
+    const solutionUser = buildSolutionBlueprintUserPrompt(params);
+    const artifactsSystem = buildGenerationArtifactsSystemPrompt();
+    const artifactsUser = buildGenerationArtifactsUserPrompt(params, solution);
+
+    expect(solutionSystem).toContain('@@@ORACLE@@@');
+    expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
+    expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
+    expect(solutionUser).toContain('这是第一阶段');
+    expect(solutionUser).not.toContain('逐测试点覆盖计划');
+    expect(solutionUser).not.toContain('函数题模板语言');
+    expect(solutionUser).not.toContain('Hydro 测试点数量');
+    expect(artifactsSystem).toContain('@@@GENERATOR@@@');
+    expect(artifactsSystem).not.toContain('@@@ORACLE@@@');
+    expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
+    expect(artifactsUser).toContain(solution.oracleCode.trim());
+    expect(artifactsUser).not.toContain('@@@ORACLE@@@');
+  });
+
+  it('解析器拒绝跨阶段夹带或重写制品', () => {
+    expect(() => parseSolutionBlueprint(
+      `${makeSolutionBlueprint('traditional')}\n@@@GENERATOR@@@\nprint(1)`,
+      tradOpts,
+    )).toThrow(/第一阶段.*禁止的 GENERATOR/);
+    expect(() => parseGenerationArtifacts(
+      `${makeGenerationArtifactsBlueprint('traditional')}\n@@@ORACLE@@@\nprint(2)`,
+      'traditional',
+      [],
+    )).toThrow(/第二阶段.*禁止的 ORACLE/);
+  });
+
+  it('函数题第一阶段逐一解析题面样例 stdin 转码', () => {
+    const statement = '输入：a = 2, b = 3\n输出：5\n输入：a = -1, b = 4\n输出：3';
+    const raw = [
+      makeSolutionBlueprint('function'),
+      '@@@SAMPLE_INPUTS@@@',
+      JSON.stringify({ samples: [
+        { id: '1', input: '2 3' },
+        { id: '2', input: '-1 4' },
+      ] }),
+    ].join('\n');
+    const solution = parseSolutionBlueprint(
+      raw,
+      { problemKind: 'function', caseCount: 1, languages: ['py'] },
+      extractStatementSamples(statement),
+    );
+    expect(solution.functionSampleInputs).toEqual([
+      { id: '1', input: '2 3\n' },
+      { id: '2', input: '-1 4\n' },
+    ]);
+  });
+
+  it('样例预验证执行 ORACLE，并校验规范化后的输出', async () => {
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), tradOpts);
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '42\n' }),
+      ]),
+    };
+    const result = await verifySolutionBlueprintSamples(
+      solution,
+      tradOpts,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+    );
+    expect(result).toEqual({ total: 1, passed: 1 });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
+      solution.oracleCode,
+      ['42\n'],
+      { signal: undefined },
+    );
+  });
+});
+
 describe('parseSandboxBlueprint v2 分节', () => {
   it('解析 SOLUTION/BRUTE/VALIDATOR 三节', () => {
     const raw = [
@@ -1461,14 +2029,69 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(() => parseSandboxBlueprint(raw, tradOpts)).toThrow(/ORACLE/);
   });
 
-  it('System Prompt 含 BRUTE 独立、SOLUTION、VALIDATOR 规则与分节', () => {
+  it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
     expect(sp).toContain('@@@SOLUTION@@@');
-    expect(sp).toContain('@@@BRUTE@@@');
-    expect(sp).toContain('@@@VALIDATOR@@@');
-    expect(sp).toContain('相互独立的第二实现');
-    // 既有断言仍需成立
+    expect(sp).not.toContain('@@@BRUTE@@@');
+    expect(sp).not.toContain('@@@VALIDATOR@@@');
+    expect(sp).toContain('独立调用中生成验证器');
     expect(sp).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+  });
+
+  it('独立验证 Prompt 与解析器强制要求 BRUTE/STRESS_GENERATOR/VALIDATOR', () => {
+    const system = buildIndependentVerifierSystemPrompt();
+    expect(system).toContain(`恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组小数据`);
+    expect(system).toContain(`至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同`);
+    expect(system).not.toContain('@@@ORACLE@@@');
+    const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
+    expect(verifier.bruteCode).toContain('independent brute');
+    expect(verifier.stressGeneratorCode).toContain('stress generator');
+    expect(verifier.validatorCode).toContain('sys.exit(0)');
+    expect(() => parseIndependentVerifierBlueprint('@@@BRUTE@@@\nprint(1)'))
+      .toThrow(/STRESS_GENERATOR、VALIDATOR/);
+  });
+
+  it('独立验证 User Prompt 不泄漏 ORACLE 源码', () => {
+    const prompt = buildIndependentVerifierUserPrompt({
+      problemTitle: '题目',
+      statementMarkdown: '输入一个整数并输出它',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [], providedStd: 'SECRET_ORACLE' },
+    }, parseSandboxBlueprint(makeSandboxBlueprint('traditional'), tradOpts));
+    expect(prompt).toContain('每个文件只放一组数据');
+    expect(prompt).not.toContain('SECRET_ORACLE');
+    expect(prompt).not.toContain('print(input())');
+  });
+
+  it('函数题样例必须由独立调用逐一转换为原始 stdin', () => {
+    const statement = [
+      '输入：a = 2, b = 3',
+      '输出：5',
+      '输入：a = -1, b = 4',
+      '输出：3',
+    ].join('\n');
+    const samples = extractStatementSamples(statement);
+    const prompt = buildIndependentVerifierUserPrompt({
+      problemTitle: '两数相加',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 1, languages: ['py'] },
+    }, {
+      problemType: 'function',
+      functionName: 'add',
+      analysis: 'stdin 两个整数以空格分隔。',
+    });
+    expect(prompt).toContain('@@@SAMPLE_INPUTS@@@');
+    expect(prompt).toContain('样例 1 展示输入');
+
+    expect(() => parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), samples))
+      .toThrow(/缺少 SAMPLE_INPUTS/);
+    const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint([
+      { id: '1', input: '2 3' },
+      { id: '2', input: '-1 4' },
+    ]), samples);
+    expect(verifier.functionSampleInputs).toEqual([
+      { id: '1', input: '2 3\n' },
+      { id: '2', input: '-1 4\n' },
+    ]);
   });
 });
 
@@ -1634,6 +2257,219 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.verification?.bruteCheck).toMatchObject({ agreed: 1, skippedTimeout: [2], disagreed: [] });
   });
 
+  it('独立验证器在内部小数据上完成强制压力对拍且不写入正式 cases', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES },
+          () => detail(),
+        )) // VALIDATOR：正式 + stress
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }), detail({ stdout: '2\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ]) // ORACLE：正式 + stress
+        .mockResolvedValueOnce(stressInputs.map(input => detail({ stdout: input }))), // BRUTE：stress
+    };
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
+    expect(res.cases).toHaveLength(2);
+    expect(res.verification?.stressCheck).toEqual({
+      generated: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      uniqueInputs: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      duplicateInputs: 0,
+      compared: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      agreed: TESTDATA_GEN_LIMITS.STRESS_CASES,
+    });
+    expect(res.verification?.bruteCheck).toBeUndefined();
+    expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
+    expect(res.notes).toContain(`${TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据`);
+  });
+
+  it('压力生成器用重复 input 凑数时在执行标程前硬失败', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const duplicatedStress = JSON.stringify({
+      cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => ({
+        label: `duplicate-${i + 1}`,
+        input: '1',
+      })),
+    });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: duplicatedStress, stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
+      /STRESS_GENERATOR 压力数据多样性不足：60 组中仅 1 组 input 唯一.*至少需要 48 组/s,
+    );
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+  });
+
+  it('历史 AC 仅在样例与独立压力对拍全部通过后作为候选输出依据', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const opts: GenerateOptions = {
+      ...tradOpts,
+      providedStd: 'print(input())',
+      providedStdSource: 'accepted-record',
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }), detail({ stdout: '2\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce(stressInputs.map(input => detail({ stdout: input }))),
+    };
+
+    const res = await materializeSandboxBlueprint(bp, opts, '', runner);
+    expect(res.verification?.oracleKind).toBe('accepted-record');
+    expect(res.verification?.stressCheck).toMatchObject({
+      compared: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      agreed: TESTDATA_GEN_LIMITS.STRESS_CASES,
+    });
+    expect(res.notes).toContain('所选历史 AC 仅作为候选解');
+  });
+
+  it('历史 AC 与独立 BRUTE 冲突时硬失败，不允许把 BRUTE 修成迎合 AC', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const opts: GenerateOptions = {
+      ...tradOpts,
+      providedStd: 'print(input())',
+      providedStdSource: 'accepted-record',
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }), detail({ stdout: '2\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce([
+          detail({ stdout: 'wrong\n' }),
+          ...stressInputs.slice(1).map(input => detail({ stdout: input })),
+        ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, opts, '', runner)).rejects.toThrow(
+      /AC 候选标程与独立 BRUTE.*已拒绝使用.*不会修复 BRUTE 来迁就它/s,
+    );
+  });
+
+  it('压力对拍 BRUTE 超时不允许跳过', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES },
+          () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }), detail({ stdout: '2\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce([
+          detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+          ...stressInputs.slice(1).map(input => detail({ stdout: input })),
+        ]),
+    };
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
+      .rejects.toThrow(/压力对拍 BRUTE 在第 1 组小数据超时；压力阶段不允许跳过/);
+  });
+
+  it('自定义 checker 题仍实跑独立 BRUTE，但不做纯文本压力比较', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: 'official-a\n' }), detail({ stdout: 'official-b\n' }),
+          ...Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail({ stdout: 'oracle-form\n' })),
+        ])
+        .mockResolvedValueOnce(Array.from(
+          { length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail({ stdout: 'different-but-checker-valid\n' }),
+        )),
+    };
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner, undefined, true);
+    expect(res.verification?.stressCheck).toEqual({
+      generated: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      uniqueInputs: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      duplicateInputs: 0,
+      compared: 0,
+      agreed: 0,
+      skippedReason: 'custom-checker',
+    });
+    expect(res.notes).toContain('跳过纯文本压力对拍');
+  });
+
   it('函数题 solution+template.py 组合实跑，一致则记 templateCheck.passed', async () => {
     const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
     const bp = parseSandboxBlueprint([
@@ -1655,6 +2491,63 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     // 组合程序 = solution + '\n' + template.py
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
       expect.stringContaining('def f(a, b):'), ['2 3\n'], expect.anything(),
+    );
+  });
+
+  it('函数题将题面展示样例独立转码后回归 ORACLE 与 template.py', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const statement = ['### 示例 1', '输入：a = 2, b = 3', '输出：5'].join('\n');
+    const statementSamples = extractStatementSamples(statement);
+    const bp = {
+      ...parseSandboxBlueprint([
+        '@@@META@@@', 'problemType: function', 'functionName: add',
+        '@@@ANALYSIS@@@', 'stdin 两个整数以空格分隔。',
+        '@@@GENERATOR@@@', 'print(gen())',
+        '@@@ORACLE@@@', 'a,b=map(int,input().split())', 'print(a+b)',
+        '@@@SOLUTION@@@', 'def add(a, b):', '    return a + b',
+        '@@@TEMPLATE:py@@@', 'a,b=map(int,input().split())', 'print(add(a,b))',
+      ].join('\n'), fnOpts),
+      ...parseIndependentVerifierBlueprint(
+        makeIndependentVerifierBlueprint([{ id: '1', input: '2 3' }]),
+        statementSamples,
+      ),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1 1' }] }), stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: '2\n' }),
+          detail({ stdout: '5\n' }),
+          ...stressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce([detail({ stdout: '2\n' }), detail({ stdout: '5\n' })])
+        .mockResolvedValueOnce(stressInputs.map(input => detail({ stdout: input }))),
+    };
+
+    const res = await materializeSandboxBlueprint(bp, fnOpts, statement, runner);
+    expect(res.verification?.sampleCheck).toEqual({ total: 1, passed: 1 });
+    expect(res.verification?.templateCheck).toEqual({
+      lang: 'py', total: 2, passed: 2, skippedTimeout: [],
+    });
+    expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
+    expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('def add(a, b):'),
+      ['1 1\n', '2 3\n'],
+      expect.anything(),
     );
   });
 

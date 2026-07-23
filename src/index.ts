@@ -33,6 +33,7 @@ import { AnalyticsHandler, AnalyticsHandlerPriv, AnalyticsFilterOptionsHandler, 
 console.log('[AI-Helper] analyticsHandler OK');
 
 import { AdminConfigHandler, AdminConfigHandlerPriv, JailbreakLogsHandler, JailbreakLogsHandlerPriv } from './handlers/adminConfigHandler';
+import { TestdataBenchmarkHandler, TestdataBenchmarkHandlerPriv } from './handlers/testdataBenchmarkHandler';
 console.log('[AI-Helper] adminConfigHandler OK');
 
 import { AIHelperDashboardHandler, AIHelperDashboardHandlerPriv } from './handlers/dashboardHandler';
@@ -325,6 +326,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
 
     // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
     ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
+
+    // POST /ai-helper/admin/testdata-benchmark - 管理员显式确认费用后运行真实模型难题基准
+    ctx.Route('ai_helper_admin_testdata_benchmark', '/ai-helper/admin/testdata-benchmark', TestdataBenchmarkHandler, TestdataBenchmarkHandlerPriv);
 
     // GET /ai-helper/export - 数据导出 API
     ctx.Route('ai_helper_export', '/ai-helper/export', ExportHandler, ExportHandlerPriv);

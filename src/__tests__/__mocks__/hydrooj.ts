@@ -10,12 +10,14 @@ export class Handler {
 export const PRIV = {
   PRIV_NONE: 0,
   PRIV_USER_PROFILE: 1,
-  PRIV_EDIT_SYSTEM: 2
+  PRIV_EDIT_SYSTEM: 2,
+  PRIV_READ_RECORD_CODE: 4,
 };
 
 export const PERM = {
   PERM_EDIT_PROBLEM: 1n << 5n,
   PERM_EDIT_PROBLEM_SELF: 1n << 6n,
+  PERM_READ_RECORD_CODE: 1n << 7n,
 };
 
 export const db = {

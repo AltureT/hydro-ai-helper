@@ -178,6 +178,29 @@ describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
     await expect(runner.runPythonBatchDetailed('print(1)', [])).resolves.toEqual([]);
     expect(http.post).not.toHaveBeenCalled();
   });
+
+  it('绝对截止时间已耗尽时不再发起新的沙箱分块请求', async () => {
+    const http = { get: jest.fn(), post: jest.fn() };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    await expect(runner.runPythonBatchDetailed('print(1)', ['a'], {
+      deadlineAt: Date.now() - 1,
+    })).rejects.toThrow(/沙箱执行总时长超出预算/);
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('按整条管线剩余预算收紧单个分块请求 timeout', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const deadlineAt = Date.now() + 2_000;
+    await runner.runPythonBatchDetailed('print(1)', ['a'], { deadlineAt });
+    const timeout = http.post.mock.calls[0][2].timeout as number;
+    expect(timeout).toBeGreaterThan(0);
+    expect(timeout).toBeLessThanOrEqual(2_000);
+    expect(timeout).toBeLessThan(55_000);
+  });
 });
 
 describe('getTestdataGenerationMode', () => {

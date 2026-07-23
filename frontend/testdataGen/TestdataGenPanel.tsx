@@ -26,6 +26,12 @@ interface ProblemContext {
     fillInDetected?: boolean;
   };
   existingFiles: string[];
+  acceptedSolutions?: Array<{
+    recordId: string;
+    lang: string;
+    submittedAt: string;
+    isOwn: boolean;
+  }>;
   limits: { minCases: number; maxCases: number; maxExtraRequirements: number; maxProvidedStd?: number };
 }
 
@@ -38,9 +44,18 @@ interface PlannedFile {
 
 interface PlanVerification {
   mode: 'sandbox' | 'direct';
-  oracleKind: 'provided-std' | 'ai-solution';
-  sampleCheck?: { total: number; passed: number };          // 仅传统题
+  oracleKind: 'provided-std' | 'accepted-record' | 'ai-solution';
+  modelEscalation?: { fromModel: string; toModel: string };
+  sampleCheck?: { total: number; passed: number };
   bruteCheck?: { compared: number; agreed: number; skippedTimeout: number[]; disagreed: number[] };
+  stressCheck?: {
+    generated: number;
+    uniqueInputs?: number;
+    duplicateInputs?: number;
+    compared: number;
+    agreed: number;
+    skippedReason?: 'custom-checker';
+  };
   validator?: { ran: boolean; casesChecked: number };
   templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
 }
@@ -61,6 +76,36 @@ interface GenerationPlan {
   }>;
   usedModel?: string;
   verification?: PlanVerification;
+}
+
+type GenerationProgressStage =
+  | 'preparing'
+  | 'sandbox_check'
+  | 'blueprint'
+  | 'blueprint_repair'
+  | 'solution_verification'
+  | 'artifacts'
+  | 'templates'
+  | 'independent_verifier'
+  | 'verifier_repair'
+  | 'generating_inputs'
+  | 'validating_inputs'
+  | 'running_oracle'
+  | 'checking_templates'
+  | 'stress_testing'
+  | 'pipeline_repair'
+  | 'model_escalation'
+  | 'assembling'
+  | 'complete';
+
+interface GenerationProgressEvent {
+  stage: GenerationProgressStage;
+  percent: number;
+  attempt: number;
+}
+
+interface GenerationProgressState extends GenerationProgressEvent {
+  source: 'live' | 'estimated';
 }
 
 type PanelPhase = 'form' | 'generating' | 'preview' | 'applying' | 'applied';
@@ -91,6 +136,27 @@ const ORIGIN_BADGE_KEYS: Record<string, string> = {
   executed: 'ai_helper_testdata_badge_executed',
   'ai-only': 'ai_helper_testdata_badge_ai_only',
   deterministic: 'ai_helper_testdata_badge_deterministic',
+};
+
+const PROGRESS_STAGE_CAPS: Record<GenerationProgressStage, number> = {
+  preparing: 4,
+  sandbox_check: 8,
+  blueprint: 30,
+  blueprint_repair: 38,
+  solution_verification: 36,
+  artifacts: 54,
+  templates: 62,
+  independent_verifier: 60,
+  verifier_repair: 62,
+  generating_inputs: 65,
+  validating_inputs: 71,
+  running_oracle: 78,
+  checking_templates: 84,
+  stress_testing: 90,
+  pipeline_repair: 94,
+  model_escalation: 94,
+  assembling: 98,
+  complete: 100,
 };
 
 // deterministic 用中性灰：getBadgeStyle 无 neutral 变体，借 info 外形覆盖配色
@@ -132,6 +198,83 @@ async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
   return { message: `HTTP ${response.status}`, recommendDeeperReasoning: false };
 }
 
+async function consumeGenerationProgressStream(
+  response: Response,
+  onProgress: (progress: GenerationProgressEvent) => void,
+): Promise<GenerationPlan> {
+  if (!response.body) throw new Error(i18n('ai_helper_testdata_progress_stream_missing'));
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let eventName = '';
+  let dataLines: string[] = [];
+  let result: GenerationPlan | null = null;
+  let streamError: TestdataRequestError | null = null;
+
+  const dispatch = () => {
+    if (!eventName || dataLines.length === 0) {
+      eventName = '';
+      dataLines = [];
+      return;
+    }
+    let data: any;
+    try { data = JSON.parse(dataLines.join('\n')); } catch {
+      eventName = '';
+      dataLines = [];
+      return;
+    }
+    if (eventName === 'progress'
+      && typeof data?.stage === 'string'
+      && Number.isFinite(Number(data?.percent))) {
+      onProgress({
+        stage: data.stage as GenerationProgressStage,
+        percent: Number(data.percent),
+        attempt: Number(data.attempt) > 1 ? Number(data.attempt) : 1,
+      });
+    } else if (eventName === 'result' && data?.plan) {
+      result = data.plan as GenerationPlan;
+    } else if (eventName === 'error') {
+      streamError = new TestdataRequestError(
+        String(data?.error || i18n('ai_helper_testdata_err_empty_plan')),
+        data?.recommendDeeperReasoning === true,
+      );
+    }
+    eventName = '';
+    dataLines = [];
+  };
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (line === '') {
+      dispatch();
+    } else if (line.startsWith('event:')) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      lines.forEach(processLine);
+    }
+    buffer += decoder.decode();
+    if (buffer) processLine(buffer);
+    dispatch();
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (streamError) throw streamError;
+  if (!result) throw new Error(i18n('ai_helper_testdata_err_empty_plan'));
+  return result;
+}
+
 // ─── 组件 ─────────────────────────────────────────────────────────────────────
 
 export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId }) => {
@@ -147,6 +290,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [showFallbackHint, setShowFallbackHint] = useState(false);
   // 仅后端确认“自动修复后仍未通过解析/机器验证”时提示换用更深思考模型。
   const [showDeeperReasoningHint, setShowDeeperReasoningHint] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgressState>({
+    stage: 'preparing', percent: 2, attempt: 1, source: 'estimated',
+  });
+  const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
 
   // 表单状态
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
@@ -155,6 +302,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [dataScale, setDataScale] = useState<'auto' | 'small' | 'medium' | 'large'>('auto');
   const [languages, setLanguages] = useState<string[]>(['py', 'java', 'cc']);
   const [providedStd, setProvidedStd] = useState('');
+  const [acceptedStdRecordId, setAcceptedStdRecordId] = useState('');
   const [extraRequirements, setExtraRequirements] = useState('');
 
   // 生成结果状态
@@ -163,6 +311,42 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [selectedFiles, setSelectedFiles] = useState<Record<string, boolean>>({});
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<{ written: string[]; failed: Array<{ name: string; error: string }> } | null>(null);
+
+  // 实时事件之间让进度缓慢前移；旧后端无 SSE 时则按等待时长给出保守估算，最高不超过 88%。
+  useEffect(() => {
+    if (phase !== 'generating') return undefined;
+    const startedAt = Date.now();
+    setGenerationElapsedSeconds(0);
+    const timer = window.setInterval(() => {
+      const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      setGenerationElapsedSeconds(elapsed);
+      setGenerationProgress(prev => {
+        if (prev.source === 'live') {
+          const cap = PROGRESS_STAGE_CAPS[prev.stage] ?? 98;
+          return prev.percent >= cap
+            ? prev
+            : { ...prev, percent: Math.min(cap, prev.percent + 0.15) };
+        }
+        const estimatedPercent = Math.min(88, 4 + 84 * (1 - Math.exp(-elapsed / 100)));
+        const estimatedStage: GenerationProgressStage = elapsed < 8
+          ? 'preparing'
+          : elapsed < 50
+            ? 'blueprint'
+            : elapsed < 100
+              ? 'independent_verifier'
+              : elapsed < 180
+                ? 'running_oracle'
+                : 'stress_testing';
+        return {
+          stage: estimatedStage,
+          percent: Math.max(prev.percent, estimatedPercent),
+          attempt: prev.attempt,
+          source: 'estimated',
+        };
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [phase]);
 
   // 加载题目上下文；403 → 无编辑权限静默隐藏，其他失败 → 显示错误卡
   useEffect(() => {
@@ -211,6 +395,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
+    setGenerationProgress({ stage: 'preparing', percent: 2, attempt: 1, source: 'estimated' });
     setPhase('generating');
     const ac = new AbortController();
     // 生成不设 token 上限、服务端单次超时 10 分钟，前端仅作 15 分钟最终兜底
@@ -221,6 +406,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         headers: {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
+          'Accept': 'text/event-stream, application/json',
         },
         credentials: 'include',
         signal: ac.signal,
@@ -232,6 +418,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           dataScale,
           languages,
           providedStd: providedStd.trim() || undefined,
+          acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
         }),
       });
@@ -239,8 +426,16 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         const details = await parseErrorDetails(response);
         throw new TestdataRequestError(details.message, details.recommendDeeperReasoning);
       }
-      const data = await response.json() as { plan: GenerationPlan };
-      const newPlan = data.plan;
+      const contentType = response.headers.get('content-type') || '';
+      const newPlan = contentType.includes('text/event-stream')
+        ? await consumeGenerationProgressStream(response, progress => {
+          setGenerationProgress(prev => ({
+            ...progress,
+            percent: Math.max(prev.percent, Math.min(100, progress.percent)),
+            source: 'live',
+          }));
+        })
+        : ((await response.json() as { plan: GenerationPlan }).plan);
       if (!newPlan || !Array.isArray(newPlan.files) || newPlan.files.length === 0) {
         throw new Error(i18n('ai_helper_testdata_err_empty_plan'));
       }
@@ -270,7 +465,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     } finally {
       clearTimeout(timeout);
     }
-  }, [problemId, problemKind, fillInMode, caseCount, dataScale, languages, providedStd, extraRequirements]);
+  }, [problemId, problemKind, fillInMode, caseCount, dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements]);
 
   // ─── 骨架模式（AI 故障降级） ─────────────────────────────────────────────────
 
@@ -282,6 +477,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
+    setGenerationProgress({ stage: 'assembling', percent: 80, attempt: 1, source: 'live' });
     setPhase('generating');
     try {
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/skeleton'), {
@@ -298,6 +494,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           dataScale,
           languages,
           providedStd: providedStd.trim() || undefined,
+          acceptedStdRecordId: acceptedStdRecordId || undefined,
         }),
       });
       if (!response.ok) {
@@ -324,7 +521,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(err instanceof Error ? err.message : String(err));
       setPhase('form');
     }
-  }, [problemId, problemKind, caseCount, dataScale, languages, providedStd]);
+  }, [problemId, problemKind, caseCount, dataScale, languages, providedStd, acceptedStdRecordId]);
 
   // ─── 写入 ───────────────────────────────────────────────────────────────────
 
@@ -439,7 +636,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         <label style={labelStyle}>{i18n('ai_helper_testdata_kind_label')}</label>
         <select
           value={problemKind}
-          onChange={e => setProblemKind(e.target.value as typeof problemKind)}
+          onChange={e => {
+            const next = e.target.value as typeof problemKind;
+            setProblemKind(next);
+            if (next !== 'traditional') setAcceptedStdRecordId('');
+          }}
           style={{ ...getInputStyle(), maxWidth: '320px' }}
         >
           <option value="auto">{i18n('ai_helper_testdata_kind_auto')}</option>
@@ -523,10 +724,42 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       )}
       <div style={fieldStyle}>
         <label style={labelStyle}>{i18n('ai_helper_testdata_std_label')}</label>
+        {(context.acceptedSolutions || []).length > 0 && (
+          <>
+            <select
+              value={acceptedStdRecordId}
+              disabled={problemKind !== 'traditional'}
+              onChange={e => {
+                setAcceptedStdRecordId(e.target.value);
+                if (e.target.value) setProvidedStd('');
+              }}
+              style={{ ...getInputStyle(), marginBottom: SPACING.xs }}
+            >
+              <option value="">{i18n('ai_helper_testdata_std_ac_none')}</option>
+              {(context.acceptedSolutions || []).map(candidate => (
+                <option key={candidate.recordId} value={candidate.recordId}>
+                  {candidate.lang} · {new Date(candidate.submittedAt).toLocaleString()}
+                  {candidate.isOwn ? ` · ${i18n('ai_helper_testdata_std_ac_own')}` : ''}
+                </option>
+              ))}
+            </select>
+            <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>
+              {problemKind === 'traditional'
+                ? i18n('ai_helper_testdata_std_ac_hint')
+                : i18n('ai_helper_testdata_std_ac_traditional_hint')}
+            </div>
+          </>
+        )}
         <textarea
           value={providedStd}
-          onChange={e => setProvidedStd(e.target.value.slice(0, context.limits.maxProvidedStd ?? 10000))}
-          placeholder={i18n('ai_helper_testdata_std_placeholder')}
+          disabled={!!acceptedStdRecordId}
+          onChange={e => {
+            setProvidedStd(e.target.value.slice(0, context.limits.maxProvidedStd ?? 10000));
+            if (e.target.value) setAcceptedStdRecordId('');
+          }}
+          placeholder={i18n(acceptedStdRecordId
+            ? 'ai_helper_testdata_std_ac_selected_placeholder'
+            : 'ai_helper_testdata_std_placeholder')}
           rows={providedStd ? 8 : 3}
           spellCheck={false}
           style={{ ...getInputStyle(), resize: 'vertical', fontFamily: MONO_FONT, fontSize: '13px' }}
@@ -582,22 +815,64 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     </div>
   );
 
-  const renderGenerating = () => (
-    <div style={{ textAlign: 'center', padding: SPACING.xl, color: COLORS.textSecondary }}>
-      <div style={{
-        width: '32px', height: '32px', margin: '0 auto',
-        border: `3px solid ${COLORS.border}`, borderTopColor: COLORS.primary,
-        borderRadius: '50%', animation: 'spin 1s linear infinite',
-      }} />
-      <style>{'@keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }'}</style>
-      <div style={{ marginTop: SPACING.base, fontSize: '14px' }}>
-        {i18n('ai_helper_testdata_generating')}
+  const renderGenerating = () => {
+    const percent = Math.max(2, Math.min(100, Math.round(generationProgress.percent)));
+    const elapsedMinutes = Math.floor(generationElapsedSeconds / 60);
+    const elapsedSeconds = generationElapsedSeconds % 60;
+    return (
+      <div style={{ padding: SPACING.xl, color: COLORS.textSecondary }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.base }}>
+          <div style={{
+            width: '22px', height: '22px', flex: '0 0 22px',
+            border: `3px solid ${COLORS.border}`, borderTopColor: COLORS.primary,
+            borderRadius: '50%', animation: 'spin 1s linear infinite',
+          }} />
+          <style>{'@keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }'}</style>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary }}>
+              {i18n(`ai_helper_testdata_progress_${generationProgress.stage}`)}
+            </div>
+            <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: '2px' }}>
+              {generationProgress.source === 'live'
+                ? i18n('ai_helper_testdata_progress_live')
+                : i18n('ai_helper_testdata_progress_estimated')}
+              {generationProgress.attempt > 1
+                ? ` · ${i18n('ai_helper_testdata_progress_attempt', generationProgress.attempt)}`
+                : ''}
+            </div>
+          </div>
+          <div style={{ fontSize: '18px', fontWeight: 700, color: COLORS.primary, fontVariantNumeric: 'tabular-nums' }}>
+            {percent}%
+          </div>
+        </div>
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          style={{
+            height: '10px', overflow: 'hidden', borderRadius: '999px',
+            background: COLORS.bgHover, border: `1px solid ${COLORS.border}`,
+          }}
+        >
+          <div style={{
+            width: `${percent}%`, height: '100%', borderRadius: '999px',
+            background: `linear-gradient(90deg, ${COLORS.primary}, ${COLORS.success})`,
+            transition: 'width 500ms ease',
+          }} />
+        </div>
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', gap: SPACING.sm,
+          ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.sm,
+        }}>
+          <span>{i18n('ai_helper_testdata_generating_hint')}</span>
+          <span style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+            {i18n('ai_helper_testdata_progress_elapsed', elapsedMinutes, String(elapsedSeconds).padStart(2, '0'))}
+          </span>
+        </div>
       </div>
-      <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
-        {i18n('ai_helper_testdata_generating_hint')}
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderPreview = () => {
     if (!plan) return null;
@@ -610,15 +885,24 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const bruteSkipped = verification?.bruteCheck?.skippedTimeout ?? [];
     const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
     const templateSkipped = verification?.templateCheck?.skippedTimeout ?? [];
+    const stressCheck = verification?.stressCheck;
     const hasAiOnlyCases = plan.files.some(
       f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
     );
-    // 全绿门槛：沙箱模式 + 对拍确实执行过（AI 未产出 BRUTE 时不能算全绿）
-    const verificationAllGreen = verification?.mode === 'sandbox'
-      && !hasAiOnlyCases
+    const stressPassed = !!stressCheck
+      && !stressCheck.skippedReason
+      && stressCheck.compared > 0
+      && stressCheck.agreed === stressCheck.compared
+      && (stressCheck.uniqueInputs === undefined
+        || stressCheck.uniqueInputs >= Math.ceil(stressCheck.generated * 0.8));
+    const legacyBrutePassed = !stressCheck
       && (verification?.bruteCheck?.compared ?? 0) > 0
       && bruteDisagreed.length === 0
-      && bruteSkipped.length === 0
+      && bruteSkipped.length === 0;
+    // 全绿门槛：优先要求内部压力对拍全量通过；旧后端回退原 BRUTE 判定。
+    const verificationAllGreen = verification?.mode === 'sandbox'
+      && !hasAiOnlyCases
+      && (stressPassed || legacyBrutePassed)
       && templateSkipped.length === 0;
 
     return (
@@ -663,6 +947,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             <div style={{ fontSize: '13px' }}>
               {i18n(verification.mode === 'sandbox' ? 'ai_helper_testdata_verify_mode_sandbox' : 'ai_helper_testdata_verify_mode_direct')}
             </div>
+            {verification.oracleKind === 'accepted-record' && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n('ai_helper_testdata_verify_ac_candidate')}
+              </div>
+            )}
+            {verification.modelEscalation && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n(
+                  'ai_helper_testdata_verify_model_escalation',
+                  verification.modelEscalation.fromModel,
+                  verification.modelEscalation.toModel,
+                )}
+              </div>
+            )}
             {verification.sampleCheck && (
               <div style={{ fontSize: '13px' }}>
                 {i18n('ai_helper_testdata_verify_samples')}: {verification.sampleCheck.passed}/{verification.sampleCheck.total}
@@ -673,6 +971,17 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {i18n('ai_helper_testdata_verify_brute')}: {verification.bruteCheck.agreed}/{verification.bruteCheck.compared}
                 {bruteSkipped.length > 0 && ` · ${i18n('ai_helper_testdata_verify_brute_skipped')}: [${bruteSkipped.join(', ')}]`}
                 {bruteDisagreed.length > 0 && ` · ${i18n('ai_helper_testdata_verify_brute_disagreed')}: [${bruteDisagreed.join(', ')}]`}
+              </div>
+            )}
+            {stressCheck && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n('ai_helper_testdata_verify_stress')}: {' '}
+                {stressCheck.skippedReason === 'custom-checker'
+                  ? i18n('ai_helper_testdata_verify_stress_custom_checker')
+                  : `${stressCheck.agreed}/${stressCheck.compared}`}
+                {` · ${i18n('ai_helper_testdata_verify_stress_generated')}: ${stressCheck.generated}`}
+                {stressCheck.uniqueInputs !== undefined
+                  && ` · ${i18n('ai_helper_testdata_verify_stress_unique')}: ${stressCheck.uniqueInputs}/${stressCheck.generated}`}
               </div>
             )}
             {verification.validator && (

@@ -28,12 +28,14 @@ export interface PythonRunDetail {
 export interface PythonBatchOptions {
   cpuSeconds?: number;        // 默认 5；clockLimit 恒为 cpu×2
   signal?: AbortSignal;
+  /** 整条验证管线共享的绝对截止时间；每个分块请求都会按剩余时间收紧 timeout。 */
+  deadlineAt?: number;
 }
 
 export interface TestdataSandboxRunner {
   isAvailable(signal?: AbortSignal): Promise<boolean>;
-  runPython(code: string, stdin?: string, signal?: AbortSignal): Promise<PythonRunResult>;
-  runPythonBatch(code: string, inputs: string[], signal?: AbortSignal): Promise<PythonRunResult[]>;
+  runPython(code: string, stdin?: string, signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult>;
+  runPythonBatch(code: string, inputs: string[], signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult[]>;
   runPythonBatchDetailed(code: string, inputs: string[], opts?: PythonBatchOptions): Promise<PythonRunDetail[]>;
 }
 
@@ -55,6 +57,7 @@ const CLOCK_LIMIT_NS = 10_000_000_000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
 const STDOUT_LIMIT_BYTES = 1024 * 1024;
 const STDERR_LIMIT_BYTES = 64 * 1024;
+const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测试点数量后重试';
 
 /**
  * 单请求内所有 cmd 在沙箱内并发执行；实测 2 核机上并发度过高会抢占内存与 RAM 盘，
@@ -155,8 +158,13 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     }
   }
 
-  async runPython(code: string, stdin = '', signal?: AbortSignal): Promise<PythonRunResult> {
-    const [result] = await this.runPythonBatch(code, [stdin], signal);
+  async runPython(
+    code: string,
+    stdin = '',
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): Promise<PythonRunResult> {
+    const [result] = await this.runPythonBatch(code, [stdin], signal, deadlineAt);
     return result;
   }
 
@@ -164,8 +172,13 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
    * 严格版：任一条未 Accepted 即抛出可读中文错误（保留原有报错文案，向后兼容）。
    * 基于宽容版实现，报错取该条 stderr / error / exitStatus。
    */
-  async runPythonBatch(code: string, inputs: string[], signal?: AbortSignal): Promise<PythonRunResult[]> {
-    const details = await this.runPythonBatchDetailed(code, inputs, { signal });
+  async runPythonBatch(
+    code: string,
+    inputs: string[],
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): Promise<PythonRunResult[]> {
+    const details = await this.runPythonBatchDetailed(code, inputs, { signal, deadlineAt });
     return details.map((detail, index) => {
       if (!detail.accepted) {
         const info = detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`;
@@ -196,12 +209,32 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
 
     const details: PythonRunDetail[] = [];
     for (let offset = 0; offset < inputs.length; offset += SANDBOX_CHUNK_SIZE) {
+      const remainingBudgetMs = opts.deadlineAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : opts.deadlineAt - Date.now();
+      if (remainingBudgetMs <= 0) throw new Error(SANDBOX_BUDGET_ERROR);
       const chunk = inputs.slice(offset, offset + SANDBOX_CHUNK_SIZE);
-      const response = await this.http.post(
-        `${this.host}/run`,
-        { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) },
-        { timeout: chunkTimeout, signal: opts.signal, maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES, proxy: false },
-      );
+      let response: { data: unknown };
+      try {
+        response = await this.http.post(
+          `${this.host}/run`,
+          { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) },
+          {
+            timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
+            signal: opts.signal,
+            maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
+            proxy: false,
+          },
+        );
+      } catch (err) {
+        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
+          throw new Error(SANDBOX_BUDGET_ERROR);
+        }
+        throw err;
+      }
+      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+        throw new Error(SANDBOX_BUDGET_ERROR);
+      }
       const results = unwrapResults(response.data);
       if (results.length !== chunk.length) {
         throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);

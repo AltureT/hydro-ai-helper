@@ -3,6 +3,7 @@ import { i18n } from '../utils/i18n';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { ScenarioModelSelector } from './ScenarioModelSelector';
+import { TestdataBenchmarkPanel } from './TestdataBenchmarkPanel';
 import { BudgetConfigForm } from './BudgetConfigForm';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
 import { TelemetrySettings } from './TelemetrySettings';
@@ -435,6 +436,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             />
           </div>
         )}
+
+        <div style={dsCardStyle}>
+          <TestdataBenchmarkPanel disabled={isBusy} />
+        </div>
 
         <div style={dsCardStyle}>
           <h2 style={cardTitleStyle}>{i18n('ai_helper_admin_general_settings')}</h2>

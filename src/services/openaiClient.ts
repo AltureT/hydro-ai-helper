@@ -756,6 +756,28 @@ export class MultiModelClient {
    * options.maxTokens / options.timeoutMs 会透传给每个端点（见 ChatCallOptions）
    */
   async chat(messages: ChatMessage[], systemPrompt: string, options?: ChatCallOptions): Promise<MultiModelChatResult> {
+    return this.chatWithClients(this.clients, messages, systemPrompt, options);
+  }
+
+  /**
+   * 为“模型正常返回、但产物未通过机器验证”的语义失败创建后续模型链。
+   * 与网络 fallback 不同，这里明确跳过已经给出错误产物的模型；调用方可用
+   * 返回的新客户端从下一配置模型重新开始一条干净管线。没有后续模型时返回 null。
+   */
+  createClientStartingAfter(usedModel: MultiModelChatResult['usedModel']): MultiModelClient | null {
+    const usedIndex = this.clients.findIndex(({ config }) =>
+      config.endpointId === usedModel.endpointId && config.modelName === usedModel.modelName,
+    );
+    if (usedIndex < 0 || usedIndex + 1 >= this.clients.length) return null;
+    return new MultiModelClient(this.clients.slice(usedIndex + 1).map(({ config }) => config));
+  }
+
+  private async chatWithClients(
+    activeClients: typeof this.clients,
+    messages: ChatMessage[],
+    systemPrompt: string,
+    options?: ChatCallOptions,
+  ): Promise<MultiModelChatResult> {
     // 外部 signal 已取消则立即抛出
     if (options?.signal?.aborted) {
       throw new AIServiceError('请求已取消', 'aborted');
@@ -776,7 +798,7 @@ export class MultiModelClient {
     const backoffAllowanceMs = Array.from({ length: RETRY.MAX_RETRIES }, (_, attempt) =>
       Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS) * (1 + RETRY.JITTER),
     ).reduce((sum, ms) => sum + ms, 0);
-    const [primary, ...fallbacks] = this.clients;
+    const [primary, ...fallbacks] = activeClients;
     // 单次尝试的有效超时：调用方覆盖优先（如测试数据生成用长超时）
     const attemptMs = (c: { config: ResolvedModelConfig }) =>
       options?.timeoutMs ?? c.config.timeoutSeconds * 1000;
@@ -793,7 +815,7 @@ export class MultiModelClient {
     options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
 
     try {
-      for (const { config, client } of this.clients) {
+      for (const { config, client } of activeClients) {
         if (skippedEndpoints.has(config.endpointId)) continue;
 
         for (let attempt = 0; attempt <= RETRY.MAX_RETRIES; attempt++) {
@@ -900,7 +922,7 @@ export class MultiModelClient {
       console.error('[MultiModelClient] 所有模型均失败:', JSON.stringify({
         timestamp: new Date().toISOString(),
         totalAttempts: errors.length,
-        modelCount: this.clients.length,
+        modelCount: activeClients.length,
         skippedEndpoints: [...skippedEndpoints],
         errors: errors.map(e => ({
           model: e.model,

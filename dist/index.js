@@ -27,6 +27,7 @@ console.log('[AI-Helper] teacherHandler OK');
 const analyticsHandler_1 = require("./handlers/analyticsHandler");
 console.log('[AI-Helper] analyticsHandler OK');
 const adminConfigHandler_1 = require("./handlers/adminConfigHandler");
+const testdataBenchmarkHandler_1 = require("./handlers/testdataBenchmarkHandler");
 console.log('[AI-Helper] adminConfigHandler OK');
 const dashboardHandler_1 = require("./handlers/dashboardHandler");
 console.log('[AI-Helper] dashboardHandler OK');
@@ -259,6 +260,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', adminConfigHandler_1.AdminConfigHandler, adminConfigHandler_1.AdminConfigHandlerPriv);
         // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
         ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
+        // POST /ai-helper/admin/testdata-benchmark - 管理员显式确认费用后运行真实模型难题基准
+        ctx.Route('ai_helper_admin_testdata_benchmark', '/ai-helper/admin/testdata-benchmark', testdataBenchmarkHandler_1.TestdataBenchmarkHandler, testdataBenchmarkHandler_1.TestdataBenchmarkHandlerPriv);
         // GET /ai-helper/export - 数据导出 API
         ctx.Route('ai_helper_export', '/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
         ctx.Route('ai_helper_export_domain', '/d/:domainId/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);

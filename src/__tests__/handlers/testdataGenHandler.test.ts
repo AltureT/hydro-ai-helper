@@ -3,7 +3,7 @@
  * 覆盖：题面多语言解析、权限校验、apply 文件校验与写入顺序
  */
 
-import { db, ProblemModel } from 'hydrooj';
+import { db, PERM, PRIV, ProblemModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
@@ -14,6 +14,7 @@ import {
 } from '../../handlers/testdataGenHandler';
 import * as openaiClient from '../../services/openaiClient';
 import { TestdataGenService, TestdataGenerationError } from '../../services/testdataGenService';
+import { ObjectId } from '../../utils/mongo';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -26,17 +27,29 @@ const PROBLEM_DOC = {
   data: [{ _id: '1.in', size: 4 }, { _id: 'config.yaml', size: 100 }],
 };
 
-function mockFindOne(result: unknown) {
-  const findOne = jest.fn().mockResolvedValue(result);
-  (db.collection as jest.Mock).mockReturnValue({ findOne });
-  return findOne;
+function mockFindOne(result: unknown, acceptedRecords: Array<Record<string, unknown>> = []) {
+  const documentFindOne = jest.fn().mockResolvedValue(result);
+  const recordFindOne = jest.fn().mockImplementation((query: { _id?: { toString(): string } }) => {
+    const wanted = query?._id?.toString();
+    return Promise.resolve(acceptedRecords.find(record => String(record._id) === wanted) || null);
+  });
+  const toArray = jest.fn().mockResolvedValue(acceptedRecords);
+  const limit = jest.fn().mockReturnValue({ toArray });
+  const sort = jest.fn().mockReturnValue({ limit });
+  const find = jest.fn().mockReturnValue({ sort });
+  (db.collection as jest.Mock).mockImplementation((name: string) => (
+    name === 'record'
+      ? { find, findOne: recordFindOne }
+      : { findOne: documentFindOne }
+  ));
+  return { documentFindOne, recordFindOne, find };
 }
 
 interface HandlerLike {
   ctx: { get: jest.Mock };
   request: { params: Record<string, string>; body: Record<string, unknown>; headers: Record<string, string> };
   response: { status?: number; body?: any; type?: string };
-  user: { _id: number; own: jest.Mock; hasPerm: jest.Mock };
+  user: { _id: number; own: jest.Mock; hasPerm: jest.Mock; hasPriv: jest.Mock };
   translate: jest.Mock;
   limitRate: jest.Mock;
 }
@@ -44,6 +57,7 @@ interface HandlerLike {
 function setupHandler<T extends { new (...args: never[]): object }>(Ctor: T, options?: {
   own?: boolean;
   hasPerm?: boolean;
+  hasReadCode?: boolean;
   body?: Record<string, unknown>;
   params?: Record<string, string>;
 }): InstanceType<T> & HandlerLike {
@@ -58,7 +72,16 @@ function setupHandler<T extends { new (...args: never[]): object }>(Ctor: T, opt
   handler.user = {
     _id: 2,
     own: jest.fn().mockReturnValue(options?.own ?? false),
-    hasPerm: jest.fn().mockReturnValue(options?.hasPerm ?? false),
+    hasPerm: jest.fn((perm: unknown) => (
+      perm === PERM.PERM_EDIT_PROBLEM
+        ? (options?.hasPerm ?? false)
+        : perm === PERM.PERM_READ_RECORD_CODE
+          ? (options?.hasReadCode ?? false)
+          : false
+    )),
+    hasPriv: jest.fn((priv: unknown) => (
+      priv === PRIV.PRIV_READ_RECORD_CODE ? (options?.hasReadCode ?? false) : false
+    )),
   };
   handler.translate = jest.fn((key: string) => key);
   handler.limitRate = jest.fn().mockResolvedValue(undefined);
@@ -163,6 +186,34 @@ describe('TestdataGenContextHandler', () => {
     await handler.get();
     expect(handler.response.body.problem.fillInDetected).toBe(false);
   });
+
+  it('只返回当前账号可读的非竞赛 Python 3 AC 元数据，不泄漏源码', async () => {
+    const rid = new ObjectId();
+    const { find } = mockFindOne(PROBLEM_DOC, [{
+      _id: rid, uid: 2, lang: 'py.py3', code: 'print(int(input()) * 2)',
+    }]);
+    const handler = setupHandler(TestdataGenContextHandler, { own: true, hasReadCode: false });
+    await handler.get();
+
+    expect(find).toHaveBeenCalledWith(expect.objectContaining({
+      domainId: 'system', pid: 1530, uid: 2, status: 1,
+      lang: { $in: expect.arrayContaining(['py.py3', 'py.pypy3']) },
+      $or: [{ contest: { $exists: false } }, { contest: null }],
+    }), expect.anything());
+    expect(handler.response.body.acceptedSolutions).toEqual([expect.objectContaining({
+      recordId: rid.toHexString(), lang: 'py.py3', isOwn: true,
+    })]);
+    expect(JSON.stringify(handler.response.body)).not.toContain('print(int(input()) * 2)');
+  });
+
+  it('拥有读取全部记录代码权限时，AC 查询不再限定 uid', async () => {
+    const { find } = mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenContextHandler, {
+      own: true, hasReadCode: true,
+    });
+    await handler.get();
+    expect(find.mock.calls[0][0]).not.toHaveProperty('uid');
+  });
 });
 
 // ─── GenerateHandler ──────────────────────────────────────────────────────────
@@ -205,6 +256,60 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 
+  it('选择本题 Python 3 AC 后，将其源码作为传统题权威标程传入服务', async () => {
+    const rid = new ObjectId();
+    const authoritativeCode = 'n = int(input())\nprint(n * 2)';
+    mockFindOne(PROBLEM_DOC, [{
+      _id: rid, uid: 2, lang: 'py.py3', code: authoritativeCode,
+    }]);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [{ name: '1.in', content: '1', kind: 'case-in' }], caseCount: 1,
+    } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102', problemKind: 'traditional', caseCount: 1,
+        languages: [], acceptedStdRecordId: rid.toHexString(),
+      },
+    });
+    try {
+      await handler.post();
+      expect(handler.response.status).toBeUndefined();
+      expect(genSpy.mock.calls[0][0].options.providedStd).toBe(authoritativeCode);
+      expect(genSpy.mock.calls[0][0].options.providedStdSource).toBe('accepted-record');
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('AC 标程拒绝 auto/函数题与手动源码冲突，且不启动 AI', async () => {
+    const rid = new ObjectId().toHexString();
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'auto', acceptedStdRecordId: rid },
+    });
+    await handler.post();
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body.code).toBe('AC_STD_TRADITIONAL_ONLY');
+    expect(clientSpy).not.toHaveBeenCalled();
+
+    const conflict = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102', problemKind: 'traditional',
+        acceptedStdRecordId: rid, providedStd: 'print(1)',
+      },
+    });
+    await conflict.post();
+    expect(conflict.response.status).toBe(400);
+    expect(conflict.response.body.code).toBe('STD_SOURCE_CONFLICT');
+  });
+
   it('body 读完后 req.destroyed=true 属正常态，不得误判为断开：仍调用生成、不返回 499', async () => {
     // body-parser 读完 POST body 后，请求可读流按正常生命周期置 destroyed=true 并触发
     // 'close'，但连接仍活着（res 未写完）。这不是客户端断开，必须继续生成。
@@ -227,6 +332,70 @@ describe('TestdataGenGenerateHandler', () => {
       expect(genSpy.mock.calls[0][0].options.dataScale).toBe('auto');
       expect(handler.response.status).not.toBe(499);
       expect(handler.response.body.plan).toEqual(planStub);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('请求 SSE 时持续推送阶段进度并以 result 事件返回计划', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const planStub = {
+      problemType: 'traditional',
+      files: [{ name: '1.in', content: '1', kind: 'case-in' }],
+      caseCount: 1,
+    };
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockImplementation(async (params: any) => {
+        params.onProgress?.({ stage: 'blueprint', percent: 12, attempt: 1 });
+        params.onProgress?.({ stage: 'stress_testing', percent: 84, attempt: 1 });
+        return planStub as never;
+      });
+    const writes: string[] = [];
+    const closeListeners: Array<() => void> = [];
+    const rawRes: any = {
+      writableEnded: false,
+      on: jest.fn((event: string, listener: () => void) => {
+        if (event === 'close') closeListeners.push(listener);
+        return rawRes;
+      }),
+      removeListener: jest.fn(),
+      writeHead: jest.fn(),
+      write: jest.fn((chunk: string) => { writes.push(chunk); return true; }),
+      end: jest.fn(() => { rawRes.writableEnded = true; }),
+    };
+    const koaContext: any = {
+      respond: true,
+      compress: true,
+      req: {
+        aborted: false,
+        socket: { destroyed: false, setNoDelay: jest.fn(), setTimeout: jest.fn() },
+      },
+      res: rawRes,
+    };
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 1 },
+    });
+    handler.request.headers.accept = 'text/event-stream';
+    (handler as unknown as { context: unknown }).context = koaContext;
+
+    try {
+      await handler.post();
+      const stream = writes.join('');
+      expect(koaContext.respond).toBe(false);
+      expect(rawRes.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+        'Content-Type': 'text/event-stream',
+        'X-Accel-Buffering': 'no',
+      }));
+      expect(stream).toContain('event: progress');
+      expect(stream).toContain('"stage":"blueprint"');
+      expect(stream).toContain('"stage":"stress_testing"');
+      expect(stream).toContain('event: result');
+      expect(stream).toContain('"plan"');
+      expect(rawRes.end).toHaveBeenCalled();
+      expect(handler.response.body).toBeUndefined();
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -305,6 +474,44 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('EMPTY_STATEMENT');
   });
 
+  it('语义升级成功时分别记录首选模型失败与后续模型成功', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const planStub = {
+      problemType: 'traditional', files: [], caseCount: 1,
+      usedModel: 'primary/model-a → deeper/model-b',
+      verification: {
+        mode: 'sandbox', oracleKind: 'ai-solution',
+        modelEscalation: { fromModel: 'primary/model-a', toModel: 'deeper/model-b' },
+      },
+    };
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockResolvedValue(planStub as never);
+    const recordAttempt = jest.fn().mockResolvedValue(undefined);
+    const recordSuccess = jest.fn().mockResolvedValue(undefined);
+    const recordModelOutcome = jest.fn().mockResolvedValue(undefined);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'featureStatsModel') return { recordAttempt, recordSuccess, recordModelOutcome };
+      return undefined;
+    });
+    try {
+      await handler.post();
+      expect(recordModelOutcome).toHaveBeenNthCalledWith(
+        1, 'testdata_generation', 'primary/model-a', false,
+      );
+      expect(recordModelOutcome).toHaveBeenNthCalledWith(
+        2, 'testdata_generation', 'deeper/model-b', true,
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
   it('自动修复后仍未通过机器验证时返回深度思考模型建议标记', async () => {
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
@@ -375,6 +582,24 @@ describe('TestdataGenSkeletonHandler', () => {
     expect(plan.totalCaseCount).toBe(2);
     // 骨架不经过限流（无 AI 开销）
     expect(handler.limitRate).not.toHaveBeenCalled();
+  });
+
+  it('骨架模式也可加载所选 AC 作为 std.py', async () => {
+    const rid = new ObjectId();
+    mockFindOne(PROBLEM_DOC, [{
+      _id: rid, uid: 2, lang: 'py.py3', code: 'print(input())',
+    }]);
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102', problemKind: 'traditional', caseCount: 1,
+        languages: [], acceptedStdRecordId: rid.toHexString(),
+      },
+    });
+    await handler.post();
+    expect(handler.response.body.plan.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'std.py', content: expect.stringContaining('print(input())') }),
+    ]));
   });
 
   it('auto 模式根据题面函数标记返回含 Java 的函数题骨架', async () => {

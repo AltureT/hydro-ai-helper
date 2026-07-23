@@ -24,6 +24,8 @@
   ],
   "scripts": {
     "build:plugin": "tsc",
+    "prebenchmark:testdata": "npm run build:plugin",
+    "benchmark:testdata": "node dist/benchmarks/testdataBenchmarkCli.js",
     "gen:locale": "node scripts/generateLocaleFallback.js",
     "dev": "tsc --watch",
     "lint": "eslint src --ext .ts,.tsx",

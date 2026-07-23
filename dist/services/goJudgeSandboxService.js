@@ -17,6 +17,7 @@ const CLOCK_LIMIT_NS = 10000000000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
 const STDOUT_LIMIT_BYTES = 1024 * 1024;
 const STDERR_LIMIT_BYTES = 64 * 1024;
+const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测试点数量后重试';
 /**
  * 单请求内所有 cmd 在沙箱内并发执行；实测 2 核机上并发度过高会抢占内存与 RAM 盘，
  * 故大批量按块串行：每块最多 4 条，块间等待上一块返回后再发下一块。
@@ -105,16 +106,16 @@ class GoJudgeSandboxRunner {
             return false;
         }
     }
-    async runPython(code, stdin = '', signal) {
-        const [result] = await this.runPythonBatch(code, [stdin], signal);
+    async runPython(code, stdin = '', signal, deadlineAt) {
+        const [result] = await this.runPythonBatch(code, [stdin], signal, deadlineAt);
         return result;
     }
     /**
      * 严格版：任一条未 Accepted 即抛出可读中文错误（保留原有报错文案，向后兼容）。
      * 基于宽容版实现，报错取该条 stderr / error / exitStatus。
      */
-    async runPythonBatch(code, inputs, signal) {
-        const details = await this.runPythonBatchDetailed(code, inputs, { signal });
+    async runPythonBatch(code, inputs, signal, deadlineAt) {
+        const details = await this.runPythonBatchDetailed(code, inputs, { signal, deadlineAt });
         return details.map((detail, index) => {
             if (!detail.accepted) {
                 const info = detail.stderr || detail.error || `exitStatus=${detail.exitStatus ?? 'unknown'}`;
@@ -138,8 +139,30 @@ class GoJudgeSandboxRunner {
         const chunkTimeout = exports.SANDBOX_CHUNK_SIZE * clockLimitMs + 15000;
         const details = [];
         for (let offset = 0; offset < inputs.length; offset += exports.SANDBOX_CHUNK_SIZE) {
+            const remainingBudgetMs = opts.deadlineAt === undefined
+                ? Number.POSITIVE_INFINITY
+                : opts.deadlineAt - Date.now();
+            if (remainingBudgetMs <= 0)
+                throw new Error(SANDBOX_BUDGET_ERROR);
             const chunk = inputs.slice(offset, offset + exports.SANDBOX_CHUNK_SIZE);
-            const response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) }, { timeout: chunkTimeout, signal: opts.signal, maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES, proxy: false });
+            let response;
+            try {
+                response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) }, {
+                    timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
+                    signal: opts.signal,
+                    maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES,
+                    proxy: false,
+                });
+            }
+            catch (err) {
+                if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
+                    throw new Error(SANDBOX_BUDGET_ERROR);
+                }
+                throw err;
+            }
+            if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+                throw new Error(SANDBOX_BUDGET_ERROR);
+            }
             const results = unwrapResults(response.data);
             if (results.length !== chunk.length) {
                 throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
