@@ -12,11 +12,13 @@ import { PROMPT_LIMITS, API_DEFAULTS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { EffectivenessService } from '../services/effectivenessService';
+import { decideSafetyPenalty } from '../services/safetyPenaltyService';
 import { OutputSafetyService } from '../services/outputSafetyService';
 import { TopicGuardService } from '../services/topicGuardService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
+import { JailbreakLogModel } from '../models/jailbreakLog';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { translateWithParams } from '../utils/i18nHelper';
@@ -227,6 +229,30 @@ export class ChatHandler extends Handler {
     // 获取数据库模型实例
     const conversationModel: ConversationModel = this.ctx.get('conversationModel');
     const messageModel: MessageModel = this.ctx.get('messageModel');
+    const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+
+    // 渐进式冷却仅限制 AI 对话；数据库不可用时保持主流程可用。
+    try {
+      const activeCooldown = await jailbreakLogModel.findActiveCooldown(domainId, userId);
+      if (activeCooldown?.blockedUntil) {
+        const retryAfterSeconds = Math.max(
+          1,
+          Math.ceil((activeCooldown.blockedUntil.getTime() - Date.now()) / 1000)
+        );
+        this.response.status = 429;
+        this.response.body = {
+          error: translateWithParams(this, 'ai_helper_err_safety_cooldown', retryAfterSeconds),
+          code: 'SAFETY_COOLDOWN',
+          category: 'safety',
+          retryable: true,
+          retryAfterSeconds,
+        };
+        this.response.type = 'application/json';
+        return null;
+      }
+    } catch (err) {
+      console.warn('[ChatHandler] 安全冷却检查失败，放行请求:', err);
+    }
 
     // 从请求体获取参数
     const {
@@ -388,25 +414,75 @@ export class ChatHandler extends Handler {
     );
     if (!validation.valid) {
       if (validation.matchedPattern) {
+        let actionTaken: 'blocked' | 'cooldown_60s' | 'cooldown_5m' = 'blocked';
+        let blockedUntil: Date | undefined;
+        let retryAfterSeconds: number | undefined;
+
+        if (validation.category) {
+          try {
+            const penalty = await decideSafetyPenalty(
+              jailbreakLogModel,
+              domainId,
+              userId,
+              validation.category
+            );
+            actionTaken = penalty.action;
+            blockedUntil = penalty.blockedUntil;
+            retryAfterSeconds = penalty.retryAfterSeconds;
+          } catch (penaltyErr) {
+            console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', penaltyErr);
+          }
+        }
+
         try {
           const effectivenessService = new EffectivenessService(this.ctx);
           await effectivenessService.logJailbreakAttempt({
+            domainId,
             userId,
             conversationId,
             problemId,
             questionType,
             matchedPattern: validation.matchedPattern,
-            matchedText: validation.matchedText || userThinking.substring(0, 120)
+            matchedText: validation.matchedText || userThinking.substring(0, 120),
+            category: validation.category,
+            confidence: validation.confidence,
+            riskScore: validation.riskScore,
+            detectionSource: validation.detectionSource,
+            actionTaken,
+            blockedUntil,
           });
         } catch (logErr) {
           console.error('[ChatHandler] 记录越狱日志失败', logErr);
         }
+
+        const isCooldown = Boolean(retryAfterSeconds);
+        this.response.status = isCooldown ? 429 : 422;
+        this.response.body = {
+          error: isCooldown
+            ? translateWithParams(this, 'ai_helper_err_safety_cooldown', retryAfterSeconds as number)
+            : validation.errorKey
+              ? translateWithParams(this, validation.errorKey, ...(validation.errorParams || []))
+              : (validation.error || this.translate('ai_helper_err_input_validation_failed')),
+          code: isCooldown ? 'SAFETY_COOLDOWN' : 'SAFETY_POLICY_VIOLATION',
+          category: validation.category || 'input_validation',
+          retryable: isCooldown,
+          ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+        };
+        this.response.type = 'application/json';
+        return null;
       }
-      throw new Error(
-        validation.errorKey
+
+      this.response.status = 400;
+      this.response.body = {
+        error: validation.errorKey
           ? translateWithParams(this, validation.errorKey, ...(validation.errorParams || []))
-          : (validation.error || this.translate('ai_helper_err_input_validation_failed'))
-      );
+          : (validation.error || this.translate('ai_helper_err_input_validation_failed')),
+        code: 'INPUT_VALIDATION_FAILED',
+        category: 'input_validation',
+        retryable: false,
+      };
+      this.response.type = 'application/json';
+      return null;
     }
 
     // 构造 system prompt
@@ -756,8 +832,8 @@ export class ChatHandler extends Handler {
         signal: requestAc.signal,
         callbacks: {
           onChunk: (content: string) => {
+            // 安全门禁：模型原始分片只在服务端缓冲，完整输出通过校验后才发送。
             fullContent += content;
-            sse.writeEvent('chunk', { content });
           },
           onDone: (result) => {
             fullContent = result.content;
@@ -802,14 +878,15 @@ export class ChatHandler extends Handler {
         problemContent: p.processedProblemContent,
         offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
         codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
+        solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked'),
       });
 
-      if (safetyResult.rewritten) {
-        fullContent = safetyResult.replacementKey
-          ? this.translate(safetyResult.replacementKey)
-          : safetyResult.content;
-        sse.writeEvent('replace', { content: fullContent });
-      }
+      fullContent = safetyResult.replacementKey
+        ? this.translate(safetyResult.replacementKey)
+        : safetyResult.content;
+
+      // 只有校验后的最终内容能够跨越服务端信任边界。
+      sse.writeEvent('chunk', { content: fullContent });
 
       // Save AI message to DB
       const aiMessageTimestamp = new Date();
@@ -1019,7 +1096,8 @@ export class ChatHandler extends Handler {
       problemTitle: p.problemTitleStr,
       problemContent: p.processedProblemContent,
       offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
-      codeTruncatedComment: this.translate('ai_helper_safety_code_truncated')
+      codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
+      solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked')
     });
     aiResponse = safetyResult.replacementKey
       ? this.translate(safetyResult.replacementKey)
@@ -1136,17 +1214,25 @@ export class ChatHandler extends Handler {
 // 导出路由权限配置 - 需要用户登录
 export const ChatHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
-function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
+export function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
   if (!raw) {
     return [];
   }
 
+  const MAX_CUSTOM_RULES = 50;
+  const MAX_PATTERN_LENGTH = 200;
+  const MAX_RULE_TEXT_LENGTH = 10_000;
+  const NESTED_QUANTIFIER = /\((?:\\.|[^()])*(?:[+*]|\{\d+,?\d*\})(?:\\.|[^()])*\)(?:[+*]|\{\d+,?\d*\})/;
   const patterns: RegExp[] = [];
-  const lines = raw.split(/\r?\n/);
+  const lines = raw.slice(0, MAX_RULE_TEXT_LENGTH).split(/\r?\n/).slice(0, MAX_CUSTOM_RULES);
 
   for (const line of lines) {
     const patternText = line.trim();
     if (!patternText) continue;
+    if (patternText.length > MAX_PATTERN_LENGTH || NESTED_QUANTIFIER.test(patternText)) {
+      console.warn('[ChatHandler] 自定义越狱规则过长或包含嵌套量词，已跳过:', patternText.slice(0, 80));
+      continue;
+    }
     try {
       patterns.push(new RegExp(patternText, 'gi'));
     } catch (err) {

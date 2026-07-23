@@ -11,6 +11,7 @@ import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { translateWithParams } from '../utils/i18nHelper';
+import { getDomainId } from '../utils/domainHelper';
 import type { PluginInstallModel } from '../models/pluginInstall';
 
 /**
@@ -81,7 +82,7 @@ export class AdminConfigHandler extends Handler {
       const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
 
       const config = await aiConfigModel.getConfig();
-      const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+      const logResult = await jailbreakLogModel.listWithPagination(page, limit, getDomainId(this));
 
       if (!config) {
         this.response.body = {
@@ -398,7 +399,7 @@ export class AdminConfigHandler extends Handler {
         hasApiKey = false;
       }
 
-      const logResult = await jailbreakLogModel.listWithPagination(1, 20);
+      const logResult = await jailbreakLogModel.listWithPagination(1, 20, getDomainId(this));
 
       this.response.body = {
         config: {
@@ -448,7 +449,7 @@ export class JailbreakLogsHandler extends Handler {
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
       const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
       const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
-      const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+      const logResult = await jailbreakLogModel.listWithPagination(page, limit, getDomainId(this));
 
       this.response.body = {
         logs: logResult.logs.map(formatJailbreakLog),
@@ -473,12 +474,19 @@ export const JailbreakLogsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 function formatJailbreakLog(log: JailbreakLog) {
   return {
     id: log._id.toHexString(),
+    domainId: log.domainId,
     userId: log.userId,
     problemId: log.problemId,
     conversationId: log.conversationId ? log.conversationId.toHexString() : undefined,
     questionType: log.questionType,
     matchedPattern: log.matchedPattern,
     matchedText: log.matchedText,
+    category: log.category,
+    confidence: log.confidence,
+    riskScore: log.riskScore,
+    detectionSource: log.detectionSource,
+    actionTaken: log.actionTaken,
+    blockedUntil: log.blockedUntil?.toISOString(),
     createdAt: log.createdAt.toISOString()
   };
 }

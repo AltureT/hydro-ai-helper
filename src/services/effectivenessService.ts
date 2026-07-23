@@ -12,6 +12,12 @@ import { parseProblemId } from '../utils/problemIdHelper';
 import type { MessageModel } from '../models/message';
 import type { ConversationModel, ConversationMetrics } from '../models/conversation';
 import type { JailbreakLogModel } from '../models/jailbreakLog';
+import type {
+  SafetyAction,
+  SafetyConfidence,
+  SafetyDetectionSource,
+  SafetyViolationCategory,
+} from '../types/safety';
 import type { QuestionType } from './promptService';
 
 const BACKFILL_DELAY_MS = 30 * 60 * 1000;
@@ -247,12 +253,19 @@ export class EffectivenessService {
    * 记录越狱尝试日志
    */
   async logJailbreakAttempt(payload: {
+    domainId?: string;
     userId?: number;
     problemId?: string;
     conversationId?: string | ObjectIdType;
     questionType?: QuestionType;
     matchedPattern: string;
     matchedText: string;
+    category?: SafetyViolationCategory;
+    confidence?: SafetyConfidence;
+    riskScore?: number;
+    detectionSource?: SafetyDetectionSource;
+    actionTaken?: SafetyAction;
+    blockedUntil?: Date;
     createdAt?: Date;
   }): Promise<void> {
     try {
@@ -265,12 +278,19 @@ export class EffectivenessService {
             : payload.conversationId;
 
       await jailbreakLogModel.create({
+        domainId: payload.domainId,
         userId: payload.userId,
         problemId: payload.problemId,
         conversationId: formattedConversationId,
         questionType: payload.questionType,
         matchedPattern: payload.matchedPattern,
         matchedText: payload.matchedText,
+        category: payload.category,
+        confidence: payload.confidence,
+        riskScore: payload.riskScore,
+        detectionSource: payload.detectionSource,
+        actionTaken: payload.actionTaken,
+        blockedUntil: payload.blockedUntil,
         createdAt: payload.createdAt ?? new Date()
       });
     } catch (err) {

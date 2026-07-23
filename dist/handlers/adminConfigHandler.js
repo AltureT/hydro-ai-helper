@@ -44,6 +44,7 @@ const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
+const domainHelper_1 = require("../utils/domainHelper");
 /**
  * AdminConfigHandler - AI 配置页面
  * GET /ai-helper/admin/config
@@ -80,7 +81,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
             const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
             const config = await aiConfigModel.getConfig();
-            const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+            const logResult = await jailbreakLogModel.listWithPagination(page, limit, (0, domainHelper_1.getDomainId)(this));
             if (!config) {
                 this.response.body = {
                     config: null,
@@ -375,7 +376,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 console.error('[AdminConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
                 hasApiKey = false;
             }
-            const logResult = await jailbreakLogModel.listWithPagination(1, 20);
+            const logResult = await jailbreakLogModel.listWithPagination(1, 20, (0, domainHelper_1.getDomainId)(this));
             this.response.body = {
                 config: {
                     endpoints: endpointsWithMaskedKeys,
@@ -425,7 +426,7 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
             const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
             const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
             const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
-            const logResult = await jailbreakLogModel.listWithPagination(page, limit);
+            const logResult = await jailbreakLogModel.listWithPagination(page, limit, (0, domainHelper_1.getDomainId)(this));
             this.response.body = {
                 logs: logResult.logs.map(formatJailbreakLog),
                 total: logResult.total,
@@ -449,12 +450,19 @@ exports.JailbreakLogsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 function formatJailbreakLog(log) {
     return {
         id: log._id.toHexString(),
+        domainId: log.domainId,
         userId: log.userId,
         problemId: log.problemId,
         conversationId: log.conversationId ? log.conversationId.toHexString() : undefined,
         questionType: log.questionType,
         matchedPattern: log.matchedPattern,
         matchedText: log.matchedText,
+        category: log.category,
+        confidence: log.confidence,
+        riskScore: log.riskScore,
+        detectionSource: log.detectionSource,
+        actionTaken: log.actionTaken,
+        blockedUntil: log.blockedUntil?.toISOString(),
         createdAt: log.createdAt.toISOString()
     };
 }

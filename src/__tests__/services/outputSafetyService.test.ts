@@ -60,7 +60,7 @@ def solve():
 
       expect(result.codeLeakDetected).toBe(true);
       expect(result.rewritten).toBe(true);
-      expect(result.content).toContain('代码已被截断');
+      expect(result.content).toContain('完整实现已隐藏');
       expect(result.content).not.toContain('print(x)');
     });
 
@@ -78,7 +78,7 @@ for i in range(n):
       expect(result.content).toContain('arr.append');
     });
 
-    it('should exempt optimize question type from code leak detection', () => {
+    it('should enforce code leak detection for optimize question type', () => {
       const codeBlock = `\`\`\`python
 def solve():
     n = int(input())
@@ -92,8 +92,8 @@ def solve():
       const aiResponse = `优化分析：\n${codeBlock}`;
       const result = service.sanitize(aiResponse, { questionType: 'optimize' });
 
-      expect(result.codeLeakDetected).toBe(false);
-      expect(result.content).toContain('print(x)');
+      expect(result.codeLeakDetected).toBe(true);
+      expect(result.content).not.toContain('print(x)');
     });
 
     it('should not trigger on responses without code blocks', () => {
@@ -145,11 +145,11 @@ def main():
       expect(result.codeLeakDetected).toBe(true);
       // Small block should remain intact
       expect(result.content).toContain('x = 1');
-      // Large block should be truncated
-      expect(result.content).toContain('代码已被截断');
+      // Large block should be hidden completely
+      expect(result.content).toContain('完整实现已隐藏');
     });
 
-    it('should preserve first 2 real code lines when truncating', () => {
+    it('should not preserve executable lines from a complete solution', () => {
       const codeBlock = `\`\`\`python
 def solve():
     n = int(input())
@@ -163,8 +163,42 @@ def solve():
       });
 
       expect(result.codeLeakDetected).toBe(true);
-      expect(result.content).toContain('def solve():');
-      expect(result.content).toContain('n = int(input())');
+      expect(result.content).not.toContain('def solve():');
+      expect(result.content).not.toContain('n = int(input())');
+    });
+
+    it('should block an unfenced complete Python solution', () => {
+      const response = [
+        'def solve():',
+        '    n = int(input())',
+        '    values = []',
+        '    for _ in range(n):',
+        '        values.append(int(input()))',
+        '    values.sort()',
+        '    for value in values:',
+        '        print(value)',
+        'solve()',
+      ].join('\n');
+
+      const result = service.sanitize(response, { questionType: 'think' });
+      expect(result.codeLeakDetected).toBe(true);
+      expect(result.content).not.toContain('values.sort()');
+    });
+
+    it('should block a complete C++ solution even when it has few recognized lines', () => {
+      const response = `\`\`\`cpp
+#include <iostream>
+using namespace std;
+int main() {
+  int n;
+  cin >> n;
+  cout << n;
+}
+\`\`\``;
+
+      const result = service.sanitize(response, { questionType: 'optimize' });
+      expect(result.codeLeakDetected).toBe(true);
+      expect(result.content).not.toContain('int main()');
     });
   });
 });

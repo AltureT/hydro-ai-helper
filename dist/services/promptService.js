@@ -300,23 +300,39 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
         const normalizedWhitelist = problemContentWhitelist
             ? this.normalizeForComparison(problemContentWhitelist.slice(0, MAX_WHITELIST_LENGTH))
             : '';
-        // 越狱关键词检测
-        const builtinPatterns = (0, jailbreakRules_1.getBuiltinJailbreakPatterns)();
-        const allPatterns = extraJailbreakPatterns?.length
-            ? [...builtinPatterns, ...extraJailbreakPatterns]
-            : builtinPatterns;
+        // 安全策略检测：内置规则带类别与风险分值；管理员规则默认视为注入规则。
+        const builtinRules = (0, jailbreakRules_1.getBuiltinJailbreakRules)();
+        const customRules = (extraJailbreakPatterns ?? []).map((pattern) => ({
+            pattern,
+            category: 'prompt_injection',
+            riskScore: 75,
+        }));
+        const allRules = [...builtinRules, ...customRules];
         const detectJailbreak = (text) => {
-            const normalized = (0, promptSanitizer_1.normalizeUnicode)(text);
-            for (const pattern of allPatterns) {
-                pattern.lastIndex = 0;
-                const match = pattern.exec(normalized);
-                if (match) {
-                    // 检查匹配文本是否来自题目内容（白名单）
-                    if (normalizedWhitelist && this.isMatchFromWhitelist(match[0], normalizedWhitelist)) {
-                        // 跳过此匹配，继续检测其他模式
-                        continue;
+            const candidates = this.buildDetectionCandidates(text);
+            for (const candidate of candidates) {
+                for (const rule of allRules) {
+                    const pattern = new RegExp(rule.pattern.source, rule.pattern.flags);
+                    pattern.lastIndex = 0;
+                    const match = pattern.exec(candidate.text);
+                    if (match) {
+                        // 只有普通文本命中才应用题面白名单；编码/插空后的内容不能借题面绕过。
+                        if (candidate.source === 'plain'
+                            && normalizedWhitelist
+                            && this.isMatchFromWhitelist(match[0], normalizedWhitelist)) {
+                            continue;
+                        }
+                        const isCustomRule = customRules.some((custom) => custom.pattern.source === rule.pattern.source);
+                        const detectionSource = isCustomRule && candidate.source === 'plain'
+                            ? 'custom'
+                            : candidate.source;
+                        const category = candidate.source === 'plain'
+                            ? rule.category
+                            : rule.category === 'answer_seeking'
+                                ? 'answer_seeking'
+                                : 'obfuscated_injection';
+                        return { rule, match, candidate, category, detectionSource };
                     }
-                    return { pattern, match };
                 }
             }
             return null;
@@ -326,13 +342,23 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
         if (userThinking) {
             const result = detectJailbreak(userThinking);
             if (result) {
-                const { pattern, match } = result;
+                const { rule, match, candidate, category, detectionSource } = result;
                 return {
                     valid: false,
-                    error: jailbreakError,
-                    errorKey: jailbreakErrorKey,
-                    matchedPattern: pattern.source,
-                    matchedText: this.buildMatchedSnippet(userThinking, match.index ?? 0, match[0])
+                    error: category === 'answer_seeking'
+                        ? '我不能直接提供完整答案或可提交代码。请说明你已经想到哪一步，我会给你下一条提示。'
+                        : jailbreakError,
+                    errorKey: category === 'answer_seeking' ? 'ai_helper_err_answer_seeking' : jailbreakErrorKey,
+                    matchedPattern: rule.pattern.source,
+                    matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
+                    category,
+                    confidence: 'high',
+                    riskScore: candidate.source === 'plain'
+                        ? rule.riskScore
+                        : category === 'answer_seeking'
+                            ? Math.max(60, rule.riskScore)
+                            : Math.max(95, rule.riskScore),
+                    detectionSource,
                 };
             }
         }
@@ -341,13 +367,23 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
         if (hasCodeInput) {
             const result = detectJailbreak(normalizedCode);
             if (result) {
-                const { pattern, match } = result;
+                const { rule, match, candidate, category, detectionSource } = result;
                 return {
                     valid: false,
-                    error: jailbreakError,
-                    errorKey: jailbreakErrorKey,
-                    matchedPattern: pattern.source,
-                    matchedText: this.buildMatchedSnippet(normalizedCode, match.index ?? 0, match[0])
+                    error: category === 'answer_seeking'
+                        ? '我不能直接提供完整答案或可提交代码。请说明你已经想到哪一步，我会给你下一条提示。'
+                        : jailbreakError,
+                    errorKey: category === 'answer_seeking' ? 'ai_helper_err_answer_seeking' : jailbreakErrorKey,
+                    matchedPattern: rule.pattern.source,
+                    matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
+                    category,
+                    confidence: 'high',
+                    riskScore: candidate.source === 'plain'
+                        ? rule.riskScore
+                        : category === 'answer_seeking'
+                            ? Math.max(60, rule.riskScore)
+                            : Math.max(95, rule.riskScore),
+                    detectionSource,
                 };
             }
         }
@@ -361,6 +397,49 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
             .toLowerCase()
             .replace(/\s+/g, ' ')
             .trim();
+    }
+    /**
+     * 构建有限、可审计的检测视图。仅解码一层且限制候选长度，避免递归解码和放大攻击。
+     */
+    buildDetectionCandidates(text) {
+        const normalized = (0, promptSanitizer_1.normalizeUnicode)(text);
+        const candidates = [{ text: normalized, source: 'plain' }];
+        const seen = new Set([normalized]);
+        const compacted = normalized.replace(/[\s\u00a0\u3000_\-—–·•.。,，;；:：'"“”‘’\\/|]+/g, '');
+        if (compacted.length >= 4 && !seen.has(compacted)) {
+            seen.add(compacted);
+            candidates.push({ text: compacted, source: 'compacted' });
+        }
+        const addDecodedCandidate = (decoded, source) => {
+            const normalizedDecoded = (0, promptSanitizer_1.normalizeUnicode)(decoded);
+            if (normalizedDecoded.length < 4 || normalizedDecoded.length > limits_1.PROMPT_LIMITS.MAX_THINKING_LENGTH)
+                return;
+            if (!this.isMostlyPrintable(normalizedDecoded) || seen.has(normalizedDecoded))
+                return;
+            seen.add(normalizedDecoded);
+            candidates.push({ text: normalizedDecoded, source });
+        };
+        const base64Tokens = normalized.match(/\b[A-Za-z0-9+/]{24,2000}={0,2}\b/g) ?? [];
+        for (const token of base64Tokens.slice(0, 3)) {
+            try {
+                addDecodedCandidate(Buffer.from(token, 'base64').toString('utf8'), 'base64');
+            }
+            catch { /* 非法编码不影响普通输入 */ }
+        }
+        const hexTokens = normalized.match(/\b(?:[0-9a-fA-F]{2}){12,1000}\b/g) ?? [];
+        for (const token of hexTokens.slice(0, 3)) {
+            try {
+                addDecodedCandidate(Buffer.from(token, 'hex').toString('utf8'), 'hex');
+            }
+            catch { /* 非法编码不影响普通输入 */ }
+        }
+        return candidates;
+    }
+    isMostlyPrintable(text) {
+        if (!text)
+            return false;
+        const printable = Array.from(text).filter((char) => char === '\n' || char === '\r' || char === '\t' || char.charCodeAt(0) >= 0x20).length;
+        return printable / Array.from(text).length >= 0.9;
     }
     /**
      * 检查匹配文本是否来自白名单（题目内容）

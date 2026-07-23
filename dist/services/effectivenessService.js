@@ -216,12 +216,19 @@ class EffectivenessService {
                     ? new mongo_1.ObjectId(payload.conversationId)
                     : payload.conversationId;
             await jailbreakLogModel.create({
+                domainId: payload.domainId,
                 userId: payload.userId,
                 problemId: payload.problemId,
                 conversationId: formattedConversationId,
                 questionType: payload.questionType,
                 matchedPattern: payload.matchedPattern,
                 matchedText: payload.matchedText,
+                category: payload.category,
+                confidence: payload.confidence,
+                riskScore: payload.riskScore,
+                detectionSource: payload.detectionSource,
+                actionTaken: payload.actionTaken,
+                blockedUntil: payload.blockedUntil,
                 createdAt: payload.createdAt ?? new Date()
             });
         }

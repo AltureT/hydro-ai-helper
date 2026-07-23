@@ -55,6 +55,10 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             if (log.problemId) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_problem_id')}${log.problemId}`);
             if (log.conversationId) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_conversation_id')}${log.conversationId}`);
             if (log.questionType) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_question_type')}${log.questionType}`);
+            if (log.category) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_category')}${log.category}`);
+            if (log.riskScore !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_risk_score')}${log.riskScore}`);
+            if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${log.actionTaken}`);
+            if (log.detectionSource) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_detection_source')}${log.detectionSource}`);
             const contextText = contextPieces.join(' \u00b7 ');
 
             return (

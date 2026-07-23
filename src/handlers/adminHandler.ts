@@ -13,6 +13,7 @@ import type { JailbreakLog } from '../models/jailbreakLog';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { translateWithParams } from '../utils/i18nHelper';
+import { getDomainId } from '../utils/domainHelper';
 
 /**
  * 更新配置请求接口
@@ -39,7 +40,7 @@ export class GetConfigHandler extends Handler {
 
       // 读取配置
       const config = await aiConfigModel.getConfig();
-      const recentLogs = await jailbreakLogModel.listRecent(20);
+      const recentLogs = await jailbreakLogModel.listRecent(20, getDomainId(this));
 
       if (!config) {
         // 尚未配置，返回 null
@@ -203,7 +204,7 @@ export class UpdateConfigHandler extends Handler {
       }
 
       // 返回更新后的配置
-      const recentLogs = await jailbreakLogModel.listRecent(20);
+      const recentLogs = await jailbreakLogModel.listRecent(20, getDomainId(this));
 
       this.response.body = {
         config: {
@@ -496,12 +497,19 @@ export class FetchModelsHandler extends Handler {
 function formatJailbreakLog(log: JailbreakLog) {
   return {
     id: log._id.toHexString(),
+    domainId: log.domainId,
     userId: log.userId,
     problemId: log.problemId,
     conversationId: log.conversationId ? log.conversationId.toHexString() : undefined,
     questionType: log.questionType,
     matchedPattern: log.matchedPattern,
     matchedText: log.matchedText,
+    category: log.category,
+    confidence: log.confidence,
+    riskScore: log.riskScore,
+    detectionSource: log.detectionSource,
+    actionTaken: log.actionTaken,
+    blockedUntil: log.blockedUntil?.toISOString(),
     createdAt: log.createdAt.toISOString()
   };
 }

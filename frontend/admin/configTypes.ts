@@ -47,12 +47,19 @@ export interface ConfigState {
 
 export interface JailbreakLogEntry {
   id: string;
+  domainId?: string;
   userId?: number;
   problemId?: string;
   conversationId?: string;
   questionType?: string;
   matchedPattern: string;
   matchedText: string;
+  category?: 'answer_seeking' | 'prompt_injection' | 'prompt_exfiltration' | 'obfuscated_injection';
+  confidence?: 'medium' | 'high';
+  riskScore?: number;
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'custom';
+  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+  blockedUntil?: string;
   createdAt: string;
 }
 

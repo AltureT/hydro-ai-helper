@@ -20,6 +20,7 @@ function createMockCollection() {
     createIndex: jest.fn(),
     insertOne: jest.fn(),
     find: jest.fn().mockReturnValue(chainMock),
+    findOne: jest.fn(),
     countDocuments: jest.fn(),
     _chain: chainMock,
   };
@@ -44,9 +45,13 @@ describe('JailbreakLogModel', () => {
   });
 
   describe('ensureIndexes', () => {
-    it('should create 2 indexes', async () => {
+    it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(2);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(3);
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { domainId: 1, userId: 1, createdAt: -1 },
+        { name: 'idx_domain_user_createdAt' }
+      );
       expect(console.log).toHaveBeenCalledWith('[JailbreakLogModel] Indexes ensured');
     });
   });
@@ -67,19 +72,26 @@ describe('JailbreakLogModel', () => {
       mockColl.insertOne.mockResolvedValue({ insertedId: 'log-2' });
 
       await model.create({
+        domainId: 'domain-a',
         userId: 42,
         problemId: 'P1001',
         conversationId: 'conv-1',
         questionType: 'debug',
         matchedPattern: 'pattern',
         matchedText: 'text',
+        category: 'prompt_injection',
+        riskScore: 85,
+        actionTaken: 'blocked',
       });
 
       const inserted = mockColl.insertOne.mock.calls[0][0];
       expect(inserted.userId).toBe(42);
+      expect(inserted.domainId).toBe('domain-a');
       expect(inserted.problemId).toBe('P1001');
       expect(inserted.conversationId).toBe('conv-1');
       expect(inserted.questionType).toBe('debug');
+      expect(inserted.category).toBe('prompt_injection');
+      expect(inserted.riskScore).toBe(85);
     });
 
     it('should leave conversationId undefined when not provided', async () => {
@@ -125,6 +137,47 @@ describe('JailbreakLogModel', () => {
       await model.listRecent();
       expect(mockColl._chain.limit).toHaveBeenCalledWith(20);
     });
+
+    it('should scope recent logs to the requested domain', async () => {
+      await model.listRecent(20, 'domain-a');
+      expect(mockColl.find).toHaveBeenCalledWith({ domainId: 'domain-a' });
+    });
+  });
+
+  describe('penalty queries', () => {
+    it('should count high-confidence events by domain, user and category', async () => {
+      mockColl.countDocuments.mockResolvedValue(2);
+      const since = new Date('2026-07-23T00:00:00Z');
+
+      const count = await model.countRecentByCategories(
+        'domain-a',
+        42,
+        ['prompt_injection', 'prompt_exfiltration'],
+        since
+      );
+
+      expect(count).toBe(2);
+      expect(mockColl.countDocuments).toHaveBeenCalledWith({
+        domainId: 'domain-a',
+        userId: 42,
+        category: { $in: ['prompt_injection', 'prompt_exfiltration'] },
+        confidence: 'high',
+        createdAt: { $gte: since },
+      });
+    });
+
+    it('should find only active cooldowns in the same domain', async () => {
+      const now = new Date('2026-07-23T00:00:00Z');
+      mockColl.findOne.mockResolvedValue({ blockedUntil: new Date('2026-07-23T00:01:00Z') });
+
+      const result = await model.findActiveCooldown('domain-a', 42, now);
+
+      expect(result).toBeTruthy();
+      expect(mockColl.findOne).toHaveBeenCalledWith(
+        { domainId: 'domain-a', userId: 42, blockedUntil: { $gt: now } },
+        { sort: { blockedUntil: -1 } }
+      );
+    });
   });
 
   describe('listWithPagination', () => {
@@ -165,6 +218,16 @@ describe('JailbreakLogModel', () => {
       await model.listWithPagination();
       expect(mockColl._chain.skip).toHaveBeenCalledWith(0);
       expect(mockColl._chain.limit).toHaveBeenCalledWith(20);
+    });
+
+    it('should scope pagination and totals to one domain', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      mockColl.countDocuments.mockResolvedValue(0);
+
+      await model.listWithPagination(1, 20, 'domain-a');
+
+      expect(mockColl.find).toHaveBeenCalledWith({ domainId: 'domain-a' });
+      expect(mockColl.countDocuments).toHaveBeenCalledWith({ domainId: 'domain-a' });
     });
   });
 });

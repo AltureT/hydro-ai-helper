@@ -11,11 +11,13 @@ class JailbreakLogModel {
     }
     async ensureIndexes() {
         await this.collection.createIndex({ createdAt: -1 }, { name: 'idx_createdAt' });
-        await this.collection.createIndex({ userId: 1, createdAt: -1 }, { name: 'idx_userId_createdAt' });
+        await this.collection.createIndex({ domainId: 1, userId: 1, createdAt: -1 }, { name: 'idx_domain_user_createdAt' });
+        await this.collection.createIndex({ domainId: 1, userId: 1, blockedUntil: -1 }, { name: 'idx_domain_user_blockedUntil' });
         console.log('[JailbreakLogModel] Indexes ensured');
     }
     async create(data) {
         const insertDoc = {
+            domainId: data.domainId,
             userId: data.userId,
             problemId: data.problemId,
             conversationId: data.conversationId === undefined
@@ -24,13 +26,32 @@ class JailbreakLogModel {
             questionType: data.questionType,
             matchedPattern: data.matchedPattern,
             matchedText: data.matchedText,
+            category: data.category,
+            confidence: data.confidence,
+            riskScore: data.riskScore,
+            detectionSource: data.detectionSource,
+            actionTaken: data.actionTaken,
+            blockedUntil: data.blockedUntil,
             createdAt: data.createdAt ?? new Date()
         };
         const result = await this.collection.insertOne(insertDoc);
         return result.insertedId;
     }
-    async listRecent(limit = 20) {
-        return this.collection.find().sort({ createdAt: -1 }).limit(limit).toArray();
+    async listRecent(limit = 20, domainId) {
+        const filter = domainId ? { domainId } : {};
+        return this.collection.find(filter).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+    async countRecentByCategories(domainId, userId, categories, since) {
+        return this.collection.countDocuments({
+            domainId,
+            userId,
+            category: { $in: categories },
+            confidence: 'high',
+            createdAt: { $gte: since },
+        });
+    }
+    async findActiveCooldown(domainId, userId, now = new Date()) {
+        return this.collection.findOne({ domainId, userId, blockedUntil: { $gt: now } }, { sort: { blockedUntil: -1 } });
     }
     /**
      * 分页查询越狱记录
@@ -38,20 +59,21 @@ class JailbreakLogModel {
      * @param limit 每页条数（最大100）
      * @returns 分页结果
      */
-    async listWithPagination(page = 1, limit = 20) {
+    async listWithPagination(page = 1, limit = 20, domainId) {
         // 参数边界处理
         const safePage = Math.max(1, Math.floor(page));
         const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
         const skip = (safePage - 1) * safeLimit;
+        const filter = domainId ? { domainId } : {};
         // 并行查询数据和总数
         const [logs, total] = await Promise.all([
             this.collection
-                .find()
+                .find(filter)
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(safeLimit)
                 .toArray(),
-            this.collection.countDocuments()
+            this.collection.countDocuments(filter)
         ]);
         const totalPages = Math.ceil(total / safeLimit);
         return {
