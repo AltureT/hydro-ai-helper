@@ -12,6 +12,7 @@ const jailbreakRules_1 = require("../constants/jailbreakRules");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
+const domainHelper_1 = require("../utils/domainHelper");
 /**
  * GetConfigHandler - 获取当前配置
  * GET /ai-helper/admin/config
@@ -23,7 +24,7 @@ class GetConfigHandler extends hydrooj_1.Handler {
             const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
             // 读取配置
             const config = await aiConfigModel.getConfig();
-            const recentLogs = await jailbreakLogModel.listRecent(20);
+            const recentLogs = await jailbreakLogModel.listRecent(20, (0, domainHelper_1.getDomainId)(this));
             if (!config) {
                 // 尚未配置，返回 null
                 this.response.body = {
@@ -170,7 +171,7 @@ class UpdateConfigHandler extends hydrooj_1.Handler {
                 hasApiKey = false;
             }
             // 返回更新后的配置
-            const recentLogs = await jailbreakLogModel.listRecent(20);
+            const recentLogs = await jailbreakLogModel.listRecent(20, (0, domainHelper_1.getDomainId)(this));
             this.response.body = {
                 config: {
                     apiBaseUrl: updatedConfig.apiBaseUrl,
@@ -442,12 +443,19 @@ exports.FetchModelsHandler = FetchModelsHandler;
 function formatJailbreakLog(log) {
     return {
         id: log._id.toHexString(),
+        domainId: log.domainId,
         userId: log.userId,
         problemId: log.problemId,
         conversationId: log.conversationId ? log.conversationId.toHexString() : undefined,
         questionType: log.questionType,
         matchedPattern: log.matchedPattern,
         matchedText: log.matchedText,
+        category: log.category,
+        confidence: log.confidence,
+        riskScore: log.riskScore,
+        detectionSource: log.detectionSource,
+        actionTaken: log.actionTaken,
+        blockedUntil: log.blockedUntil?.toISOString(),
         createdAt: log.createdAt.toISOString()
     };
 }

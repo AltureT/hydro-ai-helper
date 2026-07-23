@@ -215,18 +215,28 @@ class EffectivenessService {
                 : typeof payload.conversationId === 'string'
                     ? new mongo_1.ObjectId(payload.conversationId)
                     : payload.conversationId;
-            await jailbreakLogModel.create({
+            return await jailbreakLogModel.create({
+                domainId: payload.domainId,
                 userId: payload.userId,
                 problemId: payload.problemId,
                 conversationId: formattedConversationId,
                 questionType: payload.questionType,
                 matchedPattern: payload.matchedPattern,
                 matchedText: payload.matchedText,
+                category: payload.category,
+                confidence: payload.confidence,
+                riskScore: payload.riskScore,
+                detectionSource: payload.detectionSource,
+                actionTaken: payload.actionTaken,
+                blockedUntil: payload.blockedUntil,
+                penaltyCounterId: payload.penaltyCounterId,
+                penaltyEventId: payload.penaltyEventId,
                 createdAt: payload.createdAt ?? new Date()
             });
         }
         catch (err) {
             this.ctx.logger.error('EffectivenessService logJailbreakAttempt error', err);
+            return undefined;
         }
     }
     async fetchProblemDifficulty(domainId, problemId) {

@@ -30,6 +30,7 @@ function createMockDb(overrides: Record<string, any[]> = {}) {
               if (val && typeof val === 'object' && !Array.isArray(val)) {
                 const op = val as any;
                 if (op.$in && !op.$in.includes(docVal)) return false;
+                if (op.$ne !== undefined && docVal === op.$ne) return false;
                 if (op.$gte && docVal < op.$gte) return false;
                 if (op.$lte && docVal > op.$lte) return false;
               } else {
@@ -86,10 +87,16 @@ function makeMessage(conversationId: string, role: string, questionType?: string
   };
 }
 
-function makeJailbreak(userId: number): any {
+function makeJailbreak(
+  userId: number,
+  domainId: string = 'test',
+  category: string = 'prompt_injection'
+): any {
   return {
     _id: `jb_${userId}_${Math.random().toString(36).slice(2, 6)}`,
+    domainId,
     userId,
+    category,
     createdAt: new Date(),
   };
 }
@@ -224,6 +231,64 @@ describe('TeachingAnalysisService', () => {
       );
       expect(strategy.length).toBe(1);
       expect(strategy[0].evidence.affectedStudents.length).toBe(5);
+    });
+
+    it('should exclude safety events from other domains', async () => {
+      const jailbreakLogs = [101, 102, 103, 104, 105].map((uid) =>
+        makeJailbreak(uid, 'other-domain')
+      );
+      const conversations = [101, 102, 103, 104, 105].map((uid) => makeConversation(uid, '1'));
+      const db = createMockDb({
+        ai_conversations: conversations,
+        ai_jailbreak_logs: jailbreakLogs,
+      });
+
+      const service = new TeachingAnalysisService(db);
+      const result = await service.analyze(baseInput());
+
+      const strategy = result.findings.filter(
+        (f) => f.dimension === 'strategy' && f.title.includes('越狱'),
+      );
+      expect(strategy).toHaveLength(0);
+    });
+
+    it('should not report ordinary answer seeking as a jailbreak finding', async () => {
+      const answerSeekingLogs = [101, 102, 103, 104, 105].map((uid) =>
+        makeJailbreak(uid, 'test', 'answer_seeking')
+      );
+      const conversations = [101, 102, 103, 104, 105].map((uid) => makeConversation(uid, '1'));
+      const db = createMockDb({
+        ai_conversations: conversations,
+        ai_jailbreak_logs: answerSeekingLogs,
+      });
+
+      const service = new TeachingAnalysisService(db);
+      const result = await service.analyze(baseInput());
+
+      const strategy = result.findings.filter(
+        (f) => f.dimension === 'strategy' && f.title.includes('越狱'),
+      );
+      expect(strategy).toHaveLength(0);
+    });
+
+    it('should exclude events reviewed as false positives', async () => {
+      const falsePositives = [101, 102, 103, 104, 105].map((uid) => ({
+        ...makeJailbreak(uid),
+        reviewStatus: 'false_positive',
+      }));
+      const conversations = [101, 102, 103, 104, 105].map((uid) => makeConversation(uid, '1'));
+      const db = createMockDb({
+        ai_conversations: conversations,
+        ai_jailbreak_logs: falsePositives,
+      });
+
+      const service = new TeachingAnalysisService(db);
+      const result = await service.analyze(baseInput());
+      const strategy = result.findings.filter(
+        (f) => f.dimension === 'strategy' && f.title.includes('越狱'),
+      );
+
+      expect(strategy).toHaveLength(0);
     });
   });
 

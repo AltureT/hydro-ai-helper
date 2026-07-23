@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { i18n } from '../utils/i18n';
+import { buildApiUrl } from '../utils/domainUtils';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { ScenarioModelSelector } from './ScenarioModelSelector';
@@ -15,7 +16,7 @@ import {
 } from '../utils/styles';
 import type {
   Endpoint, ConfigState, JailbreakLogPagination, APIConfigResponse, TelemetryStatus,
-  AIScenarioKey, SelectedModel, ScenarioModelsState,
+  AIScenarioKey, SelectedModel, ScenarioModelsState, JailbreakLogFilters,
 } from './configTypes';
 
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
@@ -90,11 +91,18 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [builtinJailbreakPatterns, setBuiltinJailbreakPatterns] = useState<string[]>([]);
   const [logPagination, setLogPagination] = useState<JailbreakLogPagination>({
     logs: [], total: 0, page: 1, totalPages: 0,
+    summary: {
+      total: 0, pending: 0, confirmed: 0, falsePositive: 0,
+      reviewed: 0, falsePositiveRate: 0, appealedPending: 0,
+    },
+    ruleMetrics: [],
   });
+  const [logFilters, setLogFilters] = useState<JailbreakLogFilters>({});
 
   const { toasts, showToast, dismissToast } = useToast();
 
   const [logsLoading, setLogsLoading] = useState(false);
+  const logsRequestId = useRef(0);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
 
   useEffect(() => {
@@ -130,20 +138,36 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     }
   }, []);
 
-  const loadJailbreakLogs = useCallback(async (page: number = 1) => {
+  const loadJailbreakLogs = useCallback(async (
+    page: number = 1,
+    filters: JailbreakLogFilters = {}
+  ) => {
+    const requestId = ++logsRequestId.current;
     setLogsLoading(true);
     try {
-      const res = await fetch(`/ai-helper/admin/jailbreak-logs?page=${page}&limit=20`, {
+      const params = new URLSearchParams({ page: String(page), limit: '20' });
+      if (filters.reviewStatus) params.set('reviewStatus', filters.reviewStatus);
+      if (filters.category) params.set('category', filters.category);
+      if (filters.appealedOnly) params.set('appealed', '1');
+      if (filters.userId) params.set('userId', filters.userId);
+      if (filters.problemId) params.set('problemId', filters.problemId);
+      if (filters.actionTaken) params.set('actionTaken', filters.actionTaken);
+      if (filters.detectionSource) params.set('detectionSource', filters.detectionSource);
+      if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+      if (filters.dateTo) params.set('dateTo', filters.dateTo);
+      const res = await fetch(`${buildApiUrl('/ai-helper/admin/jailbreak-logs')}?${params.toString()}`, {
         method: 'GET', credentials: 'include',
       });
       if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_load_failed')}: ${res.status}`);
       const json: JailbreakLogPagination = await res.json();
+      if (requestId !== logsRequestId.current) return;
       setLogPagination(json);
     } catch (err: any) {
+      if (requestId !== logsRequestId.current) return;
       console.error('Load jailbreak logs error:', err);
       showToast(err.message || i18n('ai_helper_admin_jailbreak_load_failed'), 'error');
     } finally {
-      setLogsLoading(false);
+      if (requestId === logsRequestId.current) setLogsLoading(false);
     }
   }, []);
 
@@ -330,7 +354,90 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const changePage = (newPage: number) => {
     if (newPage < 1 || newPage > logPagination.totalPages) return;
-    loadJailbreakLogs(newPage);
+    loadJailbreakLogs(newPage, logFilters);
+  };
+
+  const changeLogFilters = (filters: JailbreakLogFilters) => {
+    setLogFilters(filters);
+    loadJailbreakLogs(1, filters);
+  };
+
+  const reviewJailbreakLog = async (
+    id: string,
+    reviewStatus: 'confirmed' | 'false_positive'
+  ) => {
+    try {
+      const res = await fetch(buildApiUrl(`/ai-helper/admin/jailbreak-logs/${encodeURIComponent(id)}/review`), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ reviewStatus }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || i18n('ai_helper_admin_jailbreak_review_failed'));
+      }
+      showToast(i18n('ai_helper_admin_jailbreak_review_success'), 'success');
+      await loadJailbreakLogs(logPagination.page, logFilters);
+    } catch (err: any) {
+      console.error('Review jailbreak log error:', err);
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_review_failed'), 'error');
+    }
+  };
+
+  const bulkReviewJailbreakLogs = async (
+    ids: string[],
+    reviewStatus: 'confirmed' | 'false_positive'
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch(buildApiUrl('/ai-helper/admin/jailbreak-logs/bulk-review'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ ids, reviewStatus }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || i18n('ai_helper_admin_jailbreak_bulk_failed'));
+      }
+      showToast(i18n('ai_helper_admin_jailbreak_bulk_success', json.modifiedCount || 0), 'success');
+      await loadJailbreakLogs(logPagination.page, logFilters);
+      return true;
+    } catch (err: any) {
+      console.error('Bulk review jailbreak logs error:', err);
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_bulk_failed'), 'error');
+      return false;
+    }
+  };
+
+  const exportJailbreakLogs = async (filters: JailbreakLogFilters): Promise<void> => {
+    try {
+      const params = new URLSearchParams();
+      if (filters.reviewStatus) params.set('reviewStatus', filters.reviewStatus);
+      if (filters.category) params.set('category', filters.category);
+      if (filters.appealedOnly) params.set('appealed', '1');
+      if (filters.userId) params.set('userId', filters.userId);
+      if (filters.problemId) params.set('problemId', filters.problemId);
+      if (filters.actionTaken) params.set('actionTaken', filters.actionTaken);
+      if (filters.detectionSource) params.set('detectionSource', filters.detectionSource);
+      if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+      if (filters.dateTo) params.set('dateTo', filters.dateTo);
+      const url = `${buildApiUrl('/ai-helper/admin/jailbreak-logs/export')}?${params.toString()}`;
+      const res = await fetch(url, { method: 'GET', credentials: 'include' });
+      if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_export_failed')}: ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `ai-safety-events-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err: any) {
+      console.error('Export jailbreak logs error:', err);
+      showToast(err.message || i18n('ai_helper_admin_jailbreak_export_failed'), 'error');
+    }
   };
 
   const copyToClipboard = async (text: string) => {
@@ -612,6 +719,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           onChangePage={changePage}
           onCopyToClipboard={copyToClipboard}
           onAppendPattern={appendPatternToCustomRules}
+          onReview={reviewJailbreakLog}
+          onBulkReview={bulkReviewJailbreakLogs}
+          onExport={exportJailbreakLogs}
+          filters={logFilters}
+          onChangeFilters={changeLogFilters}
         />
 
         <TelemetrySettings

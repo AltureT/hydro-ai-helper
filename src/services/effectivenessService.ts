@@ -12,6 +12,12 @@ import { parseProblemId } from '../utils/problemIdHelper';
 import type { MessageModel } from '../models/message';
 import type { ConversationModel, ConversationMetrics } from '../models/conversation';
 import type { JailbreakLogModel } from '../models/jailbreakLog';
+import type {
+  SafetyAction,
+  SafetyConfidence,
+  SafetyDetectionSource,
+  SafetyViolationCategory,
+} from '../types/safety';
 import type { QuestionType } from './promptService';
 
 const BACKFILL_DELAY_MS = 30 * 60 * 1000;
@@ -247,14 +253,23 @@ export class EffectivenessService {
    * 记录越狱尝试日志
    */
   async logJailbreakAttempt(payload: {
+    domainId?: string;
     userId?: number;
     problemId?: string;
     conversationId?: string | ObjectIdType;
     questionType?: QuestionType;
     matchedPattern: string;
     matchedText: string;
+    category?: SafetyViolationCategory;
+    confidence?: SafetyConfidence;
+    riskScore?: number;
+    detectionSource?: SafetyDetectionSource;
+    actionTaken?: SafetyAction;
+    blockedUntil?: Date;
+    penaltyCounterId?: string;
+    penaltyEventId?: string;
     createdAt?: Date;
-  }): Promise<void> {
+  }): Promise<ObjectIdType | undefined> {
     try {
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
       const formattedConversationId =
@@ -264,17 +279,27 @@ export class EffectivenessService {
             ? new ObjectId(payload.conversationId)
             : payload.conversationId;
 
-      await jailbreakLogModel.create({
+      return await jailbreakLogModel.create({
+        domainId: payload.domainId,
         userId: payload.userId,
         problemId: payload.problemId,
         conversationId: formattedConversationId,
         questionType: payload.questionType,
         matchedPattern: payload.matchedPattern,
         matchedText: payload.matchedText,
+        category: payload.category,
+        confidence: payload.confidence,
+        riskScore: payload.riskScore,
+        detectionSource: payload.detectionSource,
+        actionTaken: payload.actionTaken,
+        blockedUntil: payload.blockedUntil,
+        penaltyCounterId: payload.penaltyCounterId,
+        penaltyEventId: payload.penaltyEventId,
         createdAt: payload.createdAt ?? new Date()
       });
     } catch (err) {
       this.ctx.logger.error('EffectivenessService logJailbreakAttempt error', err);
+      return undefined;
     }
   }
 

@@ -21,10 +21,9 @@ const OFF_TOPIC_KEYWORDS = [
     // 网络用语/角色扮演
     '猫娘', '女仆', 'AI女友', '恋爱'
 ];
-const CODE_BLOCK_REGEX = /```\w*\n([\s\S]*?)```/g;
-const CODE_LINE_PATTERN = /^\s*(def\s|for\s|if\s|elif\s|else\s*:|while\s|return\b|print\s*\(|import\s|from\s|class\s|try\s*:|except\b|raise\s|with\s|yield\b|assert\b|break\b|continue\b|pass\b|\w+\s*=[^=])/;
+const CODE_BLOCK_REGEX = /```([\w+#.-]*)[^\n]*\n?([\s\S]*?)```/g;
+const CODE_LINE_PATTERN = /^\s*(?:def\s|class\s|for\s*\(?|while\s*\(?|if\s*\(?|elif\s|else\s*[:{]|try\s*[:{]|except\b|return\b|print\s*\(|input\s*\(|import\s|from\s|raise\s|with\s|yield\b|assert\b|break\b|continue\b|pass\b|#include\b|using\s+namespace\b|(?:int|long|double|float|char|bool|string|void|auto|vector|map|set|queue|stack)\s+[A-Za-z_]\w*|public\s+static\s+void\s+main|System\.out\.|Scanner\s+|std::|cin\s*>>|cout\s*<<|[A-Za-z_]\w*\s*=\s*[^=])/;
 const CODE_LEAK_THRESHOLD = 5;
-const CODE_LEAK_KEEP_LINES = 2;
 class OutputSafetyService {
     sanitize(aiResponse, options) {
         const { problemTitle, problemContent } = options;
@@ -53,42 +52,55 @@ class OutputSafetyService {
                 return { content: result, rewritten, replacementKey: 'ai_helper_err_clarify_off_topic' };
             }
         }
-        // 代码泄露检测（optimize 类型豁免）
-        const codeLeakResult = this.detectCodeLeak(result, options.questionType, options.codeTruncatedComment);
+        // 代码泄露检测：所有问题类型均执行，optimize 也不能返回可直接提交的完整实现。
+        const codeLeakResult = this.detectCodeLeak(result, options.codeTruncatedComment, options.solutionBlockedMessage);
         if (codeLeakResult.detected) {
             result = codeLeakResult.content;
             rewritten = true;
         }
         return { content: result, rewritten, codeLeakDetected: codeLeakResult.detected };
     }
-    detectCodeLeak(content, questionType, truncatedComment) {
-        if (questionType === 'optimize') {
-            return { content, detected: false };
-        }
+    detectCodeLeak(content, truncatedComment, solutionBlockedMessage) {
         let detected = false;
-        const result = content.replace(CODE_BLOCK_REGEX, (match, codeContent) => {
+        const replacement = solutionBlockedMessage
+            || truncatedComment
+            || '完整实现已隐藏。请贴出你当前的代码或说明卡住的步骤，我会给你下一条提示。';
+        const result = content.replace(CODE_BLOCK_REGEX, (match, language, codeContent) => {
             const lines = codeContent.split('\n');
-            const realCodeLines = lines.filter((line) => {
-                const trimmed = line.trim();
-                if (!trimmed)
-                    return false;
-                if (trimmed.startsWith('#'))
-                    return false;
-                if (trimmed.startsWith('//'))
-                    return false;
-                return CODE_LINE_PATTERN.test(line);
-            });
-            if (realCodeLines.length > CODE_LEAK_THRESHOLD) {
+            const realCodeLines = this.getCodeLines(lines);
+            if (realCodeLines.length > CODE_LEAK_THRESHOLD || this.looksLikeCompleteSolution(codeContent)) {
                 detected = true;
-                const kept = realCodeLines.slice(0, CODE_LEAK_KEEP_LINES).join('\n');
-                const langMatch = match.match(/^```(\w*)/);
-                const lang = langMatch ? langMatch[1] : '';
-                const comment = truncatedComment || '代码已被截断（教学模式不展示完整实现）';
-                return `\`\`\`${lang}\n${kept}\n# ... ${comment} ...\n\`\`\``;
+                const label = language ? ` (${language})` : '';
+                return `> ${replacement}${label}`;
             }
             return match;
         });
+        // 检查未使用 Markdown 围栏的可运行代码。若已构成完整解答，整体替换，
+        // 避免只删部分行后仍泄露关键填空或算法实现。
+        const withoutFencedBlocks = content.replace(CODE_BLOCK_REGEX, '');
+        const unfencedCodeLines = this.getCodeLines(withoutFencedBlocks.split('\n'));
+        if (unfencedCodeLines.length > CODE_LEAK_THRESHOLD || this.looksLikeCompleteSolution(withoutFencedBlocks)) {
+            return { content: replacement, detected: true };
+        }
         return { content: result, detected };
+    }
+    getCodeLines(lines) {
+        return lines.filter((line) => {
+            const trimmed = line.trim();
+            if (!trimmed)
+                return false;
+            if (trimmed.startsWith('//'))
+                return false;
+            if (trimmed.startsWith('#') && !trimmed.startsWith('#include'))
+                return false;
+            return CODE_LINE_PATTERN.test(line);
+        });
+    }
+    looksLikeCompleteSolution(content) {
+        const hasEntryPoint = /(?:\bdef\s+solve\s*\(|\bint\s+main\s*\(|public\s+static\s+void\s+main\s*\()/i.test(content);
+        const hasInput = /(?:\binput\s*\(|\bcin\s*>>|\bScanner\s*\(|\.next(?:Int|Long|Line)?\s*\()/i.test(content);
+        const hasOutput = /(?:\bprint\s*\(|\bcout\s*<<|System\.out\.(?:print|println)\s*\()/i.test(content);
+        return hasEntryPoint && hasInput && hasOutput;
     }
 }
 exports.OutputSafetyService = OutputSafetyService;

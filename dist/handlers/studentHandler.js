@@ -4,7 +4,8 @@
  * 处理学生的 AI 对话请求
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ProblemStatusHandlerPriv = exports.ProblemStatusHandler = exports.ChatHandlerPriv = exports.ChatHandler = void 0;
+exports.ProblemStatusHandlerPriv = exports.ProblemStatusHandler = exports.SafetyAppealHandlerPriv = exports.SafetyAppealHandler = exports.ChatHandlerPriv = exports.ChatHandler = void 0;
+exports.parseExtraJailbreakPatterns = parseExtraJailbreakPatterns;
 const hydrooj_1 = require("hydrooj");
 const judgeInfoService_1 = require("../services/judgeInfoService");
 const openaiClient_1 = require("../services/openaiClient");
@@ -13,6 +14,7 @@ const limits_1 = require("../constants/limits");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const effectivenessService_1 = require("../services/effectivenessService");
+const safetyPenaltyService_1 = require("../services/safetyPenaltyService");
 const outputSafetyService_1 = require("../services/outputSafetyService");
 const topicGuardService_1 = require("../services/topicGuardService");
 const mongo_1 = require("../utils/mongo");
@@ -64,6 +66,106 @@ class ChatHandler extends hydrooj_1.Handler {
             this.response.body = { error: this.translate('ai_helper_err_internal') };
             this.response.type = 'application/json';
         }
+    }
+    async rejectSafetyViolation(params) {
+        const { validation, jailbreakLogModel, domainId, userId, conversationId, problemId, questionType, fallbackMatchedText, } = params;
+        let actionTaken = 'blocked';
+        let blockedUntil;
+        let retryAfterSeconds;
+        let penaltyCounterId;
+        let penaltyEventId;
+        let safetyProgress;
+        if (validation.category) {
+            try {
+                const sequence = await jailbreakLogModel.nextPenaltySequence(domainId, userId, validation.category);
+                penaltyCounterId = sequence.counterId;
+                penaltyEventId = sequence.eventId;
+                const penalty = (0, safetyPenaltyService_1.decideSafetyPenaltyFromCount)(validation.category, sequence.currentCount);
+                actionTaken = penalty.action;
+                blockedUntil = penalty.blockedUntil;
+                retryAfterSeconds = penalty.retryAfterSeconds;
+                safetyProgress = {
+                    currentCount: penalty.currentCount,
+                    threshold: penalty.threshold,
+                    remainingBeforeCooldown: penalty.remainingBeforeCooldown,
+                    windowSeconds: penalty.windowSeconds,
+                };
+            }
+            catch (penaltyErr) {
+                console.warn('[ChatHandler] 原子安全计数失败，回退到日志计数:', penaltyErr);
+                try {
+                    const penalty = await (0, safetyPenaltyService_1.decideSafetyPenalty)(jailbreakLogModel, domainId, userId, validation.category);
+                    actionTaken = penalty.action;
+                    blockedUntil = penalty.blockedUntil;
+                    retryAfterSeconds = penalty.retryAfterSeconds;
+                    safetyProgress = {
+                        currentCount: penalty.currentCount,
+                        threshold: penalty.threshold,
+                        remainingBeforeCooldown: penalty.remainingBeforeCooldown,
+                        windowSeconds: penalty.windowSeconds,
+                    };
+                }
+                catch (fallbackErr) {
+                    console.warn('[ChatHandler] 安全处置计算失败，仅拦截当前请求:', fallbackErr);
+                }
+            }
+        }
+        let safetyEventId;
+        try {
+            const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
+            const logId = await effectivenessService.logJailbreakAttempt({
+                domainId,
+                userId,
+                conversationId,
+                problemId,
+                questionType,
+                matchedPattern: validation.matchedPattern,
+                matchedText: validation.matchedText || fallbackMatchedText.substring(0, 120),
+                category: validation.category,
+                confidence: validation.confidence,
+                riskScore: validation.riskScore,
+                detectionSource: validation.detectionSource,
+                actionTaken,
+                blockedUntil,
+                penaltyCounterId,
+                penaltyEventId,
+            });
+            safetyEventId = logId?.toHexString();
+            if (!logId && penaltyCounterId && penaltyEventId) {
+                const counterToRollback = penaltyCounterId;
+                const eventToRollback = penaltyEventId;
+                penaltyCounterId = undefined;
+                penaltyEventId = undefined;
+                await jailbreakLogModel.rollbackPenaltySequence(counterToRollback, eventToRollback);
+            }
+        }
+        catch (logErr) {
+            console.error('[ChatHandler] 记录越狱日志失败', logErr);
+            if (penaltyCounterId && penaltyEventId) {
+                try {
+                    await jailbreakLogModel.rollbackPenaltySequence(penaltyCounterId, penaltyEventId);
+                }
+                catch (rollbackErr) {
+                    console.error('[ChatHandler] 回滚安全计数失败', rollbackErr);
+                }
+            }
+        }
+        const isCooldown = Boolean(retryAfterSeconds);
+        this.response.status = isCooldown ? 429 : 422;
+        this.response.body = {
+            error: isCooldown
+                ? (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_err_safety_cooldown', retryAfterSeconds)
+                : validation.errorKey
+                    ? (0, i18nHelper_1.translateWithParams)(this, validation.errorKey, ...(validation.errorParams || []))
+                    : (validation.error || this.translate('ai_helper_err_input_validation_failed')),
+            code: isCooldown ? 'SAFETY_COOLDOWN' : 'SAFETY_POLICY_VIOLATION',
+            category: validation.category || 'input_validation',
+            retryable: isCooldown,
+            ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+            ...(safetyEventId ? { safetyEventId, appealAllowed: true } : {}),
+            ...(safetyProgress ? { safetyProgress } : {}),
+        };
+        this.response.type = 'application/json';
     }
     isStreamRequested() {
         const body = this.request.body;
@@ -156,6 +258,29 @@ class ChatHandler extends hydrooj_1.Handler {
         // 获取数据库模型实例
         const conversationModel = this.ctx.get('conversationModel');
         const messageModel = this.ctx.get('messageModel');
+        const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+        // 渐进式冷却仅限制 AI 对话；数据库不可用时保持主流程可用。
+        try {
+            const activeCooldown = await jailbreakLogModel.findActiveCooldown(domainId, userId);
+            if (activeCooldown?.blockedUntil) {
+                const retryAfterSeconds = Math.max(1, Math.ceil((activeCooldown.blockedUntil.getTime() - Date.now()) / 1000));
+                this.response.status = 429;
+                this.response.body = {
+                    error: (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_err_safety_cooldown', retryAfterSeconds),
+                    code: 'SAFETY_COOLDOWN',
+                    category: 'safety',
+                    retryable: true,
+                    retryAfterSeconds,
+                    safetyEventId: activeCooldown._id.toHexString(),
+                    appealAllowed: activeCooldown.reviewStatus !== 'confirmed',
+                };
+                this.response.type = 'application/json';
+                return null;
+            }
+        }
+        catch (err) {
+            console.warn('[ChatHandler] 安全冷却检查失败，放行请求:', err);
+        }
         // 从请求体获取参数
         const { problemId, problemTitle, problemContent: _problemContent, questionType, userThinking, includeCode, code, conversationId, clarifyContext } = this.request.body;
         // 验证问题类型
@@ -292,24 +417,29 @@ class ChatHandler extends hydrooj_1.Handler {
         const validation = promptService.validateInput(userThinking, processedCode, extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined, processedProblemContent);
         if (!validation.valid) {
             if (validation.matchedPattern) {
-                try {
-                    const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
-                    await effectivenessService.logJailbreakAttempt({
-                        userId,
-                        conversationId,
-                        problemId,
-                        questionType,
-                        matchedPattern: validation.matchedPattern,
-                        matchedText: validation.matchedText || userThinking.substring(0, 120)
-                    });
-                }
-                catch (logErr) {
-                    console.error('[ChatHandler] 记录越狱日志失败', logErr);
-                }
+                await this.rejectSafetyViolation({
+                    validation,
+                    jailbreakLogModel,
+                    domainId,
+                    userId,
+                    conversationId,
+                    problemId,
+                    questionType,
+                    fallbackMatchedText: userThinking,
+                });
+                return null;
             }
-            throw new Error(validation.errorKey
-                ? (0, i18nHelper_1.translateWithParams)(this, validation.errorKey, ...(validation.errorParams || []))
-                : (validation.error || this.translate('ai_helper_err_input_validation_failed')));
+            this.response.status = 400;
+            this.response.body = {
+                error: validation.errorKey
+                    ? (0, i18nHelper_1.translateWithParams)(this, validation.errorKey, ...(validation.errorParams || []))
+                    : (validation.error || this.translate('ai_helper_err_input_validation_failed')),
+                code: 'INPUT_VALIDATION_FAILED',
+                category: 'input_validation',
+                retryable: false,
+            };
+            this.response.type = 'application/json';
+            return null;
         }
         // 构造 system prompt
         // 优先使用服务端获取的可信题目标题，其次使用前端传入的，最后使用题目ID
@@ -371,6 +501,25 @@ class ChatHandler extends hydrooj_1.Handler {
                     offTopicStrike: 0
                 }
             });
+        }
+        // P0-3: 组合最近三条学生消息，拦截跨轮次拆分的注入/答案索取指令。
+        // 此查询也复用于后续历史提示词构造，避免同一请求重复读取消息。
+        const priorConversationMessages = await messageModel.findRecentByConversationId(currentConversationId, 6);
+        const sequenceValidation = promptService.validateConversationSequence(priorConversationMessages
+            .filter((message) => message.role === 'student')
+            .map((message) => message.content || ''), userThinking, extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined, processedProblemContent);
+        if (!sequenceValidation.valid && sequenceValidation.matchedPattern) {
+            await this.rejectSafetyViolation({
+                validation: sequenceValidation,
+                jailbreakLogModel,
+                domainId,
+                userId,
+                conversationId: currentConversationId.toHexString(),
+                problemId,
+                questionType,
+                fallbackMatchedText: userThinking,
+            });
+            return null;
         }
         // P0-1: Clarify 锚点校验
         if (questionType === 'clarify') {
@@ -540,10 +689,10 @@ class ChatHandler extends hydrooj_1.Handler {
         });
         // 增加会话的消息计数
         await conversationModel.incrementMessageCount(currentConversationId);
-        // P2: 历史上下文净化 - 过滤掉被标记为 off-topic 的消息
-        const historyMessages = (await messageModel.findRecentByConversationId(currentConversationId, 7))
-            .slice(0, -1)
-            .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM)
+        // 历史上下文净化：已重写/偏题的消息不再进入模型；
+        // 旧版已存储的学生输入也重新经过当前安全规则，但不重复记录或惩罚。
+        const historyMessages = promptService.filterSafeConversationHistory(priorConversationMessages
+            .filter((msg) => !msg.metadata?.safetyRewritten && !msg.metadata?.topicGuardBypassedLLM), extraJailbreakPatterns.length ? extraJailbreakPatterns : undefined, processedProblemContent)
             .map((msg) => ({
             role: msg.role,
             content: msg.content
@@ -625,8 +774,8 @@ class ChatHandler extends hydrooj_1.Handler {
                 signal: requestAc.signal,
                 callbacks: {
                     onChunk: (content) => {
+                        // 安全门禁：模型原始分片只在服务端缓冲，完整输出通过校验后才发送。
                         fullContent += content;
-                        sse.writeEvent('chunk', { content });
                     },
                     onDone: (result) => {
                         fullContent = result.content;
@@ -670,13 +819,13 @@ class ChatHandler extends hydrooj_1.Handler {
                 problemContent: p.processedProblemContent,
                 offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
                 codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
+                solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked'),
             });
-            if (safetyResult.rewritten) {
-                fullContent = safetyResult.replacementKey
-                    ? this.translate(safetyResult.replacementKey)
-                    : safetyResult.content;
-                sse.writeEvent('replace', { content: fullContent });
-            }
+            fullContent = safetyResult.replacementKey
+                ? this.translate(safetyResult.replacementKey)
+                : safetyResult.content;
+            // 只有校验后的最终内容能够跨越服务端信任边界。
+            sse.writeEvent('chunk', { content: fullContent });
             // Save AI message to DB
             const aiMessageTimestamp = new Date();
             const aiMessageMetadata = {};
@@ -882,7 +1031,8 @@ class ChatHandler extends hydrooj_1.Handler {
             problemTitle: p.problemTitleStr,
             problemContent: p.processedProblemContent,
             offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
-            codeTruncatedComment: this.translate('ai_helper_safety_code_truncated')
+            codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
+            solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked')
         });
         aiResponse = safetyResult.replacementKey
             ? this.translate(safetyResult.replacementKey)
@@ -985,16 +1135,154 @@ class ChatHandler extends hydrooj_1.Handler {
 exports.ChatHandler = ChatHandler;
 // 导出路由权限配置 - 需要用户登录
 exports.ChatHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
+/**
+ * 学生可对自己的待复核安全记录申请人工复核；申诉本身不会解除冷却。
+ */
+class SafetyAppealHandler extends hydrooj_1.Handler {
+    async post({ id }) {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            if (!mongo_1.ObjectId.isValid(id)) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_safety_appeal_invalid'),
+                    code: 'INVALID_SAFETY_EVENT_ID',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const reason = typeof this.request.body?.reason === 'string'
+                ? this.request.body.reason.trim()
+                : '';
+            if (reason.length > 300) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_safety_appeal_reason_too_long'),
+                    code: 'SAFETY_APPEAL_REASON_TOO_LONG',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            const appealResult = await jailbreakLogModel.appealByStudent(id, (0, domainHelper_1.getDomainId)(this), Number(this.user._id), reason || undefined);
+            if (appealResult === 'unavailable') {
+                this.response.status = 404;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_safety_appeal_unavailable'),
+                    code: 'SAFETY_APPEAL_UNAVAILABLE',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            this.response.body = {
+                success: true,
+                alreadySubmitted: appealResult === 'already_submitted',
+                message: this.translate('ai_helper_safety_appeal_submitted'),
+            };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] SafetyAppealHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = {
+                error: this.translate('ai_helper_err_safety_appeal_failed'),
+                code: 'SAFETY_APPEAL_FAILED',
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.SafetyAppealHandler = SafetyAppealHandler;
+exports.SafetyAppealHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
+function hasUnsafeCustomRegexStructure(patternText) {
+    // 回溯型 JS RegExp 无法设置执行超时，因此仅接受可线性扫描的保守子集：
+    // 不允许分组、回溯引用、通配符和一般量词；只允许由确定非空白字面量分隔的 \s+ / \s*。
+    if (/[()]/.test(patternText) || /\\[1-9]/.test(patternText))
+        return true;
+    let escaped = false;
+    let inCharacterClass = false;
+    let branchRequiresCharacter = false;
+    let separatorSinceWhitespaceRepeat = true;
+    for (let index = 0; index < patternText.length; index += 1) {
+        const char = patternText[index];
+        if (inCharacterClass) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (char === ']') {
+                inCharacterClass = false;
+                branchRequiresCharacter = true;
+            }
+            continue;
+        }
+        if (char === '\\') {
+            const token = patternText[index + 1];
+            if (!token || /[1-9]/.test(token))
+                return true;
+            const quantifier = patternText[index + 2];
+            if (quantifier === '+' || quantifier === '*') {
+                if (token !== 's' || !separatorSinceWhitespaceRepeat)
+                    return true;
+                branchRequiresCharacter || (branchRequiresCharacter = quantifier === '+');
+                separatorSinceWhitespaceRepeat = false;
+                index += 2;
+                continue;
+            }
+            const safeConsumingEscapes = new Set(['s', 'd', 'w', 'S', 'n', 'r', 't', 'f', 'v']);
+            const escapedLiterals = new Set(['\\', '.', '-', '/', '^', '$', '|', '[', ']', '{', '}', '?', '*', '+']);
+            if (!safeConsumingEscapes.has(token) && !escapedLiterals.has(token))
+                return true;
+            branchRequiresCharacter = true;
+            if (['d', 'w', 'S'].includes(token) || escapedLiterals.has(token)) {
+                separatorSinceWhitespaceRepeat = true;
+            }
+            index += 1;
+            continue;
+        }
+        if (char === '|') {
+            if (!branchRequiresCharacter)
+                return true;
+            branchRequiresCharacter = false;
+            separatorSinceWhitespaceRepeat = true;
+            continue;
+        }
+        if (char === '[') {
+            inCharacterClass = true;
+            continue;
+        }
+        if (char === '.' || char === '?' || char === '+' || char === '*' || char === '{' || char === '}')
+            return true;
+        if (char === '^' || char === '$')
+            continue;
+        branchRequiresCharacter = true;
+        if (!/\s/.test(char))
+            separatorSinceWhitespaceRepeat = true;
+    }
+    return escaped || inCharacterClass || !branchRequiresCharacter;
+}
 function parseExtraJailbreakPatterns(raw) {
     if (!raw) {
         return [];
     }
+    const MAX_CUSTOM_RULES = 50;
+    const MAX_PATTERN_LENGTH = 200;
+    const MAX_RULE_TEXT_LENGTH = 10000;
     const patterns = [];
-    const lines = raw.split(/\r?\n/);
+    const lines = raw.slice(0, MAX_RULE_TEXT_LENGTH).split(/\r?\n/).slice(0, MAX_CUSTOM_RULES);
     for (const line of lines) {
         const patternText = line.trim();
         if (!patternText)
             continue;
+        if (patternText.length > MAX_PATTERN_LENGTH || hasUnsafeCustomRegexStructure(patternText)) {
+            console.warn('[ChatHandler] 自定义越狱规则过长或可能导致高开销回溯，已跳过:', patternText.slice(0, 80));
+            continue;
+        }
         try {
             patterns.push(new RegExp(patternText, 'gi'));
         }

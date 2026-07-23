@@ -128,6 +128,11 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # 生成：openssl ran
 - `stable`（默认）— 只更新到正式发布版本（`vX.Y.Z` tag），经 GPG 签名校验。所有真实用户的服务器都应使用此通道。
 - `edge` — 跟踪 `main` 分支最新代码，**仅限维护者自己的测试服务器**。
 
+`AI_HELPER_JAILBREAK_LOG_RETENTION_DAYS`（可选）— 安全策略拦截日志保留天数：
+
+- 默认 `180` 天，可设置范围 `7`–`3650` 天
+- 新日志从创建时起计算；历史日志从升级时起渐进过期，不会在部署时立即删除
+
 `AI_HELPER_TESTDATA_GENERATION_MODE`（可选）— 测试数据生成是否要求沙箱（`hydrojudge.sandbox_host`）：
 
 - `auto`（默认）— 沙箱可达时实跑验证，不可达时降级直出并明确标注"未验证"

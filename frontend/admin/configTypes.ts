@@ -45,14 +45,86 @@ export interface ConfigState {
   budgetConfig: BudgetConfigState;
 }
 
+export type JailbreakCategory =
+  | 'answer_seeking'
+  | 'prompt_injection'
+  | 'prompt_exfiltration'
+  | 'obfuscated_injection';
+
+export type JailbreakReviewStatus = 'pending' | 'confirmed' | 'false_positive';
+
+export interface JailbreakLogFilters {
+  reviewStatus?: JailbreakReviewStatus;
+  category?: JailbreakCategory;
+  appealedOnly?: boolean;
+  userId?: string;
+  problemId?: string;
+  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom';
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export interface JailbreakReviewSummary {
+  total: number;
+  pending: number;
+  confirmed: number;
+  falsePositive: number;
+  reviewed: number;
+  falsePositiveRate: number;
+  appealedPending: number;
+}
+
+export interface JailbreakRuleMetric {
+  matchedPattern: string;
+  category?: JailbreakCategory;
+  total: number;
+  pending: number;
+  confirmed: number;
+  falsePositive: number;
+  reviewed: number;
+  falsePositiveRate: number;
+}
+
+export interface JailbreakOperationalMetrics {
+  windowDays: number;
+  total: number;
+  cooldown: number;
+  appealed: number;
+  pendingAppeals: number;
+  reviewed: number;
+  averageReviewMinutes: number | null;
+  averageAppealReviewMinutes: number | null;
+  dailyTrend: Array<{
+    date: string;
+    total: number;
+    cooldown: number;
+    appealed: number;
+    falsePositive: number;
+  }>;
+}
+
 export interface JailbreakLogEntry {
   id: string;
+  domainId?: string;
   userId?: number;
   problemId?: string;
   conversationId?: string;
   questionType?: string;
   matchedPattern: string;
   matchedText: string;
+  category?: JailbreakCategory;
+  confidence?: 'medium' | 'high';
+  riskScore?: number;
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom';
+  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+  blockedUntil?: string;
+  reviewStatus?: JailbreakReviewStatus;
+  reviewedAt?: string;
+  reviewedBy?: number;
+  studentAppealedAt?: string;
+  studentAppealReason?: string;
+  expiresAt?: string;
   createdAt: string;
 }
 
@@ -61,6 +133,10 @@ export interface JailbreakLogPagination {
   total: number;
   page: number;
   totalPages: number;
+  summary: JailbreakReviewSummary;
+  ruleMetrics: JailbreakRuleMetric[];
+  operationalMetrics?: JailbreakOperationalMetrics;
+  filters?: JailbreakLogFilters;
 }
 
 export interface TelemetryStatus {
