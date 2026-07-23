@@ -10,12 +10,78 @@ jest.mock('../../lib/rateLimitHelper', () => ({
 import { ObjectId } from 'mongodb';
 import { applyRateLimit } from '../../lib/rateLimitHelper';
 import {
+  AdminConfigHandler,
   JailbreakLogBulkReviewHandler,
   JailbreakLogReviewHandler,
   JailbreakLogsExportHandler,
   JailbreakLogsHandler,
   serializeSafetyLogsCsv,
 } from '../../handlers/adminConfigHandler';
+
+describe('AdminConfigHandler', () => {
+  it('returns configuration metadata without eagerly querying safety logs', async () => {
+    const handler = new AdminConfigHandler();
+    const getConfig = jest.fn().mockResolvedValue(null);
+    const getInstall = jest.fn().mockResolvedValue(null);
+    const getModel = jest.fn((name: string) => {
+      if (name === 'aiConfigModel') return { getConfig };
+      if (name === 'pluginInstallModel') return { getInstall };
+      throw new Error(`Unexpected model lookup: ${name}`);
+    });
+    handler.request = { headers: { accept: 'application/json' }, query: {} };
+    handler.response = {};
+    handler.translate = jest.fn((key: string) => key);
+    handler.ctx = { Route: jest.fn(), get: getModel };
+
+    await handler.get();
+
+    expect(getConfig).toHaveBeenCalledTimes(1);
+    expect(getModel).not.toHaveBeenCalledWith('jailbreakLogModel');
+    expect(handler.response.body).toEqual(expect.objectContaining({
+      config: null,
+      builtinJailbreakPatterns: expect.any(Array),
+    }));
+    expect(handler.response.body).not.toHaveProperty('jailbreakLogs');
+    expect(handler.response.body).not.toHaveProperty('recentJailbreakLogs');
+  });
+
+  it('updates custom rules without eagerly querying safety logs', async () => {
+    const handler = new AdminConfigHandler();
+    const updatedConfig = {
+      endpoints: [],
+      selectedModels: [],
+      scenarioModels: {},
+      apiBaseUrl: '',
+      modelName: '',
+      rateLimitPerMinute: 5,
+      timeoutSeconds: 30,
+      systemPromptTemplate: '',
+      extraJailbreakPatternsText: 'custom-rule',
+      budgetConfig: {},
+      updatedAt: new Date('2026-07-23T00:00:00.000Z'),
+    };
+    const getConfig = jest.fn().mockResolvedValue(updatedConfig);
+    const updateConfig = jest.fn().mockResolvedValue(undefined);
+    const getModel = jest.fn((name: string) => {
+      if (name === 'aiConfigModel') return { getConfig, updateConfig };
+      throw new Error(`Unexpected model lookup: ${name}`);
+    });
+    handler.request = {
+      headers: { 'x-requested-with': 'XMLHttpRequest' },
+      body: { extraJailbreakPatternsText: 'custom-rule' },
+    };
+    handler.response = {};
+    handler.translate = jest.fn((key: string) => key);
+    handler.ctx = { Route: jest.fn(), get: getModel };
+
+    await handler.put();
+
+    expect(updateConfig).toHaveBeenCalledWith({ extraJailbreakPatternsText: 'custom-rule' });
+    expect(getModel).not.toHaveBeenCalledWith('jailbreakLogModel');
+    expect(handler.response.body.config.extraJailbreakPatternsText).toBe('custom-rule');
+    expect(handler.response.body).not.toHaveProperty('jailbreakLogs');
+  });
+});
 
 function createLogsHandler(query: Record<string, string> = {}) {
   const handler = new JailbreakLogsHandler();

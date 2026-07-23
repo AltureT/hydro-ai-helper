@@ -64,7 +64,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 return;
             }
             const aiConfigModel = this.ctx.get('aiConfigModel');
-            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
             const pluginInstallModel = this.ctx.get('pluginInstallModel');
             // 获取遥测状态
             let telemetry = null;
@@ -80,23 +79,12 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 }
             }
             catch { /* non-critical */ }
-            // 解析分页参数
-            const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
-            const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
             const config = await aiConfigModel.getConfig();
-            const logResult = await jailbreakLogModel.listWithPagination(page, limit, (0, domainHelper_1.getDomainId)(this));
             if (!config) {
                 this.response.body = {
                     config: null,
                     telemetry,
                     builtinJailbreakPatterns: jailbreakRules_1.builtinJailbreakPatternSources,
-                    jailbreakLogs: {
-                        logs: logResult.logs.map(formatJailbreakLog),
-                        total: logResult.total,
-                        page: logResult.page,
-                        totalPages: logResult.totalPages
-                    },
-                    recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
                 };
                 this.response.type = 'application/json';
                 return;
@@ -158,13 +146,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 },
                 telemetry,
                 builtinJailbreakPatterns: jailbreakRules_1.builtinJailbreakPatternSources,
-                jailbreakLogs: {
-                    logs: logResult.logs.map(formatJailbreakLog),
-                    total: logResult.total,
-                    page: logResult.page,
-                    totalPages: logResult.totalPages
-                },
-                recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
             };
             this.response.type = 'application/json';
         }
@@ -334,7 +315,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     return;
                 }
             }
-            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
             await aiConfigModel.updateConfig(partial);
             const updatedConfig = await aiConfigModel.getConfig();
             if (!updatedConfig) {
@@ -379,7 +359,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 console.error('[AdminConfigHandler] API Key 解密失败:', err instanceof Error ? err.message : 'unknown');
                 hasApiKey = false;
             }
-            const logResult = await jailbreakLogModel.listWithPagination(1, 20, (0, domainHelper_1.getDomainId)(this));
             this.response.body = {
                 config: {
                     endpoints: endpointsWithMaskedKeys,
@@ -397,13 +376,6 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     updatedAt: updatedConfig.updatedAt.toISOString()
                 },
                 builtinJailbreakPatterns: jailbreakRules_1.builtinJailbreakPatternSources,
-                jailbreakLogs: {
-                    logs: logResult.logs.map(formatJailbreakLog),
-                    total: logResult.total,
-                    page: logResult.page,
-                    totalPages: logResult.totalPages
-                },
-                recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
             };
             this.response.type = 'application/json';
         }

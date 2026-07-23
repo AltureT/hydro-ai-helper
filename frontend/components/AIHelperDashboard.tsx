@@ -8,23 +8,35 @@ import { i18n } from '../utils/i18n';
 import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';
+import { SafetyGovernancePanel } from '../admin/SafetyGovernancePanel';
 import { CostDashboard } from '../teacher/CostDashboard';
 import { TeachingReviewPanel } from '../teachingSummary/TeachingReviewPanel';
 import { COLORS, FONT_FAMILY, SHADOWS, RADIUS, SPACING, getTabStyle } from '../utils/styles';
 import { getDomainFromUrl } from '../utils/domainUtils';
 
-type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'config';
+type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'safety' | 'config';
+
+const isTabType = (tab: string | null): tab is TabType => (
+  tab === 'conversations'
+  || tab === 'analytics'
+  || tab === 'teaching_review'
+  || tab === 'cost'
+  || tab === 'safety'
+  || tab === 'config'
+);
 
 export const AIHelperDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('conversations');
+  const [safetyVisited, setSafetyVisited] = useState(false);
   const domainId = getDomainFromUrl() || 'system';
 
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
-      const tab = params.get('tab') as TabType;
-      if (tab === 'analytics' || tab === 'teaching_review' || tab === 'cost' || tab === 'config' || tab === 'conversations') {
+      const tab = params.get('tab');
+      if (isTabType(tab)) {
         setActiveTab(tab);
+        if (tab === 'safety') setSafetyVisited(true);
       } else {
         setActiveTab('conversations');
       }
@@ -40,6 +52,7 @@ export const AIHelperDashboard: React.FC = () => {
 
   const handleTabChange = (tab: TabType) => {
     setActiveTab(tab);
+    if (tab === 'safety') setSafetyVisited(true);
     const url = new URL(window.location.href);
     url.searchParams.set('tab', tab);
     window.history.pushState({}, '', url.toString());
@@ -50,6 +63,7 @@ export const AIHelperDashboard: React.FC = () => {
     { id: 'analytics', label: i18n('ai_helper_dashboard_tab_analytics') },
     { id: 'teaching_review', label: i18n('ai_helper_dashboard_tab_teaching_review') || '教学总结回顾' },
     { id: 'cost', label: i18n('ai_helper_dashboard_tab_cost') },
+    { id: 'safety', label: i18n('ai_helper_dashboard_tab_safety') },
     { id: 'config', label: i18n('ai_helper_dashboard_tab_config') },
   ];
 
@@ -84,6 +98,9 @@ export const AIHelperDashboard: React.FC = () => {
           display: 'flex',
           gap: SPACING.sm,
           borderBottom: `2px solid ${COLORS.border}`,
+          overflowX: 'auto',
+          whiteSpace: 'nowrap',
+          WebkitOverflowScrolling: 'touch',
         }}>
           {tabs.map((tab) => {
             const isActive = activeTab === tab.id;
@@ -94,6 +111,7 @@ export const AIHelperDashboard: React.FC = () => {
                 style={{
                   ...getTabStyle(isActive),
                   outline: 'none',
+                  flexShrink: 0,
                 }}
               >
                 {tab.label}
@@ -114,6 +132,11 @@ export const AIHelperDashboard: React.FC = () => {
           {activeTab === 'analytics' && <AnalyticsPage embedded />}
           {activeTab === 'teaching_review' && <TeachingReviewPanel domainId={domainId} />}
           {activeTab === 'cost' && <CostDashboard embedded />}
+          {safetyVisited && (
+            <div style={{ display: activeTab === 'safety' ? 'block' : 'none' }}>
+              <SafetyGovernancePanel embedded />
+            </div>
+          )}
           {activeTab === 'config' && <ConfigPanel embedded />}
         </div>
       </div>

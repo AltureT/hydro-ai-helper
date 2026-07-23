@@ -39,7 +39,6 @@ export interface ConfigState {
   rateLimitPerMinute: number | '';
   timeoutSeconds: number | '';
   systemPromptTemplate: string;
-  extraJailbreakPatternsText: string;
   apiKeyMasked: string;
   hasApiKey: boolean;
   budgetConfig: BudgetConfigState;
@@ -175,6 +174,4 @@ export interface APIConfigResponse {
   } | null;
   telemetry?: TelemetryStatus | null;
   builtinJailbreakPatterns?: string[];
-  jailbreakLogs?: JailbreakLogPagination;
-  recentJailbreakLogs?: JailbreakLogEntry[];
 }

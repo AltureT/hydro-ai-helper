@@ -68,7 +68,6 @@ export class AdminConfigHandler extends Handler {
       }
 
       const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
-      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
       const pluginInstallModel: PluginInstallModel = this.ctx.get('pluginInstallModel');
 
       // 获取遥测状态
@@ -85,25 +84,13 @@ export class AdminConfigHandler extends Handler {
         }
       } catch { /* non-critical */ }
 
-      // 解析分页参数
-      const page = parseInt(String(this.request.query.page || '1'), 10) || 1;
-      const limit = parseInt(String(this.request.query.limit || '20'), 10) || 20;
-
       const config = await aiConfigModel.getConfig();
-      const logResult = await jailbreakLogModel.listWithPagination(page, limit, getDomainId(this));
 
       if (!config) {
         this.response.body = {
           config: null,
           telemetry,
           builtinJailbreakPatterns: builtinJailbreakPatternSources,
-          jailbreakLogs: {
-            logs: logResult.logs.map(formatJailbreakLog),
-            total: logResult.total,
-            page: logResult.page,
-            totalPages: logResult.totalPages
-          },
-          recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
         };
         this.response.type = 'application/json';
         return;
@@ -166,13 +153,6 @@ export class AdminConfigHandler extends Handler {
         },
         telemetry,
         builtinJailbreakPatterns: builtinJailbreakPatternSources,
-        jailbreakLogs: {
-          logs: logResult.logs.map(formatJailbreakLog),
-          total: logResult.total,
-          page: logResult.page,
-          totalPages: logResult.totalPages
-        },
-        recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
     } catch (err) {
@@ -359,8 +339,6 @@ export class AdminConfigHandler extends Handler {
         }
       }
 
-      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
-
       await aiConfigModel.updateConfig(partial);
 
       const updatedConfig = await aiConfigModel.getConfig();
@@ -407,8 +385,6 @@ export class AdminConfigHandler extends Handler {
         hasApiKey = false;
       }
 
-      const logResult = await jailbreakLogModel.listWithPagination(1, 20, getDomainId(this));
-
       this.response.body = {
         config: {
           endpoints: endpointsWithMaskedKeys,
@@ -426,13 +402,6 @@ export class AdminConfigHandler extends Handler {
           updatedAt: updatedConfig.updatedAt.toISOString()
         },
         builtinJailbreakPatterns: builtinJailbreakPatternSources,
-        jailbreakLogs: {
-          logs: logResult.logs.map(formatJailbreakLog),
-          total: logResult.total,
-          page: logResult.page,
-          totalPages: logResult.totalPages
-        },
-        recentJailbreakLogs: logResult.logs.map(formatJailbreakLog)
       };
       this.response.type = 'application/json';
     } catch (err) {

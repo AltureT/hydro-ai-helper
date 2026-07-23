@@ -15,6 +15,8 @@ import type {
 interface JailbreakLogsViewerProps {
   logPagination: JailbreakLogPagination;
   loading: boolean;
+  defaultCollapsed?: boolean;
+  appendPatternDisabled?: boolean;
   onChangePage: (page: number) => void;
   onCopyToClipboard: (text: string) => void;
   onAppendPattern: (pattern: string) => void;
@@ -27,9 +29,9 @@ interface JailbreakLogsViewerProps {
 
 export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern, onReview, onBulkReview, onExport,
-  filters, onChangeFilters,
+  filters, onChangeFilters, defaultCollapsed = true, appendPatternDisabled = false,
 }) => {
-  const [collapsed, setCollapsed] = React.useState(true);
+  const [collapsed, setCollapsed] = React.useState(defaultCollapsed);
   const [reviewingId, setReviewingId] = React.useState<string | null>(null);
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [bulkReviewing, setBulkReviewing] = React.useState(false);
@@ -442,7 +444,14 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
       </>
     )}
 
-    {collapsed ? null : logPagination.logs.length === 0 ? (
+    {collapsed ? null : loading && logPagination.logs.length === 0 ? (
+      <div style={{
+        padding: SPACING.base, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md,
+        border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, fontSize: '14px',
+      }}>
+        {i18n('ai_helper_safety_events_loading')}
+      </div>
+    ) : logPagination.logs.length === 0 ? (
       <div style={{
         padding: SPACING.base, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md,
         border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, fontSize: '14px',
@@ -523,6 +532,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                   <button
                     type="button"
                     onClick={() => onAppendPattern(log.matchedPattern)}
+                    disabled={appendPatternDisabled}
                     style={getButtonStyle('ghost')}
                   >
                     {i18n('ai_helper_admin_jailbreak_append_rule')}
