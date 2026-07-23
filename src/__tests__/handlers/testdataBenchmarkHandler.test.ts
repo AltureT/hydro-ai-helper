@@ -61,6 +61,35 @@ describe('TestdataBenchmarkHandler', () => {
     expect(TestdataBenchmarkHandlerPriv).toBe(PRIV.PRIV_EDIT_SYSTEM);
   });
 
+  it('免费预检只验证已保存模型链和沙箱可用性', async () => {
+    const createClient = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const available = jest.spyOn(GoJudgeSandboxRunner.prototype, 'isAvailable')
+      .mockResolvedValue(true);
+    const run = jest.spyOn(benchmark, 'runTestdataBenchmark');
+    const handler = setupHandler({});
+
+    await handler.get();
+
+    expect(createClient).toHaveBeenCalledWith(handler.ctx, undefined, 'testdataGeneration');
+    expect(available).toHaveBeenCalledWith();
+    expect(handler.response.body).toEqual({ modelConfigured: true, sandboxAvailable: true });
+    expect(run).not.toHaveBeenCalled();
+    expect(handler.limitRate).not.toHaveBeenCalled();
+  });
+
+  it('免费预检以布尔状态返回未配置或沙箱故障', async () => {
+    jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockRejectedValue(new Error('not configured'));
+    jest.spyOn(GoJudgeSandboxRunner.prototype, 'isAvailable').mockResolvedValue(false);
+    const handler = setupHandler({});
+
+    await handler.get();
+
+    expect(handler.response.body).toEqual({ modelConfigured: false, sandboxAvailable: false });
+    expect(handler.response.status).toBeUndefined();
+  });
+
   it('未明确确认付费时拒绝运行', async () => {
     const createClient = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
     const handler = setupHandler({ caseIds: ['xor-subarrays-less-than-k'] });
