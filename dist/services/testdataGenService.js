@@ -2416,41 +2416,45 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     if (templateCheck)
         verification.templateCheck = templateCheck;
     verification.discrimination = discrimination;
-    const noteParts = [
-        blueprint.notes,
-        '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
-    ];
+    const noteParts = [blueprint.notes];
+    const noteWarnings = [];
+    const noteSystem = [];
+    const appendNote = (kind, note) => {
+        noteParts.push(note);
+        (kind === 'warning' ? noteWarnings : noteSystem).push(note);
+    };
+    appendNote('system', '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。');
     if (blueprint.problemType === 'function' && samples.length > 0) {
-        noteParts.push(`已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateCheck ? ' 与 template.py' : ''}。`);
+        appendNote('system', `已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateCheck ? ' 与 template.py' : ''}。`);
     }
     if (oracleIsAcceptedRecord) {
-        noteParts.push(samples.length > 0
+        appendNote('warning', samples.length > 0
             ? `所选历史 AC 仅作为候选解；本次已通过 ${samples.length} 个题面样例与独立 BRUTE 小数据压力验证，但这不等于正确性证明，仍建议教师人工复核关键边界。`
             : '所选历史 AC 仅作为候选解；题面未解析到可回归样例，本次仅通过独立 BRUTE 小数据压力验证。这不等于正确性证明，仍建议教师人工复核关键边界。');
     }
     if (bruteCheck && bruteCheck.disagreed.length > 0) {
-        noteParts.push(customChecker
+        appendNote('warning', customChecker
             ? `题目使用自定义 checker；暴力解与标程在测试点 ${bruteCheck.disagreed.join('、')} 的文本输出不同，已保留并请人工复核 checker 语义。`
             : `暴力解与教师标准答案在测试点 ${bruteCheck.disagreed.join('、')} 不一致，已按教师 std 输出为准，请人工复核。`);
     }
     if (customChecker && samples.length > 0) {
-        noteParts.push('题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
+        appendNote('system', '题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
     }
     if (stressCheck?.droppedInvalid) {
-        noteParts.push(`已剔除 ${stressCheck.droppedInvalid} 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。`);
+        appendNote('system', `已剔除 ${stressCheck.droppedInvalid} 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。`);
     }
     if (stressCheck?.skippedReason === 'custom-checker') {
-        noteParts.push('题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
+        appendNote('system', '题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
     }
     else if (stressCheck && stressCheck.compared > 0) {
-        noteParts.push(`已使用独立生成的 BRUTE 在 ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
+        appendNote('system', `已使用独立生成的 BRUTE 在 ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
             + `其中 ${stressCheck.uniqueInputs} 组 input 唯一，重复 ${stressCheck.duplicateInputs} 组。`);
     }
     if (bruteCheck && bruteCheck.skippedTimeout.length > 0) {
-        noteParts.push(`暴力解在测试点 ${bruteCheck.skippedTimeout.join('、')} 超时，已跳过对拍。`);
+        appendNote('warning', `暴力解在测试点 ${bruteCheck.skippedTimeout.join('、')} 超时，已跳过对拍。`);
     }
     if (templateCheck && templateCheck.skippedTimeout.length > 0) {
-        noteParts.push(`模板实跑在测试点 ${templateCheck.skippedTimeout.join('、')} 超时，已跳过。`);
+        appendNote('warning', `模板实跑在测试点 ${templateCheck.skippedTimeout.join('、')} 超时，已跳过。`);
     }
     return {
         problemType: blueprint.problemType,
@@ -2470,6 +2474,11 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         pyTemplateExecuted,
         cases,
         notes: noteParts.filter(Boolean).join('\n'),
+        notesStructured: {
+            warnings: noteWarnings,
+            system: noteSystem,
+            ...(blueprint.notes ? { ai: blueprint.notes } : {}),
+        },
     };
 }
 /**
@@ -2543,6 +2552,22 @@ function assemblePlan(response, options, context = {}) {
     const configCaseNumbers = [...new Set([...existingComplete, ...newCaseNumbers])].sort((a, b) => a - b);
     const discriminationNotes = buildDiscriminationNotes(response.verification?.discrimination, response.discriminationInitialCaseCount ?? response.cases.length, newCaseNumbers);
     const notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n') || undefined;
+    const sourceNotesStructured = response.notesStructured ?? {
+        warnings: [],
+        system: [],
+        ...(response.notes ? { ai: response.notes } : {}),
+    };
+    const notesStructured = {
+        warnings: [
+            ...sourceNotesStructured.warnings,
+            ...discriminationNotes.filter(note => note.startsWith('警告:')),
+        ],
+        system: [
+            ...sourceNotesStructured.system,
+            ...discriminationNotes.filter(note => !note.startsWith('警告:')),
+        ],
+        ...(sourceNotesStructured.ai ? { ai: sourceNotesStructured.ai } : {}),
+    };
     const verification = response.verification
         ? {
             ...response.verification,
@@ -2625,6 +2650,7 @@ function assemblePlan(response, options, context = {}) {
         isFillIn: response.isFillIn,
         analysis: response.analysis,
         notes,
+        notesStructured,
         files,
         caseCount,
         totalCaseCount: configCaseNumbers.length,
@@ -3017,10 +3043,12 @@ class TestdataGenService {
         }
         const plan = await this.generateDirect(params);
         if (this.mode === 'auto') {
+            const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
             plan.notes = [
                 plan.notes,
-                'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。',
+                fallbackWarning,
             ].filter(Boolean).join('\n');
+            plan.notesStructured?.warnings.push(fallbackWarning);
         }
         this.emitProgress(params, 'complete', 100);
         return plan;
@@ -3083,10 +3111,12 @@ class TestdataGenService {
                 if (plan.verification) {
                     plan.verification.modelEscalation = { fromModel, toModel };
                 }
+                const escalationNote = `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`;
                 plan.notes = [
                     plan.notes,
-                    `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`,
+                    escalationNote,
                 ].filter(Boolean).join('\n');
+                plan.notesStructured?.system.push(escalationNote);
                 return plan;
             }
             catch (fallbackError) {

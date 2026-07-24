@@ -78,6 +78,11 @@ interface GenerationPlan {
   isFillIn?: boolean;
   analysis?: string;
   notes?: string;
+  notesStructured?: {
+    warnings: string[];
+    system: string[];
+    ai?: string;
+  };
   files: PlannedFile[];
   caseCount: number;
   totalCaseCount?: number;
@@ -1131,6 +1136,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
     return (
       <div>
+        {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
+          <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
+              {i18n('ai_helper_testdata_notes_warnings_title')}
+            </div>
+            <ul style={{ margin: 0, paddingLeft: SPACING.lg }}>
+              {plan.notesStructured.warnings.map((note, index) => (
+                <li key={`${index}-${note}`} style={{ fontSize: '13px' }}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
           <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
             {i18n(plan.problemType === 'function' ? 'ai_helper_testdata_type_function' : 'ai_helper_testdata_type_traditional')}
@@ -1143,8 +1160,32 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {plan.usedModel ? ` · ${plan.usedModel}` : ''}
           </div>
           {plan.analysis && <div style={{ fontSize: '13px' }}>{plan.analysis}</div>}
-          {plan.notes && <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>}
+          {!plan.notesStructured && plan.notes && (
+            <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>
+          )}
         </div>
+        {plan.notesStructured && plan.notesStructured.system.length > 0 && (
+          <div style={{ marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
+              {i18n('ai_helper_testdata_notes_system_title')}
+            </div>
+            <ul style={{ margin: 0, paddingLeft: SPACING.lg }}>
+              {plan.notesStructured.system.map((note, index) => (
+                <li key={`${index}-${note}`} style={{ fontSize: '13px' }}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {plan.notesStructured?.ai && (
+          <details style={{ marginBottom: SPACING.md, fontSize: '13px' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+              {i18n('ai_helper_testdata_notes_ai_toggle')}
+            </summary>
+            <div style={{ marginTop: SPACING.xs, whiteSpace: 'pre-wrap' }}>
+              {plan.notesStructured.ai}
+            </div>
+          </details>
+        )}
         {plan.caseCoverage && plan.caseCoverage.length > 0 && (
           <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.sm }}>
