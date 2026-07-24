@@ -178,6 +178,10 @@ function makeIndependentVerifierBlueprint(
   ].join('\n');
 }
 
+function makeEmptyKillTargetsResponse(): string {
+  return '未生成可用的错误解靶子';
+}
+
 function stressGeneratorStdout(): string {
   return JSON.stringify({
     cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => ({
@@ -1259,6 +1263,10 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
           content: makeGenerationArtifactsBlueprint('traditional'),
           usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 },
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
@@ -1305,13 +1313,14 @@ describe('TestdataGenService.generate', () => {
     });
 
     expect(runner.isAvailable).toHaveBeenCalled();
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.chat.mock.calls[0][1]).toContain('本阶段只解决题目');
     expect(mockClient.chat.mock.calls[0][1]).not.toContain('@@@GENERATOR@@@');
-    expect(mockClient.chat.mock.calls[1][1]).toContain('本阶段不得修改算法');
-    expect(mockClient.chat.mock.calls[1][1]).not.toContain('@@@ORACLE@@@');
-    expect(mockClient.chat.mock.calls[2][0]).toHaveLength(1);
-    expect(mockClient.chat.mock.calls[2][0][0].content).not.toContain('print(input())');
+    expect(mockClient.chat.mock.calls[1][1]).toContain('错误解分析专家');
+    expect(mockClient.chat.mock.calls[2][1]).toContain('本阶段不得修改算法');
+    expect(mockClient.chat.mock.calls[2][1]).not.toContain('@@@ORACLE@@@');
+    expect(mockClient.chat.mock.calls[3][0]).toHaveLength(1);
+    expect(mockClient.chat.mock.calls[3][0][0].content).not.toContain('print(input())');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\nA>B\nC<B\nA>C\n');
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('CBA\n');
     expect(plan.files.map(file => file.name)).toEqual(expect.arrayContaining([
@@ -1324,7 +1333,8 @@ describe('TestdataGenService.generate', () => {
     expect(progress.map(event => event.stage)).toEqual(expect.arrayContaining([
       'sandbox_check', 'blueprint', 'solution_verification', 'artifacts',
       'independent_verifier', 'generating_inputs',
-      'validating_inputs', 'running_oracle', 'stress_testing', 'assembling', 'complete',
+      'validating_inputs', 'running_oracle', 'stress_testing',
+      'discrimination_testing', 'assembling', 'complete',
     ]));
   });
 
@@ -1376,12 +1386,14 @@ describe('TestdataGenService.generate', () => {
     const fallbackClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usage, usedModel: deeperModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: deeperModel }),
     };
     const primaryClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: brokenBlueprint, usage, usedModel: primaryModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel: primaryModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: primaryModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: primaryModel })
         .mockResolvedValueOnce({
@@ -1416,9 +1428,9 @@ describe('TestdataGenService.generate', () => {
       onProgress: event => progress.push(event),
     });
 
-    expect(primaryClient.chat).toHaveBeenCalledTimes(4);
+    expect(primaryClient.chat).toHaveBeenCalledTimes(5);
     expect(primaryClient.createClientStartingAfter).toHaveBeenCalledWith(primaryModel);
-    expect(fallbackClient.chat).toHaveBeenCalledTimes(3);
+    expect(fallbackClient.chat).toHaveBeenCalledTimes(4);
     expect(plan.verification?.modelEscalation).toEqual({
       fromModel: 'primary/model-a',
       toModel: 'deeper/model-b',
@@ -1436,6 +1448,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1460,7 +1476,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     })).rejects.toBe(cancelErr);
     // 中止不应再烧一次修复请求
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
   });
 
   it('沙箱总预算耗尽时直接停止，不触发 AI 修复或模型升级', async () => {
@@ -1468,6 +1484,7 @@ describe('TestdataGenService.generate', () => {
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
       createClientStartingAfter: jest.fn(),
@@ -1496,7 +1513,7 @@ describe('TestdataGenService.generate', () => {
       telemetryMetadata: expect.objectContaining({ failureStage: 'sandbox_budget' }),
     });
     await expect(promise).rejects.toThrow(/停止后续修复与模型升级/);
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -1506,6 +1523,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1544,6 +1565,10 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
           content: artifacts,
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
@@ -1577,9 +1602,9 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] },
     });
 
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
-    expect(mockClient.chat.mock.calls[3][0][2].content).toContain('@@@TEMPLATE:java@@@');
-    expect(mockClient.chat.mock.calls[2][0]).toHaveLength(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('@@@TEMPLATE:java@@@');
+    expect(mockClient.chat.mock.calls[3][0]).toHaveLength(1);
     expect(plan.files.find(file => file.name === 'template.java')?.content).toContain('public class Main');
   });
 
@@ -1588,6 +1613,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1620,8 +1649,8 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
-    expect(mockClient.chat.mock.calls[3][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(plan.files.find(file => file.name === 'generator.py')?.content).toContain('separators');
     expect(plan.files.find(file => file.name === 'std.py')?.content).toContain('print(input())');
   });
@@ -1635,6 +1664,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1669,8 +1702,8 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
-    const repairMessages = mockClient.chat.mock.calls[3][0];
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    const repairMessages = mockClient.chat.mock.calls[4][0];
     expect(repairMessages[2].content).toContain('独立验证制品未通过');
     expect(repairMessages[0].content).not.toContain('print(input())');
     expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
@@ -1686,6 +1719,10 @@ describe('TestdataGenService.generate', () => {
         })
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1715,7 +1752,7 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
     expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 META');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
@@ -1775,6 +1812,10 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
           content: makeGenerationArtifactsBlueprint('traditional'),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
@@ -1822,7 +1863,7 @@ describe('TestdataGenService.generate', () => {
       telemetryMetadata: expect.objectContaining({ failureStage: 'accepted_std_verification' }),
     });
     await expect(promise).rejects.toThrow(/系统不会修复 BRUTE 来迁就它/);
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 

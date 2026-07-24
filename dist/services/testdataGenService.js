@@ -55,9 +55,11 @@ exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
 exports.extractStatementSamples = extractStatementSamples;
+exports.evaluateDiscrimination = evaluateDiscrimination;
 exports.parseGeneratorOutput = parseGeneratorOutput;
 exports.isCancellation = isCancellation;
 exports.verifySolutionBlueprintSamples = verifySolutionBlueprintSamples;
+exports.runDiscriminationPhase = runDiscriminationPhase;
 exports.materializeSandboxBlueprint = materializeSandboxBlueprint;
 exports.parseTemplateSections = parseTemplateSections;
 exports.assemblePlan = assemblePlan;
@@ -1511,6 +1513,61 @@ function comparableFileContent(content) {
         .join('\n')
         .trimEnd();
 }
+/** 根据沙箱逐点结果判定正式数据是否能够卡掉错误解靶子。 */
+function evaluateDiscrimination(inputs) {
+    const targets = inputs.targetRuns.map((target) => {
+        if (inputs.customChecker && target.kind !== 'brute-complexity') {
+            return {
+                kind: target.kind,
+                description: target.description,
+                killed: false,
+                skippedReason: 'custom-checker',
+            };
+        }
+        for (let index = 0; index < target.perCase.length; index++) {
+            const detail = target.perCase[index];
+            if (detail.timedOut) {
+                return {
+                    kind: target.kind,
+                    description: target.description,
+                    killed: true,
+                    killedBy: 'tle',
+                    killedByCase: index + 1,
+                };
+            }
+            if (!detail.accepted) {
+                return {
+                    kind: target.kind,
+                    description: `${target.description}(运行失败)`,
+                    killed: true,
+                    killedBy: 'wa',
+                    killedByCase: index + 1,
+                };
+            }
+            if (target.kind !== 'brute-complexity'
+                && comparableFileContent(detail.stdout)
+                    !== comparableFileContent(inputs.oracleOutputs[index] ?? '')) {
+                return {
+                    kind: target.kind,
+                    description: target.description,
+                    killed: true,
+                    killedBy: 'wa',
+                    killedByCase: index + 1,
+                };
+            }
+        }
+        return {
+            kind: target.kind,
+            description: target.description,
+            killed: false,
+        };
+    });
+    const countedTargets = targets.filter(target => !target.skippedReason);
+    return {
+        targets,
+        allKilled: countedTargets.length > 0 && countedTargets.every(target => target.killed),
+    };
+}
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
 function parseGeneratorOutput(stdout, expectedCount) {
     if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
@@ -1605,10 +1662,98 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
     return { total: samples.length, passed: samples.length };
 }
 /**
+ * 在正确性验证通过后，以独立预算运行错误解靶子与正式大数据 BRUTE 复杂度检查。
+ * HTTP、协议与预算异常只会把尚未运行的靶子标为跳过，不得推翻已验证的产物。
+ */
+async function runDiscriminationPhase(input) {
+    const deadlineAt = Date.now() + goJudgeSandboxService_1.DISCRIMINATION_BUDGET_MS;
+    const results = [];
+    const pending = input.killTargets.map(target => ({
+        kind: target.kind,
+        description: target.description,
+        code: target.code,
+        caseIndices: input.cases.map((_, index) => index),
+    }));
+    if (input.bruteCode?.trim()) {
+        const largeCaseIndices = input.cases.flatMap((item, index) => item.dataScale === 'large' ? [index] : []);
+        pending.push({
+            kind: 'brute-complexity',
+            description: '独立暴力解复杂度检查',
+            code: input.bruteCode,
+            caseIndices: largeCaseIndices.length > 0
+                ? largeCaseIndices
+                : input.cases.map((_, index) => index),
+        });
+    }
+    for (let targetIndex = 0; targetIndex < pending.length; targetIndex++) {
+        const target = pending[targetIndex];
+        if (input.customChecker && target.kind !== 'brute-complexity') {
+            results.push({
+                kind: target.kind,
+                description: target.description,
+                killed: false,
+                skippedReason: 'custom-checker',
+            });
+            continue;
+        }
+        try {
+            if (Date.now() >= deadlineAt)
+                throw new Error('区分度验证预算已耗尽');
+            const selectedCases = target.caseIndices.map(index => input.cases[index]);
+            const details = await input.runner.runPythonBatchDetailed(target.code, selectedCases.map(item => item.input), { signal: input.signal, deadlineAt });
+            if (details.length !== selectedCases.length) {
+                throw new Error(`区分度验证返回 ${details.length} 个结果，期望 ${selectedCases.length} 个`);
+            }
+            const evaluated = evaluateDiscrimination({
+                targetRuns: [{
+                        kind: target.kind,
+                        description: target.description,
+                        perCase: details,
+                    }],
+                oracleOutputs: selectedCases.map(item => item.output),
+                customChecker: input.customChecker,
+            }).targets[0];
+            if (evaluated?.killedByCase) {
+                evaluated.killedByCase = target.caseIndices[evaluated.killedByCase - 1] + 1;
+            }
+            if (evaluated)
+                results.push(evaluated);
+        }
+        catch (err) {
+            if (isCancellation(err))
+                throw err;
+            for (let index = targetIndex; index < pending.length; index++) {
+                results.push({
+                    kind: pending[index].kind,
+                    description: pending[index].description,
+                    killed: false,
+                    skippedReason: 'budget-exhausted',
+                });
+            }
+            break;
+        }
+    }
+    if (input.killTargets.length === 0) {
+        results.unshift({
+            kind: 'boundary',
+            description: '未生成可用的错误解靶子',
+            killed: false,
+            skippedReason: 'no-targets',
+        });
+    }
+    const countedTargets = results.filter(target => !target.skippedReason);
+    return {
+        targets: results,
+        allKilled: input.killTargets.length > 0
+            && countedTargets.length > 0
+            && countedTargets.every(target => target.killed),
+    };
+}
+/**
  * 验证管线（独立小数据压力对拍 + 模板实跑 + 输入校验），执行序 a→g。
  * 各阶段间累计校验总时长预算，避免大批量挤兑沙箱 RAM 盘。
  */
-async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal, customChecker = false, onProgress) {
+async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal, customChecker = false, onProgress, killTargets = []) {
     const startedAt = Date.now();
     const sandboxDeadlineAt = startedAt + goJudgeSandboxService_1.SANDBOX_TOTAL_BUDGET_MS;
     const reportProgress = (stage, percent) => {
@@ -1939,6 +2084,15 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         bruteCheck = { compared: inputs.length, agreed, skippedTimeout, disagreed };
     }
+    reportProgress('discrimination_testing', 90);
+    const discrimination = await runDiscriminationPhase({
+        killTargets,
+        bruteCode: blueprint.bruteCode,
+        cases,
+        runner,
+        signal,
+        customChecker,
+    });
     const verification = {
         mode: 'sandbox',
         oracleKind: oracleIsAcceptedRecord
@@ -1956,6 +2110,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         verification.stressCheck = stressCheck;
     if (templateCheck)
         verification.templateCheck = templateCheck;
+    verification.discrimination = discrimination;
     const noteParts = [
         blueprint.notes,
         '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
@@ -2865,6 +3020,21 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true);
             }
         }
+        // 错误解靶子只复用第一阶段 analysis、截断题面与样例；调用失败不影响正确性管线。
+        let killTargets = [];
+        try {
+            killTargets = await this.generateKillTargets({
+                statement: params.statementMarkdown,
+                analysis: solution.analysis || '',
+                samples: expectedFunctionSamples,
+                signal: params.signal,
+            });
+        }
+        catch (err) {
+            if (isCancellation(err))
+                throw err;
+            killTargets = [];
+        }
         // 解题蓝图过硬闸门后，外围制品与独立验证器并行生成；后者看不到 ORACLE 源码。
         report('artifacts', 36);
         const [artifactsState, initialVerifierState] = await Promise.all([
@@ -2901,7 +3071,7 @@ class TestdataGenService {
         }
         let response;
         try {
-            response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report);
+            response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report, killTargets);
         }
         catch (firstError) {
             if (isCancellation(firstError))
@@ -2978,7 +3148,7 @@ class TestdataGenService {
                     blueprintSourceContent = fullRepairResult.content;
                 }
                 blueprint = this.useProvidedPythonOracle(blueprint, params.options);
-                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report);
+                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report, killTargets);
             }
             catch (err) {
                 if (isCancellation(err))
