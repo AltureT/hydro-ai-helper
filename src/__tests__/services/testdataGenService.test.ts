@@ -1250,7 +1250,8 @@ describe('TestdataGenService.generate', () => {
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
   });
 
-  it('高难题模式为每次模型调用提供 20 分钟上限', async () => {
+  it('高难题模式为每次模型调用提供 30 分钟上限', async () => {
+    expect(TESTDATA_GENERATION_PROFILES.hard.aiTimeoutMs).toBe(30 * 60_000);
     const mockClient = {
       chat: jest.fn().mockResolvedValue({
         content: makeAiJson(),

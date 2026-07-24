@@ -333,8 +333,9 @@ describe('TestdataGenGenerateHandler', () => {
     }
   });
 
-  it('高难题模式传入生成服务，并使用 30 分钟服务端总时限', async () => {
+  it('高难题模式传入生成服务，并使用 90 分钟服务端总时限', async () => {
     jest.useFakeTimers();
+    expect(TESTDATA_GENERATION_PROFILES.hard.totalTimeoutMs).toBe(90 * 60_000);
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);

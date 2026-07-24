@@ -197,7 +197,7 @@ const PROGRESS_STAGE_CAPS: Record<GenerationProgressStage, number> = {
 
 const DEFAULT_GENERATION_PROFILES: Record<GenerationProfile, { aiTimeoutMs: number; totalTimeoutMs: number }> = {
   standard: { aiTimeoutMs: 600_000, totalTimeoutMs: 900_000 },
-  hard: { aiTimeoutMs: 1_200_000, totalTimeoutMs: 1_800_000 },
+  hard: { aiTimeoutMs: 1_800_000, totalTimeoutMs: 5_400_000 },
 };
 const JOB_POLL_INTERVAL_MS = 2_000;
 

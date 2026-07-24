@@ -239,8 +239,10 @@ export const TESTDATA_GENERATION_PROFILES = {
     totalTimeoutMs: 900_000,
   },
   hard: {
-    aiTimeoutMs: 1_200_000,
-    totalTimeoutMs: 1_800_000,
+    // 超难竞赛题的正常成功路径也包含至少两轮串行模型等待：先解题，
+    // 再并行生成外围件与独立验证器；还需为沙箱实跑和一次定向修复留余量。
+    aiTimeoutMs: 1_800_000,
+    totalTimeoutMs: 5_400_000,
   },
 } as const;
 
