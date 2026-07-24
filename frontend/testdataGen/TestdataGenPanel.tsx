@@ -192,7 +192,7 @@ const GENERATION_STAGE_GROUPS: Array<{
   { key: 'inputs', stages: ['generating_inputs', 'validating_inputs'] },
   {
     key: 'verify',
-    stages: ['running_oracle', 'checking_templates', 'stress_testing', 'pipeline_repair', 'model_escalation'],
+    stages: ['running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing', 'pipeline_repair', 'model_escalation'],
   },
   { key: 'finish', stages: ['assembling', 'complete'] },
 ];
@@ -261,6 +261,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [generationProgress, setGenerationProgress] = useState<GenerationProgressEvent>({
     stage: 'preparing', percent: 2, attempt: 1,
   });
+  // 记录本轮尝试到达过的最远步骤：定向修复会真实回到较早步骤重做，
+  // 步骤条需要把"已到过、待重验"的步骤与从未到达的步骤区分开，避免看起来像进度倒退。
+  const [generationMaxGroup, setGenerationMaxGroup] = useState<{ attempt: number; index: number }>({
+    attempt: 1, index: 0,
+  });
+  useEffect(() => {
+    const index = getGenerationStageGroupIndex(generationProgress.stage);
+    setGenerationMaxGroup(prev => {
+      if (prev.attempt !== generationProgress.attempt) {
+        return { attempt: generationProgress.attempt, index };
+      }
+      return index > prev.index ? { attempt: prev.attempt, index } : prev;
+    });
+  }, [generationProgress]);
   const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
   const [generationIdleSeconds, setGenerationIdleSeconds] = useState(0);
   const [generationHeartbeatSeconds, setGenerationHeartbeatSeconds] = useState(0);
@@ -499,6 +513,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setGenerationHeartbeatSeconds(0);
     setGenerationCanceling(false);
     setGenerationProgress({ stage: 'preparing', percent: 2, attempt: 1 });
+    setGenerationMaxGroup({ attempt: 1, index: 0 });
     setPhase('generating');
     try {
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/jobs'), {
@@ -941,6 +956,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const idleMinutes = Math.floor(generationIdleSeconds / 60);
     const idleSeconds = generationIdleSeconds % 60;
     const activeGroupIndex = getGenerationStageGroupIndex(generationProgress.stage);
+    const maxGroupIndex = generationMaxGroup.attempt === generationProgress.attempt
+      ? Math.max(generationMaxGroup.index, activeGroupIndex)
+      : activeGroupIndex;
+    const reworking = maxGroupIndex > activeGroupIndex && generationProgress.stage !== 'complete';
     const heartbeatStale = generationHeartbeatSeconds >= 75;
     const longWaitThresholdSeconds = 5 * 60;
     return (
@@ -971,6 +990,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           {GENERATION_STAGE_GROUPS.map((group, index) => {
             const completed = generationProgress.stage === 'complete' || index < activeGroupIndex;
             const active = !completed && index === activeGroupIndex;
+            // 本轮已到达过、因定向修复需要重新执行的步骤
+            const redo = !completed && !active && index <= maxGroupIndex;
             return (
               <div
                 key={group.key}
@@ -980,8 +1001,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                   padding: `${SPACING.sm} ${SPACING.md}`,
                   borderRadius: RADIUS.md,
                   border: `1px solid ${active ? COLORS.borderFocus : COLORS.border}`,
-                  backgroundColor: active ? COLORS.primaryLight : completed ? COLORS.successBg : COLORS.bgHover,
-                  color: active ? COLORS.primary : completed ? COLORS.successText : COLORS.textMuted,
+                  backgroundColor: active ? COLORS.primaryLight
+                    : completed ? COLORS.successBg
+                      : redo ? COLORS.warningBg : COLORS.bgHover,
+                  color: active ? COLORS.primary
+                    : completed ? COLORS.successText
+                      : redo ? COLORS.warningText : COLORS.textMuted,
                   fontSize: '12px', fontWeight: active || completed ? 600 : 500,
                 }}
               >
@@ -989,20 +1014,25 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                   width: '20px', height: '20px', flex: '0 0 20px',
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   borderRadius: RADIUS.full,
-                  color: completed || active ? '#fff' : COLORS.textMuted,
-                  backgroundColor: completed ? COLORS.success : active ? COLORS.primary : COLORS.border,
-                  fontSize: '11px', fontWeight: 700,
+                  color: completed || active ? '#fff' : redo ? COLORS.warningText : COLORS.textMuted,
+                  backgroundColor: completed ? COLORS.success
+                    : active ? COLORS.primary
+                      : redo ? 'transparent' : COLORS.border,
+                  fontSize: redo ? '13px' : '11px', fontWeight: 700,
                 }}>
-                  {completed ? '✓' : index + 1}
+                  {completed ? '✓' : redo ? '↻' : index + 1}
                 </span>
                 <span>{i18n(`ai_helper_testdata_step_${group.key}`)}</span>
               </div>
             );
           })}
         </div>
+        {reworking && (
+          <div style={{ ...TYPOGRAPHY.xs, color: COLORS.warningText, marginTop: SPACING.sm }}>
+            {i18n('ai_helper_testdata_progress_rework_notice')}
+          </div>
+        )}
         <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.sm }}>
-          {i18n('ai_helper_testdata_progress_model_unobservable')}
-          {' '}
           {i18n('ai_helper_testdata_generating_hint')}
         </div>
         {generationIdleSeconds >= 30 && (
