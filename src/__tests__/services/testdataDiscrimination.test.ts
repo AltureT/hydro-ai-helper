@@ -1,4 +1,5 @@
 import {
+  buildDiscriminationNotes,
   evaluateDiscrimination,
   runDiscriminationPhase,
 } from '../../services/testdataGenService';
@@ -145,6 +146,73 @@ describe('evaluateDiscrimination', () => {
       targets: [],
       allKilled: false,
     });
+  });
+});
+
+describe('buildDiscriminationNotes', () => {
+  it('全部命中时汇总错误解数量，并标记补刀新增的测试点', () => {
+    expect(buildDiscriminationNotes({
+      targets: [
+        {
+          kind: 'wrong-algorithm',
+          description: '错误贪心',
+          killed: true,
+          killedBy: 'wa',
+          killedByCase: 4,
+        },
+        {
+          kind: 'boundary',
+          description: '遗漏退化边界',
+          killed: true,
+          killedBy: 'wa',
+          killedByCase: 2,
+        },
+        {
+          kind: 'brute-complexity',
+          description: '独立暴力解复杂度检查',
+          killed: true,
+          killedBy: 'tle',
+          killedByCase: 3,
+        },
+      ],
+      allKilled: true,
+    }, 3)).toEqual([
+      '区分度验证:2 个错误解靶子与暴力复杂度检查均被现有数据卡住。',
+      '已为「错误贪心」错误解定向补充 hack 测试点 #4。',
+    ]);
+  });
+
+  it('BRUTE 与错误解仍幸存时分别追加人工复核警告', () => {
+    expect(buildDiscriminationNotes({
+      targets: [
+        {
+          kind: 'overflow-sim',
+          description: '整数溢出模拟',
+          killed: false,
+        },
+        {
+          kind: 'brute-complexity',
+          description: '独立暴力解复杂度检查',
+          killed: false,
+        },
+      ],
+      allKilled: false,
+    }, 3)).toEqual([
+      '警告:独立暴力解在全部测试点均于 5 秒内通过,数据规模可能不足以区分复杂度,建议人工加大规模档位。',
+      '警告:一个「整数溢出模拟」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。',
+    ]);
+  });
+
+  it('跳过的靶子不生成误导性结论', () => {
+    expect(buildDiscriminationNotes({
+      targets: [{
+        kind: 'wrong-algorithm',
+        description: '自定义 checker 靶子',
+        killed: false,
+        skippedReason: 'custom-checker',
+      }],
+      allKilled: false,
+    }, 3)).toEqual([]);
   });
 });
 

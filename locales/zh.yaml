@@ -1162,6 +1162,8 @@ ai_helper_testdata_verify_stress_custom_checker: "自定义 checker 暂不支持
 ai_helper_testdata_verify_validator: "输入合法性校验"
 ai_helper_testdata_verify_validator_none: "未提供校验器"
 ai_helper_testdata_verify_template: "模板实跑验证 (Python)"
+ai_helper_testdata_discrimination_summary: "区分度验证：已卡住 {0}/{1} 个靶子"
+ai_helper_testdata_discrimination_warning: "仍有靶子未被卡住或未完成验证，请查看生成说明并人工复核"
 ai_helper_testdata_benchmark_title: "测试数据生成能力检查"
 ai_helper_testdata_benchmark_desc: "通过几类有代表性的复杂任务，检查当前 AI 是否能够稳定生成可靠的测试数据。检查不会修改或上传题目数据。"
 ai_helper_testdata_benchmark_fee_badge: "会产生模型费用"

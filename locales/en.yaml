@@ -1162,6 +1162,8 @@ ai_helper_testdata_verify_stress_custom_checker: "text comparison unavailable fo
 ai_helper_testdata_verify_validator: "Input validation"
 ai_helper_testdata_verify_validator_none: "no validator provided"
 ai_helper_testdata_verify_template: "Template execution check (Python)"
+ai_helper_testdata_discrimination_summary: "Discrimination check: {0}/{1} targets killed"
+ai_helper_testdata_discrimination_warning: "Some targets survived or could not be checked; review the generation notes"
 ai_helper_testdata_benchmark_title: "Test-data generation capability check"
 ai_helper_testdata_benchmark_desc: "Uses representative complex tasks to check whether the current AI can generate reliable test data consistently. It does not modify or upload problem data."
 ai_helper_testdata_benchmark_fee_badge: "Uses paid model calls"

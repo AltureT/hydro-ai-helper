@@ -1415,6 +1415,7 @@ describe('TestdataGenService.generate', () => {
       killedBy: 'wa',
       killedByCase: 2,
     });
+    expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
   it('第一阶段样例预验证连续失败时不生成外围制品或独立验证器', async () => {

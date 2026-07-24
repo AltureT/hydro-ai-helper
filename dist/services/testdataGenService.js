@@ -60,6 +60,7 @@ exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
 exports.extractStatementSamples = extractStatementSamples;
 exports.evaluateDiscrimination = evaluateDiscrimination;
+exports.buildDiscriminationNotes = buildDiscriminationNotes;
 exports.parseGeneratorOutput = parseGeneratorOutput;
 exports.isCancellation = isCancellation;
 exports.verifySolutionBlueprintSamples = verifySolutionBlueprintSamples;
@@ -1648,6 +1649,32 @@ function evaluateDiscrimination(inputs) {
         targets,
         allKilled: countedTargets.length > 0 && countedTargets.every(target => target.killed),
     };
+}
+/** 将最终区分度结果转换为面向教师的生成说明。 */
+function buildDiscriminationNotes(discrimination, initialCaseCount) {
+    if (!discrimination)
+        return [];
+    const checkedWrongTargets = discrimination.targets.filter(target => target.kind !== 'brute-complexity' && !target.skippedReason);
+    const bruteTarget = discrimination.targets.find(target => target.kind === 'brute-complexity' && !target.skippedReason);
+    const notes = [];
+    if (discrimination.allKilled
+        && checkedWrongTargets.length > 0
+        && bruteTarget?.killed) {
+        notes.push(`区分度验证:${checkedWrongTargets.length} 个错误解靶子与暴力复杂度检查均被现有数据卡住。`);
+    }
+    if (bruteTarget && !bruteTarget.killed) {
+        notes.push('警告:独立暴力解在全部测试点均于 5 秒内通过,数据规模可能不足以区分复杂度,建议人工加大规模档位。');
+    }
+    for (const target of checkedWrongTargets) {
+        if (!target.killed) {
+            notes.push(`警告:一个「${target.description}」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。`);
+        }
+        else if (target.killedByCase !== undefined
+            && target.killedByCase > initialCaseCount) {
+            notes.push(`已为「${target.description}」错误解定向补充 hack 测试点 #${target.killedByCase}。`);
+        }
+    }
+    return notes;
 }
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
 function parseGeneratorOutput(stdout, expectedCount) {
@@ -3341,7 +3368,12 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, classifySandboxRepairScope(err), results, true);
             }
         }
+        const initialCaseCount = response.cases.length;
         response = await this.repairSurvivingKillTargets(params, blueprint, response, killTargets, runner);
+        const discriminationNotes = buildDiscriminationNotes(response.verification?.discrimination, initialCaseCount);
+        if (discriminationNotes.length > 0) {
+            response.notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n');
+        }
         report('assembling', 96);
         return this.applyResultMetadata(assemblePlan(response, params.options, {
             mode: 'sandbox',

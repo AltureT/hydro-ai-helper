@@ -59,6 +59,17 @@ interface PlanVerification {
   };
   validator?: { ran: boolean; casesChecked: number };
   templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
+  discrimination?: {
+    targets: Array<{
+      kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
+      description: string;
+      killed: boolean;
+      killedBy?: 'wa' | 'tle';
+      killedByCase?: number;
+      skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets';
+    }>;
+    allKilled: boolean;
+  };
 }
 
 interface GenerationPlan {
@@ -1053,6 +1064,13 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
     const templateSkipped = verification?.templateCheck?.skippedTimeout ?? [];
     const stressCheck = verification?.stressCheck;
+    const discrimination = verification?.mode === 'sandbox'
+      ? verification.discrimination
+      : undefined;
+    const discriminationKilled = discrimination?.targets.filter(target => target.killed).length ?? 0;
+    const discriminationAllKilled = !!discrimination
+      && discrimination.allKilled
+      && discriminationKilled === discrimination.targets.length;
     const hasAiOnlyCases = plan.files.some(
       f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
     );
@@ -1070,7 +1088,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const verificationAllGreen = verification?.mode === 'sandbox'
       && !hasAiOnlyCases
       && (stressPassed || legacyBrutePassed)
-      && templateSkipped.length === 0;
+      && templateSkipped.length === 0
+      && (!discrimination || discriminationAllKilled);
 
     return (
       <div>
@@ -1159,6 +1178,22 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {verification.templateCheck && (
               <div style={{ fontSize: '13px' }}>
                 {i18n('ai_helper_testdata_verify_template')}: {verification.templateCheck.passed}/{verification.templateCheck.total}
+              </div>
+            )}
+            {discrimination && (
+              <div style={{
+                ...getAlertStyle(discriminationAllKilled ? 'success' : 'warning'),
+                marginTop: SPACING.xs,
+                padding: `${SPACING.xs} ${SPACING.sm}`,
+                fontSize: '13px',
+              }}>
+                {i18n(
+                  'ai_helper_testdata_discrimination_summary',
+                  discriminationKilled,
+                  discrimination.targets.length,
+                )}
+                {!discriminationAllKilled
+                  && ` · ${i18n('ai_helper_testdata_discrimination_warning')}`}
               </div>
             )}
           </div>
