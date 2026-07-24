@@ -1045,6 +1045,65 @@ describe('assemblePlan', () => {
     expect(plan.verification?.discrimination?.targets[0].killedByCase).toBe(4);
     expect(plan.notes).toContain('已为「错误贪心」错误解定向补充 hack 测试点 #4。');
   });
+
+  it('结构化说明分类系统事实、警告与 AI 自述，同时保持 legacy notes 顺序不变', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    response.notes = 'AI 自述。\n系统事实。\n已有警告。';
+    response.notesStructured = {
+      warnings: ['已有警告。'],
+      system: ['系统事实。'],
+      ai: 'AI 自述。',
+    };
+    response.discriminationInitialCaseCount = 1;
+    response.verification = {
+      mode: 'sandbox',
+      oracleKind: 'ai-solution',
+      discrimination: {
+        targets: [
+          {
+            kind: 'boundary',
+            description: '遗漏边界',
+            killed: true,
+            killedBy: 'wa',
+            killedByCase: 2,
+          },
+          {
+            kind: 'wrong-algorithm',
+            description: '错误贪心',
+            killed: false,
+          },
+        ],
+        allKilled: false,
+      },
+    };
+
+    const plan = assemblePlan(response, options, { mode: 'sandbox' });
+
+    expect(plan.notes).toBe([
+      response.notes,
+      '已为「遗漏边界」错误解定向补充 hack 测试点 #2。',
+      '警告:一个「错误贪心」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。',
+    ].join('\n'));
+    expect(plan.notesStructured).toEqual({
+      warnings: [
+        '已有警告。',
+        '警告:一个「错误贪心」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。',
+      ],
+      system: [
+        '系统事实。',
+        '已为「遗漏边界」错误解定向补充 hack 测试点 #2。',
+      ],
+      ai: 'AI 自述。',
+    });
+  });
 });
 
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
@@ -1176,6 +1235,8 @@ describe('stage-specific sandbox repair', () => {
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
+      .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
   });
 
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
@@ -1422,6 +1483,12 @@ describe('TestdataGenService.generate', () => {
       'generator.py', 'std.py', 'config.yaml',
     ]));
     expect(plan.notes).toContain('Hydro 沙箱中实际运行');
+    expect(plan.notesStructured?.ai).toBe('解题蓝图。\n外围制品。');
+    expect(plan.notesStructured?.system).toContain(
+      '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
+    );
+    expect(plan.notesStructured?.warnings).not.toContain('解题蓝图。');
+    expect(plan.notesStructured?.system).not.toContain('外围制品。');
     expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
     expect(runner.runPython.mock.calls.every(call => typeof call[3] === 'number')).toBe(true);
     expect(runner.runPythonBatchDetailed.mock.calls.every(call => typeof call[2]?.deadlineAt === 'number')).toBe(true);
@@ -1805,6 +1872,7 @@ describe('TestdataGenService.generate', () => {
       toModel: 'deeper/model-b',
     });
     expect(plan.notes).toContain('下一配置模型');
+    expect(plan.notesStructured?.system.some(note => note.includes('下一配置模型'))).toBe(true);
     expect(plan.usedModel).toBe('primary/model-a → deeper/model-b');
     expect(plan.tokenUsage?.totalTokens).toBe(14);
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
@@ -2147,6 +2215,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
     });
     expect(plan.notes).toContain('沙箱当前不可达');
+    expect(plan.notesStructured?.warnings.some(note => note.includes('沙箱当前不可达'))).toBe(true);
     expect(runner.runPython).not.toHaveBeenCalled();
   });
 
@@ -2343,12 +2412,18 @@ describe('两阶段沙箱蓝图', () => {
     expect(solutionSystem).toContain('@@@ORACLE@@@');
     expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
     expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
+    expect(solutionSystem).toContain('NOTES 至多 2 句');
+    expect(solutionSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(solutionUser).toContain('这是第一阶段');
     expect(solutionUser).not.toContain('逐测试点覆盖计划');
     expect(solutionUser).not.toContain('函数题模板语言');
     expect(solutionUser).not.toContain('Hydro 测试点数量');
     expect(artifactsSystem).toContain('@@@GENERATOR@@@');
     expect(artifactsSystem).not.toContain('@@@ORACLE@@@');
+    expect(artifactsSystem).toContain('编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
+    expect(artifactsSystem).toContain('任何一条违反都会导致整体失败');
+    expect(artifactsSystem).toContain('NOTES 至多 2 句');
+    expect(artifactsSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
     expect(artifactsUser).toContain(solution.oracleCode.trim());
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
@@ -2447,12 +2522,20 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(sp).not.toContain('@@@VALIDATOR@@@');
     expect(sp).toContain('独立调用中生成验证器');
     expect(sp).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+    expect(sp).toContain('NOTES 至多 2 句');
+    expect(sp).toContain('不要罗列已由沙箱验证的内容');
   });
 
   it('独立验证 Prompt 与解析器强制要求 BRUTE/STRESS_GENERATOR/VALIDATOR', () => {
     const system = buildIndependentVerifierSystemPrompt();
     expect(system).toContain(`恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组小数据`);
     expect(system).toContain(`至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同`);
+    expect(system).toContain('编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
+    expect(system).toContain('每一条“保证/约定”都必须成为一条显式校验');
+    expect(system).toContain('合法输入必须接受，非法输入必须拒绝');
+    expect(system).toContain('不得添加题面没有的额外限制');
+    expect(system).not.toContain('宁可过严拒绝');
+    expect(system).toContain('=== COMPLEXITY_GAP ===');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
     expect(verifier.bruteCode).toContain('independent brute');
@@ -2938,6 +3021,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       agreed: TESTDATA_GEN_LIMITS.STRESS_CASES,
     });
     expect(res.notes).toContain('所选历史 AC 仅作为候选解');
+    expect(res.notesStructured?.warnings.some(note => note.includes('所选历史 AC 仅作为候选解')))
+      .toBe(true);
+    expect(res.notesStructured?.system.some(note => note.includes('Hydro 沙箱中实际运行')))
+      .toBe(true);
   });
 
   it('历史 AC 与独立 BRUTE 冲突时硬失败，不允许把 BRUTE 修成迎合 AC', async () => {

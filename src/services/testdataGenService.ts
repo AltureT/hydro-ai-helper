@@ -97,6 +97,8 @@ export interface GenerationResponse {
   stdSolution?: { language?: string; code: string };
   cases: GeneratedCase[];
   notes?: string;
+  /** 说明的结构化载体；notes 仍保留原拼接文本供旧消费方使用。 */
+  notesStructured?: StructuredGenerationNotes;
   /** 沙箱生成模式下用于构造输入的 Python 程序。 */
   generatorCode?: string;
   /** 沙箱生成模式下实际计算 .out 的可执行 Python 标程。 */
@@ -135,6 +137,8 @@ export interface SandboxGenerationBlueprint {
   validatorCode?: string;    // 读一份 .in，合法 exit 0；非法 exit 非 0 并向 stderr 说明
   /** 仅用于内部小数据压力对拍，不写入题目文件。 */
   stressGeneratorCode?: string;
+  /** 独立验证器声明：缺失时按存在复杂度差异处理，以兼容旧响应。 */
+  complexityGap?: 'exists' | 'none';
   /** 独立验证调用把函数题题面样例转换为主蓝图确定的原始 stdin。 */
   functionSampleInputs?: Array<{ id: string; input: string }>;
   notes?: string;
@@ -165,6 +169,8 @@ export interface IndependentVerifierBlueprint {
   bruteCode: string;
   validatorCode: string;
   stressGeneratorCode: string;
+  /** 独立验证器声明：该题是否存在明显更慢的朴素解法；缺失时维持现状。 */
+  complexityGap?: 'exists' | 'none';
   functionSampleInputs?: Array<{ id: string; input: string }>;
 }
 
@@ -204,7 +210,7 @@ export interface DiscriminationTargetResult {
   killedBy?: 'wa' | 'tle';
   /** 首个卡掉该靶子的正式测试点编号（从 1 开始）。 */
   killedByCase?: number;
-  skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets';
+  skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
 }
 
 export interface DiscriminationCheck {
@@ -236,6 +242,15 @@ export interface PlanVerification {
   discrimination?: DiscriminationCheck;
 }
 
+export interface StructuredGenerationNotes {
+  /** 需要教师行动或注意的警告。 */
+  warnings: string[];
+  /** 系统验证事实。 */
+  system: string[];
+  /** AI 蓝图原始自述。 */
+  ai?: string;
+}
+
 /** 组装后的单个待写入文件 */
 export interface PlannedFile {
   name: string;
@@ -253,6 +268,8 @@ export interface GenerationPlan {
   isFillIn?: boolean;
   analysis?: string;
   notes?: string;
+  /** 结构化说明；缺失时前端回退显示 legacy notes。 */
+  notesStructured?: StructuredGenerationNotes;
   files: PlannedFile[];
   caseCount: number;
   /** 合并现有完整数字测试点后，config.yaml 中的总测试点数量。 */
@@ -936,6 +953,7 @@ export function buildSolutionBlueprintSystemPrompt(): string {
 4. 若函数题题面包含样例，必须输出 SAMPLE_INPUTS，把每个题面展示参数转换为 ANALYSIS 确定的原始 stdin；只转换输入，id 不得遗漏或增加。
 5. 教师手动标程是权威；历史 AC 仅是可能误 AC 的候选，禁止把 AC 状态当作正确性证明。
 6. 本阶段严禁输出 GENERATOR、BRUTE、VALIDATOR 或 TEMPLATE；这些外围制品只有在 ORACLE 通过样例预验证后才会由后续阶段生成。
+7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
 @@@META@@@
@@ -1011,12 +1029,13 @@ export function buildGenerationArtifactsSystemPrompt(): string {
   return `你是一位 OJ 测试数据工程师。题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
 
 核心规则：
-1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。
+1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
 4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
 6. 不得输出 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
+7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
 @@@GENERATOR@@@
@@ -1074,6 +1093,7 @@ export function buildSandboxBlueprintSystemPrompt(): string {
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
 10. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 11. 不要输出 BRUTE 或 VALIDATOR；系统会在一次全新的、看不到 ORACLE 实现的独立调用中生成验证器，降低两份算法共享同一错误的风险。
+12. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
 @@@META@@@
@@ -1118,14 +1138,17 @@ export function buildIndependentVerifierSystemPrompt(
 
 核心规则：
 1. BRUTE 必须是自包含 Python 3 完整程序，读取一份原始 stdin 并输出题目答案。使用最朴素、最容易审查的枚举/模拟算法，不追求大规模性能，不得省略任何输出格式细节。
-2. STRESS_GENERATOR 必须是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}。
+2. STRESS_GENERATOR 必须是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}。编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 3. STRESS_GENERATOR 必须恰好生成 ${stressCaseCount} 组小数据，至少 ${Math.ceil(stressCaseCount * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；全部能让 BRUTE 在 5 秒内独立完成。混合穷举边界、固定种子随机、重复值、退化结构和容易触发错误算法的反例。不得复制正式测试点，也不得生成大规模性能数据。
-4. VALIDATOR 必须是自包含 Python 3 程序，读取一份 input，严格校验格式和题面约束；合法时静默 exit 0，非法时向 stderr 说明并 exit 1。不得无条件成功。
+4. VALIDATOR 必须是自包含 Python 3 程序，读取一份 input，严格校验格式和题面约束；合法时静默 exit 0，非法时向 stderr 说明并 exit 1。合法输入必须接受，非法输入必须拒绝；题面中每一条“保证/约定”都必须成为一条显式校验，但不得添加题面没有的额外限制。不得无条件成功。
 5. 三个程序必须使用题目已经确定的同一份原始 stdin 编码。函数题每份 input 只对应一次调用；传统题若有 T，沿用题面和编码说明中的约定。
 6. 所有生成过程必须确定性并固定随机种子。每个 input 小于 256KB，STRESS_GENERATOR stdout 小于 1MB，不打印日志。
 7. 若用户消息列出函数题题面样例，额外输出 SAMPLE_INPUTS，将每个题面参数展示转换成上述 stdin 编码。只转换输入，不填写或改写期望输出；样例 id 必须逐一对应，不能遗漏或增加。
+8. 判断题目是否存在明显的复杂度差异：如果这道题不存在时间复杂度明显劣于标程、且学生现实中可能写出的朴素解法（例如 O(1) 公式题、纯输入输出模拟题），COMPLEXITY_GAP 输出 none；否则输出 exists，且 BRUTE 必须实现那个更慢的朴素解法。
 
-只输出以下三个必需分节；函数题存在题面样例时再输出第四个 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+=== COMPLEXITY_GAP ===
+exists 或 none
 @@@BRUTE@@@
 完整 Python 3 暴力解
 @@@STRESS_GENERATOR@@@
@@ -1177,7 +1200,7 @@ export function buildIndependentVerifierUserPrompt(
 export function buildKillTargetsSystemPrompt(): string {
   return `你是一位 OJ 错误解分析专家。请根据题面与既有解法分析，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
 
-从以下菜单中挑选最可能的 2 种不同错误模式，每种输出一个完整错误解：
+从以下菜单中挑选最多 2 种现实中学生确实可能犯的不同错误模式，每种输出一个完整错误解；如果题目过于简单、不存在有区分价值的现实错误模式，允许只输出 1 个甚至 0 个分节，不要硬凑：
 - boundary：边界或退化情形处理错误，例如 n=1、全相等、空结构。
 - wrong-algorithm：看似合理但不正确的贪心、DP、公式或状态转移。
 - overflow-sim：整数溢出错误。Python 整数原生不会溢出，必须显式使用 % (1 << 31)、% (1 << 32)、有符号位转换等方式模拟题目语言中的 32/64 位溢出。
@@ -1186,7 +1209,7 @@ export function buildKillTargetsSystemPrompt(): string {
 1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
 2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
 3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
-4. 只输出两个分节，不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时保持响应为空，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
 === KILL_TARGET:<kind> ===
 DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\`python
@@ -1217,7 +1240,7 @@ export function buildKillTargetsUserPrompt(input: {
       ])
       : ['题面未解析到样例。']),
     '',
-    '请选择最可能的 2 种不同错误模式，并严格按分节格式输出。',
+    '请选择最多 2 个最可能的不同错误模式；没有合适靶子可输出 0 个。请严格按分节格式输出。',
   ].join('\n');
 }
 
@@ -1778,7 +1801,18 @@ export function parseIndependentVerifierBlueprint(
   raw: string,
   expectedFunctionSamples: StatementSample[] = [],
 ): IndependentVerifierBlueprint {
-  const sections = splitDelimitedSections(raw);
+  const lines = raw.replace(/<think>[\s\S]*?<\/think>/g, '').split(/\r?\n/);
+  const complexityGapMarker = lines.findIndex(line =>
+    /^[ \t]*===\s*COMPLEXITY_GAP\s*===\s*$/i.test(line));
+  let complexityGap: IndependentVerifierBlueprint['complexityGap'];
+  if (complexityGapMarker >= 0) {
+    const nextLine = lines[complexityGapMarker + 1];
+    const hasValueLine = nextLine !== undefined && !SECTION_MARKER_RE.test(nextLine);
+    const value = hasValueLine ? nextLine.trim().toLowerCase() : undefined;
+    if (value === 'exists' || value === 'none') complexityGap = value;
+    lines.splice(complexityGapMarker, hasValueLine ? 2 : 1);
+  }
+  const sections = splitDelimitedSections(lines.join('\n'));
   if (sections.length === 0) throw new Error('AI 未返回独立验证器分节标记');
   const bruteCode = repairSectionContent(sections, 'BRUTE');
   const stressGeneratorCode = repairSectionContent(sections, 'STRESS_GENERATOR');
@@ -1800,6 +1834,7 @@ export function parseIndependentVerifierBlueprint(
     bruteCode: bruteCode as string,
     stressGeneratorCode: stressGeneratorCode as string,
     validatorCode: validatorCode as string,
+    complexityGap,
     functionSampleInputs,
   };
 }
@@ -2100,8 +2135,15 @@ export function buildDiscriminationNotes(
   const bruteTarget = discrimination.targets.find(
     target => target.kind === 'brute-complexity' && !target.skippedReason,
   );
+  const complexityGapSkipped = discrimination.targets.some(
+    target => target.kind === 'brute-complexity'
+      && target.skippedReason === 'no-complexity-gap',
+  );
   const notes: string[] = [];
 
+  if (complexityGapSkipped) {
+    notes.push('该题不存在明显更慢的朴素解法，已跳过暴力复杂度检查。');
+  }
   if (
     discrimination.allKilled
     && checkedWrongTargets.length > 0
@@ -2335,6 +2377,7 @@ export async function verifySolutionBlueprintSamples(
 export async function runDiscriminationPhase(input: {
   killTargets: KillTarget[];
   bruteCode?: string;
+  complexityGap?: 'exists' | 'none';
   cases: Array<{ input: string; output: string; dataScale?: CaseDataScale }>;
   runner: TestdataSandboxRunner;
   signal?: AbortSignal;
@@ -2343,7 +2386,13 @@ export async function runDiscriminationPhase(input: {
 }): Promise<DiscriminationCheck> {
   const deadlineAt = input.deadlineAt ?? Date.now() + DISCRIMINATION_BUDGET_MS;
   const results: DiscriminationTargetResult[] = [];
-  const pending = input.killTargets.map(target => ({
+  const pending: Array<{
+    kind: DiscriminationTargetResult['kind'];
+    description: string;
+    code: string;
+    caseIndices: number[];
+    skippedReason?: DiscriminationTargetResult['skippedReason'];
+  }> = input.killTargets.map(target => ({
     kind: target.kind as DiscriminationTargetResult['kind'],
     description: target.description,
     code: target.code,
@@ -2359,11 +2408,23 @@ export async function runDiscriminationPhase(input: {
       caseIndices: largeCaseIndices.length > 0
         ? largeCaseIndices
         : input.cases.map((_, index) => index),
+      skippedReason: input.complexityGap === 'none'
+        ? 'no-complexity-gap'
+        : undefined,
     });
   }
 
   for (let targetIndex = 0; targetIndex < pending.length; targetIndex++) {
     const target = pending[targetIndex];
+    if (target.skippedReason) {
+      results.push({
+        kind: target.kind,
+        description: target.description,
+        killed: false,
+        skippedReason: target.skippedReason,
+      });
+      continue;
+    }
     if (input.customChecker && target.kind !== 'brute-complexity') {
       results.push({
         kind: target.kind,
@@ -2856,6 +2917,7 @@ export async function materializeSandboxBlueprint(
   const discrimination = await runDiscriminationPhase({
     killTargets: discriminationKillTargets,
     bruteCode: blueprint.bruteCode,
+    complexityGap: blueprint.complexityGap,
     cases,
     runner,
     signal,
@@ -2879,44 +2941,50 @@ export async function materializeSandboxBlueprint(
   if (templateCheck) verification.templateCheck = templateCheck;
   verification.discrimination = discrimination;
 
-  const noteParts: Array<string | undefined> = [
-    blueprint.notes,
-    '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
-  ];
+  const noteParts: Array<string | undefined> = [blueprint.notes];
+  const noteWarnings: string[] = [];
+  const noteSystem: string[] = [];
+  const appendNote = (kind: 'warning' | 'system', note: string) => {
+    noteParts.push(note);
+    (kind === 'warning' ? noteWarnings : noteSystem).push(note);
+  };
+  appendNote('system', '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。');
   if (blueprint.problemType === 'function' && samples.length > 0) {
-    noteParts.push(`已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateCheck ? ' 与 template.py' : ''}。`);
+    appendNote('system', `已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateCheck ? ' 与 template.py' : ''}。`);
   }
   if (oracleIsAcceptedRecord) {
-    noteParts.push(samples.length > 0
+    appendNote('warning', samples.length > 0
       ? `所选历史 AC 仅作为候选解；本次已通过 ${samples.length} 个题面样例与独立 BRUTE 小数据压力验证，但这不等于正确性证明，仍建议教师人工复核关键边界。`
       : '所选历史 AC 仅作为候选解；题面未解析到可回归样例，本次仅通过独立 BRUTE 小数据压力验证。这不等于正确性证明，仍建议教师人工复核关键边界。');
   }
   if (bruteCheck && bruteCheck.disagreed.length > 0) {
-    noteParts.push(customChecker
+    appendNote('warning', customChecker
       ? `题目使用自定义 checker；暴力解与标程在测试点 ${bruteCheck.disagreed.join('、')} 的文本输出不同，已保留并请人工复核 checker 语义。`
       : `暴力解与教师标准答案在测试点 ${bruteCheck.disagreed.join('、')} 不一致，已按教师 std 输出为准，请人工复核。`);
   }
   if (customChecker && samples.length > 0) {
-    noteParts.push('题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
+    appendNote('system', '题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
   }
   if (stressCheck?.droppedInvalid) {
-    noteParts.push(
+    appendNote(
+      'system',
       `已剔除 ${stressCheck.droppedInvalid} 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。`,
     );
   }
   if (stressCheck?.skippedReason === 'custom-checker') {
-    noteParts.push('题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
+    appendNote('system', '题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
   } else if (stressCheck && stressCheck.compared > 0) {
-    noteParts.push(
+    appendNote(
+      'system',
       `已使用独立生成的 BRUTE 在 ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
       + `其中 ${stressCheck.uniqueInputs} 组 input 唯一，重复 ${stressCheck.duplicateInputs} 组。`,
     );
   }
   if (bruteCheck && bruteCheck.skippedTimeout.length > 0) {
-    noteParts.push(`暴力解在测试点 ${bruteCheck.skippedTimeout.join('、')} 超时，已跳过对拍。`);
+    appendNote('warning', `暴力解在测试点 ${bruteCheck.skippedTimeout.join('、')} 超时，已跳过对拍。`);
   }
   if (templateCheck && templateCheck.skippedTimeout.length > 0) {
-    noteParts.push(`模板实跑在测试点 ${templateCheck.skippedTimeout.join('、')} 超时，已跳过。`);
+    appendNote('warning', `模板实跑在测试点 ${templateCheck.skippedTimeout.join('、')} 超时，已跳过。`);
   }
 
   return {
@@ -2937,6 +3005,11 @@ export async function materializeSandboxBlueprint(
     pyTemplateExecuted,
     cases,
     notes: noteParts.filter(Boolean).join('\n'),
+    notesStructured: {
+      warnings: noteWarnings,
+      system: noteSystem,
+      ...(blueprint.notes ? { ai: blueprint.notes } : {}),
+    },
   };
 }
 
@@ -3022,6 +3095,22 @@ export function assemblePlan(
     newCaseNumbers,
   );
   const notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n') || undefined;
+  const sourceNotesStructured = response.notesStructured ?? {
+    warnings: [],
+    system: [],
+    ...(response.notes ? { ai: response.notes } : {}),
+  };
+  const notesStructured: StructuredGenerationNotes = {
+    warnings: [
+      ...sourceNotesStructured.warnings,
+      ...discriminationNotes.filter(note => note.startsWith('警告:')),
+    ],
+    system: [
+      ...sourceNotesStructured.system,
+      ...discriminationNotes.filter(note => !note.startsWith('警告:')),
+    ],
+    ...(sourceNotesStructured.ai ? { ai: sourceNotesStructured.ai } : {}),
+  };
   const verification = response.verification
     ? {
       ...response.verification,
@@ -3121,6 +3210,7 @@ export function assemblePlan(
     isFillIn: response.isFillIn,
     analysis: response.analysis,
     notes,
+    notesStructured,
     files,
     caseCount,
     totalCaseCount: configCaseNumbers.length,
@@ -3410,7 +3500,8 @@ ${detail}
 3. ORACLE 必须是可直接运行的 Python 3 完整程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含 SOLUTION（学生提交形式）与全部模板：${templates}。
 5. 不要输出 BRUTE、STRESS_GENERATOR 或 VALIDATOR；它们由隔离的独立验证调用生成。
-6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。`;
+6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
+7. 若输出 @@@NOTES@@@，NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。`;
 }
 
 export function buildIndependentVerifierRepairPrompt(
@@ -3424,7 +3515,7 @@ export function buildIndependentVerifierRepairPrompt(
   return `独立验证制品未通过解析或 Hydro 沙箱验证：
 ${detail}
 
-请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
+请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
 1. BRUTE 必须是与 ORACLE 隔离的朴素正确实现，不能通过删除逻辑或硬编码答案绕过对拍。
 2. STRESS_GENERATOR 必须恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；固定随机种子，所有数据均能让 BRUTE 在 5 秒内完成。
 3. VALIDATOR 必须严格检查题面格式与约束，不得无条件成功。
@@ -3620,10 +3711,12 @@ export class TestdataGenService {
 
     const plan = await this.generateDirect(params);
     if (this.mode === 'auto') {
+      const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
       plan.notes = [
         plan.notes,
-        'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。',
+        fallbackWarning,
       ].filter(Boolean).join('\n');
+      plan.notesStructured?.warnings.push(fallbackWarning);
     }
     this.emitProgress(params, 'complete', 100);
     return plan;
@@ -3694,10 +3787,12 @@ export class TestdataGenService {
         if (plan.verification) {
           plan.verification.modelEscalation = { fromModel, toModel };
         }
+        const escalationNote = `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`;
         plan.notes = [
           plan.notes,
-          `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`,
+          escalationNote,
         ].filter(Boolean).join('\n');
+        plan.notesStructured?.system.push(escalationNote);
         return plan;
       } catch (fallbackError) {
         if (isCancellation(fallbackError)) throw fallbackError;
