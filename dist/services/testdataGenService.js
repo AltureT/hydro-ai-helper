@@ -1764,6 +1764,45 @@ function isCancellation(err) {
         || e.code === 'ERR_CANCELED' || e.category === 'aborted');
 }
 /**
+ * 为一段可重试/可 fallback 的异步工作创建绝对截止时间 signal，同时把用户取消
+ * 级联进去。调用方通过 deadlineTriggered 区分“预算耗尽，可静默降级”和“用户取消，
+ * 必须继续上抛”，并在 finally 中清理计时器与监听器。
+ */
+function createDeadlineAbortScope(userSignal, deadlineAt) {
+    const controller = new AbortController();
+    let triggeredByDeadline = false;
+    let deadlineTimer;
+    const onUserAbort = () => controller.abort();
+    if (userSignal?.aborted) {
+        controller.abort();
+    }
+    else {
+        userSignal?.addEventListener('abort', onUserAbort, { once: true });
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0) {
+            triggeredByDeadline = true;
+            controller.abort();
+        }
+        else {
+            deadlineTimer = setTimeout(() => {
+                if (controller.signal.aborted)
+                    return;
+                triggeredByDeadline = true;
+                controller.abort();
+            }, remainingMs);
+        }
+    }
+    return {
+        signal: controller.signal,
+        deadlineTriggered: () => triggeredByDeadline,
+        dispose: () => {
+            if (deadlineTimer !== undefined)
+                clearTimeout(deadlineTimer);
+            userSignal?.removeEventListener('abort', onUserAbort);
+        },
+    };
+}
+/**
  * 正式区分度前先用题面样例筛掉不可运行或连样例都答错的靶子，避免把语法错误
  * 等低质量程序误记为被正式数据卡住。无样例时无法烟测，保留原靶子。
  */
@@ -3176,9 +3215,9 @@ class TestdataGenService {
         });
         return parseKillTargetsResponse(result.content);
     }
-    async generateHackCandidates(params, analysis, target, timeoutMs) {
+    async generateHackCandidates(params, analysis, target, timeoutMs, signal) {
         const result = await this.aiClient.chat([{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }], buildHackCasesSystemPrompt(), {
-            ...this.getCallOptions(params),
+            ...this.getCallOptions({ signal, onProgress: params.onProgress }),
             timeoutMs,
         });
         return parseHackCasesResponse(result.content).slice(0, 3);
@@ -3214,16 +3253,24 @@ class TestdataGenService {
                     || cases.length >= exports.TESTDATA_GEN_LIMITS.MAX_CASES)
                     break targetLoop;
                 let candidates;
+                const deadlineScope = createDeadlineAbortScope(params.signal, deadlineAt);
                 try {
                     const remainingBudgetMs = deadlineAt - Date.now();
                     if (remainingBudgetMs <= 0)
                         break targetLoop;
-                    candidates = await this.generateHackCandidates(params, blueprint.analysis || '', target, remainingBudgetMs);
+                    candidates = await this.generateHackCandidates(params, blueprint.analysis || '', target, remainingBudgetMs, deadlineScope.signal);
                 }
                 catch (err) {
+                    if (params.signal?.aborted)
+                        throw err;
+                    if (deadlineScope.deadlineTriggered())
+                        break targetLoop;
                     if (isCancellation(err))
                         throw err;
                     continue;
+                }
+                finally {
+                    deadlineScope.dispose();
                 }
                 if (Date.now() >= deadlineAt)
                     break targetLoop;

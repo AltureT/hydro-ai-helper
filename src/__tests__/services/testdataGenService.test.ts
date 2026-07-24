@@ -1529,6 +1529,132 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
+  it('补刀模型链到达区分度绝对截止时间时中止并静默保留未完成状态', async () => {
+    jest.useFakeTimers();
+    try {
+      const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+      const deadlineAbort = Object.assign(new Error('deadline abort'), { name: 'AbortError' });
+      let hackSignal: AbortSignal | undefined;
+      const mockClient = {
+        chat: jest.fn()
+          .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+          .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+          .mockResolvedValueOnce({
+            content: makeGenerationArtifactsBlueprint('traditional'),
+            usedModel,
+          })
+          .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+          .mockImplementationOnce((_messages, _systemPrompt, options) => {
+            hackSignal = options.signal;
+            if (!hackSignal) return Promise.reject(new Error('缺少绝对截止时间 signal'));
+            return new Promise((_resolve, reject) => {
+              hackSignal?.addEventListener('abort', () => reject(deadlineAbort), { once: true });
+            });
+          }),
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+          stdout: code.includes('stress generator')
+            ? stressGeneratorStdout()
+            : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+          stderr: '',
+        })),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockImplementation(
+          (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+            if (code.includes('sys.exit(0)')) return detail();
+            if (code.includes('surviving wrong solution')) return detail({ stdout: input });
+            return detail({ stdout: input });
+          })),
+        ),
+      };
+
+      const generationPromise = new TestdataGenService(mockClient as never, {
+        sandboxRunner: runner,
+        mode: 'sandbox',
+      }).generate({
+        problemTitle: '补刀截止时间测试',
+        statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      });
+
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockClient.chat).toHaveBeenCalledTimes(5);
+      expect(hackSignal).toBeDefined();
+      expect(hackSignal?.aborted).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(DISCRIMINATION_BUDGET_MS);
+      const plan = await generationPromise;
+
+      expect(hackSignal?.aborted).toBe(true);
+      expect(plan.caseCount).toBe(1);
+      expect(plan.verification?.discrimination?.targets[0]).toMatchObject({
+        kind: 'wrong-algorithm',
+        killed: false,
+      });
+      expect(plan.verification?.discrimination?.targets[0].killedBy).toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('补刀模型等待期间的用户取消仍原样上抛', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const userAbort = Object.assign(new Error('user abort'), { name: 'AbortError' });
+    const controller = new AbortController();
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockImplementationOnce((_messages, _systemPrompt, options) => new Promise(
+          (_resolve, reject) => options.signal.addEventListener(
+            'abort',
+            () => reject(userAbort),
+            { once: true },
+          ),
+        )),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+
+    const generationPromise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀用户取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    });
+
+    await new Promise(resolve => setImmediate(resolve));
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    controller.abort();
+
+    await expect(generationPromise).rejects.toBe(userAbort);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
   it('补刀循环结束后用新增测试点复测其他仍幸存的靶子', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const mockClient = {
