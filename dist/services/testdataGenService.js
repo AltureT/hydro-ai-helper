@@ -3232,24 +3232,20 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true);
             }
         }
-        // 错误解靶子只复用第一阶段 analysis、截断题面与样例；调用失败不影响正确性管线。
-        let killTargets = [];
-        try {
-            killTargets = await this.generateKillTargets({
+        // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
+        // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
+        report('artifacts', 36);
+        const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
+            this.generateKillTargets({
                 statement: params.statementMarkdown,
                 analysis: solution.analysis || '',
                 samples: expectedFunctionSamples,
                 signal: params.signal,
-            });
-        }
-        catch (err) {
-            if (isCancellation(err))
-                throw err;
-            killTargets = [];
-        }
-        // 解题蓝图过硬闸门后，外围制品与独立验证器并行生成；后者看不到 ORACLE 源码。
-        report('artifacts', 36);
-        const [artifactsState, initialVerifierState] = await Promise.all([
+            }).catch((err) => {
+                if (isCancellation(err))
+                    throw err;
+                return [];
+            }),
             this.generateGenerationArtifacts(params, solution, callOptions, results),
             this.generateIndependentVerifier(params, solution, callOptions, results, attempt),
         ]);

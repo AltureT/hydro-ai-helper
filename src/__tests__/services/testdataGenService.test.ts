@@ -1275,8 +1275,12 @@ describe('TestdataGenService.generate', () => {
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
   });
 
-  it('沙箱模式运行生成器和标程后再组装文件', async () => {
+  it('沙箱模式并发生成三个独立阶段，错误解靶子失败仍继续组装文件', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
+    let releaseIndependentStages!: () => void;
+    const independentStagesGate = new Promise<void>(resolve => {
+      releaseIndependentStages = resolve;
+    });
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
@@ -1284,19 +1288,25 @@ describe('TestdataGenService.generate', () => {
           usage: { promptTokens: 50, completionTokens: 80, totalTokens: 130 },
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
-        .mockResolvedValueOnce({
-          content: makeEmptyKillTargetsResponse(),
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        .mockImplementationOnce(async () => {
+          await independentStagesGate;
+          throw new Error('kill target unavailable');
         })
-        .mockResolvedValueOnce({
-          content: makeGenerationArtifactsBlueprint('traditional'),
-          usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 },
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        .mockImplementationOnce(async () => {
+          await independentStagesGate;
+          return {
+            content: makeGenerationArtifactsBlueprint('traditional'),
+            usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 },
+            usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+          };
         })
-        .mockResolvedValueOnce({
-          content: makeIndependentVerifierBlueprint(),
-          usage: { promptTokens: 30, completionTokens: 50, totalTokens: 80 },
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        .mockImplementationOnce(async () => {
+          await independentStagesGate;
+          return {
+            content: makeIndependentVerifierBlueprint(),
+            usage: { promptTokens: 30, completionTokens: 50, totalTokens: 80 },
+            usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+          };
         }),
     };
     const stressInputs = Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => `${i + 1}\n`);
@@ -1327,12 +1337,16 @@ describe('TestdataGenService.generate', () => {
       sandboxRunner: runner,
       mode: 'sandbox',
     });
-    const plan = await service.generate({
+    const generationPromise = service.generate({
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
       onProgress: event => progress.push(event),
     });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    releaseIndependentStages();
+    const plan = await generationPromise;
 
     expect(runner.isAvailable).toHaveBeenCalled();
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
