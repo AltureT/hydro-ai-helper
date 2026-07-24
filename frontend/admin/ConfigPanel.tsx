@@ -3,7 +3,6 @@ import { i18n } from '../utils/i18n';
 import { VersionBadge } from './VersionBadge';
 import { EndpointManager } from './EndpointManager';
 import { ScenarioModelSelector } from './ScenarioModelSelector';
-import { TestdataBenchmarkPanel } from './TestdataBenchmarkPanel';
 import { BudgetConfigForm } from './BudgetConfigForm';
 import { TelemetrySettings } from './TelemetrySettings';
 import { FeedbackForm } from './FeedbackForm';
@@ -20,7 +19,6 @@ import type {
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
   studentChat: [], learningSummary: [], teachingAnalysis: [], testdataGeneration: [],
 };
-const BENCHMARK_GUIDE_STORAGE_KEY = 'ai-helper:testdata-benchmark-guide:v2';
 
 function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]>>): ScenarioModelsState {
   return {
@@ -66,10 +64,6 @@ function toConfigState(raw: APIConfigResponse['config']): ConfigState {
   };
 }
 
-function configSignature(config: ConfigState, legacyNewApiKey: string): string {
-  return JSON.stringify({ config, legacyNewApiKey });
-}
-
 interface ConfigPanelProps {
   embedded?: boolean;
 }
@@ -80,8 +74,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [fetchingModels, setFetchingModels] = useState<string | null>(null);
-  const [savedConfigSignature, setSavedConfigSignature] = useState('');
-  const [showBenchmarkGuide, setShowBenchmarkGuide] = useState(false);
 
   const [newApiKey, setNewApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -91,9 +83,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   useEffect(() => {
     loadConfig();
-    try {
-      setShowBenchmarkGuide(localStorage.getItem(BENCHMARK_GUIDE_STORAGE_KEY) !== 'dismissed');
-    } catch { setShowBenchmarkGuide(true); }
   }, []);
 
   const loadConfig = useCallback(async () => {
@@ -111,7 +100,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
       const nextConfig = toConfigState(json.config);
       setConfig(nextConfig);
-      setSavedConfigSignature(configSignature(nextConfig, ''));
     } catch (err: any) {
       console.error('Load config error:', err);
       showToast(err.message || i18n('ai_helper_config_error_load_failed', ''), 'error');
@@ -163,7 +151,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       if (json.config) {
         const nextConfig = toConfigState(json.config);
         setConfig(nextConfig);
-        setSavedConfigSignature(configSignature(nextConfig, ''));
       }
       setNewApiKey('');
       showToast(i18n('ai_helper_config_save_success'), 'success');
@@ -302,22 +289,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   const isBusy = saving || testing;
 
-  const dismissBenchmarkGuide = () => {
-    setShowBenchmarkGuide(false);
-    try { localStorage.setItem(BENCHMARK_GUIDE_STORAGE_KEY, 'dismissed'); } catch { /* best effort */ }
-  };
-
-  const scrollToBenchmark = () => {
-    document.getElementById('testdata-benchmark-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
-  const scrollToModelSettings = () => {
-    const target = config?.endpoints.length
-      ? 'testdata-scenario-models-section'
-      : 'api-endpoint-config-section';
-    document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
   const cardTitleStyle: React.CSSProperties = {
     ...TYPOGRAPHY.md,
     color: COLORS.textPrimary,
@@ -346,16 +317,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
   if (!config) return null;
 
-  const configuredGenerationChain = config.scenarioModels.testdataGeneration.length > 0
-    ? config.scenarioModels.testdataGeneration
-    : config.selectedModels;
-  const modelChainLabels = configuredGenerationChain.map(selected => selected.modelName);
-  if (modelChainLabels.length === 0 && config.modelName) modelChainLabels.push(config.modelName);
-  const usesGlobalModelChain = config.endpoints.length > 0
-    && config.scenarioModels.testdataGeneration.length === 0;
-  const hasUnsavedChanges = savedConfigSignature !== ''
-    && configSignature(config, newApiKey) !== savedConfigSignature;
-
   return (
     <div style={outerStyle}>
       <Toast messages={toasts} onDismiss={dismissToast} />
@@ -369,38 +330,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.lg }}>
         <VersionBadge />
-
-        {showBenchmarkGuide && (
-          <div style={{
-            ...dsCardStyle,
-            borderColor: COLORS.infoBorder,
-            background: `linear-gradient(135deg, ${COLORS.infoBg}, ${COLORS.bgCard})`,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: SPACING.base }}>
-              <span style={{
-                display: 'inline-flex', padding: `3px ${SPACING.sm}`,
-                borderRadius: RADIUS.full, background: COLORS.primary,
-                color: '#fff', fontSize: '11px', fontWeight: 700, lineHeight: 1.4,
-              }}>NEW</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <h2 style={{ ...TYPOGRAPHY.md, color: COLORS.textPrimary, margin: `0 0 ${SPACING.xs}` }}>
-                  {i18n('ai_helper_testdata_benchmark_onboarding_title')}
-                </h2>
-                <p style={{ ...TYPOGRAPHY.sm, color: COLORS.textSecondary, margin: 0 }}>
-                  {i18n('ai_helper_testdata_benchmark_onboarding_desc')}
-                </p>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm, marginTop: SPACING.md }}>
-                  <button type="button" style={getButtonStyle('primary')} onClick={scrollToBenchmark}>
-                    {i18n('ai_helper_testdata_benchmark_onboarding_action')}
-                  </button>
-                  <button type="button" style={getButtonStyle('ghost')} onClick={dismissBenchmarkGuide}>
-                    {i18n('ai_helper_testdata_benchmark_onboarding_dismiss')}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
 
         <div id="api-endpoint-config-section" style={dsCardStyle}>
           <EndpointManager
@@ -461,18 +390,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             />
           </div>
         )}
-
-        <div id="testdata-benchmark-section" style={{ ...dsCardStyle, scrollMarginTop: SPACING.lg }}>
-          <TestdataBenchmarkPanel
-            disabled={isBusy}
-            saving={saving}
-            modelChainLabels={modelChainLabels}
-            usesGlobalModelChain={usesGlobalModelChain}
-            hasUnsavedChanges={hasUnsavedChanges}
-            onOpenModelSettings={scrollToModelSettings}
-            onSaveConfig={saveConfig}
-          />
-        </div>
 
         <div style={dsCardStyle}>
           <h2 style={cardTitleStyle}>{i18n('ai_helper_admin_general_settings')}</h2>

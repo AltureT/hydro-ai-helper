@@ -19,6 +19,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenService = exports.TestdataGenerationError = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
+exports.partitionStressValidation = partitionStressValidation;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.buildCoveragePlan = buildCoveragePlan;
@@ -38,11 +39,19 @@ exports.buildSandboxBlueprintSystemPrompt = buildSandboxBlueprintSystemPrompt;
 exports.buildSandboxBlueprintUserPrompt = buildSandboxBlueprintUserPrompt;
 exports.buildIndependentVerifierSystemPrompt = buildIndependentVerifierSystemPrompt;
 exports.buildIndependentVerifierUserPrompt = buildIndependentVerifierUserPrompt;
+exports.buildKillTargetsSystemPrompt = buildKillTargetsSystemPrompt;
+exports.buildKillTargetsUserPrompt = buildKillTargetsUserPrompt;
+exports.buildKillTargetPromptSamples = buildKillTargetPromptSamples;
+exports.buildHackCasesSystemPrompt = buildHackCasesSystemPrompt;
+exports.buildHackCasesUserPrompt = buildHackCasesUserPrompt;
 exports.extractJsonObject = extractJsonObject;
 exports.normalizeFileContent = normalizeFileContent;
 exports.normalizeExecutableContent = normalizeExecutableContent;
 exports.normalizeGenerationObject = normalizeGenerationObject;
 exports.parseGenerationResponse = parseGenerationResponse;
+exports.parseKillTargetsResponse = parseKillTargetsResponse;
+exports.parseHackCasesResponse = parseHackCasesResponse;
+exports.mergeHackCases = mergeHackCases;
 exports.parseSandboxBlueprint = parseSandboxBlueprint;
 exports.parseSolutionBlueprint = parseSolutionBlueprint;
 exports.parseGenerationArtifacts = parseGenerationArtifacts;
@@ -52,9 +61,14 @@ exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
 exports.extractStatementSamples = extractStatementSamples;
+exports.evaluateDiscrimination = evaluateDiscrimination;
+exports.remapDiscriminationCaseNumbers = remapDiscriminationCaseNumbers;
+exports.buildDiscriminationNotes = buildDiscriminationNotes;
 exports.parseGeneratorOutput = parseGeneratorOutput;
 exports.isCancellation = isCancellation;
+exports.smokeTestKillTargets = smokeTestKillTargets;
 exports.verifySolutionBlueprintSamples = verifySolutionBlueprintSamples;
+exports.runDiscriminationPhase = runDiscriminationPhase;
 exports.materializeSandboxBlueprint = materializeSandboxBlueprint;
 exports.parseTemplateSections = parseTemplateSections;
 exports.assemblePlan = assemblePlan;
@@ -89,7 +103,32 @@ exports.TESTDATA_GEN_LIMITS = {
     STRESS_CASES: 60,
     /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
     STRESS_MIN_UNIQUE_RATIO: 0.8,
+    /** 内部压力数据经输入校验后至少需存活的比例；不足仍进入独立验证器定向修复。 */
+    STRESS_MIN_VALID_RATIO: 0.75,
 };
+/** 把压力数据的输入校验结果分成可继续对拍与需剔除两组，并判断存活数是否足够。 */
+function partitionStressValidation(input) {
+    const keptIndices = [];
+    const dropped = [];
+    input.stressResults.forEach((result, index) => {
+        if (result.accepted) {
+            keptIndices.push(index);
+            return;
+        }
+        dropped.push({
+            index,
+            reason: result.stderr || result.error || result.status || 'Unknown',
+        });
+    });
+    const minimumKept = Math.ceil(input.stressResults.length * input.minValidRatio);
+    return {
+        keptIndices,
+        dropped,
+        sufficient: keptIndices.length >= minimumKept,
+    };
+}
+/** 非关键错误解分析不得无限阻塞正确性管线。 */
+const KILL_TARGET_AI_TIMEOUT_MS = 120000;
 /** 合法测试数据文件名：字母数字、点、下划线、连字符，不允许路径分隔符 */
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 function isSafeTestdataFilename(name) {
@@ -836,6 +875,90 @@ function buildIndependentVerifierUserPrompt(params, blueprint) {
         `请生成恰好 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据，并严格按要求输出验证分节。`,
     ].filter(line => line !== '').join('\n');
 }
+/** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
+function buildKillTargetsSystemPrompt() {
+    return `你是一位 OJ 错误解分析专家。请根据题面与既有解法分析，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
+
+从以下菜单中挑选最可能的 2 种不同错误模式，每种输出一个完整错误解：
+- boundary：边界或退化情形处理错误，例如 n=1、全相等、空结构。
+- wrong-algorithm：看似合理但不正确的贪心、DP、公式或状态转移。
+- overflow-sim：整数溢出错误。Python 整数原生不会溢出，必须显式使用 % (1 << 31)、% (1 << 32)、有符号位转换等方式模拟题目语言中的 32/64 位溢出。
+
+硬性要求：
+1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
+2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
+3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
+4. 只输出两个分节，不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+=== KILL_TARGET:<kind> ===
+DESC: 一句话说明该错误解会在哪类输入上出错
+\`\`\`python
+完整 Python 3 程序
+\`\`\``;
+}
+function buildKillTargetsUserPrompt(input) {
+    const statement = input.statement.slice(0, 6000);
+    const analysis = input.analysis.slice(0, 2000);
+    const samples = input.samples.slice(0, 3);
+    return [
+        '【既有解法分析】',
+        analysis || '未提供额外分析，请从题面推导常见错误模式。',
+        '',
+        '【题面（最多 6000 字符）】',
+        statement,
+        '',
+        '【题面样例（最多 3 组，错误解必须全部通过）】',
+        ...(samples.length > 0
+            ? samples.flatMap((sample, index) => [
+                `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
+                `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+            ])
+            : ['题面未解析到样例。']),
+        '',
+        '请选择最可能的 2 种不同错误模式，并严格按分节格式输出。',
+    ].join('\n');
+}
+/** 函数题错误解提示必须复用已通过第一阶段验证的原始 stdin 转码。 */
+function buildKillTargetPromptSamples(solution, statementSamples) {
+    if (solution.problemType !== 'function') {
+        return statementSamples.map(sample => ({ input: sample.input, output: sample.output }));
+    }
+    const convertedById = new Map((solution.functionSampleInputs || []).map(sample => [sample.id, sample.input]));
+    return statementSamples.flatMap(sample => {
+        const converted = convertedById.get(sample.id);
+        return converted === undefined
+            ? []
+            : [{ input: normalizeFileContent(converted), output: sample.output }];
+    });
+}
+/** 定向补刀调用只针对一个幸存错误解，不携带前轮对话或 ORACLE 源码。 */
+function buildHackCasesSystemPrompt() {
+    return `你是一位 OJ 反例构造专家。一个典型错误解已经通过全部现有测试数据，请针对它的具体错误模式构造 2 至 3 个小规模合法反例输入。
+
+硬性要求：
+1. 每个输入必须符合既定 stdin 编码与题面约束，且不超过 2000 字符。
+2. 只构造容易人工复核的小规模输入，不生成大规模性能数据，不填写或猜测输出。
+3. 优先构造能直接触发所述错误模式的最小反例、边界组合与退化结构。
+4. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
+=== HACK_CASE ===
+RATIONALE: 一句话说明该输入为何可能卡掉错误解
+\`\`\`text
+原始 stdin
+\`\`\``;
+}
+function buildHackCasesUserPrompt(input) {
+    return [
+        '【既有解法与 stdin 编码分析】',
+        input.analysis.slice(0, 3000) || '未提供额外分析，请依据错误模式构造合法小规模输入。',
+        '',
+        '【幸存错误模式】',
+        input.target.description,
+        '',
+        '【幸存错误解（最多 6000 字符）】',
+        input.target.code.slice(0, 6000),
+        '',
+        '该错误解通过了全部现有数据。请构造 2 至 3 个小规模定向补刀输入。',
+    ].join('\n');
+}
 // ─── AI 响应解析 ──────────────────────────────────────────────────────────────
 /**
  * 从 AI 返回文本中提取 JSON（容忍 <think> 标签、代码围栏、前后缀说明文字）
@@ -991,6 +1114,97 @@ function splitDelimitedSections(raw) {
         }
     }
     return sections;
+}
+/** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
+function parseKillTargetsResponse(raw) {
+    const allowedKinds = new Set(['boundary', 'wrong-algorithm', 'overflow-sim']);
+    const markerRe = /^\s*===\s*KILL_TARGET:([a-z-]+)\s*===\s*$/i;
+    const sections = [];
+    let current = null;
+    const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    for (const line of text.split(/\r?\n/)) {
+        const marker = line.match(markerRe);
+        if (marker) {
+            current = { kind: marker[1].toLowerCase(), lines: [] };
+            sections.push(current);
+        }
+        else if (current) {
+            current.lines.push(line);
+        }
+    }
+    return sections.flatMap(section => {
+        if (!allowedKinds.has(section.kind))
+            return [];
+        const content = section.lines.join('\n');
+        const description = section.lines
+            .map(line => line.match(/^\s*DESC:\s*(.*?)\s*$/i))
+            .find((match) => Boolean(match))?.[1] || '';
+        const fenced = content.match(/(?:^|\r?\n)```(?:python|py)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?=\r?\n|$)/i);
+        const hasFenceMarker = section.lines.some(line => /^\s*```/.test(line));
+        if (hasFenceMarker && !fenced)
+            return [];
+        const rawCode = fenced
+            ? fenced[1]
+            : trimBlankEdges(section.lines.filter(line => !/^\s*DESC:/i.test(line)));
+        if (!rawCode.trim())
+            return [];
+        return [{
+                kind: section.kind,
+                description,
+                code: normalizeExecutableContent(rawCode),
+            }];
+    });
+}
+/** 解析定向补刀候选；单节损坏、空输入或超过 2000 字符时直接丢弃。 */
+function parseHackCasesResponse(raw) {
+    const markerRe = /^\s*===\s*HACK_CASE\s*===\s*$/i;
+    const sections = [];
+    let current = null;
+    const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    for (const line of text.split(/\r?\n/)) {
+        if (markerRe.test(line)) {
+            current = [];
+            sections.push(current);
+        }
+        else if (current) {
+            current.push(line);
+        }
+    }
+    return sections.flatMap(lines => {
+        const content = lines.join('\n');
+        const rationale = lines
+            .map(line => line.match(/^\s*RATIONALE:\s*(.*?)\s*$/i))
+            .find((match) => Boolean(match))?.[1] || '';
+        const fenced = content.match(/(?:^|\r?\n)```[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?=\r?\n|$)/);
+        const hasFenceMarker = lines.some(line => /^\s*```/.test(line));
+        if (hasFenceMarker && !fenced)
+            return [];
+        const rawInput = fenced
+            ? fenced[1]
+            : trimBlankEdges(lines.filter(line => !/^\s*RATIONALE:/i.test(line)));
+        if (!rawInput.trim())
+            return [];
+        const normalizedInput = normalizeFileContent(rawInput);
+        if (normalizedInput.length > 2000)
+            return [];
+        return [{ input: normalizedInput, rationale }];
+    });
+}
+/** 将已由 ORACLE 产出答案的补刀点追加进正式 cases，并保持现有测试点不变。 */
+function mergeHackCases(existing, hacks, maxCases) {
+    const capacity = Math.max(0, Math.floor(maxCases) - existing.length);
+    if (hacks.length === 0 || capacity === 0)
+        return existing;
+    const appended = hacks.slice(0, capacity).map((hack, index) => {
+        const caseNumber = existing.length + index + 1;
+        return {
+            label: `定向补刀 #${caseNumber}`,
+            input: normalizeFileContent(hack.input),
+            output: normalizeFileContent(hack.output),
+            dataScale: 'small',
+        };
+    });
+    return [...existing, ...appended];
 }
 function parseSandboxBlueprint(raw, options, parseOptions = {}) {
     const sections = splitDelimitedSections(raw);
@@ -1430,6 +1644,105 @@ function comparableFileContent(content) {
         .join('\n')
         .trimEnd();
 }
+/** 根据沙箱逐点结果判定正式数据是否能够卡掉错误解靶子。 */
+function evaluateDiscrimination(inputs) {
+    const targets = inputs.targetRuns.map((target) => {
+        if (inputs.customChecker && target.kind !== 'brute-complexity') {
+            return {
+                kind: target.kind,
+                description: target.description,
+                killed: false,
+                skippedReason: 'custom-checker',
+            };
+        }
+        for (let index = 0; index < target.perCase.length; index++) {
+            const detail = target.perCase[index];
+            if (detail.timedOut) {
+                return {
+                    kind: target.kind,
+                    description: target.description,
+                    killed: true,
+                    killedBy: 'tle',
+                    killedByCase: index + 1,
+                };
+            }
+            if (!detail.accepted) {
+                return {
+                    kind: target.kind,
+                    description: `${target.description}(运行失败)`,
+                    killed: true,
+                    killedBy: 'wa',
+                    killedByCase: index + 1,
+                };
+            }
+            if (target.kind !== 'brute-complexity'
+                && comparableFileContent(detail.stdout)
+                    !== comparableFileContent(inputs.oracleOutputs[index] ?? '')) {
+                return {
+                    kind: target.kind,
+                    description: target.description,
+                    killed: true,
+                    killedBy: 'wa',
+                    killedByCase: index + 1,
+                };
+            }
+        }
+        return {
+            kind: target.kind,
+            description: target.description,
+            killed: false,
+        };
+    });
+    const countedTargets = targets.filter(target => !target.skippedReason);
+    return {
+        targets,
+        allKilled: countedTargets.length > 0 && countedTargets.every(target => target.killed),
+    };
+}
+/** 将响应内部的从 1 开始本地序号映射为最终分配的测试点文件编号。 */
+function remapDiscriminationCaseNumbers(discrimination, allocatedCaseNumbers) {
+    if (!discrimination)
+        return undefined;
+    return {
+        ...discrimination,
+        targets: discrimination.targets.map(target => {
+            if (target.killedByCase === undefined)
+                return { ...target };
+            return {
+                ...target,
+                killedByCase: allocatedCaseNumbers[target.killedByCase - 1] ?? target.killedByCase,
+            };
+        }),
+    };
+}
+/** 将最终区分度结果转换为面向教师的生成说明。 */
+function buildDiscriminationNotes(discrimination, initialCaseCount, allocatedCaseNumbers) {
+    if (!discrimination)
+        return [];
+    const checkedWrongTargets = discrimination.targets.filter(target => target.kind !== 'brute-complexity' && !target.skippedReason);
+    const bruteTarget = discrimination.targets.find(target => target.kind === 'brute-complexity' && !target.skippedReason);
+    const notes = [];
+    if (discrimination.allKilled
+        && checkedWrongTargets.length > 0
+        && bruteTarget?.killed) {
+        notes.push(`区分度验证:${checkedWrongTargets.length} 个错误解靶子与暴力复杂度检查均被现有数据卡住。`);
+    }
+    if (bruteTarget && !bruteTarget.killed) {
+        notes.push('警告:独立暴力解在全部测试点均于 5 秒内通过,数据规模可能不足以区分复杂度,建议人工加大规模档位。');
+    }
+    for (const target of checkedWrongTargets) {
+        if (!target.killed) {
+            notes.push(`警告:一个「${target.description}」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。`);
+        }
+        else if (target.killedByCase !== undefined
+            && target.killedByCase > initialCaseCount) {
+            const caseNumber = allocatedCaseNumbers?.[target.killedByCase - 1]
+                ?? target.killedByCase;
+            notes.push(`已为「${target.description}」错误解定向补充 hack 测试点 #${caseNumber}。`);
+        }
+    }
+    return notes;
+}
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
 function parseGeneratorOutput(stdout, expectedCount) {
     if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
@@ -1473,6 +1786,77 @@ function isCancellation(err) {
     const e = err;
     return !!e && (e.name === 'AbortError' || e.name === 'CanceledError'
         || e.code === 'ERR_CANCELED' || e.category === 'aborted');
+}
+/**
+ * 为一段可重试/可 fallback 的异步工作创建绝对截止时间 signal，同时把用户取消
+ * 级联进去。调用方通过 deadlineTriggered 区分“预算耗尽，可静默降级”和“用户取消，
+ * 必须继续上抛”，并在 finally 中清理计时器与监听器。
+ */
+function createDeadlineAbortScope(userSignal, deadlineAt) {
+    const controller = new AbortController();
+    let triggeredByDeadline = false;
+    let deadlineTimer;
+    const onUserAbort = () => controller.abort();
+    if (userSignal?.aborted) {
+        controller.abort();
+    }
+    else {
+        userSignal?.addEventListener('abort', onUserAbort, { once: true });
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0) {
+            triggeredByDeadline = true;
+            controller.abort();
+        }
+        else {
+            deadlineTimer = setTimeout(() => {
+                if (controller.signal.aborted)
+                    return;
+                triggeredByDeadline = true;
+                controller.abort();
+            }, remainingMs);
+        }
+    }
+    return {
+        signal: controller.signal,
+        deadlineTriggered: () => triggeredByDeadline,
+        dispose: () => {
+            if (deadlineTimer !== undefined)
+                clearTimeout(deadlineTimer);
+            userSignal?.removeEventListener('abort', onUserAbort);
+        },
+    };
+}
+/**
+ * 正式区分度前先用题面样例筛掉不可运行或连样例都答错的靶子，避免把语法错误
+ * 等低质量程序误记为被正式数据卡住。无样例时无法烟测，保留原靶子。
+ */
+async function smokeTestKillTargets(input) {
+    if (input.killTargets.length === 0 || input.samples.length === 0) {
+        return input.killTargets;
+    }
+    const validTargets = [];
+    for (const target of input.killTargets) {
+        if (Date.now() >= input.deadlineAt)
+            break;
+        try {
+            const details = await input.runner.runPythonBatchDetailed(target.code, input.samples.map(sample => sample.input), { signal: input.signal, deadlineAt: input.deadlineAt });
+            if (details.length !== input.samples.length)
+                continue;
+            const passed = details.every((detail, index) => (detail.accepted
+                && !detail.timedOut
+                && (input.customChecker
+                    || comparableFileContent(detail.stdout)
+                        === comparableFileContent(input.samples[index].output))));
+            if (passed)
+                validTargets.push(target);
+        }
+        catch (err) {
+            if (isCancellation(err))
+                throw err;
+            // 单个靶子烟测失败仅丢弃该靶子，不影响正确性管线和其余靶子。
+        }
+    }
+    return validTargets;
 }
 /**
  * 第一阶段硬闸门：在生成器、模板和独立验证器消耗更多 AI/沙箱预算前，
@@ -1524,10 +1908,98 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
     return { total: samples.length, passed: samples.length };
 }
 /**
+ * 在正确性验证通过后，以独立预算运行错误解靶子与正式大数据 BRUTE 复杂度检查。
+ * HTTP、协议与预算异常只会把尚未运行的靶子标为跳过，不得推翻已验证的产物。
+ */
+async function runDiscriminationPhase(input) {
+    const deadlineAt = input.deadlineAt ?? Date.now() + goJudgeSandboxService_1.DISCRIMINATION_BUDGET_MS;
+    const results = [];
+    const pending = input.killTargets.map(target => ({
+        kind: target.kind,
+        description: target.description,
+        code: target.code,
+        caseIndices: input.cases.map((_, index) => index),
+    }));
+    if (input.bruteCode?.trim()) {
+        const largeCaseIndices = input.cases.flatMap((item, index) => item.dataScale === 'large' ? [index] : []);
+        pending.push({
+            kind: 'brute-complexity',
+            description: '独立暴力解复杂度检查',
+            code: input.bruteCode,
+            caseIndices: largeCaseIndices.length > 0
+                ? largeCaseIndices
+                : input.cases.map((_, index) => index),
+        });
+    }
+    for (let targetIndex = 0; targetIndex < pending.length; targetIndex++) {
+        const target = pending[targetIndex];
+        if (input.customChecker && target.kind !== 'brute-complexity') {
+            results.push({
+                kind: target.kind,
+                description: target.description,
+                killed: false,
+                skippedReason: 'custom-checker',
+            });
+            continue;
+        }
+        try {
+            if (Date.now() >= deadlineAt)
+                throw new Error('区分度验证预算已耗尽');
+            const selectedCases = target.caseIndices.map(index => input.cases[index]);
+            const details = await input.runner.runPythonBatchDetailed(target.code, selectedCases.map(item => item.input), { signal: input.signal, deadlineAt });
+            if (details.length !== selectedCases.length) {
+                throw new Error(`区分度验证返回 ${details.length} 个结果，期望 ${selectedCases.length} 个`);
+            }
+            const evaluated = evaluateDiscrimination({
+                targetRuns: [{
+                        kind: target.kind,
+                        description: target.description,
+                        perCase: details,
+                    }],
+                oracleOutputs: selectedCases.map(item => item.output),
+                customChecker: input.customChecker,
+            }).targets[0];
+            if (evaluated?.killedByCase) {
+                evaluated.killedByCase = target.caseIndices[evaluated.killedByCase - 1] + 1;
+            }
+            if (evaluated)
+                results.push(evaluated);
+        }
+        catch (err) {
+            if (isCancellation(err))
+                throw err;
+            for (let index = targetIndex; index < pending.length; index++) {
+                results.push({
+                    kind: pending[index].kind,
+                    description: pending[index].description,
+                    killed: false,
+                    skippedReason: 'budget-exhausted',
+                });
+            }
+            break;
+        }
+    }
+    if (input.killTargets.length === 0) {
+        results.unshift({
+            kind: 'boundary',
+            description: '未生成可用的错误解靶子',
+            killed: false,
+            skippedReason: 'no-targets',
+        });
+    }
+    const countedTargets = results.filter(target => !target.skippedReason);
+    return {
+        targets: results,
+        allKilled: input.killTargets.length > 0
+            && countedTargets.length > 0
+            && countedTargets.every(target => target.killed),
+    };
+}
+/**
  * 验证管线（独立小数据压力对拍 + 模板实跑 + 输入校验），执行序 a→g。
  * 各阶段间累计校验总时长预算，避免大批量挤兑沙箱 RAM 盘。
  */
-async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal, customChecker = false, onProgress) {
+async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal, customChecker = false, onProgress, killTargets = []) {
     const startedAt = Date.now();
     const sandboxDeadlineAt = startedAt + goJudgeSandboxService_1.SANDBOX_TOTAL_BUDGET_MS;
     const reportProgress = (stage, percent) => {
@@ -1572,8 +2044,10 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     // c. 独立 STRESS_GENERATOR：内部小数据只用于验证，不进入最终文件计划。
     let stressInputs = [];
     let stressGenerated = [];
+    let stressGeneratedCount = 0;
     let stressUniqueInputs = 0;
     let stressDuplicateInputs = 0;
+    let stressDroppedInvalid = 0;
     if (blueprint.stressGeneratorCode) {
         reportProgress('generating_inputs', 60);
         checkBudget();
@@ -1592,6 +2066,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         catch (err) {
             throw new Error(`STRESS_GENERATOR 输出无效：${err instanceof Error ? err.message : String(err)}`);
         }
+        stressGeneratedCount = stressGenerated.length;
         stressInputs = stressGenerated.map(item => item.input);
         stressUniqueInputs = new Set(stressInputs.map(comparableFileContent)).size;
         stressDuplicateInputs = stressInputs.length - stressUniqueInputs;
@@ -1629,7 +2104,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
     }
     const sampleInputs = samples.map(sample => sample.input);
-    // d. VALIDATOR：同时校验正式输入、题面样例转码和内部压力输入，任一不合法即硬失败。
+    // d. VALIDATOR：正式输入与题面样例仍逐项硬失败；压力输入允许在保底比例内剔除。
     let validatorRan = false;
     const validationInputs = [...inputs, ...sampleInputs, ...stressInputs];
     if (blueprint.validatorCode) {
@@ -1639,17 +2114,28 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         if (validatorResults.length !== validationInputs.length) {
             throw new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`);
         }
-        for (let i = 0; i < validatorResults.length; i++) {
+        const formalAndSampleCount = inputs.length + samples.length;
+        for (let i = 0; i < formalAndSampleCount; i++) {
             const detail = validatorResults[i];
             if (!detail.accepted) {
                 const target = i < inputs.length
                     ? `第 ${i + 1} 个 .in `
-                    : i < inputs.length + samples.length
-                        ? `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `
-                        : `第 ${i - inputs.length - samples.length + 1} 个压力 .in `;
+                    : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `;
                 throw new Error(`${target}未通过输入校验：${(0, textTruncate_1.excerpt)(detail.stderr || detail.error || detail.status, 300)}`);
             }
         }
+        const stressPartition = partitionStressValidation({
+            stressResults: validatorResults.slice(formalAndSampleCount),
+            minValidRatio: exports.TESTDATA_GEN_LIMITS.STRESS_MIN_VALID_RATIO,
+        });
+        if (!stressPartition.sufficient) {
+            const firstDropped = stressPartition.dropped[0];
+            throw new Error(`第 ${firstDropped.index + 1} 个压力 .in 未通过输入校验：`
+                + (0, textTruncate_1.excerpt)(firstDropped.reason, 300));
+        }
+        stressDroppedInvalid = stressPartition.dropped.length;
+        stressInputs = stressPartition.keptIndices.map(index => stressInputs[index]);
+        stressGenerated = stressPartition.keptIndices.map(index => stressGenerated[index]);
         validatorRan = true;
     }
     // e. ORACLE：一次批量跑正式输入、题面样例和内部压力输入。
@@ -1771,11 +2257,12 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 }
             }
             stressCheck = {
-                generated: stressInputs.length,
+                generated: stressGeneratedCount,
                 uniqueInputs: stressUniqueInputs,
                 duplicateInputs: stressDuplicateInputs,
                 compared: 0,
                 agreed: 0,
+                ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
                 skippedReason: 'custom-checker',
             };
         }
@@ -1811,11 +2298,12 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 }
             }
             stressCheck = {
-                generated: stressInputs.length,
+                generated: stressGeneratedCount,
                 uniqueInputs: stressUniqueInputs,
                 duplicateInputs: stressDuplicateInputs,
                 compared: stressInputs.length,
                 agreed: stressInputs.length,
+                ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
             };
         }
     }
@@ -1858,6 +2346,25 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         bruteCheck = { compared: inputs.length, agreed, skippedTimeout, disagreed };
     }
+    reportProgress('discrimination_testing', 90);
+    const discriminationDeadlineAt = Date.now() + goJudgeSandboxService_1.DISCRIMINATION_BUDGET_MS;
+    const discriminationKillTargets = await smokeTestKillTargets({
+        killTargets,
+        samples: samples.map(sample => ({ input: sample.input, output: sample.output })),
+        runner,
+        signal,
+        customChecker,
+        deadlineAt: discriminationDeadlineAt,
+    });
+    const discrimination = await runDiscriminationPhase({
+        killTargets: discriminationKillTargets,
+        bruteCode: blueprint.bruteCode,
+        cases,
+        runner,
+        signal,
+        customChecker,
+        deadlineAt: discriminationDeadlineAt,
+    });
     const verification = {
         mode: 'sandbox',
         oracleKind: oracleIsAcceptedRecord
@@ -1875,6 +2382,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         verification.stressCheck = stressCheck;
     if (templateCheck)
         verification.templateCheck = templateCheck;
+    verification.discrimination = discrimination;
     const noteParts = [
         blueprint.notes,
         '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
@@ -1894,6 +2402,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     }
     if (customChecker && samples.length > 0) {
         noteParts.push('题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
+    }
+    if (stressCheck?.droppedInvalid) {
+        noteParts.push(`已剔除 ${stressCheck.droppedInvalid} 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。`);
     }
     if (stressCheck?.skippedReason === 'custom-checker') {
         noteParts.push('题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
@@ -1921,6 +2432,8 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         bruteCode: blueprint.bruteCode,
         validatorCode: blueprint.validatorCode,
         verification,
+        discriminationDeadlineAt,
+        discriminationKillTargets,
         pyTemplateExecuted,
         cases,
         notes: noteParts.filter(Boolean).join('\n'),
@@ -1995,6 +2508,16 @@ function assemblePlan(response, options, context = {}) {
     const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
     const existingComplete = getExistingNumericCases(context.existingFiles).complete;
     const configCaseNumbers = [...new Set([...existingComplete, ...newCaseNumbers])].sort((a, b) => a - b);
+    const discriminationNotes = buildDiscriminationNotes(response.verification?.discrimination, response.discriminationInitialCaseCount ?? response.cases.length, newCaseNumbers);
+    const notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n') || undefined;
+    const verification = response.verification
+        ? {
+            ...response.verification,
+            ...(response.verification.discrimination ? {
+                discrimination: remapDiscriminationCaseNumbers(response.verification.discrimination, newCaseNumbers),
+            } : {}),
+        }
+        : undefined;
     /** AI 生成代码文件统一入口：文件名只写一处，注释符由文件名推导。 */
     const pushCode = (name, code, kind, origin, purpose) => files.push({ name, content: prependPurposeComment(name, code, purpose), kind, origin });
     response.cases.forEach((c, i) => {
@@ -2068,7 +2591,7 @@ function assemblePlan(response, options, context = {}) {
         problemType: response.problemType,
         isFillIn: response.isFillIn,
         analysis: response.analysis,
-        notes: response.notes,
+        notes,
         files,
         caseCount,
         totalCaseCount: configCaseNumbers.length,
@@ -2078,7 +2601,7 @@ function assemblePlan(response, options, context = {}) {
             dataScale: item.dataScale || coveragePlan[index]?.dataScale || 'small',
             target: item.label || coveragePlan[index]?.guidance || '',
         })),
-        ...(response.verification ? { verification: response.verification } : {}),
+        ...(verification ? { verification } : {}),
     };
 }
 // ─── 骨架模式（AI 故障降级，不调用 AI） ──────────────────────────────────────
@@ -2728,6 +3251,167 @@ class TestdataGenService {
             }
         }
     }
+    async generateKillTargets(input) {
+        const result = await this.aiClient.chat([{ role: 'user', content: buildKillTargetsUserPrompt(input) }], buildKillTargetsSystemPrompt(), {
+            ...this.getCallOptions({ signal: input.signal }),
+            timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
+        });
+        return parseKillTargetsResponse(result.content);
+    }
+    async generateHackCandidates(params, analysis, target, timeoutMs, signal) {
+        const result = await this.aiClient.chat([{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }], buildHackCasesSystemPrompt(), {
+            ...this.getCallOptions({ signal, onProgress: params.onProgress }),
+            timeoutMs,
+        });
+        return parseHackCasesResponse(result.content).slice(0, 3);
+    }
+    /**
+     * 仅为正式数据未卡住的 WA 靶子尝试小规模补刀。所有候选必须依次通过
+     * VALIDATOR、ORACLE 与该错误解本身的沙箱复跑，任一基础设施失败均静默停下。
+     */
+    async repairSurvivingKillTargets(params, blueprint, response, killTargets, runner) {
+        const discrimination = response.verification?.discrimination;
+        const deadlineAt = response.discriminationDeadlineAt;
+        if (!discrimination || deadlineAt === undefined || killTargets.length === 0)
+            return response;
+        let cases = response.cases;
+        const initialCaseCount = cases.length;
+        const finish = () => {
+            response.cases = cases;
+            const countedTargets = discrimination.targets.filter(target => !target.skippedReason);
+            discrimination.allKilled = countedTargets.length > 0
+                && countedTargets.every(target => target.killed);
+            return response;
+        };
+        targetLoop: for (let targetIndex = 0; targetIndex < killTargets.length; targetIndex++) {
+            const target = killTargets[targetIndex];
+            const targetResult = discrimination.targets[targetIndex];
+            if (!targetResult
+                || targetResult.kind === 'brute-complexity'
+                || targetResult.killed
+                || targetResult.skippedReason)
+                continue;
+            for (let round = 0; round < 2; round++) {
+                if (Date.now() >= deadlineAt
+                    || cases.length >= exports.TESTDATA_GEN_LIMITS.MAX_CASES)
+                    break targetLoop;
+                let candidates;
+                const deadlineScope = createDeadlineAbortScope(params.signal, deadlineAt);
+                try {
+                    const remainingBudgetMs = deadlineAt - Date.now();
+                    if (remainingBudgetMs <= 0)
+                        break targetLoop;
+                    candidates = await this.generateHackCandidates(params, blueprint.analysis || '', target, remainingBudgetMs, deadlineScope.signal);
+                }
+                catch (err) {
+                    if (params.signal?.aborted)
+                        throw err;
+                    if (deadlineScope.deadlineTriggered())
+                        break targetLoop;
+                    if (isCancellation(err))
+                        throw err;
+                    continue;
+                }
+                finally {
+                    deadlineScope.dispose();
+                }
+                if (Date.now() >= deadlineAt)
+                    break targetLoop;
+                for (const candidate of candidates) {
+                    if (cases.length >= exports.TESTDATA_GEN_LIMITS.MAX_CASES)
+                        break targetLoop;
+                    if (cases.some(item => comparableFileContent(item.input) === comparableFileContent(candidate.input))) {
+                        continue;
+                    }
+                    try {
+                        if (blueprint.validatorCode) {
+                            const validation = await runner.runPythonBatchDetailed(blueprint.validatorCode, [candidate.input], { signal: params.signal, deadlineAt });
+                            if (validation.length !== 1)
+                                throw new Error('定向补刀 VALIDATOR 未返回单条结果');
+                            if (!validation[0].accepted)
+                                continue;
+                        }
+                        const oracle = await runner.runPythonBatchDetailed(blueprint.oracleCode, [candidate.input], { signal: params.signal, deadlineAt });
+                        if (oracle.length !== 1)
+                            throw new Error('定向补刀 ORACLE 未返回单条结果');
+                        if (!oracle[0].accepted)
+                            continue;
+                        const output = normalizeFileContent(oracle[0].stdout);
+                        if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE)
+                            continue;
+                        const targetRun = await runner.runPythonBatchDetailed(target.code, [candidate.input], { signal: params.signal, deadlineAt });
+                        if (targetRun.length !== 1)
+                            throw new Error('定向补刀错误解未返回单条结果');
+                        const detail = targetRun[0];
+                        let killedBy;
+                        if (detail.timedOut)
+                            killedBy = 'tle';
+                        else if (!detail.accepted
+                            || comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
+                            killedBy = 'wa';
+                        }
+                        if (!killedBy)
+                            continue;
+                        const merged = mergeHackCases(cases, [{ input: candidate.input, output }], exports.TESTDATA_GEN_LIMITS.MAX_CASES);
+                        if (merged.length === cases.length)
+                            break targetLoop;
+                        cases = merged;
+                        targetResult.killed = true;
+                        targetResult.killedBy = killedBy;
+                        targetResult.killedByCase = cases.length;
+                        if (!detail.accepted && !detail.timedOut) {
+                            targetResult.description = `${targetResult.description}(运行失败)`;
+                        }
+                        continue targetLoop;
+                    }
+                    catch (err) {
+                        if (isCancellation(err))
+                            throw err;
+                        break targetLoop;
+                    }
+                }
+            }
+        }
+        // 一个靶子的定向反例也可能顺带卡掉其他错误模式；只复跑本轮新追加的点，
+        // 避免重复消耗正式数据的沙箱预算。
+        const appendedCases = cases.slice(initialCaseCount);
+        if (appendedCases.length > 0) {
+            for (let targetIndex = 0; targetIndex < killTargets.length; targetIndex++) {
+                if (Date.now() >= deadlineAt)
+                    break;
+                const target = killTargets[targetIndex];
+                const targetResult = discrimination.targets[targetIndex];
+                if (!targetResult || targetResult.killed || targetResult.skippedReason)
+                    continue;
+                try {
+                    const details = await runner.runPythonBatchDetailed(target.code, appendedCases.map(item => item.input), { signal: params.signal, deadlineAt });
+                    if (details.length !== appendedCases.length)
+                        break;
+                    const evaluated = evaluateDiscrimination({
+                        targetRuns: [{
+                                kind: target.kind,
+                                description: targetResult.description,
+                                perCase: details,
+                            }],
+                        oracleOutputs: appendedCases.map(item => item.output),
+                        customChecker: false,
+                    }).targets[0];
+                    if (!evaluated?.killed || evaluated.killedByCase === undefined)
+                        continue;
+                    targetResult.description = evaluated.description;
+                    targetResult.killed = true;
+                    targetResult.killedBy = evaluated.killedBy;
+                    targetResult.killedByCase = initialCaseCount + evaluated.killedByCase;
+                }
+                catch (err) {
+                    if (isCancellation(err))
+                        throw err;
+                    break;
+                }
+            }
+        }
+        return finish();
+    }
     async generateWithSandbox(params, runner, attempt = 1) {
         const report = (stage, percent) => {
             this.emitProgress(params, stage, this.progressForAttempt(percent, attempt), attempt);
@@ -2780,9 +3464,21 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true);
             }
         }
-        // 解题蓝图过硬闸门后，外围制品与独立验证器并行生成；后者看不到 ORACLE 源码。
+        // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
+        // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
         report('artifacts', 36);
-        const [artifactsState, initialVerifierState] = await Promise.all([
+        const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples);
+        const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
+            this.generateKillTargets({
+                statement: params.statementMarkdown,
+                analysis: solution.analysis || '',
+                samples: killTargetSamples,
+                signal: params.signal,
+            }).catch((err) => {
+                if (isCancellation(err))
+                    throw err;
+                return [];
+            }),
             this.generateGenerationArtifacts(params, solution, callOptions, results),
             this.generateIndependentVerifier(params, solution, callOptions, results, attempt),
         ]);
@@ -2816,7 +3512,7 @@ class TestdataGenService {
         }
         let response;
         try {
-            response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report);
+            response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report, killTargets);
         }
         catch (firstError) {
             if (isCancellation(firstError))
@@ -2893,7 +3589,7 @@ class TestdataGenService {
                     blueprintSourceContent = fullRepairResult.content;
                 }
                 blueprint = this.useProvidedPythonOracle(blueprint, params.options);
-                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report);
+                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report, killTargets);
             }
             catch (err) {
                 if (isCancellation(err))
@@ -2901,6 +3597,9 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, classifySandboxRepairScope(err), results, true);
             }
         }
+        const initialCaseCount = response.cases.length;
+        response.discriminationInitialCaseCount = initialCaseCount;
+        response = await this.repairSurvivingKillTargets(params, blueprint, response, response.discriminationKillTargets || [], runner);
         report('assembling', 96);
         return this.applyResultMetadata(assemblePlan(response, params.options, {
             mode: 'sandbox',

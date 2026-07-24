@@ -51,6 +51,7 @@ import {
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
+import { DISCRIMINATION_BUDGET_MS } from '../../services/goJudgeSandboxService';
 
 const baseOptions: GenerateOptions = {
   problemKind: 'auto',
@@ -175,6 +176,51 @@ function makeIndependentVerifierBlueprint(
       '@@@SAMPLE_INPUTS@@@',
       JSON.stringify({ samples: functionSampleInputs }),
     ] : []),
+  ].join('\n');
+}
+
+function makeEmptyKillTargetsResponse(): string {
+  return '未生成可用的错误解靶子';
+}
+
+function makeSurvivingKillTargetResponse(): string {
+  return [
+    '=== KILL_TARGET:wrong-algorithm ===',
+    'DESC: 只对已有输入返回正确答案',
+    '```python',
+    '# surviving wrong solution',
+    'value = input().strip()',
+    'print(value if value == "1" else "wrong")',
+    '```',
+  ].join('\n');
+}
+
+function makeSharedHackKillTargetsResponse(): string {
+  return [
+    '=== KILL_TARGET:boundary ===',
+    'DESC: 第一个幸存错误解',
+    '```python',
+    '# shared hack target one',
+    'value = input().strip()',
+    'print(value if value == "1" else "wrong")',
+    '```',
+    '=== KILL_TARGET:wrong-algorithm ===',
+    'DESC: 第二个幸存错误解',
+    '```python',
+    '# shared hack target two',
+    'value = input().strip()',
+    'print(value if value == "1" else "wrong")',
+    '```',
+  ].join('\n');
+}
+
+function makeHackCaseResponse(): string {
+  return [
+    '=== HACK_CASE ===',
+    'RATIONALE: 输入 2 会触发幸存错误解',
+    '```text',
+    '2',
+    '```',
   ].join('\n');
 }
 
@@ -963,6 +1009,42 @@ describe('assemblePlan', () => {
     expect(config).toContain('input: 4.in');
     expect(config).not.toContain('input: 2.in');
   });
+
+  it('区分度命中编号与补刀说明使用实际分配的测试点文件编号', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    response.discriminationInitialCaseCount = 1;
+    response.verification = {
+      mode: 'sandbox',
+      oracleKind: 'ai-solution',
+      discrimination: {
+        targets: [{
+          kind: 'wrong-algorithm',
+          description: '错误贪心',
+          killed: true,
+          killedBy: 'wa',
+          killedByCase: 2,
+        }],
+        allKilled: true,
+      },
+    };
+
+    const plan = assemblePlan(response, options, {
+      mode: 'sandbox',
+      existingFiles: ['1.in', '1.out', '2.in'],
+    });
+
+    expect(plan.caseCoverage?.map(item => item.fileNumber)).toEqual([3, 4]);
+    expect(plan.verification?.discrimination?.targets[0].killedByCase).toBe(4);
+    expect(plan.notes).toContain('已为「错误贪心」错误解定向补充 hack 测试点 #4。');
+  });
 });
 
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
@@ -1249,8 +1331,12 @@ describe('TestdataGenService.generate', () => {
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
   });
 
-  it('沙箱模式运行生成器和标程后再组装文件', async () => {
+  it('沙箱模式并发生成三个独立阶段，错误解靶子失败仍继续组装文件', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
+    let releaseIndependentStages!: () => void;
+    const independentStagesGate = new Promise<void>(resolve => {
+      releaseIndependentStages = resolve;
+    });
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
@@ -1258,15 +1344,25 @@ describe('TestdataGenService.generate', () => {
           usage: { promptTokens: 50, completionTokens: 80, totalTokens: 130 },
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
-        .mockResolvedValueOnce({
-          content: makeGenerationArtifactsBlueprint('traditional'),
-          usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 },
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        .mockImplementationOnce(async () => {
+          await independentStagesGate;
+          throw new Error('kill target unavailable');
         })
-        .mockResolvedValueOnce({
-          content: makeIndependentVerifierBlueprint(),
-          usage: { promptTokens: 30, completionTokens: 50, totalTokens: 80 },
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        .mockImplementationOnce(async () => {
+          await independentStagesGate;
+          return {
+            content: makeGenerationArtifactsBlueprint('traditional'),
+            usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 },
+            usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+          };
+        })
+        .mockImplementationOnce(async () => {
+          await independentStagesGate;
+          return {
+            content: makeIndependentVerifierBlueprint(),
+            usage: { promptTokens: 30, completionTokens: 50, totalTokens: 80 },
+            usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+          };
         }),
     };
     const stressInputs = Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => `${i + 1}\n`);
@@ -1297,21 +1393,29 @@ describe('TestdataGenService.generate', () => {
       sandboxRunner: runner,
       mode: 'sandbox',
     });
-    const plan = await service.generate({
+    const generationPromise = service.generate({
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
       onProgress: event => progress.push(event),
     });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[1][2]).toEqual(expect.objectContaining({
+      timeoutMs: 120_000,
+    }));
+    releaseIndependentStages();
+    const plan = await generationPromise;
 
     expect(runner.isAvailable).toHaveBeenCalled();
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.chat.mock.calls[0][1]).toContain('本阶段只解决题目');
     expect(mockClient.chat.mock.calls[0][1]).not.toContain('@@@GENERATOR@@@');
-    expect(mockClient.chat.mock.calls[1][1]).toContain('本阶段不得修改算法');
-    expect(mockClient.chat.mock.calls[1][1]).not.toContain('@@@ORACLE@@@');
-    expect(mockClient.chat.mock.calls[2][0]).toHaveLength(1);
-    expect(mockClient.chat.mock.calls[2][0][0].content).not.toContain('print(input())');
+    expect(mockClient.chat.mock.calls[1][1]).toContain('错误解分析专家');
+    expect(mockClient.chat.mock.calls[2][1]).toContain('本阶段不得修改算法');
+    expect(mockClient.chat.mock.calls[2][1]).not.toContain('@@@ORACLE@@@');
+    expect(mockClient.chat.mock.calls[3][0]).toHaveLength(1);
+    expect(mockClient.chat.mock.calls[3][0][0].content).not.toContain('print(input())');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\nA>B\nC<B\nA>C\n');
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('CBA\n');
     expect(plan.files.map(file => file.name)).toEqual(expect.arrayContaining([
@@ -1324,8 +1428,283 @@ describe('TestdataGenService.generate', () => {
     expect(progress.map(event => event.stage)).toEqual(expect.arrayContaining([
       'sandbox_check', 'blueprint', 'solution_verification', 'artifacts',
       'independent_verifier', 'generating_inputs',
-      'validating_inputs', 'running_oracle', 'stress_testing', 'assembling', 'complete',
+      'validating_inputs', 'running_oracle', 'stress_testing',
+      'discrimination_testing', 'assembling', 'complete',
     ]));
+  });
+
+  it('错误解靶子请求的 AbortError 原样上抛且不触发语义升级', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const abortError = Object.assign(new Error('user canceled'), { name: 'AbortError' });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockRejectedValueOnce(abortError)
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    await expect(new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toBe(abortError);
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('幸存 WA 靶子补刀成功后把新测试点写入文件计划与 config.yaml', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('surviving wrong solution')) {
+            return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][1]).toContain('反例构造专家');
+    expect(mockClient.chat.mock.calls[4][2].timeoutMs).toBeGreaterThan(0);
+    expect(mockClient.chat.mock.calls[4][2].timeoutMs).toBeLessThanOrEqual(
+      DISCRIMINATION_BUDGET_MS,
+    );
+    expect(plan.caseCount).toBe(2);
+    expect(plan.totalCaseCount).toBe(2);
+    expect(plan.files.find(file => file.name === '2.in')?.content).toBe('2\n');
+    expect(plan.files.find(file => file.name === '2.out')?.content).toBe('2\n');
+    expect(plan.files.find(file => file.name === 'config.yaml')?.content).toContain('input: 2.in');
+    expect(plan.verification?.discrimination?.targets[0]).toMatchObject({
+      kind: 'wrong-algorithm',
+      killed: true,
+      killedBy: 'wa',
+      killedByCase: 2,
+    });
+    expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
+  });
+
+  it('补刀模型链到达区分度绝对截止时间时中止并静默保留未完成状态', async () => {
+    jest.useFakeTimers();
+    try {
+      const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+      const deadlineAbort = Object.assign(new Error('deadline abort'), { name: 'AbortError' });
+      let hackSignal: AbortSignal | undefined;
+      const mockClient = {
+        chat: jest.fn()
+          .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+          .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+          .mockResolvedValueOnce({
+            content: makeGenerationArtifactsBlueprint('traditional'),
+            usedModel,
+          })
+          .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+          .mockImplementationOnce((_messages, _systemPrompt, options) => {
+            hackSignal = options.signal;
+            if (!hackSignal) return Promise.reject(new Error('缺少绝对截止时间 signal'));
+            return new Promise((_resolve, reject) => {
+              hackSignal?.addEventListener('abort', () => reject(deadlineAbort), { once: true });
+            });
+          }),
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+          stdout: code.includes('stress generator')
+            ? stressGeneratorStdout()
+            : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+          stderr: '',
+        })),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockImplementation(
+          (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+            if (code.includes('sys.exit(0)')) return detail();
+            if (code.includes('surviving wrong solution')) return detail({ stdout: input });
+            return detail({ stdout: input });
+          })),
+        ),
+      };
+
+      const generationPromise = new TestdataGenService(mockClient as never, {
+        sandboxRunner: runner,
+        mode: 'sandbox',
+      }).generate({
+        problemTitle: '补刀截止时间测试',
+        statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      });
+
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockClient.chat).toHaveBeenCalledTimes(5);
+      expect(hackSignal).toBeDefined();
+      expect(hackSignal?.aborted).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(DISCRIMINATION_BUDGET_MS);
+      const plan = await generationPromise;
+
+      expect(hackSignal?.aborted).toBe(true);
+      expect(plan.caseCount).toBe(1);
+      expect(plan.verification?.discrimination?.targets[0]).toMatchObject({
+        kind: 'wrong-algorithm',
+        killed: false,
+      });
+      expect(plan.verification?.discrimination?.targets[0].killedBy).toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('补刀模型等待期间的用户取消仍原样上抛', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const userAbort = Object.assign(new Error('user abort'), { name: 'AbortError' });
+    const controller = new AbortController();
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockImplementationOnce((_messages, _systemPrompt, options) => new Promise(
+          (_resolve, reject) => options.signal.addEventListener(
+            'abort',
+            () => reject(userAbort),
+            { once: true },
+          ),
+        )),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+
+    const generationPromise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀用户取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    });
+
+    await new Promise(resolve => setImmediate(resolve));
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    controller.abort();
+
+    await expect(generationPromise).rejects.toBe(userAbort);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('补刀循环结束后用新增测试点复测其他仍幸存的靶子', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel })
+        .mockRejectedValueOnce(new Error('第二个靶子补刀生成失败'))
+        .mockRejectedValueOnce(new Error('第二个靶子补刀重试失败')),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('shared hack target')) {
+            return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '共享补刀测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(7);
+    expect(plan.caseCount).toBe(2);
+    expect(plan.verification?.discrimination?.targets.slice(0, 2)).toEqual([
+      expect.objectContaining({ description: '第一个幸存错误解', killed: true, killedByCase: 2 }),
+      expect.objectContaining({ description: '第二个幸存错误解', killed: true, killedByCase: 2 }),
+    ]);
   });
 
   it('第一阶段样例预验证连续失败时不生成外围制品或独立验证器', async () => {
@@ -1376,12 +1755,14 @@ describe('TestdataGenService.generate', () => {
     const fallbackClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usage, usedModel: deeperModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: deeperModel }),
     };
     const primaryClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: brokenBlueprint, usage, usedModel: primaryModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel: primaryModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: primaryModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: primaryModel })
         .mockResolvedValueOnce({
@@ -1416,9 +1797,9 @@ describe('TestdataGenService.generate', () => {
       onProgress: event => progress.push(event),
     });
 
-    expect(primaryClient.chat).toHaveBeenCalledTimes(4);
+    expect(primaryClient.chat).toHaveBeenCalledTimes(5);
     expect(primaryClient.createClientStartingAfter).toHaveBeenCalledWith(primaryModel);
-    expect(fallbackClient.chat).toHaveBeenCalledTimes(3);
+    expect(fallbackClient.chat).toHaveBeenCalledTimes(4);
     expect(plan.verification?.modelEscalation).toEqual({
       fromModel: 'primary/model-a',
       toModel: 'deeper/model-b',
@@ -1436,6 +1817,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1460,7 +1845,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     })).rejects.toBe(cancelErr);
     // 中止不应再烧一次修复请求
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
   });
 
   it('沙箱总预算耗尽时直接停止，不触发 AI 修复或模型升级', async () => {
@@ -1468,6 +1853,7 @@ describe('TestdataGenService.generate', () => {
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
       createClientStartingAfter: jest.fn(),
@@ -1496,7 +1882,7 @@ describe('TestdataGenService.generate', () => {
       telemetryMetadata: expect.objectContaining({ failureStage: 'sandbox_budget' }),
     });
     await expect(promise).rejects.toThrow(/停止后续修复与模型升级/);
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -1506,6 +1892,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1544,6 +1934,10 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
           content: artifacts,
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
@@ -1577,9 +1971,9 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] },
     });
 
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
-    expect(mockClient.chat.mock.calls[3][0][2].content).toContain('@@@TEMPLATE:java@@@');
-    expect(mockClient.chat.mock.calls[2][0]).toHaveLength(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('@@@TEMPLATE:java@@@');
+    expect(mockClient.chat.mock.calls[3][0]).toHaveLength(1);
     expect(plan.files.find(file => file.name === 'template.java')?.content).toContain('public class Main');
   });
 
@@ -1588,6 +1982,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1620,8 +2018,8 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
-    expect(mockClient.chat.mock.calls[3][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(plan.files.find(file => file.name === 'generator.py')?.content).toContain('separators');
     expect(plan.files.find(file => file.name === 'std.py')?.content).toContain('print(input())');
   });
@@ -1635,6 +2033,10 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn()
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1669,8 +2071,8 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
-    const repairMessages = mockClient.chat.mock.calls[3][0];
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    const repairMessages = mockClient.chat.mock.calls[4][0];
     expect(repairMessages[2].content).toContain('独立验证制品未通过');
     expect(repairMessages[0].content).not.toContain('print(input())');
     expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
@@ -1686,6 +2088,10 @@ describe('TestdataGenService.generate', () => {
         })
         .mockResolvedValueOnce({
           content: makeSolutionBlueprint('traditional'),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1715,7 +2121,7 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
     expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 META');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
@@ -1775,6 +2181,10 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
+          content: makeEmptyKillTargetsResponse(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+        })
+        .mockResolvedValueOnce({
           content: makeGenerationArtifactsBlueprint('traditional'),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
@@ -1822,7 +2232,7 @@ describe('TestdataGenService.generate', () => {
       telemetryMetadata: expect.objectContaining({ failureStage: 'accepted_std_verification' }),
     });
     await expect(promise).rejects.toThrow(/系统不会修复 BRUTE 来迁就它/);
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -2122,6 +2532,33 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
+  it('VALIDATOR 拒绝题面样例时仍按原语义硬失败', async () => {
+    const bp = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail(),
+        detail(),
+        detail({
+          accepted: false,
+          status: 'Nonzero Exit Status',
+          exitStatus: 1,
+          stderr: '样例非法',
+        }),
+      ]),
+    };
+
+    await expect(materializeSandboxBlueprint(
+      bp,
+      tradOpts,
+      '```input1\n3\n```\n```output1\n3\n```',
+      runner,
+    )).rejects.toThrow(/题面样例 1 未通过输入校验：样例非法/);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
   it('GENERATOR 实跑失败时报错标明阶段', async () => {
     const bp = tradBlueprint();
     const runner = {
@@ -2296,6 +2733,145 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.verification?.bruteCheck).toBeUndefined();
     expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
     expect(res.notes).toContain(`${TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据`);
+  });
+
+  it('少量压力输入未通过 VALIDATOR 时剔除并只把存活集交给 ORACLE 与 BRUTE', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const invalidStressIndices = new Set([1, 4]);
+    const keptStressInputs = stressInputs.filter((_, index) => !invalidStressIndices.has(index));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([
+          detail(),
+          detail(),
+          ...stressInputs.map((_input, index) => invalidStressIndices.has(index)
+            ? detail({
+              accepted: false,
+              status: 'Nonzero Exit Status',
+              stderr: `invalid-${index + 1}`,
+            })
+            : detail()),
+        ])
+        .mockImplementationOnce((_code: string, actualInputs: string[]) => Promise.resolve(
+          actualInputs.map(input => detail({ stdout: input })),
+        ))
+        .mockImplementationOnce((_code: string, actualInputs: string[]) => Promise.resolve(
+          actualInputs.map(input => detail({ stdout: input })),
+        )),
+    };
+
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
+
+    expect(runner.runPythonBatchDetailed.mock.calls[1][1]).toEqual([
+      '1\n',
+      '2\n',
+      ...keptStressInputs,
+    ]);
+    expect(runner.runPythonBatchDetailed.mock.calls[2][1]).toEqual(keptStressInputs);
+    expect(res.verification?.stressCheck).toEqual({
+      generated: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      uniqueInputs: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      duplicateInputs: 0,
+      compared: keptStressInputs.length,
+      agreed: keptStressInputs.length,
+      droppedInvalid: invalidStressIndices.size,
+    });
+    expect(res.verification?.validator?.casesChecked).toBe(
+      2 + TESTDATA_GEN_LIMITS.STRESS_CASES,
+    );
+    expect(res.notes).toContain(
+      '已剔除 2 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。',
+    );
+  });
+
+  it('压力输入过滤后错误详情仍使用对应的原始标签', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const keptStressInputs = stressInputs.slice(1);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([
+          detail(),
+          detail(),
+          detail({
+            accepted: false,
+            status: 'Nonzero Exit Status',
+            stderr: 'drop-first',
+          }),
+          ...stressInputs.slice(1).map(() => detail()),
+        ])
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }),
+          detail({ stdout: '2\n' }),
+          ...keptStressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce([
+          detail({ stdout: 'wrong\n' }),
+          ...keptStressInputs.slice(1).map(input => detail({ stdout: input })),
+        ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
+      /第 1 组小数据不一致（stress-2）.*输入：2/s,
+    );
+  });
+
+  it('压力输入校验存活数不足 75% 时保留现有错误格式并停止后续阶段', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const invalidCount = Math.floor(
+      TESTDATA_GEN_LIMITS.STRESS_CASES
+      * (1 - TESTDATA_GEN_LIMITS.STRESS_MIN_VALID_RATIO),
+    ) + 1;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValueOnce([
+        detail(),
+        detail(),
+        ...Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, index) =>
+          index < invalidCount
+            ? detail({
+              accepted: false,
+              status: 'Nonzero Exit Status',
+              stderr: `invalid-${index + 1}`,
+            })
+            : detail()),
+      ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
+      /第 1 个压力 \.in 未通过输入校验：invalid-1/,
+    );
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
   it('压力生成器用重复 input 凑数时在执行标程前硬失败', async () => {

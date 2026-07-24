@@ -74,6 +74,8 @@ export const SANDBOX_RESPONSE_LIMIT_BYTES = (
 ) + 1024 * 1024;
 /** 沙箱执行总时长预算（毫秒），由 materialize 层在各阶段间累计校验。 */
 export const SANDBOX_TOTAL_BUDGET_MS = 300_000;
+/** 区分度验证独立预算，不占用正确性验证的总时长预算。 */
+export const DISCRIMINATION_BUDGET_MS = 180_000;
 
 function normalizeHost(host: string): string {
   const value = (host || '').trim() || 'http://localhost:5050/';

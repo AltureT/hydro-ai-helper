@@ -8,7 +8,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GoJudgeSandboxRunner = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = void 0;
+exports.GoJudgeSandboxRunner = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = void 0;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
 const textTruncate_1 = require("../lib/textTruncate");
@@ -31,6 +31,8 @@ exports.SANDBOX_CHUNK_SIZE = 4;
 exports.SANDBOX_RESPONSE_LIMIT_BYTES = (exports.SANDBOX_CHUNK_SIZE * (STDOUT_LIMIT_BYTES + STDERR_LIMIT_BYTES) * 2) + 1024 * 1024;
 /** 沙箱执行总时长预算（毫秒），由 materialize 层在各阶段间累计校验。 */
 exports.SANDBOX_TOTAL_BUDGET_MS = 300000;
+/** 区分度验证独立预算，不占用正确性验证的总时长预算。 */
+exports.DISCRIMINATION_BUDGET_MS = 180000;
 function normalizeHost(host) {
     const value = (host || '').trim() || 'http://localhost:5050/';
     let parsed;
