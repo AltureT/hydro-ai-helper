@@ -926,6 +926,30 @@ ai_helper_scoreboard_tab_learning: "Learning Summaries"
 
 # Teaching Suggestions
 ai_helper_dashboard_tab_teaching_review: Teaching Review
+ai_helper_teaching_review_total: "{0} records"
+ai_helper_teaching_review_refresh: Refresh
+ai_helper_teaching_review_loading: Loading teaching summaries…
+ai_helper_teaching_review_empty: No teaching summaries yet
+ai_helper_teaching_review_load_failed: Failed to load teaching summaries
+ai_helper_teaching_review_retry: Retry
+ai_helper_teaching_review_participated: Participants
+ai_helper_teaching_review_ai_users: AI users
+ai_helper_teaching_review_focus: Priority
+ai_helper_teaching_review_attention: Attention
+ai_helper_teaching_review_observation: Observation
+ai_helper_teaching_review_status_pending: Waiting
+ai_helper_teaching_review_status_generating: Generating
+ai_helper_teaching_review_status_completed: Completed
+ai_helper_teaching_review_status_failed: Failed
+ai_helper_teaching_review_unrated: Not rated
+ai_helper_teaching_review_helpful: Helpful
+ai_helper_teaching_review_not_helpful: Not helpful
+ai_helper_teaching_review_view: View analysis
+ai_helper_teaching_review_primary_finding: Main finding
+ai_helper_teaching_review_no_findings: No priority findings
+ai_helper_teaching_review_failed_hint: Generation failed; open the analysis to try again
+ai_helper_teaching_review_feedback: Summary feedback
+ai_helper_teaching_review_positive_rate: "{0}% helpful"
 ai_helper_teaching_generate: Generate Teaching Suggestions
 ai_helper_teaching_regenerate: Regenerate
 ai_helper_teaching_generating: Generating teaching suggestions...

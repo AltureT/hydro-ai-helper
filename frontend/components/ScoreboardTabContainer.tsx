@@ -46,6 +46,14 @@ const TABS = {
 
 type TabType = typeof TABS[keyof typeof TABS];
 
+function getInitialTab(isTeacher: boolean): TabType {
+  if (typeof window === 'undefined') return TABS.SCOREBOARD;
+  const requested = new URLSearchParams(window.location.search).get('aiTab')?.toLowerCase();
+  if (requested === 'teaching' && isTeacher) return TABS.TEACHING;
+  if (requested === 'learning') return TABS.LEARNING;
+  return TABS.SCOREBOARD;
+}
+
 // ─── Native scoreboard DOM helpers ───────────────────────────────────────────
 
 /**
@@ -110,14 +118,17 @@ export const ScoreboardTabContainer: React.FC<ScoreboardTabContainerProps> = ({
   contestId,
   isTeacher,
 }) => {
-  const [activeTab, setActiveTab] = useState<TabType>(TABS.SCOREBOARD);
+  const [initialTab] = useState<TabType>(() => getInitialTab(isTeacher));
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab);
 
   // Badge data from child callbacks
   const [teachingBadge, setTeachingBadge] = useState<string | undefined>(undefined);
   const [learningBadge, setLearningBadge] = useState<string | undefined>(undefined);
 
   // Track whether each tab has been activated at least once (lazy mount)
-  const [mountedTabs, setMountedTabs] = useState<Set<TabType>>(new Set([TABS.SCOREBOARD]));
+  const [mountedTabs, setMountedTabs] = useState<Set<TabType>>(
+    new Set([TABS.SCOREBOARD, initialTab]),
+  );
 
   // ── DOM visibility management ─────────────────────────────────────────────
 

@@ -17,6 +17,7 @@ export interface UseTeachingReviewReturn {
   total: number;
   page: number;
   loading: boolean;
+  error: string | null;
   feedbackStats: FeedbackStats;
   fetchList: (page: number) => Promise<void>;
 }
@@ -30,10 +31,12 @@ export function useTeachingReview(domainId: string): UseTeachingReviewReturn {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [feedbackStats, setFeedbackStats] = useState<FeedbackStats>({ up: 0, down: 0 });
 
   const fetchList = useCallback(async (targetPage: number) => {
     setLoading(true);
+    setError(null);
     try {
       const base = buildReviewUrl(domainId);
       const url = `${base}?page=${targetPage}&limit=${PAGE_LIMIT}`;
@@ -41,7 +44,11 @@ export function useTeachingReview(domainId: string): UseTeachingReviewReturn {
         credentials: 'include',
         headers: { 'X-Requested-With': 'XMLHttpRequest' },
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const message = data?.error?.message || `HTTP ${res.status}`;
+        throw new Error(message);
+      }
       const data = await res.json();
       setSummaries(data.summaries ?? []);
       setTotal(data.total ?? 0);
@@ -49,12 +56,12 @@ export function useTeachingReview(domainId: string): UseTeachingReviewReturn {
       if (data.feedbackStats) {
         setFeedbackStats(data.feedbackStats);
       }
-    } catch {
-      // ignore transient errors
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setLoading(false);
     }
   }, [domainId]);
 
-  return { summaries, total, page, loading, feedbackStats, fetchList };
+  return { summaries, total, page, loading, error, feedbackStats, fetchList };
 }
