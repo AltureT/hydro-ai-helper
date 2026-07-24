@@ -1001,8 +1001,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           })}
         </div>
         <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.sm }}>
-          {i18n('ai_helper_testdata_progress_model_unobservable')}
-          {' '}
           {i18n('ai_helper_testdata_generating_hint')}
         </div>
         {generationIdleSeconds >= 30 && (
