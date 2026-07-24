@@ -1235,6 +1235,8 @@ describe('stage-specific sandbox repair', () => {
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
+      .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
   });
 
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
@@ -2420,6 +2422,8 @@ describe('两阶段沙箱蓝图', () => {
     expect(artifactsSystem).not.toContain('@@@ORACLE@@@');
     expect(artifactsSystem).toContain('编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
     expect(artifactsSystem).toContain('任何一条违反都会导致整体失败');
+    expect(artifactsSystem).toContain('NOTES 至多 2 句');
+    expect(artifactsSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
     expect(artifactsUser).toContain(solution.oracleCode.trim());
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
@@ -2518,6 +2522,8 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(sp).not.toContain('@@@VALIDATOR@@@');
     expect(sp).toContain('独立调用中生成验证器');
     expect(sp).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+    expect(sp).toContain('NOTES 至多 2 句');
+    expect(sp).toContain('不要罗列已由沙箱验证的内容');
   });
 
   it('独立验证 Prompt 与解析器强制要求 BRUTE/STRESS_GENERATOR/VALIDATOR', () => {
@@ -2526,7 +2532,9 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(system).toContain(`至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同`);
     expect(system).toContain('编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
     expect(system).toContain('每一条“保证/约定”都必须成为一条显式校验');
-    expect(system).toContain('宁可过严拒绝，不可放过违规输入');
+    expect(system).toContain('合法输入必须接受，非法输入必须拒绝');
+    expect(system).toContain('不得添加题面没有的额外限制');
+    expect(system).not.toContain('宁可过严拒绝');
     expect(system).toContain('=== COMPLEXITY_GAP ===');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());

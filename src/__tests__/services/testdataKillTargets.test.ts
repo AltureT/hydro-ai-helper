@@ -99,12 +99,20 @@ describe('parseKillTargetsResponse', () => {
 describe('kill-target prompt', () => {
   it('只要求 0 至 2 个现实错误模式，不用人工靶子凑数', () => {
     const prompt = buildKillTargetsSystemPrompt();
+    const userPrompt = buildKillTargetsUserPrompt({
+      statement: '题面',
+      analysis: '分析',
+      samples: [],
+    });
 
     expect(prompt).toContain('最多 2 种现实中学生确实可能犯');
     expect(prompt).toContain('允许只输出 1 个甚至 0 个分节，不要硬凑');
     expect(prompt).toContain('仅输出 0 至 2 个 KILL_TARGET 分节');
     expect(prompt).not.toContain('只输出两个分节');
     expect(prompt).toContain('=== KILL_TARGET:<kind> ===');
+    expect(userPrompt).toContain('请选择最多 2 个');
+    expect(userPrompt).toContain('没有合适靶子可输出 0 个');
+    expect(userPrompt).not.toContain('请选择最可能的 2 种');
   });
 
   it('限制 analysis 与每个样例输入输出正文长度', () => {
