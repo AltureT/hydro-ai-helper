@@ -2453,6 +2453,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
     const system = buildIndependentVerifierSystemPrompt();
     expect(system).toContain(`恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组小数据`);
     expect(system).toContain(`至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同`);
+    expect(system).toContain('=== COMPLEXITY_GAP ===');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
     expect(verifier.bruteCode).toContain('independent brute');

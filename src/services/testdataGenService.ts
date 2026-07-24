@@ -135,6 +135,8 @@ export interface SandboxGenerationBlueprint {
   validatorCode?: string;    // 读一份 .in，合法 exit 0；非法 exit 非 0 并向 stderr 说明
   /** 仅用于内部小数据压力对拍，不写入题目文件。 */
   stressGeneratorCode?: string;
+  /** 独立验证器声明：缺失时按存在复杂度差异处理，以兼容旧响应。 */
+  complexityGap?: 'exists' | 'none';
   /** 独立验证调用把函数题题面样例转换为主蓝图确定的原始 stdin。 */
   functionSampleInputs?: Array<{ id: string; input: string }>;
   notes?: string;
@@ -165,6 +167,8 @@ export interface IndependentVerifierBlueprint {
   bruteCode: string;
   validatorCode: string;
   stressGeneratorCode: string;
+  /** 独立验证器声明：该题是否存在明显更慢的朴素解法；缺失时维持现状。 */
+  complexityGap?: 'exists' | 'none';
   functionSampleInputs?: Array<{ id: string; input: string }>;
 }
 
@@ -204,7 +208,7 @@ export interface DiscriminationTargetResult {
   killedBy?: 'wa' | 'tle';
   /** 首个卡掉该靶子的正式测试点编号（从 1 开始）。 */
   killedByCase?: number;
-  skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets';
+  skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
 }
 
 export interface DiscriminationCheck {
@@ -1124,8 +1128,11 @@ export function buildIndependentVerifierSystemPrompt(
 5. 三个程序必须使用题目已经确定的同一份原始 stdin 编码。函数题每份 input 只对应一次调用；传统题若有 T，沿用题面和编码说明中的约定。
 6. 所有生成过程必须确定性并固定随机种子。每个 input 小于 256KB，STRESS_GENERATOR stdout 小于 1MB，不打印日志。
 7. 若用户消息列出函数题题面样例，额外输出 SAMPLE_INPUTS，将每个题面参数展示转换成上述 stdin 编码。只转换输入，不填写或改写期望输出；样例 id 必须逐一对应，不能遗漏或增加。
+8. 判断题目是否存在明显的复杂度差异：如果这道题不存在时间复杂度明显劣于标程、且学生现实中可能写出的朴素解法（例如 O(1) 公式题、纯输入输出模拟题），COMPLEXITY_GAP 输出 none；否则输出 exists，且 BRUTE 必须实现那个更慢的朴素解法。
 
-只输出以下三个必需分节；函数题存在题面样例时再输出第四个 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+=== COMPLEXITY_GAP ===
+exists 或 none
 @@@BRUTE@@@
 完整 Python 3 暴力解
 @@@STRESS_GENERATOR@@@
@@ -1778,7 +1785,18 @@ export function parseIndependentVerifierBlueprint(
   raw: string,
   expectedFunctionSamples: StatementSample[] = [],
 ): IndependentVerifierBlueprint {
-  const sections = splitDelimitedSections(raw);
+  const lines = raw.replace(/<think>[\s\S]*?<\/think>/g, '').split(/\r?\n/);
+  const complexityGapMarker = lines.findIndex(line =>
+    /^[ \t]*===\s*COMPLEXITY_GAP\s*===\s*$/i.test(line));
+  let complexityGap: IndependentVerifierBlueprint['complexityGap'];
+  if (complexityGapMarker >= 0) {
+    const nextLine = lines[complexityGapMarker + 1];
+    const hasValueLine = nextLine !== undefined && !SECTION_MARKER_RE.test(nextLine);
+    const value = hasValueLine ? nextLine.trim().toLowerCase() : undefined;
+    if (value === 'exists' || value === 'none') complexityGap = value;
+    lines.splice(complexityGapMarker, hasValueLine ? 2 : 1);
+  }
+  const sections = splitDelimitedSections(lines.join('\n'));
   if (sections.length === 0) throw new Error('AI 未返回独立验证器分节标记');
   const bruteCode = repairSectionContent(sections, 'BRUTE');
   const stressGeneratorCode = repairSectionContent(sections, 'STRESS_GENERATOR');
@@ -1800,6 +1818,7 @@ export function parseIndependentVerifierBlueprint(
     bruteCode: bruteCode as string,
     stressGeneratorCode: stressGeneratorCode as string,
     validatorCode: validatorCode as string,
+    complexityGap,
     functionSampleInputs,
   };
 }
@@ -2100,8 +2119,15 @@ export function buildDiscriminationNotes(
   const bruteTarget = discrimination.targets.find(
     target => target.kind === 'brute-complexity' && !target.skippedReason,
   );
+  const complexityGapSkipped = discrimination.targets.some(
+    target => target.kind === 'brute-complexity'
+      && target.skippedReason === 'no-complexity-gap',
+  );
   const notes: string[] = [];
 
+  if (complexityGapSkipped) {
+    notes.push('该题不存在明显更慢的朴素解法，已跳过暴力复杂度检查。');
+  }
   if (
     discrimination.allKilled
     && checkedWrongTargets.length > 0
@@ -2335,6 +2361,7 @@ export async function verifySolutionBlueprintSamples(
 export async function runDiscriminationPhase(input: {
   killTargets: KillTarget[];
   bruteCode?: string;
+  complexityGap?: 'exists' | 'none';
   cases: Array<{ input: string; output: string; dataScale?: CaseDataScale }>;
   runner: TestdataSandboxRunner;
   signal?: AbortSignal;
@@ -2343,7 +2370,13 @@ export async function runDiscriminationPhase(input: {
 }): Promise<DiscriminationCheck> {
   const deadlineAt = input.deadlineAt ?? Date.now() + DISCRIMINATION_BUDGET_MS;
   const results: DiscriminationTargetResult[] = [];
-  const pending = input.killTargets.map(target => ({
+  const pending: Array<{
+    kind: DiscriminationTargetResult['kind'];
+    description: string;
+    code: string;
+    caseIndices: number[];
+    skippedReason?: DiscriminationTargetResult['skippedReason'];
+  }> = input.killTargets.map(target => ({
     kind: target.kind as DiscriminationTargetResult['kind'],
     description: target.description,
     code: target.code,
@@ -2359,11 +2392,23 @@ export async function runDiscriminationPhase(input: {
       caseIndices: largeCaseIndices.length > 0
         ? largeCaseIndices
         : input.cases.map((_, index) => index),
+      skippedReason: input.complexityGap === 'none'
+        ? 'no-complexity-gap'
+        : undefined,
     });
   }
 
   for (let targetIndex = 0; targetIndex < pending.length; targetIndex++) {
     const target = pending[targetIndex];
+    if (target.skippedReason) {
+      results.push({
+        kind: target.kind,
+        description: target.description,
+        killed: false,
+        skippedReason: target.skippedReason,
+      });
+      continue;
+    }
     if (input.customChecker && target.kind !== 'brute-complexity') {
       results.push({
         kind: target.kind,
@@ -2856,6 +2901,7 @@ export async function materializeSandboxBlueprint(
   const discrimination = await runDiscriminationPhase({
     killTargets: discriminationKillTargets,
     bruteCode: blueprint.bruteCode,
+    complexityGap: blueprint.complexityGap,
     cases,
     runner,
     signal,
@@ -3424,7 +3470,7 @@ export function buildIndependentVerifierRepairPrompt(
   return `独立验证制品未通过解析或 Hydro 沙箱验证：
 ${detail}
 
-请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
+请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
 1. BRUTE 必须是与 ORACLE 隔离的朴素正确实现，不能通过删除逻辑或硬编码答案绕过对拍。
 2. STRESS_GENERATOR 必须恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；固定随机种子，所有数据均能让 BRUTE 在 5 秒内完成。
 3. VALIDATOR 必须严格检查题面格式与约束，不得无条件成功。

@@ -67,7 +67,7 @@ interface PlanVerification {
       killed: boolean;
       killedBy?: 'wa' | 'tle';
       killedByCase?: number;
-      skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets';
+      skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
     }>;
     allKilled: boolean;
   };
@@ -135,6 +135,7 @@ type GenerationProgressStage =
   | 'running_oracle'
   | 'checking_templates'
   | 'stress_testing'
+  | 'discrimination_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -1098,10 +1099,16 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const discrimination = verification?.mode === 'sandbox'
       ? verification.discrimination
       : undefined;
-    const discriminationKilled = discrimination?.targets.filter(target => target.killed).length ?? 0;
+    const discriminationCheckedTargets = discrimination?.targets.filter(
+      target => !target.skippedReason,
+    ) ?? [];
+    const discriminationKilled = discriminationCheckedTargets.filter(
+      target => target.killed,
+    ).length;
     const discriminationAllKilled = !!discrimination
       && discrimination.allKilled
-      && discriminationKilled === discrimination.targets.length;
+      && discriminationCheckedTargets.length > 0
+      && discriminationKilled === discriminationCheckedTargets.length;
     const hasAiOnlyCases = plan.files.some(
       f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
     );
@@ -1221,7 +1228,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {i18n(
                   'ai_helper_testdata_discrimination_summary',
                   discriminationKilled,
-                  discrimination.targets.length,
+                  discriminationCheckedTargets.length,
                 )}
                 {!discriminationAllKilled
                   && ` · ${i18n('ai_helper_testdata_discrimination_warning')}`}
