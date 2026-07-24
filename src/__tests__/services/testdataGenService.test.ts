@@ -2532,6 +2532,33 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
+  it('VALIDATOR 拒绝题面样例时仍按原语义硬失败', async () => {
+    const bp = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail(),
+        detail(),
+        detail({
+          accepted: false,
+          status: 'Nonzero Exit Status',
+          exitStatus: 1,
+          stderr: '样例非法',
+        }),
+      ]),
+    };
+
+    await expect(materializeSandboxBlueprint(
+      bp,
+      tradOpts,
+      '```input1\n3\n```\n```output1\n3\n```',
+      runner,
+    )).rejects.toThrow(/题面样例 1 未通过输入校验：样例非法/);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
   it('GENERATOR 实跑失败时报错标明阶段', async () => {
     const bp = tradBlueprint();
     const runner = {
@@ -2706,6 +2733,145 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.verification?.bruteCheck).toBeUndefined();
     expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
     expect(res.notes).toContain(`${TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据`);
+  });
+
+  it('少量压力输入未通过 VALIDATOR 时剔除并只把存活集交给 ORACLE 与 BRUTE', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const invalidStressIndices = new Set([1, 4]);
+    const keptStressInputs = stressInputs.filter((_, index) => !invalidStressIndices.has(index));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([
+          detail(),
+          detail(),
+          ...stressInputs.map((_input, index) => invalidStressIndices.has(index)
+            ? detail({
+              accepted: false,
+              status: 'Nonzero Exit Status',
+              stderr: `invalid-${index + 1}`,
+            })
+            : detail()),
+        ])
+        .mockImplementationOnce((_code: string, actualInputs: string[]) => Promise.resolve(
+          actualInputs.map(input => detail({ stdout: input })),
+        ))
+        .mockImplementationOnce((_code: string, actualInputs: string[]) => Promise.resolve(
+          actualInputs.map(input => detail({ stdout: input })),
+        )),
+    };
+
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
+
+    expect(runner.runPythonBatchDetailed.mock.calls[1][1]).toEqual([
+      '1\n',
+      '2\n',
+      ...keptStressInputs,
+    ]);
+    expect(runner.runPythonBatchDetailed.mock.calls[2][1]).toEqual(keptStressInputs);
+    expect(res.verification?.stressCheck).toEqual({
+      generated: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      uniqueInputs: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      duplicateInputs: 0,
+      compared: keptStressInputs.length,
+      agreed: keptStressInputs.length,
+      droppedInvalid: invalidStressIndices.size,
+    });
+    expect(res.verification?.validator?.casesChecked).toBe(
+      2 + TESTDATA_GEN_LIMITS.STRESS_CASES,
+    );
+    expect(res.notes).toContain(
+      '已剔除 2 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。',
+    );
+  });
+
+  it('压力输入过滤后错误详情仍使用对应的原始标签', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, i) => `${i + 1}\n`,
+    );
+    const keptStressInputs = stressInputs.slice(1);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([
+          detail(),
+          detail(),
+          detail({
+            accepted: false,
+            status: 'Nonzero Exit Status',
+            stderr: 'drop-first',
+          }),
+          ...stressInputs.slice(1).map(() => detail()),
+        ])
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }),
+          detail({ stdout: '2\n' }),
+          ...keptStressInputs.map(input => detail({ stdout: input })),
+        ])
+        .mockResolvedValueOnce([
+          detail({ stdout: 'wrong\n' }),
+          ...keptStressInputs.slice(1).map(input => detail({ stdout: input })),
+        ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
+      /第 1 组小数据不一致（stress-2）.*输入：2/s,
+    );
+  });
+
+  it('压力输入校验存活数不足 75% 时保留现有错误格式并停止后续阶段', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const invalidCount = Math.floor(
+      TESTDATA_GEN_LIMITS.STRESS_CASES
+      * (1 - TESTDATA_GEN_LIMITS.STRESS_MIN_VALID_RATIO),
+    ) + 1;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValueOnce([
+        detail(),
+        detail(),
+        ...Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, index) =>
+          index < invalidCount
+            ? detail({
+              accepted: false,
+              status: 'Nonzero Exit Status',
+              stderr: `invalid-${index + 1}`,
+            })
+            : detail()),
+      ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
+      /第 1 个压力 \.in 未通过输入校验：invalid-1/,
+    );
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
   it('压力生成器用重复 input 凑数时在执行标程前硬失败', async () => {

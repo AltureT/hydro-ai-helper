@@ -55,6 +55,7 @@ interface PlanVerification {
     duplicateInputs?: number;
     compared: number;
     agreed: number;
+    droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
   validator?: { ran: boolean; casesChecked: number };

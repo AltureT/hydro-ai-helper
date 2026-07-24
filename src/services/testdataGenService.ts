@@ -228,6 +228,7 @@ export interface PlanVerification {
     duplicateInputs: number;
     compared: number;
     agreed: number;
+    droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
   validator?: { ran: boolean; casesChecked: number };
@@ -294,7 +295,43 @@ export const TESTDATA_GEN_LIMITS = {
   STRESS_CASES: 60,
   /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
   STRESS_MIN_UNIQUE_RATIO: 0.8,
+  /** 内部压力数据经输入校验后至少需存活的比例；不足仍进入独立验证器定向修复。 */
+  STRESS_MIN_VALID_RATIO: 0.75,
 } as const;
+
+/** 把压力数据的输入校验结果分成可继续对拍与需剔除两组，并判断存活数是否足够。 */
+export function partitionStressValidation(input: {
+  stressResults: Array<{
+    accepted: boolean;
+    stderr?: string;
+    error?: string;
+    status?: string;
+  }>;
+  minValidRatio: number;
+}): {
+  keptIndices: number[];
+  dropped: Array<{ index: number; reason: string }>;
+  sufficient: boolean;
+} {
+  const keptIndices: number[] = [];
+  const dropped: Array<{ index: number; reason: string }> = [];
+  input.stressResults.forEach((result, index) => {
+    if (result.accepted) {
+      keptIndices.push(index);
+      return;
+    }
+    dropped.push({
+      index,
+      reason: result.stderr || result.error || result.status || 'Unknown',
+    });
+  });
+  const minimumKept = Math.ceil(input.stressResults.length * input.minValidRatio);
+  return {
+    keptIndices,
+    dropped,
+    sufficient: keptIndices.length >= minimumKept,
+  };
+}
 
 /** 非关键错误解分析不得无限阻塞正确性管线。 */
 const KILL_TARGET_AI_TIMEOUT_MS = 120_000;
@@ -2447,8 +2484,10 @@ export async function materializeSandboxBlueprint(
   // c. 独立 STRESS_GENERATOR：内部小数据只用于验证，不进入最终文件计划。
   let stressInputs: string[] = [];
   let stressGenerated: GeneratedInputCase[] = [];
+  let stressGeneratedCount = 0;
   let stressUniqueInputs = 0;
   let stressDuplicateInputs = 0;
+  let stressDroppedInvalid = 0;
   if (blueprint.stressGeneratorCode) {
     reportProgress('generating_inputs', 60);
     checkBudget();
@@ -2472,6 +2511,7 @@ export async function materializeSandboxBlueprint(
     } catch (err) {
       throw new Error(`STRESS_GENERATOR 输出无效：${err instanceof Error ? err.message : String(err)}`);
     }
+    stressGeneratedCount = stressGenerated.length;
     stressInputs = stressGenerated.map(item => item.input);
     stressUniqueInputs = new Set(stressInputs.map(comparableFileContent)).size;
     stressDuplicateInputs = stressInputs.length - stressUniqueInputs;
@@ -2517,7 +2557,7 @@ export async function materializeSandboxBlueprint(
   }
   const sampleInputs = samples.map(sample => sample.input);
 
-  // d. VALIDATOR：同时校验正式输入、题面样例转码和内部压力输入，任一不合法即硬失败。
+  // d. VALIDATOR：正式输入与题面样例仍逐项硬失败；压力输入允许在保底比例内剔除。
   let validatorRan = false;
   const validationInputs = [...inputs, ...sampleInputs, ...stressInputs];
   if (blueprint.validatorCode) {
@@ -2531,17 +2571,30 @@ export async function materializeSandboxBlueprint(
     if (validatorResults.length !== validationInputs.length) {
       throw new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`);
     }
-    for (let i = 0; i < validatorResults.length; i++) {
+    const formalAndSampleCount = inputs.length + samples.length;
+    for (let i = 0; i < formalAndSampleCount; i++) {
       const detail = validatorResults[i];
       if (!detail.accepted) {
         const target = i < inputs.length
           ? `第 ${i + 1} 个 .in `
-          : i < inputs.length + samples.length
-            ? `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `
-            : `第 ${i - inputs.length - samples.length + 1} 个压力 .in `;
+          : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `;
         throw new Error(`${target}未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`);
       }
     }
+    const stressPartition = partitionStressValidation({
+      stressResults: validatorResults.slice(formalAndSampleCount),
+      minValidRatio: TESTDATA_GEN_LIMITS.STRESS_MIN_VALID_RATIO,
+    });
+    if (!stressPartition.sufficient) {
+      const firstDropped = stressPartition.dropped[0];
+      throw new Error(
+        `第 ${firstDropped.index + 1} 个压力 .in 未通过输入校验：`
+        + excerpt(firstDropped.reason, 300),
+      );
+    }
+    stressDroppedInvalid = stressPartition.dropped.length;
+    stressInputs = stressPartition.keptIndices.map(index => stressInputs[index]);
+    stressGenerated = stressPartition.keptIndices.map(index => stressGenerated[index]);
     validatorRan = true;
   }
 
@@ -2686,11 +2739,12 @@ export async function materializeSandboxBlueprint(
         }
       }
       stressCheck = {
-        generated: stressInputs.length,
+        generated: stressGeneratedCount,
         uniqueInputs: stressUniqueInputs,
         duplicateInputs: stressDuplicateInputs,
         compared: 0,
         agreed: 0,
+        ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
         skippedReason: 'custom-checker',
       };
     } else {
@@ -2733,11 +2787,12 @@ export async function materializeSandboxBlueprint(
         }
       }
       stressCheck = {
-        generated: stressInputs.length,
+        generated: stressGeneratedCount,
         uniqueInputs: stressUniqueInputs,
         duplicateInputs: stressDuplicateInputs,
         compared: stressInputs.length,
         agreed: stressInputs.length,
+        ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
       };
     }
   } else if (blueprint.bruteCode) {
@@ -2843,6 +2898,11 @@ export async function materializeSandboxBlueprint(
   }
   if (customChecker && samples.length > 0) {
     noteParts.push('题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
+  }
+  if (stressCheck?.droppedInvalid) {
+    noteParts.push(
+      `已剔除 ${stressCheck.droppedInvalid} 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。`,
+    );
   }
   if (stressCheck?.skippedReason === 'custom-checker') {
     noteParts.push('题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
