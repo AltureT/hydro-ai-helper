@@ -154,21 +154,6 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
     }
   };
 
-  const summary = logPagination.summary || {
-    total: 0, pending: 0, confirmed: 0, falsePositive: 0, reviewed: 0,
-    falsePositiveRate: 0, appealedPending: 0,
-  };
-  const summaryItems = [
-    { label: i18n('ai_helper_admin_jailbreak_summary_total'), value: summary.total },
-    { label: i18n('ai_helper_admin_jailbreak_summary_pending'), value: summary.pending },
-    { label: i18n('ai_helper_admin_jailbreak_summary_appealed'), value: summary.appealedPending },
-    { label: i18n('ai_helper_admin_jailbreak_summary_reviewed'), value: summary.reviewed },
-    { label: i18n('ai_helper_admin_jailbreak_summary_confirmed'), value: summary.confirmed },
-    { label: i18n('ai_helper_admin_jailbreak_summary_false_positive'), value: summary.falsePositive },
-    { label: i18n('ai_helper_admin_jailbreak_summary_false_positive_rate'), value: `${summary.falsePositiveRate}%` },
-  ];
-  const operationalMetrics = logPagination.operationalMetrics;
-
   const withDraftIdentity = (base: JailbreakLogFilters = filters): JailbreakLogFilters => ({
     ...base,
     userId: userIdDraft.trim() || undefined,
@@ -243,41 +228,25 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   };
 
   return (
-  <div style={{
-    ...cardStyle,
-    marginTop: '20px',
-  }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-      <h2 style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
-        {i18n('ai_helper_admin_jailbreak_title')}
-      </h2>
-      {logPagination.total > 0 && (
-        <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
-          {i18n('ai_helper_admin_jailbreak_total', logPagination.total)}
-        </span>
-      )}
-    </div>
-
-    <div style={{
-      display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
-      gap: SPACING.sm, marginTop: SPACING.base,
-    }}>
-      {summaryItems.map((item) => (
-        <div key={item.label} style={{
-          padding: SPACING.md, borderRadius: RADIUS.md, backgroundColor: COLORS.bgPage,
-          border: `1px solid ${COLORS.border}`,
-        }}>
-          <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{item.label}</div>
-          <div style={{ marginTop: '4px', fontSize: '20px', fontWeight: 600, color: COLORS.textPrimary }}>
-            {item.value}
-          </div>
-        </div>
-      ))}
-    </div>
-
-    <div style={{ margin: `${SPACING.base} 0` }}>
-      <div style={{ fontWeight: 600, color: COLORS.textPrimary, marginBottom: SPACING.sm }}>
-        {i18n('ai_helper_admin_jailbreak_filter_title')}
+  <div
+    id="ai-safety-panel-records"
+    role="tabpanel"
+    aria-labelledby="ai-safety-tab-records"
+    style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: SPACING.lg,
+      marginTop: SPACING.base,
+    }}
+  >
+    <section style={cardStyle}>
+      <div style={{ marginBottom: SPACING.base }}>
+        <h2 style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
+          {i18n('ai_helper_admin_jailbreak_filter_title')}
+        </h2>
+        <p style={{ margin: `${SPACING.xs} 0 0`, ...TYPOGRAPHY.xs, color: COLORS.textMuted }}>
+          {i18n('ai_helper_safety_records_filter_desc')}
+        </p>
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.md }}>
         <label style={{ minWidth: '180px', flex: '1 1 180px', fontSize: '13px', color: COLORS.textSecondary }}>
@@ -516,102 +485,43 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
           </label>
         </div>
       )}
-    </div>
-        {operationalMetrics && (
-          <div style={{ marginBottom: SPACING.base }}>
-            <div style={{ marginBottom: SPACING.sm, fontWeight: 600, color: COLORS.textPrimary }}>
-              {i18n('ai_helper_admin_jailbreak_operations_title', operationalMetrics.windowDays)}
-            </div>
-            <div style={{
-              display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-              gap: SPACING.sm, marginBottom: SPACING.sm,
-            }}>
-              {[
-                [i18n('ai_helper_admin_jailbreak_operations_total'), operationalMetrics.total],
-                [i18n('ai_helper_admin_jailbreak_operations_cooldown'), operationalMetrics.cooldown],
-                [i18n('ai_helper_admin_jailbreak_operations_pending_appeals'), operationalMetrics.pendingAppeals],
-                [i18n('ai_helper_admin_jailbreak_operations_review_time'), operationalMetrics.averageReviewMinutes ?? '-'],
-                [i18n('ai_helper_admin_jailbreak_operations_appeal_time'), operationalMetrics.averageAppealReviewMinutes ?? '-'],
-              ].map(([label, value]) => (
-                <div key={String(label)} style={{
-                  padding: SPACING.sm, borderRadius: RADIUS.md,
-                  backgroundColor: COLORS.bgPage, border: `1px solid ${COLORS.border}`,
-                }}>
-                  <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{label}</div>
-                  <div style={{ marginTop: '3px', fontWeight: 600, color: COLORS.textPrimary }}>{value}</div>
-                </div>
-              ))}
-            </div>
-            {operationalMetrics.dailyTrend.length > 0 && (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-                  <thead>
-                    <tr style={{ color: COLORS.textSecondary, textAlign: 'left' }}>
-                      <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_trend_date')}</th>
-                      <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_total')}</th>
-                      <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_operations_cooldown')}</th>
-                      <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_appealed')}</th>
-                      <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_false_positive')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {operationalMetrics.dailyTrend.map((row) => (
-                      <tr key={row.date} style={{ borderTop: `1px solid ${COLORS.border}` }}>
-                        <td style={{ padding: SPACING.sm }}>{row.date}</td>
-                        <td style={{ padding: SPACING.sm }}>{row.total}</td>
-                        <td style={{ padding: SPACING.sm }}>{row.cooldown}</td>
-                        <td style={{ padding: SPACING.sm }}>{row.appealed}</td>
-                        <td style={{ padding: SPACING.sm }}>{row.falsePositive}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+    </section>
+
+    <section
+      aria-labelledby="ai-safety-records-heading"
+      style={{ display: 'flex', flexDirection: 'column', gap: SPACING.base }}
+    >
+      <div style={cardStyle}>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: SPACING.base,
+          flexWrap: 'wrap',
+        }}>
+          <div>
+            <h2 id="ai-safety-records-heading" style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
+              {i18n('ai_helper_admin_jailbreak_title')}
+            </h2>
+            <p style={{ margin: `${SPACING.xs} 0 0`, ...TYPOGRAPHY.xs, color: COLORS.textMuted }}>
+              {i18n('ai_helper_safety_records_list_desc')}
+            </p>
           </div>
-        )}
-        {logPagination.ruleMetrics?.length > 0 && (
-          <div style={{ marginBottom: SPACING.base, overflowX: 'auto' }}>
-            <div style={{ marginBottom: SPACING.sm, fontWeight: 600, color: COLORS.textPrimary }}>
-              {i18n('ai_helper_admin_jailbreak_rule_quality_title')}
-            </div>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-              <thead>
-                <tr style={{ color: COLORS.textSecondary, textAlign: 'left' }}>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_rule')}</th>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_filter_category')}</th>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_total')}</th>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_pending')}</th>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_confirmed')}</th>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_false_positive')}</th>
-                  <th style={{ padding: SPACING.sm }}>{i18n('ai_helper_admin_jailbreak_summary_false_positive_rate')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {logPagination.ruleMetrics.map((metric) => (
-                  <tr key={`${metric.category || ''}:${metric.matchedPattern}`} style={{ borderTop: `1px solid ${COLORS.border}` }}>
-                    <td style={{ padding: SPACING.sm, maxWidth: '280px', wordBreak: 'break-all' }}>
-                      <code>{metric.matchedPattern}</code>
-                    </td>
-                    <td style={{ padding: SPACING.sm }}>{metric.category || '-'}</td>
-                    <td style={{ padding: SPACING.sm }}>{metric.total}</td>
-                    <td style={{ padding: SPACING.sm }}>{metric.pending}</td>
-                    <td style={{ padding: SPACING.sm }}>{metric.confirmed}</td>
-                    <td style={{ padding: SPACING.sm }}>{metric.falsePositive}</td>
-                    <td style={{ padding: SPACING.sm }}>{metric.falsePositiveRate}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+          {logPagination.total > 0 && (
+            <span style={{ fontSize: '13px', color: COLORS.textMuted }}>
+              {i18n('ai_helper_admin_jailbreak_total', logPagination.total)}
+            </span>
+          )}
+        </div>
         {logPagination.logs.length > 0 && (
           <div style={{
             display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: SPACING.sm,
-            marginBottom: SPACING.base, padding: SPACING.md,
-            border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
-            backgroundColor: COLORS.bgPage,
+            marginTop: SPACING.base, paddingTop: SPACING.base,
+            borderTop: `1px solid ${COLORS.border}`,
           }}>
+            <span style={{ fontWeight: 600, color: COLORS.textSecondary, fontSize: '13px' }}>
+              {i18n('ai_helper_safety_records_bulk_title')}
+            </span>
             <button type="button" onClick={toggleCurrentPage} disabled={loading || bulkReviewing} style={getButtonStyle('secondary')}>
               {i18n('ai_helper_admin_jailbreak_select_page')}
             </button>
@@ -641,6 +551,8 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             )}
           </div>
         )}
+      </div>
+
     {loading && logPagination.logs.length === 0 ? (
       <div style={{
         padding: SPACING.base, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md,
@@ -799,6 +711,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
         )}
       </>
     )}
+    </section>
   </div>
   );
 };

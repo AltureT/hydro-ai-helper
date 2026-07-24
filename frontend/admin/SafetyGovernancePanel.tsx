@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { i18n } from '../utils/i18n';
 import { buildApiUrl } from '../utils/domainUtils';
 import { Toast, useToast } from '../components/Toast';
+import { JailbreakAnalyticsPanel } from './JailbreakAnalyticsPanel';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
 import {
   COLORS,
@@ -21,7 +22,7 @@ import type {
   JailbreakLogPagination,
 } from './configTypes';
 
-type SafetySection = 'events' | 'rules';
+type SafetySection = 'records' | 'analytics' | 'rules';
 
 const EMPTY_LOG_PAGINATION: JailbreakLogPagination = {
   logs: [],
@@ -61,7 +62,7 @@ interface SafetyGovernancePanelProps {
 }
 
 export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ embedded = false }) => {
-  const [activeSection, setActiveSection] = useState<SafetySection>('events');
+  const [activeSection, setActiveSection] = useState<SafetySection>('records');
   const [builtinPatterns, setBuiltinPatterns] = useState<string[]>([]);
   const [customPatternsText, setCustomPatternsText] = useState('');
   const [savedCustomPatternsText, setSavedCustomPatternsText] = useState('');
@@ -73,7 +74,11 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
   const [logFilters, setLogFilters] = useState<JailbreakLogFilters>({});
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
+  const [analyticsPagination, setAnalyticsPagination] = useState<JailbreakLogPagination>(EMPTY_LOG_PAGINATION);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const logsRequestId = useRef(0);
+  const analyticsRequestId = useRef(0);
   const latestLogPage = useRef(1);
   const latestLogFilters = useRef<JailbreakLogFilters>({});
   const { toasts, showToast, dismissToast } = useToast();
@@ -154,6 +159,30 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
     } catch (err) {
       console.error('Load safety filter options error:', err);
       throw err;
+    }
+  }, []);
+
+  const loadJailbreakAnalytics = useCallback(async () => {
+    const requestId = ++analyticsRequestId.current;
+    setAnalyticsLoading(true);
+    setAnalyticsError(null);
+    try {
+      const params = new URLSearchParams({ page: '1', limit: '1' });
+      const res = await fetch(
+        `${buildApiUrl('/ai-helper/admin/jailbreak-logs')}?${params.toString()}`,
+        { method: 'GET', credentials: 'include' }
+      );
+      if (!res.ok) throw new Error(`${i18n('ai_helper_admin_jailbreak_load_failed')}: ${res.status}`);
+      const json: JailbreakLogPagination = await res.json();
+      if (requestId === analyticsRequestId.current) setAnalyticsPagination(json);
+    } catch (err: unknown) {
+      if (requestId !== analyticsRequestId.current) return;
+      console.error('Load jailbreak analytics error:', err);
+      const message = getErrorMessage(err, i18n('ai_helper_admin_jailbreak_load_failed'));
+      setAnalyticsError(message);
+      showToast(message, 'error');
+    } finally {
+      if (requestId === analyticsRequestId.current) setAnalyticsLoading(false);
     }
   }, []);
 
@@ -344,19 +373,44 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
         </p>
       </div>
 
-      <div style={{
+      <div
+        role="tablist"
+        aria-label={i18n('ai_helper_safety_governance_title')}
+        style={{
         display: 'flex', flexWrap: 'wrap', gap: SPACING.sm,
         marginBottom: SPACING.base,
       }}>
         <button
+          id="ai-safety-tab-records"
           type="button"
-          onClick={() => setActiveSection('events')}
-          style={getPillStyle(activeSection === 'events')}
+          role="tab"
+          aria-selected={activeSection === 'records'}
+          aria-controls="ai-safety-panel-records"
+          onClick={() => setActiveSection('records')}
+          style={getPillStyle(activeSection === 'records')}
         >
-          {i18n('ai_helper_safety_section_events')}
+          {i18n('ai_helper_safety_section_records')}
         </button>
         <button
+          id="ai-safety-tab-analytics"
           type="button"
+          role="tab"
+          aria-selected={activeSection === 'analytics'}
+          aria-controls="ai-safety-panel-analytics"
+          onClick={() => {
+            setActiveSection('analytics');
+            loadJailbreakAnalytics();
+          }}
+          style={getPillStyle(activeSection === 'analytics')}
+        >
+          {i18n('ai_helper_safety_section_analytics')}
+        </button>
+        <button
+          id="ai-safety-tab-rules"
+          type="button"
+          role="tab"
+          aria-selected={activeSection === 'rules'}
+          aria-controls="ai-safety-panel-rules"
           onClick={() => setActiveSection('rules')}
           style={getPillStyle(activeSection === 'rules')}
         >
@@ -365,7 +419,7 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
         </button>
       </div>
 
-      {activeSection === 'events' ? (
+      {activeSection === 'records' && (
         <>
           {logsError && (
             <div style={{
@@ -405,8 +459,52 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
             />
           )}
         </>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.lg }}>
+      )}
+
+      {activeSection === 'analytics' && (
+        <>
+          {analyticsError && (
+            <div style={{
+              ...cardStyle,
+              marginTop: SPACING.base,
+              borderColor: COLORS.errorBorder,
+              backgroundColor: COLORS.errorBg,
+              color: COLORS.errorText,
+            }}>
+              <div style={{ marginBottom: SPACING.sm }}>
+                {i18n('ai_helper_safety_analytics_load_error', analyticsError)}
+              </div>
+              <button
+                type="button"
+                disabled={analyticsLoading}
+                onClick={loadJailbreakAnalytics}
+                style={getButtonStyle('secondary')}
+              >
+                {i18n('ai_helper_safety_analytics_retry')}
+              </button>
+            </div>
+          )}
+          {(!analyticsError || analyticsPagination.summary.total > 0) && (
+            <JailbreakAnalyticsPanel
+              logPagination={analyticsPagination}
+              loading={analyticsLoading}
+            />
+          )}
+        </>
+      )}
+
+      {activeSection === 'rules' && (
+        <div
+          id="ai-safety-panel-rules"
+          role="tabpanel"
+          aria-labelledby="ai-safety-tab-rules"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: SPACING.lg,
+            marginTop: SPACING.base,
+          }}
+        >
           <div style={cardStyle}>
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
