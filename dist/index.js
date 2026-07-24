@@ -27,7 +27,6 @@ console.log('[AI-Helper] teacherHandler OK');
 const analyticsHandler_1 = require("./handlers/analyticsHandler");
 console.log('[AI-Helper] analyticsHandler OK');
 const adminConfigHandler_1 = require("./handlers/adminConfigHandler");
-const testdataBenchmarkHandler_1 = require("./handlers/testdataBenchmarkHandler");
 console.log('[AI-Helper] adminConfigHandler OK');
 const dashboardHandler_1 = require("./handlers/dashboardHandler");
 console.log('[AI-Helper] dashboardHandler OK');
@@ -298,8 +297,6 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/bulk-review', adminConfigHandler_1.JailbreakLogBulkReviewHandler, adminConfigHandler_1.JailbreakLogBulkReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_log_review', '/ai-helper/admin/jailbreak-logs/:id/review', adminConfigHandler_1.JailbreakLogReviewHandler, adminConfigHandler_1.JailbreakLogReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_log_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/:id/review', adminConfigHandler_1.JailbreakLogReviewHandler, adminConfigHandler_1.JailbreakLogReviewHandlerPriv);
-        // POST /ai-helper/admin/testdata-benchmark - 管理员显式确认费用后运行真实模型难题基准
-        ctx.Route('ai_helper_admin_testdata_benchmark', '/ai-helper/admin/testdata-benchmark', testdataBenchmarkHandler_1.TestdataBenchmarkHandler, testdataBenchmarkHandler_1.TestdataBenchmarkHandlerPriv);
         // GET /ai-helper/export - 数据导出 API
         ctx.Route('ai_helper_export', '/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
         ctx.Route('ai_helper_export_domain', '/d/:domainId/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
