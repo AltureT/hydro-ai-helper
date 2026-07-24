@@ -84,6 +84,8 @@ export interface GeneratedCase {
   dataScale?: CaseDataScale;
 }
 
+export type TestCase = GeneratedCase;
+
 /** AI 返回的 JSON 结构（解析后） */
 export interface GenerationResponse {
   problemType: 'function' | 'traditional';
@@ -108,6 +110,8 @@ export interface GenerationResponse {
   validatorCode?: string;
   /** 各道机器关卡的验证结果，透传到 GenerationPlan.verification。 */
   verification?: PlanVerification;
+  /** 内部字段：区分度验证与定向补刀共享的绝对截止时间，不进入最终计划。 */
+  discriminationDeadlineAt?: number;
   /** 函数题是否真正跑过 solution+template.py 组合（决定 template.py 的 origin）。 */
   pyTemplateExecuted?: boolean;
 }
@@ -173,6 +177,11 @@ export interface KillTarget {
 export interface SampleIO {
   input: string;
   output: string;
+}
+
+export interface HackCandidate {
+  input: string;
+  rationale: string;
 }
 
 /**
@@ -1167,6 +1176,40 @@ export function buildKillTargetsUserPrompt(input: {
   ].join('\n');
 }
 
+/** 定向补刀调用只针对一个幸存错误解，不携带前轮对话或 ORACLE 源码。 */
+export function buildHackCasesSystemPrompt(): string {
+  return `你是一位 OJ 反例构造专家。一个典型错误解已经通过全部现有测试数据，请针对它的具体错误模式构造 2 至 3 个小规模合法反例输入。
+
+硬性要求：
+1. 每个输入必须符合既定 stdin 编码与题面约束，且不超过 2000 字符。
+2. 只构造容易人工复核的小规模输入，不生成大规模性能数据，不填写或猜测输出。
+3. 优先构造能直接触发所述错误模式的最小反例、边界组合与退化结构。
+4. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
+=== HACK_CASE ===
+RATIONALE: 一句话说明该输入为何可能卡掉错误解
+\`\`\`text
+原始 stdin
+\`\`\``;
+}
+
+export function buildHackCasesUserPrompt(input: {
+  analysis: string;
+  target: KillTarget;
+}): string {
+  return [
+    '【既有解法与 stdin 编码分析】',
+    input.analysis.slice(0, 3000) || '未提供额外分析，请依据错误模式构造合法小规模输入。',
+    '',
+    '【幸存错误模式】',
+    input.target.description,
+    '',
+    '【幸存错误解（最多 6000 字符）】',
+    input.target.code.slice(0, 6000),
+    '',
+    '该错误解通过了全部现有数据。请构造 2 至 3 个小规模定向补刀输入。',
+  ].join('\n');
+}
+
 // ─── AI 响应解析 ──────────────────────────────────────────────────────────────
 
 /**
@@ -1381,6 +1424,58 @@ export function parseKillTargetsResponse(raw: string): KillTarget[] {
       code: normalizeExecutableContent(rawCode),
     }];
   });
+}
+
+/** 解析定向补刀候选；单节损坏、空输入或超过 2000 字符时直接丢弃。 */
+export function parseHackCasesResponse(raw: string): HackCandidate[] {
+  const markerRe = /^\s*===\s*HACK_CASE\s*===\s*$/i;
+  const sections: string[][] = [];
+  let current: string[] | null = null;
+  const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+  for (const line of text.split(/\r?\n/)) {
+    if (markerRe.test(line)) {
+      current = [];
+      sections.push(current);
+    } else if (current) {
+      current.push(line);
+    }
+  }
+
+  return sections.flatMap(lines => {
+    const content = lines.join('\n');
+    const rationale = lines
+      .map(line => line.match(/^\s*RATIONALE:\s*(.*?)\s*$/i))
+      .find((match): match is RegExpMatchArray => Boolean(match))?.[1] || '';
+    const fenced = content.match(/```[a-zA-Z]*\s*\r?\n([\s\S]*?)\r?\n?```/);
+    const rawInput = fenced
+      ? fenced[1]
+      : trimBlankEdges(lines.filter(line => !/^\s*RATIONALE:/i.test(line)));
+    if (!rawInput.trim()) return [];
+    const normalizedInput = normalizeFileContent(rawInput);
+    if (normalizedInput.length > 2000) return [];
+    return [{ input: normalizedInput, rationale }];
+  });
+}
+
+/** 将已由 ORACLE 产出答案的补刀点追加进正式 cases，并保持现有测试点不变。 */
+export function mergeHackCases(
+  existing: TestCase[],
+  hacks: Array<{ input: string; output: string }>,
+  maxCases: number,
+): TestCase[] {
+  const capacity = Math.max(0, Math.floor(maxCases) - existing.length);
+  if (hacks.length === 0 || capacity === 0) return existing;
+  const appended = hacks.slice(0, capacity).map((hack, index): TestCase => {
+    const caseNumber = existing.length + index + 1;
+    return {
+      label: `定向补刀 #${caseNumber}`,
+      input: normalizeFileContent(hack.input),
+      output: normalizeFileContent(hack.output),
+      dataScale: 'small',
+    };
+  });
+  return [...existing, ...appended];
 }
 
 export function parseSandboxBlueprint(
@@ -2026,8 +2121,9 @@ export async function runDiscriminationPhase(input: {
   runner: TestdataSandboxRunner;
   signal?: AbortSignal;
   customChecker: boolean;
+  deadlineAt?: number;
 }): Promise<DiscriminationCheck> {
-  const deadlineAt = Date.now() + DISCRIMINATION_BUDGET_MS;
+  const deadlineAt = input.deadlineAt ?? Date.now() + DISCRIMINATION_BUDGET_MS;
   const results: DiscriminationTargetResult[] = [];
   const pending = input.killTargets.map(target => ({
     kind: target.kind as DiscriminationTargetResult['kind'],
@@ -2512,6 +2608,7 @@ export async function materializeSandboxBlueprint(
   }
 
   reportProgress('discrimination_testing', 90);
+  const discriminationDeadlineAt = Date.now() + DISCRIMINATION_BUDGET_MS;
   const discrimination = await runDiscriminationPhase({
     killTargets,
     bruteCode: blueprint.bruteCode,
@@ -2519,6 +2616,7 @@ export async function materializeSandboxBlueprint(
     runner,
     signal,
     customChecker,
+    deadlineAt: discriminationDeadlineAt,
   });
 
   const verification: PlanVerification = {
@@ -2585,6 +2683,7 @@ export async function materializeSandboxBlueprint(
     bruteCode: blueprint.bruteCode,
     validatorCode: blueprint.validatorCode,
     verification,
+    discriminationDeadlineAt,
     pyTemplateExecuted,
     cases,
     notes: noteParts.filter(Boolean).join('\n'),
@@ -3626,6 +3725,138 @@ export class TestdataGenService {
     return parseKillTargetsResponse(result.content);
   }
 
+  private async generateHackCandidates(
+    params: GenerateTestdataParams,
+    analysis: string,
+    target: KillTarget,
+  ): Promise<HackCandidate[]> {
+    const result = await this.aiClient.chat(
+      [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }],
+      buildHackCasesSystemPrompt(),
+      this.getCallOptions(params),
+    );
+    return parseHackCasesResponse(result.content).slice(0, 3);
+  }
+
+  /**
+   * 仅为正式数据未卡住的 WA 靶子尝试小规模补刀。所有候选必须依次通过
+   * VALIDATOR、ORACLE 与该错误解本身的沙箱复跑，任一基础设施失败均静默停下。
+   */
+  private async repairSurvivingKillTargets(
+    params: GenerateTestdataParams,
+    blueprint: SandboxGenerationBlueprint,
+    response: GenerationResponse,
+    killTargets: KillTarget[],
+    runner: TestdataSandboxRunner,
+  ): Promise<GenerationResponse> {
+    const discrimination = response.verification?.discrimination;
+    const deadlineAt = response.discriminationDeadlineAt;
+    if (!discrimination || deadlineAt === undefined || killTargets.length === 0) return response;
+    let cases: TestCase[] = response.cases;
+
+    const finish = () => {
+      response.cases = cases;
+      const countedTargets = discrimination.targets.filter(target => !target.skippedReason);
+      discrimination.allKilled = countedTargets.length > 0
+        && countedTargets.every(target => target.killed);
+      return response;
+    };
+
+    targetLoop:
+    for (let targetIndex = 0; targetIndex < killTargets.length; targetIndex++) {
+      const target = killTargets[targetIndex];
+      const targetResult = discrimination.targets[targetIndex];
+      if (
+        !targetResult
+        || targetResult.kind === 'brute-complexity'
+        || targetResult.killed
+        || targetResult.skippedReason
+      ) continue;
+
+      for (let round = 0; round < 2; round++) {
+        if (
+          Date.now() >= deadlineAt
+          || cases.length >= TESTDATA_GEN_LIMITS.MAX_CASES
+        ) break targetLoop;
+        let candidates: HackCandidate[];
+        try {
+          candidates = await this.generateHackCandidates(
+            params,
+            blueprint.analysis || '',
+            target,
+          );
+        } catch (err) {
+          if (isCancellation(err)) throw err;
+          continue;
+        }
+        if (Date.now() >= deadlineAt) break targetLoop;
+
+        for (const candidate of candidates) {
+          if (cases.length >= TESTDATA_GEN_LIMITS.MAX_CASES) break targetLoop;
+          if (cases.some(item =>
+            comparableFileContent(item.input) === comparableFileContent(candidate.input))) {
+            continue;
+          }
+          try {
+            if (blueprint.validatorCode) {
+              const validation = await runner.runPythonBatchDetailed(
+                blueprint.validatorCode,
+                [candidate.input],
+                { signal: params.signal, deadlineAt },
+              );
+              if (validation.length !== 1) throw new Error('定向补刀 VALIDATOR 未返回单条结果');
+              if (!validation[0].accepted) continue;
+            }
+
+            const oracle = await runner.runPythonBatchDetailed(
+              blueprint.oracleCode,
+              [candidate.input],
+              { signal: params.signal, deadlineAt },
+            );
+            if (oracle.length !== 1) throw new Error('定向补刀 ORACLE 未返回单条结果');
+            if (!oracle[0].accepted) continue;
+            const output = normalizeFileContent(oracle[0].stdout);
+            if (Buffer.byteLength(output, 'utf8') > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) continue;
+
+            const targetRun = await runner.runPythonBatchDetailed(
+              target.code,
+              [candidate.input],
+              { signal: params.signal, deadlineAt },
+            );
+            if (targetRun.length !== 1) throw new Error('定向补刀错误解未返回单条结果');
+            const detail = targetRun[0];
+            let killedBy: DiscriminationTargetResult['killedBy'];
+            if (detail.timedOut) killedBy = 'tle';
+            else if (!detail.accepted
+              || comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
+              killedBy = 'wa';
+            }
+            if (!killedBy) continue;
+
+            const merged = mergeHackCases(
+              cases,
+              [{ input: candidate.input, output }],
+              TESTDATA_GEN_LIMITS.MAX_CASES,
+            );
+            if (merged.length === cases.length) break targetLoop;
+            cases = merged;
+            targetResult.killed = true;
+            targetResult.killedBy = killedBy;
+            targetResult.killedByCase = cases.length;
+            if (!detail.accepted && !detail.timedOut) {
+              targetResult.description = `${targetResult.description}(运行失败)`;
+            }
+            continue targetLoop;
+          } catch (err) {
+            if (isCancellation(err)) throw err;
+            return finish();
+          }
+        }
+      }
+    }
+    return finish();
+  }
+
   private async generateWithSandbox(
     params: GenerateTestdataParams,
     runner: TestdataSandboxRunner,
@@ -3906,6 +4137,13 @@ export class TestdataGenService {
       }
     }
 
+    response = await this.repairSurvivingKillTargets(
+      params,
+      blueprint,
+      response,
+      killTargets,
+      runner,
+    );
     report('assembling', 96);
     return this.applyResultMetadata(assemblePlan(response, params.options, {
       mode: 'sandbox',

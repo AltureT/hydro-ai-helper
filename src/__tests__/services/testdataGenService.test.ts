@@ -182,6 +182,28 @@ function makeEmptyKillTargetsResponse(): string {
   return '未生成可用的错误解靶子';
 }
 
+function makeSurvivingKillTargetResponse(): string {
+  return [
+    '=== KILL_TARGET:wrong-algorithm ===',
+    'DESC: 只对已有输入返回正确答案',
+    '```python',
+    '# surviving wrong solution',
+    'value = input().strip()',
+    'print(value if value == "1" else "wrong")',
+    '```',
+  ].join('\n');
+}
+
+function makeHackCaseResponse(): string {
+  return [
+    '=== HACK_CASE ===',
+    'RATIONALE: 输入 2 会触发幸存错误解',
+    '```text',
+    '2',
+    '```',
+  ].join('\n');
+}
+
 function stressGeneratorStdout(): string {
   return JSON.stringify({
     cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, i) => ({
@@ -1336,6 +1358,63 @@ describe('TestdataGenService.generate', () => {
       'validating_inputs', 'running_oracle', 'stress_testing',
       'discrimination_testing', 'assembling', 'complete',
     ]));
+  });
+
+  it('幸存 WA 靶子补刀成功后把新测试点写入文件计划与 config.yaml', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('surviving wrong solution')) {
+            return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][1]).toContain('反例构造专家');
+    expect(plan.caseCount).toBe(2);
+    expect(plan.totalCaseCount).toBe(2);
+    expect(plan.files.find(file => file.name === '2.in')?.content).toBe('2\n');
+    expect(plan.files.find(file => file.name === '2.out')?.content).toBe('2\n');
+    expect(plan.files.find(file => file.name === 'config.yaml')?.content).toContain('input: 2.in');
+    expect(plan.verification?.discrimination?.targets[0]).toMatchObject({
+      kind: 'wrong-algorithm',
+      killed: true,
+      killedBy: 'wa',
+      killedByCase: 2,
+    });
   });
 
   it('第一阶段样例预验证连续失败时不生成外围制品或独立验证器', async () => {
