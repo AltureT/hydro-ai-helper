@@ -157,6 +157,21 @@ export interface IndependentVerifierBlueprint {
   functionSampleInputs?: Array<{ id: string; input: string }>;
 }
 
+export type KillTargetKind = 'boundary' | 'wrong-algorithm' | 'overflow-sim';
+
+export interface KillTarget {
+  kind: KillTargetKind;
+  /** AI 对该错误解错误方式的一句话描述（面向教师展示）。 */
+  description: string;
+  /** 自包含 Python 程序，读 stdin 写 stdout，与 ORACLE 使用相同 IO 约定。 */
+  code: string;
+}
+
+export interface SampleIO {
+  input: string;
+  output: string;
+}
+
 /**
  * 文件可信来源：
  * - executed：沙箱实跑产生或被实跑的制品（最高可信）
@@ -1084,6 +1099,53 @@ export function buildIndependentVerifierUserPrompt(
   ].filter(line => line !== '').join('\n');
 }
 
+/** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
+export function buildKillTargetsSystemPrompt(): string {
+  return `你是一位 OJ 错误解分析专家。请根据题面与既有解法分析，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
+
+从以下菜单中挑选最可能的 2 种不同错误模式，每种输出一个完整错误解：
+- boundary：边界或退化情形处理错误，例如 n=1、全相等、空结构。
+- wrong-algorithm：看似合理但不正确的贪心、DP、公式或状态转移。
+- overflow-sim：整数溢出错误。Python 整数原生不会溢出，必须显式使用 % (1 << 31)、% (1 << 32)、有符号位转换等方式模拟题目语言中的 32/64 位溢出。
+
+硬性要求：
+1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
+2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
+3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
+4. 只输出两个分节，不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+=== KILL_TARGET:<kind> ===
+DESC: 一句话说明该错误解会在哪类输入上出错
+\`\`\`python
+完整 Python 3 程序
+\`\`\``;
+}
+
+export function buildKillTargetsUserPrompt(input: {
+  statement: string;
+  analysis: string;
+  samples: SampleIO[];
+}): string {
+  const statement = input.statement.slice(0, 6000);
+  const samples = input.samples.slice(0, 3);
+  return [
+    '【既有解法分析】',
+    input.analysis || '未提供额外分析，请从题面推导常见错误模式。',
+    '',
+    '【题面（最多 6000 字符）】',
+    statement,
+    '',
+    '【题面样例（最多 3 组，错误解必须全部通过）】',
+    ...(samples.length > 0
+      ? samples.flatMap((sample, index) => [
+        `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input))}`,
+        `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output))}`,
+      ])
+      : ['题面未解析到样例。']),
+    '',
+    '请选择最可能的 2 种不同错误模式，并严格按分节格式输出。',
+  ].join('\n');
+}
+
 // ─── AI 响应解析 ──────────────────────────────────────────────────────────────
 
 /**
@@ -1261,6 +1323,43 @@ function splitDelimitedSections(raw: string): ParsedSection[] {
     }
   }
   return sections;
+}
+
+/** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
+export function parseKillTargetsResponse(raw: string): KillTarget[] {
+  const allowedKinds = new Set<KillTargetKind>(['boundary', 'wrong-algorithm', 'overflow-sim']);
+  const markerRe = /^\s*===\s*KILL_TARGET:([a-z-]+)\s*===\s*$/i;
+  const sections: Array<{ kind: string; lines: string[] }> = [];
+  let current: { kind: string; lines: string[] } | null = null;
+  const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+  for (const line of text.split(/\r?\n/)) {
+    const marker = line.match(markerRe);
+    if (marker) {
+      current = { kind: marker[1].toLowerCase(), lines: [] };
+      sections.push(current);
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+
+  return sections.flatMap(section => {
+    if (!allowedKinds.has(section.kind as KillTargetKind)) return [];
+    const content = section.lines.join('\n');
+    const description = section.lines
+      .map(line => line.match(/^\s*DESC:\s*(.*?)\s*$/i))
+      .find((match): match is RegExpMatchArray => Boolean(match))?.[1] || '';
+    const fenced = content.match(/```(?:python|py)?\s*\r?\n([\s\S]*?)\r?\n?```/i);
+    const rawCode = fenced
+      ? fenced[1]
+      : trimBlankEdges(section.lines.filter(line => !/^\s*DESC:/i.test(line)));
+    if (!rawCode.trim()) return [];
+    return [{
+      kind: section.kind as KillTargetKind,
+      description,
+      code: normalizeExecutableContent(rawCode),
+    }];
+  });
 }
 
 export function parseSandboxBlueprint(
@@ -2904,7 +3003,7 @@ export class TestdataGenService {
   }
 
   private emitProgress(
-    params: GenerateTestdataParams,
+    params: Pick<GenerateTestdataParams, 'onProgress'>,
     stage: TestdataGenerationProgressStage,
     percent: number,
     attempt = 1,
@@ -2964,7 +3063,10 @@ export class TestdataGenService {
     return plan;
   }
 
-  private getCallOptions(params: GenerateTestdataParams, attempt = 1): ChatCallOptions {
+  private getCallOptions(
+    params: Pick<GenerateTestdataParams, 'signal' | 'onProgress'>,
+    attempt = 1,
+  ): ChatCallOptions {
     return {
       signal: params.signal,
       maxTokens: null,
@@ -3308,6 +3410,20 @@ export class TestdataGenService {
         );
       }
     }
+  }
+
+  async generateKillTargets(input: {
+    statement: string;
+    analysis: string;
+    samples: SampleIO[];
+    signal?: AbortSignal;
+  }): Promise<KillTarget[]> {
+    const result = await this.aiClient.chat(
+      [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
+      buildKillTargetsSystemPrompt(),
+      this.getCallOptions({ signal: input.signal }),
+    );
+    return parseKillTargetsResponse(result.content);
   }
 
   private async generateWithSandbox(

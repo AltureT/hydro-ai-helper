@@ -38,11 +38,14 @@ exports.buildSandboxBlueprintSystemPrompt = buildSandboxBlueprintSystemPrompt;
 exports.buildSandboxBlueprintUserPrompt = buildSandboxBlueprintUserPrompt;
 exports.buildIndependentVerifierSystemPrompt = buildIndependentVerifierSystemPrompt;
 exports.buildIndependentVerifierUserPrompt = buildIndependentVerifierUserPrompt;
+exports.buildKillTargetsSystemPrompt = buildKillTargetsSystemPrompt;
+exports.buildKillTargetsUserPrompt = buildKillTargetsUserPrompt;
 exports.extractJsonObject = extractJsonObject;
 exports.normalizeFileContent = normalizeFileContent;
 exports.normalizeExecutableContent = normalizeExecutableContent;
 exports.normalizeGenerationObject = normalizeGenerationObject;
 exports.parseGenerationResponse = parseGenerationResponse;
+exports.parseKillTargetsResponse = parseKillTargetsResponse;
 exports.parseSandboxBlueprint = parseSandboxBlueprint;
 exports.parseSolutionBlueprint = parseSolutionBlueprint;
 exports.parseGenerationArtifacts = parseGenerationArtifacts;
@@ -836,6 +839,47 @@ function buildIndependentVerifierUserPrompt(params, blueprint) {
         `请生成恰好 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据，并严格按要求输出验证分节。`,
     ].filter(line => line !== '').join('\n');
 }
+/** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
+function buildKillTargetsSystemPrompt() {
+    return `你是一位 OJ 错误解分析专家。请根据题面与既有解法分析，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
+
+从以下菜单中挑选最可能的 2 种不同错误模式，每种输出一个完整错误解：
+- boundary：边界或退化情形处理错误，例如 n=1、全相等、空结构。
+- wrong-algorithm：看似合理但不正确的贪心、DP、公式或状态转移。
+- overflow-sim：整数溢出错误。Python 整数原生不会溢出，必须显式使用 % (1 << 31)、% (1 << 32)、有符号位转换等方式模拟题目语言中的 32/64 位溢出。
+
+硬性要求：
+1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
+2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
+3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
+4. 只输出两个分节，不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+=== KILL_TARGET:<kind> ===
+DESC: 一句话说明该错误解会在哪类输入上出错
+\`\`\`python
+完整 Python 3 程序
+\`\`\``;
+}
+function buildKillTargetsUserPrompt(input) {
+    const statement = input.statement.slice(0, 6000);
+    const samples = input.samples.slice(0, 3);
+    return [
+        '【既有解法分析】',
+        input.analysis || '未提供额外分析，请从题面推导常见错误模式。',
+        '',
+        '【题面（最多 6000 字符）】',
+        statement,
+        '',
+        '【题面样例（最多 3 组，错误解必须全部通过）】',
+        ...(samples.length > 0
+            ? samples.flatMap((sample, index) => [
+                `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input))}`,
+                `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output))}`,
+            ])
+            : ['题面未解析到样例。']),
+        '',
+        '请选择最可能的 2 种不同错误模式，并严格按分节格式输出。',
+    ].join('\n');
+}
 // ─── AI 响应解析 ──────────────────────────────────────────────────────────────
 /**
  * 从 AI 返回文本中提取 JSON（容忍 <think> 标签、代码围栏、前后缀说明文字）
@@ -991,6 +1035,43 @@ function splitDelimitedSections(raw) {
         }
     }
     return sections;
+}
+/** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
+function parseKillTargetsResponse(raw) {
+    const allowedKinds = new Set(['boundary', 'wrong-algorithm', 'overflow-sim']);
+    const markerRe = /^\s*===\s*KILL_TARGET:([a-z-]+)\s*===\s*$/i;
+    const sections = [];
+    let current = null;
+    const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    for (const line of text.split(/\r?\n/)) {
+        const marker = line.match(markerRe);
+        if (marker) {
+            current = { kind: marker[1].toLowerCase(), lines: [] };
+            sections.push(current);
+        }
+        else if (current) {
+            current.lines.push(line);
+        }
+    }
+    return sections.flatMap(section => {
+        if (!allowedKinds.has(section.kind))
+            return [];
+        const content = section.lines.join('\n');
+        const description = section.lines
+            .map(line => line.match(/^\s*DESC:\s*(.*?)\s*$/i))
+            .find((match) => Boolean(match))?.[1] || '';
+        const fenced = content.match(/```(?:python|py)?\s*\r?\n([\s\S]*?)\r?\n?```/i);
+        const rawCode = fenced
+            ? fenced[1]
+            : trimBlankEdges(section.lines.filter(line => !/^\s*DESC:/i.test(line)));
+        if (!rawCode.trim())
+            return [];
+        return [{
+                kind: section.kind,
+                description,
+                code: normalizeExecutableContent(rawCode),
+            }];
+    });
 }
 function parseSandboxBlueprint(raw, options, parseOptions = {}) {
     const sections = splitDelimitedSections(raw);
@@ -2727,6 +2808,10 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'independent_verifier_parse', results, true);
             }
         }
+    }
+    async generateKillTargets(input) {
+        const result = await this.aiClient.chat([{ role: 'user', content: buildKillTargetsUserPrompt(input) }], buildKillTargetsSystemPrompt(), this.getCallOptions({ signal: input.signal }));
+        return parseKillTargetsResponse(result.content);
     }
     async generateWithSandbox(params, runner, attempt = 1) {
         const report = (stage, percent) => {
