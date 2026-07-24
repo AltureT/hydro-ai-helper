@@ -1,156 +1,224 @@
 /**
- * TeachingReviewPanel — timeline list of all teaching summaries in the domain.
- * Shows date, contest title, severity-dot counts, top high-priority findings,
- * and student stats. Supports pagination.
+ * TeachingReviewPanel — compact HydroOJ-style list of teaching summaries.
+ *
+ * The page intentionally uses flat rows and native Hydro colors instead of
+ * dashboard cards so it reads like the surrounding contest/admin pages.
  */
 
 import React, { useEffect } from 'react';
 import { i18n } from '../utils/i18n';
 import {
-  COLORS, SPACING, RADIUS,
-  cardStyle, getButtonStyle, getPaginationButtonStyle,
+  COLORS, SPACING, RADIUS, getPaginationButtonStyle,
 } from '../utils/styles';
-import { TeachingSummary } from './useTeachingSummary';
+import { TeachingFinding, TeachingSummary } from './useTeachingSummary';
 import { useTeachingReview, FeedbackStats } from './useTeachingReview';
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const SEVERITY_DOTS: Record<'high' | 'medium' | 'low', string> = {
-  high: '#DC2626',
-  medium: '#D97706',
-  low: '#16A34A',
-};
 
 const PAGE_LIMIT = 20;
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+const SEVERITY_COLORS: Record<TeachingFinding['severity'], string> = {
+  high: '#c23531',
+  medium: '#d48806',
+  low: COLORS.hydroGreenDark,
+};
 
-interface SeverityDotProps {
-  color: string;
+const STATUS_STYLE: Record<TeachingSummary['status'], { color: string; background: string }> = {
+  pending: { color: COLORS.textSecondary, background: '#f3f4f6' },
+  generating: { color: COLORS.warningText, background: COLORS.warningBg },
+  completed: { color: COLORS.hydroGreenDark, background: COLORS.hydroGreenLight },
+  failed: { color: COLORS.errorText, background: COLORS.errorBg },
+};
+
+const STATUS_LABEL: Record<TeachingSummary['status'], string> = {
+  pending: 'ai_helper_teaching_review_status_pending',
+  generating: 'ai_helper_teaching_review_status_generating',
+  completed: 'ai_helper_teaching_review_status_completed',
+  failed: 'ai_helper_teaching_review_status_failed',
+};
+
+function formatDate(value: string): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function buildReviewDetailUrl(summary: TeachingSummary): string {
+  const domainPrefix = summary.domainId && summary.domainId !== 'system'
+    ? `/d/${encodeURIComponent(summary.domainId)}`
+    : '';
+  const routeType = summary.contestRule === 'homework' ? 'homework' : 'contest';
+  return `${domainPrefix}/${routeType}/${encodeURIComponent(String(summary.contestId))}/scoreboard?aiTab=teaching`;
+}
+
+function findPrimaryFinding(findings: TeachingFinding[]): TeachingFinding | undefined {
+  return findings.find(finding => finding.severity === 'high')
+    || findings.find(finding => finding.severity === 'medium')
+    || findings[0];
+}
+
+interface SeverityMetricProps {
+  severity: TeachingFinding['severity'];
   count: number;
   label: string;
 }
 
-const SeverityDot: React.FC<SeverityDotProps> = ({ color, count, label }) => (
-  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginRight: SPACING.sm }}>
-    <span style={{
-      width: '10px',
-      height: '10px',
+const SeverityMetric: React.FC<SeverityMetricProps> = ({ severity, count, label }) => (
+  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', whiteSpace: 'nowrap' }}>
+    <span aria-hidden="true" style={{
+      width: '7px',
+      height: '7px',
       borderRadius: '50%',
-      backgroundColor: color,
+      backgroundColor: SEVERITY_COLORS[severity],
       flexShrink: 0,
     }} />
-    <span style={{ fontSize: '12px', color: COLORS.textSecondary }}>{label}: {count}</span>
+    <span>{label} {count}</span>
   </span>
 );
 
-interface SummaryCardProps {
-  summary: TeachingSummary;
-}
-
-const SummaryCard: React.FC<SummaryCardProps> = ({ summary }) => {
-  const highFindings = summary.findings.filter(f => f.severity === 'high');
-  const mediumCount = summary.findings.filter(f => f.severity === 'medium').length;
-  const lowCount = summary.findings.filter(f => f.severity === 'low').length;
-
-  const dateStr = summary.createdAt
-    ? new Date(summary.createdAt).toLocaleDateString('zh-CN', {
-        year: 'numeric', month: '2-digit', day: '2-digit',
-      })
-    : '';
-
-  // Navigate to the contest scoreboard with teaching tab
-  const handleClick = () => {
-    const contestId = String(summary.contestId);
-    // Try homework path first (most common), browser will redirect if wrong
-    const domainPrefix = summary.domainId && summary.domainId !== 'system'
-      ? `/d/${summary.domainId}` : '';
-    window.location.href = `${domainPrefix}/homework/${contestId}/scoreboard`;
-  };
-
+const StatusTag: React.FC<{ status: TeachingSummary['status'] }> = ({ status }) => {
+  const style = STATUS_STYLE[status];
   return (
-    <div
-      onClick={handleClick}
-      style={{
-        ...cardStyle,
-        marginBottom: SPACING.base,
-        borderLeft: highFindings.length > 0 ? `3px solid ${SEVERITY_DOTS.high}` : `3px solid ${COLORS.border}`,
-        cursor: 'pointer',
-        transition: 'box-shadow 200ms ease, border-color 200ms ease',
-      }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)'; }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = ''; }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: SPACING.sm }}>
-        <div>
-          <span style={{ fontSize: '13px', color: COLORS.textMuted, marginRight: SPACING.sm }}>{dateStr}</span>
-          <span style={{ fontSize: '15px', fontWeight: 600, color: COLORS.textPrimary }}>
-            {summary.contestTitle || summary.contestId}
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: SPACING.base, fontSize: '12px', color: COLORS.textSecondary }}>
-          <span>参与: {summary.stats?.participatedStudents ?? 0}</span>
-          <span>AI: {summary.stats?.aiUserCount ?? 0}</span>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', flexWrap: 'wrap', marginBottom: SPACING.sm }}>
-        <SeverityDot color={SEVERITY_DOTS.high} count={highFindings.length} label="高" />
-        <SeverityDot color={SEVERITY_DOTS.medium} count={mediumCount} label="中" />
-        <SeverityDot color={SEVERITY_DOTS.low} count={lowCount} label="低" />
-      </div>
-
-      {highFindings.length > 0 && (
-        <div style={{ marginTop: SPACING.sm }}>
-          {highFindings.slice(0, 2).map(f => (
-            <div key={f.id} style={{
-              padding: `${SPACING.xs} ${SPACING.sm}`,
-              backgroundColor: '#FEF2F2',
-              borderRadius: RADIUS.sm,
-              marginBottom: SPACING.xs,
-              fontSize: '13px',
-              color: '#991B1B',
-            }}>
-              {f.title}
-            </div>
-          ))}
-          {highFindings.length > 2 && (
-            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: SPACING.xs }}>
-              +{highFindings.length - 2} 项高优先级发现
-            </div>
-          )}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: SPACING.sm }}>
-        {summary.feedback ? (
-          <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: '4px',
-            fontSize: '12px',
-            color: summary.feedback.rating === 'up' ? '#16A34A' : '#DC2626',
-          }}>
-            {summary.feedback.rating === 'up' ? '\u{1F44D}' : '\u{1F44E}'}
-            {summary.feedback.rating === 'up' ? '有帮助' : '没帮助'}
-          </span>
-        ) : (
-          <span style={{ fontSize: '12px', color: COLORS.textMuted }}>
-            未评价
-          </span>
-        )}
-        <span style={{ fontSize: '12px', color: COLORS.primary }}>
-          查看详细分析 →
-        </span>
-      </div>
-    </div>
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '1px 6px',
+      borderRadius: RADIUS.sm,
+      color: style.color,
+      backgroundColor: style.background,
+      fontSize: '12px',
+      fontWeight: 500,
+      whiteSpace: 'nowrap',
+    }}>
+      {i18n(STATUS_LABEL[status])}
+    </span>
   );
 };
 
-// ─── Pagination ───────────────────────────────────────────────────────────────
+const SummaryRow: React.FC<{ summary: TeachingSummary }> = ({ summary }) => {
+  const findings = Array.isArray(summary.findings) ? summary.findings : [];
+  const counts = {
+    high: findings.filter(finding => finding.severity === 'high').length,
+    medium: findings.filter(finding => finding.severity === 'medium').length,
+    low: findings.filter(finding => finding.severity === 'low').length,
+  };
+  const primaryFinding = findPrimaryFinding(findings);
+  const status = summary.status || 'completed';
+
+  const feedbackLabel = summary.feedback?.rating === 'up'
+    ? i18n('ai_helper_teaching_review_helpful')
+    : summary.feedback?.rating === 'down'
+      ? i18n('ai_helper_teaching_review_not_helpful')
+      : i18n('ai_helper_teaching_review_unrated');
+
+  const feedbackColor = summary.feedback?.rating === 'up'
+    ? COLORS.hydroGreenDark
+    : summary.feedback?.rating === 'down'
+      ? COLORS.errorText
+      : COLORS.textMuted;
+
+  return (
+    <a
+      href={buildReviewDetailUrl(summary)}
+      aria-label={`${summary.contestTitle || summary.contestId} - ${i18n('ai_helper_teaching_review_view')}`}
+      style={{
+        display: 'block',
+        padding: `${SPACING.base} ${SPACING.sm}`,
+        color: COLORS.nativeText,
+        textDecoration: 'none',
+        borderBottom: `1px solid ${COLORS.nativeBorder}`,
+        transition: 'background-color 150ms ease',
+      }}
+      onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = '#fafafa'; }}
+      onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }}
+    >
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        gap: SPACING.base,
+        flexWrap: 'wrap',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, minWidth: 0, flexWrap: 'wrap' }}>
+          <time dateTime={summary.createdAt} style={{ color: COLORS.textMuted, fontSize: '13px', whiteSpace: 'nowrap' }}>
+            {formatDate(summary.createdAt)}
+          </time>
+          <span style={{ fontSize: '15px', fontWeight: 600, overflowWrap: 'anywhere' }}>
+            {summary.contestTitle || String(summary.contestId)}
+          </span>
+          <StatusTag status={status} />
+        </div>
+
+        <div style={{
+          display: 'flex',
+          gap: SPACING.base,
+          flexWrap: 'wrap',
+          color: COLORS.textSecondary,
+          fontSize: '12px',
+          lineHeight: 1.6,
+        }}>
+          <span>{i18n('ai_helper_teaching_review_participated')} {summary.stats?.participatedStudents ?? 0}</span>
+          <span>{i18n('ai_helper_teaching_review_ai_users')} {summary.stats?.aiUserCount ?? 0}</span>
+        </div>
+      </div>
+
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: SPACING.base,
+        flexWrap: 'wrap',
+        marginTop: SPACING.sm,
+        color: COLORS.textSecondary,
+        fontSize: '12px',
+      }}>
+        <SeverityMetric severity="high" count={counts.high} label={i18n('ai_helper_teaching_review_focus')} />
+        <SeverityMetric severity="medium" count={counts.medium} label={i18n('ai_helper_teaching_review_attention')} />
+        <SeverityMetric severity="low" count={counts.low} label={i18n('ai_helper_teaching_review_observation')} />
+      </div>
+
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: SPACING.base,
+        flexWrap: 'wrap',
+        marginTop: SPACING.sm,
+        fontSize: '12px',
+      }}>
+        <span style={{
+          color: primaryFinding?.severity === 'high' ? COLORS.errorText : COLORS.textSecondary,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          minWidth: 0,
+          flex: '1 1 320px',
+        }}>
+          {primaryFinding
+            ? `${i18n('ai_helper_teaching_review_primary_finding')}: ${primaryFinding.title}`
+            : status === 'failed'
+              ? i18n('ai_helper_teaching_review_failed_hint')
+              : status === 'pending' || status === 'generating'
+                ? i18n(STATUS_LABEL[status])
+                : i18n('ai_helper_teaching_review_no_findings')}
+        </span>
+
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: SPACING.base, whiteSpace: 'nowrap' }}>
+          <span style={{ color: feedbackColor }}>{feedbackLabel}</span>
+          <span style={{ color: COLORS.hydroGreenDark, fontWeight: 500 }}>
+            {i18n('ai_helper_teaching_review_view')} →
+          </span>
+        </span>
+      </div>
+    </a>
+  );
+};
 
 interface PaginationProps {
   page: number;
   total: number;
-  onPageChange: (p: number) => void;
+  onPageChange: (page: number) => void;
 }
 
 const Pagination: React.FC<PaginationProps> = ({ page, total, onPageChange }) => {
@@ -158,155 +226,196 @@ const Pagination: React.FC<PaginationProps> = ({ page, total, onPageChange }) =>
   if (totalPages <= 1) return null;
 
   const pages: number[] = [];
-  for (let p = Math.max(1, page - 2); p <= Math.min(totalPages, page + 2); p++) {
-    pages.push(p);
+  for (let current = Math.max(1, page - 2); current <= Math.min(totalPages, page + 2); current++) {
+    pages.push(current);
   }
 
+  const pageButtonStyle = (isActive: boolean, isDisabled = false): React.CSSProperties => ({
+    ...getPaginationButtonStyle(isActive, isDisabled),
+    borderRadius: RADIUS.sm,
+    ...(isActive ? {
+      color: '#ffffff',
+      backgroundColor: COLORS.hydroGreen,
+      borderColor: COLORS.hydroGreen,
+    } : {}),
+  });
+
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', gap: SPACING.xs, marginTop: SPACING.lg }}>
+    <nav aria-label="Pagination" style={{ display: 'flex', justifyContent: 'center', gap: SPACING.xs, paddingTop: SPACING.lg }}>
       <button
-        style={getPaginationButtonStyle(false, page <= 1)}
+        type="button"
+        style={pageButtonStyle(false, page <= 1)}
         disabled={page <= 1}
         onClick={() => onPageChange(page - 1)}
       >
         {'<'}
       </button>
-      {pages.map(p => (
+      {pages.map(current => (
         <button
-          key={p}
-          style={getPaginationButtonStyle(p === page)}
-          onClick={() => onPageChange(p)}
+          type="button"
+          key={current}
+          style={pageButtonStyle(current === page)}
+          aria-current={current === page ? 'page' : undefined}
+          onClick={() => onPageChange(current)}
         >
-          {p}
+          {current}
         </button>
       ))}
       <button
-        style={getPaginationButtonStyle(false, page >= totalPages)}
+        type="button"
+        style={pageButtonStyle(false, page >= totalPages)}
         disabled={page >= totalPages}
         onClick={() => onPageChange(page + 1)}
       >
         {'>'}
       </button>
-    </div>
+    </nav>
   );
 };
 
-// ─── Main component ───────────────────────────────────────────────────────────
+const FeedbackStatsBar: React.FC<{ stats: FeedbackStats }> = ({ stats }) => {
+  const total = stats.up + stats.down;
+  if (total === 0) return null;
+  const positiveRate = Math.round((stats.up / total) * 100);
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: SPACING.base,
+      flexWrap: 'wrap',
+      padding: `${SPACING.sm} 0 ${SPACING.md}`,
+      borderBottom: `1px solid ${COLORS.nativeBorder}`,
+      color: COLORS.textSecondary,
+      fontSize: '12px',
+    }}>
+      <strong style={{ color: COLORS.nativeText, fontWeight: 600 }}>
+        {i18n('ai_helper_teaching_review_feedback')}
+      </strong>
+      <span style={{ color: COLORS.hydroGreenDark }}>
+        {i18n('ai_helper_teaching_review_helpful')} {stats.up}
+      </span>
+      <span style={{ color: COLORS.errorText }}>
+        {i18n('ai_helper_teaching_review_not_helpful')} {stats.down}
+      </span>
+      <span style={{ color: COLORS.textMuted }}>
+        {i18n('ai_helper_teaching_review_positive_rate', positiveRate)}
+      </span>
+    </div>
+  );
+};
 
 interface TeachingReviewPanelProps {
   domainId: string;
 }
 
-// ─── Feedback stats bar ──────────────────────────────────────────────────────
-
-const FeedbackStatsBar: React.FC<{ stats: FeedbackStats }> = ({ stats }) => {
-  const total = stats.up + stats.down;
-  if (total === 0) return null;
-
-  const upPct = Math.round((stats.up / total) * 100);
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: SPACING.base,
-      padding: `${SPACING.sm} ${SPACING.base}`,
-      backgroundColor: '#F8FAFC',
-      borderRadius: RADIUS.md,
-      marginBottom: SPACING.lg,
-      fontSize: '13px',
-    }}>
-      <span style={{ color: COLORS.textSecondary, fontWeight: 500 }}>教学总结反馈</span>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#16A34A' }}>
-        {'\u{1F44D}'} {stats.up}
-      </span>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#DC2626' }}>
-        {'\u{1F44E}'} {stats.down}
-      </span>
-      {/* Progress bar */}
-      <div style={{
-        flex: 1, height: '6px', backgroundColor: '#FEE2E2',
-        borderRadius: '3px', overflow: 'hidden', minWidth: '60px',
-      }}>
-        <div style={{
-          width: `${upPct}%`, height: '100%',
-          backgroundColor: '#16A34A', borderRadius: '3px',
-          transition: 'width 300ms ease',
-        }} />
-      </div>
-      <span style={{ color: COLORS.textMuted, fontSize: '12px' }}>
-        {upPct}% 好评
-      </span>
-    </div>
-  );
-};
-
 export const TeachingReviewPanel: React.FC<TeachingReviewPanelProps> = ({ domainId }) => {
-  const { summaries, total, page, loading, feedbackStats, fetchList } = useTeachingReview(domainId);
+  const {
+    summaries, total, page, loading, error, feedbackStats, fetchList,
+  } = useTeachingReview(domainId);
 
   useEffect(() => {
     fetchList(1);
   }, [fetchList]);
 
-  const handlePageChange = (p: number) => {
-    fetchList(p);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  const handlePageChange = (targetPage: number) => {
+    fetchList(targetPage);
+    document.getElementById('ai-teaching-review-heading')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  const initialLoading = loading && summaries.length === 0;
+
   return (
-    <div style={{ padding: SPACING.lg }}>
-      {/* Panel header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.lg }}>
+    <section aria-labelledby="ai-teaching-review-heading" aria-busy={loading} style={{ padding: SPACING.lg }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: SPACING.base,
+        paddingBottom: SPACING.md,
+        borderBottom: `1px solid ${COLORS.nativeBorder}`,
+      }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: COLORS.textPrimary }}>
-            {i18n('ai_helper_dashboard_tab_teaching_review') || '教学总结回顾'}
+          <h2 id="ai-teaching-review-heading" style={{ margin: 0, fontSize: '18px', fontWeight: 600, color: COLORS.nativeText }}>
+            {i18n('ai_helper_dashboard_tab_teaching_review')}
           </h2>
-          {!loading && total > 0 && (
-            <p style={{ margin: '4px 0 0', fontSize: '13px', color: COLORS.textSecondary }}>
-              共 {total} 条记录
+          {!initialLoading && (
+            <p style={{ margin: '4px 0 0', color: COLORS.textSecondary, fontSize: '12px' }}>
+              {i18n('ai_helper_teaching_review_total', total)}
             </p>
           )}
         </div>
         <button
-          style={getButtonStyle('secondary')}
+          type="button"
+          disabled={loading}
           onClick={() => fetchList(page)}
+          style={{
+            padding: '5px 12px',
+            color: loading ? COLORS.textMuted : COLORS.nativeText,
+            backgroundColor: '#ffffff',
+            border: `1px solid ${COLORS.nativeBorder}`,
+            borderRadius: RADIUS.sm,
+            cursor: loading ? 'wait' : 'pointer',
+            fontSize: '13px',
+          }}
         >
-          刷新
+          {i18n('ai_helper_teaching_review_refresh')}
         </button>
       </div>
 
-      {/* Feedback stats */}
-      {!loading && <FeedbackStatsBar stats={feedbackStats} />}
+      {!initialLoading && <FeedbackStatsBar stats={feedbackStats} />}
 
-      {/* Loading state */}
-      {loading && (
-        <div style={{ textAlign: 'center', padding: SPACING.xl, color: COLORS.textMuted }}>
-          加载中...
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!loading && summaries.length === 0 && (
-        <div style={{
-          textAlign: 'center',
-          padding: SPACING.xl,
-          color: COLORS.textMuted,
-          border: `2px dashed ${COLORS.border}`,
-          borderRadius: RADIUS.lg,
-          fontSize: '14px',
+      {error && (
+        <div role="alert" style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: SPACING.base,
+          marginTop: SPACING.base,
+          padding: `${SPACING.sm} ${SPACING.md}`,
+          color: COLORS.errorText,
+          backgroundColor: COLORS.errorBg,
+          borderLeft: `3px solid ${COLORS.error}`,
+          fontSize: '13px',
         }}>
-          暂无教学总结记录
+          <span>{i18n('ai_helper_teaching_review_load_failed')}: {error}</span>
+          <button
+            type="button"
+            onClick={() => fetchList(page)}
+            style={{
+              padding: '3px 9px',
+              color: COLORS.errorText,
+              backgroundColor: '#ffffff',
+              border: `1px solid ${COLORS.errorBorder}`,
+              borderRadius: RADIUS.sm,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {i18n('ai_helper_teaching_review_retry')}
+          </button>
         </div>
       )}
 
-      {/* Summary list */}
-      {!loading && summaries.length > 0 && (
+      {initialLoading && (
+        <div style={{ padding: SPACING.xl, color: COLORS.textMuted, textAlign: 'center', fontSize: '13px' }}>
+          {i18n('ai_helper_teaching_review_loading')}
+        </div>
+      )}
+
+      {!initialLoading && !error && summaries.length === 0 && (
+        <div style={{ padding: SPACING.xl, color: COLORS.textMuted, textAlign: 'center', fontSize: '13px' }}>
+          {i18n('ai_helper_teaching_review_empty')}
+        </div>
+      )}
+
+      {summaries.length > 0 && (
         <div>
-          {summaries.map(s => (
-            <SummaryCard key={s._id} summary={s} />
-          ))}
+          {summaries.map(summary => <SummaryRow key={summary._id} summary={summary} />)}
           <Pagination page={page} total={total} onPageChange={handlePageChange} />
         </div>
       )}
-    </div>
+    </section>
   );
 };
 

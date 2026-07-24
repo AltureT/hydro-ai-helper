@@ -36,6 +36,8 @@ export interface TeachingSummary {
   contestId: string;
   contestTitle: string;
   contestContent: string;
+  /** HydroOJ contest rule, used by the review page to select contest/homework routes. */
+  contestRule?: string;
   teachingFocus?: string;
   createdBy: number;
   createdAt: string;

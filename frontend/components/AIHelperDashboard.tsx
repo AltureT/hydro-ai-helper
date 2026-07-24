@@ -11,7 +11,7 @@ import { ConfigPanel } from '../admin/ConfigPanel';
 import { SafetyGovernancePanel } from '../admin/SafetyGovernancePanel';
 import { CostDashboard } from '../teacher/CostDashboard';
 import { TeachingReviewPanel } from '../teachingSummary/TeachingReviewPanel';
-import { COLORS, FONT_FAMILY, SHADOWS, RADIUS, SPACING, getTabStyle } from '../utils/styles';
+import { COLORS, FONT_FAMILY, SPACING } from '../utils/styles';
 import { getDomainFromUrl } from '../utils/domainUtils';
 
 type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'safety' | 'config';
@@ -69,35 +69,28 @@ export const AIHelperDashboard: React.FC = () => {
 
   return (
     <div style={{
-      padding: SPACING.xl,
+      padding: `${SPACING.lg} 0`,
       fontFamily: FONT_FAMILY,
-      backgroundColor: COLORS.bgPage,
-      minHeight: '100vh',
+      color: COLORS.nativeText,
     }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+      <div style={{ width: '100%' }}>
         {/* Dashboard Header */}
         <div style={{
-          marginBottom: SPACING.lg,
-          padding: `${SPACING.lg} ${SPACING.xl}`,
-          background: COLORS.bgCard,
-          borderRadius: RADIUS.lg,
-          border: `1px solid ${COLORS.border}`,
-          boxShadow: SHADOWS.sm,
+          padding: `0 0 ${SPACING.lg}`,
         }}>
-          <h1 style={{ margin: 0, fontSize: '24px', fontWeight: 700, color: COLORS.textPrimary }}>
+          <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 600, color: COLORS.nativeText }}>
             {i18n('ai_helper')}
           </h1>
-          <p style={{ margin: '8px 0 0', color: COLORS.textSecondary, fontSize: '14px' }}>
+          <p style={{ margin: '6px 0 0', color: COLORS.textSecondary, fontSize: '13px' }}>
             {i18n('ai_helper_dashboard_subtitle')}
           </p>
         </div>
 
         {/* Tab Navigation Bar */}
-        <div style={{
-          marginBottom: SPACING.lg,
+        <div role="tablist" style={{
           display: 'flex',
-          gap: SPACING.sm,
-          borderBottom: `2px solid ${COLORS.border}`,
+          gap: 0,
+          borderBottom: `1px solid ${COLORS.nativeBorder}`,
           overflowX: 'auto',
           whiteSpace: 'nowrap',
           WebkitOverflowScrolling: 'touch',
@@ -107,9 +100,19 @@ export const AIHelperDashboard: React.FC = () => {
             return (
               <button
                 key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
                 onClick={() => handleTabChange(tab.id)}
                 style={{
-                  ...getTabStyle(isActive),
+                  padding: `10px ${SPACING.base}`,
+                  color: isActive ? COLORS.hydroGreenDark : COLORS.textSecondary,
+                  backgroundColor: 'transparent',
+                  border: 'none',
+                  borderBottom: isActive ? `2px solid ${COLORS.hydroGreen}` : '2px solid transparent',
+                  fontSize: '14px',
+                  fontWeight: isActive ? 600 : 400,
+                  cursor: 'pointer',
                   outline: 'none',
                   flexShrink: 0,
                 }}
@@ -123,9 +126,8 @@ export const AIHelperDashboard: React.FC = () => {
         {/* Tab Content Container */}
         <div style={{
           backgroundColor: COLORS.bgCard,
-          borderRadius: RADIUS.lg,
-          border: `1px solid ${COLORS.border}`,
-          boxShadow: SHADOWS.sm,
+          border: `1px solid ${COLORS.nativeBorder}`,
+          borderTop: 'none',
           overflow: 'hidden',
         }}>
           {activeTab === 'conversations' && <ConversationList embedded />}

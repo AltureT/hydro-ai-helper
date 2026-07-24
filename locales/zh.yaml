@@ -926,6 +926,30 @@ ai_helper_scoreboard_tab_learning: "学习总结"
 
 # 教学建议
 ai_helper_dashboard_tab_teaching_review: 教学总结回顾
+ai_helper_teaching_review_total: "共 {0} 条记录"
+ai_helper_teaching_review_refresh: 刷新
+ai_helper_teaching_review_loading: 正在加载教学总结…
+ai_helper_teaching_review_empty: 暂无教学总结记录
+ai_helper_teaching_review_load_failed: 教学总结加载失败
+ai_helper_teaching_review_retry: 重试
+ai_helper_teaching_review_participated: 参与
+ai_helper_teaching_review_ai_users: AI 使用
+ai_helper_teaching_review_focus: 重点
+ai_helper_teaching_review_attention: 一般
+ai_helper_teaching_review_observation: 观察
+ai_helper_teaching_review_status_pending: 等待生成
+ai_helper_teaching_review_status_generating: 生成中
+ai_helper_teaching_review_status_completed: 已完成
+ai_helper_teaching_review_status_failed: 生成失败
+ai_helper_teaching_review_unrated: 未评价
+ai_helper_teaching_review_helpful: 有帮助
+ai_helper_teaching_review_not_helpful: 没帮助
+ai_helper_teaching_review_view: 查看分析
+ai_helper_teaching_review_primary_finding: 主要问题
+ai_helper_teaching_review_no_findings: 暂无重点问题
+ai_helper_teaching_review_failed_hint: 本次总结生成失败，可进入教学分析重新生成
+ai_helper_teaching_review_feedback: 总结反馈
+ai_helper_teaching_review_positive_rate: "{0}% 有帮助"
 ai_helper_teaching_generate: 生成教学建议
 ai_helper_teaching_regenerate: 重新生成
 ai_helper_teaching_generating: 正在生成教学建议...

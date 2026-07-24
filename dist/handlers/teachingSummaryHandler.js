@@ -373,7 +373,18 @@ class TeachingReviewHandler extends hydrooj_1.Handler {
                 model.countByDomain(domainId),
                 model.getFeedbackStats(domainId),
             ]);
-            this.response.body = { summaries, total, page, limit, feedbackStats };
+            // Summary documents predate route metadata. Resolve the current HydroOJ
+            // rule in one query so review links can choose /contest or /homework.
+            const contestIds = summaries.map(summary => summary.contestId);
+            const contestDocs = contestIds.length > 0
+                ? await hydrooj_1.db.collection('document').find({ domainId, docType: 30, docId: { $in: contestIds } }, { projection: { docId: 1, rule: 1 } }).toArray()
+                : [];
+            const contestRuleById = new Map(contestDocs.map(doc => [String(doc.docId), String(doc.rule || '')]));
+            const enrichedSummaries = summaries.map(summary => ({
+                ...summary,
+                contestRule: contestRuleById.get(String(summary.contestId)) || '',
+            }));
+            this.response.body = { summaries: enrichedSummaries, total, page, limit, feedbackStats };
             this.response.type = 'application/json';
         }
         catch (err) {
