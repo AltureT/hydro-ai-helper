@@ -50,7 +50,6 @@ import {
   shouldRecommendDeeperReasoning,
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
-  TESTDATA_GENERATION_PROFILES,
 } from '../../services/testdataGenService';
 
 const baseOptions: GenerateOptions = {
@@ -1237,9 +1236,9 @@ describe('TestdataGenService.generate', () => {
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toContain('提莫攻击');
     expect(systemPrompt).toContain('JSON');
-    // 不限输出长度 + 长超时
+    // 不限输出长度，且不由插件为长推理设置截止时间。
     expect(callOptions.maxTokens).toBeNull();
-    expect(callOptions.timeoutMs).toBe(TESTDATA_GEN_LIMITS.AI_TIMEOUT_MS);
+    expect(callOptions.timeoutMs).toBeNull();
     expect(callOptions.retryTimeouts).toBe(false);
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
@@ -1248,28 +1247,6 @@ describe('TestdataGenService.generate', () => {
       'preparing', 'blueprint', 'assembling', 'complete',
     ]));
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
-  });
-
-  it('高难题模式为每次模型调用提供 30 分钟上限', async () => {
-    expect(TESTDATA_GENERATION_PROFILES.hard.aiTimeoutMs).toBe(30 * 60_000);
-    const mockClient = {
-      chat: jest.fn().mockResolvedValue({
-        content: makeAiJson(),
-        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
-      }),
-    };
-    const service = new TestdataGenService(mockClient as never);
-    await service.generate({
-      problemTitle: '高难题',
-      statementMarkdown: '题面',
-      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
-      generationProfile: 'hard',
-    });
-
-    expect(mockClient.chat.mock.calls[0][2]).toEqual(expect.objectContaining({
-      timeoutMs: TESTDATA_GENERATION_PROFILES.hard.aiTimeoutMs,
-      retryTimeouts: false,
-    }));
   });
 
   it('沙箱模式运行生成器和标程后再组装文件', async () => {

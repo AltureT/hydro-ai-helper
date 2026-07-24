@@ -9,7 +9,6 @@ import { ensureObjectId } from '../utils/ensureObjectId';
 import type {
   GenerationPlan,
   TestdataGenerationProgress,
-  TestdataGenerationProfile,
 } from '../services/testdataGenService';
 
 export type TestdataGenerationJobStatus =
@@ -35,7 +34,6 @@ export interface TestdataGenerationJob {
   problemId: string;
   problemTitle: string;
   createdBy: number;
-  generationProfile: TestdataGenerationProfile;
   status: TestdataGenerationJobStatus;
   active: boolean;
   restorable: boolean;
@@ -61,7 +59,6 @@ interface CreateJobParams {
   problemId: string;
   problemTitle: string;
   createdBy: number;
-  generationProfile: TestdataGenerationProfile;
 }
 
 const interruptedError: TestdataGenerationJobError = {
@@ -189,7 +186,12 @@ export class TestdataGenerationJobModel {
     const now = new Date();
     const result = await this.collection.updateOne(
       { _id: ensureObjectId(id), active: true, cancelRequested: false },
-      { $set: { updatedAt: now, leaseExpiresAt: new Date(now.getTime() + TESTDATA_JOB_LEASE_MS) } },
+      { $set: {
+        updatedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + TESTDATA_JOB_LEASE_MS),
+        // 活跃任务采用滑动保留期，避免长推理在固定 24 小时 TTL 到点时被误删。
+        expiresAt: new Date(now.getTime() + TESTDATA_JOB_RETENTION_MS),
+      } },
     );
     return result.modifiedCount > 0;
   }

@@ -33,11 +33,8 @@ interface ProblemContext {
     isOwn: boolean;
   }>;
   limits: { minCases: number; maxCases: number; maxExtraRequirements: number; maxProvidedStd?: number };
-  generationProfiles?: Record<GenerationProfile, { aiTimeoutMs: number; totalTimeoutMs: number }>;
   restorableJob?: BackgroundGenerationJob;
 }
-
-type GenerationProfile = 'standard' | 'hard';
 
 interface PlannedFile {
   name: string;
@@ -94,7 +91,6 @@ interface BackgroundGenerationJob {
   id: string;
   problemId: string;
   problemTitle: string;
-  generationProfile: GenerationProfile;
   status: BackgroundGenerationJobStatus;
   progress: GenerationProgressEvent;
   error?: {
@@ -139,10 +135,6 @@ interface GenerationProgressEvent {
   attempt: number;
 }
 
-interface GenerationProgressState extends GenerationProgressEvent {
-  source: 'live' | 'estimated';
-}
-
 type PanelPhase = 'form' | 'generating' | 'preview' | 'applying' | 'applied';
 
 interface TestdataGenPanelProps {
@@ -173,32 +165,31 @@ const ORIGIN_BADGE_KEYS: Record<string, string> = {
   deterministic: 'ai_helper_testdata_badge_deterministic',
 };
 
-const PROGRESS_STAGE_CAPS: Record<GenerationProgressStage, number> = {
-  preparing: 4,
-  sandbox_check: 8,
-  blueprint: 30,
-  blueprint_repair: 38,
-  solution_verification: 36,
-  artifacts: 54,
-  templates: 62,
-  independent_verifier: 60,
-  verifier_repair: 62,
-  generating_inputs: 65,
-  validating_inputs: 71,
-  running_oracle: 78,
-  checking_templates: 84,
-  stress_testing: 90,
-  pipeline_repair: 94,
-  model_fallback: 60,
-  model_escalation: 94,
-  assembling: 98,
-  complete: 100,
-};
+const GENERATION_STAGE_GROUPS: Array<{
+  key: string;
+  stages: GenerationProgressStage[];
+}> = [
+  {
+    key: 'understand',
+    stages: ['preparing', 'sandbox_check', 'blueprint', 'blueprint_repair', 'solution_verification', 'model_fallback'],
+  },
+  {
+    key: 'components',
+    stages: ['artifacts', 'templates', 'independent_verifier', 'verifier_repair'],
+  },
+  { key: 'inputs', stages: ['generating_inputs', 'validating_inputs'] },
+  {
+    key: 'verify',
+    stages: ['running_oracle', 'checking_templates', 'stress_testing', 'pipeline_repair', 'model_escalation'],
+  },
+  { key: 'finish', stages: ['assembling', 'complete'] },
+];
 
-const DEFAULT_GENERATION_PROFILES: Record<GenerationProfile, { aiTimeoutMs: number; totalTimeoutMs: number }> = {
-  standard: { aiTimeoutMs: 600_000, totalTimeoutMs: 900_000 },
-  hard: { aiTimeoutMs: 1_800_000, totalTimeoutMs: 5_400_000 },
-};
+function getGenerationStageGroupIndex(stage: GenerationProgressStage): number {
+  const index = GENERATION_STAGE_GROUPS.findIndex(group => group.stages.includes(stage));
+  return index >= 0 ? index : 0;
+}
+
 const JOB_POLL_INTERVAL_MS = 2_000;
 
 // deterministic 用中性灰：getBadgeStyle 无 neutral 变体，借 info 外形覆盖配色
@@ -255,20 +246,21 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [showFallbackHint, setShowFallbackHint] = useState(false);
   // 仅后端确认“自动修复后仍未通过解析/机器验证”时提示换用更深思考模型。
   const [showDeeperReasoningHint, setShowDeeperReasoningHint] = useState(false);
-  const [generationProgress, setGenerationProgress] = useState<GenerationProgressState>({
-    stage: 'preparing', percent: 2, attempt: 1, source: 'estimated',
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgressEvent>({
+    stage: 'preparing', percent: 2, attempt: 1,
   });
   const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
   const [generationIdleSeconds, setGenerationIdleSeconds] = useState(0);
+  const [generationHeartbeatSeconds, setGenerationHeartbeatSeconds] = useState(0);
   const [generationCanceling, setGenerationCanceling] = useState(false);
   const generationStartedAtRef = useRef(0);
   const generationLastEventAtRef = useRef(0);
+  const generationHeartbeatAtRef = useRef(0);
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
   const restoreCheckedRef = useRef(false);
   const jobStorageKey = `ai-helper:testdata-generation-job:${window.location.pathname}:${problemId}`;
 
   // 表单状态
-  const [generationProfile, setGenerationProfile] = useState<GenerationProfile>('standard');
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
   const [fillInMode, setFillInMode] = useState<'auto' | 'yes' | 'no'>('auto');
   const [caseCount, setCaseCount] = useState(10);
@@ -311,43 +303,25 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setPhase('preview');
   }, []);
 
-  // 后台阶段事件之间让进度缓慢前移；百分比始终是阶段估算，最高不超过当前阶段上限。
+  // 只显示服务端真实阶段，不按等待时间伪造百分比或推测模型内部进度。
   useEffect(() => {
     if (phase !== 'generating') return undefined;
     const startedAt = generationStartedAtRef.current || Date.now();
     generationStartedAtRef.current = startedAt;
     if (!generationLastEventAtRef.current) generationLastEventAtRef.current = startedAt;
+    if (!generationHeartbeatAtRef.current) generationHeartbeatAtRef.current = startedAt;
     setGenerationElapsedSeconds(0);
     setGenerationIdleSeconds(0);
+    setGenerationHeartbeatSeconds(0);
     const timer = window.setInterval(() => {
       const now = Date.now();
       const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000));
       setGenerationElapsedSeconds(elapsed);
       setGenerationIdleSeconds(Math.max(0, Math.floor((now - generationLastEventAtRef.current) / 1000)));
-      setGenerationProgress(prev => {
-        if (prev.source === 'live') {
-          const cap = PROGRESS_STAGE_CAPS[prev.stage] ?? 98;
-          return prev.percent >= cap
-            ? prev
-            : { ...prev, percent: Math.min(cap, prev.percent + 0.15) };
-        }
-        const estimatedPercent = Math.min(88, 4 + 84 * (1 - Math.exp(-elapsed / 100)));
-        const estimatedStage: GenerationProgressStage = elapsed < 8
-          ? 'preparing'
-          : elapsed < 50
-            ? 'blueprint'
-            : elapsed < 100
-              ? 'independent_verifier'
-              : elapsed < 180
-                ? 'running_oracle'
-                : 'stress_testing';
-        return {
-          stage: estimatedStage,
-          percent: Math.max(prev.percent, estimatedPercent),
-          attempt: prev.attempt,
-          source: 'estimated',
-        };
-      });
+      setGenerationHeartbeatSeconds(Math.max(
+        0,
+        Math.floor((now - generationHeartbeatAtRef.current) / 1000),
+      ));
     }, 1000);
     return () => window.clearInterval(timer);
   }, [phase]);
@@ -394,15 +368,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     if (!jobId) return;
 
     rememberJob(jobId);
-    if (savedJob?.generationProfile) setGenerationProfile(savedJob.generationProfile);
     const startedAt = Date.parse(savedJob?.startedAt || savedJob?.createdAt || '');
     const progressAt = Date.parse(savedJob?.progressUpdatedAt || '');
+    const heartbeatAt = Date.parse(savedJob?.updatedAt || '');
     generationStartedAtRef.current = Number.isFinite(startedAt) ? startedAt : Date.now();
     generationLastEventAtRef.current = Number.isFinite(progressAt)
       ? progressAt
       : generationStartedAtRef.current;
+    generationHeartbeatAtRef.current = Number.isFinite(heartbeatAt)
+      ? heartbeatAt
+      : generationStartedAtRef.current;
     if (savedJob?.progress) {
-      setGenerationProgress({ ...savedJob.progress, source: 'live' });
+      setGenerationProgress(savedJob.progress);
     }
     setCollapsed(false);
     setPhase('generating');
@@ -431,17 +408,14 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         const data = await response.json() as { job: BackgroundGenerationJob };
         if (disposed || !data.job) return;
         const job = data.job;
-        setGenerationProfile(job.generationProfile);
         const startedAt = Date.parse(job.startedAt || job.createdAt || '');
         const progressAt = Date.parse(job.progressUpdatedAt || '');
+        const heartbeatAt = Date.parse(job.updatedAt || '');
         if (Number.isFinite(startedAt)) generationStartedAtRef.current = startedAt;
         if (Number.isFinite(progressAt)) generationLastEventAtRef.current = progressAt;
+        if (Number.isFinite(heartbeatAt)) generationHeartbeatAtRef.current = heartbeatAt;
         if (job.progress) {
-          setGenerationProgress(prev => ({
-            ...job.progress,
-            percent: Math.max(prev.percent, Math.min(100, job.progress.percent)),
-            source: 'live',
-          }));
+          setGenerationProgress(job.progress);
         }
 
         if (job.status === 'completed') {
@@ -508,9 +482,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const startedAt = Date.now();
     generationStartedAtRef.current = startedAt;
     generationLastEventAtRef.current = startedAt;
+    generationHeartbeatAtRef.current = startedAt;
     setGenerationIdleSeconds(0);
+    setGenerationHeartbeatSeconds(0);
     setGenerationCanceling(false);
-    setGenerationProgress({ stage: 'preparing', percent: 2, attempt: 1, source: 'estimated' });
+    setGenerationProgress({ stage: 'preparing', percent: 2, attempt: 1 });
     setPhase('generating');
     try {
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/jobs'), {
@@ -530,7 +506,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
-          generationProfile,
         }),
       });
       if (!response.ok) {
@@ -540,9 +515,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       const data = await response.json() as { job: BackgroundGenerationJob };
       if (!data.job?.id) throw new Error(i18n('ai_helper_testdata_job_start_failed'));
       rememberJob(data.job.id);
-      setGenerationProfile(data.job.generationProfile);
+      const heartbeatAt = Date.parse(data.job.updatedAt || '');
+      if (Number.isFinite(heartbeatAt)) generationHeartbeatAtRef.current = heartbeatAt;
       if (data.job.progress) {
-        setGenerationProgress({ ...data.job.progress, source: 'live' });
+        setGenerationProgress(data.job.progress);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -553,7 +529,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setPhase('form');
     }
   }, [
-    problemId, generationProfile, problemKind, fillInMode, caseCount,
+    problemId, problemKind, fillInMode, caseCount,
     dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements,
     rememberJob,
   ]);
@@ -592,7 +568,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
-    setGenerationProgress({ stage: 'assembling', percent: 80, attempt: 1, source: 'live' });
+    setGenerationProgress({ stage: 'assembling', percent: 80, attempt: 1 });
     setPhase('generating');
     try {
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/skeleton'), {
@@ -762,33 +738,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       {!context.problem.hasStatement && (
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
           {i18n('ai_helper_testdata_warn_no_statement')}
-        </div>
-      )}
-      <div style={fieldStyle}>
-        <label style={labelStyle}>{i18n('ai_helper_testdata_profile_label')}</label>
-        <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
-          {(['standard', 'hard'] as GenerationProfile[]).map(profile => (
-            <button
-              key={profile}
-              type="button"
-              aria-pressed={generationProfile === profile}
-              onClick={() => setGenerationProfile(profile)}
-              style={{
-                ...getButtonStyle(generationProfile === profile ? 'primary' : 'secondary'),
-                minWidth: '150px',
-              }}
-            >
-              {i18n(`ai_helper_testdata_profile_${profile}`)}
-            </button>
-          ))}
-        </div>
-        <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
-          {i18n(`ai_helper_testdata_profile_${generationProfile}_hint`)}
-        </div>
-      </div>
-      {generationProfile === 'hard' && (
-        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
-          {i18n('ai_helper_testdata_profile_hard_warning')}
         </div>
       )}
       <div style={fieldStyle}>
@@ -975,15 +924,13 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   );
 
   const renderGenerating = () => {
-    const percent = Math.max(2, Math.min(100, Math.round(generationProgress.percent)));
     const elapsedMinutes = Math.floor(generationElapsedSeconds / 60);
     const elapsedSeconds = generationElapsedSeconds % 60;
     const idleMinutes = Math.floor(generationIdleSeconds / 60);
     const idleSeconds = generationIdleSeconds % 60;
-    const profileTiming = context?.generationProfiles?.[generationProfile]
-      || DEFAULT_GENERATION_PROFILES[generationProfile];
-    const longWaitThresholdSeconds = generationProfile === 'hard' ? 10 * 60 : 5 * 60;
-    const totalLimitMinutes = Math.round(profileTiming.totalTimeoutMs / 60_000);
+    const activeGroupIndex = getGenerationStageGroupIndex(generationProgress.stage);
+    const heartbeatStale = generationHeartbeatSeconds >= 75;
+    const longWaitThresholdSeconds = 5 * 60;
     return (
       <div style={{ padding: SPACING.xl, color: COLORS.textSecondary }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.base }}>
@@ -994,53 +941,57 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           }} />
           <style>{'@keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }'}</style>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary }}>
+            <div role="status" aria-live="polite" style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary }}>
               {i18n(`ai_helper_testdata_progress_${generationProgress.stage}`)}
             </div>
             <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: '2px' }}>
-              {generationProgress.source === 'live'
-                ? i18n('ai_helper_testdata_progress_live')
-                : i18n('ai_helper_testdata_progress_estimated')}
+              {i18n('ai_helper_testdata_progress_live')}
               {generationProgress.attempt > 1
                 ? ` · ${i18n('ai_helper_testdata_progress_attempt', generationProgress.attempt)}`
                 : ''}
-              {' · '}
-              {i18n(`ai_helper_testdata_profile_${generationProfile}`)}
             </div>
           </div>
-          <div style={{ fontSize: '18px', fontWeight: 700, color: COLORS.primary, fontVariantNumeric: 'tabular-nums' }}>
-            {percent}%
+          <div style={{ ...TYPOGRAPHY.sm, fontWeight: 600, color: COLORS.primary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+            {i18n('ai_helper_testdata_progress_elapsed', elapsedMinutes, String(elapsedSeconds).padStart(2, '0'))}
           </div>
         </div>
-        <div
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-          style={{
-            height: '10px', overflow: 'hidden', borderRadius: '999px',
-            background: COLORS.bgHover, border: `1px solid ${COLORS.border}`,
-          }}
-        >
-          <div style={{
-            width: `${percent}%`, height: '100%', borderRadius: '999px',
-            background: `linear-gradient(90deg, ${COLORS.primary}, ${COLORS.success})`,
-            transition: 'width 500ms ease',
-          }} />
+        <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
+          {GENERATION_STAGE_GROUPS.map((group, index) => {
+            const completed = generationProgress.stage === 'complete' || index < activeGroupIndex;
+            const active = !completed && index === activeGroupIndex;
+            return (
+              <div
+                key={group.key}
+                style={{
+                  flex: '1 1 120px', minWidth: 0,
+                  display: 'flex', alignItems: 'center', gap: SPACING.sm,
+                  padding: `${SPACING.sm} ${SPACING.md}`,
+                  borderRadius: RADIUS.md,
+                  border: `1px solid ${active ? COLORS.borderFocus : COLORS.border}`,
+                  backgroundColor: active ? COLORS.primaryLight : completed ? COLORS.successBg : COLORS.bgHover,
+                  color: active ? COLORS.primary : completed ? COLORS.successText : COLORS.textMuted,
+                  fontSize: '12px', fontWeight: active || completed ? 600 : 500,
+                }}
+              >
+                <span aria-hidden="true" style={{
+                  width: '20px', height: '20px', flex: '0 0 20px',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  borderRadius: RADIUS.full,
+                  color: completed || active ? '#fff' : COLORS.textMuted,
+                  backgroundColor: completed ? COLORS.success : active ? COLORS.primary : COLORS.border,
+                  fontSize: '11px', fontWeight: 700,
+                }}>
+                  {completed ? '✓' : index + 1}
+                </span>
+                <span>{i18n(`ai_helper_testdata_step_${group.key}`)}</span>
+              </div>
+            );
+          })}
         </div>
-        <div style={{
-          display: 'flex', justifyContent: 'space-between', gap: SPACING.sm,
-          ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.sm,
-        }}>
-          <span>{i18n(
-            generationProfile === 'hard'
-              ? 'ai_helper_testdata_generating_hint_hard'
-              : 'ai_helper_testdata_generating_hint_standard',
-            totalLimitMinutes,
-          )}</span>
-          <span style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-            {i18n('ai_helper_testdata_progress_elapsed', elapsedMinutes, String(elapsedSeconds).padStart(2, '0'))}
-          </span>
+        <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.sm }}>
+          {i18n('ai_helper_testdata_progress_model_unobservable')}
+          {' '}
+          {i18n('ai_helper_testdata_generating_hint')}
         </div>
         {generationIdleSeconds >= 30 && (
           <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
@@ -1056,10 +1007,23 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {i18n('ai_helper_testdata_progress_waiting_long')}
           </div>
         )}
-        <div style={{ ...getAlertStyle('success'), marginTop: SPACING.base }}>
-          {i18n(generationJobId
-            ? 'ai_helper_testdata_background_active'
-            : 'ai_helper_testdata_background_starting')}
+        <div style={{
+          ...getAlertStyle(generationJobId && heartbeatStale ? 'warning' : 'success'),
+          marginTop: SPACING.base,
+        }}>
+          {generationJobId
+            ? i18n(
+              heartbeatStale
+                ? 'ai_helper_testdata_progress_heartbeat_stale'
+                : 'ai_helper_testdata_progress_heartbeat',
+              generationHeartbeatSeconds,
+            )
+            : i18n('ai_helper_testdata_background_starting')}
+          {generationJobId && !heartbeatStale && (
+            <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs }}>
+              {i18n('ai_helper_testdata_background_active')}
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: SPACING.base }}>
           <button

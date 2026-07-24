@@ -236,7 +236,6 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                     maxExtraRequirements: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS,
                     maxProvidedStd: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
                 },
-                generationProfiles: testdataGenService_1.TESTDATA_GENERATION_PROFILES,
                 restorableJob,
             };
             this.response.type = 'application/json';
@@ -255,7 +254,8 @@ function serializeGenerationJob(job) {
         id: String(job._id),
         problemId: job.problemId,
         problemTitle: job.problemTitle,
-        generationProfile: job.generationProfile,
+        // 仅兼容服务升级时仍打开的旧版页面；新版不读取此字段，后端也不据此设置时限。
+        generationProfile: 'hard',
         status: job.status,
         progress: job.progress,
         error: job.error,
@@ -296,16 +296,11 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, generationProfile, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, translate, } = params;
     const jobId = String(job._id);
     const ac = new AbortController();
     backgroundGenerationControllers.set(jobId, ac);
-    let deadlineExceeded = false;
     let progressWrites = Promise.resolve();
-    const deadlineTimer = setTimeout(() => {
-        deadlineExceeded = true;
-        ac.abort();
-    }, testdataGenService_1.TESTDATA_GENERATION_PROFILES[generationProfile].totalTimeoutMs);
     const heartbeatTimer = setInterval(() => {
         jobModel.renewLease(job._id).then(active => {
             if (!active)
@@ -330,7 +325,6 @@ async function runBackgroundGeneration(params) {
             existingFiles,
             existingConfig: pdoc.config,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
-            generationProfile,
             signal: ac.signal,
             onProgress: progress => {
                 progressWrites = progressWrites
@@ -357,17 +351,7 @@ async function runBackgroundGeneration(params) {
     }
     catch (err) {
         if ((0, testdataGenService_1.isCancellation)(err)) {
-            if (deadlineExceeded) {
-                await jobModel.fail(job._id, {
-                    message: translate('ai_helper_testdata_err_timeout'),
-                    code: 'GENERATION_TIMEOUT',
-                    category: 'timeout',
-                    retryable: true,
-                });
-            }
-            else {
-                await jobModel.cancel(job._id);
-            }
+            await jobModel.cancel(job._id);
             return;
         }
         console.error('[TestdataGenJob] generation failed:', err);
@@ -396,7 +380,6 @@ async function runBackgroundGeneration(params) {
         await jobModel.fail(job._id, jobError);
     }
     finally {
-        clearTimeout(deadlineTimer);
         clearInterval(heartbeatTimer);
         if (backgroundGenerationControllers.get(jobId) === ac) {
             backgroundGenerationControllers.delete(jobId);
@@ -413,8 +396,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         let keepaliveTimer;
         let streamRawRes;
         let streamCloseListener;
-        let generationDeadlineTimer;
-        let generationDeadlineExceeded = false;
         try {
             if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
                 return;
@@ -432,13 +413,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             if (!checkEditPermission(this, pdoc))
                 return;
-            const requestedProfile = body.generationProfile || 'standard';
-            if (!(0, testdataGenService_1.isTestdataGenerationProfile)(requestedProfile)) {
-                sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
-                return;
-            }
-            const generationProfile = requestedProfile;
-            const generationTiming = testdataGenService_1.TESTDATA_GENERATION_PROFILES[generationProfile];
             // AI 生成开销大：限制每人每 5 分钟 5 次
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_testdata_gen', periodSecs: 300, maxOps: 5,
@@ -503,10 +477,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             streamCloseListener = () => { if (!rawRes?.writableEnded)
                 requestAc.abort(); };
             rawRes?.on?.('close', streamCloseListener);
-            generationDeadlineTimer = setTimeout(() => {
-                generationDeadlineExceeded = true;
-                requestAc.abort();
-            }, generationTiming.totalTimeoutMs);
             const accept = String(this.request.headers?.accept || '').toLowerCase();
             if (accept.includes('text/event-stream') && rawRes) {
                 koaCtx.respond = false;
@@ -526,7 +496,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 existingFiles,
                 existingConfig: pdoc.config,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
-                generationProfile,
                 signal: requestAc.signal,
                 onProgress: progress => progressStream?.writeEvent('progress', progress),
             });
@@ -549,24 +518,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
         }
         catch (err) {
-            if ((0, testdataGenService_1.isCancellation)(err) && generationDeadlineExceeded) {
-                const errorBody = {
-                    error: this.translate('ai_helper_testdata_err_timeout'),
-                    code: 'GENERATION_TIMEOUT',
-                    category: 'timeout',
-                    retryable: true,
-                };
-                if (progressStream) {
-                    progressStream.writeEvent('error', errorBody);
-                    progressStream.end();
-                }
-                else {
-                    this.response.status = 504;
-                    this.response.body = errorBody;
-                    this.response.type = 'application/json';
-                }
-                return;
-            }
             // 客户端主动断开：非故障，不上报也不打 error 日志
             if ((0, testdataGenService_1.isCancellation)(err)) {
                 if (progressStream) {
@@ -636,8 +587,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         finally {
             if (keepaliveTimer)
                 clearInterval(keepaliveTimer);
-            if (generationDeadlineTimer)
-                clearTimeout(generationDeadlineTimer);
             if (streamRawRes && streamCloseListener) {
                 streamRawRes.removeListener?.('close', streamCloseListener);
             }
@@ -666,12 +615,6 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
             }
             if (!checkEditPermission(this, pdoc))
                 return;
-            const requestedProfile = body.generationProfile || 'standard';
-            if (!(0, testdataGenService_1.isTestdataGenerationProfile)(requestedProfile)) {
-                sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
-                return;
-            }
-            const generationProfile = requestedProfile;
             const jobModel = this.ctx.get('testdataGenerationJobModel');
             if (!jobModel) {
                 sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
@@ -728,12 +671,10 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 problemId: pdoc.pid || String(pdoc.docId),
                 problemTitle: pdoc.title || problemId,
                 createdBy: this.user?._id,
-                generationProfile,
             });
             if (created) {
                 // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
                 const backgroundTranslations = {
-                    ai_helper_testdata_err_timeout: this.translate('ai_helper_testdata_err_timeout'),
                     ai_helper_err_internal: this.translate('ai_helper_err_internal'),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
@@ -747,7 +688,6 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     statement,
                     options,
                     existingFiles,
-                    generationProfile,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {
                     console.error('[TestdataGenJob] unhandled background failure:', err);
