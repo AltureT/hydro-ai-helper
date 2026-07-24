@@ -669,6 +669,7 @@ function buildSolutionBlueprintSystemPrompt() {
 4. 若函数题题面包含样例，必须输出 SAMPLE_INPUTS，把每个题面展示参数转换为 ANALYSIS 确定的原始 stdin；只转换输入，id 不得遗漏或增加。
 5. 教师手动标程是权威；历史 AC 仅是可能误 AC 的候选，禁止把 AC 状态当作正确性证明。
 6. 本阶段严禁输出 GENERATOR、BRUTE、VALIDATOR 或 TEMPLATE；这些外围制品只有在 ORACLE 通过样例预验证后才会由后续阶段生成。
+7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
 @@@META@@@
@@ -733,7 +734,7 @@ function buildGenerationArtifactsSystemPrompt() {
     return `你是一位 OJ 测试数据工程师。题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
 
 核心规则：
-1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。
+1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
 4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
@@ -825,9 +826,9 @@ function buildIndependentVerifierSystemPrompt(stressCaseCount = exports.TESTDATA
 
 核心规则：
 1. BRUTE 必须是自包含 Python 3 完整程序，读取一份原始 stdin 并输出题目答案。使用最朴素、最容易审查的枚举/模拟算法，不追求大规模性能，不得省略任何输出格式细节。
-2. STRESS_GENERATOR 必须是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}。
+2. STRESS_GENERATOR 必须是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}。编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 3. STRESS_GENERATOR 必须恰好生成 ${stressCaseCount} 组小数据，至少 ${Math.ceil(stressCaseCount * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；全部能让 BRUTE 在 5 秒内独立完成。混合穷举边界、固定种子随机、重复值、退化结构和容易触发错误算法的反例。不得复制正式测试点，也不得生成大规模性能数据。
-4. VALIDATOR 必须是自包含 Python 3 程序，读取一份 input，严格校验格式和题面约束；合法时静默 exit 0，非法时向 stderr 说明并 exit 1。不得无条件成功。
+4. VALIDATOR 必须是自包含 Python 3 程序，读取一份 input，严格校验格式和题面约束；合法时静默 exit 0，非法时向 stderr 说明并 exit 1。题面中每一条“保证/约定”都必须成为一条显式校验；宁可过严拒绝，不可放过违规输入。不得无条件成功。
 5. 三个程序必须使用题目已经确定的同一份原始 stdin 编码。函数题每份 input 只对应一次调用；传统题若有 T，沿用题面和编码说明中的约定。
 6. 所有生成过程必须确定性并固定随机种子。每个 input 小于 256KB，STRESS_GENERATOR stdout 小于 1MB，不打印日志。
 7. 若用户消息列出函数题题面样例，额外输出 SAMPLE_INPUTS，将每个题面参数展示转换成上述 stdin 编码。只转换输入，不填写或改写期望输出；样例 id 必须逐一对应，不能遗漏或增加。
@@ -882,7 +883,7 @@ function buildIndependentVerifierUserPrompt(params, blueprint) {
 function buildKillTargetsSystemPrompt() {
     return `你是一位 OJ 错误解分析专家。请根据题面与既有解法分析，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
 
-从以下菜单中挑选最可能的 2 种不同错误模式，每种输出一个完整错误解：
+从以下菜单中挑选最多 2 种现实中学生确实可能犯的不同错误模式，每种输出一个完整错误解；如果题目过于简单、不存在有区分价值的现实错误模式，允许只输出 1 个甚至 0 个分节，不要硬凑：
 - boundary：边界或退化情形处理错误，例如 n=1、全相等、空结构。
 - wrong-algorithm：看似合理但不正确的贪心、DP、公式或状态转移。
 - overflow-sim：整数溢出错误。Python 整数原生不会溢出，必须显式使用 % (1 << 31)、% (1 << 32)、有符号位转换等方式模拟题目语言中的 32/64 位溢出。
@@ -891,7 +892,7 @@ function buildKillTargetsSystemPrompt() {
 1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
 2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
 3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
-4. 只输出两个分节，不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时保持响应为空，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
 === KILL_TARGET:<kind> ===
 DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\`python

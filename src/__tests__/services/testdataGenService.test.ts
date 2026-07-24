@@ -2410,12 +2410,16 @@ describe('两阶段沙箱蓝图', () => {
     expect(solutionSystem).toContain('@@@ORACLE@@@');
     expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
     expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
+    expect(solutionSystem).toContain('NOTES 至多 2 句');
+    expect(solutionSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(solutionUser).toContain('这是第一阶段');
     expect(solutionUser).not.toContain('逐测试点覆盖计划');
     expect(solutionUser).not.toContain('函数题模板语言');
     expect(solutionUser).not.toContain('Hydro 测试点数量');
     expect(artifactsSystem).toContain('@@@GENERATOR@@@');
     expect(artifactsSystem).not.toContain('@@@ORACLE@@@');
+    expect(artifactsSystem).toContain('编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
+    expect(artifactsSystem).toContain('任何一条违反都会导致整体失败');
     expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
     expect(artifactsUser).toContain(solution.oracleCode.trim());
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
@@ -2520,6 +2524,9 @@ describe('parseSandboxBlueprint v2 分节', () => {
     const system = buildIndependentVerifierSystemPrompt();
     expect(system).toContain(`恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组小数据`);
     expect(system).toContain(`至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同`);
+    expect(system).toContain('编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
+    expect(system).toContain('每一条“保证/约定”都必须成为一条显式校验');
+    expect(system).toContain('宁可过严拒绝，不可放过违规输入');
     expect(system).toContain('=== COMPLEXITY_GAP ===');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
