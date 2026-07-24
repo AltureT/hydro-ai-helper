@@ -12,6 +12,7 @@ import { applyRateLimit } from '../../lib/rateLimitHelper';
 import {
   AdminConfigHandler,
   JailbreakLogBulkReviewHandler,
+  JailbreakLogFilterOptionsHandler,
   JailbreakLogReviewHandler,
   JailbreakLogsExportHandler,
   JailbreakLogsHandler,
@@ -244,6 +245,128 @@ describe('JailbreakLogsHandler', () => {
     await reversed.handler.get();
     expect(reversed.handler.response.status).toBe(400);
     expect(reversed.listWithPagination).not.toHaveBeenCalled();
+  });
+});
+
+describe('JailbreakLogFilterOptionsHandler', () => {
+  function createFilterOptionsHandler(query: Record<string, string>) {
+    const handler = new JailbreakLogFilterOptionsHandler();
+    const suggestUserIds = jest.fn().mockResolvedValue([42, 142]);
+    const suggestProblemIds = jest.fn().mockResolvedValue(['P1001']);
+    const userFind = jest.fn().mockReturnValue({
+      toArray: jest.fn().mockResolvedValue([
+        { _id: 42, uname: 'alice' },
+        { _id: 142, uname: 'bob' },
+      ]),
+    });
+    const problemFind = jest.fn().mockReturnValue({
+      toArray: jest.fn().mockResolvedValue([
+        { docId: 1001, title: 'A + B Problem' },
+      ]),
+    });
+    handler.args = { domainId: 'domain-a' };
+    handler.request = { headers: {}, query };
+    handler.response = {};
+    handler.translate = jest.fn((key: string) => key);
+    handler.ctx = {
+      Route: jest.fn(),
+      get: jest.fn(() => ({ suggestUserIds, suggestProblemIds })),
+      db: {
+        collection: jest.fn((name: string) => ({
+          find: name === 'user' ? userFind : problemFind,
+        })),
+      },
+    };
+    return {
+      handler,
+      suggestUserIds,
+      suggestProblemIds,
+      userFind,
+      problemFind,
+    };
+  }
+
+  it('returns named student candidates from logs in the active domain', async () => {
+    const { handler, suggestUserIds, userFind } = createFilterOptionsHandler({
+      kind: 'user',
+      q: '42',
+    });
+
+    await handler.get();
+
+    expect(suggestUserIds).toHaveBeenCalledWith('domain-a', '42', 10);
+    expect(userFind).toHaveBeenCalledWith(
+      { _id: { $in: [42, 142] } },
+      { projection: { _id: 1, uname: 1 } }
+    );
+    expect(handler.response.body).toEqual({
+      kind: 'user',
+      options: [
+        { value: '42', label: 'alice' },
+        { value: '142', label: 'bob' },
+      ],
+    });
+  });
+
+  it('returns titled problem candidates without crossing domains', async () => {
+    const { handler, suggestProblemIds, problemFind } = createFilterOptionsHandler({
+      kind: 'problem',
+      q: '100',
+      limit: '50',
+    });
+
+    await handler.get();
+
+    expect(suggestProblemIds).toHaveBeenCalledWith('domain-a', '100', 20);
+    expect(problemFind).toHaveBeenCalledWith(
+      { domainId: 'domain-a', docType: 10, docId: { $in: [1001] } },
+      { projection: { docId: 1, title: 1 } }
+    );
+    expect(handler.response.body.options).toEqual([
+      { value: 'P1001', label: 'A + B Problem' },
+    ]);
+  });
+
+  it('rejects empty or unsupported suggestion queries before database access', async () => {
+    const { handler, suggestUserIds, suggestProblemIds } = createFilterOptionsHandler({
+      kind: 'class',
+      q: '',
+    });
+
+    await handler.get();
+
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body.code).toBe('INVALID_JAILBREAK_FILTER_SUGGESTION');
+    expect(suggestUserIds).not.toHaveBeenCalled();
+    expect(suggestProblemIds).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-numeric student prefixes before database access', async () => {
+    const { handler, suggestUserIds } = createFilterOptionsHandler({
+      kind: 'user',
+      q: 'student',
+    });
+
+    await handler.get();
+
+    expect(handler.response.status).toBe(400);
+    expect(suggestUserIds).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the suggestion rate limiter is unavailable or exceeded', async () => {
+    (applyRateLimit as jest.Mock).mockResolvedValueOnce(true);
+    const { handler, suggestUserIds } = createFilterOptionsHandler({
+      kind: 'user',
+      q: '42',
+    });
+
+    await handler.get();
+
+    expect(applyRateLimit).toHaveBeenCalledWith(handler, expect.objectContaining({
+      op: 'ai_safety_filter_suggestions',
+      failOpen: false,
+    }));
+    expect(suggestUserIds).not.toHaveBeenCalled();
   });
 });
 

@@ -7,11 +7,26 @@
  */
 
 import type { Db } from 'mongodb';
+import type { ObjectIdType } from '../utils/mongo';
 
 /**
  * 默认域 ID（用于迁移没有 domainId 的历史数据）
  */
 export const DEFAULT_DOMAIN_ID = 'system';
+const MIGRATION_BATCH_SIZE = 500;
+
+const MISSING_DOMAIN_FILTER = {
+  $or: [
+    { domainId: { $exists: false } },
+    { domainId: null },
+    { domainId: '' }
+  ]
+};
+
+interface LegacyJailbreakLogDomainRecord {
+  _id: ObjectIdType;
+  domainId?: string | null;
+}
 
 /**
  * MigrationService 类
@@ -35,13 +50,7 @@ export class MigrationService {
 
     // 兼容历史脏数据：domainId 缺失 / null / 空字符串都回填为 system
     const result = await collection.updateMany(
-      {
-        $or: [
-          { domainId: { $exists: false } },
-          { domainId: null },
-          { domainId: '' }
-        ]
-      },
+      MISSING_DOMAIN_FILTER,
       { $set: { domainId: DEFAULT_DOMAIN_ID } }
     );
 
@@ -61,18 +70,57 @@ export class MigrationService {
 
     // 兼容历史脏数据：domainId 缺失 / null / 空字符串都回填为 system
     const result = await collection.updateMany(
-      {
-        $or: [
-          { domainId: { $exists: false } },
-          { domainId: null },
-          { domainId: '' }
-        ]
-      },
+      MISSING_DOMAIN_FILTER,
       { $set: { domainId: DEFAULT_DOMAIN_ID } }
     );
 
     console.log(`[MigrationService] Migrated ${result.modifiedCount} rate limit records with domainId`);
     return result.modifiedCount;
+  }
+
+  /**
+   * 迁移旧版安全日志的 domainId。
+   *
+   * 旧日志里的 conversationId/problemId 是在请求完成会话归属校验前记录的，
+   * 不能作为可信租户证据。所有缺失域的历史日志统一进入 system 隔离域，
+   * 保留数据供系统管理员审计，同时避免猜测归属造成跨域泄露。
+   *
+   * 使用游标和批量写入，避免历史日志较多时一次性加载到内存。
+   */
+  async migrateJailbreakLogDomainIds(): Promise<number> {
+    const logCollection = this.db.collection<LegacyJailbreakLogDomainRecord>('ai_jailbreak_logs');
+    const cursor = logCollection.find(
+      MISSING_DOMAIN_FILTER,
+      { projection: { _id: 1 } }
+    ).batchSize(MIGRATION_BATCH_SIZE);
+
+    let migrated = 0;
+    let batch: LegacyJailbreakLogDomainRecord[] = [];
+
+    const flushBatch = async () => {
+      if (batch.length === 0) return;
+      const result = await logCollection.bulkWrite(
+        batch.map((log) => ({
+          updateOne: {
+            // 保留缺失域条件，避免覆盖迁移期间被其他流程修复的记录。
+            filter: { _id: log._id, ...MISSING_DOMAIN_FILTER },
+            update: { $set: { domainId: DEFAULT_DOMAIN_ID } }
+          }
+        })),
+        { ordered: false }
+      );
+      migrated += result.modifiedCount;
+      batch = [];
+    };
+
+    for await (const log of cursor) {
+      batch.push(log);
+      if (batch.length >= MIGRATION_BATCH_SIZE) await flushBatch();
+    }
+    await flushBatch();
+
+    console.log(`[MigrationService] Migrated ${migrated} jailbreak log records with domainId`);
+    return migrated;
   }
 
   /**
@@ -103,6 +151,7 @@ export class MigrationService {
   async runAllMigrations(): Promise<{
     conversationsMigrated: number;
     rateLimitRecordsMigrated: number;
+    jailbreakLogsMigrated: number;
   }> {
     console.log('[MigrationService] Starting data migration...');
 
@@ -111,13 +160,25 @@ export class MigrationService {
 
     // 迁移数据
     const conversationsMigrated = await this.migrateConversationDomainIds();
+    let jailbreakLogsMigrated = 0;
+    try {
+      jailbreakLogsMigrated = await this.migrateJailbreakLogDomainIds();
+    } catch (err) {
+      // 迁移失败不应让整个 AI 助手在路由注册前离线；缺少 domainId 的日志
+      // 仍不会被任何租户查询命中，下次重启会通过幂等条件继续重试。
+      console.warn(
+        '[MigrationService] Jailbreak log domain migration failed; will retry on next startup:',
+        err
+      );
+    }
     const rateLimitRecordsMigrated = await this.migrateRateLimitRecords();
 
     console.log('[MigrationService] Data migration completed');
 
     return {
       conversationsMigrated,
-      rateLimitRecordsMigrated
+      rateLimitRecordsMigrated,
+      jailbreakLogsMigrated
     };
   }
 }

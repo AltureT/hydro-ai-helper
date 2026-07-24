@@ -552,6 +552,52 @@ describe('JailbreakLogModel', () => {
     });
   });
 
+  describe('filter suggestions', () => {
+    it('returns recent matching student IDs within the active domain', async () => {
+      mockColl._aggregateChain.toArray.mockResolvedValue([{ _id: 42 }, { _id: 420 }]);
+
+      await expect(model.suggestUserIds('domain-a', '42', 10)).resolves.toEqual([42, 420]);
+
+      const pipeline = mockColl.aggregate.mock.calls[0][0];
+      expect(pipeline[0]).toEqual({
+        $match: {
+          domainId: 'domain-a',
+          $or: expect.arrayContaining([
+            { userId: { $gte: 42, $lt: 43 } },
+            { userId: { $gte: 420, $lt: 430 } },
+          ]),
+        },
+      });
+      expect(pipeline).toContainEqual({ $limit: 10 });
+      expect(mockColl.aggregate.mock.calls[0][1]).toEqual({ maxTimeMS: 2000 });
+    });
+
+    it('escapes problem ID input before building the domain-scoped regex', async () => {
+      mockColl._aggregateChain.toArray.mockResolvedValue([{ _id: 'P10.*' }]);
+
+      await expect(model.suggestProblemIds('domain-a', 'P10.*', 100)).resolves.toEqual(['P10.*']);
+
+      const pipeline = mockColl.aggregate.mock.calls[0][0];
+      expect(pipeline[0]).toEqual({
+        $match: {
+          domainId: 'domain-a',
+          $or: [
+            { problemId: { $regex: '^P10\\.\\*' } },
+            { problemId: { $regex: '^p10\\.\\*' } },
+          ],
+        },
+      });
+      expect(pipeline).toContainEqual({ $limit: 20 });
+      expect(mockColl.aggregate.mock.calls[0][1]).toEqual({ maxTimeMS: 2000 });
+    });
+
+    it('does not query when the partial student ID is empty or non-numeric', async () => {
+      await expect(model.suggestUserIds('domain-a', '  ')).resolves.toEqual([]);
+      await expect(model.suggestUserIds('domain-a', 'student')).resolves.toEqual([]);
+      expect(mockColl.aggregate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getReviewSummary', () => {
     it('should calculate a domain-scoped false-positive rate from reviewed logs', async () => {
       mockColl.countDocuments

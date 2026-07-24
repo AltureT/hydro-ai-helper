@@ -276,6 +276,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
         ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_logs_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs', adminConfigHandler_1.JailbreakLogsHandler, adminConfigHandler_1.JailbreakLogsHandlerPriv);
+        ctx.Route('ai_helper_admin_jailbreak_logs_filter_options', '/ai-helper/admin/jailbreak-logs/filter-options', adminConfigHandler_1.JailbreakLogFilterOptionsHandler, adminConfigHandler_1.JailbreakLogFilterOptionsHandlerPriv);
+        ctx.Route('ai_helper_admin_jailbreak_logs_filter_options_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/filter-options', adminConfigHandler_1.JailbreakLogFilterOptionsHandler, adminConfigHandler_1.JailbreakLogFilterOptionsHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_logs_export', '/ai-helper/admin/jailbreak-logs/export', adminConfigHandler_1.JailbreakLogsExportHandler, adminConfigHandler_1.JailbreakLogsExportHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_logs_export_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/export', adminConfigHandler_1.JailbreakLogsExportHandler, adminConfigHandler_1.JailbreakLogsExportHandlerPriv);
         // POST /ai-helper/admin/jailbreak-logs/:id/review - 复核拦截记录

@@ -6,6 +6,7 @@ import {
 } from '../utils/styles';
 import type {
   JailbreakCategory,
+  JailbreakLogFilterOption,
   JailbreakLogEntry,
   JailbreakLogFilters,
   JailbreakLogPagination,
@@ -15,7 +16,6 @@ import type {
 interface JailbreakLogsViewerProps {
   logPagination: JailbreakLogPagination;
   loading: boolean;
-  defaultCollapsed?: boolean;
   appendPatternDisabled?: boolean;
   onChangePage: (page: number) => void;
   onCopyToClipboard: (text: string) => void;
@@ -25,19 +25,46 @@ interface JailbreakLogsViewerProps {
   onExport: (filters: JailbreakLogFilters) => Promise<void>;
   filters: JailbreakLogFilters;
   onChangeFilters: (filters: JailbreakLogFilters) => void;
+  onLoadFilterOptions: (
+    kind: 'user' | 'problem',
+    query: string
+  ) => Promise<JailbreakLogFilterOption[]>;
+}
+
+const DETECTION_SOURCE_OPTIONS: Array<{
+  value: NonNullable<JailbreakLogFilters['detectionSource']>;
+  labelKey: string;
+}> = [
+  { value: 'plain', labelKey: 'ai_helper_admin_jailbreak_source_plain' },
+  { value: 'compacted', labelKey: 'ai_helper_admin_jailbreak_source_compacted' },
+  { value: 'base64', labelKey: 'ai_helper_admin_jailbreak_source_base64' },
+  { value: 'hex', labelKey: 'ai_helper_admin_jailbreak_source_hex' },
+  { value: 'conversation', labelKey: 'ai_helper_admin_jailbreak_source_conversation' },
+  { value: 'custom', labelKey: 'ai_helper_admin_jailbreak_source_custom' },
+];
+
+function getDetectionSourceLabel(source: JailbreakLogFilters['detectionSource']): string {
+  const option = DETECTION_SOURCE_OPTIONS.find((item) => item.value === source);
+  return option ? i18n(option.labelKey) : String(source || '');
 }
 
 export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   logPagination, loading, onChangePage, onCopyToClipboard, onAppendPattern, onReview, onBulkReview, onExport,
-  filters, onChangeFilters, defaultCollapsed = true, appendPatternDisabled = false,
+  filters, onChangeFilters, onLoadFilterOptions, appendPatternDisabled = false,
 }) => {
-  const [collapsed, setCollapsed] = React.useState(defaultCollapsed);
   const [reviewingId, setReviewingId] = React.useState<string | null>(null);
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [bulkReviewing, setBulkReviewing] = React.useState(false);
   const [exporting, setExporting] = React.useState(false);
   const [userIdDraft, setUserIdDraft] = React.useState(filters.userId || '');
   const [problemIdDraft, setProblemIdDraft] = React.useState(filters.problemId || '');
+  const [userOptions, setUserOptions] = React.useState<JailbreakLogFilterOption[]>([]);
+  const [problemOptions, setProblemOptions] = React.useState<JailbreakLogFilterOption[]>([]);
+  const [userOptionsError, setUserOptionsError] = React.useState<string | null>(null);
+  const [problemOptionsError, setProblemOptionsError] = React.useState<string | null>(null);
+  const [advancedFiltersOpen, setAdvancedFiltersOpen] = React.useState(false);
+  const userOptionRequestId = React.useRef(0);
+  const problemOptionRequestId = React.useRef(0);
 
   React.useEffect(() => {
     const visibleIds = new Set(logPagination.logs.map((log) => log.id));
@@ -48,6 +75,72 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
     setUserIdDraft(filters.userId || '');
     setProblemIdDraft(filters.problemId || '');
   }, [filters.userId, filters.problemId]);
+
+  React.useEffect(() => {
+    const query = userIdDraft.trim();
+    const requestId = ++userOptionRequestId.current;
+    if (!query) {
+      setUserOptions([]);
+      setUserOptionsError(null);
+      return undefined;
+    }
+    setUserOptionsError(null);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void onLoadFilterOptions('user', query).then((options) => {
+        if (!cancelled && requestId === userOptionRequestId.current) {
+          setUserOptions(options);
+          setUserOptionsError(null);
+        }
+      }).catch((error: unknown) => {
+        if (!cancelled && requestId === userOptionRequestId.current) {
+          setUserOptions([]);
+          setUserOptionsError(
+            error instanceof Error && error.message
+              ? error.message
+              : i18n('ai_helper_admin_jailbreak_filter_suggestions_failed')
+          );
+        }
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [userIdDraft, onLoadFilterOptions]);
+
+  React.useEffect(() => {
+    const query = problemIdDraft.trim();
+    const requestId = ++problemOptionRequestId.current;
+    if (!query) {
+      setProblemOptions([]);
+      setProblemOptionsError(null);
+      return undefined;
+    }
+    setProblemOptionsError(null);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void onLoadFilterOptions('problem', query).then((options) => {
+        if (!cancelled && requestId === problemOptionRequestId.current) {
+          setProblemOptions(options);
+          setProblemOptionsError(null);
+        }
+      }).catch((error: unknown) => {
+        if (!cancelled && requestId === problemOptionRequestId.current) {
+          setProblemOptions([]);
+          setProblemOptionsError(
+            error instanceof Error && error.message
+              ? error.message
+              : i18n('ai_helper_admin_jailbreak_filter_suggestions_failed')
+          );
+        }
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [problemIdDraft, onLoadFilterOptions]);
 
   const submitReview = async (
     log: JailbreakLogEntry,
@@ -76,32 +169,49 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
   ];
   const operationalMetrics = logPagination.operationalMetrics;
 
+  const withDraftIdentity = (base: JailbreakLogFilters = filters): JailbreakLogFilters => ({
+    ...base,
+    userId: userIdDraft.trim() || undefined,
+    problemId: problemIdDraft.trim() || undefined,
+  });
+
   const updateReviewStatusFilter = (value: string) => {
     onChangeFilters({
-      ...filters,
+      ...withDraftIdentity(),
       reviewStatus: value ? value as JailbreakReviewStatus : undefined,
     });
   };
 
   const updateCategoryFilter = (value: string) => {
     onChangeFilters({
-      ...filters,
+      ...withDraftIdentity(),
       category: value ? value as JailbreakCategory : undefined,
     });
   };
 
   const applyIdentityFilters = () => {
-    onChangeFilters({
-      ...filters,
-      userId: userIdDraft.trim() || undefined,
-      problemId: problemIdDraft.trim() || undefined,
-    });
+    onChangeFilters(withDraftIdentity());
   };
+
+  const resetFilters = () => {
+    setUserIdDraft('');
+    setProblemIdDraft('');
+    setAdvancedFiltersOpen(false);
+    onChangeFilters({});
+  };
+
+  const advancedFilterCount = [
+    filters.appealedOnly,
+    filters.actionTaken,
+    filters.detectionSource,
+    filters.dateFrom,
+    filters.dateTo,
+  ].filter(Boolean).length;
 
   const submitExport = async () => {
     setExporting(true);
     try {
-      await onExport(filters);
+      await onExport(withDraftIdentity());
     } finally {
       setExporting(false);
     }
@@ -137,12 +247,8 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
     ...cardStyle,
     marginTop: '20px',
   }}>
-    <div
-      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', userSelect: 'none' }}
-      onClick={() => setCollapsed(!collapsed)}
-    >
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
       <h2 style={{ margin: 0, ...TYPOGRAPHY.md, color: COLORS.textPrimary }}>
-        <span style={{ display: 'inline-block', transition: 'transform 0.2s', transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)', marginRight: '8px' }}>▼</span>
         {i18n('ai_helper_admin_jailbreak_title')}
       </h2>
       {logPagination.total > 0 && (
@@ -152,76 +258,202 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
       )}
     </div>
 
-    {!collapsed && (
-      <>
-        <div style={{
-          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
-          gap: SPACING.sm, marginTop: SPACING.base,
+    <div style={{
+      display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+      gap: SPACING.sm, marginTop: SPACING.base,
+    }}>
+      {summaryItems.map((item) => (
+        <div key={item.label} style={{
+          padding: SPACING.md, borderRadius: RADIUS.md, backgroundColor: COLORS.bgPage,
+          border: `1px solid ${COLORS.border}`,
         }}>
-          {summaryItems.map((item) => (
-            <div key={item.label} style={{
-              padding: SPACING.md, borderRadius: RADIUS.md, backgroundColor: COLORS.bgPage,
-              border: `1px solid ${COLORS.border}`,
-            }}>
-              <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{item.label}</div>
-              <div style={{ marginTop: '4px', fontSize: '20px', fontWeight: 600, color: COLORS.textPrimary }}>
-                {item.value}
-              </div>
-            </div>
-          ))}
+          <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{item.label}</div>
+          <div style={{ marginTop: '4px', fontSize: '20px', fontWeight: 600, color: COLORS.textPrimary }}>
+            {item.value}
+          </div>
         </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.md, margin: `${SPACING.base} 0` }}>
-          <label style={{ minWidth: '180px', fontSize: '13px', color: COLORS.textSecondary }}>
-            {i18n('ai_helper_admin_jailbreak_filter_review_status')}
-            <select
-              value={filters.reviewStatus || ''}
-              disabled={loading}
-              onChange={(event) => updateReviewStatusFilter(event.target.value)}
-              style={{ ...getInputStyle(), marginTop: '6px' }}
+      ))}
+    </div>
+
+    <div style={{ margin: `${SPACING.base} 0` }}>
+      <div style={{ fontWeight: 600, color: COLORS.textPrimary, marginBottom: SPACING.sm }}>
+        {i18n('ai_helper_admin_jailbreak_filter_title')}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.md }}>
+        <label style={{ minWidth: '180px', flex: '1 1 180px', fontSize: '13px', color: COLORS.textSecondary }}>
+          {i18n('ai_helper_admin_jailbreak_filter_review_status')}
+          <select
+            value={filters.reviewStatus || ''}
+            disabled={loading}
+            onChange={(event) => updateReviewStatusFilter(event.target.value)}
+            style={{ ...getInputStyle(), marginTop: '6px' }}
+          >
+            <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
+            <option value="pending">{i18n('ai_helper_admin_jailbreak_review_pending')}</option>
+            <option value="confirmed">{i18n('ai_helper_admin_jailbreak_review_confirmed')}</option>
+            <option value="false_positive">{i18n('ai_helper_admin_jailbreak_review_false_positive')}</option>
+          </select>
+        </label>
+        <label style={{ minWidth: '210px', flex: '1 1 210px', fontSize: '13px', color: COLORS.textSecondary }}>
+          {i18n('ai_helper_admin_jailbreak_filter_category')}
+          <select
+            value={filters.category || ''}
+            disabled={loading}
+            onChange={(event) => updateCategoryFilter(event.target.value)}
+            style={{ ...getInputStyle(), marginTop: '6px' }}
+          >
+            <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
+            <option value="answer_seeking">{i18n('ai_helper_admin_jailbreak_category_answer_seeking')}</option>
+            <option value="prompt_injection">{i18n('ai_helper_admin_jailbreak_category_prompt_injection')}</option>
+            <option value="prompt_exfiltration">{i18n('ai_helper_admin_jailbreak_category_prompt_exfiltration')}</option>
+            <option value="obfuscated_injection">{i18n('ai_helper_admin_jailbreak_category_obfuscated_injection')}</option>
+          </select>
+        </label>
+        <label style={{ minWidth: '170px', flex: '1 1 170px', fontSize: '13px', color: COLORS.textSecondary }}>
+          {i18n('ai_helper_admin_jailbreak_filter_user')}
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={32}
+            list="ai-safety-user-options"
+            value={userIdDraft}
+            disabled={loading}
+            aria-invalid={Boolean(userOptionsError)}
+            aria-describedby={userOptionsError ? 'ai-safety-user-options-error' : undefined}
+            placeholder={i18n('ai_helper_admin_jailbreak_filter_user_placeholder')}
+            onChange={(event) => setUserIdDraft(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') applyIdentityFilters(); }}
+            style={{ ...getInputStyle(), marginTop: '6px' }}
+          />
+          <datalist id="ai-safety-user-options">
+            {userOptions.map((option) => (
+              <option
+                key={option.value}
+                value={option.value}
+                label={option.label === option.value
+                  ? option.value
+                  : `${option.label} (${option.value})`}
+              />
+            ))}
+          </datalist>
+          {userOptionsError && (
+            <span
+              id="ai-safety-user-options-error"
+              role="status"
+              aria-live="polite"
+              style={{ display: 'block', marginTop: '4px', fontSize: '12px', color: COLORS.errorText }}
             >
-              <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
-              <option value="pending">{i18n('ai_helper_admin_jailbreak_review_pending')}</option>
-              <option value="confirmed">{i18n('ai_helper_admin_jailbreak_review_confirmed')}</option>
-              <option value="false_positive">{i18n('ai_helper_admin_jailbreak_review_false_positive')}</option>
-            </select>
-          </label>
-          <label style={{ minWidth: '210px', fontSize: '13px', color: COLORS.textSecondary }}>
-            {i18n('ai_helper_admin_jailbreak_filter_category')}
-            <select
-              value={filters.category || ''}
-              disabled={loading}
-              onChange={(event) => updateCategoryFilter(event.target.value)}
-              style={{ ...getInputStyle(), marginTop: '6px' }}
+              {userOptionsError}
+            </span>
+          )}
+        </label>
+        <label style={{ minWidth: '190px', flex: '1 1 190px', fontSize: '13px', color: COLORS.textSecondary }}>
+          {i18n('ai_helper_admin_jailbreak_filter_problem')}
+          <input
+            type="text"
+            maxLength={64}
+            list="ai-safety-problem-options"
+            value={problemIdDraft}
+            disabled={loading}
+            aria-invalid={Boolean(problemOptionsError)}
+            aria-describedby={problemOptionsError ? 'ai-safety-problem-options-error' : undefined}
+            placeholder={i18n('ai_helper_admin_jailbreak_filter_problem_placeholder')}
+            onChange={(event) => setProblemIdDraft(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') applyIdentityFilters(); }}
+            style={{ ...getInputStyle(), marginTop: '6px' }}
+          />
+          <datalist id="ai-safety-problem-options">
+            {problemOptions.map((option) => (
+              <option key={option.value} value={option.value} label={option.label} />
+            ))}
+          </datalist>
+          {problemOptionsError && (
+            <span
+              id="ai-safety-problem-options-error"
+              role="status"
+              aria-live="polite"
+              style={{ display: 'block', marginTop: '4px', fontSize: '12px', color: COLORS.errorText }}
             >
-              <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
-              <option value="answer_seeking">{i18n('ai_helper_admin_jailbreak_category_answer_seeking')}</option>
-              <option value="prompt_injection">{i18n('ai_helper_admin_jailbreak_category_prompt_injection')}</option>
-              <option value="prompt_exfiltration">{i18n('ai_helper_admin_jailbreak_category_prompt_exfiltration')}</option>
-              <option value="obfuscated_injection">{i18n('ai_helper_admin_jailbreak_category_obfuscated_injection')}</option>
-            </select>
-          </label>
+              {problemOptionsError}
+            </span>
+          )}
+        </label>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: SPACING.sm, marginTop: SPACING.md }}>
+        <button
+          type="button"
+          disabled={loading}
+          onClick={applyIdentityFilters}
+          style={getButtonStyle('secondary')}
+        >
+          {i18n('ai_helper_admin_jailbreak_filter_apply')}
+        </button>
+        <button
+          type="button"
+          disabled={loading}
+          onClick={resetFilters}
+          style={getButtonStyle('secondary')}
+        >
+          {i18n('ai_helper_admin_jailbreak_filter_reset')}
+        </button>
+        <button
+          type="button"
+          aria-expanded={advancedFiltersOpen}
+          aria-controls="ai-safety-advanced-filters"
+          onClick={() => setAdvancedFiltersOpen((open) => !open)}
+          style={getButtonStyle('secondary')}
+        >
+          {advancedFiltersOpen
+            ? i18n('ai_helper_admin_jailbreak_filter_less')
+            : i18n('ai_helper_admin_jailbreak_filter_more', advancedFilterCount)}
+        </button>
+        <button
+          type="button"
+          disabled={loading || exporting}
+          onClick={submitExport}
+          style={getButtonStyle('secondary')}
+        >
+          {exporting
+            ? i18n('ai_helper_admin_jailbreak_exporting')
+            : i18n('ai_helper_admin_jailbreak_export_csv')}
+        </button>
+      </div>
+
+      {advancedFiltersOpen && (
+        <div
+          id="ai-safety-advanced-filters"
+          role="region"
+          aria-label={i18n('ai_helper_admin_jailbreak_filter_more_region')}
+          style={{
+            display: 'flex', flexWrap: 'wrap', gap: SPACING.md,
+            marginTop: SPACING.md, padding: SPACING.md,
+            border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
+            backgroundColor: COLORS.bgPage,
+          }}
+        >
           <label style={{
             display: 'flex', alignItems: 'center', gap: SPACING.sm,
-            fontSize: '13px', color: COLORS.textSecondary, alignSelf: 'flex-end', paddingBottom: '8px',
+            minWidth: '230px', fontSize: '13px', color: COLORS.textSecondary,
           }}>
             <input
               type="checkbox"
               checked={Boolean(filters.appealedOnly)}
               disabled={loading}
               onChange={(event) => onChangeFilters({
-                ...filters,
+                ...withDraftIdentity(),
                 appealedOnly: event.target.checked || undefined,
               })}
             />
             {i18n('ai_helper_admin_jailbreak_filter_appealed')}
           </label>
-          <label style={{ minWidth: '150px', fontSize: '13px', color: COLORS.textSecondary }}>
+          <label style={{ minWidth: '160px', flex: '1 1 160px', fontSize: '13px', color: COLORS.textSecondary }}>
             {i18n('ai_helper_admin_jailbreak_filter_action')}
             <select
               value={filters.actionTaken || ''}
               disabled={loading}
               onChange={(event) => onChangeFilters({
-                ...filters,
+                ...withDraftIdentity(),
                 actionTaken: event.target.value
                   ? event.target.value as JailbreakLogFilters['actionTaken']
                   : undefined,
@@ -234,13 +466,13 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
               <option value="cooldown_5m">{i18n('ai_helper_admin_jailbreak_action_cooldown_5m')}</option>
             </select>
           </label>
-          <label style={{ minWidth: '170px', fontSize: '13px', color: COLORS.textSecondary }}>
+          <label style={{ minWidth: '220px', flex: '1 1 220px', fontSize: '13px', color: COLORS.textSecondary }}>
             {i18n('ai_helper_admin_jailbreak_filter_source')}
             <select
               value={filters.detectionSource || ''}
               disabled={loading}
               onChange={(event) => onChangeFilters({
-                ...filters,
+                ...withDraftIdentity(),
                 detectionSource: event.target.value
                   ? event.target.value as JailbreakLogFilters['detectionSource']
                   : undefined,
@@ -248,75 +480,43 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
               style={{ ...getInputStyle(), marginTop: '6px' }}
             >
               <option value="">{i18n('ai_helper_admin_jailbreak_filter_all')}</option>
-              {['plain', 'compacted', 'base64', 'hex', 'conversation', 'custom'].map((source) => (
-                <option key={source} value={source}>{source}</option>
+              {DETECTION_SOURCE_OPTIONS.map((source) => (
+                <option key={source.value} value={source.value}>{i18n(source.labelKey)}</option>
               ))}
             </select>
+            <span style={{ display: 'block', marginTop: '4px', fontSize: '12px', color: COLORS.textMuted }}>
+              {i18n('ai_helper_admin_jailbreak_filter_source_help')}
+            </span>
           </label>
-          <label style={{ minWidth: '140px', fontSize: '13px', color: COLORS.textSecondary }}>
+          <label style={{ minWidth: '160px', flex: '1 1 160px', fontSize: '13px', color: COLORS.textSecondary }}>
             {i18n('ai_helper_admin_jailbreak_filter_date_from')}
             <input
               type="date"
               value={filters.dateFrom || ''}
               disabled={loading}
-              onChange={(event) => onChangeFilters({ ...filters, dateFrom: event.target.value || undefined })}
+              onChange={(event) => onChangeFilters({
+                ...withDraftIdentity(),
+                dateFrom: event.target.value || undefined,
+              })}
               style={{ ...getInputStyle(), marginTop: '6px' }}
             />
           </label>
-          <label style={{ minWidth: '140px', fontSize: '13px', color: COLORS.textSecondary }}>
+          <label style={{ minWidth: '160px', flex: '1 1 160px', fontSize: '13px', color: COLORS.textSecondary }}>
             {i18n('ai_helper_admin_jailbreak_filter_date_to')}
             <input
               type="date"
               value={filters.dateTo || ''}
               disabled={loading}
-              onChange={(event) => onChangeFilters({ ...filters, dateTo: event.target.value || undefined })}
+              onChange={(event) => onChangeFilters({
+                ...withDraftIdentity(),
+                dateTo: event.target.value || undefined,
+              })}
               style={{ ...getInputStyle(), marginTop: '6px' }}
             />
           </label>
-          <label style={{ minWidth: '130px', fontSize: '13px', color: COLORS.textSecondary }}>
-            {i18n('ai_helper_admin_jailbreak_filter_user')}
-            <input
-              type="number"
-              min="0"
-              step="1"
-              value={userIdDraft}
-              disabled={loading}
-              onChange={(event) => setUserIdDraft(event.target.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter') applyIdentityFilters(); }}
-              style={{ ...getInputStyle(), marginTop: '6px' }}
-            />
-          </label>
-          <label style={{ minWidth: '160px', fontSize: '13px', color: COLORS.textSecondary }}>
-            {i18n('ai_helper_admin_jailbreak_filter_problem')}
-            <input
-              type="text"
-              maxLength={128}
-              value={problemIdDraft}
-              disabled={loading}
-              onChange={(event) => setProblemIdDraft(event.target.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter') applyIdentityFilters(); }}
-              style={{ ...getInputStyle(), marginTop: '6px' }}
-            />
-          </label>
-          <button
-            type="button"
-            disabled={loading}
-            onClick={applyIdentityFilters}
-            style={{ ...getButtonStyle('secondary'), alignSelf: 'flex-end' }}
-          >
-            {i18n('ai_helper_admin_jailbreak_filter_apply')}
-          </button>
-          <button
-            type="button"
-            disabled={loading || exporting}
-            onClick={submitExport}
-            style={{ ...getButtonStyle('secondary'), alignSelf: 'flex-end' }}
-          >
-            {exporting
-              ? i18n('ai_helper_admin_jailbreak_exporting')
-              : i18n('ai_helper_admin_jailbreak_export_csv')}
-          </button>
         </div>
+      )}
+    </div>
         {operationalMetrics && (
           <div style={{ marginBottom: SPACING.base }}>
             <div style={{ marginBottom: SPACING.sm, fontWeight: 600, color: COLORS.textPrimary }}>
@@ -441,10 +641,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             )}
           </div>
         )}
-      </>
-    )}
-
-    {collapsed ? null : loading && logPagination.logs.length === 0 ? (
+    {loading && logPagination.logs.length === 0 ? (
       <div style={{
         padding: SPACING.base, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md,
         border: `1px dashed ${COLORS.border}`, color: COLORS.textMuted, fontSize: '14px',
@@ -470,7 +667,11 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             if (log.category) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_category')}${log.category}`);
             if (log.riskScore !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_risk_score')}${log.riskScore}`);
             if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${log.actionTaken}`);
-            if (log.detectionSource) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_detection_source')}${log.detectionSource}`);
+            if (log.detectionSource) {
+              contextPieces.push(
+                `${i18n('ai_helper_admin_jailbreak_detection_source')}${getDetectionSourceLabel(log.detectionSource)}`
+              );
+            }
             if (log.expiresAt) contextPieces.push(
               `${i18n('ai_helper_admin_jailbreak_expires_at')}${new Date(log.expiresAt).toLocaleDateString()}`
             );
