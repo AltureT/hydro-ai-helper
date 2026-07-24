@@ -27,9 +27,6 @@ import {
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
-  TESTDATA_GENERATION_PROFILES,
-  isTestdataGenerationProfile,
-  type TestdataGenerationProfile,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import {
@@ -317,7 +314,6 @@ export class TestdataGenContextHandler extends Handler {
           maxExtraRequirements: TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS,
           maxProvidedStd: TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
         },
-        generationProfiles: TESTDATA_GENERATION_PROFILES,
         restorableJob,
       };
       this.response.type = 'application/json';
@@ -340,6 +336,7 @@ interface GenerateRequestBody {
   providedStd?: string;
   acceptedStdRecordId?: string;
   extraRequirements?: string;
+  /** @deprecated 旧版前端可能仍会发送；统一自适应流程会安全忽略。 */
   generationProfile?: string;
 }
 
@@ -351,7 +348,8 @@ function serializeGenerationJob(job: TestdataGenerationJob) {
     id: String(job._id),
     problemId: job.problemId,
     problemTitle: job.problemTitle,
-    generationProfile: job.generationProfile,
+    // 仅兼容服务升级时仍打开的旧版页面；新版不读取此字段，后端也不据此设置时限。
+    generationProfile: 'hard' as const,
     status: job.status,
     progress: job.progress,
     error: job.error,
@@ -402,24 +400,18 @@ interface BackgroundGenerationParams {
   statement: string;
   options: GenerateOptions;
   existingFiles: string[];
-  generationProfile: TestdataGenerationProfile;
   translate: (key: string) => string;
 }
 
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    generationProfile, translate,
+    translate,
   } = params;
   const jobId = String(job._id);
   const ac = new AbortController();
   backgroundGenerationControllers.set(jobId, ac);
-  let deadlineExceeded = false;
   let progressWrites = Promise.resolve();
-  const deadlineTimer = setTimeout(() => {
-    deadlineExceeded = true;
-    ac.abort();
-  }, TESTDATA_GENERATION_PROFILES[generationProfile].totalTimeoutMs);
   const heartbeatTimer = setInterval(() => {
     jobModel.renewLease(job._id).then(active => {
       if (!active) ac.abort();
@@ -444,7 +436,6 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       existingFiles,
       existingConfig: pdoc.config,
       fillInDetected: isFillInBlankProblem(statement),
-      generationProfile,
       signal: ac.signal,
       onProgress: progress => {
         progressWrites = progressWrites
@@ -474,16 +465,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     ).catch(() => { /* best-effort */ });
   } catch (err) {
     if (isCancellation(err)) {
-      if (deadlineExceeded) {
-        await jobModel.fail(job._id, {
-          message: translate('ai_helper_testdata_err_timeout'),
-          code: 'GENERATION_TIMEOUT',
-          category: 'timeout',
-          retryable: true,
-        });
-      } else {
-        await jobModel.cancel(job._id);
-      }
+      await jobModel.cancel(job._id);
       return;
     }
 
@@ -521,7 +503,6 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       };
     await jobModel.fail(job._id, jobError);
   } finally {
-    clearTimeout(deadlineTimer);
     clearInterval(heartbeatTimer);
     if (backgroundGenerationControllers.get(jobId) === ac) {
       backgroundGenerationControllers.delete(jobId);
@@ -539,8 +520,6 @@ export class TestdataGenGenerateHandler extends Handler {
     let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
     let streamRawRes: ServerResponse | undefined;
     let streamCloseListener: (() => void) | undefined;
-    let generationDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    let generationDeadlineExceeded = false;
     try {
       if (rejectIfCsrfInvalid(this)) return;
       const domainId = getDomainId(this);
@@ -558,14 +537,6 @@ export class TestdataGenGenerateHandler extends Handler {
         return;
       }
       if (!checkEditPermission(this, pdoc)) return;
-
-      const requestedProfile = body.generationProfile || 'standard';
-      if (!isTestdataGenerationProfile(requestedProfile)) {
-        sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
-        return;
-      }
-      const generationProfile: TestdataGenerationProfile = requestedProfile;
-      const generationTiming = TESTDATA_GENERATION_PROFILES[generationProfile];
 
       // AI 生成开销大：限制每人每 5 分钟 5 次
       if (await applyRateLimit(this, {
@@ -634,10 +605,6 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       streamCloseListener = () => { if (!rawRes?.writableEnded) requestAc.abort(); };
       rawRes?.on?.('close', streamCloseListener);
-      generationDeadlineTimer = setTimeout(() => {
-        generationDeadlineExceeded = true;
-        requestAc.abort();
-      }, generationTiming.totalTimeoutMs);
 
       const accept = String(this.request.headers?.accept || '').toLowerCase();
       if (accept.includes('text/event-stream') && rawRes) {
@@ -658,7 +625,6 @@ export class TestdataGenGenerateHandler extends Handler {
         existingFiles,
         existingConfig: pdoc.config,
         fillInDetected: isFillInBlankProblem(statement),
-        generationProfile,
         signal: requestAc.signal,
         onProgress: progress => progressStream?.writeEvent('progress', progress),
       });
@@ -685,23 +651,6 @@ export class TestdataGenGenerateHandler extends Handler {
         this.response.type = 'application/json';
       }
     } catch (err) {
-      if (isCancellation(err) && generationDeadlineExceeded) {
-        const errorBody = {
-          error: this.translate('ai_helper_testdata_err_timeout'),
-          code: 'GENERATION_TIMEOUT',
-          category: 'timeout',
-          retryable: true,
-        };
-        if (progressStream) {
-          progressStream.writeEvent('error', errorBody);
-          progressStream.end();
-        } else {
-          this.response.status = 504;
-          this.response.body = errorBody;
-          this.response.type = 'application/json';
-        }
-        return;
-      }
       // 客户端主动断开：非故障，不上报也不打 error 日志
       if (isCancellation(err)) {
         if (progressStream) {
@@ -774,7 +723,6 @@ export class TestdataGenGenerateHandler extends Handler {
       }
     } finally {
       if (keepaliveTimer) clearInterval(keepaliveTimer);
-      if (generationDeadlineTimer) clearTimeout(generationDeadlineTimer);
       if (streamRawRes && streamCloseListener) {
         streamRawRes.removeListener?.('close', streamCloseListener);
       }
@@ -803,12 +751,6 @@ export class TestdataGenJobStartHandler extends Handler {
       }
       if (!checkEditPermission(this, pdoc)) return;
 
-      const requestedProfile = body.generationProfile || 'standard';
-      if (!isTestdataGenerationProfile(requestedProfile)) {
-        sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
-        return;
-      }
-      const generationProfile: TestdataGenerationProfile = requestedProfile;
       const jobModel = this.ctx.get('testdataGenerationJobModel') as TestdataGenerationJobModel | undefined;
       if (!jobModel) {
         sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
@@ -867,13 +809,11 @@ export class TestdataGenJobStartHandler extends Handler {
         problemId: pdoc.pid || String(pdoc.docId),
         problemTitle: pdoc.title || problemId,
         createdBy: this.user?._id,
-        generationProfile,
       });
 
       if (created) {
         // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
         const backgroundTranslations: Record<string, string> = {
-          ai_helper_testdata_err_timeout: this.translate('ai_helper_testdata_err_timeout'),
           ai_helper_err_internal: this.translate('ai_helper_err_internal'),
         };
         for (const key of Object.values(USER_ERROR_MESSAGE_KEYS)) {
@@ -887,7 +827,6 @@ export class TestdataGenJobStartHandler extends Handler {
           statement,
           options,
           existingFiles,
-          generationProfile,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {
           console.error('[TestdataGenJob] unhandled background failure:', err);

@@ -18,8 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TestdataGenerationError = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.TESTDATA_GENERATION_PROFILES = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
-exports.isTestdataGenerationProfile = isTestdataGenerationProfile;
+exports.TestdataGenService = exports.TestdataGenerationError = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.buildCoveragePlan = buildCoveragePlan;
@@ -71,36 +70,13 @@ const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
-/**
- * 测试数据生成的等待策略。普通模式覆盖日常题目；高难题模式为需要长推理的
- * 竞赛题保留更长的单次模型时间。总时限由 Handler 强制执行，始终有限。
- */
-exports.TESTDATA_GENERATION_PROFILES = {
-    standard: {
-        aiTimeoutMs: 600000,
-        totalTimeoutMs: 900000,
-    },
-    hard: {
-        // 超难竞赛题的正常成功路径也包含至少两轮串行模型等待：先解题，
-        // 再并行生成外围件与独立验证器；还需为沙箱实跑和一次定向修复留余量。
-        aiTimeoutMs: 1800000,
-        totalTimeoutMs: 5400000,
-    },
-};
-function isTestdataGenerationProfile(value) {
-    return value === 'standard' || value === 'hard';
-}
+// ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
     MIN_CASES: 1,
     MAX_CASES: 30,
     MAX_EXTRA_REQUIREMENTS: 1000,
     MAX_PROVIDED_STD: 10000,
     MAX_STATEMENT_LENGTH: 20000,
-    /**
-     * AI 单次尝试超时（毫秒）。测试数据生成正确性优先、允许长思考，
-     * 故显著高于普通对话；且本次调用不发送 max_tokens（输出长度不设限）。
-     */
-    AI_TIMEOUT_MS: exports.TESTDATA_GENERATION_PROFILES.standard.aiTimeoutMs,
     /** apply 时单文件内容上限（字节） */
     MAX_FILE_SIZE: 256 * 1024,
     /** apply 时文件数量上限 */
@@ -2494,12 +2470,13 @@ class TestdataGenService {
         return plan;
     }
     getCallOptions(params, attempt = 1) {
-        const profile = exports.TESTDATA_GENERATION_PROFILES[params.generationProfile || 'standard'];
         return {
             signal: params.signal,
             maxTokens: null,
-            timeoutMs: profile.aiTimeoutMs,
-            // 长推理超时后不在同一模型上盲等第二轮；其他短暂网络/服务错误仍保留快速重试。
+            // 测试数据生成以正确性优先：不由插件设置模型截止时间。调用只会在
+            // 上游明确失败、服务进程中断或用户主动取消时结束。
+            timeoutMs: null,
+            // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
             retryTimeouts: false,
             onAttempt: event => {
                 if (event.type === 'fallback') {

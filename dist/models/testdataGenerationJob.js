@@ -96,7 +96,12 @@ class TestdataGenerationJobModel {
     }
     async renewLease(id) {
         const now = new Date();
-        const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true, cancelRequested: false }, { $set: { updatedAt: now, leaseExpiresAt: new Date(now.getTime() + exports.TESTDATA_JOB_LEASE_MS) } });
+        const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true, cancelRequested: false }, { $set: {
+                updatedAt: now,
+                leaseExpiresAt: new Date(now.getTime() + exports.TESTDATA_JOB_LEASE_MS),
+                // 活跃任务采用滑动保留期，避免长推理在固定 24 小时 TTL 到点时被误删。
+                expiresAt: new Date(now.getTime() + exports.TESTDATA_JOB_RETENTION_MS),
+            } });
         return result.modifiedCount > 0;
     }
     async complete(id, plan) {

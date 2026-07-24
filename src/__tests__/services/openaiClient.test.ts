@@ -199,6 +199,13 @@ describe('OpenAIClient', () => {
       expect(config.timeout).toBe(600_000);
     });
 
+    it('should disable the axios deadline when timeoutMs is null', async () => {
+      mockSuccessResponse();
+      await client.chat([{ role: 'user', content: 'Hi' }], 'System', { timeoutMs: null });
+      const [, , config] = mockedAxios.post.mock.calls[0] as any[];
+      expect(config.timeout).toBe(0);
+    });
+
     it('should throw AIServiceError with category=auth on 401', async () => {
       mockedAxios.post.mockRejectedValueOnce(createAxiosError(401));
       await expect(client.chat([{ role: 'user', content: 'Hi' }], 'System'))
@@ -482,6 +489,32 @@ describe('MultiModelClient', () => {
       const error = await errorPromise;
       expect(error).toBeInstanceOf(AIServiceError);
       expect((error as AIServiceError).category).toBe('timeout');
+    });
+
+    it('should not create a total deadline when timeoutMs is null, but still honor cancellation', async () => {
+      const client = new MultiModelClient([makeResolvedConfig()]);
+      const ac = new AbortController();
+
+      mockSignalAwareNeverResolve();
+      mockedAxios.isCancel.mockReturnValue(true);
+
+      let settled = false;
+      const chatPromise = client.chat([{ role: 'user', content: 'Hi' }], 'System', {
+        timeoutMs: null,
+        signal: ac.signal,
+      });
+      const errorPromise = chatPromise.catch((e: unknown) => { settled = true; return e; });
+
+      await jest.advanceTimersByTimeAsync(24 * 60 * 60_000);
+      expect(settled).toBe(false);
+      const [, , config] = mockedAxios.post.mock.calls[0] as any[];
+      expect(config.timeout).toBe(0);
+
+      ac.abort();
+      await jest.advanceTimersByTimeAsync(100);
+      const error = await errorPromise;
+      expect(error).toBeInstanceOf(AIServiceError);
+      expect((error as AIServiceError).category).toBe('aborted');
     });
   });
 

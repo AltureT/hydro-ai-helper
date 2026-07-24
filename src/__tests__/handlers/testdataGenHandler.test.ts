@@ -20,7 +20,6 @@ import * as openaiClient from '../../services/openaiClient';
 import {
   TestdataGenService,
   TestdataGenerationError,
-  TESTDATA_GENERATION_PROFILES,
 } from '../../services/testdataGenService';
 import { ObjectId } from '../../utils/mongo';
 
@@ -44,7 +43,6 @@ function makeGenerationJob(overrides: Record<string, unknown> = {}) {
     problemId: 'D3102',
     problemTitle: '机动车违章识别系统',
     createdBy: 2,
-    generationProfile: 'hard',
     status: 'running',
     active: true,
     restorable: true,
@@ -195,7 +193,7 @@ describe('TestdataGenContextHandler', () => {
     expect(handler.response.body.problem.pid).toBe('D3102');
     expect(handler.response.body.problem.hasStatement).toBe(true);
     expect(handler.response.body.existingFiles).toEqual(['1.in', 'config.yaml']);
-    expect(handler.response.body.generationProfiles).toEqual(TESTDATA_GENERATION_PROFILES);
+    expect(handler.response.body).not.toHaveProperty('generationProfiles');
   });
 
   it('拥有 PERM_EDIT_PROBLEM 的教师可访问', async () => {
@@ -314,9 +312,15 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 
-  it('非法生成等待方式返回 400，且不启动 AI', async () => {
+  it('兼容忽略旧版 generationProfile 字段并使用统一流程', async () => {
     mockFindOne(PROBLEM_DOC);
-    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const plan = {
+      problemType: 'traditional', files: [{ name: '1.in', content: '1', kind: 'case-in' }], caseCount: 1,
+    };
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockResolvedValue(plan as never);
     const handler = setupHandler(TestdataGenGenerateHandler, {
       own: true,
       body: { problemId: 'D3102', generationProfile: 'unlimited' },
@@ -325,46 +329,56 @@ describe('TestdataGenGenerateHandler', () => {
     try {
       await handler.post();
 
-      expect(handler.response.status).toBe(400);
-      expect(handler.response.body.code).toBe('INVALID_GENERATION_PROFILE');
-      expect(clientSpy).not.toHaveBeenCalled();
+      expect(handler.response.status).toBeUndefined();
+      expect(clientSpy).toHaveBeenCalled();
+      expect(genSpy.mock.calls[0][0]).not.toHaveProperty('generationProfile');
+      expect(handler.response.body.plan).toEqual(plan);
     } finally {
+      genSpy.mockRestore();
       clientSpy.mockRestore();
     }
   });
 
-  it('高难题模式传入生成服务，并使用 90 分钟服务端总时限', async () => {
+  it('长任务不会被插件按固定时长自动终止，仍可由用户连接取消', async () => {
     jest.useFakeTimers();
-    expect(TESTDATA_GENERATION_PROFILES.hard.totalTimeoutMs).toBe(90 * 60_000);
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);
-    let capturedProfile: string | undefined;
+    let capturedSignal: AbortSignal | undefined;
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockImplementation(
-      (params: { generationProfile?: string; signal?: AbortSignal }) => new Promise((_resolve, reject) => {
-        capturedProfile = params.generationProfile;
+      (params: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        capturedSignal = params.signal;
         params.signal?.addEventListener('abort', () =>
-          reject(Object.assign(new Error('deadline'), { name: 'AbortError' })));
+          reject(Object.assign(new Error('canceled'), { name: 'AbortError' })));
       }) as never,
     );
     const handler = setupHandler(TestdataGenGenerateHandler, {
       own: true,
       body: { problemId: 'D3102', generationProfile: 'hard' },
     });
+    const listeners: Record<string, () => void> = {};
+    (handler as unknown as { context: unknown }).context = {
+      req: { aborted: false, socket: { destroyed: false }, on: jest.fn(), removeListener: jest.fn() },
+      res: {
+        writableEnded: false,
+        on: (event: string, listener: () => void) => { listeners[event] = listener; },
+        removeListener: jest.fn(),
+      },
+    };
 
     try {
-      const done = handler.post();
-      for (let i = 0; i < 20 && !capturedProfile; i++) await Promise.resolve();
-      expect(capturedProfile).toBe('hard');
+      let settled = false;
+      const done = handler.post().then(() => { settled = true; });
+      for (let i = 0; i < 20 && !capturedSignal; i++) await Promise.resolve();
+      expect(capturedSignal).toBeDefined();
 
-      await jest.advanceTimersByTimeAsync(TESTDATA_GENERATION_PROFILES.hard.totalTimeoutMs);
+      await jest.advanceTimersByTimeAsync(24 * 60 * 60_000);
+      expect(settled).toBe(false);
+      expect(capturedSignal?.aborted).toBe(false);
+
+      listeners.close?.();
       await done;
-
-      expect(handler.response.status).toBe(504);
-      expect(handler.response.body).toEqual(expect.objectContaining({
-        code: 'GENERATION_TIMEOUT',
-        category: 'timeout',
-      }));
+      expect(handler.response.status).toBe(499);
     } finally {
       jest.useRealTimers();
       genSpy.mockRestore();
@@ -691,7 +705,9 @@ describe('Testdata generation background jobs', () => {
       await handler.post();
       expect(handler.response.body).toEqual(expect.objectContaining({
         created: false,
-        job: expect.objectContaining({ id: String(job._id), status: 'running' }),
+        job: expect.objectContaining({
+          id: String(job._id), status: 'running', generationProfile: 'hard',
+        }),
       }));
       expect(handler.limitRate).not.toHaveBeenCalled();
       expect(clientSpy).not.toHaveBeenCalled();
@@ -746,6 +762,77 @@ describe('Testdata generation background jobs', () => {
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
       expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
     } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('background job keeps running past the former deadline and remains user-cancelable', async () => {
+    jest.useFakeTimers();
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({
+      status: 'pending', startedAt: null,
+      leaseExpiresAt: new Date(Date.now() + 48 * 60 * 60_000),
+    });
+    const canceled = makeGenerationJob({
+      _id: job._id,
+      status: 'canceled', active: false, restorable: false, cancelRequested: true,
+    });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+      markExpiredLeaseInterrupted: jest.fn().mockResolvedValue(false),
+      findById: jest.fn()
+        .mockResolvedValueOnce(job)
+        .mockResolvedValueOnce(canceled),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    let capturedSignal: AbortSignal | undefined;
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockImplementation(
+      (params: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        capturedSignal = params.signal;
+        params.signal?.addEventListener('abort', () =>
+          reject(Object.assign(new Error('canceled'), { name: 'AbortError' })));
+      }) as never,
+    );
+    const startHandler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102', caseCount: 1 },
+    });
+    startHandler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await startHandler.post();
+      for (let i = 0; i < 20 && !capturedSignal; i++) await Promise.resolve();
+      expect(capturedSignal).toBeDefined();
+
+      await jest.advanceTimersByTimeAsync(2 * 60 * 60_000);
+      expect(capturedSignal?.aborted).toBe(false);
+      expect(jobModel.fail).not.toHaveBeenCalled();
+
+      const cancelHandler = setupHandler(TestdataGenJobCancelHandler, {
+        own: true,
+        params: { jobId: String(job._id) },
+      });
+      cancelHandler.ctx.get = jest.fn((name: string) => (
+        name === 'testdataGenerationJobModel' ? jobModel : undefined
+      ));
+      await cancelHandler.post();
+      for (let i = 0; i < 20 && !capturedSignal?.aborted; i++) await Promise.resolve();
+
+      expect(capturedSignal?.aborted).toBe(true);
+      expect(cancelHandler.response.body.job).toEqual(expect.objectContaining({ status: 'canceled' }));
+    } finally {
+      jest.useRealTimers();
       genSpy.mockRestore();
       clientSpy.mockRestore();
     }

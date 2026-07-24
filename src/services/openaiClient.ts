@@ -153,8 +153,12 @@ export interface ChatCallOptions {
    * - null：不发送 max_tokens 字段，由服务商按模型上限决定（长输出场景，如测试数据生成）
    */
   maxTokens?: number | null;
-  /** 覆盖本次请求的超时（毫秒）。未设置时使用配置的 timeoutSeconds */
-  timeoutMs?: number;
+  /**
+   * 覆盖本次请求的超时（毫秒）：
+   * - 未设置：使用端点配置的 timeoutSeconds
+   * - null：不设置客户端截止时间，仅响应上游失败或 AbortSignal 取消
+   */
+  timeoutMs?: number | null;
   /** 是否对单次超时重试同一模型；默认 true，长推理任务可关闭并直接尝试后备模型。 */
   retryTimeouts?: boolean;
   /** 模型请求开始、重试或切换后备模型时的可观测事件。 */
@@ -366,7 +370,9 @@ export class OpenAIClient {
     if (options?.maxTokens !== null) {
       payload.max_tokens = options?.maxTokens ?? API_DEFAULTS.MAX_COMPLETION_TOKENS;
     }
-    const timeoutMs = options?.timeoutMs ?? this.config.timeoutSeconds * 1000;
+    const timeoutMs = options?.timeoutMs === null
+      ? 0
+      : options?.timeoutMs ?? this.config.timeoutSeconds * 1000;
 
     try {
       // 发送请求
@@ -438,7 +444,10 @@ export class OpenAIClient {
             throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${errorMsg}`, 'client', status);
           }
         } else if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
-          throw new AIServiceError(`请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`, 'timeout');
+          const timeoutMessage = timeoutMs > 0
+            ? `请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`
+            : '上游 AI 服务请求超时';
+          throw new AIServiceError(timeoutMessage, 'timeout');
         } else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
           throw new AIServiceError('无法连接到 AI 服务', 'network');
         } else if (axiosError.code === 'ECONNRESET' || axiosError.code === 'EPIPE') {
@@ -811,17 +820,25 @@ export class MultiModelClient {
     const backoffAllowanceMs = Array.from({ length: RETRY.MAX_RETRIES }, (_, attempt) =>
       Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS) * (1 + RETRY.JITTER),
     ).reduce((sum, ms) => sum + ms, 0);
+    const deadlineDisabled = options?.timeoutMs === null;
     const [primary, ...fallbacks] = activeClients;
-    // 单次尝试的有效超时：调用方覆盖优先（如测试数据生成用长超时）
+    // 单次尝试的有效超时：调用方覆盖优先。timeoutMs=null 的长任务不创建
+    // 客户端截止时间，只能由上游明确失败或外部 AbortSignal 结束。
     const attemptMs = (c: { config: ResolvedModelConfig }) =>
       options?.timeoutMs ?? c.config.timeoutSeconds * 1000;
-    const budgetMs = attemptMs(primary) * (RETRY.MAX_RETRIES + 1)
-      + backoffAllowanceMs
-      + fallbacks.reduce((sum, c) => sum + attemptMs(c), 0);
-    const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
+    const budgetMs = deadlineDisabled
+      ? 0
+      : attemptMs(primary) * (RETRY.MAX_RETRIES + 1)
+        + backoffAllowanceMs
+        + fallbacks.reduce((sum, c) => sum + attemptMs(c), 0);
+    const totalTimeoutMs = deadlineDisabled
+      ? 0
+      : Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
     const totalAc = new AbortController();
     let timedOut = false;
-    const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);
+    const totalTimer = deadlineDisabled
+      ? undefined
+      : setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);
 
     // 外部 signal 级联到内部 totalAc
     const onExternalAbort = () => totalAc.abort();
@@ -974,7 +991,7 @@ export class MultiModelClient {
         })),
       });
     } finally {
-      clearTimeout(totalTimer);
+      if (totalTimer) clearTimeout(totalTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
     }
   }

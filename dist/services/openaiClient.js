@@ -210,7 +210,9 @@ class OpenAIClient {
         if (options?.maxTokens !== null) {
             payload.max_tokens = options?.maxTokens ?? limits_1.API_DEFAULTS.MAX_COMPLETION_TOKENS;
         }
-        const timeoutMs = options?.timeoutMs ?? this.config.timeoutSeconds * 1000;
+        const timeoutMs = options?.timeoutMs === null
+            ? 0
+            : options?.timeoutMs ?? this.config.timeoutSeconds * 1000;
         try {
             // 发送请求
             const response = await axios_1.default.post(`${this.config.apiBaseUrl}${limits_1.API_DEFAULTS.CHAT_ENDPOINT}`, payload, {
@@ -276,7 +278,10 @@ class OpenAIClient {
                     }
                 }
                 else if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
-                    throw new AIServiceError(`请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`, 'timeout');
+                    const timeoutMessage = timeoutMs > 0
+                        ? `请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`
+                        : '上游 AI 服务请求超时';
+                    throw new AIServiceError(timeoutMessage, 'timeout');
                 }
                 else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
                     throw new AIServiceError('无法连接到 AI 服务', 'network');
@@ -573,16 +578,24 @@ class MultiModelClient {
         // 中途即被掐断、fallback 端点永远轮不到——慢端点上的长文生成稳定死于
         // 「AI 服务总超时」，而重试与 fallback 正是为这种场景配置的。
         const backoffAllowanceMs = Array.from({ length: RETRY.MAX_RETRIES }, (_, attempt) => Math.min(RETRY.BASE_DELAY_MS * 2 ** attempt, RETRY.MAX_DELAY_MS) * (1 + RETRY.JITTER)).reduce((sum, ms) => sum + ms, 0);
+        const deadlineDisabled = options?.timeoutMs === null;
         const [primary, ...fallbacks] = activeClients;
-        // 单次尝试的有效超时：调用方覆盖优先（如测试数据生成用长超时）
+        // 单次尝试的有效超时：调用方覆盖优先。timeoutMs=null 的长任务不创建
+        // 客户端截止时间，只能由上游明确失败或外部 AbortSignal 结束。
         const attemptMs = (c) => options?.timeoutMs ?? c.config.timeoutSeconds * 1000;
-        const budgetMs = attemptMs(primary) * (RETRY.MAX_RETRIES + 1)
-            + backoffAllowanceMs
-            + fallbacks.reduce((sum, c) => sum + attemptMs(c), 0);
-        const totalTimeoutMs = Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
+        const budgetMs = deadlineDisabled
+            ? 0
+            : attemptMs(primary) * (RETRY.MAX_RETRIES + 1)
+                + backoffAllowanceMs
+                + fallbacks.reduce((sum, c) => sum + attemptMs(c), 0);
+        const totalTimeoutMs = deadlineDisabled
+            ? 0
+            : Math.max(RETRY.TOTAL_TIMEOUT_MS, budgetMs);
         const totalAc = new AbortController();
         let timedOut = false;
-        const totalTimer = setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);
+        const totalTimer = deadlineDisabled
+            ? undefined
+            : setTimeout(() => { timedOut = true; totalAc.abort(); }, totalTimeoutMs);
         // 外部 signal 级联到内部 totalAc
         const onExternalAbort = () => totalAc.abort();
         options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
@@ -730,7 +743,8 @@ class MultiModelClient {
             });
         }
         finally {
-            clearTimeout(totalTimer);
+            if (totalTimer)
+                clearTimeout(totalTimer);
             options?.signal?.removeEventListener('abort', onExternalAbort);
         }
     }

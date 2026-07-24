@@ -227,40 +227,12 @@ export interface ParseAiResponseOptions {
 
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 
-export type TestdataGenerationProfile = 'standard' | 'hard';
-
-/**
- * 测试数据生成的等待策略。普通模式覆盖日常题目；高难题模式为需要长推理的
- * 竞赛题保留更长的单次模型时间。总时限由 Handler 强制执行，始终有限。
- */
-export const TESTDATA_GENERATION_PROFILES = {
-  standard: {
-    aiTimeoutMs: 600_000,
-    totalTimeoutMs: 900_000,
-  },
-  hard: {
-    // 超难竞赛题的正常成功路径也包含至少两轮串行模型等待：先解题，
-    // 再并行生成外围件与独立验证器；还需为沙箱实跑和一次定向修复留余量。
-    aiTimeoutMs: 1_800_000,
-    totalTimeoutMs: 5_400_000,
-  },
-} as const;
-
-export function isTestdataGenerationProfile(value: unknown): value is TestdataGenerationProfile {
-  return value === 'standard' || value === 'hard';
-}
-
 export const TESTDATA_GEN_LIMITS = {
   MIN_CASES: 1,
   MAX_CASES: 30,
   MAX_EXTRA_REQUIREMENTS: 1000,
   MAX_PROVIDED_STD: 10000,
   MAX_STATEMENT_LENGTH: 20000,
-  /**
-   * AI 单次尝试超时（毫秒）。测试数据生成正确性优先、允许长思考，
-   * 故显著高于普通对话；且本次调用不发送 max_tokens（输出长度不设限）。
-   */
-  AI_TIMEOUT_MS: TESTDATA_GENERATION_PROFILES.standard.aiTimeoutMs,
   /** apply 时单文件内容上限（字节） */
   MAX_FILE_SIZE: 256 * 1024,
   /** apply 时文件数量上限 */
@@ -2895,8 +2867,6 @@ export interface GenerateTestdataParams {
   existingConfig?: string;
   /** 服务端规则引擎的填空题初判信号 */
   fillInDetected?: boolean;
-  /** 普通题默认 standard；高难题允许更长的单次模型推理时间。 */
-  generationProfile?: TestdataGenerationProfile;
   signal?: AbortSignal;
   /** 页面进度事件；回调异常不得影响生成主流程。 */
   onProgress?: (progress: TestdataGenerationProgress) => void;
@@ -2995,12 +2965,13 @@ export class TestdataGenService {
   }
 
   private getCallOptions(params: GenerateTestdataParams, attempt = 1): ChatCallOptions {
-    const profile = TESTDATA_GENERATION_PROFILES[params.generationProfile || 'standard'];
     return {
       signal: params.signal,
       maxTokens: null,
-      timeoutMs: profile.aiTimeoutMs,
-      // 长推理超时后不在同一模型上盲等第二轮；其他短暂网络/服务错误仍保留快速重试。
+      // 测试数据生成以正确性优先：不由插件设置模型截止时间。调用只会在
+      // 上游明确失败、服务进程中断或用户主动取消时结束。
+      timeoutMs: null,
+      // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
       retryTimeouts: false,
       onAttempt: event => {
         if (event.type === 'fallback') {

@@ -30,7 +30,6 @@ const createParams = {
   problemId: 'D3102',
   problemTitle: 'Test problem',
   createdBy: 2,
-  generationProfile: 'hard' as const,
 };
 
 describe('TestdataGenerationJobModel', () => {
@@ -107,5 +106,16 @@ describe('TestdataGenerationJobModel', () => {
         }),
       }),
     );
+  });
+
+  it('heartbeat extends both the worker lease and the active job retention window', async () => {
+    const { model, collection } = createModel();
+    const before = Date.now();
+
+    await expect(model.renewLease('job1')).resolves.toBe(true);
+
+    const update = collection.updateOne.mock.calls[0][1].$set;
+    expect(update.leaseExpiresAt.getTime()).toBeGreaterThanOrEqual(before + TESTDATA_JOB_LEASE_MS);
+    expect(update.expiresAt.getTime()).toBeGreaterThanOrEqual(before + TESTDATA_JOB_RETENTION_MS);
   });
 });
