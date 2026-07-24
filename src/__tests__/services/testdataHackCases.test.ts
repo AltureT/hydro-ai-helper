@@ -62,6 +62,26 @@ describe('parseHackCasesResponse', () => {
 
     expect(parseHackCasesResponse(raw)).toEqual([]);
   });
+
+  it('分节含未闭合围栏时丢弃，而真正无围栏的输入仍可解析', () => {
+    const unclosed = [
+      '=== HACK_CASE ===',
+      'RATIONALE: 围栏损坏',
+      '```text',
+      '1',
+    ].join('\n');
+    const unfenced = [
+      '=== HACK_CASE ===',
+      'RATIONALE: 无围栏但完整',
+      '2',
+    ].join('\n');
+
+    expect(parseHackCasesResponse(unclosed)).toEqual([]);
+    expect(parseHackCasesResponse(unfenced)).toEqual([{
+      input: '2\n',
+      rationale: '无围栏但完整',
+    }]);
+  });
 });
 
 describe('mergeHackCases', () => {

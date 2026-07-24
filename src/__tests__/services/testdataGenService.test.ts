@@ -51,6 +51,7 @@ import {
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
+import { DISCRIMINATION_BUDGET_MS } from '../../services/goJudgeSandboxService';
 
 const baseOptions: GenerateOptions = {
   problemKind: 'auto',
@@ -188,6 +189,25 @@ function makeSurvivingKillTargetResponse(): string {
     'DESC: 只对已有输入返回正确答案',
     '```python',
     '# surviving wrong solution',
+    'value = input().strip()',
+    'print(value if value == "1" else "wrong")',
+    '```',
+  ].join('\n');
+}
+
+function makeSharedHackKillTargetsResponse(): string {
+  return [
+    '=== KILL_TARGET:boundary ===',
+    'DESC: 第一个幸存错误解',
+    '```python',
+    '# shared hack target one',
+    'value = input().strip()',
+    'print(value if value == "1" else "wrong")',
+    '```',
+    '=== KILL_TARGET:wrong-algorithm ===',
+    'DESC: 第二个幸存错误解',
+    '```python',
+    '# shared hack target two',
     'value = input().strip()',
     'print(value if value == "1" else "wrong")',
     '```',
@@ -989,6 +1009,42 @@ describe('assemblePlan', () => {
     expect(config).toContain('input: 4.in');
     expect(config).not.toContain('input: 2.in');
   });
+
+  it('区分度命中编号与补刀说明使用实际分配的测试点文件编号', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    response.discriminationInitialCaseCount = 1;
+    response.verification = {
+      mode: 'sandbox',
+      oracleKind: 'ai-solution',
+      discrimination: {
+        targets: [{
+          kind: 'wrong-algorithm',
+          description: '错误贪心',
+          killed: true,
+          killedBy: 'wa',
+          killedByCase: 2,
+        }],
+        allKilled: true,
+      },
+    };
+
+    const plan = assemblePlan(response, options, {
+      mode: 'sandbox',
+      existingFiles: ['1.in', '1.out', '2.in'],
+    });
+
+    expect(plan.caseCoverage?.map(item => item.fileNumber)).toEqual([3, 4]);
+    expect(plan.verification?.discrimination?.targets[0].killedByCase).toBe(4);
+    expect(plan.notes).toContain('已为「错误贪心」错误解定向补充 hack 测试点 #4。');
+  });
 });
 
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
@@ -1345,6 +1401,9 @@ describe('TestdataGenService.generate', () => {
     });
     await new Promise(resolve => setImmediate(resolve));
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[1][2]).toEqual(expect.objectContaining({
+      timeoutMs: 120_000,
+    }));
     releaseIndependentStages();
     const plan = await generationPromise;
 
@@ -1372,6 +1431,40 @@ describe('TestdataGenService.generate', () => {
       'validating_inputs', 'running_oracle', 'stress_testing',
       'discrimination_testing', 'assembling', 'complete',
     ]));
+  });
+
+  it('错误解靶子请求的 AbortError 原样上抛且不触发语义升级', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const abortError = Object.assign(new Error('user canceled'), { name: 'AbortError' });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockRejectedValueOnce(abortError)
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    await expect(new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toBe(abortError);
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
   it('幸存 WA 靶子补刀成功后把新测试点写入文件计划与 config.yaml', async () => {
@@ -1418,6 +1511,10 @@ describe('TestdataGenService.generate', () => {
 
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
     expect(mockClient.chat.mock.calls[4][1]).toContain('反例构造专家');
+    expect(mockClient.chat.mock.calls[4][2].timeoutMs).toBeGreaterThan(0);
+    expect(mockClient.chat.mock.calls[4][2].timeoutMs).toBeLessThanOrEqual(
+      DISCRIMINATION_BUDGET_MS,
+    );
     expect(plan.caseCount).toBe(2);
     expect(plan.totalCaseCount).toBe(2);
     expect(plan.files.find(file => file.name === '2.in')?.content).toBe('2\n');
@@ -1430,6 +1527,58 @@ describe('TestdataGenService.generate', () => {
       killedByCase: 2,
     });
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
+  });
+
+  it('补刀循环结束后用新增测试点复测其他仍幸存的靶子', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel })
+        .mockRejectedValueOnce(new Error('第二个靶子补刀生成失败'))
+        .mockRejectedValueOnce(new Error('第二个靶子补刀重试失败')),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('shared hack target')) {
+            return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '共享补刀测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(7);
+    expect(plan.caseCount).toBe(2);
+    expect(plan.verification?.discrimination?.targets.slice(0, 2)).toEqual([
+      expect.objectContaining({ description: '第一个幸存错误解', killed: true, killedByCase: 2 }),
+      expect.objectContaining({ description: '第二个幸存错误解', killed: true, killedByCase: 2 }),
+    ]);
   });
 
   it('第一阶段样例预验证连续失败时不生成外围制品或独立验证器', async () => {

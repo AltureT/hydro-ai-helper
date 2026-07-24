@@ -1,4 +1,8 @@
-import { parseKillTargetsResponse } from '../../services/testdataGenService';
+import {
+  buildKillTargetPromptSamples,
+  buildKillTargetsUserPrompt,
+  parseKillTargetsResponse,
+} from '../../services/testdataGenService';
 
 describe('parseKillTargetsResponse', () => {
   it('解析两个合法错误解靶子', () => {
@@ -67,5 +71,60 @@ describe('parseKillTargetsResponse', () => {
     ].join('\n');
 
     expect(parseKillTargetsResponse(raw)).toEqual([]);
+  });
+
+  it('分节含未闭合代码围栏时丢弃，而真正无围栏的代码仍可解析', () => {
+    const unclosed = [
+      '=== KILL_TARGET:boundary ===',
+      'DESC: 围栏损坏',
+      '```python',
+      'print(0)',
+    ].join('\n');
+    const unfenced = [
+      '=== KILL_TARGET:boundary ===',
+      'DESC: 无围栏但完整',
+      'print(0)',
+    ].join('\n');
+
+    expect(parseKillTargetsResponse(unclosed)).toEqual([]);
+    expect(parseKillTargetsResponse(unfenced)).toEqual([{
+      kind: 'boundary',
+      description: '无围栏但完整',
+      code: 'print(0)\n',
+    }]);
+  });
+});
+
+describe('kill-target prompt', () => {
+  it('限制 analysis 与每个样例输入输出正文长度', () => {
+    const prompt = buildKillTargetsUserPrompt({
+      statement: 's'.repeat(6000),
+      analysis: `${'a'.repeat(2000)}ANALYSIS_TAIL`,
+      samples: [{
+        input: `${'i'.repeat(1000)}INPUT_TAIL`,
+        output: `${'o'.repeat(1000)}OUTPUT_TAIL`,
+      }],
+    });
+
+    expect(prompt).not.toContain('ANALYSIS_TAIL');
+    expect(prompt).not.toContain('INPUT_TAIL');
+    expect(prompt).not.toContain('OUTPUT_TAIL');
+    expect(prompt).toContain('a'.repeat(2000));
+    expect(prompt).toContain('i'.repeat(1000));
+    expect(prompt).toContain('o'.repeat(1000));
+  });
+
+  it('函数题用已验证的原始 stdin 转码替换展示形式样例', () => {
+    expect(buildKillTargetPromptSamples({
+      problemType: 'function',
+      functionSampleInputs: [{ id: '1', input: '3\n1 2 3\n' }],
+    }, [{
+      id: '1',
+      input: 'nums = [1, 2, 3]\n',
+      output: '6\n',
+    }])).toEqual([{
+      input: '3\n1 2 3\n',
+      output: '6\n',
+    }]);
   });
 });

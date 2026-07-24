@@ -112,6 +112,10 @@ export interface GenerationResponse {
   verification?: PlanVerification;
   /** 内部字段：区分度验证与定向补刀共享的绝对截止时间，不进入最终计划。 */
   discriminationDeadlineAt?: number;
+  /** 内部字段：通过题面样例烟测、可进入正式区分度与补刀阶段的错误解。 */
+  discriminationKillTargets?: KillTarget[];
+  /** 内部字段：补刀前正式测试点数量，用于识别并展示新增 hack 点。 */
+  discriminationInitialCaseCount?: number;
   /** 函数题是否真正跑过 solution+template.py 组合（决定 template.py 的 origin）。 */
   pyTemplateExecuted?: boolean;
 }
@@ -291,6 +295,9 @@ export const TESTDATA_GEN_LIMITS = {
   /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
   STRESS_MIN_UNIQUE_RATIO: 0.8,
 } as const;
+
+/** 非关键错误解分析不得无限阻塞正确性管线。 */
+const KILL_TARGET_AI_TIMEOUT_MS = 120_000;
 
 /** 合法测试数据文件名：字母数字、点、下划线、连字符，不允许路径分隔符 */
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -1156,10 +1163,11 @@ export function buildKillTargetsUserPrompt(input: {
   samples: SampleIO[];
 }): string {
   const statement = input.statement.slice(0, 6000);
+  const analysis = input.analysis.slice(0, 2000);
   const samples = input.samples.slice(0, 3);
   return [
     '【既有解法分析】',
-    input.analysis || '未提供额外分析，请从题面推导常见错误模式。',
+    analysis || '未提供额外分析，请从题面推导常见错误模式。',
     '',
     '【题面（最多 6000 字符）】',
     statement,
@@ -1167,13 +1175,32 @@ export function buildKillTargetsUserPrompt(input: {
     '【题面样例（最多 3 组，错误解必须全部通过）】',
     ...(samples.length > 0
       ? samples.flatMap((sample, index) => [
-        `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input))}`,
-        `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output))}`,
+        `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
+        `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
       ])
       : ['题面未解析到样例。']),
     '',
     '请选择最可能的 2 种不同错误模式，并严格按分节格式输出。',
   ].join('\n');
+}
+
+/** 函数题错误解提示必须复用已通过第一阶段验证的原始 stdin 转码。 */
+export function buildKillTargetPromptSamples(
+  solution: Pick<SandboxSolutionBlueprint, 'problemType' | 'functionSampleInputs'>,
+  statementSamples: StatementSample[],
+): SampleIO[] {
+  if (solution.problemType !== 'function') {
+    return statementSamples.map(sample => ({ input: sample.input, output: sample.output }));
+  }
+  const convertedById = new Map(
+    (solution.functionSampleInputs || []).map(sample => [sample.id, sample.input]),
+  );
+  return statementSamples.flatMap(sample => {
+    const converted = convertedById.get(sample.id);
+    return converted === undefined
+      ? []
+      : [{ input: normalizeFileContent(converted), output: sample.output }];
+  });
 }
 
 /** 定向补刀调用只针对一个幸存错误解，不携带前轮对话或 ORACLE 源码。 */
@@ -1413,7 +1440,11 @@ export function parseKillTargetsResponse(raw: string): KillTarget[] {
     const description = section.lines
       .map(line => line.match(/^\s*DESC:\s*(.*?)\s*$/i))
       .find((match): match is RegExpMatchArray => Boolean(match))?.[1] || '';
-    const fenced = content.match(/```(?:python|py)?\s*\r?\n([\s\S]*?)\r?\n?```/i);
+    const fenced = content.match(
+      /(?:^|\r?\n)```(?:python|py)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?=\r?\n|$)/i,
+    );
+    const hasFenceMarker = section.lines.some(line => /^\s*```/.test(line));
+    if (hasFenceMarker && !fenced) return [];
     const rawCode = fenced
       ? fenced[1]
       : trimBlankEdges(section.lines.filter(line => !/^\s*DESC:/i.test(line)));
@@ -1447,7 +1478,11 @@ export function parseHackCasesResponse(raw: string): HackCandidate[] {
     const rationale = lines
       .map(line => line.match(/^\s*RATIONALE:\s*(.*?)\s*$/i))
       .find((match): match is RegExpMatchArray => Boolean(match))?.[1] || '';
-    const fenced = content.match(/```[a-zA-Z]*\s*\r?\n([\s\S]*?)\r?\n?```/);
+    const fenced = content.match(
+      /(?:^|\r?\n)```[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?=\r?\n|$)/,
+    );
+    const hasFenceMarker = lines.some(line => /^\s*```/.test(line));
+    if (hasFenceMarker && !fenced) return [];
     const rawInput = fenced
       ? fenced[1]
       : trimBlankEdges(lines.filter(line => !/^\s*RATIONALE:/i.test(line)));
@@ -1997,10 +2032,29 @@ export function evaluateDiscrimination(inputs: {
   };
 }
 
+/** 将响应内部的从 1 开始本地序号映射为最终分配的测试点文件编号。 */
+export function remapDiscriminationCaseNumbers(
+  discrimination: DiscriminationCheck | undefined,
+  allocatedCaseNumbers: number[],
+): DiscriminationCheck | undefined {
+  if (!discrimination) return undefined;
+  return {
+    ...discrimination,
+    targets: discrimination.targets.map(target => {
+      if (target.killedByCase === undefined) return { ...target };
+      return {
+        ...target,
+        killedByCase: allocatedCaseNumbers[target.killedByCase - 1] ?? target.killedByCase,
+      };
+    }),
+  };
+}
+
 /** 将最终区分度结果转换为面向教师的生成说明。 */
 export function buildDiscriminationNotes(
   discrimination: DiscriminationCheck | undefined,
   initialCaseCount: number,
+  allocatedCaseNumbers?: number[],
 ): string[] {
   if (!discrimination) return [];
   const checkedWrongTargets = discrimination.targets.filter(
@@ -2028,7 +2082,9 @@ export function buildDiscriminationNotes(
       target.killedByCase !== undefined
       && target.killedByCase > initialCaseCount
     ) {
-      notes.push(`已为「${target.description}」错误解定向补充 hack 测试点 #${target.killedByCase}。`);
+      const caseNumber = allocatedCaseNumbers?.[target.killedByCase - 1]
+        ?? target.killedByCase;
+      notes.push(`已为「${target.description}」错误解定向补充 hack 测试点 #${caseNumber}。`);
     }
   }
   return notes;
@@ -2084,6 +2140,49 @@ export function isCancellation(err: unknown): boolean {
     e.name === 'AbortError' || e.name === 'CanceledError'
     || e.code === 'ERR_CANCELED' || e.category === 'aborted'
   );
+}
+
+/**
+ * 正式区分度前先用题面样例筛掉不可运行或连样例都答错的靶子，避免把语法错误
+ * 等低质量程序误记为被正式数据卡住。无样例时无法烟测，保留原靶子。
+ */
+export async function smokeTestKillTargets(input: {
+  killTargets: KillTarget[];
+  samples: SampleIO[];
+  runner: TestdataSandboxRunner;
+  signal?: AbortSignal;
+  customChecker: boolean;
+  deadlineAt: number;
+}): Promise<KillTarget[]> {
+  if (input.killTargets.length === 0 || input.samples.length === 0) {
+    return input.killTargets;
+  }
+  const validTargets: KillTarget[] = [];
+  for (const target of input.killTargets) {
+    if (Date.now() >= input.deadlineAt) break;
+    try {
+      const details = await input.runner.runPythonBatchDetailed(
+        target.code,
+        input.samples.map(sample => sample.input),
+        { signal: input.signal, deadlineAt: input.deadlineAt },
+      );
+      if (details.length !== input.samples.length) continue;
+      const passed = details.every((detail, index) => (
+        detail.accepted
+        && !detail.timedOut
+        && (
+          input.customChecker
+          || comparableFileContent(detail.stdout)
+            === comparableFileContent(input.samples[index].output)
+        )
+      ));
+      if (passed) validTargets.push(target);
+    } catch (err) {
+      if (isCancellation(err)) throw err;
+      // 单个靶子烟测失败仅丢弃该靶子，不影响正确性管线和其余靶子。
+    }
+  }
+  return validTargets;
 }
 
 /**
@@ -2646,8 +2745,16 @@ export async function materializeSandboxBlueprint(
 
   reportProgress('discrimination_testing', 90);
   const discriminationDeadlineAt = Date.now() + DISCRIMINATION_BUDGET_MS;
-  const discrimination = await runDiscriminationPhase({
+  const discriminationKillTargets = await smokeTestKillTargets({
     killTargets,
+    samples: samples.map(sample => ({ input: sample.input, output: sample.output })),
+    runner,
+    signal,
+    customChecker,
+    deadlineAt: discriminationDeadlineAt,
+  });
+  const discrimination = await runDiscriminationPhase({
+    killTargets: discriminationKillTargets,
     bruteCode: blueprint.bruteCode,
     cases,
     runner,
@@ -2721,6 +2828,7 @@ export async function materializeSandboxBlueprint(
     validatorCode: blueprint.validatorCode,
     verification,
     discriminationDeadlineAt,
+    discriminationKillTargets,
     pyTemplateExecuted,
     cases,
     notes: noteParts.filter(Boolean).join('\n'),
@@ -2803,6 +2911,23 @@ export function assemblePlan(
   const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
   const existingComplete = getExistingNumericCases(context.existingFiles).complete;
   const configCaseNumbers = [...new Set([...existingComplete, ...newCaseNumbers])].sort((a, b) => a - b);
+  const discriminationNotes = buildDiscriminationNotes(
+    response.verification?.discrimination,
+    response.discriminationInitialCaseCount ?? response.cases.length,
+    newCaseNumbers,
+  );
+  const notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n') || undefined;
+  const verification = response.verification
+    ? {
+      ...response.verification,
+      ...(response.verification.discrimination ? {
+        discrimination: remapDiscriminationCaseNumbers(
+          response.verification.discrimination,
+          newCaseNumbers,
+        ),
+      } : {}),
+    }
+    : undefined;
   /** AI 生成代码文件统一入口：文件名只写一处，注释符由文件名推导。 */
   const pushCode = (
     name: string, code: string, kind: PlannedFile['kind'], origin: PlannedFileOrigin, purpose: string,
@@ -2890,7 +3015,7 @@ export function assemblePlan(
     problemType: response.problemType,
     isFillIn: response.isFillIn,
     analysis: response.analysis,
-    notes: response.notes,
+    notes,
     files,
     caseCount,
     totalCaseCount: configCaseNumbers.length,
@@ -2900,7 +3025,7 @@ export function assemblePlan(
       dataScale: item.dataScale || coveragePlan[index]?.dataScale || 'small',
       target: item.label || coveragePlan[index]?.guidance || '',
     })),
-    ...(response.verification ? { verification: response.verification } : {}),
+    ...(verification ? { verification } : {}),
   };
 }
 
@@ -3757,7 +3882,10 @@ export class TestdataGenService {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
       buildKillTargetsSystemPrompt(),
-      this.getCallOptions({ signal: input.signal }),
+      {
+        ...this.getCallOptions({ signal: input.signal }),
+        timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
+      },
     );
     return parseKillTargetsResponse(result.content);
   }
@@ -3766,11 +3894,15 @@ export class TestdataGenService {
     params: GenerateTestdataParams,
     analysis: string,
     target: KillTarget,
+    timeoutMs: number,
   ): Promise<HackCandidate[]> {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }],
       buildHackCasesSystemPrompt(),
-      this.getCallOptions(params),
+      {
+        ...this.getCallOptions(params),
+        timeoutMs,
+      },
     );
     return parseHackCasesResponse(result.content).slice(0, 3);
   }
@@ -3790,6 +3922,7 @@ export class TestdataGenService {
     const deadlineAt = response.discriminationDeadlineAt;
     if (!discrimination || deadlineAt === undefined || killTargets.length === 0) return response;
     let cases: TestCase[] = response.cases;
+    const initialCaseCount = cases.length;
 
     const finish = () => {
       response.cases = cases;
@@ -3817,10 +3950,13 @@ export class TestdataGenService {
         ) break targetLoop;
         let candidates: HackCandidate[];
         try {
+          const remainingBudgetMs = deadlineAt - Date.now();
+          if (remainingBudgetMs <= 0) break targetLoop;
           candidates = await this.generateHackCandidates(
             params,
             blueprint.analysis || '',
             target,
+            remainingBudgetMs,
           );
         } catch (err) {
           if (isCancellation(err)) throw err;
@@ -3886,8 +4022,45 @@ export class TestdataGenService {
             continue targetLoop;
           } catch (err) {
             if (isCancellation(err)) throw err;
-            return finish();
+            break targetLoop;
           }
+        }
+      }
+    }
+
+    // 一个靶子的定向反例也可能顺带卡掉其他错误模式；只复跑本轮新追加的点，
+    // 避免重复消耗正式数据的沙箱预算。
+    const appendedCases = cases.slice(initialCaseCount);
+    if (appendedCases.length > 0) {
+      for (let targetIndex = 0; targetIndex < killTargets.length; targetIndex++) {
+        if (Date.now() >= deadlineAt) break;
+        const target = killTargets[targetIndex];
+        const targetResult = discrimination.targets[targetIndex];
+        if (!targetResult || targetResult.killed || targetResult.skippedReason) continue;
+        try {
+          const details = await runner.runPythonBatchDetailed(
+            target.code,
+            appendedCases.map(item => item.input),
+            { signal: params.signal, deadlineAt },
+          );
+          if (details.length !== appendedCases.length) break;
+          const evaluated = evaluateDiscrimination({
+            targetRuns: [{
+              kind: target.kind,
+              description: targetResult.description,
+              perCase: details,
+            }],
+            oracleOutputs: appendedCases.map(item => item.output),
+            customChecker: false,
+          }).targets[0];
+          if (!evaluated?.killed || evaluated.killedByCase === undefined) continue;
+          targetResult.description = evaluated.description;
+          targetResult.killed = true;
+          targetResult.killedBy = evaluated.killedBy;
+          targetResult.killedByCase = initialCaseCount + evaluated.killedByCase;
+        } catch (err) {
+          if (isCancellation(err)) throw err;
+          break;
         }
       }
     }
@@ -3987,11 +4160,12 @@ export class TestdataGenService {
     // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
     // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
     report('artifacts', 36);
+    const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples);
     const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
       this.generateKillTargets({
         statement: params.statementMarkdown,
         analysis: solution.analysis || '',
-        samples: expectedFunctionSamples,
+        samples: killTargetSamples,
         signal: params.signal,
       }).catch((err): KillTarget[] => {
         if (isCancellation(err)) throw err;
@@ -4171,20 +4345,14 @@ export class TestdataGenService {
     }
 
     const initialCaseCount = response.cases.length;
+    response.discriminationInitialCaseCount = initialCaseCount;
     response = await this.repairSurvivingKillTargets(
       params,
       blueprint,
       response,
-      killTargets,
+      response.discriminationKillTargets || [],
       runner,
     );
-    const discriminationNotes = buildDiscriminationNotes(
-      response.verification?.discrimination,
-      initialCaseCount,
-    );
-    if (discriminationNotes.length > 0) {
-      response.notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n');
-    }
     report('assembling', 96);
     return this.applyResultMetadata(assemblePlan(response, params.options, {
       mode: 'sandbox',

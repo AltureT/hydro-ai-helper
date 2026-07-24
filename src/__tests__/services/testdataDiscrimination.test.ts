@@ -1,7 +1,9 @@
 import {
   buildDiscriminationNotes,
   evaluateDiscrimination,
+  remapDiscriminationCaseNumbers,
   runDiscriminationPhase,
+  smokeTestKillTargets,
 } from '../../services/testdataGenService';
 
 const accepted = (stdout: string) => ({
@@ -213,6 +215,90 @@ describe('buildDiscriminationNotes', () => {
       }],
       allKilled: false,
     }, 3)).toEqual([]);
+  });
+
+  it('按实际分配的文件编号映射 killedByCase 与补刀说明', () => {
+    const discrimination = {
+      targets: [{
+        kind: 'wrong-algorithm' as const,
+        description: '错误贪心',
+        killed: true,
+        killedBy: 'wa' as const,
+        killedByCase: 2,
+      }],
+      allKilled: true,
+    };
+
+    expect(remapDiscriminationCaseNumbers(discrimination, [3, 5])).toEqual({
+      targets: [{
+        kind: 'wrong-algorithm',
+        description: '错误贪心',
+        killed: true,
+        killedBy: 'wa',
+        killedByCase: 5,
+      }],
+      allKilled: true,
+    });
+    expect(buildDiscriminationNotes(discrimination, 1, [3, 5])).toContain(
+      '已为「错误贪心」错误解定向补充 hack 测试点 #5。',
+    );
+    expect(discrimination.targets[0].killedByCase).toBe(2);
+  });
+});
+
+describe('smokeTestKillTargets', () => {
+  it('丢弃样例上崩溃、超时或答案错误的靶子，并在全部丢弃时记录 no-targets', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string) => {
+        if (code === 'crash') return Promise.resolve([{ accepted: false, timedOut: false, stdout: '' }]);
+        if (code === 'timeout') return Promise.resolve([{ accepted: false, timedOut: true, stdout: '' }]);
+        return Promise.resolve([accepted('wrong\n')]);
+      }),
+    };
+    const filtered = await smokeTestKillTargets({
+      killTargets: [
+        { kind: 'boundary', description: '崩溃', code: 'crash' },
+        { kind: 'wrong-algorithm', description: '超时', code: 'timeout' },
+        { kind: 'overflow-sim', description: '样例错误', code: 'wrong' },
+      ],
+      samples: [{ input: '1\n', output: '1\n' }],
+      runner,
+      customChecker: false,
+      deadlineAt: Date.now() + 10_000,
+    });
+    const result = await runDiscriminationPhase({
+      killTargets: filtered,
+      cases: [{ input: '2\n', output: '2\n' }],
+      runner,
+      customChecker: false,
+    });
+
+    expect(filtered).toEqual([]);
+    expect(result.targets).toEqual([expect.objectContaining({
+      killed: false,
+      skippedReason: 'no-targets',
+    })]);
+  });
+
+  it('自定义 checker 的样例烟测只要求靶子成功执行', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([accepted('另一种合法输出\n')]),
+    };
+    const target = { kind: 'wrong-algorithm' as const, description: '多解输出', code: 'print(1)' };
+
+    await expect(smokeTestKillTargets({
+      killTargets: [target],
+      samples: [{ input: '1\n', output: '标准文本\n' }],
+      runner,
+      customChecker: true,
+      deadlineAt: Date.now() + 10_000,
+    })).resolves.toEqual([target]);
   });
 });
 
