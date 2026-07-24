@@ -12,7 +12,7 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
+exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenJobDismissHandler = exports.TestdataGenJobCancelHandler = exports.TestdataGenJobStatusHandler = exports.TestdataGenJobStartHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
 exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
 const openaiClient_1 = require("../services/openaiClient");
@@ -206,6 +206,18 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
             const acceptedSolutions = await listAcceptedStdCandidates(this, domainId, pdoc.docId);
+            const jobModel = this.ctx.get('testdataGenerationJobModel');
+            let restorableJob;
+            if (jobModel && typeof this.user?._id === 'number') {
+                let savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
+                if (savedJob?.active && savedJob.leaseExpiresAt?.getTime() <= Date.now()) {
+                    await jobModel.markExpiredLeaseInterrupted(savedJob._id);
+                    savedJob = null;
+                }
+                if (savedJob) {
+                    restorableJob = { ...serializeGenerationJob(savedJob), plan: undefined };
+                }
+            }
             this.response.body = {
                 problem: {
                     docId: pdoc.docId,
@@ -225,6 +237,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                     maxProvidedStd: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
                 },
                 generationProfiles: testdataGenService_1.TESTDATA_GENERATION_PROFILES,
+                restorableJob,
             };
             this.response.type = 'application/json';
         }
@@ -235,6 +248,161 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
     }
 }
 exports.TestdataGenContextHandler = TestdataGenContextHandler;
+const backgroundGenerationControllers = new Map();
+const TESTDATA_JOB_HEARTBEAT_MS = 30000;
+function serializeGenerationJob(job) {
+    return {
+        id: String(job._id),
+        problemId: job.problemId,
+        problemTitle: job.problemTitle,
+        generationProfile: job.generationProfile,
+        status: job.status,
+        progress: job.progress,
+        error: job.error,
+        plan: job.status === 'completed' ? job.plan : undefined,
+        createdAt: job.createdAt?.toISOString?.() || job.createdAt,
+        startedAt: job.startedAt?.toISOString?.() || job.startedAt,
+        updatedAt: job.updatedAt?.toISOString?.() || job.updatedAt,
+        progressUpdatedAt: job.progressUpdatedAt?.toISOString?.() || job.progressUpdatedAt,
+        completedAt: job.completedAt?.toISOString?.() || job.completedAt,
+    };
+}
+async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
+    let job;
+    try {
+        job = await jobModel.findById(jobId);
+    }
+    catch {
+        job = null;
+    }
+    const domainId = (0, domainHelper_1.getDomainId)(handler);
+    if (!job || job.domainId !== domainId || job.createdBy !== handler.user?._id) {
+        sendError(handler, 404, 'JOB_NOT_FOUND', 'ai_helper_testdata_job_not_found');
+        return null;
+    }
+    const pdoc = await findProblem(domainId, String(job.problemDocId));
+    if (!pdoc) {
+        sendError(handler, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
+        return null;
+    }
+    if (!checkEditPermission(handler, pdoc))
+        return null;
+    if (job.active && job.leaseExpiresAt && job.leaseExpiresAt.getTime() <= Date.now()) {
+        await jobModel.markExpiredLeaseInterrupted(job._id);
+        job = await jobModel.findById(job._id);
+        if (!job)
+            return null;
+    }
+    return { job, pdoc };
+}
+async function runBackgroundGeneration(params) {
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, generationProfile, translate, } = params;
+    const jobId = String(job._id);
+    const ac = new AbortController();
+    backgroundGenerationControllers.set(jobId, ac);
+    let deadlineExceeded = false;
+    let progressWrites = Promise.resolve();
+    const deadlineTimer = setTimeout(() => {
+        deadlineExceeded = true;
+        ac.abort();
+    }, testdataGenService_1.TESTDATA_GENERATION_PROFILES[generationProfile].totalTimeoutMs);
+    const heartbeatTimer = setInterval(() => {
+        jobModel.renewLease(job._id).then(active => {
+            if (!active)
+                ac.abort();
+        }).catch(err => {
+            console.warn('[TestdataGenJob] lease renewal failed:', err);
+        });
+    }, TESTDATA_JOB_HEARTBEAT_MS);
+    try {
+        await jobModel.markRunning(job._id);
+        ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
+        const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration');
+        const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+        const service = new testdataGenService_1.TestdataGenService(aiClient, {
+            sandboxRunner: new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost),
+            mode: (0, goJudgeSandboxService_1.getTestdataGenerationMode)(),
+        });
+        const plan = await service.generate({
+            problemTitle: pdoc.title || job.problemId,
+            statementMarkdown: statement,
+            options,
+            existingFiles,
+            existingConfig: pdoc.config,
+            fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
+            generationProfile,
+            signal: ac.signal,
+            onProgress: progress => {
+                progressWrites = progressWrites
+                    .then(() => jobModel.updateProgress(job._id, progress))
+                    .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
+            },
+        });
+        await progressWrites;
+        if (ac.signal.aborted) {
+            throw Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
+        const saved = await jobModel.complete(job._id, plan);
+        if (!saved)
+            return;
+        ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
+        const successfulModel = typeof plan.usedModel === 'string'
+            ? plan.usedModel.split(' → ').pop()?.trim()
+            : undefined;
+        const escalatedFromModel = plan.verification?.modelEscalation?.fromModel;
+        if (escalatedFromModel) {
+            ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', escalatedFromModel, false).catch(() => { });
+        }
+        ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', successfulModel || '', true).catch(() => { });
+    }
+    catch (err) {
+        if ((0, testdataGenService_1.isCancellation)(err)) {
+            if (deadlineExceeded) {
+                await jobModel.fail(job._id, {
+                    message: translate('ai_helper_testdata_err_timeout'),
+                    code: 'GENERATION_TIMEOUT',
+                    category: 'timeout',
+                    retryable: true,
+                });
+            }
+            else {
+                await jobModel.cancel(job._id);
+            }
+            return;
+        }
+        console.error('[TestdataGenJob] generation failed:', err);
+        const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+        const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
+        const usedModels = Array.isArray(testdataMetadata?.usedModels)
+            ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
+            : [];
+        const failedModel = usedModels[usedModels.length - 1]
+            || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
+        ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
+        ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: job.problemId, jobId, ...testdataMetadata, ...aiMetadata });
+        const jobError = err instanceof openaiClient_1.AIServiceError
+            ? {
+                message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
+                code: 'AI_SERVICE_ERROR',
+                category: err.category,
+                retryable: err.isRetryable,
+            }
+            : {
+                message: err instanceof Error ? err.message : translate('ai_helper_err_internal'),
+                code: 'GENERATION_FAILED',
+                retryable: true,
+                recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
+            };
+        await jobModel.fail(job._id, jobError);
+    }
+    finally {
+        clearTimeout(deadlineTimer);
+        clearInterval(heartbeatTimer);
+        if (backgroundGenerationControllers.get(jobId) === ac) {
+            backgroundGenerationControllers.delete(jobId);
+        }
+    }
+}
 /**
  * POST /ai-helper/testdata-gen/generate
  * 调用 AI 生成文件计划并返回（不写入任何文件）
@@ -477,6 +645,200 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
     }
 }
 exports.TestdataGenGenerateHandler = TestdataGenGenerateHandler;
+// ─── Persistent background generation jobs ───────────────────────────────────
+/** POST /ai-helper/testdata-gen/jobs - 创建后台任务并立即返回任务 ID。 */
+class TestdataGenJobStartHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const body = (this.request.body || {});
+            const problemId = String(body.problemId || '');
+            if (!problemId) {
+                sendError(this, 400, 'INVALID_PROBLEM_ID', 'ai_helper_testdata_err_problem_not_found');
+                return;
+            }
+            const pdoc = await findProblem(domainId, problemId);
+            if (!pdoc) {
+                sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
+                return;
+            }
+            if (!checkEditPermission(this, pdoc))
+                return;
+            const requestedProfile = body.generationProfile || 'standard';
+            if (!(0, testdataGenService_1.isTestdataGenerationProfile)(requestedProfile)) {
+                sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
+                return;
+            }
+            const generationProfile = requestedProfile;
+            const jobModel = this.ctx.get('testdataGenerationJobModel');
+            if (!jobModel) {
+                sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
+                return;
+            }
+            let existingJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user?._id);
+            if (existingJob?.active && existingJob.leaseExpiresAt?.getTime() <= Date.now()) {
+                await jobModel.markExpiredLeaseInterrupted(existingJob._id);
+                existingJob = null;
+            }
+            if (existingJob?.active) {
+                this.response.body = { job: serializeGenerationJob(existingJob), created: false };
+                this.response.type = 'application/json';
+                return;
+            }
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_testdata_gen', periodSecs: 300, maxOps: 5,
+                errorMessage: 'ai_helper_testdata_err_rate_limited',
+            }))
+                return;
+            const resolvedStd = await resolveRequestedStd(this, domainId, pdoc, body);
+            if (resolvedStd.errorCode && resolvedStd.errorKey) {
+                sendError(this, 400, resolvedStd.errorCode, resolvedStd.errorKey);
+                return;
+            }
+            const options = {
+                problemKind: (body.problemKind || 'auto'),
+                fillInMode: (body.fillInMode || 'auto'),
+                caseCount: Number(body.caseCount ?? 10),
+                dataScale: (body.dataScale || 'auto'),
+                languages: Array.isArray(body.languages)
+                    ? body.languages.filter(l => testdataGenService_1.SUPPORTED_TEMPLATE_LANGS.includes(l))
+                    : [...testdataGenService_1.SUPPORTED_TEMPLATE_LANGS],
+                providedStd: resolvedStd.providedStd,
+                providedStdSource: resolvedStd.providedStdSource,
+                extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+            };
+            const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
+            if (optionError) {
+                sendError(this, 400, 'INVALID_OPTIONS', optionError);
+                return;
+            }
+            const statement = extractStatementMarkdown(pdoc.content);
+            if (!statement.trim()) {
+                sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
+                return;
+            }
+            const existingFiles = (pdoc.data || [])
+                .map(f => String(f._id ?? f.name ?? ''))
+                .filter(Boolean);
+            const { job, created } = await jobModel.createOrGetActive({
+                domainId,
+                problemDocId: pdoc.docId,
+                problemId: pdoc.pid || String(pdoc.docId),
+                problemTitle: pdoc.title || problemId,
+                createdBy: this.user?._id,
+                generationProfile,
+            });
+            if (created) {
+                // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
+                const backgroundTranslations = {
+                    ai_helper_testdata_err_timeout: this.translate('ai_helper_testdata_err_timeout'),
+                    ai_helper_err_internal: this.translate('ai_helper_err_internal'),
+                };
+                for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
+                    backgroundTranslations[key] = this.translate(key);
+                }
+                void runBackgroundGeneration({
+                    ctx: this.ctx,
+                    jobModel,
+                    job,
+                    pdoc,
+                    statement,
+                    options,
+                    existingFiles,
+                    generationProfile,
+                    translate: key => backgroundTranslations[key] || key,
+                }).catch(err => {
+                    console.error('[TestdataGenJob] unhandled background failure:', err);
+                });
+            }
+            this.response.status = created ? 202 : 200;
+            this.response.body = { job: serializeGenerationJob(job), created };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[TestdataGenJobStartHandler.post] error:', err);
+            sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
+        }
+    }
+}
+exports.TestdataGenJobStartHandler = TestdataGenJobStartHandler;
+/** GET /ai-helper/testdata-gen/jobs/:jobId - 查询进度或完整结果。 */
+class TestdataGenJobStatusHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            const jobModel = this.ctx.get('testdataGenerationJobModel');
+            if (!jobModel) {
+                sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
+                return;
+            }
+            const authorized = await findAuthorizedGenerationJob(this, jobModel, String(this.request.params.jobId || ''));
+            if (!authorized)
+                return;
+            this.response.body = { job: serializeGenerationJob(authorized.job) };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[TestdataGenJobStatusHandler.get] error:', err);
+            sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
+        }
+    }
+}
+exports.TestdataGenJobStatusHandler = TestdataGenJobStatusHandler;
+/** POST /ai-helper/testdata-gen/jobs/:jobId/cancel - 跨页面、跨进程请求取消。 */
+class TestdataGenJobCancelHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            const jobModel = this.ctx.get('testdataGenerationJobModel');
+            if (!jobModel) {
+                sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
+                return;
+            }
+            const jobId = String(this.request.params.jobId || '');
+            const authorized = await findAuthorizedGenerationJob(this, jobModel, jobId);
+            if (!authorized)
+                return;
+            await jobModel.cancel(authorized.job._id);
+            backgroundGenerationControllers.get(jobId)?.abort();
+            const updated = await jobModel.findById(authorized.job._id);
+            this.response.body = { job: updated ? serializeGenerationJob(updated) : undefined };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[TestdataGenJobCancelHandler.post] error:', err);
+            sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
+        }
+    }
+}
+exports.TestdataGenJobCancelHandler = TestdataGenJobCancelHandler;
+/** POST /ai-helper/testdata-gen/jobs/:jobId/dismiss - 放弃尚未写入的预览。 */
+class TestdataGenJobDismissHandler extends hydrooj_1.Handler {
+    async post() {
+        try {
+            if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+                return;
+            const jobModel = this.ctx.get('testdataGenerationJobModel');
+            if (!jobModel) {
+                sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
+                return;
+            }
+            const authorized = await findAuthorizedGenerationJob(this, jobModel, String(this.request.params.jobId || ''));
+            if (!authorized)
+                return;
+            await jobModel.dismiss(authorized.job._id);
+            this.response.body = { dismissed: true };
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[TestdataGenJobDismissHandler.post] error:', err);
+            sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
+        }
+    }
+}
+exports.TestdataGenJobDismissHandler = TestdataGenJobDismissHandler;
 // ─── TestdataGenSkeletonHandler ───────────────────────────────────────────────
 /**
  * POST /ai-helper/testdata-gen/skeleton
@@ -565,6 +927,24 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             }
             if (!checkEditPermission(this, pdoc))
                 return;
+            let generationJob;
+            let generationJobModel;
+            const jobId = typeof body.jobId === 'string' ? body.jobId.trim() : '';
+            if (jobId) {
+                generationJobModel = this.ctx.get('testdataGenerationJobModel');
+                if (!generationJobModel) {
+                    sendError(this, 503, 'JOB_SERVICE_UNAVAILABLE', 'ai_helper_err_internal');
+                    return;
+                }
+                const authorized = await findAuthorizedGenerationJob(this, generationJobModel, jobId);
+                if (!authorized)
+                    return;
+                if (authorized.job.problemDocId !== pdoc.docId || authorized.job.status !== 'completed') {
+                    sendError(this, 400, 'JOB_RESULT_UNAVAILABLE', 'ai_helper_testdata_job_result_unavailable');
+                    return;
+                }
+                generationJob = authorized.job;
+            }
             const files = Array.isArray(body.files) ? body.files : [];
             if (files.length === 0) {
                 sendError(this, 400, 'NO_FILES', 'ai_helper_testdata_err_no_files');
@@ -625,6 +1005,9 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             }
             if (written.length > 0 && failed.length === 0) {
                 this.ctx.get('featureStatsModel')?.recordSuccess('testdata_apply').catch(() => { });
+                if (generationJob && generationJobModel) {
+                    await generationJobModel.markApplied(generationJob._id);
+                }
             }
             this.response.body = { written, failed };
             this.response.type = 'application/json';

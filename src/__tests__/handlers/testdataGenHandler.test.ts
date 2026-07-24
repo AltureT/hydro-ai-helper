@@ -7,6 +7,10 @@ import { db, PERM, PRIV, ProblemModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
+  TestdataGenJobStartHandler,
+  TestdataGenJobStatusHandler,
+  TestdataGenJobCancelHandler,
+  TestdataGenJobDismissHandler,
   TestdataGenSkeletonHandler,
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
@@ -30,6 +34,32 @@ const PROBLEM_DOC = {
   owner: 2,
   data: [{ _id: '1.in', size: 4 }, { _id: 'config.yaml', size: 100 }],
 };
+
+function makeGenerationJob(overrides: Record<string, unknown> = {}) {
+  const now = new Date();
+  return {
+    _id: new ObjectId(),
+    domainId: 'system',
+    problemDocId: 1530,
+    problemId: 'D3102',
+    problemTitle: '机动车违章识别系统',
+    createdBy: 2,
+    generationProfile: 'hard',
+    status: 'running',
+    active: true,
+    restorable: true,
+    cancelRequested: false,
+    progress: { stage: 'blueprint', percent: 20, attempt: 1 },
+    createdAt: now,
+    startedAt: now,
+    updatedAt: now,
+    progressUpdatedAt: now,
+    completedAt: null,
+    leaseExpiresAt: new Date(now.getTime() + 60_000),
+    expiresAt: new Date(now.getTime() + 86_400_000),
+    ...overrides,
+  };
+}
 
 function mockFindOne(result: unknown, acceptedRecords: Array<Record<string, unknown>> = []) {
   const documentFindOne = jest.fn().mockResolvedValue(result);
@@ -126,9 +156,13 @@ describe('extractStatementMarkdown', () => {
 // ─── 导出 ─────────────────────────────────────────────────────────────────────
 
 describe('exports', () => {
-  it('导出三个 Handler 与路由权限', () => {
+  it('导出生成、后台任务与写入 Handler', () => {
     expect(typeof TestdataGenContextHandler).toBe('function');
     expect(typeof TestdataGenGenerateHandler).toBe('function');
+    expect(typeof TestdataGenJobStartHandler).toBe('function');
+    expect(typeof TestdataGenJobStatusHandler).toBe('function');
+    expect(typeof TestdataGenJobCancelHandler).toBe('function');
+    expect(typeof TestdataGenJobDismissHandler).toBe('function');
     expect(typeof TestdataGenApplyHandler).toBe('function');
     expect(TestdataGenHandlerPriv).toBeDefined();
   });
@@ -190,6 +224,25 @@ describe('TestdataGenContextHandler', () => {
     const handler = setupHandler(TestdataGenContextHandler, { own: true });
     await handler.get();
     expect(handler.response.body.problem.fillInDetected).toBe(false);
+  });
+
+  it('返回当前用户可恢复的后台任务摘要，但不在上下文接口携带完整计划', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({
+      status: 'completed', active: false,
+      plan: { problemType: 'traditional', files: [{ name: 'std.py', content: 'secret' }], caseCount: 1 },
+    });
+    const jobModel = { findRestorable: jest.fn().mockResolvedValue(job) };
+    const handler = setupHandler(TestdataGenContextHandler, { own: true });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    await handler.get();
+    expect(handler.response.body.restorableJob).toEqual(expect.objectContaining({
+      id: String(job._id), status: 'completed', plan: undefined,
+    }));
+    expect(JSON.stringify(handler.response.body)).not.toContain('secret');
   });
 
   it('只返回当前账号可读的非竞赛 Python 3 AC 元数据，不泄漏源码', async () => {
@@ -615,6 +668,132 @@ describe('TestdataGenGenerateHandler', () => {
   });
 });
 
+// ─── Persistent generation job handlers ─────────────────────────────────────
+
+describe('Testdata generation background jobs', () => {
+  it('existing active job is returned without starting or rate-limiting another paid call', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob();
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(job),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102', generationProfile: 'hard' },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        created: false,
+        job: expect.objectContaining({ id: String(job._id), status: 'running' }),
+      }));
+      expect(handler.limitRate).not.toHaveBeenCalled();
+      expect(clientSpy).not.toHaveBeenCalled();
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('new job responds 202 immediately and saves the eventual plan in the background', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const completedJob = makeGenerationJob({
+      _id: job._id,
+      status: 'completed', active: false,
+    });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+      findById: jest.fn().mockResolvedValue(completedJob),
+    };
+    const plan = {
+      problemType: 'traditional',
+      files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
+      caseCount: 1,
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockResolvedValue(plan as never);
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102', caseCount: 1, generationProfile: 'hard' },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(202);
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        created: true,
+        job: expect.objectContaining({ id: String(job._id), status: 'pending' }),
+      }));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
+      expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('job status cannot be read by another user even if they can edit the problem', async () => {
+    const job = makeGenerationJob({ createdBy: 99 });
+    const jobModel = { findById: jest.fn().mockResolvedValue(job) };
+    const handler = setupHandler(TestdataGenJobStatusHandler, {
+      own: true,
+      params: { jobId: String(job._id) },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    await handler.get();
+    expect(handler.response.status).toBe(404);
+    expect(handler.response.body.code).toBe('JOB_NOT_FOUND');
+  });
+
+  it('cancel endpoint persists cancellation and returns the canceled state', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob();
+    const canceled = makeGenerationJob({
+      _id: job._id,
+      status: 'canceled', active: false, restorable: false, cancelRequested: true,
+    });
+    const jobModel = {
+      findById: jest.fn()
+        .mockResolvedValueOnce(job)
+        .mockResolvedValueOnce(canceled),
+      markExpiredLeaseInterrupted: jest.fn(),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const handler = setupHandler(TestdataGenJobCancelHandler, {
+      own: true,
+      params: { jobId: String(job._id) },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    await handler.post();
+    expect(jobModel.cancel).toHaveBeenCalledWith(job._id);
+    expect(handler.response.body.job).toEqual(expect.objectContaining({ status: 'canceled' }));
+  });
+});
+
 // ─── SkeletonHandler（AI 故障降级） ──────────────────────────────────────────
 
 describe('TestdataGenSkeletonHandler', () => {
@@ -769,6 +948,31 @@ describe('TestdataGenApplyHandler', () => {
     expect(Buffer.isBuffer(calls[0][3])).toBe(true);
     expect(calls[0][3].toString()).toBe('1 2\n'); // 规范化补齐换行
     expect(calls[0][4]).toBe(2);
+  });
+
+  it('后台任务结果全部写入成功后标记为已处理，不再自动恢复', async () => {
+    mockFindOne(PROBLEM_DOC);
+    (ProblemModel.addTestdata as jest.Mock).mockResolvedValue(undefined);
+    const job = makeGenerationJob({ status: 'completed', active: false });
+    const jobModel = {
+      findById: jest.fn().mockResolvedValue(job),
+      markApplied: jest.fn().mockResolvedValue(undefined),
+    };
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102',
+        jobId: String(job._id),
+        files: [{ name: '1.in', content: '1\n' }],
+      },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    await handler.post();
+    expect(handler.response.body.failed).toEqual([]);
+    expect(jobModel.markApplied).toHaveBeenCalledWith(job._id);
   });
 
   it('部分文件写入失败时如实返回 failed 列表', async () => {

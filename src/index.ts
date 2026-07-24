@@ -98,6 +98,10 @@ console.log('[AI-Helper] updateHandler OK');
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
+  TestdataGenJobStartHandler,
+  TestdataGenJobStatusHandler,
+  TestdataGenJobCancelHandler,
+  TestdataGenJobDismissHandler,
   TestdataGenSkeletonHandler,
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
@@ -113,6 +117,7 @@ import { VersionCacheModel } from './models/versionCache';
 import { PluginInstallModel } from './models/pluginInstall';
 import { TokenUsageModel } from './models/tokenUsage';
 import { BatchSummaryJobModel } from './models/batchSummaryJob';
+import { TestdataGenerationJobModel } from './models/testdataGenerationJob';
 import { StudentSummaryModel } from './models/studentSummary';
 import { StudentHistoryModel } from './models/studentHistory';
 console.log('[AI-Helper] models OK');
@@ -179,6 +184,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const requestStatsModel = new RequestStatsModel(db);
     const featureStatsModel = new FeatureStatsModel(db);
     const batchSummaryJobModel = new BatchSummaryJobModel(db);
+    const testdataGenerationJobModel = new TestdataGenerationJobModel(db);
     const studentSummaryModel = new StudentSummaryModel(db);
     const studentHistoryModel = new StudentHistoryModel(db);
     const teachingSummaryModel = new TeachingSummaryModel(db);
@@ -228,9 +234,19 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(requestStatsModel, 'requestStatsModel');
     await safeEnsureIndexes(featureStatsModel, 'featureStatsModel');
     await safeEnsureIndexes(batchSummaryJobModel, 'batchSummaryJobModel');
+    await safeEnsureIndexes(testdataGenerationJobModel, 'testdataGenerationJobModel');
     await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
     await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
     await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
+
+    try {
+      const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
+      if (interruptedJobs > 0) {
+        console.log(`[AI-Helper] Marked ${interruptedJobs} expired testdata generation job(s) as interrupted`);
+      }
+    } catch (err) {
+      console.warn('[AI-Helper] Failed to clean expired testdata generation jobs:', err);
+    }
 
     // 执行数据迁移（为历史数据添加 domainId）
     const migrationService = new MigrationService(db);
@@ -287,6 +303,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('requestStatsModel', requestStatsModel);
     ctx.provide('featureStatsModel', featureStatsModel);
     ctx.provide('batchSummaryJobModel', batchSummaryJobModel);
+    ctx.provide('testdataGenerationJobModel', testdataGenerationJobModel);
     ctx.provide('studentSummaryModel', studentSummaryModel);
     ctx.provide('studentHistoryModel', studentHistoryModel);
     ctx.provide('teachingSummaryModel', teachingSummaryModel);
@@ -462,6 +479,15 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // POST /ai-helper/testdata-gen/generate - AI 生成测试数据计划（仅预览）
     ctx.Route('ai_testdata_gen_generate', '/ai-helper/testdata-gen/generate', TestdataGenGenerateHandler, TestdataGenHandlerPriv);
     ctx.Route('ai_testdata_gen_generate_domain', '/d/:domainId/ai-helper/testdata-gen/generate', TestdataGenGenerateHandler, TestdataGenHandlerPriv);
+    // 持久后台任务：页面关闭后继续执行，重新进入时可恢复进度/结果
+    ctx.Route('ai_testdata_gen_job_start', '/ai-helper/testdata-gen/jobs', TestdataGenJobStartHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_start_domain', '/d/:domainId/ai-helper/testdata-gen/jobs', TestdataGenJobStartHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_status', '/ai-helper/testdata-gen/jobs/:jobId', TestdataGenJobStatusHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_status_domain', '/d/:domainId/ai-helper/testdata-gen/jobs/:jobId', TestdataGenJobStatusHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_cancel', '/ai-helper/testdata-gen/jobs/:jobId/cancel', TestdataGenJobCancelHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_cancel_domain', '/d/:domainId/ai-helper/testdata-gen/jobs/:jobId/cancel', TestdataGenJobCancelHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_dismiss', '/ai-helper/testdata-gen/jobs/:jobId/dismiss', TestdataGenJobDismissHandler, TestdataGenHandlerPriv);
+    ctx.Route('ai_testdata_gen_job_dismiss_domain', '/d/:domainId/ai-helper/testdata-gen/jobs/:jobId/dismiss', TestdataGenJobDismissHandler, TestdataGenHandlerPriv);
     // POST /ai-helper/testdata-gen/skeleton - 骨架模式（AI 故障降级，不调用 AI）
     ctx.Route('ai_testdata_gen_skeleton', '/ai-helper/testdata-gen/skeleton', TestdataGenSkeletonHandler, TestdataGenHandlerPriv);
     ctx.Route('ai_testdata_gen_skeleton_domain', '/d/:domainId/ai-helper/testdata-gen/skeleton', TestdataGenSkeletonHandler, TestdataGenHandlerPriv);
