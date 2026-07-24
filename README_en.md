@@ -67,6 +67,7 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
   - Supports traditional problems, LeetCode-style function problems (auto-generates `template.py/java/cc` and `compile.sh`) and fill-in-the-blank problems
   - Paste an existing reference solution as the single source of truth; `config.yaml` is built deterministically and judge settings sync automatically
   - Every generated code file (std.py, generator.py, validator.py, …) starts with a purpose comment; everything is previewed, editable and opt-in before writing
+  - Offers Standard (about 15 minutes) and Hard Problem (about 30 minutes) wait modes, shows the last server-stage update and backup-model switch, and lets the user cancel at any time
   - ⚠️ Highly sensitive to model capability: assign your strongest model to the Test Data Generation scenario; a skeleton mode (no AI) is available as fallback
 - **Teaching Analysis** — class-level insights from collective submission data
   - 8-dimension rule engine (common errors / comprehension gaps / at-risk students / progress trends, …) + error-signature clustering + temporal behavior patterns

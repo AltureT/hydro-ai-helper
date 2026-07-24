@@ -18,7 +18,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TestdataGenerationError = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
+exports.TestdataGenService = exports.TestdataGenerationError = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.TESTDATA_GENERATION_PROFILES = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
+exports.isTestdataGenerationProfile = isTestdataGenerationProfile;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.buildCoveragePlan = buildCoveragePlan;
@@ -70,7 +71,23 @@ const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
-// ─── 常量与校验 ───────────────────────────────────────────────────────────────
+/**
+ * 测试数据生成的等待策略。普通模式覆盖日常题目；高难题模式为需要长推理的
+ * 竞赛题保留更长的单次模型时间。总时限由 Handler 强制执行，始终有限。
+ */
+exports.TESTDATA_GENERATION_PROFILES = {
+    standard: {
+        aiTimeoutMs: 600000,
+        totalTimeoutMs: 900000,
+    },
+    hard: {
+        aiTimeoutMs: 1200000,
+        totalTimeoutMs: 1800000,
+    },
+};
+function isTestdataGenerationProfile(value) {
+    return value === 'standard' || value === 'hard';
+}
 exports.TESTDATA_GEN_LIMITS = {
     MIN_CASES: 1,
     MAX_CASES: 30,
@@ -81,7 +98,7 @@ exports.TESTDATA_GEN_LIMITS = {
      * AI 单次尝试超时（毫秒）。测试数据生成正确性优先、允许长思考，
      * 故显著高于普通对话；且本次调用不发送 max_tokens（输出长度不设限）。
      */
-    AI_TIMEOUT_MS: 600000,
+    AI_TIMEOUT_MS: exports.TESTDATA_GENERATION_PROFILES.standard.aiTimeoutMs,
     /** apply 时单文件内容上限（字节） */
     MAX_FILE_SIZE: 256 * 1024,
     /** apply 时文件数量上限 */
@@ -2474,11 +2491,19 @@ class TestdataGenService {
         this.emitProgress(params, 'complete', 100);
         return plan;
     }
-    getCallOptions(signal) {
+    getCallOptions(params, attempt = 1) {
+        const profile = exports.TESTDATA_GENERATION_PROFILES[params.generationProfile || 'standard'];
         return {
-            signal,
+            signal: params.signal,
             maxTokens: null,
-            timeoutMs: exports.TESTDATA_GEN_LIMITS.AI_TIMEOUT_MS,
+            timeoutMs: profile.aiTimeoutMs,
+            // 长推理超时后不在同一模型上盲等第二轮；其他短暂网络/服务错误仍保留快速重试。
+            retryTimeouts: false,
+            onAttempt: event => {
+                if (event.type === 'fallback') {
+                    this.emitProgress(params, 'model_fallback', attempt > 1 ? 72 : 30, attempt);
+                }
+            },
         };
     }
     /**
@@ -2558,7 +2583,7 @@ class TestdataGenService {
     async generateDirect(params) {
         const systemPrompt = buildTestdataSystemPrompt();
         const userPrompt = buildTestdataUserPrompt(params);
-        const callOptions = this.getCallOptions(params.signal);
+        const callOptions = this.getCallOptions(params);
         this.emitProgress(params, 'blueprint', 12);
         const initialResult = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         const results = [initialResult];
@@ -2733,7 +2758,7 @@ class TestdataGenService {
         const userPrompt = buildSandboxBlueprintUserPrompt(params);
         const solutionSystemPrompt = buildSolutionBlueprintSystemPrompt();
         const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
-        const callOptions = this.getCallOptions(params.signal);
+        const callOptions = this.getCallOptions(params, attempt);
         report('blueprint', 10);
         const initialResult = await this.aiClient.chat([{ role: 'user', content: solutionUserPrompt }], solutionSystemPrompt, callOptions);
         const results = [initialResult];

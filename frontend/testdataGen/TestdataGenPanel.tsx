@@ -6,7 +6,7 @@
  * 后端在写入 config.yaml 后由 HydroOJ 自动同步评测设置。
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { i18n } from '../utils/i18n';
 import { buildApiUrl } from '../utils/domainUtils';
 import {
@@ -33,7 +33,10 @@ interface ProblemContext {
     isOwn: boolean;
   }>;
   limits: { minCases: number; maxCases: number; maxExtraRequirements: number; maxProvidedStd?: number };
+  generationProfiles?: Record<GenerationProfile, { aiTimeoutMs: number; totalTimeoutMs: number }>;
 }
+
+type GenerationProfile = 'standard' | 'hard';
 
 interface PlannedFile {
   name: string;
@@ -94,6 +97,7 @@ type GenerationProgressStage =
   | 'checking_templates'
   | 'stress_testing'
   | 'pipeline_repair'
+  | 'model_fallback'
   | 'model_escalation'
   | 'assembling'
   | 'complete';
@@ -154,10 +158,17 @@ const PROGRESS_STAGE_CAPS: Record<GenerationProgressStage, number> = {
   checking_templates: 84,
   stress_testing: 90,
   pipeline_repair: 94,
+  model_fallback: 60,
   model_escalation: 94,
   assembling: 98,
   complete: 100,
 };
+
+const DEFAULT_GENERATION_PROFILES: Record<GenerationProfile, { aiTimeoutMs: number; totalTimeoutMs: number }> = {
+  standard: { aiTimeoutMs: 600_000, totalTimeoutMs: 900_000 },
+  hard: { aiTimeoutMs: 1_200_000, totalTimeoutMs: 1_800_000 },
+};
+const CLIENT_TIMEOUT_GRACE_MS = 30_000;
 
 // deterministic 用中性灰：getBadgeStyle 无 neutral 变体，借 info 外形覆盖配色
 const getOriginBadgeStyle = (origin: string): React.CSSProperties => {
@@ -294,8 +305,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     stage: 'preparing', percent: 2, attempt: 1, source: 'estimated',
   });
   const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
+  const [generationIdleSeconds, setGenerationIdleSeconds] = useState(0);
+  const [generationCanceling, setGenerationCanceling] = useState(false);
+  const generationStartedAtRef = useRef(0);
+  const generationLastEventAtRef = useRef(0);
+  const generationAbortControllerRef = useRef<AbortController | null>(null);
+  const generationAbortReasonRef = useRef<'user' | 'timeout' | null>(null);
 
   // 表单状态
+  const [generationProfile, setGenerationProfile] = useState<GenerationProfile>('standard');
   const [problemKind, setProblemKind] = useState<'auto' | 'traditional' | 'function'>('auto');
   const [fillInMode, setFillInMode] = useState<'auto' | 'yes' | 'no'>('auto');
   const [caseCount, setCaseCount] = useState(10);
@@ -315,11 +333,16 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   // 实时事件之间让进度缓慢前移；旧后端无 SSE 时则按等待时长给出保守估算，最高不超过 88%。
   useEffect(() => {
     if (phase !== 'generating') return undefined;
-    const startedAt = Date.now();
+    const startedAt = generationStartedAtRef.current || Date.now();
+    generationStartedAtRef.current = startedAt;
+    if (!generationLastEventAtRef.current) generationLastEventAtRef.current = startedAt;
     setGenerationElapsedSeconds(0);
+    setGenerationIdleSeconds(0);
     const timer = window.setInterval(() => {
-      const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      const now = Date.now();
+      const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000));
       setGenerationElapsedSeconds(elapsed);
+      setGenerationIdleSeconds(Math.max(0, Math.floor((now - generationLastEventAtRef.current) / 1000)));
       setGenerationProgress(prev => {
         if (prev.source === 'live') {
           const cap = PROGRESS_STAGE_CAPS[prev.stage] ?? 98;
@@ -395,11 +418,23 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
+    const profileTiming = context?.generationProfiles?.[generationProfile]
+      || DEFAULT_GENERATION_PROFILES[generationProfile];
+    const startedAt = Date.now();
+    generationStartedAtRef.current = startedAt;
+    generationLastEventAtRef.current = startedAt;
+    generationAbortReasonRef.current = null;
+    setGenerationIdleSeconds(0);
+    setGenerationCanceling(false);
     setGenerationProgress({ stage: 'preparing', percent: 2, attempt: 1, source: 'estimated' });
     setPhase('generating');
     const ac = new AbortController();
-    // 生成不设 token 上限、服务端单次超时 10 分钟，前端仅作 15 分钟最终兜底
-    const timeout = setTimeout(() => ac.abort(), 900_000);
+    generationAbortControllerRef.current = ac;
+    // 服务端先按所选模式截止；前端多留 30 秒以接收结构化超时事件。
+    const timeout = setTimeout(() => {
+      generationAbortReasonRef.current = 'timeout';
+      ac.abort();
+    }, profileTiming.totalTimeoutMs + CLIENT_TIMEOUT_GRACE_MS);
     try {
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/generate'), {
         method: 'POST',
@@ -420,6 +455,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
+          generationProfile,
         }),
       });
       if (!response.ok) {
@@ -429,6 +465,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       const contentType = response.headers.get('content-type') || '';
       const newPlan = contentType.includes('text/event-stream')
         ? await consumeGenerationProgressStream(response, progress => {
+          generationLastEventAtRef.current = Date.now();
           setGenerationProgress(prev => ({
             ...progress,
             percent: Math.max(prev.percent, Math.min(100, progress.percent)),
@@ -452,20 +489,43 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setApplyResult(null);
       setPhase('preview');
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setError(i18n('ai_helper_testdata_err_timeout'));
+      if (generationAbortReasonRef.current === 'user') {
+        setError(i18n('ai_helper_testdata_err_canceled'));
+        setShowFallbackHint(false);
+      } else if (err instanceof DOMException && err.name === 'AbortError') {
+        setError(i18n(
+          'ai_helper_testdata_err_timeout_profile',
+          Math.round(profileTiming.totalTimeoutMs / 60_000),
+        ));
+        setShowFallbackHint(true);
       } else {
         setError(err instanceof Error ? err.message : String(err));
+        setShowFallbackHint(true);
       }
       setShowDeeperReasoningHint(
         err instanceof TestdataRequestError && err.recommendDeeperReasoning,
       );
-      setShowFallbackHint(true);
       setPhase('form');
     } finally {
       clearTimeout(timeout);
+      if (generationAbortControllerRef.current === ac) {
+        generationAbortControllerRef.current = null;
+      }
+      generationAbortReasonRef.current = null;
+      setGenerationCanceling(false);
     }
-  }, [problemId, problemKind, fillInMode, caseCount, dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements]);
+  }, [
+    problemId, context, generationProfile, problemKind, fillInMode, caseCount,
+    dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements,
+  ]);
+
+  const handleCancelGeneration = useCallback(() => {
+    const controller = generationAbortControllerRef.current;
+    if (!controller || controller.signal.aborted) return;
+    generationAbortReasonRef.current = 'user';
+    setGenerationCanceling(true);
+    controller.abort();
+  }, []);
 
   // ─── 骨架模式（AI 故障降级） ─────────────────────────────────────────────────
 
@@ -630,6 +690,33 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       {!context.problem.hasStatement && (
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
           {i18n('ai_helper_testdata_warn_no_statement')}
+        </div>
+      )}
+      <div style={fieldStyle}>
+        <label style={labelStyle}>{i18n('ai_helper_testdata_profile_label')}</label>
+        <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
+          {(['standard', 'hard'] as GenerationProfile[]).map(profile => (
+            <button
+              key={profile}
+              type="button"
+              aria-pressed={generationProfile === profile}
+              onClick={() => setGenerationProfile(profile)}
+              style={{
+                ...getButtonStyle(generationProfile === profile ? 'primary' : 'secondary'),
+                minWidth: '150px',
+              }}
+            >
+              {i18n(`ai_helper_testdata_profile_${profile}`)}
+            </button>
+          ))}
+        </div>
+        <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+          {i18n(`ai_helper_testdata_profile_${generationProfile}_hint`)}
+        </div>
+      </div>
+      {generationProfile === 'hard' && (
+        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
+          {i18n('ai_helper_testdata_profile_hard_warning')}
         </div>
       )}
       <div style={fieldStyle}>
@@ -819,6 +906,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const percent = Math.max(2, Math.min(100, Math.round(generationProgress.percent)));
     const elapsedMinutes = Math.floor(generationElapsedSeconds / 60);
     const elapsedSeconds = generationElapsedSeconds % 60;
+    const idleMinutes = Math.floor(generationIdleSeconds / 60);
+    const idleSeconds = generationIdleSeconds % 60;
+    const profileTiming = context?.generationProfiles?.[generationProfile]
+      || DEFAULT_GENERATION_PROFILES[generationProfile];
+    const longWaitThresholdSeconds = generationProfile === 'hard' ? 10 * 60 : 5 * 60;
+    const totalLimitMinutes = Math.round(profileTiming.totalTimeoutMs / 60_000);
     return (
       <div style={{ padding: SPACING.xl, color: COLORS.textSecondary }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.base }}>
@@ -839,6 +932,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               {generationProgress.attempt > 1
                 ? ` · ${i18n('ai_helper_testdata_progress_attempt', generationProgress.attempt)}`
                 : ''}
+              {' · '}
+              {i18n(`ai_helper_testdata_profile_${generationProfile}`)}
             </div>
           </div>
           <div style={{ fontSize: '18px', fontWeight: 700, color: COLORS.primary, fontVariantNumeric: 'tabular-nums' }}>
@@ -865,10 +960,41 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           display: 'flex', justifyContent: 'space-between', gap: SPACING.sm,
           ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.sm,
         }}>
-          <span>{i18n('ai_helper_testdata_generating_hint')}</span>
+          <span>{i18n(
+            generationProfile === 'hard'
+              ? 'ai_helper_testdata_generating_hint_hard'
+              : 'ai_helper_testdata_generating_hint_standard',
+            totalLimitMinutes,
+          )}</span>
           <span style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
             {i18n('ai_helper_testdata_progress_elapsed', elapsedMinutes, String(elapsedSeconds).padStart(2, '0'))}
           </span>
+        </div>
+        {generationIdleSeconds >= 30 && (
+          <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginTop: SPACING.xs }}>
+            {i18n(
+              'ai_helper_testdata_progress_last_update',
+              idleMinutes,
+              String(idleSeconds).padStart(2, '0'),
+            )}
+          </div>
+        )}
+        {generationIdleSeconds >= longWaitThresholdSeconds && generationProgress.stage !== 'model_fallback' && (
+          <div style={{ ...getAlertStyle('info'), marginTop: SPACING.base }}>
+            {i18n('ai_helper_testdata_progress_waiting_long')}
+          </div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: SPACING.base }}>
+          <button
+            type="button"
+            style={getButtonStyle('secondary')}
+            onClick={handleCancelGeneration}
+            disabled={generationCanceling}
+          >
+            {i18n(generationCanceling
+              ? 'ai_helper_testdata_canceling'
+              : 'ai_helper_testdata_cancel')}
+          </button>
         </div>
       </div>
     );

@@ -13,7 +13,11 @@ import {
   extractStatementMarkdown,
 } from '../../handlers/testdataGenHandler';
 import * as openaiClient from '../../services/openaiClient';
-import { TestdataGenService, TestdataGenerationError } from '../../services/testdataGenService';
+import {
+  TestdataGenService,
+  TestdataGenerationError,
+  TESTDATA_GENERATION_PROFILES,
+} from '../../services/testdataGenService';
 import { ObjectId } from '../../utils/mongo';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
@@ -157,6 +161,7 @@ describe('TestdataGenContextHandler', () => {
     expect(handler.response.body.problem.pid).toBe('D3102');
     expect(handler.response.body.problem.hasStatement).toBe(true);
     expect(handler.response.body.existingFiles).toEqual(['1.in', 'config.yaml']);
+    expect(handler.response.body.generationProfiles).toEqual(TESTDATA_GENERATION_PROFILES);
   });
 
   it('拥有 PERM_EDIT_PROBLEM 的教师可访问', async () => {
@@ -254,6 +259,63 @@ describe('TestdataGenGenerateHandler', () => {
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
+  });
+
+  it('非法生成等待方式返回 400，且不启动 AI', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', generationProfile: 'unlimited' },
+    });
+
+    try {
+      await handler.post();
+
+      expect(handler.response.status).toBe(400);
+      expect(handler.response.body.code).toBe('INVALID_GENERATION_PROFILE');
+      expect(clientSpy).not.toHaveBeenCalled();
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('高难题模式传入生成服务，并使用 30 分钟服务端总时限', async () => {
+    jest.useFakeTimers();
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    let capturedProfile: string | undefined;
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockImplementation(
+      (params: { generationProfile?: string; signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        capturedProfile = params.generationProfile;
+        params.signal?.addEventListener('abort', () =>
+          reject(Object.assign(new Error('deadline'), { name: 'AbortError' })));
+      }) as never,
+    );
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', generationProfile: 'hard' },
+    });
+
+    try {
+      const done = handler.post();
+      for (let i = 0; i < 20 && !capturedProfile; i++) await Promise.resolve();
+      expect(capturedProfile).toBe('hard');
+
+      await jest.advanceTimersByTimeAsync(TESTDATA_GENERATION_PROFILES.hard.totalTimeoutMs);
+      await done;
+
+      expect(handler.response.status).toBe(504);
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'GENERATION_TIMEOUT',
+        category: 'timeout',
+      }));
+    } finally {
+      jest.useRealTimers();
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
   });
 
   it('选择本题 Python 3 AC 后，将其源码作为传统题权威标程传入服务', async () => {

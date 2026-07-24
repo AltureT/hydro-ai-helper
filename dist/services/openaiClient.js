@@ -587,7 +587,8 @@ class MultiModelClient {
         const onExternalAbort = () => totalAc.abort();
         options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
         try {
-            for (const { config, client } of activeClients) {
+            for (let clientIndex = 0; clientIndex < activeClients.length; clientIndex++) {
+                const { config, client } = activeClients[clientIndex];
                 if (skippedEndpoints.has(config.endpointId))
                     continue;
                 for (let attempt = 0; attempt <= RETRY.MAX_RETRIES; attempt++) {
@@ -598,6 +599,18 @@ class MultiModelClient {
                             : new AIServiceError('请求已取消', 'aborted');
                     }
                     try {
+                        try {
+                            options?.onAttempt?.({
+                                type: attempt > 0 ? 'retry' : clientIndex > 0 ? 'fallback' : 'primary',
+                                endpointId: config.endpointId,
+                                endpointName: config.endpointName,
+                                modelName: config.modelName,
+                                attempt: attempt + 1,
+                            });
+                        }
+                        catch {
+                            // 可观测回调不得影响模型调用。
+                        }
                         const chatResult = await client.chat(messages, systemPrompt, {
                             signal: totalAc.signal,
                             maxTokens: options?.maxTokens,
@@ -651,7 +664,9 @@ class MultiModelClient {
                             break;
                         }
                         // 可重试 + 尚有重试次数 → backoff 后重试
-                        if (aiError.isRetryable && attempt < RETRY.MAX_RETRIES) {
+                        const retryCurrentModel = aiError.isRetryable
+                            && (aiError.category !== 'timeout' || options?.retryTimeouts !== false);
+                        if (retryCurrentModel && attempt < RETRY.MAX_RETRIES) {
                             const delay = calculateBackoffMs(attempt);
                             console.warn(`[MultiModelClient] ${config.modelName} 失败 (${aiError.category})，${delay}ms 后重试 (${attempt + 1}/${RETRY.MAX_RETRIES})`);
                             try {

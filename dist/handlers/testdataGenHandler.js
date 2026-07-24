@@ -224,6 +224,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                     maxExtraRequirements: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS,
                     maxProvidedStd: testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
                 },
+                generationProfiles: testdataGenService_1.TESTDATA_GENERATION_PROFILES,
             };
             this.response.type = 'application/json';
         }
@@ -244,6 +245,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         let keepaliveTimer;
         let streamRawRes;
         let streamCloseListener;
+        let generationDeadlineTimer;
+        let generationDeadlineExceeded = false;
         try {
             if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
                 return;
@@ -261,6 +264,13 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             if (!checkEditPermission(this, pdoc))
                 return;
+            const requestedProfile = body.generationProfile || 'standard';
+            if (!(0, testdataGenService_1.isTestdataGenerationProfile)(requestedProfile)) {
+                sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
+                return;
+            }
+            const generationProfile = requestedProfile;
+            const generationTiming = testdataGenService_1.TESTDATA_GENERATION_PROFILES[generationProfile];
             // AI 生成开销大：限制每人每 5 分钟 5 次
             if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
                 op: 'ai_testdata_gen', periodSecs: 300, maxOps: 5,
@@ -325,6 +335,10 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             streamCloseListener = () => { if (!rawRes?.writableEnded)
                 requestAc.abort(); };
             rawRes?.on?.('close', streamCloseListener);
+            generationDeadlineTimer = setTimeout(() => {
+                generationDeadlineExceeded = true;
+                requestAc.abort();
+            }, generationTiming.totalTimeoutMs);
             const accept = String(this.request.headers?.accept || '').toLowerCase();
             if (accept.includes('text/event-stream') && rawRes) {
                 koaCtx.respond = false;
@@ -344,6 +358,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 existingFiles,
                 existingConfig: pdoc.config,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
+                generationProfile,
                 signal: requestAc.signal,
                 onProgress: progress => progressStream?.writeEvent('progress', progress),
             });
@@ -366,6 +381,24 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
         }
         catch (err) {
+            if ((0, testdataGenService_1.isCancellation)(err) && generationDeadlineExceeded) {
+                const errorBody = {
+                    error: this.translate('ai_helper_testdata_err_timeout'),
+                    code: 'GENERATION_TIMEOUT',
+                    category: 'timeout',
+                    retryable: true,
+                };
+                if (progressStream) {
+                    progressStream.writeEvent('error', errorBody);
+                    progressStream.end();
+                }
+                else {
+                    this.response.status = 504;
+                    this.response.body = errorBody;
+                    this.response.type = 'application/json';
+                }
+                return;
+            }
             // 客户端主动断开：非故障，不上报也不打 error 日志
             if ((0, testdataGenService_1.isCancellation)(err)) {
                 if (progressStream) {
@@ -435,6 +468,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         finally {
             if (keepaliveTimer)
                 clearInterval(keepaliveTimer);
+            if (generationDeadlineTimer)
+                clearTimeout(generationDeadlineTimer);
             if (streamRawRes && streamCloseListener) {
                 streamRawRes.removeListener?.('close', streamCloseListener);
             }

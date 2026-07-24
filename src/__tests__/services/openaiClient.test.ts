@@ -302,6 +302,34 @@ describe('MultiModelClient', () => {
   });
 
   describe('retry behavior', () => {
+    it('should skip same-model timeout retries when retryTimeouts=false', async () => {
+      const client = new MultiModelClient([
+        makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),
+        makeResolvedConfig({ endpointId: 'ep-2', modelName: 'model-b' }),
+      ]);
+      const attempts: Array<{ type: string; modelName: string }> = [];
+
+      mockedAxios.post
+        .mockRejectedValueOnce(createTimeoutError())
+        .mockResolvedValueOnce({
+          data: {
+            choices: [{ message: { role: 'assistant', content: 'Backup after timeout' }, finish_reason: 'stop' }],
+          },
+        });
+
+      const result = await client.chat([{ role: 'user', content: 'Hi' }], 'System', {
+        retryTimeouts: false,
+        onAttempt: event => attempts.push({ type: event.type, modelName: event.modelName }),
+      });
+
+      expect(result.content).toBe('Backup after timeout');
+      expect(mockedAxios.post).toHaveBeenCalledTimes(2);
+      expect(attempts).toEqual([
+        { type: 'primary', modelName: 'model-a' },
+        { type: 'fallback', modelName: 'model-b' },
+      ]);
+    });
+
     it('should retry on 503 and succeed on third attempt', async () => {
       const client = new MultiModelClient([makeResolvedConfig()]);
 

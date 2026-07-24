@@ -27,6 +27,9 @@ import {
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
+  TESTDATA_GENERATION_PROFILES,
+  isTestdataGenerationProfile,
+  type TestdataGenerationProfile,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import {
@@ -297,6 +300,7 @@ export class TestdataGenContextHandler extends Handler {
           maxExtraRequirements: TESTDATA_GEN_LIMITS.MAX_EXTRA_REQUIREMENTS,
           maxProvidedStd: TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD,
         },
+        generationProfiles: TESTDATA_GENERATION_PROFILES,
       };
       this.response.type = 'application/json';
     } catch (err) {
@@ -318,6 +322,7 @@ interface GenerateRequestBody {
   providedStd?: string;
   acceptedStdRecordId?: string;
   extraRequirements?: string;
+  generationProfile?: string;
 }
 
 /**
@@ -330,6 +335,8 @@ export class TestdataGenGenerateHandler extends Handler {
     let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
     let streamRawRes: ServerResponse | undefined;
     let streamCloseListener: (() => void) | undefined;
+    let generationDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let generationDeadlineExceeded = false;
     try {
       if (rejectIfCsrfInvalid(this)) return;
       const domainId = getDomainId(this);
@@ -347,6 +354,14 @@ export class TestdataGenGenerateHandler extends Handler {
         return;
       }
       if (!checkEditPermission(this, pdoc)) return;
+
+      const requestedProfile = body.generationProfile || 'standard';
+      if (!isTestdataGenerationProfile(requestedProfile)) {
+        sendError(this, 400, 'INVALID_GENERATION_PROFILE', 'ai_helper_testdata_err_invalid_generation_profile');
+        return;
+      }
+      const generationProfile: TestdataGenerationProfile = requestedProfile;
+      const generationTiming = TESTDATA_GENERATION_PROFILES[generationProfile];
 
       // AI 生成开销大：限制每人每 5 分钟 5 次
       if (await applyRateLimit(this, {
@@ -415,6 +430,10 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       streamCloseListener = () => { if (!rawRes?.writableEnded) requestAc.abort(); };
       rawRes?.on?.('close', streamCloseListener);
+      generationDeadlineTimer = setTimeout(() => {
+        generationDeadlineExceeded = true;
+        requestAc.abort();
+      }, generationTiming.totalTimeoutMs);
 
       const accept = String(this.request.headers?.accept || '').toLowerCase();
       if (accept.includes('text/event-stream') && rawRes) {
@@ -435,6 +454,7 @@ export class TestdataGenGenerateHandler extends Handler {
         existingFiles,
         existingConfig: pdoc.config,
         fillInDetected: isFillInBlankProblem(statement),
+        generationProfile,
         signal: requestAc.signal,
         onProgress: progress => progressStream?.writeEvent('progress', progress),
       });
@@ -461,6 +481,23 @@ export class TestdataGenGenerateHandler extends Handler {
         this.response.type = 'application/json';
       }
     } catch (err) {
+      if (isCancellation(err) && generationDeadlineExceeded) {
+        const errorBody = {
+          error: this.translate('ai_helper_testdata_err_timeout'),
+          code: 'GENERATION_TIMEOUT',
+          category: 'timeout',
+          retryable: true,
+        };
+        if (progressStream) {
+          progressStream.writeEvent('error', errorBody);
+          progressStream.end();
+        } else {
+          this.response.status = 504;
+          this.response.body = errorBody;
+          this.response.type = 'application/json';
+        }
+        return;
+      }
       // 客户端主动断开：非故障，不上报也不打 error 日志
       if (isCancellation(err)) {
         if (progressStream) {
@@ -533,6 +570,7 @@ export class TestdataGenGenerateHandler extends Handler {
       }
     } finally {
       if (keepaliveTimer) clearInterval(keepaliveTimer);
+      if (generationDeadlineTimer) clearTimeout(generationDeadlineTimer);
       if (streamRawRes && streamCloseListener) {
         streamRawRes.removeListener?.('close', streamCloseListener);
       }
