@@ -37,7 +37,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.JailbreakLogBulkReviewHandlerPriv = exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsExportHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogBulkReviewHandler = exports.JailbreakLogReviewHandler = exports.JailbreakLogsExportHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
+exports.JailbreakLogBulkReviewHandlerPriv = exports.JailbreakLogReviewHandlerPriv = exports.JailbreakLogsExportHandlerPriv = exports.JailbreakLogFilterOptionsHandlerPriv = exports.JailbreakLogsHandlerPriv = exports.AdminConfigHandlerPriv = exports.JailbreakLogBulkReviewHandler = exports.JailbreakLogReviewHandler = exports.JailbreakLogsExportHandler = exports.JailbreakLogFilterOptionsHandler = exports.JailbreakLogsHandler = exports.AdminConfigHandler = void 0;
 exports.serializeSafetyLogsCsv = serializeSafetyLogsCsv;
 const hydrooj_1 = require("hydrooj");
 const aiConfig_1 = require("../models/aiConfig");
@@ -47,6 +47,7 @@ const csrfHelper_1 = require("../lib/csrfHelper");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
 const domainHelper_1 = require("../utils/domainHelper");
+const problemIdHelper_1 = require("../utils/problemIdHelper");
 const mongo_1 = require("../utils/mongo");
 /**
  * AdminConfigHandler - AI 配置页面
@@ -442,6 +443,90 @@ class JailbreakLogsHandler extends hydrooj_1.Handler {
 }
 exports.JailbreakLogsHandler = JailbreakLogsHandler;
 /**
+ * JailbreakLogFilterOptionsHandler - 按输入片段返回当前域安全日志中的学生/题目候选项
+ * GET /ai-helper/admin/jailbreak-logs/filter-options?kind=user&q=42
+ */
+class JailbreakLogFilterOptionsHandler extends hydrooj_1.Handler {
+    async get() {
+        try {
+            const query = this.request.query || {};
+            const kind = String(query.kind || '');
+            const partial = String(query.q || '').trim();
+            const requestedLimit = parseInt(String(query.limit || '10'), 10) || 10;
+            const limit = Math.min(20, Math.max(1, requestedLimit));
+            const invalidPartial = kind === 'user'
+                ? !/^\d{1,32}$/.test(partial)
+                : !partial || partial.length > 64;
+            if (!['user', 'problem'].includes(kind) || invalidPartial) {
+                this.response.status = 400;
+                this.response.body = {
+                    error: this.translate('ai_helper_admin_jailbreak_filter_suggestions_invalid'),
+                    code: 'INVALID_JAILBREAK_FILTER_SUGGESTION',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_safety_filter_suggestions',
+                periodSecs: 60,
+                maxOps: 60,
+                failOpen: false,
+                errorMessage: 'ai_helper_admin_jailbreak_filter_suggestions_rate_limited',
+            }))
+                return;
+            const domainId = (0, domainHelper_1.getDomainId)(this);
+            const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
+            if (kind === 'user') {
+                const userIds = await jailbreakLogModel.suggestUserIds(domainId, partial, limit);
+                const users = userIds.length > 0
+                    ? await this.ctx.db.collection('user').find({ _id: { $in: userIds } }, { projection: { _id: 1, uname: 1 } }).toArray()
+                    : [];
+                const nameById = new Map(users.map((user) => [user._id, user.uname || String(user._id)]));
+                this.response.body = {
+                    kind,
+                    options: userIds.map((id) => ({
+                        value: String(id),
+                        label: nameById.get(id) || String(id),
+                    })),
+                };
+            }
+            else {
+                const problemIds = await jailbreakLogModel.suggestProblemIds(domainId, partial, limit);
+                const numericIds = [
+                    ...new Set(problemIds
+                        .map((problemId) => (0, problemIdHelper_1.parseProblemId)(problemId))
+                        .filter((problemId) => problemId !== null)),
+                ];
+                const problems = numericIds.length > 0
+                    ? await this.ctx.db.collection('document').find({ domainId, docType: 10, docId: { $in: numericIds } }, { projection: { docId: 1, title: 1 } }).toArray()
+                    : [];
+                const titleById = new Map(problems.map((problem) => [problem.docId, problem.title || String(problem.docId)]));
+                this.response.body = {
+                    kind,
+                    options: problemIds.map((id) => {
+                        const numericId = (0, problemIdHelper_1.parseProblemId)(id);
+                        return {
+                            value: id,
+                            label: numericId === null ? id : titleById.get(numericId) || id,
+                        };
+                    }),
+                };
+            }
+            this.response.type = 'application/json';
+        }
+        catch (err) {
+            console.error('[AI Helper] JailbreakLogFilterOptionsHandler error:', err instanceof Error ? err.message : 'unknown');
+            this.response.status = 500;
+            this.response.body = {
+                error: this.translate('ai_helper_admin_jailbreak_filter_suggestions_failed'),
+                code: 'JAILBREAK_FILTER_SUGGESTIONS_FAILED',
+            };
+            this.response.type = 'application/json';
+        }
+    }
+}
+exports.JailbreakLogFilterOptionsHandler = JailbreakLogFilterOptionsHandler;
+/**
  * JailbreakLogsExportHandler - 导出当前域内、按当前筛选条件命中的脱敏安全事件
  * GET /ai-helper/admin/jailbreak-logs/export
  */
@@ -594,6 +679,7 @@ exports.JailbreakLogBulkReviewHandler = JailbreakLogBulkReviewHandler;
 // 导出路由权限配置（使用系统管理员权限）
 exports.AdminConfigHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
+exports.JailbreakLogFilterOptionsHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogsExportHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 exports.JailbreakLogBulkReviewHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;

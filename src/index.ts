@@ -44,6 +44,8 @@ import {
   AdminConfigHandlerPriv,
   JailbreakLogsHandler,
   JailbreakLogsHandlerPriv,
+  JailbreakLogFilterOptionsHandler,
+  JailbreakLogFilterOptionsHandlerPriv,
   JailbreakLogsExportHandler,
   JailbreakLogsExportHandlerPriv,
   JailbreakLogReviewHandler,
@@ -367,6 +369,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
     ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
     ctx.Route('ai_helper_admin_jailbreak_logs_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
+    ctx.Route('ai_helper_admin_jailbreak_logs_filter_options', '/ai-helper/admin/jailbreak-logs/filter-options', JailbreakLogFilterOptionsHandler, JailbreakLogFilterOptionsHandlerPriv);
+    ctx.Route('ai_helper_admin_jailbreak_logs_filter_options_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/filter-options', JailbreakLogFilterOptionsHandler, JailbreakLogFilterOptionsHandlerPriv);
     ctx.Route('ai_helper_admin_jailbreak_logs_export', '/ai-helper/admin/jailbreak-logs/export', JailbreakLogsExportHandler, JailbreakLogsExportHandlerPriv);
     ctx.Route('ai_helper_admin_jailbreak_logs_export_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/export', JailbreakLogsExportHandler, JailbreakLogsExportHandlerPriv);
 

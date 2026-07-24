@@ -16,6 +16,7 @@ import {
 } from '../utils/styles';
 import type {
   APIConfigResponse,
+  JailbreakLogFilterOption,
   JailbreakLogFilters,
   JailbreakLogPagination,
 } from './configTypes';
@@ -127,6 +128,32 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
       showToast(message, 'error');
     } finally {
       if (requestId === logsRequestId.current) setLogsLoading(false);
+    }
+  }, []);
+
+  const loadLogFilterOptions = useCallback(async (
+    kind: 'user' | 'problem',
+    query: string
+  ): Promise<JailbreakLogFilterOption[]> => {
+    const params = new URLSearchParams({ kind, q: query, limit: '10' });
+    try {
+      const res = await fetch(
+        `${buildApiUrl('/ai-helper/admin/jailbreak-logs/filter-options')}?${params.toString()}`,
+        { method: 'GET', credentials: 'include' }
+      );
+      if (!res.ok) {
+        let message = i18n('ai_helper_admin_jailbreak_filter_suggestions_failed');
+        try {
+          const errorBody = await res.json();
+          if (typeof errorBody?.error === 'string') message = errorBody.error;
+        } catch { /* keep the localized fallback */ }
+        throw new Error(message);
+      }
+      const json = await res.json();
+      return Array.isArray(json.options) ? json.options : [];
+    } catch (err) {
+      console.error('Load safety filter options error:', err);
+      throw err;
     }
   }, []);
 
@@ -365,7 +392,6 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
             <JailbreakLogsViewer
               logPagination={logPagination}
               loading={logsLoading}
-              defaultCollapsed={false}
               appendPatternDisabled={rulesSaving || !rulesReady}
               onChangePage={changePage}
               onCopyToClipboard={copyToClipboard}
@@ -375,6 +401,7 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
               onExport={exportJailbreakLogs}
               filters={logFilters}
               onChangeFilters={changeLogFilters}
+              onLoadFilterOptions={loadLogFilterOptions}
             />
           )}
         </>

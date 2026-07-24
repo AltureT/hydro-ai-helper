@@ -138,6 +138,11 @@ export interface JailbreakLogPagination {
   filters?: JailbreakLogFilters;
 }
 
+export interface JailbreakLogFilterOption {
+  value: string;
+  label: string;
+}
+
 export interface TelemetryStatus {
   enabled: boolean;
   instanceId: string;

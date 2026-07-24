@@ -13,8 +13,10 @@ import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { translateWithParams } from '../utils/i18nHelper';
 import { getDomainId } from '../utils/domainHelper';
+import { parseProblemId } from '../utils/problemIdHelper';
 import type { PluginInstallModel } from '../models/pluginInstall';
 import { ObjectId } from '../utils/mongo';
+import type { ProblemDocument, UserDocument } from '../types/hydrooj';
 import type {
   SafetyAction,
   SafetyDetectionSource,
@@ -467,6 +469,101 @@ export class JailbreakLogsHandler extends Handler {
 }
 
 /**
+ * JailbreakLogFilterOptionsHandler - 按输入片段返回当前域安全日志中的学生/题目候选项
+ * GET /ai-helper/admin/jailbreak-logs/filter-options?kind=user&q=42
+ */
+export class JailbreakLogFilterOptionsHandler extends Handler {
+  async get() {
+    try {
+      const query = this.request.query || {};
+      const kind = String(query.kind || '');
+      const partial = String(query.q || '').trim();
+      const requestedLimit = parseInt(String(query.limit || '10'), 10) || 10;
+      const limit = Math.min(20, Math.max(1, requestedLimit));
+      const invalidPartial = kind === 'user'
+        ? !/^\d{1,32}$/.test(partial)
+        : !partial || partial.length > 64;
+      if (!['user', 'problem'].includes(kind) || invalidPartial) {
+        this.response.status = 400;
+        this.response.body = {
+          error: this.translate('ai_helper_admin_jailbreak_filter_suggestions_invalid'),
+          code: 'INVALID_JAILBREAK_FILTER_SUGGESTION',
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+      if (await applyRateLimit(this, {
+        op: 'ai_safety_filter_suggestions',
+        periodSecs: 60,
+        maxOps: 60,
+        failOpen: false,
+        errorMessage: 'ai_helper_admin_jailbreak_filter_suggestions_rate_limited',
+      })) return;
+
+      const domainId = getDomainId(this);
+      const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
+      if (kind === 'user') {
+        const userIds = await jailbreakLogModel.suggestUserIds(domainId, partial, limit);
+        const users: UserDocument[] = userIds.length > 0
+          ? await this.ctx.db.collection('user').find(
+            { _id: { $in: userIds } },
+            { projection: { _id: 1, uname: 1 } }
+          ).toArray() as UserDocument[]
+          : [];
+        const nameById = new Map(users.map((user) => [user._id, user.uname || String(user._id)]));
+        this.response.body = {
+          kind,
+          options: userIds.map((id) => ({
+            value: String(id),
+            label: nameById.get(id) || String(id),
+          })),
+        };
+      } else {
+        const problemIds = await jailbreakLogModel.suggestProblemIds(domainId, partial, limit);
+        const numericIds = [
+          ...new Set(
+            problemIds
+              .map((problemId) => parseProblemId(problemId))
+              .filter((problemId): problemId is number => problemId !== null)
+          ),
+        ];
+        const problems: ProblemDocument[] = numericIds.length > 0
+          ? await this.ctx.db.collection('document').find(
+            { domainId, docType: 10, docId: { $in: numericIds } },
+            { projection: { docId: 1, title: 1 } }
+          ).toArray() as ProblemDocument[]
+          : [];
+        const titleById = new Map<number, string>(
+          problems.map((problem) => [problem.docId, problem.title || String(problem.docId)])
+        );
+        this.response.body = {
+          kind,
+          options: problemIds.map((id) => {
+            const numericId = parseProblemId(id);
+            return {
+              value: id,
+              label: numericId === null ? id : titleById.get(numericId) || id,
+            };
+          }),
+        };
+      }
+      this.response.type = 'application/json';
+    } catch (err) {
+      console.error(
+        '[AI Helper] JailbreakLogFilterOptionsHandler error:',
+        err instanceof Error ? err.message : 'unknown'
+      );
+      this.response.status = 500;
+      this.response.body = {
+        error: this.translate('ai_helper_admin_jailbreak_filter_suggestions_failed'),
+        code: 'JAILBREAK_FILTER_SUGGESTIONS_FAILED',
+      };
+      this.response.type = 'application/json';
+    }
+  }
+}
+
+/**
  * JailbreakLogsExportHandler - 导出当前域内、按当前筛选条件命中的脱敏安全事件
  * GET /ai-helper/admin/jailbreak-logs/export
  */
@@ -630,6 +727,7 @@ export class JailbreakLogBulkReviewHandler extends Handler {
 // 导出路由权限配置（使用系统管理员权限）
 export const AdminConfigHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
+export const JailbreakLogFilterOptionsHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogsExportHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogReviewHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;
 export const JailbreakLogBulkReviewHandlerPriv = PRIV.PRIV_EDIT_SYSTEM;

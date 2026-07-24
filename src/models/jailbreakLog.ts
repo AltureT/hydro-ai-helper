@@ -147,6 +147,7 @@ export const DEFAULT_JAILBREAK_LOG_RETENTION_DAYS = 180;
 const MIN_JAILBREAK_LOG_RETENTION_DAYS = 7;
 const MAX_JAILBREAK_LOG_RETENTION_DAYS = 3650;
 const MAX_STORED_MATCHED_TEXT_LENGTH = 256;
+const MAX_FILTER_SUGGESTION_QUERY_LENGTH = 64;
 
 export function resolveJailbreakLogRetentionDays(
   raw: string | undefined = process.env.AI_HELPER_JAILBREAK_LOG_RETENTION_DAYS
@@ -168,6 +169,27 @@ export function sanitizeSafetyLogSnippet(value: string): string {
     .replace(/\b(?:sk|api)[-_][A-Za-z0-9_-]{12,}\b/gi, '[secret]')
     .replace(/Bearer\s+[^\s]+/gi, 'Bearer [secret]')
     .slice(0, MAX_STORED_MATCHED_TEXT_LENGTH);
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildNumericPrefixRanges(query: string): Array<{ userId: { $gte: number; $lt: number } }> {
+  if (!/^\d+$/.test(query) || (query.length > 1 && query.startsWith('0'))) return [];
+  const prefix = Number(query);
+  if (!Number.isSafeInteger(prefix) || prefix < 0) return [];
+  if (prefix === 0) return [{ userId: { $gte: 0, $lt: 1 } }];
+
+  const ranges: Array<{ userId: { $gte: number; $lt: number } }> = [];
+  for (let suffixDigits = 0; suffixDigits <= 15; suffixDigits += 1) {
+    const factor = 10 ** suffixDigits;
+    const lower = prefix * factor;
+    const upper = (prefix + 1) * factor;
+    if (!Number.isSafeInteger(lower) || !Number.isSafeInteger(upper)) break;
+    ranges.push({ userId: { $gte: lower, $lt: upper } });
+  }
+  return ranges;
 }
 
 export class JailbreakLogModel {
@@ -512,6 +534,63 @@ export class JailbreakLogModel {
       this.collection.countDocuments(filter),
     ]);
     return { logs, total, truncated: total > logs.length };
+  }
+
+  async suggestUserIds(
+    domainId: string,
+    query: string,
+    limit: number = 10
+  ): Promise<number[]> {
+    const normalizedQuery = query.trim().slice(0, MAX_FILTER_SUGGESTION_QUERY_LENGTH);
+    if (!normalizedQuery) return [];
+    const safeLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+    const prefixRanges = buildNumericPrefixRanges(normalizedQuery);
+    if (prefixRanges.length === 0) return [];
+    const rows = await this.collection.aggregate<{ _id: number }>([
+      { $match: { domainId, $or: prefixRanges } },
+      { $group: { _id: '$userId', lastSeen: { $max: '$createdAt' } } },
+      { $sort: { lastSeen: -1, _id: 1 } },
+      { $limit: safeLimit },
+      { $project: { _id: 1 } },
+    ], { maxTimeMS: 2000 }).toArray();
+    return rows.map((row) => row._id);
+  }
+
+  async suggestProblemIds(
+    domainId: string,
+    query: string,
+    limit: number = 10
+  ): Promise<string[]> {
+    const normalizedQuery = query.trim().slice(0, MAX_FILTER_SUGGESTION_QUERY_LENGTH);
+    if (!normalizedQuery) return [];
+    const safeLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+    const bareQuery = normalizedQuery.replace(/^[Pp]/, '');
+    if (!bareQuery) return [];
+    const escapedBareQuery = escapeRegexLiteral(bareQuery);
+    const exactPrefix = escapeRegexLiteral(normalizedQuery);
+    const problemPrefixFilters = /^[Pp]/.test(normalizedQuery)
+      ? [
+        { problemId: { $regex: `^P${escapedBareQuery}` } },
+        { problemId: { $regex: `^p${escapedBareQuery}` } },
+      ]
+      : [
+        { problemId: { $regex: `^${exactPrefix}` } },
+        { problemId: { $regex: `^P${escapedBareQuery}` } },
+        { problemId: { $regex: `^p${escapedBareQuery}` } },
+      ];
+    const rows = await this.collection.aggregate<{ _id: string }>([
+      {
+        $match: {
+          domainId,
+          $or: problemPrefixFilters,
+        },
+      },
+      { $group: { _id: '$problemId', lastSeen: { $max: '$createdAt' } } },
+      { $sort: { lastSeen: -1, _id: 1 } },
+      { $limit: safeLimit },
+      { $project: { _id: 1 } },
+    ], { maxTimeMS: 2000 }).toArray();
+    return rows.map((row) => row._id);
   }
 
   async getReviewSummary(domainId?: string): Promise<JailbreakReviewSummary> {
