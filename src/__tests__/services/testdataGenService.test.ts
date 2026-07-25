@@ -13,6 +13,7 @@ import {
   assertExistingConfigParsable,
   buildCoveragePlan,
   allocateCasesToSubtasks,
+  extendTieredAllocations,
   resolveTieredSubtaskGeneration,
   allocateCaseNumbers,
   getExistingNumericCases,
@@ -389,6 +390,26 @@ describe('parseSubtasksSection / allocateCasesToSubtasks', () => {
     expect(allocations.filter(item => item.subtaskId === 1)).toHaveLength(5);
     expect(allocations.filter(item => item.subtaskId === 2)).toHaveLength(3);
     expect(allocations.filter(item => item.subtaskId === 3)).toHaveLength(2);
+  });
+
+  it('extendTieredAllocations 总数不变时原样返回同一分配', () => {
+    const base = allocateCasesToSubtasks(6, subtasks);
+    expect(extendTieredAllocations(base, 6, subtasks)).toBe(base);
+  });
+
+  it('extendTieredAllocations 追加项保持原分配不变并归入最后一个子任务', () => {
+    const base = allocateCasesToSubtasks(6, subtasks);
+    const extended = extendTieredAllocations(base, 8, subtasks);
+    expect(extended.slice(0, 6)).toEqual(base);
+    expect(extended.slice(6).map(item => item.subtaskId)).toEqual([3, 3]);
+    expect(extended.slice(6).map(item => item.caseNumber)).toEqual([7, 8]);
+    expect(extended[6].guidance).toBe(subtasks[2].constraints);
+  });
+
+  it('extendTieredAllocations 原分配为空或总数变少时返回空数组', () => {
+    const base = allocateCasesToSubtasks(6, subtasks);
+    expect(extendTieredAllocations([], 3, subtasks)).toEqual([]);
+    expect(extendTieredAllocations(base, 5, subtasks)).toEqual([]);
   });
 
   it('测试点数恰好等于子任务数时每个子任务分配一个', () => {

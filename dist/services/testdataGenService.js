@@ -24,6 +24,7 @@ exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.buildCoveragePlan = buildCoveragePlan;
 exports.allocateCasesToSubtasks = allocateCasesToSubtasks;
+exports.extendTieredAllocations = extendTieredAllocations;
 exports.getExistingNumericCases = getExistingNumericCases;
 exports.allocateCaseNumbers = allocateCaseNumbers;
 exports.detectStdFilename = detectStdFilename;
@@ -279,6 +280,25 @@ function allocateCasesToSubtasks(caseCount, subtasks) {
         }
     }
     return allocations;
+}
+/**
+ * 补刀等后续阶段追加测试点时，前 N 个 case 的「构造档位 ↔ 配置归档」对应关系必须保持不变，
+ * 否则按某档约束构造的输入会被归入另一档、破坏子任务约束契约。
+ * 追加项一律归入最后一个子任务（题面惯例上约束最宽的完整档）；
+ * 原分配为空或总数反而变少时返回空数组（调用方降级为扁平配置）。
+ */
+function extendTieredAllocations(base, totalCaseCount, subtasks) {
+    if (totalCaseCount === base.length)
+        return base;
+    if (base.length === 0 || totalCaseCount < base.length || subtasks.length === 0)
+        return [];
+    const last = subtasks[subtasks.length - 1];
+    const appended = Array.from({ length: totalCaseCount - base.length }, (_, index) => ({
+        caseNumber: base.length + index + 1,
+        subtaskId: last.id,
+        guidance: last.constraints,
+    }));
+    return [...base, ...appended];
 }
 /** 提取数字测试点状态：任一侧存在即保留编号，只有 in/out 成对才进入 config。 */
 function getExistingNumericCases(existingFiles = []) {
@@ -3478,9 +3498,7 @@ function assemblePlan(response, options, context = {}) {
         existingConfig: context.existingConfig,
     });
     const subtaskAllocations = tieredDecision.enabled
-        ? (caseCount === options.caseCount
-            ? tieredDecision.allocations
-            : allocateCasesToSubtasks(caseCount, response.subtasks || []))
+        ? extendTieredAllocations(tieredDecision.allocations, caseCount, response.subtasks || [])
         : [];
     const tieredApplied = tieredDecision.enabled && subtaskAllocations.length === caseCount;
     const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
@@ -3505,8 +3523,13 @@ function assemblePlan(response, options, context = {}) {
         ...(tieredApplied ? [{
                 kind: 'system',
                 message: `已按题面子任务表生成 ${response.subtasks?.length || 0} 档分层数据;`
-                    + 'VALIDATOR 仅machine校验全局约束,各子任务档位约束由生成器构造保证,'
+                    + 'VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,'
                     + '建议抽查各档 .in 是否符合对应约束',
+            }] : []),
+        ...(tieredApplied && caseCount > tieredDecision.allocations.length ? [{
+                kind: 'warning',
+                message: `补刀新增测试点 ${newCaseNumbers.slice(tieredDecision.allocations.length).map(n => `#${n}`).join('、')} 已归入子任务 ${response.subtasks?.[response.subtasks.length - 1]?.id ?? ''}(约束最宽档);`
+                    + '其输入仅经全局校验,请人工核对是否符合该档约束',
             }] : []),
     ];
     const discriminationNotes = buildDiscriminationNotes(response.verification?.discrimination, response.discriminationInitialCaseCount ?? response.cases.length, newCaseNumbers);
