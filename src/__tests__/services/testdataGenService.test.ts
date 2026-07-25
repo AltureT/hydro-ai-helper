@@ -46,6 +46,7 @@ import {
   hasCustomChecker,
   getTestlibCheckerFilename,
   extendDeadlineByBestEffortElapsed,
+  resolveMaterializationResume,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -1469,6 +1470,72 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
 describe('stage-specific sandbox repair', () => {
   const options: GenerateOptions = { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] };
 
+  it('按单一变更产物解析最早重跑阶段与可复用集合，未知或组合变更保守全量重跑', () => {
+    const none = {
+      formalInputs: false,
+      stressInputs: false,
+      validationResults: false,
+      oracleOutputs: false,
+    };
+    expect(resolveMaterializationResume(['GENERATOR'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume(['full'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume(['STRESS_GENERATOR'])).toEqual({
+      phase: 'stress-generator',
+      reuse: { ...none, formalInputs: true },
+    });
+    expect(resolveMaterializationResume(['VALIDATOR'])).toEqual({
+      phase: 'validator',
+      reuse: { ...none, formalInputs: true, stressInputs: true },
+    });
+    for (const artifact of ['ORACLE', 'SOLUTION']) {
+      expect(resolveMaterializationResume([artifact])).toEqual({
+        phase: 'oracle',
+        reuse: {
+          ...none,
+          formalInputs: true,
+          stressInputs: true,
+          validationResults: true,
+        },
+      });
+    }
+    expect(resolveMaterializationResume(['BRUTE'])).toEqual({
+      phase: 'brute',
+      reuse: {
+        formalInputs: true,
+        stressInputs: true,
+        validationResults: true,
+        oracleOutputs: true,
+      },
+    });
+    expect(resolveMaterializationResume(['template.py'])).toEqual({
+      phase: 'template',
+      reuse: {
+        formalInputs: true,
+        stressInputs: true,
+        validationResults: true,
+        oracleOutputs: true,
+      },
+    });
+    expect(resolveMaterializationResume(['UNKNOWN'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume(['ORACLE', 'BRUTE'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume([])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+  });
+
   it('按错误阶段分类并生成定向提示词', () => {
     expect(classifySandboxRepairScope(new Error('GENERATOR 实跑失败：Output Limit Exceeded'))).toBe('generator');
     expect(classifySandboxRepairScope(new Error('STRESS_GENERATOR 输出无效'))).toBe('stress-generator');
@@ -2465,6 +2532,8 @@ describe('TestdataGenService.generate', () => {
     expect(repairMessages[2].content).toContain('独立验证制品未通过');
     expect(repairMessages[0].content).not.toContain('print(input())');
     expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
+    // 仅 BRUTE 发生变化：正式 GENERATOR 与 STRESS_GENERATOR 各只执行一次。
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
   });
 
@@ -2635,6 +2704,8 @@ describe('TestdataGenService.generate', () => {
     expect(runner.compileCpp).toHaveBeenCalledTimes(1);
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
     expect(mockClient.chat.mock.calls[4][0][2].content).toContain('改用 Python 3');
+    // ORACLE 修复从 ORACLE 阶段继续，不重复生成正式输入或压力输入。
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(plan.files.some(file => file.name === 'std.py')).toBe(true);
     expect(plan.files.some(file => file.name === 'std.cc')).toBe(false);
   });
@@ -3151,6 +3222,75 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ...extra,
     ].join('\n'), tradOpts);
   }
+
+  it('修复轮复用阶段缓存并仅延续已消耗后的沙箱预算，AI 等待时间不计入', async () => {
+    const broken = tradBlueprint([
+      '@@@BRUTE@@@',
+      'print("wrong")  # broken-brute',
+    ]);
+    const repaired = {
+      ...broken,
+      bruteCode: 'print(input())  # fixed-brute\n',
+    };
+    let clock = 1_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation(async () => {
+        clock += 100;
+        return { stdout: twoCaseGen(), stderr: '' };
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        async (code: string, inputs: string[]) => {
+          clock += 100;
+          return inputs.map(input => detail({
+            stdout: code.includes('broken-brute') ? 'wrong\n' : input,
+          }));
+        },
+      ),
+    };
+    const cache = {};
+    try {
+      await expect(materializeSandboxBlueprint(
+        broken,
+        tradOpts,
+        '',
+        runner,
+        undefined,
+        false,
+        undefined,
+        [],
+        false,
+        undefined,
+        { ...resolveMaterializationResume(['GENERATOR']), cache },
+      )).rejects.toThrow(/暴力解与标程/);
+
+      // 模拟两轮 materialization 之间较慢的 AI 修复；它不应吞掉沙箱余额。
+      clock += 100_000;
+      await expect(materializeSandboxBlueprint(
+        repaired,
+        tradOpts,
+        '',
+        runner,
+        undefined,
+        false,
+        undefined,
+        [],
+        false,
+        undefined,
+        { ...resolveMaterializationResume(['BRUTE']), cache },
+      )).resolves.toMatchObject({ cases: [{ output: '1\n' }, { output: '2\n' }] });
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(runner.runPython).toHaveBeenCalledTimes(1);
+    const fixedBruteCall = runner.runPythonBatchDetailed.mock.calls.find(
+      ([code]) => String(code).includes('fixed-brute'),
+    );
+    expect(fixedBruteCall?.[2]?.deadlineAt).toBe(401_000);
+  });
 
   it('C++ ORACLE 在正确性检查结束后清理 fileId，清理耗时不消耗正确性预算', async () => {
     const bp = parseSandboxBlueprint([
