@@ -42,6 +42,8 @@ export type DataScale = 'auto' | 'small' | 'medium' | 'large';
 /** 单个测试点最终采用的规模档位。 */
 export type CaseDataScale = Exclude<DataScale, 'auto'>;
 
+export type OracleLanguage = 'python' | 'cpp';
+
 export interface CoverageSlot {
   /** 本次生成内的测试点序号（从 1 开始，不等同于最终文件编号）。 */
   caseNumber: number;
@@ -101,8 +103,10 @@ export interface GenerationResponse {
   notesStructured?: StructuredGenerationNotes;
   /** 沙箱生成模式下用于构造输入的 Python 程序。 */
   generatorCode?: string;
-  /** 沙箱生成模式下实际计算 .out 的可执行 Python 标程。 */
+  /** 沙箱生成模式下实际计算 .out 的可执行标程源码。 */
   oracleCode?: string;
+  /** 沙箱标程的执行语言；缺失时保持 Python-only 兼容行为。 */
+  oracleLanguage?: OracleLanguage;
   // ─ 以下为沙箱模式的验证制品载体，供 assemblePlan 决定文件写入与 origin ─
   /** 学生提交形式的解（函数题）：写入 std.py，供教师本地复验。 */
   solutionCode?: string;
@@ -130,7 +134,8 @@ export interface SandboxGenerationBlueprint {
   functionName?: string;
   templates?: Partial<Record<TemplateLang, string>>;
   generatorCode: string;
-  oracleCode: string;        // 语义不变：自包含 stdin→stdout 完整标程
+  oracleCode: string;        // 自包含 stdin→stdout 完整标程（Python 3 或 C++17）
+  oracleLanguage?: OracleLanguage;
   solutionCode?: string;     // 学生提交形式的解（函数题=函数/类；传统题可省略）
   /** 独立验证调用生成；兼容旧蓝图时也接受主调用中的同名分节。 */
   bruteCode?: string;        // 自包含完整程序的暴力解（读同一 stdin 编码）
@@ -151,6 +156,7 @@ export interface SandboxSolutionBlueprint {
   analysis?: string;
   functionName?: string;
   oracleCode: string;
+  oracleLanguage?: OracleLanguage;
   solutionCode?: string;
   /** 第一阶段用于尽早回归函数题题面样例；最终仍以独立验证调用的转码为准。 */
   functionSampleInputs?: Array<{ id: string; input: string }>;
@@ -491,6 +497,7 @@ export function allocateCaseNumbers(existingFiles: string[] = [], count: number)
 
 /** 根据标准答案代码猜测 std 文件扩展名（教师多用 Python，启发式足够） */
 export function detectStdFilename(code: string): string {
+  if (/(?:^|\r?\n)\s*```(?:cpp|c\+\+)[ \t]*(?:\r?\n|$)/i.test(code)) return 'std.cc';
   if (/#include\s*[<"]/.test(code)) return 'std.cc';
   if (/\bpublic\s+(static\s+)?class\b|\bpublic\s+class\b|\bSystem\.out\./.test(code)) return 'std.java';
   return 'std.py';
@@ -1056,12 +1063,21 @@ export function buildTestdataUserPrompt(params: BuildUserPromptParams): string {
 }
 
 /** 第一阶段：把模型注意力集中在题意、stdin 编码和正确算法上。 */
-export function buildSolutionBlueprintSystemPrompt(): string {
+export function buildSolutionBlueprintSystemPrompt(cppOracleAvailable = false): string {
+  const oracleRule = cppOracleAvailable
+    ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+    : '2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。';
+  const oracleLanguageSection = cppOracleAvailable
+    ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
+    : '';
+  const oracleDescription = cppOracleAvailable
+    ? '完整 Python 3 或 C++17 标程（与 ORACLE_LANG 一致）'
+    : '完整 Python 3 标程';
   return `你是一位资深 OJ 算法审核专家。本阶段只解决题目并输出可执行标程，不生成测试数据、输入生成器、暴力解、校验器或多语言模板。
 
 核心规则：
 1. 先确定唯一、语言无关的原始 stdin 编码，并在 ANALYSIS 中逐行说明输入、输出、约束、算法正确性理由与复杂度。
-2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。
+${oracleRule}
 3. 函数题仍要在 ORACLE 内包含完整实现与 stdin 驱动，并额外输出 SOLUTION：与学生提交形式一致的函数或类定义，不含读输入和打印。
 4. 若函数题题面包含样例，必须输出 SAMPLE_INPUTS，把每个题面展示参数转换为 ANALYSIS 确定的原始 stdin；只转换输入，id 不得遗漏或增加。
 5. 教师手动标程是权威；历史 AC 仅是可能误 AC 的候选，禁止把 AC 状态当作正确性证明。
@@ -1069,6 +1085,7 @@ export function buildSolutionBlueprintSystemPrompt(): string {
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
+${oracleLanguageSection}\
 @@@META@@@
 problemType: traditional 或 function
 isFillIn: false
@@ -1076,7 +1093,7 @@ functionName: 函数题函数名（传统题省略）
 @@@ANALYSIS@@@
 stdin 编码、题意、算法正确性与复杂度（不超过 500 字）
 @@@ORACLE@@@
-完整 Python 3 标程
+${oracleDescription}
 @@@SOLUTION@@@
 函数题学生提交形式的实现（传统题省略）
 @@@SAMPLE_INPUTS@@@
@@ -1191,7 +1208,16 @@ export function buildGenerationArtifactsUserPrompt(
  * 兼容性/定向修复协议：初始生成已拆为解题与外围制品两阶段；当沙箱定位到
  * 具体失败节时仍可用该完整协议只替换目标分节。
  */
-export function buildSandboxBlueprintSystemPrompt(): string {
+export function buildSandboxBlueprintSystemPrompt(cppOracleAvailable = false): string {
+  const oracleRule = cppOracleAvailable
+    ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+    : '5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。';
+  const oracleLanguageSection = cppOracleAvailable
+    ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
+    : '';
+  const oracleDescription = cppOracleAvailable
+    ? '完整 Python 3 或 C++17 标程（stdin → stdout，与 ORACLE_LANG 一致）'
+    : '完整 Python 3 标程（stdin → stdout，正解算法）';
   return `你是一位资深 OJ 出题与测试数据专家。请根据题面输出一份可在 Hydro go-judge 中执行的测试数据生成蓝图。
 
 核心规则：
@@ -1199,7 +1225,7 @@ export function buildSandboxBlueprintSystemPrompt(): string {
 2. GENERATOR 只生成 .in，不生成答案。input 必须是程序真实读取的原始 stdin，禁止 s = "101"、k = 2、arr = [1,2] 等源码赋值写法。
 3. ACM/传统题：每个 input 是一份独立完整的输入文件。若题面首行是 T，默认每个文件固定 T=1，并紧跟恰好一组完整数据；只有教师明确要求批处理时才使用 T>1。
 4. LeetCode/函数题：每个 input 只表示一次函数调用，不额外添加 T。默认每个参数占一行；一维数组用空格分隔，字符串不带源码引号。所有模板与 ORACLE 必须使用完全相同的输入编码。
-5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。
+${oracleRule}
 6. 函数题必须输出 SOLUTION 节：与学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印），它将与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
 7. 数据必须严格遵守用户消息中的逐 CASE 覆盖计划，并根据题面真实约束交叉变化不同维度；所有生成过程必须确定性，固定随机种子。
 8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），stdout 总量必须小于 1MB。每个 input 的 UTF-8 内容必须小于 256KB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须小于 1MB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
@@ -1209,6 +1235,7 @@ export function buildSandboxBlueprintSystemPrompt(): string {
 12. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
+${oracleLanguageSection}\
 @@@META@@@
 problemType: traditional 或 function
 isFillIn: false
@@ -1218,7 +1245,7 @@ functionName: 函数题函数名（传统题省略）
 @@@GENERATOR@@@
 完整 Python 3 输入生成器
 @@@ORACLE@@@
-完整 Python 3 标程（stdin → stdout，正解算法）
+${oracleDescription}
 @@@SOLUTION@@@
 函数题：学生提交形式的函数/类实现（传统题省略）
 @@@TEMPLATE:py@@@
@@ -1686,6 +1713,21 @@ export function mergeHackCases(
   return [...existing, ...appended];
 }
 
+/**
+ * ORACLE_LANG 使用独立的 === 分节，避免改变既有 @@@ 代码分节契约。
+ * 缺失、损坏或未知值一律回退 Python；函数题始终忽略 cpp 声明。
+ */
+export function parseOracleLanguage(
+  raw: string,
+  problemType: SandboxGenerationBlueprint['problemType'],
+): OracleLanguage {
+  if (problemType === 'function') return 'python';
+  const match = raw.match(
+    /(?:^|\r?\n)[ \t]*===\s*ORACLE_LANG\s*===\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i,
+  );
+  return match?.[1].toLowerCase() === 'cpp' ? 'cpp' : 'python';
+}
+
 export function parseSandboxBlueprint(
   raw: string,
   options: GenerateOptions,
@@ -1756,6 +1798,7 @@ export function parseSandboxBlueprint(
     templates: problemType === 'function' ? templates : undefined,
     generatorCode: normalizeExecutableContent(generatorCode),
     oracleCode: normalizeExecutableContent(oracleCode),
+    oracleLanguage: parseOracleLanguage(raw, problemType),
     // SOLUTION/BRUTE/VALIDATOR 均可缺失（宽容）；缺失后果在 verification 中体现
     solutionCode: solutionCode.trim() ? normalizeExecutableContent(solutionCode) : undefined,
     bruteCode: bruteCode.trim() ? normalizeExecutableContent(bruteCode) : undefined,
@@ -1858,6 +1901,7 @@ export function parseSolutionBlueprint(
     analysis,
     functionName: meta.functionName || undefined,
     oracleCode: normalizeExecutableContent(oracleCode),
+    oracleLanguage: parseOracleLanguage(raw, problemType),
     solutionCode: solutionCode.trim() ? normalizeExecutableContent(solutionCode) : undefined,
     functionSampleInputs: problemType === 'function'
       ? parseFunctionSampleInputsSection(sections, expectedFunctionSamples, '解题蓝图')
@@ -2422,6 +2466,107 @@ export async function smokeTestKillTargets(input: {
   return validTargets;
 }
 
+interface OracleExecutor {
+  readonly language: OracleLanguage;
+  runBatchDetailed(
+    inputs: string[],
+    opts?: { signal?: AbortSignal; deadlineAt?: number },
+  ): Promise<PythonRunDetail[]>;
+  dispose(): Promise<void>;
+}
+
+function isProvidedCppOracle(
+  blueprint: Pick<SandboxSolutionBlueprint, 'problemType'>,
+  options: GenerateOptions,
+): boolean {
+  const provided = options.providedStd?.trim();
+  return blueprint.problemType === 'traditional'
+    && !!provided
+    && detectStdFilename(provided) === 'std.cc';
+}
+
+async function createOracleExecutor(input: {
+  blueprint: Pick<SandboxSolutionBlueprint, 'problemType' | 'oracleCode' | 'oracleLanguage'>;
+  options: GenerateOptions;
+  runner: TestdataSandboxRunner;
+  cppOracleAvailable: boolean;
+  signal?: AbortSignal;
+  deadlineAt?: number;
+  /** 补刀属于非关键增强：主流程已编译成功后，二次编译失败只应降级跳过。 */
+  hardProvidedStdFailure?: boolean;
+}): Promise<OracleExecutor> {
+  const providedCpp = isProvidedCppOracle(input.blueprint, input.options);
+  const language: OracleLanguage = input.blueprint.problemType === 'function'
+    ? 'python'
+    : providedCpp ? 'cpp' : input.blueprint.oracleLanguage || 'python';
+  const source = providedCpp
+    ? normalizeExecutableContent(input.options.providedStd as string)
+    : input.blueprint.oracleCode;
+
+  if (language === 'python') {
+    return {
+      language,
+      runBatchDetailed: (inputs, opts = {}) =>
+        input.runner.runPythonBatchDetailed(source, inputs, opts),
+      dispose: async () => {},
+    };
+  }
+
+  const hardProvidedStdFailure = providedCpp && input.hardProvidedStdFailure !== false;
+  if (
+    !input.cppOracleAvailable
+    || !input.runner.compileCpp
+    || !input.runner.runCompiledBatchDetailed
+  ) {
+    const detail = '当前 Hydro 沙箱未通过 C++17 编译能力探测';
+    if (hardProvidedStdFailure) {
+      throw new TestdataGenerationError(
+        `当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`,
+        'provided_cpp_oracle',
+        [],
+        false,
+        CPP_ORACLE_UNAVAILABLE_KEY,
+        detail,
+      );
+    }
+    throw new Error(`ORACLE_LANG=cpp 的 C++17 ORACLE 编译能力不可用：${detail}`);
+  }
+
+  const compiled = await input.runner.compileCpp(source, {
+    signal: input.signal,
+    deadlineAt: input.deadlineAt,
+  });
+  if (compiled.ok === false) {
+    const detail = excerptTail(compiled.error, 2000);
+    if (hardProvidedStdFailure) {
+      throw new TestdataGenerationError(
+        `教师提供的 C++ 标准答案编译失败：${detail}`,
+        'provided_cpp_oracle',
+        [],
+        false,
+        CPP_PROVIDED_STD_COMPILE_FAILED_KEY,
+        detail,
+      );
+    }
+    throw new Error(`ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：${detail}`);
+  }
+
+  return {
+    language,
+    runBatchDetailed: (inputs, opts = {}) =>
+      (input.runner.runCompiledBatchDetailed as NonNullable<
+        TestdataSandboxRunner['runCompiledBatchDetailed']
+      >)(compiled.fileId, inputs, opts),
+    dispose: async () => {
+      try {
+        await input.runner.deleteCachedFile?.(compiled.fileId);
+      } catch {
+        // go-judge 缓存最终会按 TTL 回收；清理失败不得覆盖验证结果。
+      }
+    },
+  };
+}
+
 /**
  * 第一阶段硬闸门：在生成器、模板和独立验证器消耗更多 AI/沙箱预算前，
  * 先确认 ORACLE 至少能够执行并通过题面中可解析的样例。
@@ -2433,6 +2578,7 @@ export async function verifySolutionBlueprintSamples(
   runner: TestdataSandboxRunner,
   signal?: AbortSignal,
   customChecker = false,
+  cppOracleAvailable = false,
 ): Promise<{ total: number; passed: number }> {
   const statementSamples = extractStatementSamples(statementMarkdown);
   if (statementSamples.length === 0) return { total: 0, passed: 0 };
@@ -2446,16 +2592,26 @@ export async function verifySolutionBlueprintSamples(
       input: normalizeFileContent(converted.get(sample.id) as string),
     }));
   }
+  let executor: OracleExecutor | undefined;
   let results: PythonRunDetail[];
   try {
-    results = await runner.runPythonBatchDetailed(
-      solution.oracleCode,
+    executor = await createOracleExecutor({
+      blueprint: solution,
+      options,
+      runner,
+      cppOracleAvailable,
+      signal,
+    });
+    results = await executor.runBatchDetailed(
       samples.map(sample => sample.input),
       { signal },
     );
   } catch (err) {
     if (isCancellation(err)) throw err;
+    if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
     throw new Error(`ORACLE 样例预验证执行失败：${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    await executor?.dispose();
   }
   if (results.length !== samples.length) {
     throw new Error(`ORACLE 样例预验证返回 ${results.length} 个结果，期望 ${samples.length} 个`);
@@ -2615,6 +2771,7 @@ export async function materializeSandboxBlueprint(
   customChecker = false,
   onProgress?: (stage: TestdataGenerationProgressStage, percent: number) => void,
   killTargets: KillTarget[] = [],
+  cppOracleAvailable = false,
 ): Promise<GenerationResponse> {
   const startedAt = Date.now();
   const sandboxDeadlineAt = startedAt + SANDBOX_TOTAL_BUDGET_MS;
@@ -2776,16 +2933,29 @@ export async function materializeSandboxBlueprint(
   reportProgress('running_oracle', 72);
   checkBudget();
   const allInputs = [...inputs, ...sampleInputs, ...stressInputs];
+  let oracleExecutor: OracleExecutor | undefined;
+  let oracleLanguage: OracleLanguage;
   let oracleResults: PythonRunDetail[];
   try {
-    oracleResults = await runner.runPythonBatchDetailed(
-      blueprint.oracleCode,
+    oracleExecutor = await createOracleExecutor({
+      blueprint,
+      options,
+      runner,
+      cppOracleAvailable,
+      signal,
+      deadlineAt: sandboxDeadlineAt,
+    });
+    oracleLanguage = oracleExecutor.language;
+    oracleResults = await oracleExecutor.runBatchDetailed(
       allInputs,
       { signal, deadlineAt: sandboxDeadlineAt },
     );
   } catch (err) {
     if (isCancellation(err)) throw err;
+    if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
     throw new Error(`ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    await oracleExecutor?.dispose();
   }
   if (oracleResults.length !== allInputs.length) {
     throw new Error(`ORACLE（标程）返回 ${oracleResults.length} 个结果，期望 ${allInputs.length} 个`);
@@ -2880,7 +3050,10 @@ export async function materializeSandboxBlueprint(
   const oracleMatchesProvidedStd = !!(
     providedStd
     && blueprint.problemType === 'traditional'
-    && detectStdFilename(providedStd) === 'std.py'
+    && (
+      detectStdFilename(providedStd) === 'std.py'
+      || detectStdFilename(providedStd) === 'std.cc'
+    )
     && comparableFileContent(blueprint.oracleCode) === comparableFileContent(normalizeExecutableContent(providedStd))
   );
   const oracleIsAcceptedRecord = oracleMatchesProvidedStd
@@ -3061,7 +3234,10 @@ export async function materializeSandboxBlueprint(
     noteParts.push(note);
     (kind === 'warning' ? noteWarnings : noteSystem).push(note);
   };
-  appendNote('system', '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。');
+  appendNote(
+    'system',
+    `测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 ${oracleLanguage === 'cpp' ? 'C++17' : 'Python'} 标程生成。`,
+  );
   if (blueprint.problemType === 'function' && samples.length > 0) {
     appendNote('system', `已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateCheck ? ' 与 template.py' : ''}。`);
   }
@@ -3106,9 +3282,10 @@ export async function materializeSandboxBlueprint(
     analysis: blueprint.analysis,
     functionName: blueprint.functionName,
     templates: blueprint.templates,
-    stdSolution: { language: 'python', code: blueprint.oracleCode },
+    stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
     generatorCode: blueprint.generatorCode,
     oracleCode: blueprint.oracleCode,
+    oracleLanguage,
     solutionCode: blueprint.solutionCode,
     bruteCode: blueprint.bruteCode,
     validatorCode: blueprint.validatorCode,
@@ -3292,7 +3469,10 @@ export function assemblePlan(
       name: detectStdFilename(providedStd),
       content: normalizedProvidedStd,
       kind: 'std',
-      origin: options.providedStdSource === 'accepted-record' && sandbox ? 'executed' : 'deterministic',
+      origin: sandbox && (
+        options.providedStdSource === 'accepted-record'
+        || (detectStdFilename(providedStd) === 'std.cc' && response.oracleLanguage === 'cpp')
+      ) ? 'executed' : 'deterministic',
     });
     if (
       response.oracleCode?.trim()
@@ -3305,8 +3485,11 @@ export function assemblePlan(
     const useSolutionForm = sandbox && response.problemType === 'function' && response.solutionCode?.trim();
     const stdContent = useSolutionForm ? response.solutionCode : response.stdSolution?.code;
     if (stdContent) {
+      const stdFilename = response.problemType === 'traditional' && response.oracleLanguage === 'cpp'
+        ? 'std.cc'
+        : 'std.py';
       pushCode(
-        'std.py', stdContent, 'std', sandbox ? 'executed' : 'ai-only',
+        stdFilename, stdContent, 'std', sandbox ? 'executed' : 'ai-only',
         useSolutionForm ? FILE_PURPOSES.stdSolutionForm : FILE_PURPOSES.stdProgram,
       );
       if (
@@ -3516,12 +3699,16 @@ export type SandboxRepairScope = 'generator' | 'stress-generator' | 'function-sa
 
 type ChatResult = Awaited<ReturnType<MultiModelClient['chat']>>;
 
+export const CPP_ORACLE_UNAVAILABLE_KEY = 'ai_helper_testdata_err_cpp_oracle_unavailable';
+export const CPP_PROVIDED_STD_COMPILE_FAILED_KEY = 'ai_helper_testdata_err_cpp_std_compile_failed';
+
 /** 携带匿名模型/阶段信息的业务错误，供遥测判断失败是否与模型相关。 */
 export class TestdataGenerationError extends Error {
   readonly telemetryMetadata: Record<string, unknown>;
   readonly recommendDeeperReasoning: boolean;
   readonly chatResults: readonly ChatResult[];
   readonly userMessageKey?: string;
+  readonly userMessageDetail?: string;
 
   constructor(
     message: string,
@@ -3529,12 +3716,14 @@ export class TestdataGenerationError extends Error {
     results: ChatResult[] = [],
     recommendDeeperReasoning = false,
     userMessageKey?: string,
+    userMessageDetail?: string,
   ) {
     super(message);
     this.name = 'TestdataGenerationError';
     this.recommendDeeperReasoning = recommendDeeperReasoning;
     this.chatResults = [...results];
     this.userMessageKey = userMessageKey;
+    this.userMessageDetail = userMessageDetail;
     const usedModels = [...new Set(results.map(result =>
       `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
     const lastModel = results[results.length - 1]?.usedModel;
@@ -3557,6 +3746,10 @@ export function extractTestdataErrorMetadata(err: unknown): Record<string, unkno
 
 export function extractTestdataUserMessageKey(err: unknown): string | undefined {
   return err instanceof TestdataGenerationError ? err.userMessageKey : undefined;
+}
+
+export function extractTestdataUserMessageDetail(err: unknown): string | undefined {
+  return err instanceof TestdataGenerationError ? err.userMessageDetail : undefined;
 }
 
 /** 仅在模型已经自动修复、但产物仍未通过解析/机器验证时建议换用更深思考模型。 */
@@ -3616,10 +3809,11 @@ ${detail}
 请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@、@@@SAMPLE_INPUTS@@@ 四个分节。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出 ORACLE、模板、代码围栏或解释。`;
   }
   if (scope === 'oracle') {
+    const oracleLanguage = /\bORACLE_LANG\s*=\s*cpp\b|C\+\+/.test(detail) ? 'C++17' : 'Python 3';
     return `你上一条蓝图的标程阶段未通过 Hydro 沙箱验证：
 ${detail}
 
-请只输出修复后的 @@@ORACLE@@@。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的编译错误。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
   }
   if (scope === 'brute') {
     return `你上一条蓝图的暴力对拍阶段未通过验证：
@@ -3639,7 +3833,7 @@ ${detail}
 请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
 1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
-3. ORACLE 必须是可直接运行的 Python 3 完整程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
+3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含 SOLUTION（学生提交形式）与全部模板：${templates}。
 5. 不要输出 BRUTE、STRESS_GENERATOR 或 VALIDATOR；它们由隔离的独立验证调用生成。
 6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
@@ -3773,6 +3967,8 @@ export interface GenerateTestdataParams {
 export interface TestdataGenServiceOptions {
   sandboxRunner?: TestdataSandboxRunner;
   mode?: TestdataGenerationMode;
+  /** Handler 对固定 C++17 探针程序的单次编译结果。 */
+  cppOracleAvailable?: boolean;
   /** 内部开关：语义失败后最多从下一配置模型重跑一次，防止递归升级。 */
   semanticModelFallback?: boolean;
 }
@@ -3793,11 +3989,13 @@ interface GenerationArtifactsCallState {
 export class TestdataGenService {
   private readonly sandboxRunner?: TestdataSandboxRunner;
   private readonly mode: TestdataGenerationMode;
+  private readonly cppOracleAvailable: boolean;
   private readonly semanticModelFallback: boolean;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
     this.mode = serviceOptions.mode || (serviceOptions.sandboxRunner ? 'auto' : 'direct');
+    this.cppOracleAvailable = serviceOptions.cppOracleAvailable === true;
     this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
   }
 
@@ -3837,6 +4035,21 @@ export class TestdataGenService {
         const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
         return plan;
+      }
+      if (
+        params.options.problemKind === 'traditional'
+        && params.options.providedStd?.trim()
+        && detectStdFilename(params.options.providedStd) === 'std.cc'
+      ) {
+        const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
+        throw new TestdataGenerationError(
+          `当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`,
+          'provided_cpp_oracle',
+          [],
+          false,
+          CPP_ORACLE_UNAVAILABLE_KEY,
+          detail,
+        );
       }
       if (requiresAcceptedRecordVerification) {
         throw new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。');
@@ -3913,6 +4126,7 @@ export class TestdataGenService {
       const fallbackService = new TestdataGenService(fallbackClient, {
         sandboxRunner: runner,
         mode: 'sandbox',
+        cppOracleAvailable: this.cppOracleAvailable,
         semanticModelFallback: false,
       });
       try {
@@ -3966,13 +4180,22 @@ export class TestdataGenService {
     return plan;
   }
 
-  private useProvidedPythonOracle<T extends Pick<SandboxSolutionBlueprint, 'problemType' | 'oracleCode'>>(
+  private useProvidedOracle<
+    T extends Pick<SandboxSolutionBlueprint, 'problemType' | 'oracleCode' | 'oracleLanguage'>,
+  >(
     blueprint: T,
     options: GenerateOptions,
   ): T {
     const provided = options.providedStd?.trim();
-    if (blueprint.problemType === 'traditional' && provided && detectStdFilename(provided) === 'std.py') {
-      return { ...blueprint, oracleCode: normalizeExecutableContent(provided) };
+    if (blueprint.problemType === 'traditional' && provided) {
+      const filename = detectStdFilename(provided);
+      if (filename === 'std.py' || filename === 'std.cc') {
+        return {
+          ...blueprint,
+          oracleCode: normalizeExecutableContent(provided),
+          oracleLanguage: filename === 'std.cc' ? 'cpp' : 'python',
+        };
+      }
     }
     return blueprint;
   }
@@ -4280,6 +4503,24 @@ export class TestdataGenService {
       return response;
     };
 
+    let oracleExecutor: OracleExecutor;
+    try {
+      oracleExecutor = await createOracleExecutor({
+        blueprint,
+        options: params.options,
+        runner,
+        cppOracleAvailable: this.cppOracleAvailable,
+        signal: params.signal,
+        deadlineAt,
+        hardProvidedStdFailure: false,
+      });
+    } catch (err) {
+      if (isCancellation(err)) throw err;
+      // 定向补刀是非关键增强；主流程 ORACLE 已验证成功，二次编译失败只跳过补刀。
+      return finish();
+    }
+
+    try {
     targetLoop:
     for (let targetIndex = 0; targetIndex < killTargets.length; targetIndex++) {
       const target = killTargets[targetIndex];
@@ -4336,8 +4577,7 @@ export class TestdataGenService {
               if (!validation[0].accepted) continue;
             }
 
-            const oracle = await runner.runPythonBatchDetailed(
-              blueprint.oracleCode,
+            const oracle = await oracleExecutor.runBatchDetailed(
               [candidate.input],
               { signal: params.signal, deadlineAt },
             );
@@ -4419,7 +4659,10 @@ export class TestdataGenService {
         }
       }
     }
-    return finish();
+      return finish();
+    } finally {
+      await oracleExecutor.dispose();
+    }
   }
 
   private async generateWithSandbox(
@@ -4431,9 +4674,9 @@ export class TestdataGenService {
       this.emitProgress(params, stage, this.progressForAttempt(percent, attempt), attempt);
     };
     // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
-    const systemPrompt = buildSandboxBlueprintSystemPrompt();
+    const systemPrompt = buildSandboxBlueprintSystemPrompt(this.cppOracleAvailable);
     const userPrompt = buildSandboxBlueprintUserPrompt(params);
-    const solutionSystemPrompt = buildSolutionBlueprintSystemPrompt();
+    const solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(this.cppOracleAvailable);
     const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
     const callOptions = this.getCallOptions(params, attempt);
     report('blueprint', 10);
@@ -4449,7 +4692,7 @@ export class TestdataGenService {
     let solutionSourceContent = initialResult.content;
     let solution: SandboxSolutionBlueprint;
     try {
-      solution = this.useProvidedPythonOracle(
+      solution = this.useProvidedOracle(
         parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples),
         params.options,
       );
@@ -4461,9 +4704,13 @@ export class TestdataGenService {
         runner,
         params.signal,
         customChecker,
+        this.cppOracleAvailable,
       );
     } catch (solutionError) {
       if (isCancellation(solutionError)) throw solutionError;
+      if (solutionError instanceof TestdataGenerationError && solutionError.userMessageKey) {
+        throw solutionError;
+      }
       if (classifySandboxRepairScope(solutionError) === 'accepted-std') {
         throw new TestdataGenerationError(
           `所选历史 AC 候选解未通过第一阶段题面样例验证，已拒绝使用。技术细节：${solutionError instanceof Error ? solutionError.message : String(solutionError)}`,
@@ -4488,7 +4735,7 @@ export class TestdataGenService {
       results.push(repairResult);
       solutionSourceContent = repairResult.content;
       try {
-        solution = this.useProvidedPythonOracle(
+        solution = this.useProvidedOracle(
           parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples),
           params.options,
         );
@@ -4500,6 +4747,7 @@ export class TestdataGenService {
           runner,
           params.signal,
           customChecker,
+          this.cppOracleAvailable,
         );
       } catch (repairParseError) {
         if (isCancellation(repairParseError)) throw repairParseError;
@@ -4575,9 +4823,13 @@ export class TestdataGenService {
         hasCustomChecker(params.existingConfig),
         report,
         killTargets,
+        this.cppOracleAvailable,
       );
     } catch (firstError) {
       if (isCancellation(firstError)) throw firstError;
+      if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
+        throw firstError;
+      }
       if (/沙箱执行总时长超出预算/.test(firstError instanceof Error ? firstError.message : String(firstError))) {
         throw new TestdataGenerationError(
           '沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。',
@@ -4681,15 +4933,17 @@ export class TestdataGenService {
           };
           blueprintSourceContent = fullRepairResult.content;
         }
-        blueprint = this.useProvidedPythonOracle(blueprint, params.options);
+        blueprint = this.useProvidedOracle(blueprint, params.options);
         response = await materializeSandboxBlueprint(
           blueprint, params.options, params.statementMarkdown, runner, params.signal,
           hasCustomChecker(params.existingConfig),
           report,
           killTargets,
+          this.cppOracleAvailable,
         );
       } catch (err) {
         if (isCancellation(err)) throw err;
+        if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
         throw new TestdataGenerationError(
           `AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`,
           classifySandboxRepairScope(err),

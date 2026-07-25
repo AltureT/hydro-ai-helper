@@ -31,6 +31,7 @@ import {
   buildSandboxBlueprintUserPrompt,
   buildIndependentVerifierSystemPrompt,
   buildIndependentVerifierUserPrompt,
+  parseOracleLanguage,
   parseSandboxBlueprint,
   parseSolutionBlueprint,
   parseGenerationArtifacts,
@@ -326,6 +327,8 @@ describe('buildCoveragePlan / numeric case allocation', () => {
 describe('detectStdFilename', () => {
   it('按代码特征选择扩展名', () => {
     expect(detectStdFilename('#include <bits/stdc++.h>\nint main(){}')).toBe('std.cc');
+    expect(detectStdFilename('```cpp\nint main() { return 0; }\n```')).toBe('std.cc');
+    expect(detectStdFilename('```c++\nint main() { return 0; }\n```')).toBe('std.cc');
     expect(detectStdFilename('public class Main { }')).toBe('std.java');
     expect(detectStdFilename('import java.util.*;\nclass X { void f(){ System.out.println(1); } }')).toBe('std.java');
     expect(detectStdFilename('def solve():\n    pass')).toBe('std.py');
@@ -1394,6 +1397,12 @@ describe('stage-specific sandbox repair', () => {
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+    const cppRepair = buildSandboxRepairPrompt(
+      new Error('ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：prog.cc:7: error'),
+      options,
+    );
+    expect(cppRepair).toContain('当前 ORACLE 语言为 C++17');
+    expect(cppRepair).toContain('prog.cc:7: error');
     expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
       .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
   });
@@ -2430,6 +2439,34 @@ describe('TestdataGenService.generate', () => {
     expect(runner.runPython).not.toHaveBeenCalled();
   });
 
+  it('教师 C++ 标程在 auto 模式沙箱不可达时给出编译能力硬错误，不降级直出', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'auto',
+    });
+    await expect(service.generate({
+      problemTitle: '传统题',
+      statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        providedStd: '#include <iostream>\nint main() {}',
+        providedStdSource: 'manual',
+      },
+    })).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_oracle_unavailable',
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+  });
+
   it('历史 AC 候选解在沙箱不可达时拒绝降级直出', async () => {
     const mockClient = { chat: jest.fn() };
     const runner = {
@@ -2608,6 +2645,33 @@ function twoCaseGen(): string {
 }
 
 describe('两阶段沙箱蓝图', () => {
+  it('解析可选 ORACLE_LANG，缺失或非法回退 Python，函数题忽略 C++', () => {
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\npython', 'traditional')).toBe('python');
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'traditional')).toBe('cpp');
+    expect(parseOracleLanguage('@@@META@@@\nproblemType: traditional', 'traditional')).toBe('python');
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\nrust', 'traditional')).toBe('python');
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'function')).toBe('python');
+
+    const cppSolution = parseSolutionBlueprint(
+      `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`,
+      tradOpts,
+    );
+    expect(cppSolution.oracleLanguage).toBe('cpp');
+    const cppFull = parseSandboxBlueprint(
+      `=== ORACLE_LANG ===\ncpp\n${makeSandboxBlueprint('traditional')}`,
+      tradOpts,
+    );
+    expect(cppFull.oracleLanguage).toBe('cpp');
+  });
+
+  it('仅在编译能力可用时向模型提供 ORACLE_LANG C++ 契约', () => {
+    expect(buildSolutionBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
+    expect(buildSandboxBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
+    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('C++17');
+    expect(buildSandboxBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+  });
+
   it('第一阶段 Prompt 只要求解题，第二阶段只要求外围制品', () => {
     const params = {
       problemTitle: '两数之和',
@@ -2695,6 +2759,77 @@ describe('两阶段沙箱蓝图', () => {
       ['42\n'],
       { signal: undefined },
     );
+  });
+
+  it('C++ ORACLE 样例闸门编译后执行缓存二进制，并在 finally 清理', async () => {
+    const solution = parseSolutionBlueprint(
+      `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`,
+      tradOpts,
+    );
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'oracle-bin' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '42\n' }),
+      ]),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    await expect(verifySolutionBlueprintSamples(
+      solution,
+      tradOpts,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+      undefined,
+      false,
+      true,
+    )).resolves.toEqual({ total: 1, passed: 1 });
+    expect(runner.compileCpp).toHaveBeenCalledWith(
+      solution.oracleCode,
+      { signal: undefined, deadlineAt: undefined },
+    );
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'oracle-bin',
+      ['42\n'],
+      { signal: undefined },
+    );
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('oracle-bin');
+  });
+
+  it('教师 C++ 标程编译失败是含 g++ 摘要的硬错误，不进入 AI 修复语义', async () => {
+    const options: GenerateOptions = {
+      ...tradOpts,
+      providedStd: '```cpp\nint main( {\n```',
+      providedStdSource: 'manual',
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options);
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        error: 'prog.cc:1: error: expected declaration',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+    await expect(verifySolutionBlueprintSamples(
+      solution,
+      options,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+      undefined,
+      false,
+      true,
+    )).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_std_compile_failed',
+      message: expect.stringContaining('prog.cc:1: error'),
+    });
   });
 });
 
@@ -2809,6 +2944,47 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ...extra,
     ].join('\n'), tradOpts);
   }
+
+  it('C++ ORACLE 用缓存二进制生成正式 .out，并在流程结束时清理 fileId', async () => {
+    const bp = parseSandboxBlueprint([
+      '=== ORACLE_LANG ===', 'cpp',
+      '@@@META@@@', 'problemType: traditional',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', '#include <iostream>',
+    ].join('\n'), tradOpts);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'materialized-oracle' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '1\n' }),
+        detail({ stdout: '2\n' }),
+      ]),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    const response = await materializeSandboxBlueprint(
+      bp,
+      tradOpts,
+      '',
+      runner,
+      undefined,
+      false,
+      undefined,
+      [],
+      true,
+    );
+    expect(response.cases.map(item => item.output)).toEqual(['1\n', '2\n']);
+    expect(response.oracleLanguage).toBe('cpp');
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'materialized-oracle',
+      ['1\n', '2\n'],
+      expect.objectContaining({ deadlineAt: expect.any(Number) }),
+    );
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('materialized-oracle');
+  });
 
   it('VALIDATOR 拒绝某个 .in 时硬失败并带 stderr，且先于标程执行', async () => {
     const bp = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
@@ -3469,6 +3645,30 @@ describe('materializeSandboxBlueprint 双重验证', () => {
 });
 
 describe('assemblePlan origin 矩阵与验证透传', () => {
+  it('传统题 C++ ORACLE 生成 std.cc，教师 C++ 标程标记为 executed', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      oracleCode: '#include <iostream>\nint main() {}',
+      oracleLanguage: 'cpp',
+      stdSolution: { language: 'cpp', code: '#include <iostream>\nint main() {}' },
+      verification: { mode: 'sandbox', oracleKind: 'provided-std' },
+    } as never;
+    const opts: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 1,
+      languages: [],
+      providedStd: '```cpp\n#include <iostream>\nint main() {}\n```',
+      providedStdSource: 'manual',
+    };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    expect(plan.files.find(file => file.name === 'std.cc')).toMatchObject({
+      kind: 'std',
+      origin: 'executed',
+    });
+    expect(plan.files.find(file => file.name === 'std.py')).toBeUndefined();
+  });
+
   it('沙箱模式：数据/生成器/对拍器 executed，结构文件 deterministic', () => {
     const response = {
       problemType: 'traditional',

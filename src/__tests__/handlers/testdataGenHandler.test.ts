@@ -21,6 +21,7 @@ import {
   TestdataGenService,
   TestdataGenerationError,
 } from '../../services/testdataGenService';
+import { GoJudgeSandboxRunner } from '../../services/goJudgeSandboxService';
 import { ObjectId } from '../../utils/mongo';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
@@ -120,8 +121,18 @@ function setupHandler<T extends { new (...args: never[]): object }>(Ctor: T, opt
   return handler;
 }
 
+const compileProbeSpy = jest.spyOn(GoJudgeSandboxRunner.prototype, 'compileCpp')
+  .mockResolvedValue({ ok: false, error: 'test sandbox has no compiler' });
+const deleteProbeFileSpy = jest.spyOn(GoJudgeSandboxRunner.prototype, 'deleteCachedFile')
+  .mockResolvedValue(undefined);
+
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+afterAll(() => {
+  compileProbeSpy.mockRestore();
+  deleteProbeFileSpy.mockRestore();
 });
 
 // ─── extractStatementMarkdown ────────────────────────────────────────────────

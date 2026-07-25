@@ -1116,6 +1116,8 @@ ai_helper_testdata_err_std_source_conflict: "Do not paste a reference solution a
 ai_helper_testdata_err_ac_std_traditional_only: "Accepted submissions can currently be used only as Python reference candidates for traditional problems; select Traditional first"
 ai_helper_testdata_err_ac_std_unavailable: "The selected accepted submission is unavailable, deleted, or its source is not readable by this account"
 ai_helper_testdata_err_config_unparsable: "The existing config.yaml cannot be parsed. Generation was stopped to avoid overwriting and losing its settings; fix or delete the file, then retry."
+ai_helper_testdata_err_cpp_oracle_unavailable: "The current sandbox has no C++ compiler available, so the teacher-provided C++ reference solution cannot be used. Check the g++ setup or provide a Python solution."
+ai_helper_testdata_err_cpp_std_compile_failed: "The teacher-provided C++ reference solution failed to compile. g++ error summary:"
 ai_helper_testdata_fill_in_label: "Fill-in-the-blank (complete the code)"
 ai_helper_testdata_fill_in_auto: "Auto detect (from statement)"
 ai_helper_testdata_fill_in_yes: "Yes (statement contains scaffold code)"

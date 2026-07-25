@@ -180,6 +180,42 @@ function sendError(handler, status, code, messageKey) {
     handler.response.body = { error: handler.translate(messageKey), code };
     handler.response.type = 'application/json';
 }
+const CPP_ORACLE_PROBE_SOURCE = '#include <iostream>\nint main() { return 0; }\n';
+/** 每次生成只探测一次；任何非取消失败都按无编译能力降级，不影响 Python-only 路径。 */
+async function probeCppOracleAvailability(runner, mode, signal) {
+    if (mode === 'direct')
+        return false;
+    let fileId;
+    try {
+        const result = await runner.compileCpp(CPP_ORACLE_PROBE_SOURCE, { signal });
+        if (result.ok === false)
+            return false;
+        fileId = result.fileId;
+        return true;
+    }
+    catch (err) {
+        if (signal?.aborted || (0, testdataGenService_1.isCancellation)(err))
+            throw err;
+        return false;
+    }
+    finally {
+        if (fileId) {
+            try {
+                await runner.deleteCachedFile(fileId);
+            }
+            catch {
+                // 探针缓存清理失败由 go-judge TTL 兜底，不得阻断生成。
+            }
+        }
+    }
+}
+function resolveTestdataUserMessage(translate, err) {
+    const key = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+    if (!key)
+        return undefined;
+    const detail = (0, testdataGenService_1.extractTestdataUserMessageDetail)(err);
+    return detail ? `${translate(key)}\n${detail}` : translate(key);
+}
 // ─── TestdataGenContextHandler ────────────────────────────────────────────────
 /**
  * GET /ai-helper/testdata-gen/context/:problemId
@@ -314,9 +350,13 @@ async function runBackgroundGeneration(params) {
         ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
         const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration');
         const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+        const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
+        const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
+        const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal);
         const service = new testdataGenService_1.TestdataGenService(aiClient, {
-            sandboxRunner: new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost),
-            mode: (0, goJudgeSandboxService_1.getTestdataGenerationMode)(),
+            sandboxRunner,
+            mode: generationMode,
+            cppOracleAvailable,
         });
         const plan = await service.generate({
             problemTitle: pdoc.title || job.problemId,
@@ -357,6 +397,7 @@ async function runBackgroundGeneration(params) {
         console.error('[TestdataGenJob] generation failed:', err);
         const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
         const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+        const testdataUserMessage = resolveTestdataUserMessage(translate, err);
         const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
         const usedModels = Array.isArray(testdataMetadata?.usedModels)
             ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
@@ -374,7 +415,7 @@ async function runBackgroundGeneration(params) {
             }
             : {
                 message: testdataUserMessageKey
-                    ? translate(testdataUserMessageKey)
+                    ? testdataUserMessage
                     : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
@@ -452,10 +493,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
             const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration');
             const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
-            const service = new testdataGenService_1.TestdataGenService(aiClient, {
-                sandboxRunner: new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost),
-                mode: (0, goJudgeSandboxService_1.getTestdataGenerationMode)(),
-            });
+            const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
+            const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
@@ -492,6 +531,12 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     progressStream?.writeComment('keepalive');
                 }, limits_1.API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
             }
+            const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal);
+            const service = new testdataGenService_1.TestdataGenService(aiClient, {
+                sandboxRunner,
+                mode: generationMode,
+                cppOracleAvailable,
+            });
             const plan = await service.generate({
                 problemTitle: pdoc.title || problemId,
                 statementMarkdown: statement,
@@ -541,6 +586,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             console.error('[TestdataGenGenerateHandler.post] error:', err);
             const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
             const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+            const testdataUserMessage = resolveTestdataUserMessage(key => this.translate(key), err);
             const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
             const usedModels = Array.isArray(testdataMetadata?.usedModels)
                 ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
@@ -574,7 +620,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             // 解析/校验失败等业务错误：消息为中文可直接展示
             const errorBody = {
                 error: testdataUserMessageKey
-                    ? this.translate(testdataUserMessageKey)
+                    ? testdataUserMessage
                     : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
@@ -683,6 +729,8 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 const backgroundTranslations = {
                     ai_helper_err_internal: this.translate('ai_helper_err_internal'),
                     [testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY),
+                    [testdataGenService_1.CPP_ORACLE_UNAVAILABLE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_UNAVAILABLE_KEY),
+                    [testdataGenService_1.CPP_PROVIDED_STD_COMPILE_FAILED_KEY]: this.translate(testdataGenService_1.CPP_PROVIDED_STD_COMPILE_FAILED_KEY),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
                     backgroundTranslations[key] = this.translate(key);
