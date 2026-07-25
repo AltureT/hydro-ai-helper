@@ -2793,7 +2793,7 @@ interface OracleExecutor {
   readonly language: OracleLanguage;
   runBatchDetailed(
     inputs: string[],
-    opts?: { signal?: AbortSignal; deadlineAt?: number },
+    opts?: { signal?: AbortSignal; deadlineAt?: number; chunkConcurrency?: number },
   ): Promise<PythonRunDetail[]>;
   dispose(): Promise<void>;
 }
@@ -3489,7 +3489,7 @@ export async function materializeSandboxBlueprint(
       const validatorResults = await runner.runPythonBatchDetailed(
         blueprint.validatorCode,
         validationInputs,
-        { signal, deadlineAt: sandboxDeadlineAt },
+        { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 },
       );
       if (validatorResults.length !== validationInputs.length) {
         throw new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`);
@@ -3559,7 +3559,7 @@ export async function materializeSandboxBlueprint(
       oracleLanguage = oracleExecutor.language;
       oracleResults = await oracleExecutor.runBatchDetailed(
         allInputs,
-        { signal, deadlineAt: sandboxDeadlineAt },
+        { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 },
       );
     } catch (err) {
       if (isCancellation(err)) throw err;

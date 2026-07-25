@@ -2765,7 +2765,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             if (blueprint.validatorCode) {
                 reportProgress('validating_inputs', 66);
                 checkBudget();
-                const validatorResults = await runner.runPythonBatchDetailed(blueprint.validatorCode, validationInputs, { signal, deadlineAt: sandboxDeadlineAt });
+                const validatorResults = await runner.runPythonBatchDetailed(blueprint.validatorCode, validationInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 });
                 if (validatorResults.length !== validationInputs.length) {
                     throw new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`);
                 }
@@ -2830,7 +2830,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     deadlineAt: sandboxDeadlineAt,
                 });
                 oracleLanguage = oracleExecutor.language;
-                oracleResults = await oracleExecutor.runBatchDetailed(allInputs, { signal, deadlineAt: sandboxDeadlineAt });
+                oracleResults = await oracleExecutor.runBatchDetailed(allInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 });
             }
             catch (err) {
                 if (isCancellation(err))

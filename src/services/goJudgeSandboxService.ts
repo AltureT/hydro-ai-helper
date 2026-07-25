@@ -30,6 +30,8 @@ export interface PythonBatchOptions {
   signal?: AbortSignal;
   /** 整条验证管线共享的绝对截止时间；每个分块请求都会按剩余时间收紧 timeout。 */
   deadlineAt?: number;
+  /** 同时在途的分块数；默认 1 保持原有串行与 TLE 负载语义。 */
+  chunkConcurrency?: number;
 }
 
 export interface CppCompileOptions {
@@ -97,7 +99,7 @@ const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测�
 
 /**
  * 单请求内所有 cmd 在沙箱内并发执行；实测 2 核机上并发度过高会抢占内存与 RAM 盘，
- * 故大批量按块串行：每块最多 4 条，块间等待上一块返回后再发下一块。
+ * 故大批量每块最多 4 条，默认块间串行；仅无 TLE 判定的确定性 sweep 可显式提高并发。
  */
 export const SANDBOX_CHUNK_SIZE = 4;
 /**
@@ -114,6 +116,46 @@ export const SANDBOX_TOTAL_BUDGET_MS = 300_000;
 export const DISCRIMINATION_BUDGET_MS = 180_000;
 /** checker 编译与执行共享的独立尽力预算，不占用正确性验证预算。 */
 export const CHECKER_BUDGET_MS = 120_000;
+
+/**
+ * 有界并发调度独立分块，并把结果恢复到输入顺序。
+ * 任一任务失败后立即原样传播且不再领取新任务；已在途请求仍由原 signal/deadline 收束。
+ */
+export async function scheduleSandboxChunks<T, R>(
+  chunks: T[],
+  concurrency: number,
+  runChunk: (chunk: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (chunks.length === 0) return [];
+  const normalizedConcurrency = Number.isFinite(concurrency) && concurrency > 0
+    ? Math.max(1, Math.floor(concurrency))
+    : 1;
+  const workerCount = Math.min(normalizedConcurrency, chunks.length);
+  const results = new Array<R>(chunks.length);
+  let nextIndex = 0;
+  let failed = false;
+  let firstError: unknown;
+
+  const worker = async () => {
+    while (!failed) {
+      const index = nextIndex;
+      if (index >= chunks.length) return;
+      nextIndex++;
+      try {
+        results[index] = await runChunk(chunks[index], index);
+      } catch (err) {
+        if (!failed) {
+          failed = true;
+          firstError = err;
+        }
+        throw firstError;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
 
 function normalizeHost(host: string): string {
   const value = (host || '').trim() || 'http://localhost:5050/';
@@ -420,7 +462,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
 
   /**
    * 宽容 + 分块批量执行：不因单条失败抛错，仅在 HTTP/协议层错误时抛。
-   * 按 SANDBOX_CHUNK_SIZE 分块、块间串行；块请求 timeout = chunkSize × clockLimit + 15s。
+   * 按 SANDBOX_CHUNK_SIZE 分块、默认块间串行；块请求 timeout = chunkSize × clockLimit + 15s。
    */
   async runPythonBatchDetailed(
     code: string,
@@ -475,41 +517,47 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     const clockLimitMs = cpuSeconds * 2 * 1000;
     const chunkTimeout = SANDBOX_CHUNK_SIZE * clockLimitMs + 15_000;
 
-    const details: PythonRunDetail[] = [];
+    const chunks: T[][] = [];
     for (let offset = 0; offset < inputs.length; offset += SANDBOX_CHUNK_SIZE) {
-      const remainingBudgetMs = opts.deadlineAt === undefined
-        ? Number.POSITIVE_INFINITY
-        : opts.deadlineAt - Date.now();
-      if (remainingBudgetMs <= 0) throw new Error(SANDBOX_BUDGET_ERROR);
-      const chunk = inputs.slice(offset, offset + SANDBOX_CHUNK_SIZE);
-      let response: { data: unknown };
-      try {
-        response = await this.http.post(
-          `${this.host}/run`,
-          { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) },
-          {
-            timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
-            signal: opts.signal,
-            maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
-            proxy: false,
-          },
-        );
-      } catch (err) {
-        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
+      chunks.push(inputs.slice(offset, offset + SANDBOX_CHUNK_SIZE));
+    }
+    const chunkDetails = await scheduleSandboxChunks(
+      chunks,
+      opts.chunkConcurrency ?? 1,
+      async chunk => {
+        const remainingBudgetMs = opts.deadlineAt === undefined
+          ? Number.POSITIVE_INFINITY
+          : opts.deadlineAt - Date.now();
+        if (remainingBudgetMs <= 0) throw new Error(SANDBOX_BUDGET_ERROR);
+        let response: { data: unknown };
+        try {
+          response = await this.http.post(
+            `${this.host}/run`,
+            { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) },
+            {
+              timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
+              signal: opts.signal,
+              maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
+              proxy: false,
+            },
+          );
+        } catch (err) {
+          if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
+            throw new Error(SANDBOX_BUDGET_ERROR);
+          }
+          throw err;
+        }
+        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
           throw new Error(SANDBOX_BUDGET_ERROR);
         }
-        throw err;
-      }
-      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-        throw new Error(SANDBOX_BUDGET_ERROR);
-      }
-      const results = unwrapResults(response.data);
-      if (results.length !== chunk.length) {
-        throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
-      }
-      for (const result of results) details.push(toRunDetail(result));
-    }
-    return details;
+        const results = unwrapResults(response.data);
+        if (results.length !== chunk.length) {
+          throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
+        }
+        return results.map(result => toRunDetail(result));
+      },
+    );
+    return chunkDetails.flat();
   }
 }
 

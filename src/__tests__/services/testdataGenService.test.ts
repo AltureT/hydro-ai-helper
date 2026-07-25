@@ -3401,7 +3401,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
       'materialized-oracle',
       ['1\n', '2\n'],
-      expect.objectContaining({ deadlineAt: expect.any(Number) }),
+      expect.objectContaining({
+        deadlineAt: expect.any(Number),
+        chunkConcurrency: 3,
+      }),
     );
     expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
     expect(runner.deleteCachedFile).toHaveBeenCalledWith('materialized-oracle');
@@ -4078,6 +4081,14 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       lang: 'py', total: 2, passed: 2, skippedTimeout: [],
     });
     expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
+    expect(runner.runPythonBatchDetailed.mock.calls[0][2]).toEqual(expect.objectContaining({
+      chunkConcurrency: 3,
+    }));
+    expect(runner.runPythonBatchDetailed.mock.calls[1][2]).toEqual(expect.objectContaining({
+      chunkConcurrency: 3,
+    }));
+    expect(runner.runPythonBatchDetailed.mock.calls[2][2]).not.toHaveProperty('chunkConcurrency');
+    expect(runner.runPythonBatchDetailed.mock.calls[3][2]).not.toHaveProperty('chunkConcurrency');
     expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining('def add(a, b):'),

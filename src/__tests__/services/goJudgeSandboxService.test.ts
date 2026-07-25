@@ -1,6 +1,7 @@
 import {
   GoJudgeSandboxRunner,
   getTestdataGenerationMode,
+  scheduleSandboxChunks,
   SANDBOX_CHUNK_SIZE,
   SANDBOX_RESPONSE_LIMIT_BYTES,
 } from '../../services/goJudgeSandboxService';
@@ -13,6 +14,59 @@ function goJudgeResult(over: Record<string, unknown> = {}) {
     ...over,
   };
 }
+
+describe('scheduleSandboxChunks', () => {
+  it('并发分块乱序完成时仍按原始索引归位结果', async () => {
+    const releases: Array<() => void> = [];
+    const promise = scheduleSandboxChunks(['a', 'b', 'c'], 3, async (value, index) => {
+      await new Promise<void>(resolve => {
+        releases[index] = resolve;
+      });
+      return `${index}:${value}`;
+    });
+    await new Promise(resolve => setImmediate(resolve));
+
+    releases[2]();
+    releases[0]();
+    releases[1]();
+
+    await expect(promise).resolves.toEqual(['0:a', '1:b', '2:c']);
+  });
+
+  it('在途分块数不超过指定并发上限', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const promise = scheduleSandboxChunks([0, 1, 2, 3, 4, 5], 2, async value => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => setImmediate(resolve));
+      active--;
+      return value;
+    });
+
+    await expect(promise).resolves.toEqual([0, 1, 2, 3, 4, 5]);
+    expect(maxActive).toBe(2);
+  });
+
+  it('中途分块失败时原样传播并停止领取后续分块', async () => {
+    const failure = new Error('chunk failed');
+    const started: number[] = [];
+    let releaseFirst!: () => void;
+    const promise = scheduleSandboxChunks([0, 1, 2], 2, async value => {
+      started.push(value);
+      if (value === 1) throw failure;
+      await new Promise<void>(resolve => {
+        releaseFirst = resolve;
+      });
+      return value;
+    });
+    const rejection = expect(promise).rejects.toBe(failure);
+
+    await rejection;
+    expect(started).toEqual([0, 1]);
+    releaseFirst();
+  });
+});
 
 describe('GoJudgeSandboxRunner', () => {
   it('通过 /version 探测 Hydro 沙箱', async () => {
