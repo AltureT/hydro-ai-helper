@@ -23,6 +23,7 @@ exports.partitionStressValidation = partitionStressValidation;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
 exports.buildCoveragePlan = buildCoveragePlan;
+exports.allocateCasesToSubtasks = allocateCasesToSubtasks;
 exports.getExistingNumericCases = getExistingNumericCases;
 exports.allocateCaseNumbers = allocateCaseNumbers;
 exports.detectStdFilename = detectStdFilename;
@@ -57,6 +58,7 @@ exports.parseKillTargetsResponse = parseKillTargetsResponse;
 exports.parseHackCasesResponse = parseHackCasesResponse;
 exports.mergeHackCases = mergeHackCases;
 exports.parseOracleLanguage = parseOracleLanguage;
+exports.parseSubtasksSection = parseSubtasksSection;
 exports.parseSandboxBlueprint = parseSandboxBlueprint;
 exports.parseSolutionBlueprint = parseSolutionBlueprint;
 exports.parseGenerationArtifacts = parseGenerationArtifacts;
@@ -233,6 +235,49 @@ function buildCoveragePlan(caseCount, strategy = 'auto') {
         dataScale,
         guidance: COVERAGE_GUIDANCE[dataScale],
     }));
+}
+/**
+ * 为题面子任务建立确定性测试点分配：每个子任务先获得一个测试点，
+ * 剩余名额按分值目标使用最大缺口法分配；同缺口时保持题面 id 顺序。
+ */
+function allocateCasesToSubtasks(caseCount, subtasks) {
+    if (!Number.isInteger(caseCount) || caseCount < subtasks.length || subtasks.length === 0)
+        return [];
+    let previousId = 0;
+    if (subtasks.some(subtask => {
+        const invalid = !Number.isSafeInteger(subtask.id)
+            || subtask.id <= previousId
+            || !Number.isSafeInteger(subtask.score)
+            || subtask.score <= 0
+            || !subtask.constraints.trim();
+        previousId = subtask.id;
+        return invalid;
+    }))
+        return [];
+    const totalScore = subtasks.reduce((sum, subtask) => sum + subtask.score, 0);
+    if (!Number.isSafeInteger(totalScore) || totalScore <= 0)
+        return [];
+    const counts = subtasks.map(() => 1);
+    const desiredExtras = subtasks.map(subtask => ((caseCount - subtasks.length) * subtask.score / totalScore));
+    for (let assigned = 0; assigned < caseCount - subtasks.length; assigned++) {
+        const next = subtasks.reduce((best, _subtask, index) => (desiredExtras[index] - (counts[index] - 1)
+            > desiredExtras[best] - (counts[best] - 1)
+            ? index
+            : best), 0);
+        counts[next]++;
+    }
+    const allocations = [];
+    for (let index = 0; index < subtasks.length; index++) {
+        const subtask = subtasks[index];
+        for (let count = 0; count < counts[index]; count++) {
+            allocations.push({
+                caseNumber: allocations.length + 1,
+                subtaskId: subtask.id,
+                guidance: `${subtask.constraints};数据必须严格满足本子任务的全部约束;应包含该档位下的边界/极端情形`,
+            });
+        }
+    }
+    return allocations;
 }
 /** 提取数字测试点状态：任一侧存在即保留编号，只有 in/out 成对才进入 config。 */
 function getExistingNumericCases(existingFiles = []) {
@@ -837,11 +882,14 @@ ${oracleRule}
 3. 函数题仍要在 ORACLE 内包含完整实现与 stdin 驱动，并额外输出 SOLUTION：与学生提交形式一致的函数或类定义，不含读输入和打印。
 4. 若函数题题面包含样例，必须输出 SAMPLE_INPUTS，把每个题面展示参数转换为 ANALYSIS 确定的原始 stdin；只转换输入，id 不得遗漏或增加。
 5. 教师手动标程是权威；历史 AC 仅是可能误 AC 的候选，禁止把 AC 状态当作正确性证明。
-6. 本阶段严禁输出 GENERATOR、BRUTE、VALIDATOR 或 TEMPLATE；这些外围制品只有在 ORACLE 通过样例预验证后才会由后续阶段生成。
-7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
+6. 仅当题面明确给出子任务/分数表时输出该分节（SUBTASKS）；约束摘要为该子任务的完整生效约束（含继承的全局约束收紧），一行一个，按 id 升序。
+7. 本阶段严禁输出 GENERATOR、BRUTE、VALIDATOR 或 TEMPLATE；这些外围制品只有在 ORACLE 通过样例预验证后才会由后续阶段生成。
+8. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
 ${oracleLanguageSection}\
+=== SUBTASKS ===
+可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
 isFillIn: false
@@ -896,7 +944,7 @@ function buildSolutionBlueprintUserPrompt(params) {
             ? '【历史 AC 候选解（不是权威；可能因旧数据薄弱而误 AC，必须接受独立验证）】'
             : '【教师提供的标准答案（手动，唯一权威；输出格式以它为准）】', '```', options.providedStd.trim(), '```');
     }
-    lines.push('', '这是第一阶段：只输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE 或 CASE。');
+    lines.push('', '这是第一阶段：只输出 META、ANALYSIS、ORACLE，函数题需要的 SOLUTION/SAMPLE_INPUTS，以及题面明确有子任务/分数表时的 SUBTASKS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE 或 CASE。');
     return lines.join('\n');
 }
 /** 第二阶段：在已验证解法固定后生成输入与函数题驱动模板。 */
@@ -969,10 +1017,13 @@ ${oracleRule}
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
 10. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 11. 不要输出 BRUTE 或 VALIDATOR；系统会在一次全新的、看不到 ORACLE 实现的独立调用中生成验证器，降低两份算法共享同一错误的风险。
-12. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
+12. 仅当题面明确给出子任务/分数表时输出该分节（SUBTASKS）；约束摘要为该子任务的完整生效约束（含继承的全局约束收紧），一行一个，按 id 升序。
+13. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
 ${oracleLanguageSection}\
+=== SUBTASKS ===
+可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
 isFillIn: false
@@ -1402,6 +1453,36 @@ function parseOracleLanguage(raw, problemType) {
     const match = raw.match(/(?:^|\r?\n)[ \t]*===\s*ORACLE_LANG\s*===\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i);
     return match?.[1].toLowerCase() === 'cpp' ? 'cpp' : 'python';
 }
+/**
+ * SUBTASKS 使用独立的 === 分节，不改变既有 @@@ 代码分节契约。
+ * 任一行不满足严格格式时整体丢弃，后续即可无歧义地降级为扁平生成。
+ */
+function parseSubtasksSection(raw) {
+    const match = raw.match(/(?:^|\r?\n)[ \t]*===\s*SUBTASKS\s*===\s*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i);
+    const content = match?.[1].trim();
+    if (!content)
+        return [];
+    const subtasks = [];
+    let previousId = 0;
+    for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        const parsed = line.match(/^(\d+)\s*\|\s*(\d+)\s*\|\s*(.+)$/);
+        if (!parsed)
+            return [];
+        const id = Number(parsed[1]);
+        const score = Number(parsed[2]);
+        const constraints = parsed[3].trim();
+        if (!Number.isSafeInteger(id)
+            || id <= previousId
+            || !Number.isSafeInteger(score)
+            || score <= 0
+            || !constraints)
+            return [];
+        subtasks.push({ id, score, constraints });
+        previousId = id;
+    }
+    return subtasks;
+}
 function parseSandboxBlueprint(raw, options, parseOptions = {}) {
     const sections = splitDelimitedSections(raw);
     if (sections.length === 0)
@@ -1471,6 +1552,7 @@ function parseSandboxBlueprint(raw, options, parseOptions = {}) {
         problemType,
         isFillIn,
         analysis,
+        subtasks: parseSubtasksSection(raw),
         functionName: meta.functionName || undefined,
         templates: problemType === 'function' ? templates : undefined,
         generatorCode: normalizeExecutableContent(generatorCode),
@@ -1582,6 +1664,7 @@ function parseSolutionBlueprint(raw, options, expectedFunctionSamples = []) {
             : fillInMode === 'no' ? false
                 : meta.isFillIn?.toLowerCase() === 'true',
         analysis,
+        subtasks: parseSubtasksSection(raw),
         functionName: meta.functionName || undefined,
         oracleCode: normalizeExecutableContent(oracleCode),
         oracleLanguage: parseOracleLanguage(raw, problemType),
@@ -3803,6 +3886,7 @@ function checkpointSolutionFromBlueprint(blueprint) {
         problemType: blueprint.problemType,
         isFillIn: blueprint.isFillIn,
         analysis: blueprint.analysis,
+        subtasks: blueprint.subtasks,
         functionName: blueprint.functionName,
         oracleCode: blueprint.oracleCode,
         oracleLanguage: blueprint.oracleLanguage,

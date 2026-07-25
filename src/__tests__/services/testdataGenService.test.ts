@@ -11,6 +11,7 @@ import {
   extractRawTopLevelYamlEntry,
   assertExistingConfigParsable,
   buildCoveragePlan,
+  allocateCasesToSubtasks,
   allocateCaseNumbers,
   getExistingNumericCases,
   buildSkeletonPlan,
@@ -33,6 +34,7 @@ import {
   buildIndependentVerifierSystemPrompt,
   buildIndependentVerifierUserPrompt,
   parseOracleLanguage,
+  parseSubtasksSection,
   parseSandboxBlueprint,
   parseSolutionBlueprint,
   parseGenerationArtifacts,
@@ -326,6 +328,69 @@ describe('buildCoveragePlan / numeric case allocation', () => {
     expect([...state.reserved]).toEqual([1, 2, 3]);
     expect(state.complete).toEqual([1]);
     expect(allocateCaseNumbers(['1.in', '1.out', '2.in', '3.out'], 2)).toEqual([4, 5]);
+  });
+});
+
+describe('parseSubtasksSection / allocateCasesToSubtasks', () => {
+  const subtasks = [
+    { id: 1, score: 60, constraints: 'n <= 20，且所有 a_i 相等' },
+    { id: 2, score: 30, constraints: 'n <= 1000，a_i <= 100' },
+    { id: 3, score: 10, constraints: 'n <= 100000，a_i <= 10^9' },
+  ];
+
+  it('解析合法 SUBTASKS 分节并保留完整约束摘要', () => {
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '1 | 20 | n<=20, p_i=1',
+      '3 | 80 | sum n<=1000, p_i=1, 依赖子任务1',
+      '@@@META@@@',
+      'problemType: traditional',
+    ].join('\n'))).toEqual([
+      { id: 1, score: 20, constraints: 'n<=20, p_i=1' },
+      { id: 3, score: 80, constraints: 'sum n<=1000, p_i=1, 依赖子任务1' },
+    ]);
+  });
+
+  it('id 乱序或重复时整体丢弃', () => {
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '2 | 20 | n<=20',
+      '1 | 80 | n<=1000',
+    ].join('\n'))).toEqual([]);
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '1 | 20 | n<=20',
+      '1 | 80 | n<=1000',
+    ].join('\n'))).toEqual([]);
+  });
+
+  it('任一行格式非法时整体丢弃，缺失分节返回空数组', () => {
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '1 | 20 | n<=20',
+      '2 | 0 | n<=1000',
+    ].join('\n'))).toEqual([]);
+    expect(parseSubtasksSection('@@@META@@@\nproblemType: traditional')).toEqual([]);
+  });
+
+  it('均匀分值把剩余测试点平均分配，并按顺序恢复 caseNumber', () => {
+    const allocations = allocateCasesToSubtasks(6, subtasks.map(item => ({ ...item, score: 1 })));
+    expect(allocations.map(item => item.subtaskId)).toEqual([1, 1, 2, 2, 3, 3]);
+    expect(allocations.map(item => item.caseNumber)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(allocations[0].guidance).toBe(
+      'n <= 20，且所有 a_i 相等;数据必须严格满足本子任务的全部约束;应包含该档位下的边界/极端情形',
+    );
+  });
+
+  it('剩余名额按分值比例使用最大缺口法分配', () => {
+    const allocations = allocateCasesToSubtasks(10, subtasks);
+    expect(allocations.filter(item => item.subtaskId === 1)).toHaveLength(5);
+    expect(allocations.filter(item => item.subtaskId === 2)).toHaveLength(3);
+    expect(allocations.filter(item => item.subtaskId === 3)).toHaveLength(2);
+  });
+
+  it('测试点数恰好等于子任务数时每个子任务分配一个', () => {
+    expect(allocateCasesToSubtasks(3, subtasks).map(item => item.subtaskId)).toEqual([1, 2, 3]);
   });
 });
 
@@ -2993,6 +3058,9 @@ describe('两阶段沙箱蓝图', () => {
     expect(solutionSystem).toContain('@@@ORACLE@@@');
     expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
     expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
+    expect(solutionSystem).toContain('=== SUBTASKS ===');
+    expect(solutionSystem).toContain('仅当题面明确给出子任务/分数表时输出该分节');
+    expect(solutionSystem).toContain('约束摘要为该子任务的完整生效约束');
     expect(solutionSystem).toContain('NOTES 至多 2 句');
     expect(solutionSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(solutionUser).toContain('这是第一阶段');
@@ -3205,12 +3273,37 @@ describe('parseSandboxBlueprint v2 分节', () => {
   it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
     expect(sp).toContain('@@@SOLUTION@@@');
+    expect(sp).toContain('=== SUBTASKS ===');
     expect(sp).not.toContain('@@@BRUTE@@@');
     expect(sp).not.toContain('@@@VALIDATOR@@@');
     expect(sp).toContain('独立调用中生成验证器');
     expect(sp).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
     expect(sp).toContain('NOTES 至多 2 句');
     expect(sp).toContain('不要罗列已由沙箱验证的内容');
+  });
+
+  it('第一阶段与兼容完整蓝图均存储合法 SUBTASKS 规格', () => {
+    const subtaskSection = [
+      '=== SUBTASKS ===',
+      '1 | 30 | n<=100，且所有权值相等',
+      '2 | 70 | n<=100000，完整题面约束',
+    ].join('\n');
+    const expected = [
+      { id: 1, score: 30, constraints: 'n<=100，且所有权值相等' },
+      { id: 2, score: 70, constraints: 'n<=100000，完整题面约束' },
+    ];
+
+    const solution = parseSolutionBlueprint(
+      `${subtaskSection}\n${makeSolutionBlueprint('traditional')}`,
+      tradOpts,
+    );
+    const full = parseSandboxBlueprint(
+      `${subtaskSection}\n${makeSandboxBlueprint('traditional')}`,
+      tradOpts,
+    );
+
+    expect(solution.subtasks).toEqual(expected);
+    expect(full.subtasks).toEqual(expected);
   });
 
   it('独立验证 Prompt 与解析器强制要求 BRUTE/STRESS_GENERATOR/VALIDATOR', () => {
