@@ -11,8 +11,9 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 
-import { Handler, PRIV, PERM, ProblemModel, SystemModel, STATUS, db } from 'hydrooj';
+import { Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
+import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import {
   TestdataGenService,
@@ -32,6 +33,7 @@ import {
   TESTDATA_CONFIG_UNPARSABLE_KEY,
   CPP_ORACLE_UNAVAILABLE_KEY,
   CPP_PROVIDED_STD_COMPILE_FAILED_KEY,
+  getTestlibCheckerFilename,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import {
@@ -63,6 +65,76 @@ interface ProblemDocLite {
   owner?: number;
   config?: string;
   data?: Array<{ _id?: string; name?: string; size?: number }>;
+}
+
+interface TestlibCheckerArtifacts {
+  checkerSource: string;
+  checkerHeaders: Record<string, string>;
+}
+
+function normalizeCheckerPath(filename: string): string | undefined {
+  if (!filename || filename.includes('\\') || filename.includes('\0') || pathPosix.isAbsolute(filename)) {
+    return undefined;
+  }
+  const normalized = pathPosix.normalize(filename);
+  if (normalized === '..' || normalized.startsWith('../')) return undefined;
+  return normalized.replace(/^\.\//, '');
+}
+
+async function readStorageText(storagePath: string): Promise<string> {
+  const value = await StorageModel.get(storagePath);
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  const chunks: Buffer[] = [];
+  for await (const chunk of value as unknown as AsyncIterable<Buffer | string>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
+ * 让 service 完整回退到原有自定义 checker 跳过语义。
+ */
+export async function loadTestlibCheckerArtifacts(
+  domainId: string,
+  pdoc: ProblemDocLite,
+): Promise<TestlibCheckerArtifacts | undefined> {
+  let configured: string | undefined;
+  try {
+    configured = getTestlibCheckerFilename(pdoc.config);
+  } catch {
+    // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
+    return undefined;
+  }
+  const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
+  if (!checkerFilename) return undefined;
+
+  const files = (pdoc.data || []).flatMap(item => {
+    const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
+    return storageName ? [{ storageName, logicalName: storageName }] : [];
+  });
+  const checkerFile = files.find(file => file.logicalName === checkerFilename);
+  if (!checkerFile) return undefined;
+  const checkerDir = pathPosix.dirname(checkerFilename);
+  const headerFiles = files.filter(file =>
+    pathPosix.dirname(file.logicalName) === checkerDir
+    && file.logicalName.toLowerCase().endsWith('.h'));
+  const storageBase = `problem/${domainId}/${pdoc.docId}/testdata`;
+
+  try {
+    const checkerSource = await readStorageText(`${storageBase}/${checkerFile.storageName}`);
+    const headerEntries = await Promise.all(headerFiles.map(async file => [
+      pathPosix.basename(file.logicalName),
+      await readStorageText(`${storageBase}/${file.storageName}`),
+    ] as const));
+    return {
+      checkerSource,
+      checkerHeaders: Object.fromEntries(headerEntries),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 interface AcceptedStdRecordLite {
@@ -472,11 +544,10 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
     const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
     const generationMode = getTestdataGenerationMode();
-    const cppOracleAvailable = await probeCppOracleAvailability(
-      sandboxRunner,
-      generationMode,
-      ac.signal,
-    );
+    const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+      probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
+      loadTestlibCheckerArtifacts(job.domainId, pdoc),
+    ]);
     const service = new TestdataGenService(aiClient, {
       sandboxRunner,
       mode: generationMode,
@@ -488,6 +559,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       options,
       existingFiles,
       existingConfig: pdoc.config,
+      ...checkerArtifacts,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
       onProgress: progress => {
@@ -673,11 +745,10 @@ export class TestdataGenGenerateHandler extends Handler {
         }, API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
       }
 
-      const cppOracleAvailable = await probeCppOracleAvailability(
-        sandboxRunner,
-        generationMode,
-        requestAc.signal,
-      );
+      const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+        probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
+        loadTestlibCheckerArtifacts(domainId, pdoc),
+      ]);
       const service = new TestdataGenService(aiClient, {
         sandboxRunner,
         mode: generationMode,
@@ -689,6 +760,7 @@ export class TestdataGenGenerateHandler extends Handler {
         options,
         existingFiles,
         existingConfig: pdoc.config,
+        ...checkerArtifacts,
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
         onProgress: progress => progressStream?.writeEvent('progress', progress),

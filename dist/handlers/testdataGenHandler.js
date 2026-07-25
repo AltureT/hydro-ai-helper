@@ -13,8 +13,10 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenJobDismissHandler = exports.TestdataGenJobCancelHandler = exports.TestdataGenJobStatusHandler = exports.TestdataGenJobStartHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
+exports.loadTestlibCheckerArtifacts = loadTestlibCheckerArtifacts;
 exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
+const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
 const testdataGenService_1 = require("../services/testdataGenService");
 const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
@@ -27,6 +29,69 @@ const domainHelper_1 = require("../utils/domainHelper");
 const mongo_1 = require("../utils/mongo");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
+function normalizeCheckerPath(filename) {
+    if (!filename || filename.includes('\\') || filename.includes('\0') || path_1.posix.isAbsolute(filename)) {
+        return undefined;
+    }
+    const normalized = path_1.posix.normalize(filename);
+    if (normalized === '..' || normalized.startsWith('../'))
+        return undefined;
+    return normalized.replace(/^\.\//, '');
+}
+async function readStorageText(storagePath) {
+    const value = await hydrooj_1.StorageModel.get(storagePath);
+    if (typeof value === 'string')
+        return value;
+    if (Buffer.isBuffer(value))
+        return value.toString('utf8');
+    const chunks = [];
+    for await (const chunk of value) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+}
+/**
+ * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
+ * 让 service 完整回退到原有自定义 checker 跳过语义。
+ */
+async function loadTestlibCheckerArtifacts(domainId, pdoc) {
+    let configured;
+    try {
+        configured = (0, testdataGenService_1.getTestlibCheckerFilename)(pdoc.config);
+    }
+    catch {
+        // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
+        return undefined;
+    }
+    const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
+    if (!checkerFilename)
+        return undefined;
+    const files = (pdoc.data || []).flatMap(item => {
+        const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
+        return storageName ? [{ storageName, logicalName: storageName }] : [];
+    });
+    const checkerFile = files.find(file => file.logicalName === checkerFilename);
+    if (!checkerFile)
+        return undefined;
+    const checkerDir = path_1.posix.dirname(checkerFilename);
+    const headerFiles = files.filter(file => path_1.posix.dirname(file.logicalName) === checkerDir
+        && file.logicalName.toLowerCase().endsWith('.h'));
+    const storageBase = `problem/${domainId}/${pdoc.docId}/testdata`;
+    try {
+        const checkerSource = await readStorageText(`${storageBase}/${checkerFile.storageName}`);
+        const headerEntries = await Promise.all(headerFiles.map(async (file) => [
+            path_1.posix.basename(file.logicalName),
+            await readStorageText(`${storageBase}/${file.storageName}`),
+        ]));
+        return {
+            checkerSource,
+            checkerHeaders: Object.fromEntries(headerEntries),
+        };
+    }
+    catch {
+        return undefined;
+    }
+}
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
 const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
 function canReadAllRecordCodes(handler) {
@@ -352,7 +417,10 @@ async function runBackgroundGeneration(params) {
         const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
         const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
         const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
-        const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal);
+        const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+            probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
+            loadTestlibCheckerArtifacts(job.domainId, pdoc),
+        ]);
         const service = new testdataGenService_1.TestdataGenService(aiClient, {
             sandboxRunner,
             mode: generationMode,
@@ -364,6 +432,7 @@ async function runBackgroundGeneration(params) {
             options,
             existingFiles,
             existingConfig: pdoc.config,
+            ...checkerArtifacts,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
             onProgress: progress => {
@@ -531,7 +600,10 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     progressStream?.writeComment('keepalive');
                 }, limits_1.API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
             }
-            const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal);
+            const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+                probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
+                loadTestlibCheckerArtifacts(domainId, pdoc),
+            ]);
             const service = new testdataGenService_1.TestdataGenService(aiClient, {
                 sandboxRunner,
                 mode: generationMode,
@@ -543,6 +615,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 options,
                 existingFiles,
                 existingConfig: pdoc.config,
+                ...checkerArtifacts,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
                 onProgress: progress => progressStream?.writeEvent('progress', progress),

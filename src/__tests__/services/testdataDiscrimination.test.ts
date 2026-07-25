@@ -396,6 +396,45 @@ describe('runDiscriminationPhase', () => {
     expect(result.allKilled).toBe(true);
   });
 
+  it('自定义 checker 可用时以 testlib 拒绝结果判定错误解 WA', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([accepted('另一种文本\n')]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      runBatch: jest.fn().mockResolvedValue(['reject']),
+      runChecker: jest.fn().mockResolvedValue('reject'),
+      dispose: jest.fn(),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [{
+        kind: 'wrong-algorithm',
+        description: '输出不合法方案',
+        code: 'print("alternative")',
+      }],
+      cases: [{ input: '1\n', output: '标准答案\n' }],
+      runner,
+      customChecker: true,
+      checkerExecutor,
+    });
+
+    expect(checkerExecutor.runBatch).toHaveBeenCalledWith([{
+      input: '1\n',
+      output: '另一种文本\n',
+      answer: '标准答案\n',
+    }], expect.objectContaining({ deadlineAt: expect.any(Number) }));
+    expect(result.targets[0]).toMatchObject({
+      killed: true,
+      killedBy: 'wa',
+      killedByCase: 1,
+    });
+  });
+
   it('沙箱异常把当前及未运行靶子标为预算跳过而不抛错', async () => {
     const runner = {
       isAvailable: jest.fn(),

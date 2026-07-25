@@ -116,6 +116,30 @@ function buildCompiledCommand(fileId, stdin, limits = {}) {
         copyOutMax: STDOUT_LIMIT_BYTES,
     };
 }
+function buildCheckerCommand(fileId, testcase, limits = {}) {
+    return {
+        args: ['prog', 'in.txt', 'out.txt', 'ans.txt'],
+        env: ['PATH=/usr/bin:/bin'],
+        files: [
+            { content: '' },
+            { name: 'stdout', max: STDOUT_LIMIT_BYTES },
+            { name: 'stderr', max: STDERR_LIMIT_BYTES },
+        ],
+        cpuLimit: limits.cpuLimit ?? CPU_LIMIT_NS,
+        clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
+        memoryLimit: MEMORY_LIMIT_BYTES,
+        stackLimit: 64 * 1024 * 1024,
+        procLimit: 16,
+        copyIn: {
+            prog: { fileId },
+            'in.txt': { content: testcase.input },
+            'out.txt': { content: testcase.output },
+            'ans.txt': { content: testcase.answer },
+        },
+        copyOut: ['stdout', 'stderr'],
+        copyOutMax: STDOUT_LIMIT_BYTES,
+    };
+}
 function unwrapResults(data) {
     if (Array.isArray(data))
         return data;
@@ -251,6 +275,10 @@ class GoJudgeSandboxRunner {
     /** 宽容执行已缓存的二进制，分块、限额与绝对截止时间语义和 Python 完全一致。 */
     async runCompiledBatchDetailed(fileId, inputs, opts = {}) {
         return this.runBatchDetailed(inputs, opts, (input, limits) => buildCompiledCommand(fileId, input, limits));
+    }
+    /** testlib checker：argv 依次传入输入、选手输出与标准答案文件。 */
+    async runCheckerBatchDetailed(fileId, cases, opts = {}) {
+        return this.runBatchDetailed(cases, opts, (testcase, limits) => buildCheckerCommand(fileId, testcase, limits));
     }
     async runBatchDetailed(inputs, opts, buildCommand) {
         if (inputs.length === 0)

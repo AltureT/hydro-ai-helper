@@ -43,6 +43,7 @@ import {
   buildSandboxRepairPrompt,
   mergeSandboxBlueprintRepair,
   hasCustomChecker,
+  getTestlibCheckerFilename,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -473,6 +474,18 @@ describe('buildConfigYaml', () => {
   it('default/strict checker 不按自定义 checker 处理', () => {
     expect(hasCustomChecker('checker_type: default')).toBe(false);
     expect(hasCustomChecker('checker_type: strict')).toBe(false);
+  });
+
+  it('仅为 testlib 配置提取 checker 源文件名', () => {
+    expect(getTestlibCheckerFilename(
+      'checker_type: testlib\nchecker: checker/checker.cc\n',
+    )).toBe('checker/checker.cc');
+    expect(getTestlibCheckerFilename(
+      'checker_type: default\nchecker: checker.cc\n',
+    )).toBeUndefined();
+    expect(getTestlibCheckerFilename(
+      'checker_type: interactive\nchecker: checker.cc\n',
+    )).toBeUndefined();
   });
 });
 
@@ -1024,6 +1037,52 @@ describe('Hydro 沙箱生成蓝图', () => {
     );
     expect(response.verification?.sampleCheck).toBeUndefined();
     expect(response.notes).toContain('自定义 checker');
+  });
+
+  it('可执行 checker 用 testlib 语义回归题面样例，而非纯文本比较', async () => {
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'case', input: '1\n' }] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'answer\n', stderr: '' },
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'different but valid\n', stderr: '' },
+      ]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      runBatch: jest.fn().mockResolvedValue(['accept']),
+      runChecker: jest.fn().mockResolvedValue('accept'),
+      dispose: jest.fn(),
+    };
+    const blueprint = parseSandboxBlueprint(
+      makeSandboxBlueprint('traditional'),
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+    );
+
+    const response = await materializeSandboxBlueprint(
+      blueprint,
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+      coinStatementWithSample,
+      runner,
+      undefined,
+      true,
+      undefined,
+      [],
+      false,
+      checkerExecutor,
+    );
+
+    expect(checkerExecutor.runBatch).toHaveBeenCalledWith([{
+      input: expect.any(String),
+      output: 'different but valid\n',
+      answer: expect.any(String),
+    }], expect.objectContaining({ deadlineAt: expect.any(Number) }));
+    expect(response.verification?.sampleCheck).toEqual({ total: 1, passed: 1 });
   });
 });
 
@@ -3519,6 +3578,69 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       skippedReason: 'custom-checker',
     });
     expect(res.notes).toContain('跳过纯文本压力对拍');
+  });
+
+  it('可执行 checker 对 BRUTE 与 ORACLE 的不同文本做压力判定', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: 'official-a\n' }), detail({ stdout: 'official-b\n' }),
+          ...Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail({ stdout: 'oracle-form\n' })),
+        ])
+        .mockResolvedValueOnce(Array.from(
+          { length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail({ stdout: 'alternative-form\n' }),
+        ))
+        .mockResolvedValueOnce([detail(), detail()]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      runBatch: jest.fn().mockResolvedValue(
+        Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => 'accept'),
+      ),
+      runChecker: jest.fn().mockResolvedValue('accept'),
+      dispose: jest.fn(),
+    };
+
+    const res = await materializeSandboxBlueprint(
+      bp,
+      tradOpts,
+      '',
+      runner,
+      undefined,
+      true,
+      undefined,
+      [],
+      false,
+      checkerExecutor,
+    );
+
+    expect(checkerExecutor.runBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([{
+        input: expect.any(String),
+        output: 'alternative-form\n',
+        answer: 'oracle-form\n',
+      }]),
+      expect.objectContaining({ deadlineAt: expect.any(Number) }),
+    );
+    expect(res.verification?.stressCheck).toMatchObject({
+      compared: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      agreed: TESTDATA_GEN_LIMITS.STRESS_CASES,
+    });
+    expect(res.verification?.stressCheck).not.toHaveProperty('skippedReason');
+    expect(res.notes).toContain('题目 checker');
   });
 
   it('函数题 solution+template.py 组合实跑，一致则记 templateCheck.passed', async () => {

@@ -325,6 +325,39 @@ describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
     expect(details[4]).toMatchObject({ accepted: true, stdout: 'e' });
   });
 
+  it('runCheckerBatchDetailed 以 testlib 参数顺序挂载输入、输出和答案', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [goJudgeResult()],
+      }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await expect(runner.runCheckerBatchDetailed('cached-checker-1', [{
+      input: '1 2\n',
+      output: '3\n',
+      answer: '3.0\n',
+    }])).resolves.toHaveLength(1);
+
+    expect(http.post).toHaveBeenCalledWith(
+      'http://localhost:5050/run',
+      {
+        cmd: [expect.objectContaining({
+          args: ['prog', 'in.txt', 'out.txt', 'ans.txt'],
+          copyIn: {
+            prog: { fileId: 'cached-checker-1' },
+            'in.txt': { content: '1 2\n' },
+            'out.txt': { content: '3\n' },
+            'ans.txt': { content: '3.0\n' },
+          },
+          copyOut: ['stdout', 'stderr'],
+        })],
+      },
+      expect.objectContaining({ proxy: false }),
+    );
+  });
+
   it('deleteCachedFile 调用缓存删除端点且失败静默', async () => {
     const http = {
       get: jest.fn(),

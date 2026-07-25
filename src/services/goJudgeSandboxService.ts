@@ -42,6 +42,12 @@ export type CppCompileResult =
   | { ok: true; fileId: string }
   | { ok: false; error: string };
 
+export interface CheckerRunCase {
+  input: string;
+  output: string;
+  answer: string;
+}
+
 export interface TestdataSandboxRunner {
   isAvailable(signal?: AbortSignal): Promise<boolean>;
   runPython(code: string, stdin?: string, signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult>;
@@ -52,6 +58,11 @@ export interface TestdataSandboxRunner {
   runCompiledBatchDetailed?(
     fileId: string,
     inputs: string[],
+    opts?: PythonBatchOptions,
+  ): Promise<PythonRunDetail[]>;
+  runCheckerBatchDetailed?(
+    fileId: string,
+    cases: CheckerRunCase[],
     opts?: PythonBatchOptions,
   ): Promise<PythonRunDetail[]>;
   deleteCachedFile?(fileId: string): Promise<void>;
@@ -187,6 +198,35 @@ function buildCompiledCommand(
     procLimit: 16,
     copyIn: {
       prog: { fileId },
+    },
+    copyOut: ['stdout', 'stderr'],
+    copyOutMax: STDOUT_LIMIT_BYTES,
+  };
+}
+
+function buildCheckerCommand(
+  fileId: string,
+  testcase: CheckerRunCase,
+  limits: { cpuLimit?: number; clockLimit?: number } = {},
+) {
+  return {
+    args: ['prog', 'in.txt', 'out.txt', 'ans.txt'],
+    env: ['PATH=/usr/bin:/bin'],
+    files: [
+      { content: '' },
+      { name: 'stdout', max: STDOUT_LIMIT_BYTES },
+      { name: 'stderr', max: STDERR_LIMIT_BYTES },
+    ],
+    cpuLimit: limits.cpuLimit ?? CPU_LIMIT_NS,
+    clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
+    memoryLimit: MEMORY_LIMIT_BYTES,
+    stackLimit: 64 * 1024 * 1024,
+    procLimit: 16,
+    copyIn: {
+      prog: { fileId },
+      'in.txt': { content: testcase.input },
+      'out.txt': { content: testcase.output },
+      'ans.txt': { content: testcase.answer },
     },
     copyOut: ['stdout', 'stderr'],
     copyOutMax: STDOUT_LIMIT_BYTES,
@@ -369,11 +409,24 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     );
   }
 
-  private async runBatchDetailed(
-    inputs: string[],
+  /** testlib checker：argv 依次传入输入、选手输出与标准答案文件。 */
+  async runCheckerBatchDetailed(
+    fileId: string,
+    cases: CheckerRunCase[],
+    opts: PythonBatchOptions = {},
+  ): Promise<PythonRunDetail[]> {
+    return this.runBatchDetailed(
+      cases,
+      opts,
+      (testcase, limits) => buildCheckerCommand(fileId, testcase, limits),
+    );
+  }
+
+  private async runBatchDetailed<T>(
+    inputs: T[],
     opts: PythonBatchOptions,
     buildCommand: (
-      input: string,
+      input: T,
       limits: { cpuLimit: number; clockLimit: number },
     ) => unknown,
   ): Promise<PythonRunDetail[]> {

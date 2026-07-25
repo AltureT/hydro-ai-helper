@@ -22,6 +22,7 @@ import {
 } from './goJudgeSandboxService';
 import { excerpt, excerptTail } from '../lib/textTruncate';
 import type {
+  CheckerRunCase,
   PythonRunDetail,
   PythonRunResult,
   TestdataGenerationMode,
@@ -216,7 +217,7 @@ export interface DiscriminationTargetResult {
   killedBy?: 'wa' | 'tle';
   /** 首个卡掉该靶子的正式测试点编号（从 1 开始）。 */
   killedByCase?: number;
-  skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
+  skippedReason?: 'custom-checker' | 'checker-infra-error' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
 }
 
 export interface DiscriminationCheck {
@@ -245,6 +246,11 @@ export interface PlanVerification {
   };
   validator?: { ran: boolean; casesChecked: number };
   templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
+  /** testlib checker 尽力实跑状态；缺失表示未提供可执行 checker。 */
+  checkerCheck?: {
+    status: 'executed' | 'compile-failed';
+    runtimeSkipped: number;
+  };
   discrimination?: DiscriminationCheck;
 }
 
@@ -713,6 +719,16 @@ export function hasCustomChecker(raw?: string): boolean {
   const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
   return (!!checkerType && !['default', 'strict'].includes(checkerType))
     || (!!checker && !['default', 'strict'].includes(checkerType));
+}
+
+/** 仅精确支持 testlib；其他 checker 类型继续沿用既有跳过行为。 */
+export function getTestlibCheckerFilename(raw?: string): string | undefined {
+  const config = parseExistingProblemConfig(raw);
+  const checkerType = typeof config.checker_type === 'string'
+    ? config.checker_type.trim().toLowerCase()
+    : '';
+  const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
+  return checkerType === 'testlib' && checker ? checker : undefined;
 }
 
 /**
@@ -2194,18 +2210,186 @@ function comparableFileContent(content: string): string {
     .trimEnd();
 }
 
+export type CheckerExecutionVerdict = 'accept' | 'reject' | 'infra-error';
+
+/** 将 checker 沙箱结果归约为业务三态；基础设施异常永远不能被当成 WA。 */
+export function reduceCheckerExecution(
+  detail?: Pick<PythonRunDetail, 'status' | 'accepted' | 'timedOut' | 'exitStatus'>,
+  infrastructureError = false,
+): CheckerExecutionVerdict {
+  if (
+    infrastructureError
+    || !detail
+    || detail.timedOut
+  ) return 'infra-error';
+  if (detail.accepted && detail.exitStatus === 0) return 'accept';
+  if (
+    /nonzero exit status/i.test(detail.status || '')
+    || (detail.status === '' && typeof detail.exitStatus === 'number' && detail.exitStatus !== 0)
+  ) return 'reject';
+  return 'infra-error';
+}
+
+export interface CheckerExecutor {
+  readonly status: 'ready' | 'unavailable' | 'compile-failed';
+  readonly compileError?: string;
+  readonly runtimeSkipped: number;
+  runBatch(
+    cases: CheckerRunCase[],
+    opts?: { signal?: AbortSignal; deadlineAt?: number },
+  ): Promise<CheckerExecutionVerdict[]>;
+  runChecker(
+    input: string,
+    output: string,
+    answer: string,
+    opts?: { signal?: AbortSignal; deadlineAt?: number },
+  ): Promise<CheckerExecutionVerdict>;
+  dispose(): Promise<void>;
+}
+
+function unavailableCheckerExecutor(
+  status: 'unavailable' | 'compile-failed',
+  compileError?: string,
+): CheckerExecutor {
+  return {
+    status,
+    compileError,
+    runtimeSkipped: 0,
+    runBatch: async cases => cases.map(() => 'infra-error'),
+    runChecker: async () => 'infra-error',
+    dispose: async () => {},
+  };
+}
+
+/** checker 属于尽力增强：编译失败只记录状态，绝不阻断已存在的正确性管线。 */
+async function createCheckerExecutor(input: {
+  source?: string;
+  headers?: Record<string, string>;
+  runner: TestdataSandboxRunner;
+  signal?: AbortSignal;
+}): Promise<CheckerExecutor> {
+  if (!input.source?.trim()) return unavailableCheckerExecutor('unavailable');
+  if (!input.runner.compileCpp || !input.runner.runCheckerBatchDetailed) {
+    return unavailableCheckerExecutor('compile-failed', '当前 Hydro 沙箱不支持 checker 编译或执行');
+  }
+
+  let compiled;
+  try {
+    compiled = await input.runner.compileCpp(input.source, {
+      extraFiles: input.headers,
+      signal: input.signal,
+    });
+  } catch (err) {
+    if (input.signal?.aborted || isCancellation(err)) throw err;
+    return unavailableCheckerExecutor(
+      'compile-failed',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  if (compiled.ok === false) {
+    return unavailableCheckerExecutor('compile-failed', excerptTail(compiled.error, 2000));
+  }
+
+  let runtimeSkipped = 0;
+  const executor: CheckerExecutor = {
+    status: 'ready',
+    get runtimeSkipped() {
+      return runtimeSkipped;
+    },
+    runBatch: async (cases, opts = {}) => {
+      try {
+        const details = await (input.runner.runCheckerBatchDetailed as NonNullable<
+          TestdataSandboxRunner['runCheckerBatchDetailed']
+        >)(compiled.fileId, cases, opts);
+        const verdicts = cases.map((_, index) => reduceCheckerExecution(details[index]));
+        runtimeSkipped += verdicts.filter(verdict => verdict === 'infra-error').length;
+        return verdicts;
+      } catch (err) {
+        if (opts.signal?.aborted || input.signal?.aborted || isCancellation(err)) throw err;
+        runtimeSkipped += cases.length;
+        return cases.map(() => 'infra-error');
+      }
+    },
+    runChecker: async (checkerInput, output, answer, opts = {}) => {
+      const [verdict] = await executor.runBatch([{
+        input: checkerInput,
+        output,
+        answer,
+      }], opts);
+      return verdict;
+    },
+    dispose: async () => {
+      try {
+        await input.runner.deleteCachedFile?.(compiled.fileId);
+      } catch {
+        // checker 仅是尽力增强；缓存清理失败不能覆盖主流程结果。
+      }
+    },
+  };
+  return executor;
+}
+
+function appendCheckerExecutionNotes(
+  response: GenerationResponse,
+  customChecker: boolean,
+  checkerExecutor: CheckerExecutor,
+): void {
+  if (!customChecker) return;
+  if (response.verification && checkerExecutor.status !== 'unavailable') {
+    response.verification.checkerCheck = {
+      status: checkerExecutor.status === 'ready' ? 'executed' : 'compile-failed',
+      runtimeSkipped: checkerExecutor.runtimeSkipped,
+    };
+  }
+  const notes: Array<{ kind: 'warning' | 'system'; text: string }> = [];
+  if (checkerExecutor.status === 'ready') {
+    notes.push({
+      kind: 'system',
+      text: '题目 testlib checker 已编译并实跑，用于样例回归、压力对拍、区分度与定向补刀判定。',
+    });
+  } else if (checkerExecutor.status === 'compile-failed') {
+    notes.push({
+      kind: 'warning',
+      text: `checker 编译失败，按无 checker 实跑处理：${excerptTail(checkerExecutor.compileError || '未知错误', 500)}`,
+    });
+  }
+  if (checkerExecutor.runtimeSkipped > 0) {
+    notes.push({
+      kind: 'warning',
+      text: `题目 checker 有 ${checkerExecutor.runtimeSkipped} 次判定因沙箱超时或基础设施错误跳过；这些结果未用于否定已通过的正确性。`,
+    });
+  }
+  for (const note of notes) {
+    response.notes = [response.notes, note.text].filter(Boolean).join('\n');
+    if (response.notesStructured) {
+      response.notesStructured[note.kind === 'warning' ? 'warnings' : 'system'].push(note.text);
+    }
+  }
+}
+
 /** 根据沙箱逐点结果判定正式数据是否能够卡掉错误解靶子。 */
 export function evaluateDiscrimination(inputs: {
   targetRuns: Array<{
     kind: DiscriminationTargetResult['kind'];
     description: string;
-    perCase: Array<{ accepted: boolean; timedOut: boolean; stdout: string }>;
+    perCase: Array<{
+      accepted: boolean;
+      timedOut: boolean;
+      stdout: string;
+      checkerVerdict?: CheckerExecutionVerdict;
+    }>;
   }>;
   oracleOutputs: string[];
   customChecker: boolean;
+  checkerAvailable?: boolean;
 }): DiscriminationCheck {
   const targets = inputs.targetRuns.map((target): DiscriminationTargetResult => {
-    if (inputs.customChecker && target.kind !== 'brute-complexity') {
+    if (
+      inputs.customChecker
+      && target.kind !== 'brute-complexity'
+      && !inputs.checkerAvailable
+      && !target.perCase.some(detail => detail.checkerVerdict !== undefined)
+    ) {
       return {
         kind: target.kind,
         description: target.description,
@@ -2214,6 +2398,7 @@ export function evaluateDiscrimination(inputs: {
       };
     }
 
+    let checkerInfraError = false;
     for (let index = 0; index < target.perCase.length; index++) {
       const detail = target.perCase[index];
       if (detail.timedOut) {
@@ -2234,7 +2419,18 @@ export function evaluateDiscrimination(inputs: {
           killedByCase: index + 1,
         };
       }
-      if (
+      if (target.kind !== 'brute-complexity' && inputs.customChecker) {
+        if (detail.checkerVerdict === 'reject') {
+          return {
+            kind: target.kind,
+            description: target.description,
+            killed: true,
+            killedBy: 'wa',
+            killedByCase: index + 1,
+          };
+        }
+        if (detail.checkerVerdict === 'infra-error') checkerInfraError = true;
+      } else if (
         target.kind !== 'brute-complexity'
         && comparableFileContent(detail.stdout)
           !== comparableFileContent(inputs.oracleOutputs[index] ?? '')
@@ -2247,6 +2443,14 @@ export function evaluateDiscrimination(inputs: {
           killedByCase: index + 1,
         };
       }
+    }
+    if (checkerInfraError) {
+      return {
+        kind: target.kind,
+        description: target.description,
+        killed: false,
+        skippedReason: 'checker-infra-error',
+      };
     }
     return {
       kind: target.kind,
@@ -2433,6 +2637,7 @@ export async function smokeTestKillTargets(input: {
   runner: TestdataSandboxRunner;
   signal?: AbortSignal;
   customChecker: boolean;
+  checkerExecutor?: CheckerExecutor;
   deadlineAt: number;
 }): Promise<KillTarget[]> {
   if (input.killTargets.length === 0 || input.samples.length === 0) {
@@ -2448,15 +2653,24 @@ export async function smokeTestKillTargets(input: {
         { signal: input.signal, deadlineAt: input.deadlineAt },
       );
       if (details.length !== input.samples.length) continue;
-      const passed = details.every((detail, index) => (
-        detail.accepted
-        && !detail.timedOut
-        && (
-          input.customChecker
+      if (details.some(detail => !detail.accepted || detail.timedOut)) continue;
+      let checkerVerdicts: CheckerExecutionVerdict[] | undefined;
+      if (input.customChecker && input.checkerExecutor?.status === 'ready') {
+        checkerVerdicts = await input.checkerExecutor.runBatch(
+          input.samples.map((sample, index) => ({
+            input: sample.input,
+            output: details[index]?.stdout || '',
+            answer: sample.output,
+          })),
+          { signal: input.signal, deadlineAt: input.deadlineAt },
+        );
+      }
+      const passed = details.every((detail, index) => {
+        if (checkerVerdicts) return checkerVerdicts[index] !== 'reject';
+        return input.customChecker
           || comparableFileContent(detail.stdout)
-            === comparableFileContent(input.samples[index].output)
-        )
-      ));
+            === comparableFileContent(input.samples[index].output);
+      });
       if (passed) validTargets.push(target);
     } catch (err) {
       if (isCancellation(err)) throw err;
@@ -2579,6 +2793,7 @@ export async function verifySolutionBlueprintSamples(
   signal?: AbortSignal,
   customChecker = false,
   cppOracleAvailable = false,
+  checkerExecutor?: CheckerExecutor,
 ): Promise<{ total: number; passed: number }> {
   const statementSamples = extractStatementSamples(statementMarkdown);
   if (statementSamples.length === 0) return { total: 0, passed: 0 };
@@ -2619,16 +2834,33 @@ export async function verifySolutionBlueprintSamples(
   const acceptedRecord = options.providedStdSource === 'accepted-record';
   for (let i = 0; i < results.length; i++) {
     const detail = results[i];
+    if (detail.accepted) continue;
     const prefix = acceptedRecord ? 'AC 候选标程' : 'ORACLE';
-    if (!detail.accepted) {
+    throw new Error(
+      `${prefix}未通过第一阶段题面样例 ${samples[i].id} 的执行预验证（${detail.status || 'Unknown'}）\n`
+      + `输入：${excerpt(samples[i].input, 300)}\n`
+      + `错误：${excerptTail(detail.stderr || detail.error || '', 1000)}`,
+    );
+  }
+  const checkerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+    ? await checkerExecutor.runBatch(samples.map((sample, index) => ({
+      input: sample.input,
+      output: results[index]?.stdout || '',
+      answer: sample.output,
+    })), { signal })
+    : undefined;
+  for (let i = 0; i < results.length; i++) {
+    const detail = results[i];
+    const prefix = acceptedRecord ? 'AC 候选标程' : 'ORACLE';
+    if (checkerVerdicts?.[i] === 'reject') {
       throw new Error(
-        `${prefix}未通过第一阶段题面样例 ${samples[i].id} 的执行预验证（${detail.status || 'Unknown'}）\n`
-        + `输入：${excerpt(samples[i].input, 300)}\n`
-        + `错误：${excerptTail(detail.stderr || detail.error || '', 1000)}`,
+        `${prefix}未通过第一阶段题面样例 ${samples[i].id} 的题目 checker 验证`,
       );
     }
-    if (!customChecker
-      && comparableFileContent(detail.stdout) !== comparableFileContent(samples[i].output)) {
+    if (
+      !customChecker
+      && comparableFileContent(detail.stdout) !== comparableFileContent(samples[i].output)
+    ) {
       throw new Error(
         `${prefix}未通过第一阶段题面样例 ${samples[i].id}`
         + `：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
@@ -2636,7 +2868,12 @@ export async function verifySolutionBlueprintSamples(
       );
     }
   }
-  return { total: samples.length, passed: samples.length };
+  return {
+    total: samples.length,
+    passed: checkerVerdicts
+      ? checkerVerdicts.filter(verdict => verdict === 'accept').length
+      : samples.length,
+  };
 }
 
 /**
@@ -2651,6 +2888,7 @@ export async function runDiscriminationPhase(input: {
   runner: TestdataSandboxRunner;
   signal?: AbortSignal;
   customChecker: boolean;
+  checkerExecutor?: CheckerExecutor;
   deadlineAt?: number;
 }): Promise<DiscriminationCheck> {
   const deadlineAt = input.deadlineAt ?? Date.now() + DISCRIMINATION_BUDGET_MS;
@@ -2694,7 +2932,11 @@ export async function runDiscriminationPhase(input: {
       });
       continue;
     }
-    if (input.customChecker && target.kind !== 'brute-complexity') {
+    if (
+      input.customChecker
+      && target.kind !== 'brute-complexity'
+      && input.checkerExecutor?.status !== 'ready'
+    ) {
       results.push({
         kind: target.kind,
         description: target.description,
@@ -2714,14 +2956,42 @@ export async function runDiscriminationPhase(input: {
       if (details.length !== selectedCases.length) {
         throw new Error(`区分度验证返回 ${details.length} 个结果，期望 ${selectedCases.length} 个`);
       }
+      let checkerVerdicts: Array<CheckerExecutionVerdict | undefined> | undefined;
+      if (
+        input.customChecker
+        && target.kind !== 'brute-complexity'
+        && input.checkerExecutor?.status === 'ready'
+      ) {
+        const mappedVerdicts: Array<CheckerExecutionVerdict | undefined> = new Array(
+          selectedCases.length,
+        );
+        checkerVerdicts = mappedVerdicts;
+        const acceptedIndices = details.flatMap((detail, index) =>
+          detail.accepted && !detail.timedOut ? [index] : []);
+        const verdicts = await input.checkerExecutor.runBatch(
+          acceptedIndices.map(index => ({
+            input: selectedCases[index].input,
+            output: details[index].stdout,
+            answer: selectedCases[index].output,
+          })),
+          { signal: input.signal, deadlineAt },
+        );
+        acceptedIndices.forEach((caseIndex, verdictIndex) => {
+          mappedVerdicts[caseIndex] = verdicts[verdictIndex];
+        });
+      }
       const evaluated = evaluateDiscrimination({
         targetRuns: [{
           kind: target.kind,
           description: target.description,
-          perCase: details,
+          perCase: details.map((detail, index) => ({
+            ...detail,
+            checkerVerdict: checkerVerdicts?.[index],
+          })),
         }],
         oracleOutputs: selectedCases.map(item => item.output),
         customChecker: input.customChecker,
+        checkerAvailable: input.checkerExecutor?.status === 'ready',
       }).targets[0];
       if (evaluated?.killedByCase) {
         evaluated.killedByCase = target.caseIndices[evaluated.killedByCase - 1] + 1;
@@ -2772,6 +3042,7 @@ export async function materializeSandboxBlueprint(
   onProgress?: (stage: TestdataGenerationProgressStage, percent: number) => void,
   killTargets: KillTarget[] = [],
   cppOracleAvailable = false,
+  checkerExecutor?: CheckerExecutor,
 ): Promise<GenerationResponse> {
   const startedAt = Date.now();
   const sandboxDeadlineAt = startedAt + SANDBOX_TOTAL_BUDGET_MS;
@@ -2983,14 +3254,26 @@ export async function materializeSandboxBlueprint(
     }
     return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
   });
-  for (let i = 0; i < samples.length && !customChecker; i++) {
+  const sampleCheckerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+    ? await checkerExecutor.runBatch(samples.map((sample, index) => ({
+      input: sample.input,
+      output: oracleResults[inputs.length + index]?.stdout || '',
+      answer: sample.output,
+    })), { signal, deadlineAt: sandboxDeadlineAt })
+    : undefined;
+  for (let i = 0; i < samples.length; i++) {
     const actual = oracleResults[inputs.length + i]?.stdout || '';
-    if (comparableFileContent(actual) !== comparableFileContent(samples[i].output)) {
+    const checkerRejected = sampleCheckerVerdicts?.[i] === 'reject';
+    const textRejected = !customChecker
+      && comparableFileContent(actual) !== comparableFileContent(samples[i].output);
+    if (checkerRejected || textRejected) {
       throw new Error(
         `${usingAcceptedRecordCandidate ? 'AC 候选标程' : 'ORACLE'}未通过${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i].id}`
         + `（stdin：${JSON.stringify(comparableFileContent(samples[i].input))}）`
-        + `：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
-        + `，实际 ${JSON.stringify(comparableFileContent(actual))}`,
+        + (checkerRejected
+          ? '的题目 checker 验证'
+          : `：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
+            + `，实际 ${JSON.stringify(comparableFileContent(actual))}`),
       );
     }
   }
@@ -3066,7 +3349,7 @@ export async function materializeSandboxBlueprint(
   }
   if (blueprint.bruteCode && stressInputs.length > 0) {
     reportProgress('stress_testing', 84);
-    if (customChecker) {
+    if (customChecker && checkerExecutor?.status !== 'ready') {
       checkBudget();
       const bruteResults = await runner.runPythonBatchDetailed(
         blueprint.bruteCode,
@@ -3104,7 +3387,6 @@ export async function materializeSandboxBlueprint(
       if (bruteResults.length !== stressInputs.length) {
         throw new Error(`压力对拍 BRUTE 返回 ${bruteResults.length} 个结果，期望 ${stressInputs.length} 个`);
       }
-      const stressOracleOffset = inputs.length + samples.length;
       for (let i = 0; i < bruteResults.length; i++) {
         const detail = bruteResults[i];
         const caseNo = i + 1;
@@ -3114,8 +3396,27 @@ export async function materializeSandboxBlueprint(
         if (!detail.accepted) {
           throw new Error(`压力对拍 BRUTE 在第 ${caseNo} 组小数据执行失败：${excerpt(detail.stderr || detail.error || detail.status, 300)}`);
         }
+      }
+      const stressOracleOffset = inputs.length + samples.length;
+      const checkerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+        ? await checkerExecutor.runBatch(stressInputs.map((input, index) => ({
+          input,
+          output: bruteResults[index]?.stdout || '',
+          answer: oracleResults[stressOracleOffset + index]?.stdout || '',
+        })), { signal, deadlineAt: sandboxDeadlineAt })
+        : undefined;
+      let compared = 0;
+      let agreed = 0;
+      for (let i = 0; i < bruteResults.length; i++) {
+        const detail = bruteResults[i];
+        const caseNo = i + 1;
         const oracleOutput = oracleResults[stressOracleOffset + i]?.stdout || '';
-        if (comparableFileContent(detail.stdout) !== comparableFileContent(oracleOutput)) {
+        if (checkerVerdicts?.[i] === 'infra-error') continue;
+        compared++;
+        const disagreed = checkerVerdicts
+          ? checkerVerdicts[i] === 'reject'
+          : comparableFileContent(detail.stdout) !== comparableFileContent(oracleOutput);
+        if (disagreed) {
           if (oracleIsAcceptedRecord) {
             throw new Error(
               `AC 候选标程与独立 BRUTE 在第 ${caseNo} 组小数据不一致（${stressGenerated[i]?.label || ''}）\n`
@@ -3132,13 +3433,14 @@ export async function materializeSandboxBlueprint(
             + `BRUTE 输出：${excerpt(detail.stdout, 300)}`,
           );
         }
+        agreed++;
       }
       stressCheck = {
         generated: stressGeneratedCount,
         uniqueInputs: stressUniqueInputs,
         duplicateInputs: stressDuplicateInputs,
-        compared: stressInputs.length,
-        agreed: stressInputs.length,
+        compared,
+        agreed,
         ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
       };
     }
@@ -3198,6 +3500,7 @@ export async function materializeSandboxBlueprint(
     runner,
     signal,
     customChecker,
+    checkerExecutor,
     deadlineAt: discriminationDeadlineAt,
   });
   const discrimination = await runDiscriminationPhase({
@@ -3208,6 +3511,7 @@ export async function materializeSandboxBlueprint(
     runner,
     signal,
     customChecker,
+    checkerExecutor,
     deadlineAt: discriminationDeadlineAt,
   });
 
@@ -3218,9 +3522,16 @@ export async function materializeSandboxBlueprint(
       : oracleIsManualStd ? 'provided-std' : 'ai-solution',
     validator: { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
   };
-  if (!customChecker && (blueprint.problemType === 'traditional' || samples.length > 0)) {
-    // 样例不一致已在上面抛出，走到这里即全部通过
-    verification.sampleCheck = { total: samples.length, passed: samples.length };
+  if (
+    (!customChecker || checkerExecutor?.status === 'ready')
+    && (blueprint.problemType === 'traditional' || samples.length > 0)
+  ) {
+    verification.sampleCheck = {
+      total: samples.length,
+      passed: sampleCheckerVerdicts
+        ? sampleCheckerVerdicts.filter(verdict => verdict === 'accept').length
+        : samples.length,
+    };
   }
   if (bruteCheck) verification.bruteCheck = bruteCheck;
   if (stressCheck) verification.stressCheck = stressCheck;
@@ -3251,7 +3562,7 @@ export async function materializeSandboxBlueprint(
       ? `题目使用自定义 checker；暴力解与标程在测试点 ${bruteCheck.disagreed.join('、')} 的文本输出不同，已保留并请人工复核 checker 语义。`
       : `暴力解与教师标准答案在测试点 ${bruteCheck.disagreed.join('、')} 不一致，已按教师 std 输出为准，请人工复核。`);
   }
-  if (customChecker && samples.length > 0) {
+  if (customChecker && samples.length > 0 && checkerExecutor?.status !== 'ready') {
     appendNote('system', '题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
   }
   if (stressCheck?.droppedInvalid) {
@@ -3265,7 +3576,10 @@ export async function materializeSandboxBlueprint(
   } else if (stressCheck && stressCheck.compared > 0) {
     appendNote(
       'system',
-      `已使用独立生成的 BRUTE 在 ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
+      `${customChecker && checkerExecutor?.status === 'ready'
+        ? '已使用独立生成的 BRUTE 和题目 checker 在'
+        : '已使用独立生成的 BRUTE 在'}`
+      + ` ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
       + `其中 ${stressCheck.uniqueInputs} 组 input 唯一，重复 ${stressCheck.duplicateInputs} 组。`,
     );
   }
@@ -3957,6 +4271,10 @@ export interface GenerateTestdataParams {
   existingFiles?: string[];
   /** 当前题目的 pdoc.config，用于保留 checker/time/memory 等评测设置。 */
   existingConfig?: string;
+  /** testlib checker 源码；读取或能力不可用时缺省，保持原自定义 checker 降级行为。 */
+  checkerSource?: string;
+  /** 与 checker 同目录的头文件，编译时以内存 extraFiles 注入。 */
+  checkerHeaders?: Record<string, string>;
   /** 服务端规则引擎的填空题初判信号 */
   fillInDetected?: boolean;
   signal?: AbortSignal;
@@ -4488,6 +4806,7 @@ export class TestdataGenService {
     killTargets: KillTarget[],
     runner: TestdataSandboxRunner,
     results: ChatResult[],
+    checkerExecutor?: CheckerExecutor,
   ): Promise<GenerationResponse> {
     const discrimination = response.verification?.discrimination;
     const deadlineAt = response.discriminationDeadlineAt;
@@ -4595,8 +4914,17 @@ export class TestdataGenService {
             const detail = targetRun[0];
             let killedBy: DiscriminationTargetResult['killedBy'];
             if (detail.timedOut) killedBy = 'tle';
-            else if (!detail.accepted
-              || comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
+            else if (!detail.accepted) killedBy = 'wa';
+            else if (checkerExecutor?.status === 'ready') {
+              const verdict = await checkerExecutor.runChecker(
+                candidate.input,
+                detail.stdout,
+                output,
+                { signal: params.signal, deadlineAt },
+              );
+              if (verdict === 'infra-error') continue;
+              if (verdict === 'reject') killedBy = 'wa';
+            } else if (comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
               killedBy = 'wa';
             }
             if (!killedBy) continue;
@@ -4639,14 +4967,38 @@ export class TestdataGenService {
             { signal: params.signal, deadlineAt },
           );
           if (details.length !== appendedCases.length) break;
+          let checkerVerdicts: Array<CheckerExecutionVerdict | undefined> | undefined;
+          if (checkerExecutor?.status === 'ready') {
+            const mappedVerdicts: Array<CheckerExecutionVerdict | undefined> = new Array(
+              appendedCases.length,
+            );
+            checkerVerdicts = mappedVerdicts;
+            const acceptedIndices = details.flatMap((detail, index) =>
+              detail.accepted && !detail.timedOut ? [index] : []);
+            const verdicts = await checkerExecutor.runBatch(
+              acceptedIndices.map(index => ({
+                input: appendedCases[index].input,
+                output: details[index].stdout,
+                answer: appendedCases[index].output,
+              })),
+              { signal: params.signal, deadlineAt },
+            );
+            acceptedIndices.forEach((caseIndex, verdictIndex) => {
+              mappedVerdicts[caseIndex] = verdicts[verdictIndex];
+            });
+          }
           const evaluated = evaluateDiscrimination({
             targetRuns: [{
               kind: target.kind,
               description: targetResult.description,
-              perCase: details,
+              perCase: details.map((detail, index) => ({
+                ...detail,
+                checkerVerdict: checkerVerdicts?.[index],
+              })),
             }],
             oracleOutputs: appendedCases.map(item => item.output),
-            customChecker: false,
+            customChecker: hasCustomChecker(params.existingConfig),
+            checkerAvailable: checkerExecutor?.status === 'ready',
           }).targets[0];
           if (!evaluated?.killed || evaluated.killedByCase === undefined) continue;
           targetResult.description = evaluated.description;
@@ -4673,6 +5025,14 @@ export class TestdataGenService {
     const report = (stage: TestdataGenerationProgressStage, percent: number) => {
       this.emitProgress(params, stage, this.progressForAttempt(percent, attempt), attempt);
     };
+    const customChecker = hasCustomChecker(params.existingConfig);
+    const checkerExecutor = await createCheckerExecutor({
+      source: params.checkerSource,
+      headers: params.checkerHeaders,
+      runner,
+      signal: params.signal,
+    });
+    try {
     // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
     const systemPrompt = buildSandboxBlueprintSystemPrompt(this.cppOracleAvailable);
     const userPrompt = buildSandboxBlueprintUserPrompt(params);
@@ -4687,7 +5047,6 @@ export class TestdataGenService {
     );
     const results: ChatResult[] = [initialResult];
     const expectedFunctionSamples = extractStatementSamples(params.statementMarkdown);
-    const customChecker = hasCustomChecker(params.existingConfig);
     report('blueprint', 24);
     let solutionSourceContent = initialResult.content;
     let solution: SandboxSolutionBlueprint;
@@ -4705,6 +5064,7 @@ export class TestdataGenService {
         params.signal,
         customChecker,
         this.cppOracleAvailable,
+        checkerExecutor,
       );
     } catch (solutionError) {
       if (isCancellation(solutionError)) throw solutionError;
@@ -4748,6 +5108,7 @@ export class TestdataGenService {
           params.signal,
           customChecker,
           this.cppOracleAvailable,
+          checkerExecutor,
         );
       } catch (repairParseError) {
         if (isCancellation(repairParseError)) throw repairParseError;
@@ -4820,10 +5181,11 @@ export class TestdataGenService {
     try {
       response = await materializeSandboxBlueprint(
         blueprint, params.options, params.statementMarkdown, runner, params.signal,
-        hasCustomChecker(params.existingConfig),
+        customChecker,
         report,
         killTargets,
         this.cppOracleAvailable,
+        checkerExecutor,
       );
     } catch (firstError) {
       if (isCancellation(firstError)) throw firstError;
@@ -4936,10 +5298,11 @@ export class TestdataGenService {
         blueprint = this.useProvidedOracle(blueprint, params.options);
         response = await materializeSandboxBlueprint(
           blueprint, params.options, params.statementMarkdown, runner, params.signal,
-          hasCustomChecker(params.existingConfig),
+          customChecker,
           report,
           killTargets,
           this.cppOracleAvailable,
+          checkerExecutor,
         );
       } catch (err) {
         if (isCancellation(err)) throw err;
@@ -4962,12 +5325,17 @@ export class TestdataGenService {
       response.discriminationKillTargets || [],
       runner,
       results,
+      checkerExecutor,
     );
+    appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
     report('assembling', 96);
     return this.applyResultMetadata(assemblePlan(response, params.options, {
       mode: 'sandbox',
       existingFiles: params.existingFiles,
       existingConfig: params.existingConfig,
     }), results);
+    } finally {
+      await checkerExecutor.dispose();
+    }
   }
 }

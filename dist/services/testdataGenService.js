@@ -30,6 +30,7 @@ exports.buildCompileSh = buildCompileSh;
 exports.assertExistingConfigParsable = assertExistingConfigParsable;
 exports.mergeConfigSubtasks = mergeConfigSubtasks;
 exports.hasCustomChecker = hasCustomChecker;
+exports.getTestlibCheckerFilename = getTestlibCheckerFilename;
 exports.buildConfigYaml = buildConfigYaml;
 exports.buildTestdataSystemPrompt = buildTestdataSystemPrompt;
 exports.buildTestdataUserPrompt = buildTestdataUserPrompt;
@@ -64,6 +65,7 @@ exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
 exports.extractStatementSamples = extractStatementSamples;
+exports.reduceCheckerExecution = reduceCheckerExecution;
 exports.evaluateDiscrimination = evaluateDiscrimination;
 exports.remapDiscriminationCaseNumbers = remapDiscriminationCaseNumbers;
 exports.buildDiscriminationNotes = buildDiscriminationNotes;
@@ -435,6 +437,15 @@ function hasCustomChecker(raw) {
     const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
     return (!!checkerType && !['default', 'strict'].includes(checkerType))
         || (!!checker && !['default', 'strict'].includes(checkerType));
+}
+/** 仅精确支持 testlib；其他 checker 类型继续沿用既有跳过行为。 */
+function getTestlibCheckerFilename(raw) {
+    const config = parseExistingProblemConfig(raw);
+    const checkerType = typeof config.checker_type === 'string'
+        ? config.checker_type.trim().toLowerCase()
+        : '';
+    const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
+    return checkerType === 'testlib' && checker ? checker : undefined;
 }
 /**
  * 生成 config.yaml（评测设置）
@@ -1782,10 +1793,132 @@ function comparableFileContent(content) {
         .join('\n')
         .trimEnd();
 }
+/** 将 checker 沙箱结果归约为业务三态；基础设施异常永远不能被当成 WA。 */
+function reduceCheckerExecution(detail, infrastructureError = false) {
+    if (infrastructureError
+        || !detail
+        || detail.timedOut)
+        return 'infra-error';
+    if (detail.accepted && detail.exitStatus === 0)
+        return 'accept';
+    if (/nonzero exit status/i.test(detail.status || '')
+        || (detail.status === '' && typeof detail.exitStatus === 'number' && detail.exitStatus !== 0))
+        return 'reject';
+    return 'infra-error';
+}
+function unavailableCheckerExecutor(status, compileError) {
+    return {
+        status,
+        compileError,
+        runtimeSkipped: 0,
+        runBatch: async (cases) => cases.map(() => 'infra-error'),
+        runChecker: async () => 'infra-error',
+        dispose: async () => { },
+    };
+}
+/** checker 属于尽力增强：编译失败只记录状态，绝不阻断已存在的正确性管线。 */
+async function createCheckerExecutor(input) {
+    if (!input.source?.trim())
+        return unavailableCheckerExecutor('unavailable');
+    if (!input.runner.compileCpp || !input.runner.runCheckerBatchDetailed) {
+        return unavailableCheckerExecutor('compile-failed', '当前 Hydro 沙箱不支持 checker 编译或执行');
+    }
+    let compiled;
+    try {
+        compiled = await input.runner.compileCpp(input.source, {
+            extraFiles: input.headers,
+            signal: input.signal,
+        });
+    }
+    catch (err) {
+        if (input.signal?.aborted || isCancellation(err))
+            throw err;
+        return unavailableCheckerExecutor('compile-failed', err instanceof Error ? err.message : String(err));
+    }
+    if (compiled.ok === false) {
+        return unavailableCheckerExecutor('compile-failed', (0, textTruncate_1.excerptTail)(compiled.error, 2000));
+    }
+    let runtimeSkipped = 0;
+    const executor = {
+        status: 'ready',
+        get runtimeSkipped() {
+            return runtimeSkipped;
+        },
+        runBatch: async (cases, opts = {}) => {
+            try {
+                const details = await input.runner.runCheckerBatchDetailed(compiled.fileId, cases, opts);
+                const verdicts = cases.map((_, index) => reduceCheckerExecution(details[index]));
+                runtimeSkipped += verdicts.filter(verdict => verdict === 'infra-error').length;
+                return verdicts;
+            }
+            catch (err) {
+                if (opts.signal?.aborted || input.signal?.aborted || isCancellation(err))
+                    throw err;
+                runtimeSkipped += cases.length;
+                return cases.map(() => 'infra-error');
+            }
+        },
+        runChecker: async (checkerInput, output, answer, opts = {}) => {
+            const [verdict] = await executor.runBatch([{
+                    input: checkerInput,
+                    output,
+                    answer,
+                }], opts);
+            return verdict;
+        },
+        dispose: async () => {
+            try {
+                await input.runner.deleteCachedFile?.(compiled.fileId);
+            }
+            catch {
+                // checker 仅是尽力增强；缓存清理失败不能覆盖主流程结果。
+            }
+        },
+    };
+    return executor;
+}
+function appendCheckerExecutionNotes(response, customChecker, checkerExecutor) {
+    if (!customChecker)
+        return;
+    if (response.verification && checkerExecutor.status !== 'unavailable') {
+        response.verification.checkerCheck = {
+            status: checkerExecutor.status === 'ready' ? 'executed' : 'compile-failed',
+            runtimeSkipped: checkerExecutor.runtimeSkipped,
+        };
+    }
+    const notes = [];
+    if (checkerExecutor.status === 'ready') {
+        notes.push({
+            kind: 'system',
+            text: '题目 testlib checker 已编译并实跑，用于样例回归、压力对拍、区分度与定向补刀判定。',
+        });
+    }
+    else if (checkerExecutor.status === 'compile-failed') {
+        notes.push({
+            kind: 'warning',
+            text: `checker 编译失败，按无 checker 实跑处理：${(0, textTruncate_1.excerptTail)(checkerExecutor.compileError || '未知错误', 500)}`,
+        });
+    }
+    if (checkerExecutor.runtimeSkipped > 0) {
+        notes.push({
+            kind: 'warning',
+            text: `题目 checker 有 ${checkerExecutor.runtimeSkipped} 次判定因沙箱超时或基础设施错误跳过；这些结果未用于否定已通过的正确性。`,
+        });
+    }
+    for (const note of notes) {
+        response.notes = [response.notes, note.text].filter(Boolean).join('\n');
+        if (response.notesStructured) {
+            response.notesStructured[note.kind === 'warning' ? 'warnings' : 'system'].push(note.text);
+        }
+    }
+}
 /** 根据沙箱逐点结果判定正式数据是否能够卡掉错误解靶子。 */
 function evaluateDiscrimination(inputs) {
     const targets = inputs.targetRuns.map((target) => {
-        if (inputs.customChecker && target.kind !== 'brute-complexity') {
+        if (inputs.customChecker
+            && target.kind !== 'brute-complexity'
+            && !inputs.checkerAvailable
+            && !target.perCase.some(detail => detail.checkerVerdict !== undefined)) {
             return {
                 kind: target.kind,
                 description: target.description,
@@ -1793,6 +1926,7 @@ function evaluateDiscrimination(inputs) {
                 skippedReason: 'custom-checker',
             };
         }
+        let checkerInfraError = false;
         for (let index = 0; index < target.perCase.length; index++) {
             const detail = target.perCase[index];
             if (detail.timedOut) {
@@ -1813,7 +1947,20 @@ function evaluateDiscrimination(inputs) {
                     killedByCase: index + 1,
                 };
             }
-            if (target.kind !== 'brute-complexity'
+            if (target.kind !== 'brute-complexity' && inputs.customChecker) {
+                if (detail.checkerVerdict === 'reject') {
+                    return {
+                        kind: target.kind,
+                        description: target.description,
+                        killed: true,
+                        killedBy: 'wa',
+                        killedByCase: index + 1,
+                    };
+                }
+                if (detail.checkerVerdict === 'infra-error')
+                    checkerInfraError = true;
+            }
+            else if (target.kind !== 'brute-complexity'
                 && comparableFileContent(detail.stdout)
                     !== comparableFileContent(inputs.oracleOutputs[index] ?? '')) {
                 return {
@@ -1824,6 +1971,14 @@ function evaluateDiscrimination(inputs) {
                     killedByCase: index + 1,
                 };
             }
+        }
+        if (checkerInfraError) {
+            return {
+                kind: target.kind,
+                description: target.description,
+                killed: false,
+                skippedReason: 'checker-infra-error',
+            };
         }
         return {
             kind: target.kind,
@@ -1985,11 +2140,23 @@ async function smokeTestKillTargets(input) {
             const details = await input.runner.runPythonBatchDetailed(target.code, input.samples.map(sample => sample.input), { signal: input.signal, deadlineAt: input.deadlineAt });
             if (details.length !== input.samples.length)
                 continue;
-            const passed = details.every((detail, index) => (detail.accepted
-                && !detail.timedOut
-                && (input.customChecker
+            if (details.some(detail => !detail.accepted || detail.timedOut))
+                continue;
+            let checkerVerdicts;
+            if (input.customChecker && input.checkerExecutor?.status === 'ready') {
+                checkerVerdicts = await input.checkerExecutor.runBatch(input.samples.map((sample, index) => ({
+                    input: sample.input,
+                    output: details[index]?.stdout || '',
+                    answer: sample.output,
+                })), { signal: input.signal, deadlineAt: input.deadlineAt });
+            }
+            const passed = details.every((detail, index) => {
+                if (checkerVerdicts)
+                    return checkerVerdicts[index] !== 'reject';
+                return input.customChecker
                     || comparableFileContent(detail.stdout)
-                        === comparableFileContent(input.samples[index].output))));
+                        === comparableFileContent(input.samples[index].output);
+            });
             if (passed)
                 validTargets.push(target);
         }
@@ -2060,7 +2227,7 @@ async function createOracleExecutor(input) {
  * 第一阶段硬闸门：在生成器、模板和独立验证器消耗更多 AI/沙箱预算前，
  * 先确认 ORACLE 至少能够执行并通过题面中可解析的样例。
  */
-async function verifySolutionBlueprintSamples(solution, options, statementMarkdown, runner, signal, customChecker = false, cppOracleAvailable = false) {
+async function verifySolutionBlueprintSamples(solution, options, statementMarkdown, runner, signal, customChecker = false, cppOracleAvailable = false, checkerExecutor) {
     const statementSamples = extractStatementSamples(statementMarkdown);
     if (statementSamples.length === 0)
         return { total: 0, passed: 0 };
@@ -2103,11 +2270,25 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
     const acceptedRecord = options.providedStdSource === 'accepted-record';
     for (let i = 0; i < results.length; i++) {
         const detail = results[i];
+        if (detail.accepted)
+            continue;
         const prefix = acceptedRecord ? 'AC 候选标程' : 'ORACLE';
-        if (!detail.accepted) {
-            throw new Error(`${prefix}未通过第一阶段题面样例 ${samples[i].id} 的执行预验证（${detail.status || 'Unknown'}）\n`
-                + `输入：${(0, textTruncate_1.excerpt)(samples[i].input, 300)}\n`
-                + `错误：${(0, textTruncate_1.excerptTail)(detail.stderr || detail.error || '', 1000)}`);
+        throw new Error(`${prefix}未通过第一阶段题面样例 ${samples[i].id} 的执行预验证（${detail.status || 'Unknown'}）\n`
+            + `输入：${(0, textTruncate_1.excerpt)(samples[i].input, 300)}\n`
+            + `错误：${(0, textTruncate_1.excerptTail)(detail.stderr || detail.error || '', 1000)}`);
+    }
+    const checkerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+        ? await checkerExecutor.runBatch(samples.map((sample, index) => ({
+            input: sample.input,
+            output: results[index]?.stdout || '',
+            answer: sample.output,
+        })), { signal })
+        : undefined;
+    for (let i = 0; i < results.length; i++) {
+        const detail = results[i];
+        const prefix = acceptedRecord ? 'AC 候选标程' : 'ORACLE';
+        if (checkerVerdicts?.[i] === 'reject') {
+            throw new Error(`${prefix}未通过第一阶段题面样例 ${samples[i].id} 的题目 checker 验证`);
         }
         if (!customChecker
             && comparableFileContent(detail.stdout) !== comparableFileContent(samples[i].output)) {
@@ -2116,7 +2297,12 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
                 + `，实际 ${JSON.stringify(comparableFileContent(detail.stdout))}`);
         }
     }
-    return { total: samples.length, passed: samples.length };
+    return {
+        total: samples.length,
+        passed: checkerVerdicts
+            ? checkerVerdicts.filter(verdict => verdict === 'accept').length
+            : samples.length,
+    };
 }
 /**
  * 在正确性验证通过后，以独立预算运行错误解靶子与正式大数据 BRUTE 复杂度检查。
@@ -2156,7 +2342,9 @@ async function runDiscriminationPhase(input) {
             });
             continue;
         }
-        if (input.customChecker && target.kind !== 'brute-complexity') {
+        if (input.customChecker
+            && target.kind !== 'brute-complexity'
+            && input.checkerExecutor?.status !== 'ready') {
             results.push({
                 kind: target.kind,
                 description: target.description,
@@ -2173,14 +2361,34 @@ async function runDiscriminationPhase(input) {
             if (details.length !== selectedCases.length) {
                 throw new Error(`区分度验证返回 ${details.length} 个结果，期望 ${selectedCases.length} 个`);
             }
+            let checkerVerdicts;
+            if (input.customChecker
+                && target.kind !== 'brute-complexity'
+                && input.checkerExecutor?.status === 'ready') {
+                const mappedVerdicts = new Array(selectedCases.length);
+                checkerVerdicts = mappedVerdicts;
+                const acceptedIndices = details.flatMap((detail, index) => detail.accepted && !detail.timedOut ? [index] : []);
+                const verdicts = await input.checkerExecutor.runBatch(acceptedIndices.map(index => ({
+                    input: selectedCases[index].input,
+                    output: details[index].stdout,
+                    answer: selectedCases[index].output,
+                })), { signal: input.signal, deadlineAt });
+                acceptedIndices.forEach((caseIndex, verdictIndex) => {
+                    mappedVerdicts[caseIndex] = verdicts[verdictIndex];
+                });
+            }
             const evaluated = evaluateDiscrimination({
                 targetRuns: [{
                         kind: target.kind,
                         description: target.description,
-                        perCase: details,
+                        perCase: details.map((detail, index) => ({
+                            ...detail,
+                            checkerVerdict: checkerVerdicts?.[index],
+                        })),
                     }],
                 oracleOutputs: selectedCases.map(item => item.output),
                 customChecker: input.customChecker,
+                checkerAvailable: input.checkerExecutor?.status === 'ready',
             }).targets[0];
             if (evaluated?.killedByCase) {
                 evaluated.killedByCase = target.caseIndices[evaluated.killedByCase - 1] + 1;
@@ -2222,7 +2430,7 @@ async function runDiscriminationPhase(input) {
  * 验证管线（独立小数据压力对拍 + 模板实跑 + 输入校验），执行序 a→g。
  * 各阶段间累计校验总时长预算，避免大批量挤兑沙箱 RAM 盘。
  */
-async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal, customChecker = false, onProgress, killTargets = [], cppOracleAvailable = false) {
+async function materializeSandboxBlueprint(blueprint, options, statementMarkdown, runner, signal, customChecker = false, onProgress, killTargets = [], cppOracleAvailable = false, checkerExecutor) {
     const startedAt = Date.now();
     const sandboxDeadlineAt = startedAt + goJudgeSandboxService_1.SANDBOX_TOTAL_BUDGET_MS;
     const reportProgress = (stage, percent) => {
@@ -2414,13 +2622,25 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
     });
-    for (let i = 0; i < samples.length && !customChecker; i++) {
+    const sampleCheckerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+        ? await checkerExecutor.runBatch(samples.map((sample, index) => ({
+            input: sample.input,
+            output: oracleResults[inputs.length + index]?.stdout || '',
+            answer: sample.output,
+        })), { signal, deadlineAt: sandboxDeadlineAt })
+        : undefined;
+    for (let i = 0; i < samples.length; i++) {
         const actual = oracleResults[inputs.length + i]?.stdout || '';
-        if (comparableFileContent(actual) !== comparableFileContent(samples[i].output)) {
+        const checkerRejected = sampleCheckerVerdicts?.[i] === 'reject';
+        const textRejected = !customChecker
+            && comparableFileContent(actual) !== comparableFileContent(samples[i].output);
+        if (checkerRejected || textRejected) {
             throw new Error(`${usingAcceptedRecordCandidate ? 'AC 候选标程' : 'ORACLE'}未通过${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i].id}`
                 + `（stdin：${JSON.stringify(comparableFileContent(samples[i].input))}）`
-                + `：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
-                + `，实际 ${JSON.stringify(comparableFileContent(actual))}`);
+                + (checkerRejected
+                    ? '的题目 checker 验证'
+                    : `：期望 ${JSON.stringify(comparableFileContent(samples[i].output))}`
+                        + `，实际 ${JSON.stringify(comparableFileContent(actual))}`));
         }
     }
     // f. 函数题：solution + template.py 组合实跑，验证模板与输入编码
@@ -2481,7 +2701,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     }
     if (blueprint.bruteCode && stressInputs.length > 0) {
         reportProgress('stress_testing', 84);
-        if (customChecker) {
+        if (customChecker && checkerExecutor?.status !== 'ready') {
             checkBudget();
             const bruteResults = await runner.runPythonBatchDetailed(blueprint.bruteCode, stressInputs, { signal, deadlineAt: sandboxDeadlineAt });
             if (bruteResults.length !== stressInputs.length) {
@@ -2512,7 +2732,6 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             if (bruteResults.length !== stressInputs.length) {
                 throw new Error(`压力对拍 BRUTE 返回 ${bruteResults.length} 个结果，期望 ${stressInputs.length} 个`);
             }
-            const stressOracleOffset = inputs.length + samples.length;
             for (let i = 0; i < bruteResults.length; i++) {
                 const detail = bruteResults[i];
                 const caseNo = i + 1;
@@ -2522,8 +2741,28 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 if (!detail.accepted) {
                     throw new Error(`压力对拍 BRUTE 在第 ${caseNo} 组小数据执行失败：${(0, textTruncate_1.excerpt)(detail.stderr || detail.error || detail.status, 300)}`);
                 }
+            }
+            const stressOracleOffset = inputs.length + samples.length;
+            const checkerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+                ? await checkerExecutor.runBatch(stressInputs.map((input, index) => ({
+                    input,
+                    output: bruteResults[index]?.stdout || '',
+                    answer: oracleResults[stressOracleOffset + index]?.stdout || '',
+                })), { signal, deadlineAt: sandboxDeadlineAt })
+                : undefined;
+            let compared = 0;
+            let agreed = 0;
+            for (let i = 0; i < bruteResults.length; i++) {
+                const detail = bruteResults[i];
+                const caseNo = i + 1;
                 const oracleOutput = oracleResults[stressOracleOffset + i]?.stdout || '';
-                if (comparableFileContent(detail.stdout) !== comparableFileContent(oracleOutput)) {
+                if (checkerVerdicts?.[i] === 'infra-error')
+                    continue;
+                compared++;
+                const disagreed = checkerVerdicts
+                    ? checkerVerdicts[i] === 'reject'
+                    : comparableFileContent(detail.stdout) !== comparableFileContent(oracleOutput);
+                if (disagreed) {
                     if (oracleIsAcceptedRecord) {
                         throw new Error(`AC 候选标程与独立 BRUTE 在第 ${caseNo} 组小数据不一致（${stressGenerated[i]?.label || ''}）\n`
                             + `输入：${(0, textTruncate_1.excerpt)(stressInputs[i], 300)}\n`
@@ -2536,13 +2775,14 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         + `ORACLE 输出：${(0, textTruncate_1.excerpt)(oracleOutput, 300)}\n`
                         + `BRUTE 输出：${(0, textTruncate_1.excerpt)(detail.stdout, 300)}`);
                 }
+                agreed++;
             }
             stressCheck = {
                 generated: stressGeneratedCount,
                 uniqueInputs: stressUniqueInputs,
                 duplicateInputs: stressDuplicateInputs,
-                compared: stressInputs.length,
-                agreed: stressInputs.length,
+                compared,
+                agreed,
                 ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
             };
         }
@@ -2594,6 +2834,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         runner,
         signal,
         customChecker,
+        checkerExecutor,
         deadlineAt: discriminationDeadlineAt,
     });
     const discrimination = await runDiscriminationPhase({
@@ -2604,6 +2845,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         runner,
         signal,
         customChecker,
+        checkerExecutor,
         deadlineAt: discriminationDeadlineAt,
     });
     const verification = {
@@ -2613,9 +2855,14 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             : oracleIsManualStd ? 'provided-std' : 'ai-solution',
         validator: { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
     };
-    if (!customChecker && (blueprint.problemType === 'traditional' || samples.length > 0)) {
-        // 样例不一致已在上面抛出，走到这里即全部通过
-        verification.sampleCheck = { total: samples.length, passed: samples.length };
+    if ((!customChecker || checkerExecutor?.status === 'ready')
+        && (blueprint.problemType === 'traditional' || samples.length > 0)) {
+        verification.sampleCheck = {
+            total: samples.length,
+            passed: sampleCheckerVerdicts
+                ? sampleCheckerVerdicts.filter(verdict => verdict === 'accept').length
+                : samples.length,
+        };
     }
     if (bruteCheck)
         verification.bruteCheck = bruteCheck;
@@ -2645,7 +2892,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             ? `题目使用自定义 checker；暴力解与标程在测试点 ${bruteCheck.disagreed.join('、')} 的文本输出不同，已保留并请人工复核 checker 语义。`
             : `暴力解与教师标准答案在测试点 ${bruteCheck.disagreed.join('、')} 不一致，已按教师 std 输出为准，请人工复核。`);
     }
-    if (customChecker && samples.length > 0) {
+    if (customChecker && samples.length > 0 && checkerExecutor?.status !== 'ready') {
         appendNote('system', '题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
     }
     if (stressCheck?.droppedInvalid) {
@@ -2655,7 +2902,10 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         appendNote('system', '题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
     }
     else if (stressCheck && stressCheck.compared > 0) {
-        appendNote('system', `已使用独立生成的 BRUTE 在 ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
+        appendNote('system', `${customChecker && checkerExecutor?.status === 'ready'
+            ? '已使用独立生成的 BRUTE 和题目 checker 在'
+            : '已使用独立生成的 BRUTE 在'}`
+            + ` ${stressCheck.compared} 组内部小数据上完成压力对拍，全部一致；`
             + `其中 ${stressCheck.uniqueInputs} 组 input 唯一，重复 ${stressCheck.duplicateInputs} 组。`);
     }
     if (bruteCheck && bruteCheck.skippedTimeout.length > 0) {
@@ -3597,7 +3847,7 @@ class TestdataGenService {
      * 仅为正式数据未卡住的 WA 靶子尝试小规模补刀。所有候选必须依次通过
      * VALIDATOR、ORACLE 与该错误解本身的沙箱复跑，任一基础设施失败均静默停下。
      */
-    async repairSurvivingKillTargets(params, blueprint, response, killTargets, runner, results) {
+    async repairSurvivingKillTargets(params, blueprint, response, killTargets, runner, results, checkerExecutor) {
         const discrimination = response.verification?.discrimination;
         const deadlineAt = response.discriminationDeadlineAt;
         if (!discrimination || deadlineAt === undefined || killTargets.length === 0)
@@ -3693,8 +3943,16 @@ class TestdataGenService {
                             let killedBy;
                             if (detail.timedOut)
                                 killedBy = 'tle';
-                            else if (!detail.accepted
-                                || comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
+                            else if (!detail.accepted)
+                                killedBy = 'wa';
+                            else if (checkerExecutor?.status === 'ready') {
+                                const verdict = await checkerExecutor.runChecker(candidate.input, detail.stdout, output, { signal: params.signal, deadlineAt });
+                                if (verdict === 'infra-error')
+                                    continue;
+                                if (verdict === 'reject')
+                                    killedBy = 'wa';
+                            }
+                            else if (comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
                                 killedBy = 'wa';
                             }
                             if (!killedBy)
@@ -3734,14 +3992,32 @@ class TestdataGenService {
                         const details = await runner.runPythonBatchDetailed(target.code, appendedCases.map(item => item.input), { signal: params.signal, deadlineAt });
                         if (details.length !== appendedCases.length)
                             break;
+                        let checkerVerdicts;
+                        if (checkerExecutor?.status === 'ready') {
+                            const mappedVerdicts = new Array(appendedCases.length);
+                            checkerVerdicts = mappedVerdicts;
+                            const acceptedIndices = details.flatMap((detail, index) => detail.accepted && !detail.timedOut ? [index] : []);
+                            const verdicts = await checkerExecutor.runBatch(acceptedIndices.map(index => ({
+                                input: appendedCases[index].input,
+                                output: details[index].stdout,
+                                answer: appendedCases[index].output,
+                            })), { signal: params.signal, deadlineAt });
+                            acceptedIndices.forEach((caseIndex, verdictIndex) => {
+                                mappedVerdicts[caseIndex] = verdicts[verdictIndex];
+                            });
+                        }
                         const evaluated = evaluateDiscrimination({
                             targetRuns: [{
                                     kind: target.kind,
                                     description: targetResult.description,
-                                    perCase: details,
+                                    perCase: details.map((detail, index) => ({
+                                        ...detail,
+                                        checkerVerdict: checkerVerdicts?.[index],
+                                    })),
                                 }],
                             oracleOutputs: appendedCases.map(item => item.output),
-                            customChecker: false,
+                            customChecker: hasCustomChecker(params.existingConfig),
+                            checkerAvailable: checkerExecutor?.status === 'ready',
                         }).targets[0];
                         if (!evaluated?.killed || evaluated.killedByCase === undefined)
                             continue;
@@ -3767,204 +4043,216 @@ class TestdataGenService {
         const report = (stage, percent) => {
             this.emitProgress(params, stage, this.progressForAttempt(percent, attempt), attempt);
         };
-        // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
-        const systemPrompt = buildSandboxBlueprintSystemPrompt(this.cppOracleAvailable);
-        const userPrompt = buildSandboxBlueprintUserPrompt(params);
-        const solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(this.cppOracleAvailable);
-        const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
-        const callOptions = this.getCallOptions(params, attempt);
-        report('blueprint', 10);
-        const initialResult = await this.aiClient.chat([{ role: 'user', content: solutionUserPrompt }], solutionSystemPrompt, callOptions);
-        const results = [initialResult];
-        const expectedFunctionSamples = extractStatementSamples(params.statementMarkdown);
         const customChecker = hasCustomChecker(params.existingConfig);
-        report('blueprint', 24);
-        let solutionSourceContent = initialResult.content;
-        let solution;
+        const checkerExecutor = await createCheckerExecutor({
+            source: params.checkerSource,
+            headers: params.checkerHeaders,
+            runner,
+            signal: params.signal,
+        });
         try {
-            solution = this.useProvidedOracle(parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples), params.options);
-            report('solution_verification', 28);
-            await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, this.cppOracleAvailable);
-        }
-        catch (solutionError) {
-            if (isCancellation(solutionError))
-                throw solutionError;
-            if (solutionError instanceof TestdataGenerationError && solutionError.userMessageKey) {
-                throw solutionError;
-            }
-            if (classifySandboxRepairScope(solutionError) === 'accepted-std') {
-                throw new TestdataGenerationError(`所选历史 AC 候选解未通过第一阶段题面样例验证，已拒绝使用。技术细节：${solutionError instanceof Error ? solutionError.message : String(solutionError)}`, 'accepted_std_verification', results);
-            }
-            report('blueprint_repair', 30);
-            const repairResult = await this.aiClient.chat([
-                { role: 'user', content: solutionUserPrompt },
-                { role: 'assistant', content: initialResult.content },
-                {
-                    role: 'user',
-                    content: `第一阶段解题蓝图未通过解析或样例预验证：${solutionError instanceof Error ? solutionError.message : String(solutionError)}\n`
-                        + '请重新完整输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
-                },
-            ], solutionSystemPrompt, callOptions);
-            results.push(repairResult);
-            solutionSourceContent = repairResult.content;
+            // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
+            const systemPrompt = buildSandboxBlueprintSystemPrompt(this.cppOracleAvailable);
+            const userPrompt = buildSandboxBlueprintUserPrompt(params);
+            const solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(this.cppOracleAvailable);
+            const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
+            const callOptions = this.getCallOptions(params, attempt);
+            report('blueprint', 10);
+            const initialResult = await this.aiClient.chat([{ role: 'user', content: solutionUserPrompt }], solutionSystemPrompt, callOptions);
+            const results = [initialResult];
+            const expectedFunctionSamples = extractStatementSamples(params.statementMarkdown);
+            report('blueprint', 24);
+            let solutionSourceContent = initialResult.content;
+            let solution;
             try {
-                solution = this.useProvidedOracle(parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples), params.options);
-                report('solution_verification', 32);
-                await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, this.cppOracleAvailable);
+                solution = this.useProvidedOracle(parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples), params.options);
+                report('solution_verification', 28);
+                await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, this.cppOracleAvailable, checkerExecutor);
             }
-            catch (repairParseError) {
-                if (isCancellation(repairParseError))
-                    throw repairParseError;
-                throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true);
-            }
-        }
-        // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
-        // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
-        report('artifacts', 36);
-        const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples);
-        const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
-            this.generateKillTargets({
-                statement: params.statementMarkdown,
-                analysis: solution.analysis || '',
-                samples: killTargetSamples,
-                signal: params.signal,
-            }, results).catch((err) => {
-                if (isCancellation(err))
-                    throw err;
-                return [];
-            }),
-            this.generateGenerationArtifacts(params, solution, callOptions, results),
-            this.generateIndependentVerifier(params, solution, callOptions, results, attempt),
-        ]);
-        report('independent_verifier', 54);
-        let verifierState = initialVerifierState;
-        let blueprintSourceContent = `${solutionSourceContent}\n${artifactsState.sourceContent}`;
-        let blueprint = {
-            ...solution,
-            ...artifactsState.artifacts,
-            ...verifierState.verifier,
-            notes: [solution.notes, artifactsState.artifacts.notes].filter(Boolean).join('\n') || undefined,
-        };
-        if (blueprint.problemType === 'function') {
-            const missing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
-            if (missing.length > 0) {
-                report('templates', 58);
+            catch (solutionError) {
+                if (isCancellation(solutionError))
+                    throw solutionError;
+                if (solutionError instanceof TestdataGenerationError && solutionError.userMessageKey) {
+                    throw solutionError;
+                }
+                if (classifySandboxRepairScope(solutionError) === 'accepted-std') {
+                    throw new TestdataGenerationError(`所选历史 AC 候选解未通过第一阶段题面样例验证，已拒绝使用。技术细节：${solutionError instanceof Error ? solutionError.message : String(solutionError)}`, 'accepted_std_verification', results);
+                }
+                report('blueprint_repair', 30);
                 const repairResult = await this.aiClient.chat([
-                    { role: 'user', content: userPrompt },
-                    { role: 'assistant', content: blueprintSourceContent },
-                    { role: 'user', content: buildTemplateRepairPrompt(missing) },
-                ], systemPrompt, callOptions);
+                    { role: 'user', content: solutionUserPrompt },
+                    { role: 'assistant', content: initialResult.content },
+                    {
+                        role: 'user',
+                        content: `第一阶段解题蓝图未通过解析或样例预验证：${solutionError instanceof Error ? solutionError.message : String(solutionError)}\n`
+                            + '请重新完整输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
+                    },
+                ], solutionSystemPrompt, callOptions);
                 results.push(repairResult);
-                const repairedTemplates = parseTemplateSections(repairResult.content);
-                blueprint.templates = { ...blueprint.templates, ...repairedTemplates };
-                blueprintSourceContent = `${blueprintSourceContent}\n${repairResult.content}`;
-                const stillMissing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
-                if (stillMissing.length > 0) {
-                    throw new TestdataGenerationError(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`, 'template_missing', results, true);
+                solutionSourceContent = repairResult.content;
+                try {
+                    solution = this.useProvidedOracle(parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples), params.options);
+                    report('solution_verification', 32);
+                    await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, this.cppOracleAvailable, checkerExecutor);
+                }
+                catch (repairParseError) {
+                    if (isCancellation(repairParseError))
+                        throw repairParseError;
+                    throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true);
                 }
             }
-        }
-        let response;
-        try {
-            response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report, killTargets, this.cppOracleAvailable);
-        }
-        catch (firstError) {
-            if (isCancellation(firstError))
-                throw firstError;
-            if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
-                throw firstError;
-            }
-            if (/沙箱执行总时长超出预算/.test(firstError instanceof Error ? firstError.message : String(firstError))) {
-                throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false);
-            }
-            const repairScope = classifySandboxRepairScope(firstError);
-            if (repairScope === 'accepted-std') {
-                throw new TestdataGenerationError(`所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, 'accepted_std_verification', results);
-            }
-            report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
-            let repairResult;
-            try {
-                if (isIndependentVerifierScope(repairScope)) {
-                    repairResult = await this.aiClient.chat([
-                        { role: 'user', content: verifierState.userPrompt },
-                        { role: 'assistant', content: verifierState.sourceContent },
-                        {
-                            role: 'user',
-                            content: buildIndependentVerifierRepairPrompt(firstError, verifierState.expectedFunctionSamples),
-                        },
-                    ], verifierState.systemPrompt, callOptions);
-                }
-                else {
-                    repairResult = await this.aiClient.chat([
+            // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
+            // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
+            report('artifacts', 36);
+            const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples);
+            const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
+                this.generateKillTargets({
+                    statement: params.statementMarkdown,
+                    analysis: solution.analysis || '',
+                    samples: killTargetSamples,
+                    signal: params.signal,
+                }, results).catch((err) => {
+                    if (isCancellation(err))
+                        throw err;
+                    return [];
+                }),
+                this.generateGenerationArtifacts(params, solution, callOptions, results),
+                this.generateIndependentVerifier(params, solution, callOptions, results, attempt),
+            ]);
+            report('independent_verifier', 54);
+            let verifierState = initialVerifierState;
+            let blueprintSourceContent = `${solutionSourceContent}\n${artifactsState.sourceContent}`;
+            let blueprint = {
+                ...solution,
+                ...artifactsState.artifacts,
+                ...verifierState.verifier,
+                notes: [solution.notes, artifactsState.artifacts.notes].filter(Boolean).join('\n') || undefined,
+            };
+            if (blueprint.problemType === 'function') {
+                const missing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
+                if (missing.length > 0) {
+                    report('templates', 58);
+                    const repairResult = await this.aiClient.chat([
                         { role: 'user', content: userPrompt },
                         { role: 'assistant', content: blueprintSourceContent },
-                        { role: 'user', content: buildSandboxRepairPrompt(firstError, params.options, repairScope) },
+                        { role: 'user', content: buildTemplateRepairPrompt(missing) },
                     ], systemPrompt, callOptions);
+                    results.push(repairResult);
+                    const repairedTemplates = parseTemplateSections(repairResult.content);
+                    blueprint.templates = { ...blueprint.templates, ...repairedTemplates };
+                    blueprintSourceContent = `${blueprintSourceContent}\n${repairResult.content}`;
+                    const stillMissing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
+                    if (stillMissing.length > 0) {
+                        throw new TestdataGenerationError(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`, 'template_missing', results, true);
+                    }
                 }
             }
-            catch (err) {
-                if (isCancellation(err))
-                    throw err;
-                throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, repairScope, results);
-            }
-            results.push(repairResult);
+            let response;
             try {
+                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, this.cppOracleAvailable, checkerExecutor);
+            }
+            catch (firstError) {
+                if (isCancellation(firstError))
+                    throw firstError;
+                if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
+                    throw firstError;
+                }
+                if (/沙箱执行总时长超出预算/.test(firstError instanceof Error ? firstError.message : String(firstError))) {
+                    throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false);
+                }
+                const repairScope = classifySandboxRepairScope(firstError);
+                if (repairScope === 'accepted-std') {
+                    throw new TestdataGenerationError(`所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, 'accepted_std_verification', results);
+                }
+                report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
+                let repairResult;
                 try {
                     if (isIndependentVerifierScope(repairScope)) {
-                        verifierState = {
-                            ...verifierState,
-                            verifier: parseIndependentVerifierBlueprint(repairResult.content, verifierState.expectedFunctionSamples),
-                            sourceContent: repairResult.content,
-                        };
-                        blueprint = { ...blueprint, ...verifierState.verifier };
-                    }
-                    else if (repairScope === 'full') {
-                        const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
-                        blueprint = { ...repairedMain, ...verifierState.verifier };
-                        blueprintSourceContent = repairResult.content;
+                        repairResult = await this.aiClient.chat([
+                            { role: 'user', content: verifierState.userPrompt },
+                            { role: 'assistant', content: verifierState.sourceContent },
+                            {
+                                role: 'user',
+                                content: buildIndependentVerifierRepairPrompt(firstError, verifierState.expectedFunctionSamples),
+                            },
+                        ], verifierState.systemPrompt, callOptions);
                     }
                     else {
-                        blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope);
+                        repairResult = await this.aiClient.chat([
+                            { role: 'user', content: userPrompt },
+                            { role: 'assistant', content: blueprintSourceContent },
+                            { role: 'user', content: buildSandboxRepairPrompt(firstError, params.options, repairScope) },
+                        ], systemPrompt, callOptions);
                     }
                 }
-                catch (targetedParseError) {
-                    if (repairScope === 'full' || isIndependentVerifierScope(repairScope))
-                        throw targetedParseError;
-                    const fullRepairResult = await this.aiClient.chat([
-                        { role: 'user', content: userPrompt },
-                        { role: 'assistant', content: blueprintSourceContent },
-                        {
-                            role: 'user',
-                            content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full'),
-                        },
-                    ], systemPrompt, callOptions);
-                    results.push(fullRepairResult);
-                    blueprint = {
-                        ...parseSandboxBlueprint(fullRepairResult.content, params.options),
-                        ...verifierState.verifier,
-                    };
-                    blueprintSourceContent = fullRepairResult.content;
+                catch (err) {
+                    if (isCancellation(err))
+                        throw err;
+                    throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, repairScope, results);
                 }
-                blueprint = this.useProvidedOracle(blueprint, params.options);
-                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, hasCustomChecker(params.existingConfig), report, killTargets, this.cppOracleAvailable);
+                results.push(repairResult);
+                try {
+                    try {
+                        if (isIndependentVerifierScope(repairScope)) {
+                            verifierState = {
+                                ...verifierState,
+                                verifier: parseIndependentVerifierBlueprint(repairResult.content, verifierState.expectedFunctionSamples),
+                                sourceContent: repairResult.content,
+                            };
+                            blueprint = { ...blueprint, ...verifierState.verifier };
+                        }
+                        else if (repairScope === 'full') {
+                            const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
+                            blueprint = { ...repairedMain, ...verifierState.verifier };
+                            blueprintSourceContent = repairResult.content;
+                        }
+                        else {
+                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope);
+                        }
+                    }
+                    catch (targetedParseError) {
+                        if (repairScope === 'full' || isIndependentVerifierScope(repairScope))
+                            throw targetedParseError;
+                        const fullRepairResult = await this.aiClient.chat([
+                            { role: 'user', content: userPrompt },
+                            { role: 'assistant', content: blueprintSourceContent },
+                            {
+                                role: 'user',
+                                content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full'),
+                            },
+                        ], systemPrompt, callOptions);
+                        results.push(fullRepairResult);
+                        blueprint = {
+                            ...parseSandboxBlueprint(fullRepairResult.content, params.options),
+                            ...verifierState.verifier,
+                        };
+                        blueprintSourceContent = fullRepairResult.content;
+                    }
+                    blueprint = this.useProvidedOracle(blueprint, params.options);
+                    response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, this.cppOracleAvailable, checkerExecutor);
+                }
+                catch (err) {
+                    if (isCancellation(err))
+                        throw err;
+                    if (err instanceof TestdataGenerationError && err.userMessageKey)
+                        throw err;
+                    throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, classifySandboxRepairScope(err), results, true);
+                }
             }
-            catch (err) {
-                if (isCancellation(err))
-                    throw err;
-                if (err instanceof TestdataGenerationError && err.userMessageKey)
-                    throw err;
-                throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, classifySandboxRepairScope(err), results, true);
-            }
+            const initialCaseCount = response.cases.length;
+            response.discriminationInitialCaseCount = initialCaseCount;
+            response = await this.repairSurvivingKillTargets(params, blueprint, response, response.discriminationKillTargets || [], runner, results, checkerExecutor);
+            appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
+            report('assembling', 96);
+            return this.applyResultMetadata(assemblePlan(response, params.options, {
+                mode: 'sandbox',
+                existingFiles: params.existingFiles,
+                existingConfig: params.existingConfig,
+            }), results);
         }
-        const initialCaseCount = response.cases.length;
-        response.discriminationInitialCaseCount = initialCaseCount;
-        response = await this.repairSurvivingKillTargets(params, blueprint, response, response.discriminationKillTargets || [], runner, results);
-        report('assembling', 96);
-        return this.applyResultMetadata(assemblePlan(response, params.options, {
-            mode: 'sandbox',
-            existingFiles: params.existingFiles,
-            existingConfig: params.existingConfig,
-        }), results);
+        finally {
+            await checkerExecutor.dispose();
+        }
     }
 }
 exports.TestdataGenService = TestdataGenService;

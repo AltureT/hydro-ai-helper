@@ -34,6 +34,10 @@ export const ProblemModel = {
   addTestdata: jest.fn(),
 };
 
+export const StorageModel = {
+  get: jest.fn(),
+};
+
 export const SystemModel = {
   get: jest.fn(),
 };

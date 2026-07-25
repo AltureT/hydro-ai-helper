@@ -1169,5 +1169,8 @@ ai_helper_testdata_verify_stress_custom_checker: "自定义 checker 暂不支持
 ai_helper_testdata_verify_validator: "输入合法性校验"
 ai_helper_testdata_verify_validator_none: "未提供校验器"
 ai_helper_testdata_verify_template: "模板实跑验证 (Python)"
+ai_helper_testdata_verify_checker_executed: "题目 testlib checker 已编译并用于实际判定"
+ai_helper_testdata_verify_checker_fallback: "题目 checker 编译失败，已按原有跳过策略降级"
+ai_helper_testdata_verify_checker_runtime_skipped: "{0} 次 checker 判定因沙箱基础设施错误跳过"
 ai_helper_testdata_discrimination_summary: "区分度验证：已卡住 {0}/{1} 个靶子"
 ai_helper_testdata_discrimination_warning: "仍有靶子未被卡住或未完成验证，请查看生成说明并人工复核"

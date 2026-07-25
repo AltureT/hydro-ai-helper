@@ -60,6 +60,7 @@ interface PlanVerification {
   };
   validator?: { ran: boolean; casesChecked: number };
   templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
+  checkerCheck?: { status: 'executed' | 'compile-failed'; runtimeSkipped: number };
   discrimination?: {
     targets: Array<{
       kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
@@ -67,7 +68,7 @@ interface PlanVerification {
       killed: boolean;
       killedBy?: 'wa' | 'tle';
       killedByCase?: number;
-      skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
+      skippedReason?: 'custom-checker' | 'checker-infra-error' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
     }>;
     allKilled: boolean;
   };
@@ -1257,6 +1258,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {verification.templateCheck && (
               <div style={{ fontSize: '13px' }}>
                 {i18n('ai_helper_testdata_verify_template')}: {verification.templateCheck.passed}/{verification.templateCheck.total}
+              </div>
+            )}
+            {verification.checkerCheck && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n(verification.checkerCheck.status === 'executed'
+                  ? 'ai_helper_testdata_verify_checker_executed'
+                  : 'ai_helper_testdata_verify_checker_fallback')}
+                {verification.checkerCheck.runtimeSkipped > 0
+                  && ` · ${i18n(
+                    'ai_helper_testdata_verify_checker_runtime_skipped',
+                    verification.checkerCheck.runtimeSkipped,
+                  )}`}
               </div>
             )}
             {discrimination && (

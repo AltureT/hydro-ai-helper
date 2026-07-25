@@ -3,7 +3,8 @@
  * 覆盖：题面多语言解析、权限校验、apply 文件校验与写入顺序
  */
 
-import { db, PERM, PRIV, ProblemModel } from 'hydrooj';
+import { Readable } from 'stream';
+import { db, PERM, PRIV, ProblemModel, StorageModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
@@ -15,6 +16,7 @@ import {
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
   extractStatementMarkdown,
+  loadTestlibCheckerArtifacts,
 } from '../../handlers/testdataGenHandler';
 import * as openaiClient from '../../services/openaiClient';
 import {
@@ -159,6 +161,48 @@ describe('extractStatementMarkdown', () => {
 
   it('非 JSON 的花括号开头内容按原文处理', () => {
     expect(extractStatementMarkdown('{not json')).toBe('{not json');
+  });
+});
+
+describe('loadTestlibCheckerArtifacts', () => {
+  it('读取 config.checker 与同目录全部 .h，并使用 basename 传给编译器', async () => {
+    const files: Record<string, string> = {
+      'problem/system/1530/testdata/checker/checker.cc': '#include "testlib.h"\n',
+      'problem/system/1530/testdata/checker/testlib.h': '// testlib\n',
+      'problem/system/1530/testdata/checker/helper.h': '// helper\n',
+    };
+    (StorageModel.get as jest.Mock).mockImplementation(
+      (key: string) => Promise.resolve(Readable.from([files[key]])),
+    );
+
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker/checker.cc\n',
+      data: [
+        { _id: 'checker/checker.cc' },
+        { _id: 'checker/testlib.h' },
+        { _id: 'checker/helper.h' },
+        { _id: 'other/ignored.h' },
+      ],
+    })).resolves.toEqual({
+      checkerSource: '#include "testlib.h"\n',
+      checkerHeaders: {
+        'testlib.h': '// testlib\n',
+        'helper.h': '// helper\n',
+      },
+    });
+    expect(StorageModel.get).not.toHaveBeenCalledWith(
+      'problem/system/1530/testdata/other/ignored.h',
+    );
+  });
+
+  it('checker 或头文件不可读时省略制品并降级', async () => {
+    (StorageModel.get as jest.Mock).mockRejectedValue(new Error('storage unavailable'));
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker.cc\n',
+      data: [{ _id: 'checker.cc' }],
+    })).resolves.toBeUndefined();
   });
 });
 
@@ -344,6 +388,40 @@ describe('TestdataGenGenerateHandler', () => {
       expect(clientSpy).toHaveBeenCalled();
       expect(genSpy.mock.calls[0][0]).not.toHaveProperty('generationProfile');
       expect(handler.response.body.plan).toEqual(plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('将 testlib checker 源码与同目录头文件传入 service', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker.cc\n',
+      data: [{ _id: 'checker.cc' }, { _id: 'testlib.h' }],
+    });
+    (StorageModel.get as jest.Mock).mockImplementation((key: string) => Promise.resolve(
+      Readable.from([key.endsWith('checker.cc') ? '#include "testlib.h"\n' : '// header\n']),
+    ));
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockResolvedValue({
+        problemType: 'traditional',
+        files: [],
+        caseCount: 0,
+      } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102' },
+    });
+
+    try {
+      await handler.post();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        checkerSource: '#include "testlib.h"\n',
+        checkerHeaders: { 'testlib.h': '// header\n' },
+      }));
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();

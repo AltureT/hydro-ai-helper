@@ -1169,5 +1169,8 @@ ai_helper_testdata_verify_stress_custom_checker: "text comparison unavailable fo
 ai_helper_testdata_verify_validator: "Input validation"
 ai_helper_testdata_verify_validator_none: "no validator provided"
 ai_helper_testdata_verify_template: "Template execution check (Python)"
+ai_helper_testdata_verify_checker_executed: "The problem's testlib checker was compiled and used for actual judgments"
+ai_helper_testdata_verify_checker_fallback: "The problem checker failed to compile; existing skip behavior was used"
+ai_helper_testdata_verify_checker_runtime_skipped: "{0} checker judgments skipped due to sandbox infrastructure errors"
 ai_helper_testdata_discrimination_summary: "Discrimination check: {0}/{1} targets killed"
 ai_helper_testdata_discrimination_warning: "Some targets survived or could not be checked; review the generation notes"
