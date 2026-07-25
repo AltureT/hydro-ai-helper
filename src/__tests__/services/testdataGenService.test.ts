@@ -2566,6 +2566,7 @@ describe('TestdataGenService.generate', () => {
 
   it('自动修复仍失败时从下一配置模型完整重跑一次', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
+    const onCheckpoint = jest.fn().mockResolvedValue(undefined);
     const brokenBlueprint = makeSolutionBlueprint('traditional').replace(
       'print(input())',
       'raise RuntimeError("broken oracle")',
@@ -2615,6 +2616,7 @@ describe('TestdataGenService.generate', () => {
     }).generate({
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      onCheckpoint,
       onProgress: event => progress.push(event),
     });
 
@@ -2632,6 +2634,11 @@ describe('TestdataGenService.generate', () => {
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
     expect(progress.some(event => event.attempt === 2 && event.stage === 'blueprint')).toBe(true);
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 2 });
+    expect(onCheckpoint).toHaveBeenCalledWith(null);
+    const clearCall = onCheckpoint.mock.calls.findIndex(([update]) => update === null);
+    expect(clearCall).toBeGreaterThanOrEqual(0);
+    expect(onCheckpoint.mock.invocationCallOrder[clearCall])
+      .toBeLessThan(fallbackClient.chat.mock.invocationCallOrder[0]);
   });
 
   it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {

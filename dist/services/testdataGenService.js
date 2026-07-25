@@ -4106,11 +4106,11 @@ class TestdataGenService {
     emitCheckpoint(params, update) {
         try {
             const pending = params.onCheckpoint?.(update);
-            if (pending)
-                void Promise.resolve(pending).catch(() => undefined);
+            return Promise.resolve(pending).catch(() => undefined);
         }
         catch {
             // 断点只用于降低中断重试成本，持久化失败不能改变生成结果。
+            return Promise.resolve();
         }
     }
     async generate(params) {
@@ -4212,7 +4212,8 @@ class TestdataGenService {
             });
             try {
                 this.emitProgress(params, 'model_escalation', 60, 2);
-                // 语义升级说明已有制品质量不足，必须完整重跑；仍保留回调以保存升级后的新制品。
+                // 先原子清空已持久化的首轮制品；升级轮仍保留回调以保存自己的全新制品。
+                await this.emitCheckpoint(params, null);
                 const plan = await fallbackService.generateWithSandbox({ ...params, checkpoint: undefined }, runner, 2);
                 const fallbackModels = plan.usedModel ? plan.usedModel.split(' → ').filter(Boolean) : [];
                 const toModel = fallbackModels[0] || 'next configured model';
@@ -4683,7 +4684,7 @@ class TestdataGenService {
                     solutionSourceContent = initialResult.content;
                     solution = this.useProvidedOracle(parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples), params.options);
                 }
-                this.emitCheckpoint(params, { solution });
+                void this.emitCheckpoint(params, { solution });
                 report('blueprint', 24);
                 report('solution_verification', 28);
                 await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, cppOracleAvailableForAttempt, checkerExecutor);
@@ -4720,7 +4721,7 @@ class TestdataGenService {
                 solutionSourceContent = repairResult.content;
                 try {
                     solution = this.useProvidedOracle(parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples), params.options);
-                    this.emitCheckpoint(params, { solution });
+                    void this.emitCheckpoint(params, { solution });
                     report('solution_verification', 32);
                     await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, cppOracleAvailableForAttempt, checkerExecutor);
                 }
@@ -4749,7 +4750,7 @@ class TestdataGenService {
                         signal: params.signal,
                     }, optionalDiscriminationResults)
                         .then(targets => {
-                        this.emitCheckpoint(params, { killTargets: targets });
+                        void this.emitCheckpoint(params, { killTargets: targets });
                         return targets;
                     })
                         .catch((err) => {
@@ -4764,7 +4765,7 @@ class TestdataGenService {
                     })
                     : this.generateGenerationArtifacts(params, solution, callOptions, artifactsResults)
                         .then(state => {
-                        this.emitCheckpoint(params, { artifacts: state.artifacts });
+                        void this.emitCheckpoint(params, { artifacts: state.artifacts });
                         return state;
                     }),
                 params.checkpoint?.verifier
@@ -4778,13 +4779,13 @@ class TestdataGenService {
                             : [],
                     })
                     : this.generateIndependentVerifier(params, solution, callOptions, verifierResults, attempt).then(state => {
-                        this.emitCheckpoint(params, { verifier: state.verifier });
+                        void this.emitCheckpoint(params, { verifier: state.verifier });
                         return state;
                     }),
             ]);
             if (params.checkpoint) {
                 // 恢复任务会创建新 job；把命中的旧制品复制到新断点，保证再次中断仍可续跑。
-                this.emitCheckpoint(params, {
+                void this.emitCheckpoint(params, {
                     solution,
                     artifacts: artifactsState.artifacts,
                     verifier: initialVerifierState.verifier,
@@ -4818,7 +4819,7 @@ class TestdataGenService {
                     if (stillMissing.length > 0) {
                         throw new TestdataGenerationError(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`, 'template_missing', results, true);
                     }
-                    this.emitCheckpoint(params, {
+                    void this.emitCheckpoint(params, {
                         artifacts: {
                             ...artifactsState.artifacts,
                             templates: blueprint.templates,
@@ -4930,7 +4931,7 @@ class TestdataGenService {
                         repairedSolutionCheckpoint.notes = solution.notes;
                         repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
                     }
-                    this.emitCheckpoint(params, {
+                    void this.emitCheckpoint(params, {
                         solution: repairedSolutionCheckpoint,
                         artifacts: repairedArtifactsCheckpoint,
                         verifier: checkpointVerifierFromBlueprint(blueprint),

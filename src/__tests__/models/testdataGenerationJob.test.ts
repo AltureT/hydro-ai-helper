@@ -76,8 +76,53 @@ describe('TestdataGenerationJobModel', () => {
     ).statementHash).not.toBe(first.statementHash);
   });
 
+  it('checkpoint hash 将 languages 视为集合，并覆盖配置与 checker 内容', () => {
+    const first = computeTestdataCheckpointHashes(
+      { problemKind: 'function', languages: ['python', 'cpp', 'python'] },
+      '题面正文',
+      {
+        existingConfig: 'time: 1s\nsubtasks:\n  - score: 100\n',
+        checkerSource: '#include "testlib.h"\nint main() {}\n',
+      },
+    );
+    const equivalent = computeTestdataCheckpointHashes(
+      { languages: ['cpp', 'python'], problemKind: 'function' },
+      '题面正文',
+      {
+        existingConfig: 'subtasks:\n  - score: 100\ntime: 1s\n',
+        checkerSource: '#include "testlib.h"\r\nint main() {}\r\n',
+      },
+    );
+
+    expect(equivalent).toEqual(first);
+    expect(computeTestdataCheckpointHashes(
+      { problemKind: 'function', languages: ['cpp', 'python'] },
+      '题面正文',
+      {
+        existingConfig: 'time: 2s\nsubtasks:\n  - score: 100\n',
+        checkerSource: '#include "testlib.h"\nint main() {}\n',
+      },
+    ).optionsHash).not.toBe(first.optionsHash);
+    expect(computeTestdataCheckpointHashes(
+      { problemKind: 'function', languages: ['cpp', 'python'] },
+      '题面正文',
+      {
+        existingConfig: 'time: 1s\nsubtasks:\n  - score: 100\n',
+      },
+    ).optionsHash).not.toBe(first.optionsHash);
+    expect(computeTestdataCheckpointHashes(
+      { problemKind: 'function', languages: ['cpp', 'python'] },
+      '题面正文',
+      {
+        existingConfig: 'time: 1s\nsubtasks:\n  - score: 100\n',
+        checkerSource: '#include "testlib.h"\nint main() { return 1; }\n',
+      },
+    ).optionsHash).not.toBe(first.optionsHash);
+  });
+
   it('仅接受同作用域 interrupted 任务且双 hash 一致的 checkpoint', () => {
     const checkpoint = {
+      revision: 3,
       optionsHash: 'options',
       statementHash: 'statement',
       solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' },
@@ -105,28 +150,70 @@ describe('TestdataGenerationJobModel', () => {
       { createdBy: 99 },
       { checkpoint: { ...checkpoint, optionsHash: 'other' } },
       { checkpoint: { ...checkpoint, statementHash: 'other' } },
+      { checkpoint: { ...checkpoint, revision: undefined } },
+      { checkpoint: { ...checkpoint, revision: 0 } },
     ]) {
       expect(selectTestdataResumeCheckpoint({ ...job, ...mismatch } as never, expected))
         .toBeUndefined();
     }
   });
 
-  it('checkpoint 单字段序列化超过 256KB 时跳过，不影响其他字段', () => {
+  it('checkpoint envelope 字段超限时丢弃该字段及所有下游字段', () => {
     const smallSolution = {
       problemType: 'traditional' as const,
       oracleCode: 'print(input())',
     };
     const filtered = filterTestdataCheckpointUpdate({
+      revision: 4,
       solution: smallSolution,
       artifacts: {
         generatorCode: 'x'.repeat((256 * 1024) + 1),
       },
+      verifier: {
+        bruteCode: 'print(input())',
+        validatorCode: 'print(1)',
+        stressGeneratorCode: 'print(1)',
+      },
       killTargets: [],
     });
     expect(filtered).toEqual({
+      revision: 4,
       solution: smallSolution,
-      killTargets: [],
     });
+  });
+
+  it('checkpoint 以完整 envelope 原子覆盖，并用 revision 拒绝陈旧写入', async () => {
+    const { model, collection } = createModel();
+    const solution = {
+      problemType: 'traditional' as const,
+      oracleCode: 'print(input())',
+    };
+
+    await model.updateCheckpoint(
+      'job1',
+      { optionsHash: 'options', statementHash: 'statement' },
+      { revision: 2, solution, killTargets: [] },
+    );
+
+    expect(collection.updateOne).toHaveBeenCalledWith(
+      {
+        _id: 'job1',
+        active: true,
+        $or: [
+          { 'checkpoint.revision': { $lt: 2 } },
+          { 'checkpoint.revision': { $exists: false } },
+        ],
+      },
+      { $set: expect.objectContaining({
+        checkpoint: {
+          optionsHash: 'options',
+          statementHash: 'statement',
+          revision: 2,
+          solution,
+          killTargets: [],
+        },
+      }) },
+    );
   });
 
   it('creates an active uniqueness index and a 24-hour TTL index', async () => {

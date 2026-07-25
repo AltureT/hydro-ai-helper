@@ -3,12 +3,16 @@
  * Persistent test-data generation jobs. Results can contain a full reference
  * solution, so handlers must also enforce creator and problem-edit access.
  */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenerationJobModel = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = void 0;
 exports.computeTestdataCheckpointHashes = computeTestdataCheckpointHashes;
 exports.filterTestdataCheckpointUpdate = filterTestdataCheckpointUpdate;
 exports.selectTestdataResumeCheckpoint = selectTestdataResumeCheckpoint;
 const node_crypto_1 = require("node:crypto");
+const js_yaml_1 = __importDefault(require("js-yaml"));
 const ensureObjectId_1 = require("../utils/ensureObjectId");
 exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = 256 * 1024;
 function normalizeForStableJson(value) {
@@ -24,16 +28,54 @@ function normalizeForStableJson(value) {
 function sha256(value) {
     return (0, node_crypto_1.createHash)('sha256').update(value, 'utf8').digest('hex');
 }
+function normalizeCheckpointOptions(options) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        return normalizeForStableJson(options);
+    }
+    const normalized = { ...options };
+    if (Array.isArray(normalized.languages)) {
+        normalized.languages = [...new Set(normalized.languages.map(language => String(language)))]
+            .sort((left, right) => left.localeCompare(right));
+    }
+    return normalizeForStableJson(normalized);
+}
+function normalizeExistingConfig(existingConfig) {
+    if (existingConfig === undefined || existingConfig.trim() === '')
+        return null;
+    try {
+        return normalizeForStableJson(js_yaml_1.default.load(existingConfig));
+    }
+    catch {
+        // 正常入口会先执行 config 硬校验；纯函数仍为异常输入提供确定性 hash。
+        return existingConfig.replace(/\r\n?/g, '\n').trim();
+    }
+}
+function normalizeTextForHash(value) {
+    return value.replace(/\r\n?/g, '\n');
+}
 /** 断点只在完整生成选项与题面均完全一致时可复用。 */
-function computeTestdataCheckpointHashes(options, statementMarkdown) {
+function computeTestdataCheckpointHashes(options, statementMarkdown, context = {}) {
+    const checkerPresent = context.checkerSource !== undefined;
+    const checkerHeaders = Object.fromEntries(Object.entries(context.checkerHeaders || {})
+        .map(([name, content]) => [name, sha256(normalizeTextForHash(content))]));
     return {
-        optionsHash: sha256(JSON.stringify(normalizeForStableJson(options))),
+        optionsHash: sha256(JSON.stringify(normalizeForStableJson({
+            options: normalizeCheckpointOptions(options),
+            existingConfig: normalizeExistingConfig(context.existingConfig),
+            checker: {
+                present: checkerPresent,
+                contentHash: checkerPresent
+                    ? sha256(normalizeTextForHash(context.checkerSource))
+                    : null,
+                headers: checkerHeaders,
+            },
+        }))),
         statementHash: sha256(statementMarkdown),
     };
 }
-/** MongoDB 单文档安全边界：过大的单项制品静默不落盘，不影响其他断点字段。 */
+/** MongoDB 单文档安全边界：任一制品过大时同时丢弃它与所有下游制品，禁止混代复用。 */
 function filterTestdataCheckpointUpdate(update) {
-    const filtered = {};
+    const filtered = { revision: update.revision };
     const keys = [
         'solution',
         'artifacts',
@@ -48,9 +90,13 @@ function filterTestdataCheckpointUpdate(update) {
             if (Buffer.byteLength(JSON.stringify(value), 'utf8') <= exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES) {
                 filtered[key] = value;
             }
+            else {
+                break;
+            }
         }
         catch {
-            // 不可序列化制品与超大制品一样只跳过当前字段。
+            // 不可序列化与超大制品一样会切断依赖链，避免保留来自旧轮次的下游字段。
+            break;
         }
     }
     return filtered;
@@ -59,7 +105,8 @@ function filterTestdataCheckpointUpdate(update) {
 function selectTestdataResumeCheckpoint(job, expected) {
     if (!job?.checkpoint || job.status !== 'interrupted')
         return undefined;
-    if (job.domainId !== expected.domainId
+    if (!Number.isSafeInteger(job.checkpoint.revision) || job.checkpoint.revision < 1
+        || job.domainId !== expected.domainId
         || job.problemDocId !== expected.problemDocId
         || job.problemId !== expected.problemId
         || job.createdBy !== expected.createdBy
@@ -159,18 +206,16 @@ class TestdataGenerationJobModel {
     }
     async updateCheckpoint(id, hashes, update) {
         const filtered = filterTestdataCheckpointUpdate(update);
-        if (Object.keys(filtered).length === 0)
-            return;
         const now = new Date();
-        const set = {
-            'checkpoint.optionsHash': hashes.optionsHash,
-            'checkpoint.statementHash': hashes.statementHash,
-            updatedAt: now,
-        };
-        for (const [key, value] of Object.entries(filtered)) {
-            set[`checkpoint.${key}`] = value;
-        }
-        await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true }, { $set: set });
+        const checkpoint = { ...hashes, ...filtered };
+        await this.collection.updateOne({
+            _id: (0, ensureObjectId_1.ensureObjectId)(id),
+            active: true,
+            $or: [
+                { 'checkpoint.revision': { $lt: update.revision } },
+                { 'checkpoint.revision': { $exists: false } },
+            ],
+        }, { $set: { checkpoint, updatedAt: now } });
     }
     async renewLease(id) {
         const now = new Date();

@@ -55,6 +55,8 @@ import {
   selectTestdataResumeCheckpoint,
   type TestdataGenerationJob,
   type TestdataGenerationCheckpoint,
+  type TestdataGenerationCheckpointEnvelope,
+  type TestdataGenerationCheckpointPayload,
   type TestdataCheckpointHashes,
   type TestdataGenerationJobError,
 } from '../models/testdataGenerationJob';
@@ -526,18 +528,48 @@ interface BackgroundGenerationParams {
   existingFiles: string[];
   checkpoint?: TestdataGenerationCheckpoint;
   checkpointHashes: TestdataCheckpointHashes;
+  checkerArtifacts?: TestlibCheckerArtifacts;
   translate: (key: string) => string;
 }
 
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    checkpoint, checkpointHashes, translate,
+    checkpoint, checkpointHashes, checkerArtifacts, translate,
   } = params;
   const jobId = String(job._id);
   const ac = new AbortController();
   backgroundGenerationControllers.set(jobId, ac);
   let progressWrites = Promise.resolve();
+  let checkpointWrites = Promise.resolve();
+  let checkpointRevision = 0;
+  const checkpointPayload: TestdataGenerationCheckpointPayload = {};
+  for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
+    if (checkpoint?.[key] !== undefined) checkpointPayload[key] = checkpoint[key] as never;
+  }
+  const persistCheckpoint = (
+    update: TestdataGenerationCheckpointPayload | null,
+  ): Promise<void> => {
+    if (update === null) {
+      for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
+        delete checkpointPayload[key];
+      }
+    } else {
+      for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
+        if (update[key] !== undefined) checkpointPayload[key] = update[key] as never;
+      }
+    }
+    const envelope: TestdataGenerationCheckpointEnvelope = {
+      revision: ++checkpointRevision,
+      ...checkpointPayload,
+    };
+    checkpointWrites = checkpointWrites
+      .then(() => jobModel.updateCheckpoint(job._id, checkpointHashes, envelope))
+      .catch(err => {
+        console.warn('[TestdataGenJob] checkpoint update failed:', err);
+      });
+    return checkpointWrites;
+  };
   const heartbeatTimer = setInterval(() => {
     jobModel.renewLease(job._id).then(active => {
       if (!active) ac.abort();
@@ -553,10 +585,11 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
     const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
     const generationMode = getTestdataGenerationMode();
-    const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
-      probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
-      loadTestlibCheckerArtifacts(job.domainId, pdoc),
-    ]);
+    const cppOracleAvailable = await probeCppOracleAvailability(
+      sandboxRunner,
+      generationMode,
+      ac.signal,
+    );
     const service = new TestdataGenService(aiClient, {
       sandboxRunner,
       mode: generationMode,
@@ -572,17 +605,14 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
       checkpoint,
-      onCheckpoint: update => {
-        void jobModel.updateCheckpoint(job._id, checkpointHashes, update).catch(err => {
-          console.warn('[TestdataGenJob] checkpoint update failed:', err);
-        });
-      },
+      onCheckpoint: persistCheckpoint,
       onProgress: progress => {
         progressWrites = progressWrites
           .then(() => jobModel.updateProgress(job._id, progress))
           .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
       },
     });
+    await checkpointWrites;
     await progressWrites;
     if (ac.signal.aborted) {
       throw Object.assign(new Error('canceled'), { name: 'AbortError' });
@@ -604,6 +634,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       'testdata_generation', successfulModel || '', true,
     ).catch(() => { /* best-effort */ });
   } catch (err) {
+    await checkpointWrites;
     if (isCancellation(err)) {
       await jobModel.cancel(job._id);
       return;
@@ -964,7 +995,12 @@ export class TestdataGenJobStartHandler extends Handler {
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
-      const checkpointHashes = computeTestdataCheckpointHashes(options, statement);
+      const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
+      const checkpointHashes = computeTestdataCheckpointHashes(options, statement, {
+        existingConfig: pdoc.config,
+        checkerSource: checkerArtifacts?.checkerSource,
+        checkerHeaders: checkerArtifacts?.checkerHeaders,
+      });
       let checkpoint: TestdataGenerationCheckpoint | undefined;
       const resumeFromJobId = typeof body.resumeFromJobId === 'string'
         ? body.resumeFromJobId.trim()
@@ -1013,6 +1049,7 @@ export class TestdataGenJobStartHandler extends Handler {
           existingFiles,
           checkpoint,
           checkpointHashes,
+          checkerArtifacts,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {
           console.error('[TestdataGenJob] unhandled background failure:', err);

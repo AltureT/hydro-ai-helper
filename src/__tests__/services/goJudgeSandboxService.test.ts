@@ -48,23 +48,25 @@ describe('scheduleSandboxChunks', () => {
     expect(maxActive).toBe(2);
   });
 
-  it('中途分块失败时原样传播并停止领取后续分块', async () => {
+  it('中途分块失败时原样传播、中止同批在途分块并停止领取后续分块', async () => {
     const failure = new Error('chunk failed');
     const started: number[] = [];
-    let releaseFirst!: () => void;
-    const promise = scheduleSandboxChunks([0, 1, 2], 2, async value => {
+    let siblingAborted = false;
+    const promise = scheduleSandboxChunks([0, 1, 2], 2, async (value, _index, signal) => {
       started.push(value);
       if (value === 1) throw failure;
-      await new Promise<void>(resolve => {
-        releaseFirst = resolve;
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          siblingAborted = true;
+          reject(signal.reason);
+        }, { once: true });
       });
       return value;
     });
-    const rejection = expect(promise).rejects.toBe(failure);
 
-    await rejection;
+    await expect(promise).rejects.toBe(failure);
     expect(started).toEqual([0, 1]);
-    releaseFirst();
+    expect(siblingAborted).toBe(true);
   });
 });
 

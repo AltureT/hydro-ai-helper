@@ -4,6 +4,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import yaml from 'js-yaml';
 import type { Collection, Db } from 'mongodb';
 import type { ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
@@ -41,7 +42,12 @@ export interface TestdataGenerationCheckpointPayload {
   killTargets?: KillTarget[];
 }
 
-export interface TestdataGenerationCheckpoint extends TestdataGenerationCheckpointPayload {
+export interface TestdataGenerationCheckpointEnvelope extends TestdataGenerationCheckpointPayload {
+  /** 单个新 job 内严格递增；旧格式无 revision 的断点不再复用。 */
+  revision: number;
+}
+
+export interface TestdataGenerationCheckpoint extends TestdataGenerationCheckpointEnvelope {
   optionsHash: string;
   statementHash: string;
 }
@@ -49,6 +55,12 @@ export interface TestdataGenerationCheckpoint extends TestdataGenerationCheckpoi
 export interface TestdataCheckpointHashes {
   optionsHash: string;
   statementHash: string;
+}
+
+export interface TestdataCheckpointContext {
+  existingConfig?: string;
+  checkerSource?: string;
+  checkerHeaders?: Record<string, string>;
 }
 
 interface TestdataResumeScope extends TestdataCheckpointHashes {
@@ -82,22 +94,64 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function normalizeCheckpointOptions(options: unknown): unknown {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    return normalizeForStableJson(options);
+  }
+  const normalized = { ...(options as Record<string, unknown>) };
+  if (Array.isArray(normalized.languages)) {
+    normalized.languages = [...new Set(normalized.languages.map(language => String(language)))]
+      .sort((left, right) => left.localeCompare(right));
+  }
+  return normalizeForStableJson(normalized);
+}
+
+function normalizeExistingConfig(existingConfig: string | undefined): unknown {
+  if (existingConfig === undefined || existingConfig.trim() === '') return null;
+  try {
+    return normalizeForStableJson(yaml.load(existingConfig));
+  } catch {
+    // 正常入口会先执行 config 硬校验；纯函数仍为异常输入提供确定性 hash。
+    return existingConfig.replace(/\r\n?/g, '\n').trim();
+  }
+}
+
+function normalizeTextForHash(value: string): string {
+  return value.replace(/\r\n?/g, '\n');
+}
+
 /** 断点只在完整生成选项与题面均完全一致时可复用。 */
 export function computeTestdataCheckpointHashes(
   options: unknown,
   statementMarkdown: string,
+  context: TestdataCheckpointContext = {},
 ): TestdataCheckpointHashes {
+  const checkerPresent = context.checkerSource !== undefined;
+  const checkerHeaders = Object.fromEntries(
+    Object.entries(context.checkerHeaders || {})
+      .map(([name, content]) => [name, sha256(normalizeTextForHash(content))]),
+  );
   return {
-    optionsHash: sha256(JSON.stringify(normalizeForStableJson(options))),
+    optionsHash: sha256(JSON.stringify(normalizeForStableJson({
+      options: normalizeCheckpointOptions(options),
+      existingConfig: normalizeExistingConfig(context.existingConfig),
+      checker: {
+        present: checkerPresent,
+        contentHash: checkerPresent
+          ? sha256(normalizeTextForHash(context.checkerSource as string))
+          : null,
+        headers: checkerHeaders,
+      },
+    }))),
     statementHash: sha256(statementMarkdown),
   };
 }
 
-/** MongoDB 单文档安全边界：过大的单项制品静默不落盘，不影响其他断点字段。 */
+/** MongoDB 单文档安全边界：任一制品过大时同时丢弃它与所有下游制品，禁止混代复用。 */
 export function filterTestdataCheckpointUpdate(
-  update: TestdataGenerationCheckpointPayload,
-): TestdataGenerationCheckpointPayload {
-  const filtered: TestdataGenerationCheckpointPayload = {};
+  update: TestdataGenerationCheckpointEnvelope,
+): TestdataGenerationCheckpointEnvelope {
+  const filtered: TestdataGenerationCheckpointEnvelope = { revision: update.revision };
   const keys: Array<keyof TestdataGenerationCheckpointPayload> = [
     'solution',
     'artifacts',
@@ -109,10 +163,13 @@ export function filterTestdataCheckpointUpdate(
     if (value === undefined) continue;
     try {
       if (Buffer.byteLength(JSON.stringify(value), 'utf8') <= TESTDATA_CHECKPOINT_FIELD_MAX_BYTES) {
-        (filtered as Record<string, unknown>)[key] = value;
+        (filtered as unknown as Record<string, unknown>)[key] = value;
+      } else {
+        break;
       }
     } catch {
-      // 不可序列化制品与超大制品一样只跳过当前字段。
+      // 不可序列化与超大制品一样会切断依赖链，避免保留来自旧轮次的下游字段。
+      break;
     }
   }
   return filtered;
@@ -124,7 +181,8 @@ export function selectTestdataResumeCheckpoint(
   expected: TestdataResumeScope,
 ): TestdataGenerationCheckpoint | undefined {
   if (!job?.checkpoint || job.status !== 'interrupted') return undefined;
-  if (job.domainId !== expected.domainId
+  if (!Number.isSafeInteger(job.checkpoint.revision) || job.checkpoint.revision < 1
+    || job.domainId !== expected.domainId
     || job.problemDocId !== expected.problemDocId
     || job.problemId !== expected.problemId
     || job.createdBy !== expected.createdBy
@@ -294,22 +352,21 @@ export class TestdataGenerationJobModel {
   async updateCheckpoint(
     id: string | ObjectIdType,
     hashes: TestdataCheckpointHashes,
-    update: TestdataGenerationCheckpointPayload,
+    update: TestdataGenerationCheckpointEnvelope,
   ): Promise<void> {
     const filtered = filterTestdataCheckpointUpdate(update);
-    if (Object.keys(filtered).length === 0) return;
     const now = new Date();
-    const set: Record<string, unknown> = {
-      'checkpoint.optionsHash': hashes.optionsHash,
-      'checkpoint.statementHash': hashes.statementHash,
-      updatedAt: now,
-    };
-    for (const [key, value] of Object.entries(filtered)) {
-      set[`checkpoint.${key}`] = value;
-    }
+    const checkpoint: TestdataGenerationCheckpoint = { ...hashes, ...filtered };
     await this.collection.updateOne(
-      { _id: ensureObjectId(id), active: true },
-      { $set: set },
+      {
+        _id: ensureObjectId(id),
+        active: true,
+        $or: [
+          { 'checkpoint.revision': { $lt: update.revision } },
+          { 'checkpoint.revision': { $exists: false } },
+        ],
+      },
+      { $set: { checkpoint, updatedAt: now } },
     );
   }
 

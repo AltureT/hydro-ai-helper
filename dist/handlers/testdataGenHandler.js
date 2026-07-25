@@ -398,11 +398,41 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, translate, } = params;
     const jobId = String(job._id);
     const ac = new AbortController();
     backgroundGenerationControllers.set(jobId, ac);
     let progressWrites = Promise.resolve();
+    let checkpointWrites = Promise.resolve();
+    let checkpointRevision = 0;
+    const checkpointPayload = {};
+    for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
+        if (checkpoint?.[key] !== undefined)
+            checkpointPayload[key] = checkpoint[key];
+    }
+    const persistCheckpoint = (update) => {
+        if (update === null) {
+            for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
+                delete checkpointPayload[key];
+            }
+        }
+        else {
+            for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
+                if (update[key] !== undefined)
+                    checkpointPayload[key] = update[key];
+            }
+        }
+        const envelope = {
+            revision: ++checkpointRevision,
+            ...checkpointPayload,
+        };
+        checkpointWrites = checkpointWrites
+            .then(() => jobModel.updateCheckpoint(job._id, checkpointHashes, envelope))
+            .catch(err => {
+            console.warn('[TestdataGenJob] checkpoint update failed:', err);
+        });
+        return checkpointWrites;
+    };
     const heartbeatTimer = setInterval(() => {
         jobModel.renewLease(job._id).then(active => {
             if (!active)
@@ -418,10 +448,7 @@ async function runBackgroundGeneration(params) {
         const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
         const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
         const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
-        const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
-            probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
-            loadTestlibCheckerArtifacts(job.domainId, pdoc),
-        ]);
+        const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal);
         const service = new testdataGenService_1.TestdataGenService(aiClient, {
             sandboxRunner,
             mode: generationMode,
@@ -437,17 +464,14 @@ async function runBackgroundGeneration(params) {
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
             checkpoint,
-            onCheckpoint: update => {
-                void jobModel.updateCheckpoint(job._id, checkpointHashes, update).catch(err => {
-                    console.warn('[TestdataGenJob] checkpoint update failed:', err);
-                });
-            },
+            onCheckpoint: persistCheckpoint,
             onProgress: progress => {
                 progressWrites = progressWrites
                     .then(() => jobModel.updateProgress(job._id, progress))
                     .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
             },
         });
+        await checkpointWrites;
         await progressWrites;
         if (ac.signal.aborted) {
             throw Object.assign(new Error('canceled'), { name: 'AbortError' });
@@ -466,6 +490,7 @@ async function runBackgroundGeneration(params) {
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', successfulModel || '', true).catch(() => { });
     }
     catch (err) {
+        await checkpointWrites;
         if ((0, testdataGenService_1.isCancellation)(err)) {
             await jobModel.cancel(job._id);
             return;
@@ -799,7 +824,12 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
-            const checkpointHashes = (0, testdataGenerationJob_1.computeTestdataCheckpointHashes)(options, statement);
+            const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
+            const checkpointHashes = (0, testdataGenerationJob_1.computeTestdataCheckpointHashes)(options, statement, {
+                existingConfig: pdoc.config,
+                checkerSource: checkerArtifacts?.checkerSource,
+                checkerHeaders: checkerArtifacts?.checkerHeaders,
+            });
             let checkpoint;
             const resumeFromJobId = typeof body.resumeFromJobId === 'string'
                 ? body.resumeFromJobId.trim()
@@ -848,6 +878,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     existingFiles,
                     checkpoint,
                     checkpointHashes,
+                    checkerArtifacts,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {
                     console.error('[TestdataGenJob] unhandled background failure:', err);

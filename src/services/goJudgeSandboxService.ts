@@ -119,12 +119,13 @@ export const CHECKER_BUDGET_MS = 120_000;
 
 /**
  * 有界并发调度独立分块，并把结果恢复到输入顺序。
- * 任一任务失败后立即原样传播且不再领取新任务；已在途请求仍由原 signal/deadline 收束。
+ * 任一任务失败后中止同批在途任务、等待它们收束，再原样传播首个错误且不再领取新任务。
  */
 export async function scheduleSandboxChunks<T, R>(
   chunks: T[],
   concurrency: number,
-  runChunk: (chunk: T, index: number) => Promise<R>,
+  runChunk: (chunk: T, index: number, signal: AbortSignal) => Promise<R>,
+  callerSignal?: AbortSignal,
 ): Promise<R[]> {
   if (chunks.length === 0) return [];
   const normalizedConcurrency = Number.isFinite(concurrency) && concurrency > 0
@@ -132,29 +133,42 @@ export async function scheduleSandboxChunks<T, R>(
     : 1;
   const workerCount = Math.min(normalizedConcurrency, chunks.length);
   const results = new Array<R>(chunks.length);
+  const internalAbort = new AbortController();
+  const abortFromCaller = () => internalAbort.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
   let nextIndex = 0;
   let failed = false;
   let firstError: unknown;
 
   const worker = async () => {
-    while (!failed) {
+    while (!failed && !internalAbort.signal.aborted) {
       const index = nextIndex;
       if (index >= chunks.length) return;
       nextIndex++;
       try {
-        results[index] = await runChunk(chunks[index], index);
+        results[index] = await runChunk(chunks[index], index, internalAbort.signal);
       } catch (err) {
         if (!failed) {
           failed = true;
           firstError = err;
+          internalAbort.abort(err);
         }
-        throw firstError;
+        return;
       }
     }
   };
 
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
+  try {
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (failed) throw firstError;
+    if (callerSignal?.aborted) {
+      throw callerSignal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+    }
+    return results;
+  } finally {
+    callerSignal?.removeEventListener('abort', abortFromCaller);
+  }
 }
 
 function normalizeHost(host: string): string {
@@ -524,7 +538,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     const chunkDetails = await scheduleSandboxChunks(
       chunks,
       opts.chunkConcurrency ?? 1,
-      async chunk => {
+      async (chunk, _index, chunkSignal) => {
         const remainingBudgetMs = opts.deadlineAt === undefined
           ? Number.POSITIVE_INFINITY
           : opts.deadlineAt - Date.now();
@@ -536,7 +550,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
             { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) },
             {
               timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
-              signal: opts.signal,
+              signal: chunkSignal,
               maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
               proxy: false,
             },
@@ -556,6 +570,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
         }
         return results.map(result => toRunDetail(result));
       },
+      opts.signal,
     );
     return chunkDetails.flat();
   }

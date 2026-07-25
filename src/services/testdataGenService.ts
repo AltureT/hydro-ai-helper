@@ -5024,7 +5024,7 @@ export interface GenerateTestdataParams {
   /** 已通过 handler 作用域与 hash 校验的解析后断点制品。 */
   checkpoint?: TestdataGenerationCheckpointPayload;
   /** 每个 AI 阶段成功后的异步落盘钩子；失败不得影响生成。 */
-  onCheckpoint?: (update: TestdataGenerationCheckpointPayload) => void | Promise<void>;
+  onCheckpoint?: (update: TestdataGenerationCheckpointPayload | null) => void | Promise<void>;
 }
 
 export interface TestdataGenerationCheckpointPayload {
@@ -5131,13 +5131,14 @@ export class TestdataGenService {
 
   private emitCheckpoint(
     params: Pick<GenerateTestdataParams, 'onCheckpoint'>,
-    update: TestdataGenerationCheckpointPayload,
-  ): void {
+    update: TestdataGenerationCheckpointPayload | null,
+  ): Promise<void> {
     try {
       const pending = params.onCheckpoint?.(update);
-      if (pending) void Promise.resolve(pending).catch(() => undefined);
+      return Promise.resolve(pending).catch(() => undefined);
     } catch {
       // 断点只用于降低中断重试成本，持久化失败不能改变生成结果。
+      return Promise.resolve();
     }
   }
 
@@ -5262,7 +5263,8 @@ export class TestdataGenService {
       });
       try {
         this.emitProgress(params, 'model_escalation', 60, 2);
-        // 语义升级说明已有制品质量不足，必须完整重跑；仍保留回调以保存升级后的新制品。
+        // 先原子清空已持久化的首轮制品；升级轮仍保留回调以保存自己的全新制品。
+        await this.emitCheckpoint(params, null);
         const plan = await fallbackService.generateWithSandbox(
           { ...params, checkpoint: undefined },
           runner,
@@ -5881,7 +5883,7 @@ export class TestdataGenService {
           params.options,
         );
       }
-      this.emitCheckpoint(params, { solution });
+      void this.emitCheckpoint(params, { solution });
       report('blueprint', 24);
       report('solution_verification', 28);
       await verifySolutionBlueprintSamples(
@@ -5938,7 +5940,7 @@ export class TestdataGenService {
           parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples),
           params.options,
         );
-        this.emitCheckpoint(params, { solution });
+        void this.emitCheckpoint(params, { solution });
         report('solution_verification', 32);
         await verifySolutionBlueprintSamples(
           solution,
@@ -5980,7 +5982,7 @@ export class TestdataGenService {
           signal: params.signal,
         }, optionalDiscriminationResults)
           .then(targets => {
-            this.emitCheckpoint(params, { killTargets: targets });
+            void this.emitCheckpoint(params, { killTargets: targets });
             return targets;
           })
           .catch((err): KillTarget[] => {
@@ -5994,7 +5996,7 @@ export class TestdataGenService {
         })
         : this.generateGenerationArtifacts(params, solution, callOptions, artifactsResults)
           .then(state => {
-            this.emitCheckpoint(params, { artifacts: state.artifacts });
+            void this.emitCheckpoint(params, { artifacts: state.artifacts });
             return state;
           }),
       params.checkpoint?.verifier
@@ -6014,13 +6016,13 @@ export class TestdataGenService {
           verifierResults,
           attempt,
         ).then(state => {
-          this.emitCheckpoint(params, { verifier: state.verifier });
+          void this.emitCheckpoint(params, { verifier: state.verifier });
           return state;
         }),
     ]);
     if (params.checkpoint) {
       // 恢复任务会创建新 job；把命中的旧制品复制到新断点，保证再次中断仍可续跑。
-      this.emitCheckpoint(params, {
+      void this.emitCheckpoint(params, {
         solution,
         artifacts: artifactsState.artifacts,
         verifier: initialVerifierState.verifier,
@@ -6067,7 +6069,7 @@ export class TestdataGenService {
             true,
           );
         }
-        this.emitCheckpoint(params, {
+        void this.emitCheckpoint(params, {
           artifacts: {
             ...artifactsState.artifacts,
             templates: blueprint.templates,
@@ -6219,7 +6221,7 @@ export class TestdataGenService {
           repairedSolutionCheckpoint.notes = solution.notes;
           repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
         }
-        this.emitCheckpoint(params, {
+        void this.emitCheckpoint(params, {
           solution: repairedSolutionCheckpoint,
           artifacts: repairedArtifactsCheckpoint,
           verifier: checkpointVerifierFromBlueprint(blueprint),

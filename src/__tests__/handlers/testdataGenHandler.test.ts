@@ -925,6 +925,7 @@ describe('Testdata generation background jobs', () => {
       extraRequirements: undefined,
     };
     const checkpoint = {
+      revision: 2,
       ...computeTestdataCheckpointHashes(options, PROBLEM_DOC.content),
       solution: {
         problemType: 'traditional' as const,
@@ -937,6 +938,8 @@ describe('Testdata generation background jobs', () => {
       checkpoint,
     });
     const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    let activeCheckpointWrites = 0;
+    let maxActiveCheckpointWrites = 0;
     const jobModel = {
       findRestorable: jest.fn().mockResolvedValue(null),
       findById: jest.fn().mockResolvedValue(interruptedJob),
@@ -944,7 +947,12 @@ describe('Testdata generation background jobs', () => {
       markRunning: jest.fn().mockResolvedValue(undefined),
       renewLease: jest.fn().mockResolvedValue(true),
       updateProgress: jest.fn().mockResolvedValue(undefined),
-      updateCheckpoint: jest.fn().mockResolvedValue(undefined),
+      updateCheckpoint: jest.fn().mockImplementation(async () => {
+        activeCheckpointWrites++;
+        maxActiveCheckpointWrites = Math.max(maxActiveCheckpointWrites, activeCheckpointWrites);
+        await new Promise(resolve => setImmediate(resolve));
+        activeCheckpointWrites--;
+      }),
       complete: jest.fn().mockResolvedValue(true),
       fail: jest.fn().mockResolvedValue(undefined),
       cancel: jest.fn().mockResolvedValue(undefined),
@@ -960,7 +968,12 @@ describe('Testdata generation background jobs', () => {
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
       .mockImplementation(async params => {
         receivedParams = params as unknown as Record<string, unknown>;
-        params.onCheckpoint?.({ killTargets: [] });
+        await Promise.all([
+          params.onCheckpoint?.({ killTargets: [] }),
+          params.onCheckpoint?.({
+            artifacts: { generatorCode: 'print(1)' },
+          }),
+        ]);
         return plan as never;
       });
     const handler = setupHandler(TestdataGenJobStartHandler, {
@@ -980,15 +993,36 @@ describe('Testdata generation background jobs', () => {
     try {
       await handler.post();
       await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
 
       expect(receivedParams?.checkpoint).toBe(checkpoint);
-      expect(jobModel.updateCheckpoint).toHaveBeenCalledWith(
+      expect(maxActiveCheckpointWrites).toBe(1);
+      expect(jobModel.updateCheckpoint).toHaveBeenNthCalledWith(
+        1,
         job._id,
         expect.objectContaining({
           optionsHash: checkpoint.optionsHash,
           statementHash: checkpoint.statementHash,
         }),
-        { killTargets: [] },
+        {
+          revision: 1,
+          solution: checkpoint.solution,
+          killTargets: [],
+        },
+      );
+      expect(jobModel.updateCheckpoint).toHaveBeenNthCalledWith(
+        2,
+        job._id,
+        expect.objectContaining({
+          optionsHash: checkpoint.optionsHash,
+          statementHash: checkpoint.statementHash,
+        }),
+        {
+          revision: 2,
+          solution: checkpoint.solution,
+          artifacts: { generatorCode: 'print(1)' },
+          killTargets: [],
+        },
       );
     } finally {
       genSpy.mockRestore();
