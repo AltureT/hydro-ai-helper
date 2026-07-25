@@ -2,12 +2,19 @@
  * TestdataGenService 单元测试
  */
 
+import yaml from 'js-yaml';
 import {
   validateGenerateOptions,
   isSafeTestdataFilename,
   buildCompileSh,
   buildConfigYaml,
+  mergeConfigSubtasks,
+  extractRawTopLevelYamlEntry,
+  assertExistingConfigParsable,
   buildCoveragePlan,
+  allocateCasesToSubtasks,
+  extendTieredAllocations,
+  resolveTieredSubtaskGeneration,
   allocateCaseNumbers,
   getExistingNumericCases,
   buildSkeletonPlan,
@@ -29,6 +36,8 @@ import {
   buildSandboxBlueprintUserPrompt,
   buildIndependentVerifierSystemPrompt,
   buildIndependentVerifierUserPrompt,
+  parseOracleLanguage,
+  parseSubtasksSection,
   parseSandboxBlueprint,
   parseSolutionBlueprint,
   parseGenerationArtifacts,
@@ -40,6 +49,9 @@ import {
   buildSandboxRepairPrompt,
   mergeSandboxBlueprintRepair,
   hasCustomChecker,
+  getTestlibCheckerFilename,
+  extendDeadlineByBestEffortElapsed,
+  resolveMaterializationResume,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -51,7 +63,10 @@ import {
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
-import { DISCRIMINATION_BUDGET_MS } from '../../services/goJudgeSandboxService';
+import {
+  DISCRIMINATION_BUDGET_MS,
+  SANDBOX_TOTAL_BUDGET_MS,
+} from '../../services/goJudgeSandboxService';
 
 const baseOptions: GenerateOptions = {
   problemKind: 'auto',
@@ -319,11 +334,161 @@ describe('buildCoveragePlan / numeric case allocation', () => {
   });
 });
 
+describe('parseSubtasksSection / allocateCasesToSubtasks', () => {
+  const subtasks = [
+    { id: 1, score: 60, constraints: 'n <= 20，且所有 a_i 相等' },
+    { id: 2, score: 30, constraints: 'n <= 1000，a_i <= 100' },
+    { id: 3, score: 10, constraints: 'n <= 100000，a_i <= 10^9' },
+  ];
+
+  it('解析合法 SUBTASKS 分节并保留完整约束摘要', () => {
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '1 | 20 | n<=20, p_i=1',
+      '3 | 80 | sum n<=1000, p_i=1, 依赖子任务1',
+      '@@@META@@@',
+      'problemType: traditional',
+    ].join('\n'))).toEqual([
+      { id: 1, score: 20, constraints: 'n<=20, p_i=1' },
+      { id: 3, score: 80, constraints: 'sum n<=1000, p_i=1, 依赖子任务1' },
+    ]);
+  });
+
+  it('id 乱序或重复时整体丢弃', () => {
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '2 | 20 | n<=20',
+      '1 | 80 | n<=1000',
+    ].join('\n'))).toEqual([]);
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '1 | 20 | n<=20',
+      '1 | 80 | n<=1000',
+    ].join('\n'))).toEqual([]);
+  });
+
+  it('任一行格式非法时整体丢弃，缺失分节返回空数组', () => {
+    expect(parseSubtasksSection([
+      '=== SUBTASKS ===',
+      '1 | 20 | n<=20',
+      '2 | 0 | n<=1000',
+    ].join('\n'))).toEqual([]);
+    expect(parseSubtasksSection('@@@META@@@\nproblemType: traditional')).toEqual([]);
+  });
+
+  it('均匀分值把剩余测试点平均分配，并按顺序恢复 caseNumber', () => {
+    const allocations = allocateCasesToSubtasks(6, subtasks.map(item => ({ ...item, score: 1 })));
+    expect(allocations.map(item => item.subtaskId)).toEqual([1, 1, 2, 2, 3, 3]);
+    expect(allocations.map(item => item.caseNumber)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(allocations[0].guidance).toBe(
+      'n <= 20，且所有 a_i 相等;数据必须严格满足本子任务的全部约束;应包含该档位下的边界/极端情形',
+    );
+  });
+
+  it('剩余名额按分值比例使用最大缺口法分配', () => {
+    const allocations = allocateCasesToSubtasks(10, subtasks);
+    expect(allocations.filter(item => item.subtaskId === 1)).toHaveLength(5);
+    expect(allocations.filter(item => item.subtaskId === 2)).toHaveLength(3);
+    expect(allocations.filter(item => item.subtaskId === 3)).toHaveLength(2);
+  });
+
+  it('extendTieredAllocations 总数不变时原样返回同一分配', () => {
+    const base = allocateCasesToSubtasks(6, subtasks);
+    expect(extendTieredAllocations(base, 6, subtasks)).toBe(base);
+  });
+
+  it('extendTieredAllocations 追加项保持原分配不变并归入最后一个子任务', () => {
+    const base = allocateCasesToSubtasks(6, subtasks);
+    const extended = extendTieredAllocations(base, 8, subtasks);
+    expect(extended.slice(0, 6)).toEqual(base);
+    expect(extended.slice(6).map(item => item.subtaskId)).toEqual([3, 3]);
+    expect(extended.slice(6).map(item => item.caseNumber)).toEqual([7, 8]);
+    expect(extended[6].guidance).toBe(subtasks[2].constraints);
+  });
+
+  it('extendTieredAllocations 原分配为空或总数变少时返回空数组', () => {
+    const base = allocateCasesToSubtasks(6, subtasks);
+    expect(extendTieredAllocations([], 3, subtasks)).toEqual([]);
+    expect(extendTieredAllocations(base, 5, subtasks)).toEqual([]);
+  });
+
+  it('测试点数恰好等于子任务数时每个子任务分配一个', () => {
+    expect(allocateCasesToSubtasks(3, subtasks).map(item => item.subtaskId)).toEqual([1, 2, 3]);
+  });
+
+  it.each([
+    {
+      name: '题面未声明 SUBTASKS',
+      input: { caseCount: 3, dataScale: 'auto' as const },
+      warning: undefined,
+    },
+    {
+      name: '既有 config 已含 subtasks',
+      input: {
+        caseCount: 3,
+        dataScale: 'auto' as const,
+        subtasks,
+        existingConfig: 'subtasks:\n  - id: 9\n    score: 100\n    cases: []\n',
+      },
+      warning: undefined,
+    },
+    {
+      name: '用户选择非 auto 规模',
+      input: { caseCount: 3, dataScale: 'medium' as const, subtasks },
+      warning: undefined,
+    },
+    {
+      name: '测试点少于子任务数',
+      input: { caseCount: 2, dataScale: 'auto' as const, subtasks },
+      warning: '题面含 3 个子任务但仅请求 2 个测试点,已按普通模式生成;建议将测试点数提高到 ≥3 后重新生成以获得分层数据',
+    },
+    {
+      name: '子任务分值合计不是 100',
+      input: {
+        caseCount: 3,
+        dataScale: 'auto' as const,
+        subtasks: subtasks.map((subtask, index) => (
+          index === 0 ? { ...subtask, score: 50 } : subtask
+        )),
+      },
+      warning: '子任务分值合计为 90,非 100,已按普通模式输出配置',
+    },
+  ])('四条件门控：$name 时完整回退扁平模式', ({ input, warning }) => {
+    expect(resolveTieredSubtaskGeneration(input)).toEqual({
+      enabled: false,
+      allocations: [],
+      ...(warning ? { warning } : {}),
+    });
+  });
+
+  it('四项条件全部满足时启用分层并返回确定性分配', () => {
+    const result = resolveTieredSubtaskGeneration({
+      caseCount: 3,
+      dataScale: 'auto',
+      subtasks,
+    });
+    expect(result.enabled).toBe(true);
+    expect(result.allocations.map(item => item.subtaskId)).toEqual([1, 2, 3]);
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('既有空 subtasks 沿用原语义视为未配置，不阻止新分层', () => {
+    expect(resolveTieredSubtaskGeneration({
+      caseCount: 3,
+      dataScale: 'auto',
+      subtasks,
+      existingConfig: 'subtasks: []\n',
+    }).enabled).toBe(true);
+  });
+});
+
 // ─── detectStdFilename ────────────────────────────────────────────────────────
 
 describe('detectStdFilename', () => {
   it('按代码特征选择扩展名', () => {
     expect(detectStdFilename('#include <bits/stdc++.h>\nint main(){}')).toBe('std.cc');
+    expect(detectStdFilename('```cpp\nint main() { return 0; }\n```')).toBe('std.cc');
+    expect(detectStdFilename('```c++\nint main() { return 0; }\n```')).toBe('std.cc');
     expect(detectStdFilename('public class Main { }')).toBe('std.java');
     expect(detectStdFilename('import java.util.*;\nclass X { void f(){ System.out.println(1); } }')).toBe('std.java');
     expect(detectStdFilename('def solve():\n    pass')).toBe('std.py');
@@ -438,6 +603,48 @@ describe('buildConfigYaml', () => {
     expect(yamlText).not.toContain('input: 2.in');
   });
 
+  it('分层模式按题面 id/score 输出多个子任务，并把既有完整测试点并入第一个子任务', () => {
+    const subtasks = [
+      { id: 1, score: 30, constraints: 'n<=100' },
+      { id: 2, score: 70, constraints: 'n<=100000' },
+    ];
+    const yamlText = buildConfigYaml({
+      problemType: 'traditional',
+      caseCount: 3,
+      languages: [],
+      caseNumbers: [1, 3, 4],
+      newCaseNumbers: [3, 4],
+      subtasks,
+      subtaskAllocations: allocateCasesToSubtasks(2, subtasks),
+    });
+    const parsed = yaml.load(yamlText) as {
+      subtasks: Array<{
+        id: number;
+        score: number;
+        type: string;
+        cases: Array<{ input: string; output: string }>;
+      }>;
+    };
+
+    expect(parsed.subtasks).toEqual([
+      {
+        id: 1,
+        score: 30,
+        type: 'sum',
+        cases: [
+          { input: '1.in', output: '1.out' },
+          { input: '3.in', output: '3.out' },
+        ],
+      },
+      {
+        id: 2,
+        score: 70,
+        type: 'sum',
+        cases: [{ input: '4.in', output: '4.out' }],
+      },
+    ]);
+  });
+
   it('更新测试点时保留现有 checker、时限与额外文件配置', () => {
     const existingConfig = [
       'type: default',
@@ -462,12 +669,139 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('time: 2500ms');
     expect(yamlText).toContain('memory: 512m');
     expect(yamlText).toContain('input: 1.in');
-    expect(yamlText).not.toContain('old.in');
+    expect(yamlText).toContain('old.in');
+  });
+
+  it('if 式 subtasks 原文块逐字保留注释、引号与格式', () => {
+    const rawSubtasks = [
+      'subtasks:',
+      '  # 教师手写规则，不得格式化',
+      '  - id: "phase-a"',
+      '    score: 100 # 行尾说明',
+      '    if: ["1.in", "2.in"]',
+    ].join('\n');
+    const existingConfig = [
+      'type: default',
+      rawSubtasks,
+      'time: 2500ms',
+    ].join('\n');
+
+    expect(extractRawTopLevelYamlEntry(existingConfig, 'subtasks')).toBe(`${rawSubtasks}\n`);
+    const yamlText = buildConfigYaml({
+      problemType: 'traditional',
+      caseCount: 1,
+      languages: [],
+      existingConfig,
+    });
+    expect(yamlText).toContain(rawSubtasks);
+    expect(yamlText).not.toContain('input: 1.in');
   });
 
   it('default/strict checker 不按自定义 checker 处理', () => {
     expect(hasCustomChecker('checker_type: default')).toBe(false);
     expect(hasCustomChecker('checker_type: strict')).toBe(false);
+  });
+
+  it('仅为 testlib 配置提取 checker 源文件名', () => {
+    expect(getTestlibCheckerFilename(
+      'checker_type: testlib\nchecker: checker/checker.cc\n',
+    )).toBe('checker/checker.cc');
+    expect(getTestlibCheckerFilename(
+      'checker_type: default\nchecker: checker.cc\n',
+    )).toBeUndefined();
+    expect(getTestlibCheckerFilename(
+      'checker_type: interactive\nchecker: checker.cc\n',
+    )).toBeUndefined();
+  });
+});
+
+describe('mergeConfigSubtasks', () => {
+  it('无既有 subtasks 时保持扁平配置生成路径', () => {
+    expect(mergeConfigSubtasks(undefined, [1, 2])).toBeUndefined();
+    expect(mergeConfigSubtasks([], [1, 2])).toBeUndefined();
+  });
+
+  it('全 cases 式 subtasks 深拷贝保留并向最后一项追加排序后的新增测试点', () => {
+    const existing = [
+      {
+        id: 1,
+        score: 40,
+        cases: [{ input: 'old-a.in', output: 'old-a.out' }],
+      },
+      {
+        id: 2,
+        score: 60,
+        cases: [{ input: 'old-b.in', output: 'old-b.out' }],
+      },
+    ];
+    const result = mergeConfigSubtasks(existing, [5, 3, 5]);
+
+    expect(result).toEqual({
+      subtasks: [
+        {
+          id: 1,
+          score: 40,
+          cases: [{ input: 'old-a.in', output: 'old-a.out' }],
+        },
+        {
+          id: 2,
+          score: 60,
+          cases: [
+            { input: 'old-b.in', output: 'old-b.out' },
+            { input: '3.in', output: '3.out' },
+            { input: '5.in', output: '5.out' },
+          ],
+        },
+      ],
+      note: {
+        kind: 'system',
+        message: '新增测试点 #3、#5 已并入子任务 2,请核对分值分配。',
+      },
+      newCaseSubtaskIds: { 3: 2, 5: 2 },
+    });
+    expect(result?.subtasks).not.toBe(existing);
+    expect(result?.subtasks[0]).not.toBe(existing[0]);
+    expect(existing[1].cases).toEqual([{ input: 'old-b.in', output: 'old-b.out' }]);
+  });
+
+  it('含 if 式 subtask 时深拷贝原样保留并返回未纳入警告', () => {
+    const existing = [
+      { id: 7, score: 100, if: ['1 <= id && id <= 2'], type: 'sum' },
+    ];
+    const result = mergeConfigSubtasks(existing, [4, 3]);
+
+    expect(result).toEqual({
+      subtasks: existing,
+      note: {
+        kind: 'warning',
+        message: '该题已配置子任务;本次新增测试点 #3、#4 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。',
+      },
+      newCaseSubtaskIds: {},
+    });
+    expect(result?.subtasks).not.toBe(existing);
+    expect(result?.subtasks[0]).not.toBe(existing[0]);
+  });
+});
+
+describe('assertExistingConfigParsable', () => {
+  it('非空非法 YAML 抛出带用户消息 key 的 TestdataGenerationError', () => {
+    expect.assertions(3);
+    try {
+      assertExistingConfigParsable('subtasks:\n  - cases: [1\n');
+    } catch (err) {
+      expect(err).toBeInstanceOf(TestdataGenerationError);
+      expect((err as TestdataGenerationError).userMessageKey)
+        .toBe('ai_helper_testdata_err_config_unparsable');
+      expect((err as Error).message).toContain('为避免覆盖丢失配置已中止');
+    }
+  });
+
+  it.each([
+    ['合法配置', 'type: default\nsubtasks: []\n'],
+    ['空配置', ' \n\t'],
+    ['缺失配置', undefined],
+  ])('%s 不受影响', (_label, raw) => {
+    expect(() => assertExistingConfigParsable(raw)).not.toThrow();
   });
 });
 
@@ -932,6 +1266,52 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(response.verification?.sampleCheck).toBeUndefined();
     expect(response.notes).toContain('自定义 checker');
   });
+
+  it('可执行 checker 用 testlib 语义回归题面样例，而非纯文本比较', async () => {
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'case', input: '1\n' }] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'answer\n', stderr: '' },
+        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: 'different but valid\n', stderr: '' },
+      ]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      runBatch: jest.fn().mockResolvedValue(['accept']),
+      runChecker: jest.fn().mockResolvedValue('accept'),
+      dispose: jest.fn(),
+    };
+    const blueprint = parseSandboxBlueprint(
+      makeSandboxBlueprint('traditional'),
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+    );
+
+    const response = await materializeSandboxBlueprint(
+      blueprint,
+      { problemKind: 'traditional', caseCount: 1, languages: [] },
+      coinStatementWithSample,
+      runner,
+      undefined,
+      true,
+      undefined,
+      [],
+      false,
+      checkerExecutor,
+    );
+
+    expect(checkerExecutor.runBatch).toHaveBeenCalledWith([{
+      input: expect.any(String),
+      output: 'different but valid\n',
+      answer: expect.any(String),
+    }], { signal: undefined });
+    expect(response.verification?.sampleCheck).toEqual({ total: 1, passed: 1 });
+  });
 });
 
 // ─── assemblePlan ─────────────────────────────────────────────────────────────
@@ -1010,6 +1390,257 @@ describe('assemblePlan', () => {
     expect(config).not.toContain('input: 2.in');
   });
 
+  it('启用分层时 config、覆盖元数据与结构化说明共享同一子任务分配', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      dataScale: 'auto',
+      languages: [],
+    };
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    response.subtasks = [
+      { id: 1, score: 30, constraints: 'n<=100' },
+      { id: 2, score: 70, constraints: 'n<=100000' },
+    ];
+    const plan = assemblePlan(response, options, {
+      mode: 'sandbox',
+      existingFiles: ['1.in', '1.out', '2.in'],
+    });
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as {
+      subtasks: Array<{
+        id: number;
+        score: number;
+        cases: Array<{ input: string; output: string }>;
+      }>;
+    };
+
+    expect(config.subtasks).toEqual([
+      {
+        id: 1,
+        score: 30,
+        type: 'sum',
+        cases: [
+          { input: '1.in', output: '1.out' },
+          { input: '3.in', output: '3.out' },
+        ],
+      },
+      {
+        id: 2,
+        score: 70,
+        type: 'sum',
+        cases: [{ input: '4.in', output: '4.out' }],
+      },
+    ]);
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
+    expect(plan.notesStructured?.warnings).toContain(
+      '既有完整测试点 #1 已并入子任务 1,请人工复核其子任务归属。',
+    );
+    expect(plan.notesStructured?.system).toContain(
+      '已按题面子任务表生成 2 档分层数据;VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,建议抽查各档 .in 是否符合对应约束',
+    );
+    expect(plan.notes).not.toContain('子任务分值合计为');
+  });
+
+  it('子任务分值合计非 100 时禁用分层配置并给出普通模式警告', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      dataScale: 'auto',
+      languages: [],
+    };
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    response.subtasks = [
+      { id: 1, score: 30, constraints: 'n<=100' },
+      { id: 2, score: 60, constraints: 'n<=100000' },
+    ];
+    const plan = assemblePlan(response, options);
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ id: number; score: number }> };
+    const warning = '子任务分值合计为 90,非 100,已按普通模式输出配置';
+
+    expect(config.subtasks).toEqual([expect.objectContaining({ id: 1, score: 100 })]);
+    expect(plan.caseCoverage?.every(item => item.subtaskId === undefined)).toBe(true);
+    expect(plan.notesStructured?.warnings).toContain(warning);
+    expect(plan.notes).toContain(warning);
+  });
+
+  it('组装消费本轮冻结的分层决策，不因后续蓝图子任务漂移而重新分配', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      dataScale: 'auto',
+      languages: [],
+    };
+    const frozenSubtasks = [
+      { id: 1, score: 40, constraints: 'n<=100' },
+      { id: 2, score: 60, constraints: 'n<=100000' },
+    ];
+    const tieredDecision = resolveTieredSubtaskGeneration({
+      caseCount: 2,
+      dataScale: 'auto',
+      subtasks: frozenSubtasks,
+    });
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    response.subtasks = [{ id: 7, score: 100, constraints: '修复响应中的漂移规格' }];
+
+    const plan = assemblePlan(response, options, { tieredDecision });
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ id: number; score: number }> };
+
+    expect(config.subtasks.map(({ id, score }) => ({ id, score }))).toEqual([
+      { id: 1, score: 40 },
+      { id: 2, score: 60 },
+    ]);
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
+  });
+
+  it.each([
+    {
+      name: '无 SUBTASKS',
+      subtasks: undefined,
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] } as GenerateOptions,
+      context: {},
+      warning: undefined,
+      expectedSubtaskIds: undefined,
+    },
+    {
+      name: '既有 config 含 subtasks',
+      subtasks: [
+        { id: 1, score: 30, constraints: 'n<=100' },
+        { id: 2, score: 70, constraints: 'n<=100000' },
+      ],
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] } as GenerateOptions,
+      context: {
+        existingConfig: 'subtasks:\n  - id: 9\n    score: 100\n    cases: []\n',
+      },
+      warning: undefined,
+      expectedSubtaskIds: [9, 9],
+    },
+    {
+      name: '非 auto 规模',
+      subtasks: [
+        { id: 1, score: 30, constraints: 'n<=100' },
+        { id: 2, score: 70, constraints: 'n<=100000' },
+      ],
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'medium', languages: [] } as GenerateOptions,
+      context: {},
+      warning: undefined,
+      expectedSubtaskIds: undefined,
+    },
+    {
+      name: '请求测试点不足',
+      subtasks: [
+        { id: 1, score: 20, constraints: 'n<=10' },
+        { id: 2, score: 30, constraints: 'n<=100' },
+        { id: 3, score: 50, constraints: 'n<=1000' },
+      ],
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] } as GenerateOptions,
+      context: {},
+      warning: '题面含 3 个子任务但仅请求 2 个测试点,已按普通模式生成;建议将测试点数提高到 ≥3 后重新生成以获得分层数据',
+      expectedSubtaskIds: undefined,
+    },
+  ])('四条件回退集成：$name 时 config 保持既有语义', ({
+    subtasks, options, context, warning, expectedSubtaskIds,
+  }) => {
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    response.subtasks = subtasks;
+    const plan = assemblePlan(response, options, context);
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ score: number }> };
+
+    if (expectedSubtaskIds) {
+      expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual(expectedSubtaskIds);
+    } else {
+      expect(plan.caseCoverage?.every(item => item.subtaskId === undefined)).toBe(true);
+    }
+    expect(plan.notesStructured?.system.some(note => note.includes('已按题面子任务表生成'))).toBe(false);
+    if (context.existingConfig) {
+      expect(config.subtasks[0].score).toBe(100);
+    } else {
+      expect(config.subtasks).toHaveLength(1);
+      expect(config.subtasks[0].score).toBe(100);
+    }
+    if (warning) {
+      expect(plan.notesStructured?.warnings).toContain(warning);
+      expect(plan.notes).toContain(warning);
+    }
+  });
+
+  it('既有显式 cases 子任务保持顺序并将排序后的新增编号追加到最后一项', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    const plan = assemblePlan(response, options, {
+      existingFiles: ['1.in', '1.out', '2.in'],
+      existingConfig: [
+        'type: default',
+        'subtasks:',
+        '  - id: 1',
+        '    score: 40',
+        '    cases:',
+        '      - input: 1.in',
+        '        output: 1.out',
+        '  - id: 9',
+        '    score: 60',
+        '    cases:',
+        '      - input: old.in',
+        '        output: old.out',
+      ].join('\n'),
+    });
+
+    const config = plan.files.find(file => file.name === 'config.yaml')?.content || '';
+    expect(config.indexOf('id: 1')).toBeLessThan(config.indexOf('id: 9'));
+    expect(config).toContain('input: old.in');
+    expect(config.indexOf('input: 3.in')).toBeLessThan(config.indexOf('input: 4.in'));
+    expect(plan.notesStructured?.system).toContain(
+      '新增测试点 #3、#4 已并入子任务 9,请核对分值分配。',
+    );
+    expect(plan.notes).toContain('新增测试点 #3、#4 已并入子任务 9,请核对分值分配。');
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([9, 9]);
+  });
+
+  it('既有 if 式子任务不接收新增测试点并在结构化与 legacy 说明中警告', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    const warning = '该题已配置子任务;本次新增测试点 #3、#4 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。';
+    const plan = assemblePlan(response, options, {
+      existingFiles: ['1.in', '1.out', '2.in'],
+      existingConfig: [
+        'type: default',
+        'subtasks:',
+        '  - id: 1',
+        '    score: 100',
+        '    if:',
+        '      - 1 <= id && id <= 2',
+      ].join('\n'),
+    });
+
+    const config = plan.files.find(file => file.name === 'config.yaml')?.content || '';
+    expect(config).toContain('1 <= id && id <= 2');
+    expect(config).not.toContain('input: 3.in');
+    expect(config).not.toContain('input: 4.in');
+    expect(plan.notesStructured?.warnings).toContain(warning);
+    expect(plan.notes).toContain(warning);
+  });
+
   it('区分度命中编号与补刀说明使用实际分配的测试点文件编号', () => {
     const options: GenerateOptions = {
       problemKind: 'traditional',
@@ -1044,6 +1675,65 @@ describe('assemblePlan', () => {
     expect(plan.caseCoverage?.map(item => item.fileNumber)).toEqual([3, 4]);
     expect(plan.verification?.discrimination?.targets[0].killedByCase).toBe(4);
     expect(plan.notes).toContain('已为「错误贪心」错误解定向补充 hack 测试点 #4。');
+  });
+
+  it('结构化说明分类系统事实、警告与 AI 自述，同时保持 legacy notes 顺序不变', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    response.notes = 'AI 自述。\n系统事实。\n已有警告。';
+    response.notesStructured = {
+      warnings: ['已有警告。'],
+      system: ['系统事实。'],
+      ai: 'AI 自述。',
+    };
+    response.discriminationInitialCaseCount = 1;
+    response.verification = {
+      mode: 'sandbox',
+      oracleKind: 'ai-solution',
+      discrimination: {
+        targets: [
+          {
+            kind: 'boundary',
+            description: '遗漏边界',
+            killed: true,
+            killedBy: 'wa',
+            killedByCase: 2,
+          },
+          {
+            kind: 'wrong-algorithm',
+            description: '错误贪心',
+            killed: false,
+          },
+        ],
+        allKilled: false,
+      },
+    };
+
+    const plan = assemblePlan(response, options, { mode: 'sandbox' });
+
+    expect(plan.notes).toBe([
+      response.notes,
+      '已为「遗漏边界」错误解定向补充 hack 测试点 #2。',
+      '警告:一个「错误贪心」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。',
+    ].join('\n'));
+    expect(plan.notesStructured).toEqual({
+      warnings: [
+        '已有警告。',
+        '警告:一个「错误贪心」类错误解通过了全部数据与定向补刀,建议教师针对该错误模式人工补充测试点。',
+      ],
+      system: [
+        '系统事实。',
+        '已为「遗漏边界」错误解定向补充 hack 测试点 #2。',
+      ],
+      ai: 'AI 自述。',
+    });
   });
 });
 
@@ -1159,6 +1849,72 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
 describe('stage-specific sandbox repair', () => {
   const options: GenerateOptions = { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] };
 
+  it('按单一变更产物解析最早重跑阶段与可复用集合，未知或组合变更保守全量重跑', () => {
+    const none = {
+      formalInputs: false,
+      stressInputs: false,
+      validationResults: false,
+      oracleOutputs: false,
+    };
+    expect(resolveMaterializationResume(['GENERATOR'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume(['full'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume(['STRESS_GENERATOR'])).toEqual({
+      phase: 'stress-generator',
+      reuse: { ...none, formalInputs: true },
+    });
+    expect(resolveMaterializationResume(['VALIDATOR'])).toEqual({
+      phase: 'validator',
+      reuse: { ...none, formalInputs: true, stressInputs: true },
+    });
+    for (const artifact of ['ORACLE', 'SOLUTION']) {
+      expect(resolveMaterializationResume([artifact])).toEqual({
+        phase: 'oracle',
+        reuse: {
+          ...none,
+          formalInputs: true,
+          stressInputs: true,
+          validationResults: true,
+        },
+      });
+    }
+    expect(resolveMaterializationResume(['BRUTE'])).toEqual({
+      phase: 'brute',
+      reuse: {
+        formalInputs: true,
+        stressInputs: true,
+        validationResults: true,
+        oracleOutputs: true,
+      },
+    });
+    expect(resolveMaterializationResume(['template.py'])).toEqual({
+      phase: 'template',
+      reuse: {
+        formalInputs: true,
+        stressInputs: true,
+        validationResults: true,
+        oracleOutputs: true,
+      },
+    });
+    expect(resolveMaterializationResume(['UNKNOWN'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume(['ORACLE', 'BRUTE'])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+    expect(resolveMaterializationResume([])).toEqual({
+      phase: 'generator',
+      reuse: none,
+    });
+  });
+
   it('按错误阶段分类并生成定向提示词', () => {
     expect(classifySandboxRepairScope(new Error('GENERATOR 实跑失败：Output Limit Exceeded'))).toBe('generator');
     expect(classifySandboxRepairScope(new Error('STRESS_GENERATOR 输出无效'))).toBe('stress-generator');
@@ -1176,6 +1932,35 @@ describe('stage-specific sandbox repair', () => {
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+    const cppRepair = buildSandboxRepairPrompt(
+      new Error('ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：prog.cc:7: error'),
+      options,
+    );
+    expect(cppRepair).toContain('当前 ORACLE 语言为 C++17');
+    expect(cppRepair).toContain('prog.cc:7: error');
+    const cppInfraRepair = buildSandboxRepairPrompt(
+      new Error('ORACLE_CPP_INFRA：connect ECONNREFUSED'),
+      options,
+    );
+    expect(cppInfraRepair).toContain('改用 Python 3');
+    expect(cppInfraRepair).not.toContain('保持该语言不变');
+    expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
+      .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
+    const tieredCoverage = allocateCasesToSubtasks(3, [
+      { id: 1, score: 40, constraints: 'n<=100' },
+      { id: 2, score: 60, constraints: 'n<=100000' },
+    ]);
+    for (const scope of ['generator', 'full'] as const) {
+      const prompt = buildSandboxRepairPrompt(
+        new Error(scope === 'generator' ? 'GENERATOR 超时' : '未知协议错误'),
+        { ...options, caseCount: 3 },
+        scope,
+        tieredCoverage,
+      );
+      expect(prompt).toContain('CASE 1: 子任务 1 — n<=100;数据必须严格满足本子任务的全部约束');
+      expect(prompt).toContain('CASE 3: 子任务 2 — n<=100000;数据必须严格满足本子任务的全部约束');
+      expect(prompt).not.toContain('CASE 1: small');
+    }
   });
 
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
@@ -1297,6 +2082,100 @@ describe('buildSkeletonPlan', () => {
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
+  it('best-effort checker 耗时扩展正确性截止时间，不消耗主预算', () => {
+    expect(extendDeadlineByBestEffortElapsed(10_000, 2_000, 7_500)).toBe(15_500);
+    expect(extendDeadlineByBestEffortElapsed(10_000, 7_500, 2_000)).toBe(10_000);
+  });
+
+  it('非法既有 config 在任何 AI 或沙箱调用前中止', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '配置守卫',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      existingConfig: 'subtasks:\n  - cases: [1\n',
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_config_unparsable',
+      telemetryMetadata: expect.objectContaining({ failureStage: 'config_parse' }),
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
+  it('checkpoint 命中四项制品时跳过对应 AI 调用但仍完整运行沙箱', async () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 1,
+      languages: [],
+    };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(
+        makeSolutionBlueprint('traditional'),
+        options,
+        [],
+      ),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'),
+        'traditional',
+        [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(
+        makeIndependentVerifierBlueprint(),
+        [],
+      ),
+      killTargets: [],
+    };
+    const mockClient = { chat: jest.fn() };
+    const onCheckpoint = jest.fn().mockRejectedValue(new Error('checkpoint store unavailable'));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '断点续跑',
+      statementMarkdown: '题面',
+      options,
+      checkpoint,
+      onCheckpoint,
+    });
+
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(onCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+      solution: checkpoint.solution,
+      artifacts: checkpoint.artifacts,
+      verifier: checkpoint.verifier,
+      killTargets: [],
+    }));
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
+    expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+  });
+
   it('调用 AI 客户端并返回组装后的计划', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
     const mockClient = {
@@ -1422,6 +2301,12 @@ describe('TestdataGenService.generate', () => {
       'generator.py', 'std.py', 'config.yaml',
     ]));
     expect(plan.notes).toContain('Hydro 沙箱中实际运行');
+    expect(plan.notesStructured?.ai).toBe('解题蓝图。\n外围制品。');
+    expect(plan.notesStructured?.system).toContain(
+      '测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 Python 标程生成。',
+    );
+    expect(plan.notesStructured?.warnings).not.toContain('解题蓝图。');
+    expect(plan.notesStructured?.system).not.toContain('外围制品。');
     expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
     expect(runner.runPython.mock.calls.every(call => typeof call[3] === 'number')).toBe(true);
     expect(runner.runPythonBatchDetailed.mock.calls.every(call => typeof call[2]?.deadlineAt === 'number')).toBe(true);
@@ -1469,16 +2354,34 @@ describe('TestdataGenService.generate', () => {
 
   it('幸存 WA 靶子补刀成功后把新测试点写入文件计划与 config.yaml', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const killModel = { endpointId: 'ep2', endpointName: 'kill', modelName: 'gpt-kill' };
+    const hackModel = { endpointId: 'ep3', endpointName: 'hack', modelName: 'gpt-hack' };
+    const artifactsModel = { endpointId: 'ep4', endpointName: 'artifacts', modelName: 'gpt-artifacts' };
+    const verifierModel = { endpointId: 'ep5', endpointName: 'verifier', modelName: 'gpt-verifier' };
+    const usage = (totalTokens: number) => ({
+      promptTokens: totalTokens,
+      completionTokens: 0,
+      totalTokens,
+    });
     const mockClient = {
       chat: jest.fn()
-        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
-        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'), usage: usage(1), usedModel,
+        })
+        .mockResolvedValueOnce({
+          content: makeSurvivingKillTargetResponse(), usage: usage(2), usedModel: killModel,
+        })
         .mockResolvedValueOnce({
           content: makeGenerationArtifactsBlueprint('traditional'),
-          usedModel,
+          usage: usage(3),
+          usedModel: artifactsModel,
         })
-        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
-        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(), usage: usage(4), usedModel: verifierModel,
+        })
+        .mockResolvedValueOnce({
+          content: makeHackCaseResponse(), usage: usage(5), usedModel: hackModel,
+        }),
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -1526,6 +2429,15 @@ describe('TestdataGenService.generate', () => {
       killedBy: 'wa',
       killedByCase: 2,
     });
+    expect(plan.tokenUsage).toEqual({
+      promptTokens: 15,
+      completionTokens: 0,
+      totalTokens: 15,
+    });
+    expect(plan.usedModel).toBe(
+      'main/gpt-test → artifacts/gpt-artifacts → verifier/gpt-verifier'
+      + ' → kill/gpt-kill → hack/gpt-hack',
+    );
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
@@ -1745,6 +2657,7 @@ describe('TestdataGenService.generate', () => {
 
   it('自动修复仍失败时从下一配置模型完整重跑一次', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
+    const onCheckpoint = jest.fn().mockResolvedValue(undefined);
     const brokenBlueprint = makeSolutionBlueprint('traditional').replace(
       'print(input())',
       'raise RuntimeError("broken oracle")',
@@ -1794,6 +2707,7 @@ describe('TestdataGenService.generate', () => {
     }).generate({
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      onCheckpoint,
       onProgress: event => progress.push(event),
     });
 
@@ -1805,11 +2719,17 @@ describe('TestdataGenService.generate', () => {
       toModel: 'deeper/model-b',
     });
     expect(plan.notes).toContain('下一配置模型');
+    expect(plan.notesStructured?.system.some(note => note.includes('下一配置模型'))).toBe(true);
     expect(plan.usedModel).toBe('primary/model-a → deeper/model-b');
     expect(plan.tokenUsage?.totalTokens).toBe(14);
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
     expect(progress.some(event => event.attempt === 2 && event.stage === 'blueprint')).toBe(true);
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 2 });
+    expect(onCheckpoint).toHaveBeenCalledWith(null);
+    const clearCall = onCheckpoint.mock.calls.findIndex(([update]) => update === null);
+    expect(clearCall).toBeGreaterThanOrEqual(0);
+    expect(onCheckpoint.mock.invocationCallOrder[clearCall])
+      .toBeLessThan(fallbackClient.chat.mock.invocationCallOrder[0]);
   });
 
   it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
@@ -1978,10 +2898,16 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('GENERATOR 沙箱失败时只请求并合并生成器分节', async () => {
+    const tieredSolution = [
+      '=== SUBTASKS ===',
+      '1 | 40 | n<=100',
+      '2 | 60 | n<=100000',
+      makeSolutionBlueprint('traditional'),
+    ].join('\n');
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({
-          content: makeSolutionBlueprint('traditional'),
+          content: tieredSolution,
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
@@ -1997,7 +2923,7 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         })
         .mockResolvedValueOnce({
-          content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"label":"修复","input":"1"}]}, separators=(",", ":")))',
+          content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"label":"修复1","input":"1"},{"label":"修复2","input":"2"}]}, separators=(",", ":")))',
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
         }),
     };
@@ -2005,7 +2931,13 @@ describe('TestdataGenService.generate', () => {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn()
         .mockRejectedValueOnce(new Error('第 1 个沙箱任务执行失败（Output Limit Exceeded）'))
-        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ label: '修复', input: '1' }] }), stderr: '' })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [
+            { label: '修复1', input: '1' },
+            { label: '修复2', input: '2' },
+          ] }),
+          stderr: '',
+        })
         .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, ins: string[]) => Promise.resolve(
         ins.map(input => ({ status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: input, stderr: '' })),
@@ -2016,12 +2948,80 @@ describe('TestdataGenService.generate', () => {
       sandboxRunner: runner, mode: 'sandbox',
     }).generate({
       problemTitle: 't', statementMarkdown: '题面',
-      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] },
     });
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
+    const artifactsPrompt = mockClient.chat.mock.calls[2][0][0].content;
+    const repairMessages = mockClient.chat.mock.calls[4][0];
+    const guidance = 'CASE 1: 子任务 1 — n<=100;数据必须严格满足本子任务的全部约束';
+    expect(artifactsPrompt).toContain(guidance);
+    expect(repairMessages[0].content).toContain(guidance);
+    expect(repairMessages[2].content).toContain(guidance);
+    expect(repairMessages[2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(plan.files.find(file => file.name === 'generator.py')?.content).toContain('separators');
     expect(plan.files.find(file => file.name === 'std.py')?.content).toContain('print(input())');
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
+  });
+
+  it('解题蓝图修复未返回 SUBTASKS 时保留初次解析的合法子任务', async () => {
+    const initialSolution = [
+      '=== SUBTASKS ===',
+      '1 | 40 | n<=100',
+      '2 | 60 | n<=100000',
+      makeSolutionBlueprint('traditional').replace(
+        'print(input())',
+        'raise RuntimeError("broken oracle")',
+      ),
+    ].join('\n');
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: initialSolution, usedModel })
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [
+            { label: '第一档', input: '1' },
+            { label: '第二档', input: '2' },
+          ] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('RuntimeError')) {
+            return detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1 });
+          }
+          if (code.includes('sys.exit(0)')) return detail();
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '修复保留子任务',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[1][1]).toContain('=== SUBTASKS ===');
+    expect(mockClient.chat.mock.calls[3][0][0].content).toContain('CASE 1: 子任务 1');
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ score: number }> };
+    expect(config.subtasks.map(subtask => subtask.score)).toEqual([40, 60]);
   });
 
   it('压力对拍失败时只重生成独立验证器，不把 ORACLE 源码放入修复上下文', async () => {
@@ -2076,6 +3076,8 @@ describe('TestdataGenService.generate', () => {
     expect(repairMessages[2].content).toContain('独立验证制品未通过');
     expect(repairMessages[0].content).not.toContain('print(input())');
     expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
+    // 仅 BRUTE 发生变化：正式 GENERATOR 与 STRESS_GENERATOR 各只执行一次。
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
   });
 
@@ -2147,7 +3149,109 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
     });
     expect(plan.notes).toContain('沙箱当前不可达');
+    expect(plan.notesStructured?.warnings.some(note => note.includes('沙箱当前不可达'))).toBe(true);
     expect(runner.runPython).not.toHaveBeenCalled();
+  });
+
+  it('教师 C++ 标程在 auto 模式沙箱不可达时给出编译能力硬错误，不降级直出', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+    };
+    const service = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'auto',
+    });
+    await expect(service.generate({
+      problemTitle: '传统题',
+      statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        providedStd: '#include <iostream>\nint main() {}',
+        providedStdSource: 'manual',
+      },
+    })).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_oracle_unavailable',
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('教师 C++ 标程在 direct 模式直接拒绝，不生成未由标程导出的输出', async () => {
+    const mockClient = { chat: jest.fn() };
+    await expect(new TestdataGenService(mockClient as never, {
+      mode: 'direct',
+    }).generate({
+      problemTitle: '传统题',
+      statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        providedStd: '#include <iostream>\nint main() {}',
+        providedStdSource: 'manual',
+      },
+    })).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_oracle_unavailable',
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('AI 选择的 C++ ORACLE 遇到编译基础设施失败时禁用 C++ 并定向改用 Python', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const cppSolution = `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`;
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: cppSolution, usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@ORACLE@@@\nprint(input())', usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'infra',
+        error: 'connect ECONNRESET',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+      cppOracleAvailable: true,
+    }).generate({
+      problemTitle: 'C++ 基础设施降级',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(runner.compileCpp).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('改用 Python 3');
+    // ORACLE 修复从 ORACLE 阶段继续，不重复生成正式输入或压力输入。
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
+    expect(plan.files.some(file => file.name === 'std.py')).toBe(true);
+    expect(plan.files.some(file => file.name === 'std.cc')).toBe(false);
   });
 
   it('历史 AC 候选解在沙箱不可达时拒绝降级直出', async () => {
@@ -2328,6 +3432,33 @@ function twoCaseGen(): string {
 }
 
 describe('两阶段沙箱蓝图', () => {
+  it('解析可选 ORACLE_LANG，缺失或非法回退 Python，函数题忽略 C++', () => {
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\npython', 'traditional')).toBe('python');
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'traditional')).toBe('cpp');
+    expect(parseOracleLanguage('@@@META@@@\nproblemType: traditional', 'traditional')).toBe('python');
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\nrust', 'traditional')).toBe('python');
+    expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'function')).toBe('python');
+
+    const cppSolution = parseSolutionBlueprint(
+      `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`,
+      tradOpts,
+    );
+    expect(cppSolution.oracleLanguage).toBe('cpp');
+    const cppFull = parseSandboxBlueprint(
+      `=== ORACLE_LANG ===\ncpp\n${makeSandboxBlueprint('traditional')}`,
+      tradOpts,
+    );
+    expect(cppFull.oracleLanguage).toBe('cpp');
+  });
+
+  it('仅在编译能力可用时向模型提供 ORACLE_LANG C++ 契约', () => {
+    expect(buildSolutionBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
+    expect(buildSandboxBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
+    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('C++17');
+    expect(buildSandboxBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+  });
+
   it('第一阶段 Prompt 只要求解题，第二阶段只要求外围制品', () => {
     const params = {
       problemTitle: '两数之和',
@@ -2343,15 +3474,49 @@ describe('两阶段沙箱蓝图', () => {
     expect(solutionSystem).toContain('@@@ORACLE@@@');
     expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
     expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
+    expect(solutionSystem).toContain('=== SUBTASKS ===');
+    expect(solutionSystem).toContain('仅当题面明确给出子任务/分数表时输出该分节');
+    expect(solutionSystem).toContain('约束摘要为该子任务的完整生效约束');
+    expect(solutionSystem).toContain('NOTES 至多 2 句');
+    expect(solutionSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(solutionUser).toContain('这是第一阶段');
     expect(solutionUser).not.toContain('逐测试点覆盖计划');
     expect(solutionUser).not.toContain('函数题模板语言');
     expect(solutionUser).not.toContain('Hydro 测试点数量');
     expect(artifactsSystem).toContain('@@@GENERATOR@@@');
     expect(artifactsSystem).not.toContain('@@@ORACLE@@@');
+    expect(artifactsSystem).toContain('编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
+    expect(artifactsSystem).toContain('任何一条违反都会导致整体失败');
+    expect(artifactsSystem).toContain('NOTES 至多 2 句');
+    expect(artifactsSystem).toContain('不要罗列已由沙箱验证的内容');
     expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
     expect(artifactsUser).toContain(solution.oracleCode.trim());
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
+  });
+
+  it('分层启用时外围制品 Prompt 用子任务分配替换 small/medium/large 覆盖行', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 3,
+      dataScale: 'auto',
+      languages: [],
+    };
+    const solution = parseSolutionBlueprint([
+      '=== SUBTASKS ===',
+      '1 | 40 | n<=100',
+      '2 | 60 | n<=100000',
+      makeSolutionBlueprint('traditional'),
+    ].join('\n'), options);
+    const prompt = buildGenerationArtifactsUserPrompt({
+      problemTitle: '分层题',
+      statementMarkdown: '题面明确列出两个子任务。',
+      options,
+    }, solution);
+
+    expect(prompt).toContain('CASE 1: 子任务 1 — n<=100;数据必须严格满足本子任务的全部约束');
+    expect(prompt).toContain('CASE 2: 子任务 2 — n<=100000;数据必须严格满足本子任务的全部约束');
+    expect(prompt).toContain('CASE 3: 子任务 2 — n<=100000;数据必须严格满足本子任务的全部约束');
+    expect(prompt).not.toContain('CASE 1: small');
   });
 
   it('解析器拒绝跨阶段夹带或重写制品', () => {
@@ -2410,6 +3575,112 @@ describe('两阶段沙箱蓝图', () => {
       { signal: undefined },
     );
   });
+
+  it('C++ ORACLE 样例闸门编译后执行缓存二进制，并在 finally 清理', async () => {
+    const solution = parseSolutionBlueprint(
+      `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`,
+      tradOpts,
+    );
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'oracle-bin' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '42\n' }),
+      ]),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    await expect(verifySolutionBlueprintSamples(
+      solution,
+      tradOpts,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+      undefined,
+      false,
+      true,
+    )).resolves.toEqual({ total: 1, passed: 1 });
+    expect(runner.compileCpp).toHaveBeenCalledWith(
+      solution.oracleCode,
+      { signal: undefined, deadlineAt: undefined },
+    );
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'oracle-bin',
+      ['42\n'],
+      { signal: undefined },
+    );
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('oracle-bin');
+  });
+
+  it('教师 C++ 标程编译失败是含 g++ 摘要的硬错误，不进入 AI 修复语义', async () => {
+    const options: GenerateOptions = {
+      ...tradOpts,
+      providedStd: '```cpp\nint main( {\n```',
+      providedStdSource: 'manual',
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options);
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'compile',
+        error: 'prog.cc:1: error: expected declaration',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+    await expect(verifySolutionBlueprintSamples(
+      solution,
+      options,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+      undefined,
+      false,
+      true,
+    )).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_std_compile_failed',
+      message: expect.stringContaining('prog.cc:1: error'),
+    });
+  });
+
+  it('教师 C++ 标程编译基础设施失败标为可重试生成错误，而非教师代码错误', async () => {
+    const options: GenerateOptions = {
+      ...tradOpts,
+      providedStd: '```cpp\nint main() { return 0; }\n```',
+      providedStdSource: 'manual',
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options);
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'infra',
+        error: 'connect ECONNRESET',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+    await expect(verifySolutionBlueprintSamples(
+      solution,
+      options,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+      undefined,
+      false,
+      true,
+    )).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_oracle_infra',
+      message: expect.stringContaining('ECONNRESET'),
+    });
+  });
 });
 
 describe('parseSandboxBlueprint v2 分节', () => {
@@ -2443,16 +3714,49 @@ describe('parseSandboxBlueprint v2 分节', () => {
   it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
     expect(sp).toContain('@@@SOLUTION@@@');
+    expect(sp).toContain('=== SUBTASKS ===');
     expect(sp).not.toContain('@@@BRUTE@@@');
     expect(sp).not.toContain('@@@VALIDATOR@@@');
     expect(sp).toContain('独立调用中生成验证器');
     expect(sp).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
+    expect(sp).toContain('NOTES 至多 2 句');
+    expect(sp).toContain('不要罗列已由沙箱验证的内容');
+  });
+
+  it('第一阶段与兼容完整蓝图均存储合法 SUBTASKS 规格', () => {
+    const subtaskSection = [
+      '=== SUBTASKS ===',
+      '1 | 30 | n<=100，且所有权值相等',
+      '2 | 70 | n<=100000，完整题面约束',
+    ].join('\n');
+    const expected = [
+      { id: 1, score: 30, constraints: 'n<=100，且所有权值相等' },
+      { id: 2, score: 70, constraints: 'n<=100000，完整题面约束' },
+    ];
+
+    const solution = parseSolutionBlueprint(
+      `${subtaskSection}\n${makeSolutionBlueprint('traditional')}`,
+      tradOpts,
+    );
+    const full = parseSandboxBlueprint(
+      `${subtaskSection}\n${makeSandboxBlueprint('traditional')}`,
+      tradOpts,
+    );
+
+    expect(solution.subtasks).toEqual(expected);
+    expect(full.subtasks).toEqual(expected);
   });
 
   it('独立验证 Prompt 与解析器强制要求 BRUTE/STRESS_GENERATOR/VALIDATOR', () => {
     const system = buildIndependentVerifierSystemPrompt();
     expect(system).toContain(`恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组小数据`);
     expect(system).toContain(`至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同`);
+    expect(system).toContain('编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证');
+    expect(system).toContain('每一条“保证/约定”都必须成为一条显式校验');
+    expect(system).toContain('合法输入必须接受，非法输入必须拒绝');
+    expect(system).toContain('不得添加题面没有的额外限制');
+    expect(system).not.toContain('宁可过严拒绝');
+    expect(system).toContain('=== COMPLEXITY_GAP ===');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
     expect(verifier.bruteCode).toContain('independent brute');
@@ -2515,6 +3819,130 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ...extra,
     ].join('\n'), tradOpts);
   }
+
+  it('修复轮复用阶段缓存并仅延续已消耗后的沙箱预算，AI 等待时间不计入', async () => {
+    const broken = tradBlueprint([
+      '@@@BRUTE@@@',
+      'print("wrong")  # broken-brute',
+    ]);
+    const repaired = {
+      ...broken,
+      bruteCode: 'print(input())  # fixed-brute\n',
+    };
+    let clock = 1_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation(async () => {
+        clock += 100;
+        return { stdout: twoCaseGen(), stderr: '' };
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        async (code: string, inputs: string[]) => {
+          clock += 100;
+          return inputs.map(input => detail({
+            stdout: code.includes('broken-brute') ? 'wrong\n' : input,
+          }));
+        },
+      ),
+    };
+    const cache = {};
+    try {
+      await expect(materializeSandboxBlueprint(
+        broken,
+        tradOpts,
+        '',
+        runner,
+        undefined,
+        false,
+        undefined,
+        [],
+        false,
+        undefined,
+        { ...resolveMaterializationResume(['GENERATOR']), cache },
+      )).rejects.toThrow(/暴力解与标程/);
+
+      // 模拟两轮 materialization 之间较慢的 AI 修复；它不应吞掉沙箱余额。
+      clock += 100_000;
+      await expect(materializeSandboxBlueprint(
+        repaired,
+        tradOpts,
+        '',
+        runner,
+        undefined,
+        false,
+        undefined,
+        [],
+        false,
+        undefined,
+        { ...resolveMaterializationResume(['BRUTE']), cache },
+      )).resolves.toMatchObject({ cases: [{ output: '1\n' }, { output: '2\n' }] });
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(runner.runPython).toHaveBeenCalledTimes(1);
+    const fixedBruteCall = runner.runPythonBatchDetailed.mock.calls.find(
+      ([code]) => String(code).includes('fixed-brute'),
+    );
+    expect(fixedBruteCall?.[2]?.deadlineAt).toBe(401_000);
+  });
+
+  it('C++ ORACLE 在正确性检查结束后清理 fileId，清理耗时不消耗正确性预算', async () => {
+    const bp = parseSandboxBlueprint([
+      '=== ORACLE_LANG ===', 'cpp',
+      '@@@META@@@', 'problemType: traditional',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', '#include <iostream>',
+      '@@@BRUTE@@@', 'print(input())',
+    ].join('\n'), tradOpts);
+    let clock = 1_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'materialized-oracle' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: '1\n' }),
+        detail({ stdout: '2\n' }),
+      ]),
+      deleteCachedFile: jest.fn().mockImplementation(async () => {
+        clock += SANDBOX_TOTAL_BUDGET_MS + 1;
+      }),
+    };
+    let response: Awaited<ReturnType<typeof materializeSandboxBlueprint>>;
+    try {
+      response = await materializeSandboxBlueprint(
+        bp,
+        tradOpts,
+        '',
+        runner,
+        undefined,
+        false,
+        undefined,
+        [],
+        true,
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(response.cases.map(item => item.output)).toEqual(['1\n', '2\n']);
+    expect(response.oracleLanguage).toBe('cpp');
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'materialized-oracle',
+      ['1\n', '2\n'],
+      expect.objectContaining({
+        deadlineAt: expect.any(Number),
+        chunkConcurrency: 3,
+      }),
+    );
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('materialized-oracle');
+  });
 
   it('VALIDATOR 拒绝某个 .in 时硬失败并带 stderr，且先于标程执行', async () => {
     const bp = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
@@ -2938,6 +4366,10 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       agreed: TESTDATA_GEN_LIMITS.STRESS_CASES,
     });
     expect(res.notes).toContain('所选历史 AC 仅作为候选解');
+    expect(res.notesStructured?.warnings.some(note => note.includes('所选历史 AC 仅作为候选解')))
+      .toBe(true);
+    expect(res.notesStructured?.system.some(note => note.includes('Hydro 沙箱中实际运行')))
+      .toBe(true);
   });
 
   it('历史 AC 与独立 BRUTE 冲突时硬失败，不允许把 BRUTE 修成迎合 AC', async () => {
@@ -3047,6 +4479,69 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.notes).toContain('跳过纯文本压力对拍');
   });
 
+  it('可执行 checker 对 BRUTE 与 ORACLE 的不同文本做压力判定', async () => {
+    const bp = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: twoCaseGen(), stderr: '' })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(Array.from(
+          { length: 2 + TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail(),
+        ))
+        .mockResolvedValueOnce([
+          detail({ stdout: 'official-a\n' }), detail({ stdout: 'official-b\n' }),
+          ...Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail({ stdout: 'oracle-form\n' })),
+        ])
+        .mockResolvedValueOnce(Array.from(
+          { length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => detail({ stdout: 'alternative-form\n' }),
+        ))
+        .mockResolvedValueOnce([detail(), detail()]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      runBatch: jest.fn().mockResolvedValue(
+        Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => 'accept'),
+      ),
+      runChecker: jest.fn().mockResolvedValue('accept'),
+      dispose: jest.fn(),
+    };
+
+    const res = await materializeSandboxBlueprint(
+      bp,
+      tradOpts,
+      '',
+      runner,
+      undefined,
+      true,
+      undefined,
+      [],
+      false,
+      checkerExecutor,
+    );
+
+    expect(checkerExecutor.runBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([{
+        input: expect.any(String),
+        output: 'alternative-form\n',
+        answer: 'oracle-form\n',
+      }]),
+      { signal: undefined },
+    );
+    expect(res.verification?.stressCheck).toMatchObject({
+      compared: TESTDATA_GEN_LIMITS.STRESS_CASES,
+      agreed: TESTDATA_GEN_LIMITS.STRESS_CASES,
+    });
+    expect(res.verification?.stressCheck).not.toHaveProperty('skippedReason');
+    expect(res.notes).toContain('题目 checker');
+  });
+
   it('函数题 solution+template.py 组合实跑，一致则记 templateCheck.passed', async () => {
     const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
     const bp = parseSandboxBlueprint([
@@ -3120,6 +4615,14 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       lang: 'py', total: 2, passed: 2, skippedTimeout: [],
     });
     expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
+    expect(runner.runPythonBatchDetailed.mock.calls[0][2]).toEqual(expect.objectContaining({
+      chunkConcurrency: 3,
+    }));
+    expect(runner.runPythonBatchDetailed.mock.calls[1][2]).toEqual(expect.objectContaining({
+      chunkConcurrency: 3,
+    }));
+    expect(runner.runPythonBatchDetailed.mock.calls[2][2]).not.toHaveProperty('chunkConcurrency');
+    expect(runner.runPythonBatchDetailed.mock.calls[3][2]).not.toHaveProperty('chunkConcurrency');
     expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining('def add(a, b):'),
@@ -3171,6 +4674,30 @@ describe('materializeSandboxBlueprint 双重验证', () => {
 });
 
 describe('assemblePlan origin 矩阵与验证透传', () => {
+  it('传统题 C++ ORACLE 生成 std.cc，教师 C++ 标程标记为 executed', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      oracleCode: '#include <iostream>\nint main() {}',
+      oracleLanguage: 'cpp',
+      stdSolution: { language: 'cpp', code: '#include <iostream>\nint main() {}' },
+      verification: { mode: 'sandbox', oracleKind: 'provided-std' },
+    } as never;
+    const opts: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 1,
+      languages: [],
+      providedStd: '```cpp\n#include <iostream>\nint main() {}\n```',
+      providedStdSource: 'manual',
+    };
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+    expect(plan.files.find(file => file.name === 'std.cc')).toMatchObject({
+      kind: 'std',
+      origin: 'executed',
+    });
+    expect(plan.files.find(file => file.name === 'std.py')).toBeUndefined();
+  });
+
   it('沙箱模式：数据/生成器/对拍器 executed，结构文件 deterministic', () => {
     const response = {
       problemType: 'traditional',

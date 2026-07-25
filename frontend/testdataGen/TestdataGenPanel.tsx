@@ -60,6 +60,7 @@ interface PlanVerification {
   };
   validator?: { ran: boolean; casesChecked: number };
   templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
+  checkerCheck?: { status: 'executed' | 'compile-failed'; runtimeSkipped: number };
   discrimination?: {
     targets: Array<{
       kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
@@ -67,7 +68,7 @@ interface PlanVerification {
       killed: boolean;
       killedBy?: 'wa' | 'tle';
       killedByCase?: number;
-      skippedReason?: 'custom-checker' | 'budget-exhausted' | 'no-targets';
+      skippedReason?: 'custom-checker' | 'checker-infra-error' | 'budget-exhausted' | 'no-targets' | 'no-complexity-gap';
     }>;
     allKilled: boolean;
   };
@@ -78,6 +79,11 @@ interface GenerationPlan {
   isFillIn?: boolean;
   analysis?: string;
   notes?: string;
+  notesStructured?: {
+    warnings: string[];
+    system: string[];
+    ai?: string;
+  };
   files: PlannedFile[];
   caseCount: number;
   totalCaseCount?: number;
@@ -85,6 +91,7 @@ interface GenerationPlan {
     caseNumber: number;
     fileNumber: number;
     dataScale: 'small' | 'medium' | 'large';
+    subtaskId?: number;
     target: string;
   }>;
   usedModel?: string;
@@ -135,6 +142,7 @@ type GenerationProgressStage =
   | 'running_oracle'
   | 'checking_templates'
   | 'stress_testing'
+  | 'discrimination_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -283,6 +291,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const generationLastEventAtRef = useRef(0);
   const generationHeartbeatAtRef = useRef(0);
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
+  const [resumeCheckpointJobId, setResumeCheckpointJobId] = useState<string | null>(null);
   const restoreCheckedRef = useRef(false);
   const jobStorageKey = `ai-helper:testdata-generation-job:${window.location.pathname}:${problemId}`;
 
@@ -393,6 +402,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const jobId = savedJob?.id || storedJobId;
     if (!jobId) return;
 
+    if (savedJob?.status === 'interrupted') {
+      rememberJob(null);
+      setResumeCheckpointJobId(savedJob.id);
+      setError(i18n('ai_helper_testdata_job_interrupted'));
+      setShowFallbackHint(true);
+      setCollapsed(false);
+      return;
+    }
+
     rememberJob(jobId);
     const startedAt = Date.parse(savedJob?.startedAt || savedJob?.createdAt || '');
     const progressAt = Date.parse(savedJob?.progressUpdatedAt || '');
@@ -451,6 +469,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         } else if (job.status === 'failed' || job.status === 'interrupted') {
           terminal = true;
           rememberJob(null);
+          setResumeCheckpointJobId(job.status === 'interrupted' ? job.id : null);
           setError(job.error?.code === 'WORKER_INTERRUPTED'
             ? i18n('ai_helper_testdata_job_interrupted')
             : (job.error?.message || i18n('ai_helper_testdata_job_failed')));
@@ -497,7 +516,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // ─── 生成 ───────────────────────────────────────────────────────────────────
 
-  const handleGenerate = useCallback(async () => {
+  const handleGenerate = useCallback(async (resumeFromJobId?: string) => {
     setError(null);
     setShowFallbackHint(false);
     setShowDeeperReasoningHint(false);
@@ -533,6 +552,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
+          resumeFromJobId,
         }),
       });
       if (!response.ok) {
@@ -541,6 +561,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       }
       const data = await response.json() as { job: BackgroundGenerationJob };
       if (!data.job?.id) throw new Error(i18n('ai_helper_testdata_job_start_failed'));
+      setResumeCheckpointJobId(null);
       rememberJob(data.job.id);
       const heartbeatAt = Date.parse(data.job.updatedAt || '');
       if (Number.isFinite(heartbeatAt)) generationHeartbeatAtRef.current = heartbeatAt;
@@ -926,12 +947,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               {i18n('ai_helper_testdata_fallback_suggestion')}
             </div>
           )}
+          {resumeCheckpointJobId && (
+            <button
+              style={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
+              onClick={() => void handleGenerate(resumeCheckpointJobId)}
+            >
+              {i18n('ai_helper_testdata_resume_checkpoint_btn')}
+            </button>
+          )}
         </div>
       )}
       <div style={{ display: 'flex', gap: SPACING.sm, alignItems: 'center', flexWrap: 'wrap' }}>
         <button
           style={getButtonStyle('primary')}
-          onClick={handleGenerate}
+          onClick={() => void handleGenerate()}
           disabled={!context.problem.hasStatement}
         >
           {i18n('ai_helper_testdata_generate_btn')}
@@ -1098,10 +1127,16 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const discrimination = verification?.mode === 'sandbox'
       ? verification.discrimination
       : undefined;
-    const discriminationKilled = discrimination?.targets.filter(target => target.killed).length ?? 0;
+    const discriminationCheckedTargets = discrimination?.targets.filter(
+      target => !target.skippedReason,
+    ) ?? [];
+    const discriminationKilled = discriminationCheckedTargets.filter(
+      target => target.killed,
+    ).length;
     const discriminationAllKilled = !!discrimination
       && discrimination.allKilled
-      && discriminationKilled === discrimination.targets.length;
+      && discriminationCheckedTargets.length > 0
+      && discriminationKilled === discriminationCheckedTargets.length;
     const hasAiOnlyCases = plan.files.some(
       f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
     );
@@ -1124,6 +1159,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
     return (
       <div>
+        {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
+          <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
+              {i18n('ai_helper_testdata_notes_warnings_title')}
+            </div>
+            <ul style={{ margin: 0, paddingLeft: SPACING.lg }}>
+              {plan.notesStructured.warnings.map((note, index) => (
+                <li key={`${index}-${note}`} style={{ fontSize: '13px' }}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
           <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
             {i18n(plan.problemType === 'function' ? 'ai_helper_testdata_type_function' : 'ai_helper_testdata_type_traditional')}
@@ -1136,8 +1183,32 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {plan.usedModel ? ` · ${plan.usedModel}` : ''}
           </div>
           {plan.analysis && <div style={{ fontSize: '13px' }}>{plan.analysis}</div>}
-          {plan.notes && <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>}
+          {!plan.notesStructured && plan.notes && (
+            <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>
+          )}
         </div>
+        {plan.notesStructured && plan.notesStructured.system.length > 0 && (
+          <div style={{ marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
+              {i18n('ai_helper_testdata_notes_system_title')}
+            </div>
+            <ul style={{ margin: 0, paddingLeft: SPACING.lg }}>
+              {plan.notesStructured.system.map((note, index) => (
+                <li key={`${index}-${note}`} style={{ fontSize: '13px' }}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {plan.notesStructured?.ai && (
+          <details style={{ marginBottom: SPACING.md, fontSize: '13px' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+              {i18n('ai_helper_testdata_notes_ai_toggle')}
+            </summary>
+            <div style={{ marginTop: SPACING.xs, whiteSpace: 'pre-wrap' }}>
+              {plan.notesStructured.ai}
+            </div>
+          </details>
+        )}
         {plan.caseCoverage && plan.caseCoverage.length > 0 && (
           <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.sm }}>
@@ -1148,7 +1219,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 <div key={item.caseNumber} style={{ fontSize: '13px', display: 'flex', gap: SPACING.sm, alignItems: 'baseline' }}>
                   <code>{item.fileNumber}.in/.out</code>
                   <span style={getBadgeStyle('info')}>
-                    {i18n(`ai_helper_testdata_scale_${item.dataScale}`)}
+                    {item.subtaskId !== undefined
+                      ? i18n('ai_helper_testdata_subtask_label', item.subtaskId)
+                      : i18n(`ai_helper_testdata_scale_${item.dataScale}`)}
                   </span>
                   <span style={{ color: COLORS.textSecondary }}>{item.target}</span>
                 </div>
@@ -1211,6 +1284,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {i18n('ai_helper_testdata_verify_template')}: {verification.templateCheck.passed}/{verification.templateCheck.total}
               </div>
             )}
+            {verification.checkerCheck && (
+              <div style={{ fontSize: '13px' }}>
+                {i18n(verification.checkerCheck.status === 'executed'
+                  ? 'ai_helper_testdata_verify_checker_executed'
+                  : 'ai_helper_testdata_verify_checker_fallback')}
+                {verification.checkerCheck.runtimeSkipped > 0
+                  && ` · ${i18n(
+                    'ai_helper_testdata_verify_checker_runtime_skipped',
+                    verification.checkerCheck.runtimeSkipped,
+                  )}`}
+              </div>
+            )}
             {discrimination && (
               <div style={{
                 ...getAlertStyle(discriminationAllKilled ? 'success' : 'warning'),
@@ -1221,7 +1306,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {i18n(
                   'ai_helper_testdata_discrimination_summary',
                   discriminationKilled,
-                  discrimination.targets.length,
+                  discriminationCheckedTargets.length,
                 )}
                 {!discriminationAllKilled
                   && ` · ${i18n('ai_helper_testdata_discrimination_warning')}`}

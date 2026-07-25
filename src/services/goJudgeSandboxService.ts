@@ -1,5 +1,5 @@
 /**
- * go-judge 客户端：通过 Hydro 配置的沙箱执行 AI 生成的 Python 程序。
+ * go-judge 客户端：通过 Hydro 配置的沙箱执行 AI 生成的 Python / C++ 程序。
  *
  * 这里只传内存文件与标准输入输出，不在 Hydro Web 进程中执行任何 AI 代码。
  */
@@ -30,6 +30,24 @@ export interface PythonBatchOptions {
   signal?: AbortSignal;
   /** 整条验证管线共享的绝对截止时间；每个分块请求都会按剩余时间收紧 timeout。 */
   deadlineAt?: number;
+  /** 同时在途的分块数；默认 1 保持原有串行与 TLE 负载语义。 */
+  chunkConcurrency?: number;
+}
+
+export interface CppCompileOptions {
+  extraFiles?: Record<string, string>;
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}
+
+export type CppCompileResult =
+  | { ok: true; fileId: string }
+  | { ok: false; kind: 'compile' | 'infra'; error: string };
+
+export interface CheckerRunCase {
+  input: string;
+  output: string;
+  answer: string;
 }
 
 export interface TestdataSandboxRunner {
@@ -37,6 +55,19 @@ export interface TestdataSandboxRunner {
   runPython(code: string, stdin?: string, signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult>;
   runPythonBatch(code: string, inputs: string[], signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult[]>;
   runPythonBatchDetailed(code: string, inputs: string[], opts?: PythonBatchOptions): Promise<PythonRunDetail[]>;
+  /** 可选编译能力；缺失时上层必须保持 Python-only 降级行为。 */
+  compileCpp?(source: string, opts?: CppCompileOptions): Promise<CppCompileResult>;
+  runCompiledBatchDetailed?(
+    fileId: string,
+    inputs: string[],
+    opts?: PythonBatchOptions,
+  ): Promise<PythonRunDetail[]>;
+  runCheckerBatchDetailed?(
+    fileId: string,
+    cases: CheckerRunCase[],
+    opts?: PythonBatchOptions,
+  ): Promise<PythonRunDetail[]>;
+  deleteCachedFile?(fileId: string): Promise<void>;
 }
 
 interface GoJudgeResult {
@@ -44,12 +75,14 @@ interface GoJudgeResult {
   exitStatus?: number;
   error?: string;
   files?: Record<string, string>;
+  fileIds?: Record<string, string>;
   fileError?: Array<{ name?: string; type?: string; message?: string }>;
 }
 
 interface HttpClient {
   get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<{ data: T }>;
   post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<{ data: T }>;
+  delete?<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<{ data: T }>;
 }
 
 const CPU_LIMIT_NS = 5_000_000_000;
@@ -57,11 +90,16 @@ const CLOCK_LIMIT_NS = 10_000_000_000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
 const STDOUT_LIMIT_BYTES = 1024 * 1024;
 const STDERR_LIMIT_BYTES = 64 * 1024;
+const CPP_COMPILE_CPU_LIMIT_NS = 30_000_000_000;
+const CPP_COMPILE_CLOCK_LIMIT_NS = 60_000_000_000;
+const CPP_COMPILE_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024;
+const CPP_COMPILE_PROC_LIMIT = 64;
+const CPP_COMPILE_TIMEOUT_MS = 75_000;
 const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测试点数量后重试';
 
 /**
  * 单请求内所有 cmd 在沙箱内并发执行；实测 2 核机上并发度过高会抢占内存与 RAM 盘，
- * 故大批量按块串行：每块最多 4 条，块间等待上一块返回后再发下一块。
+ * 故大批量每块最多 4 条，默认块间串行；仅无 TLE 判定的确定性 sweep 可显式提高并发。
  */
 export const SANDBOX_CHUNK_SIZE = 4;
 /**
@@ -76,6 +114,62 @@ export const SANDBOX_RESPONSE_LIMIT_BYTES = (
 export const SANDBOX_TOTAL_BUDGET_MS = 300_000;
 /** 区分度验证独立预算，不占用正确性验证的总时长预算。 */
 export const DISCRIMINATION_BUDGET_MS = 180_000;
+/** checker 编译与执行共享的独立尽力预算，不占用正确性验证预算。 */
+export const CHECKER_BUDGET_MS = 120_000;
+
+/**
+ * 有界并发调度独立分块，并把结果恢复到输入顺序。
+ * 任一任务失败后中止同批在途任务、等待它们收束，再原样传播首个错误且不再领取新任务。
+ */
+export async function scheduleSandboxChunks<T, R>(
+  chunks: T[],
+  concurrency: number,
+  runChunk: (chunk: T, index: number, signal: AbortSignal) => Promise<R>,
+  callerSignal?: AbortSignal,
+): Promise<R[]> {
+  if (chunks.length === 0) return [];
+  const normalizedConcurrency = Number.isFinite(concurrency) && concurrency > 0
+    ? Math.max(1, Math.floor(concurrency))
+    : 1;
+  const workerCount = Math.min(normalizedConcurrency, chunks.length);
+  const results = new Array<R>(chunks.length);
+  const internalAbort = new AbortController();
+  const abortFromCaller = () => internalAbort.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+  let nextIndex = 0;
+  let failed = false;
+  let firstError: unknown;
+
+  const worker = async () => {
+    while (!failed && !internalAbort.signal.aborted) {
+      const index = nextIndex;
+      if (index >= chunks.length) return;
+      nextIndex++;
+      try {
+        results[index] = await runChunk(chunks[index], index, internalAbort.signal);
+      } catch (err) {
+        if (!failed) {
+          failed = true;
+          firstError = err;
+          internalAbort.abort(err);
+        }
+        return;
+      }
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (failed) throw firstError;
+    if (callerSignal?.aborted) {
+      throw callerSignal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+    }
+    return results;
+  } finally {
+    callerSignal?.removeEventListener('abort', abortFromCaller);
+  }
+}
 
 function normalizeHost(host: string): string {
   const value = (host || '').trim() || 'http://localhost:5050/';
@@ -117,6 +211,86 @@ function buildPythonCommand(
   };
 }
 
+function buildCppCompileCommand(source: string, extraFiles: Record<string, string> = {}) {
+  const extraCopyIn = Object.fromEntries(
+    Object.entries(extraFiles).map(([name, content]) => [name, { content }]),
+  );
+  return {
+    args: ['/usr/bin/g++', '-O2', '-std=c++17', '-o', 'prog', 'prog.cc'],
+    env: ['PATH=/usr/bin:/bin'],
+    files: [
+      { content: '' },
+      { name: 'stdout', max: STDERR_LIMIT_BYTES },
+      { name: 'stderr', max: STDERR_LIMIT_BYTES },
+    ],
+    cpuLimit: CPP_COMPILE_CPU_LIMIT_NS,
+    clockLimit: CPP_COMPILE_CLOCK_LIMIT_NS,
+    memoryLimit: CPP_COMPILE_MEMORY_LIMIT_BYTES,
+    procLimit: CPP_COMPILE_PROC_LIMIT,
+    copyIn: {
+      ...extraCopyIn,
+      'prog.cc': { content: source },
+    },
+    copyOut: ['stdout', 'stderr'],
+    copyOutCached: ['prog'],
+  };
+}
+
+function buildCompiledCommand(
+  fileId: string,
+  stdin: string,
+  limits: { cpuLimit?: number; clockLimit?: number } = {},
+) {
+  return {
+    args: ['prog'],
+    env: ['PATH=/usr/bin:/bin'],
+    files: [
+      { content: stdin },
+      { name: 'stdout', max: STDOUT_LIMIT_BYTES },
+      { name: 'stderr', max: STDERR_LIMIT_BYTES },
+    ],
+    cpuLimit: limits.cpuLimit ?? CPU_LIMIT_NS,
+    clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
+    memoryLimit: MEMORY_LIMIT_BYTES,
+    stackLimit: 64 * 1024 * 1024,
+    procLimit: 16,
+    copyIn: {
+      prog: { fileId },
+    },
+    copyOut: ['stdout', 'stderr'],
+    copyOutMax: STDOUT_LIMIT_BYTES,
+  };
+}
+
+function buildCheckerCommand(
+  fileId: string,
+  testcase: CheckerRunCase,
+  limits: { cpuLimit?: number; clockLimit?: number } = {},
+) {
+  return {
+    args: ['prog', 'in.txt', 'out.txt', 'ans.txt'],
+    env: ['PATH=/usr/bin:/bin'],
+    files: [
+      { content: '' },
+      { name: 'stdout', max: STDOUT_LIMIT_BYTES },
+      { name: 'stderr', max: STDERR_LIMIT_BYTES },
+    ],
+    cpuLimit: limits.cpuLimit ?? CPU_LIMIT_NS,
+    clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
+    memoryLimit: MEMORY_LIMIT_BYTES,
+    stackLimit: 64 * 1024 * 1024,
+    procLimit: 16,
+    copyIn: {
+      prog: { fileId },
+      'in.txt': { content: testcase.input },
+      'out.txt': { content: testcase.output },
+      'ans.txt': { content: testcase.answer },
+    },
+    copyOut: ['stdout', 'stderr'],
+    copyOutMax: STDOUT_LIMIT_BYTES,
+  };
+}
+
 function unwrapResults(data: unknown): GoJudgeResult[] {
   if (Array.isArray(data)) return data as GoJudgeResult[];
   if (data && typeof data === 'object' && Array.isArray((data as { results?: unknown }).results)) {
@@ -144,6 +318,27 @@ function toRunDetail(result: GoJudgeResult): PythonRunDetail {
   };
 }
 
+function summarizeSandboxError(err: unknown): string {
+  if (err instanceof Error) return excerptTail(err.message, 2000);
+  return excerptTail(String(err), 2000);
+}
+
+function collectReturnedFileIds(data: unknown): string[] {
+  const candidates = Array.isArray(data)
+    ? data
+    : data && typeof data === 'object' && Array.isArray((data as { results?: unknown }).results)
+      ? (data as { results: unknown[] }).results
+      : [];
+  return [...new Set(candidates.flatMap(candidate => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const fileIds = (candidate as { fileIds?: unknown }).fileIds;
+    if (!fileIds || typeof fileIds !== 'object' || Array.isArray(fileIds)) return [];
+    return Object.values(fileIds).filter(
+      (fileId): fileId is string => typeof fileId === 'string' && !!fileId,
+    );
+  }))];
+}
+
 export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
   private readonly host: string;
 
@@ -157,6 +352,92 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * 将 C++17 源码编译为 go-judge 缓存文件。编译器、协议或网络不可用均返回
+   * ok:false，便于上层按降级铁律回到 Python-only；仅用户主动取消原样上抛。
+   */
+  async compileCpp(source: string, opts: CppCompileOptions = {}): Promise<CppCompileResult> {
+    const remainingBudgetMs = opts.deadlineAt === undefined
+      ? Number.POSITIVE_INFINITY
+      : opts.deadlineAt - Date.now();
+    if (remainingBudgetMs <= 0) {
+      return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
+    }
+
+    let returnedFileIds: string[] = [];
+    const cleanupReturnedFiles = async () => {
+      await Promise.all(returnedFileIds.map(fileId => this.deleteCachedFile(fileId)));
+      returnedFileIds = [];
+    };
+    try {
+      const response = await this.http.post(
+        `${this.host}/run`,
+        { cmd: [buildCppCompileCommand(source, opts.extraFiles)] },
+        {
+          timeout: Math.max(1, Math.min(CPP_COMPILE_TIMEOUT_MS, remainingBudgetMs)),
+          signal: opts.signal,
+          maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
+          proxy: false,
+        },
+      );
+      // 响应即使超期或其余字段畸形，也先抢救出所有缓存 ID，确保任何非成功
+      // 返回都能尽力回收 go-judge 产物。
+      returnedFileIds = collectReturnedFileIds(response.data);
+      const results = unwrapResults(response.data);
+      const fail = async (
+        kind: 'compile' | 'infra',
+        error: string,
+      ): Promise<CppCompileResult> => {
+        await cleanupReturnedFiles();
+        return { ok: false, kind, error };
+      };
+      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+        return await fail('infra', SANDBOX_BUDGET_ERROR);
+      }
+      if (results.length !== 1) {
+        return await fail(
+          'infra',
+          `Hydro 沙箱返回 ${results.length} 个编译结果，期望 1 个`,
+        );
+      }
+      const result = results[0];
+      const detail = toRunDetail(result);
+      if (!detail.accepted) {
+        const info = detail.stderr
+          || detail.error
+          || `${detail.status || 'Unknown'}（exitStatus=${detail.exitStatus ?? 'unknown'}）`;
+        const kind = /nonzero exit status/i.test(detail.status) ? 'compile' : 'infra';
+        return await fail(kind, excerptTail(info, 2000));
+      }
+      const fileId = result.fileIds?.prog;
+      if (!fileId) {
+        return await fail('infra', 'Hydro 沙箱编译成功但未返回 prog 缓存文件');
+      }
+      returnedFileIds = [];
+      return { ok: true, fileId };
+    } catch (err) {
+      await cleanupReturnedFiles();
+      if (opts.signal?.aborted) throw err;
+      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+        return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
+      }
+      return { ok: false, kind: 'infra', error: summarizeSandboxError(err) };
+    }
+  }
+
+  /** 删除 go-judge 缓存文件；清理失败不得遮蔽原流程结果。 */
+  async deleteCachedFile(fileId: string): Promise<void> {
+    if (!this.http.delete) return;
+    try {
+      await this.http.delete(
+        `${this.host}/file/${encodeURIComponent(fileId)}`,
+        { timeout: 3000, proxy: false },
+      );
+    } catch {
+      // best-effort：缓存会由 go-judge TTL 最终回收，不能让清理失败影响生成结果。
     }
   }
 
@@ -195,12 +476,53 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
 
   /**
    * 宽容 + 分块批量执行：不因单条失败抛错，仅在 HTTP/协议层错误时抛。
-   * 按 SANDBOX_CHUNK_SIZE 分块、块间串行；块请求 timeout = chunkSize × clockLimit + 15s。
+   * 按 SANDBOX_CHUNK_SIZE 分块、默认块间串行；块请求 timeout = chunkSize × clockLimit + 15s。
    */
   async runPythonBatchDetailed(
     code: string,
     inputs: string[],
     opts: PythonBatchOptions = {},
+  ): Promise<PythonRunDetail[]> {
+    return this.runBatchDetailed(
+      inputs,
+      opts,
+      (input, limits) => buildPythonCommand(code, input, limits),
+    );
+  }
+
+  /** 宽容执行已缓存的二进制，分块、限额与绝对截止时间语义和 Python 完全一致。 */
+  async runCompiledBatchDetailed(
+    fileId: string,
+    inputs: string[],
+    opts: PythonBatchOptions = {},
+  ): Promise<PythonRunDetail[]> {
+    return this.runBatchDetailed(
+      inputs,
+      opts,
+      (input, limits) => buildCompiledCommand(fileId, input, limits),
+    );
+  }
+
+  /** testlib checker：argv 依次传入输入、选手输出与标准答案文件。 */
+  async runCheckerBatchDetailed(
+    fileId: string,
+    cases: CheckerRunCase[],
+    opts: PythonBatchOptions = {},
+  ): Promise<PythonRunDetail[]> {
+    return this.runBatchDetailed(
+      cases,
+      opts,
+      (testcase, limits) => buildCheckerCommand(fileId, testcase, limits),
+    );
+  }
+
+  private async runBatchDetailed<T>(
+    inputs: T[],
+    opts: PythonBatchOptions,
+    buildCommand: (
+      input: T,
+      limits: { cpuLimit: number; clockLimit: number },
+    ) => unknown,
   ): Promise<PythonRunDetail[]> {
     if (inputs.length === 0) return [];
     const cpuSeconds = opts.cpuSeconds ?? 5;
@@ -209,41 +531,48 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     const clockLimitMs = cpuSeconds * 2 * 1000;
     const chunkTimeout = SANDBOX_CHUNK_SIZE * clockLimitMs + 15_000;
 
-    const details: PythonRunDetail[] = [];
+    const chunks: T[][] = [];
     for (let offset = 0; offset < inputs.length; offset += SANDBOX_CHUNK_SIZE) {
-      const remainingBudgetMs = opts.deadlineAt === undefined
-        ? Number.POSITIVE_INFINITY
-        : opts.deadlineAt - Date.now();
-      if (remainingBudgetMs <= 0) throw new Error(SANDBOX_BUDGET_ERROR);
-      const chunk = inputs.slice(offset, offset + SANDBOX_CHUNK_SIZE);
-      let response: { data: unknown };
-      try {
-        response = await this.http.post(
-          `${this.host}/run`,
-          { cmd: chunk.map(input => buildPythonCommand(code, input, { cpuLimit, clockLimit })) },
-          {
-            timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
-            signal: opts.signal,
-            maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
-            proxy: false,
-          },
-        );
-      } catch (err) {
-        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
+      chunks.push(inputs.slice(offset, offset + SANDBOX_CHUNK_SIZE));
+    }
+    const chunkDetails = await scheduleSandboxChunks(
+      chunks,
+      opts.chunkConcurrency ?? 1,
+      async (chunk, _index, chunkSignal) => {
+        const remainingBudgetMs = opts.deadlineAt === undefined
+          ? Number.POSITIVE_INFINITY
+          : opts.deadlineAt - Date.now();
+        if (remainingBudgetMs <= 0) throw new Error(SANDBOX_BUDGET_ERROR);
+        let response: { data: unknown };
+        try {
+          response = await this.http.post(
+            `${this.host}/run`,
+            { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) },
+            {
+              timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
+              signal: chunkSignal,
+              maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
+              proxy: false,
+            },
+          );
+        } catch (err) {
+          if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
+            throw new Error(SANDBOX_BUDGET_ERROR);
+          }
+          throw err;
+        }
+        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
           throw new Error(SANDBOX_BUDGET_ERROR);
         }
-        throw err;
-      }
-      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-        throw new Error(SANDBOX_BUDGET_ERROR);
-      }
-      const results = unwrapResults(response.data);
-      if (results.length !== chunk.length) {
-        throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
-      }
-      for (const result of results) details.push(toRunDetail(result));
-    }
-    return details;
+        const results = unwrapResults(response.data);
+        if (results.length !== chunk.length) {
+          throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
+        }
+        return results.map(result => toRunDetail(result));
+      },
+      opts.signal,
+    );
+    return chunkDetails.flat();
   }
 }
 

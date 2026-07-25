@@ -13,8 +13,10 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenJobDismissHandler = exports.TestdataGenJobCancelHandler = exports.TestdataGenJobStatusHandler = exports.TestdataGenJobStartHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
+exports.loadTestlibCheckerArtifacts = loadTestlibCheckerArtifacts;
 exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
+const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
 const testdataGenService_1 = require("../services/testdataGenService");
 const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
@@ -25,8 +27,72 @@ const sseHelper_1 = require("../lib/sseHelper");
 const limits_1 = require("../constants/limits");
 const domainHelper_1 = require("../utils/domainHelper");
 const mongo_1 = require("../utils/mongo");
+const testdataGenerationJob_1 = require("../models/testdataGenerationJob");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
+function normalizeCheckerPath(filename) {
+    if (!filename || filename.includes('\\') || filename.includes('\0') || path_1.posix.isAbsolute(filename)) {
+        return undefined;
+    }
+    const normalized = path_1.posix.normalize(filename);
+    if (normalized === '..' || normalized.startsWith('../'))
+        return undefined;
+    return normalized.replace(/^\.\//, '');
+}
+async function readStorageText(storagePath) {
+    const value = await hydrooj_1.StorageModel.get(storagePath);
+    if (typeof value === 'string')
+        return value;
+    if (Buffer.isBuffer(value))
+        return value.toString('utf8');
+    const chunks = [];
+    for await (const chunk of value) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+}
+/**
+ * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
+ * 让 service 完整回退到原有自定义 checker 跳过语义。
+ */
+async function loadTestlibCheckerArtifacts(domainId, pdoc) {
+    let configured;
+    try {
+        configured = (0, testdataGenService_1.getTestlibCheckerFilename)(pdoc.config);
+    }
+    catch {
+        // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
+        return undefined;
+    }
+    const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
+    if (!checkerFilename)
+        return undefined;
+    const files = (pdoc.data || []).flatMap(item => {
+        const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
+        return storageName ? [{ storageName, logicalName: storageName }] : [];
+    });
+    const checkerFile = files.find(file => file.logicalName === checkerFilename);
+    if (!checkerFile)
+        return undefined;
+    const checkerDir = path_1.posix.dirname(checkerFilename);
+    const headerFiles = files.filter(file => path_1.posix.dirname(file.logicalName) === checkerDir
+        && file.logicalName.toLowerCase().endsWith('.h'));
+    const storageBase = `problem/${domainId}/${pdoc.docId}/testdata`;
+    try {
+        const checkerSource = await readStorageText(`${storageBase}/${checkerFile.storageName}`);
+        const headerEntries = await Promise.all(headerFiles.map(async (file) => [
+            path_1.posix.basename(file.logicalName),
+            await readStorageText(`${storageBase}/${file.storageName}`),
+        ]));
+        return {
+            checkerSource,
+            checkerHeaders: Object.fromEntries(headerEntries),
+        };
+    }
+    catch {
+        return undefined;
+    }
+}
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
 const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
 function canReadAllRecordCodes(handler) {
@@ -180,6 +246,42 @@ function sendError(handler, status, code, messageKey) {
     handler.response.body = { error: handler.translate(messageKey), code };
     handler.response.type = 'application/json';
 }
+const CPP_ORACLE_PROBE_SOURCE = '#include <iostream>\nint main() { return 0; }\n';
+/** 每次生成只探测一次；任何非取消失败都按无编译能力降级，不影响 Python-only 路径。 */
+async function probeCppOracleAvailability(runner, mode, signal) {
+    if (mode === 'direct')
+        return false;
+    let fileId;
+    try {
+        const result = await runner.compileCpp(CPP_ORACLE_PROBE_SOURCE, { signal });
+        if (result.ok === false)
+            return false;
+        fileId = result.fileId;
+        return true;
+    }
+    catch (err) {
+        if (signal?.aborted || (0, testdataGenService_1.isCancellation)(err))
+            throw err;
+        return false;
+    }
+    finally {
+        if (fileId) {
+            try {
+                await runner.deleteCachedFile(fileId);
+            }
+            catch {
+                // 探针缓存清理失败由 go-judge TTL 兜底，不得阻断生成。
+            }
+        }
+    }
+}
+function resolveTestdataUserMessage(translate, err) {
+    const key = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+    if (!key)
+        return undefined;
+    const detail = (0, testdataGenService_1.extractTestdataUserMessageDetail)(err);
+    return detail ? `${translate(key)}\n${detail}` : translate(key);
+}
 // ─── TestdataGenContextHandler ────────────────────────────────────────────────
 /**
  * GET /ai-helper/testdata-gen/context/:problemId
@@ -212,7 +314,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                 let savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
                 if (savedJob?.active && savedJob.leaseExpiresAt?.getTime() <= Date.now()) {
                     await jobModel.markExpiredLeaseInterrupted(savedJob._id);
-                    savedJob = null;
+                    savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
                 }
                 if (savedJob) {
                     restorableJob = { ...serializeGenerationJob(savedJob), plan: undefined };
@@ -296,11 +398,41 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, translate, } = params;
     const jobId = String(job._id);
     const ac = new AbortController();
     backgroundGenerationControllers.set(jobId, ac);
     let progressWrites = Promise.resolve();
+    let checkpointWrites = Promise.resolve();
+    let checkpointRevision = 0;
+    const checkpointPayload = {};
+    for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
+        if (checkpoint?.[key] !== undefined)
+            checkpointPayload[key] = checkpoint[key];
+    }
+    const persistCheckpoint = (update) => {
+        if (update === null) {
+            for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
+                delete checkpointPayload[key];
+            }
+        }
+        else {
+            for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
+                if (update[key] !== undefined)
+                    checkpointPayload[key] = update[key];
+            }
+        }
+        const envelope = {
+            revision: ++checkpointRevision,
+            ...checkpointPayload,
+        };
+        checkpointWrites = checkpointWrites
+            .then(() => jobModel.updateCheckpoint(job._id, checkpointHashes, envelope))
+            .catch(err => {
+            console.warn('[TestdataGenJob] checkpoint update failed:', err);
+        });
+        return checkpointWrites;
+    };
     const heartbeatTimer = setInterval(() => {
         jobModel.renewLease(job._id).then(active => {
             if (!active)
@@ -314,9 +446,13 @@ async function runBackgroundGeneration(params) {
         ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
         const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration');
         const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+        const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
+        const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
+        const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal);
         const service = new testdataGenService_1.TestdataGenService(aiClient, {
-            sandboxRunner: new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost),
-            mode: (0, goJudgeSandboxService_1.getTestdataGenerationMode)(),
+            sandboxRunner,
+            mode: generationMode,
+            cppOracleAvailable,
         });
         const plan = await service.generate({
             problemTitle: pdoc.title || job.problemId,
@@ -324,14 +460,18 @@ async function runBackgroundGeneration(params) {
             options,
             existingFiles,
             existingConfig: pdoc.config,
+            ...checkerArtifacts,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
+            checkpoint,
+            onCheckpoint: persistCheckpoint,
             onProgress: progress => {
                 progressWrites = progressWrites
                     .then(() => jobModel.updateProgress(job._id, progress))
                     .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
             },
         });
+        await checkpointWrites;
         await progressWrites;
         if (ac.signal.aborted) {
             throw Object.assign(new Error('canceled'), { name: 'AbortError' });
@@ -350,12 +490,15 @@ async function runBackgroundGeneration(params) {
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', successfulModel || '', true).catch(() => { });
     }
     catch (err) {
+        await checkpointWrites;
         if ((0, testdataGenService_1.isCancellation)(err)) {
             await jobModel.cancel(job._id);
             return;
         }
         console.error('[TestdataGenJob] generation failed:', err);
         const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+        const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+        const testdataUserMessage = resolveTestdataUserMessage(translate, err);
         const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
         const usedModels = Array.isArray(testdataMetadata?.usedModels)
             ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
@@ -372,7 +515,9 @@ async function runBackgroundGeneration(params) {
                 retryable: err.isRetryable,
             }
             : {
-                message: err instanceof Error ? err.message : translate('ai_helper_err_internal'),
+                message: testdataUserMessageKey
+                    ? testdataUserMessage
+                    : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
@@ -411,6 +556,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
                 return;
             }
+            (0, testdataGenService_1.assertExistingConfigParsable)(pdoc.config);
             if (!checkEditPermission(this, pdoc))
                 return;
             // AI 生成开销大：限制每人每 5 分钟 5 次
@@ -449,10 +595,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
             const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration');
             const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
-            const service = new testdataGenService_1.TestdataGenService(aiClient, {
-                sandboxRunner: new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost),
-                mode: (0, goJudgeSandboxService_1.getTestdataGenerationMode)(),
-            });
+            const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
+            const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
@@ -489,12 +633,22 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     progressStream?.writeComment('keepalive');
                 }, limits_1.API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
             }
+            const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+                probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
+                loadTestlibCheckerArtifacts(domainId, pdoc),
+            ]);
+            const service = new testdataGenService_1.TestdataGenService(aiClient, {
+                sandboxRunner,
+                mode: generationMode,
+                cppOracleAvailable,
+            });
             const plan = await service.generate({
                 problemTitle: pdoc.title || problemId,
                 statementMarkdown: statement,
                 options,
                 existingFiles,
                 existingConfig: pdoc.config,
+                ...checkerArtifacts,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
                 onProgress: progress => progressStream?.writeEvent('progress', progress),
@@ -537,6 +691,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
             const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+            const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+            const testdataUserMessage = resolveTestdataUserMessage(key => this.translate(key), err);
             const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
             const usedModels = Array.isArray(testdataMetadata?.usedModels)
                 ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
@@ -569,7 +725,9 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             // 解析/校验失败等业务错误：消息为中文可直接展示
             const errorBody = {
-                error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
+                error: testdataUserMessageKey
+                    ? testdataUserMessage
+                    : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
@@ -579,7 +737,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 progressStream.end();
             }
             else {
-                this.response.status = 502;
+                this.response.status = testdataUserMessageKey ? 400 : 502;
                 this.response.body = errorBody;
                 this.response.type = 'application/json';
             }
@@ -613,6 +771,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
                 return;
             }
+            (0, testdataGenService_1.assertExistingConfigParsable)(pdoc.config);
             if (!checkEditPermission(this, pdoc))
                 return;
             const jobModel = this.ctx.get('testdataGenerationJobModel');
@@ -665,6 +824,31 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
+            const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
+            const checkpointHashes = (0, testdataGenerationJob_1.computeTestdataCheckpointHashes)(options, statement, {
+                existingConfig: pdoc.config,
+                checkerSource: checkerArtifacts?.checkerSource,
+                checkerHeaders: checkerArtifacts?.checkerHeaders,
+            });
+            let checkpoint;
+            const resumeFromJobId = typeof body.resumeFromJobId === 'string'
+                ? body.resumeFromJobId.trim()
+                : '';
+            if (resumeFromJobId) {
+                try {
+                    const resumeJob = await jobModel.findById(resumeFromJobId);
+                    checkpoint = (0, testdataGenerationJob_1.selectTestdataResumeCheckpoint)(resumeJob, {
+                        domainId,
+                        problemDocId: pdoc.docId,
+                        problemId: pdoc.pid || String(pdoc.docId),
+                        createdBy: this.user?._id,
+                        ...checkpointHashes,
+                    });
+                }
+                catch {
+                    // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。
+                }
+            }
             const { job, created } = await jobModel.createOrGetActive({
                 domainId,
                 problemDocId: pdoc.docId,
@@ -676,6 +860,10 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
                 const backgroundTranslations = {
                     ai_helper_err_internal: this.translate('ai_helper_err_internal'),
+                    [testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY),
+                    [testdataGenService_1.CPP_ORACLE_UNAVAILABLE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_UNAVAILABLE_KEY),
+                    [testdataGenService_1.CPP_PROVIDED_STD_COMPILE_FAILED_KEY]: this.translate(testdataGenService_1.CPP_PROVIDED_STD_COMPILE_FAILED_KEY),
+                    [testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
                     backgroundTranslations[key] = this.translate(key);
@@ -688,6 +876,9 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     statement,
                     options,
                     existingFiles,
+                    checkpoint,
+                    checkpointHashes,
+                    checkerArtifacts,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {
                     console.error('[TestdataGenJob] unhandled background failure:', err);
@@ -699,6 +890,11 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenJobStartHandler.post] error:', err);
+            const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+            if (testdataUserMessageKey) {
+                sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+                return;
+            }
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }
@@ -838,6 +1034,11 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[TestdataGenSkeletonHandler.post] error:', err);
             this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || '') });
+            const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+            if (testdataUserMessageKey) {
+                sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+                return;
+            }
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }

@@ -56,6 +56,10 @@ declare module 'hydrooj' {
 
   export const ProblemModel: any;
 
+  export const StorageModel: {
+    get(path: string): Promise<NodeJS.ReadableStream | Buffer | string>;
+  };
+
   export const SystemModel: {
     get(key: string): any;
   };

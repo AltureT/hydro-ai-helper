@@ -11,8 +11,9 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 
-import { Handler, PRIV, PERM, ProblemModel, SystemModel, STATUS, db } from 'hydrooj';
+import { Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
+import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import {
   TestdataGenService,
@@ -23,15 +24,24 @@ import {
   isSafeTestdataFilename,
   isCancellation,
   extractTestdataErrorMetadata,
+  extractTestdataUserMessageKey,
+  extractTestdataUserMessageDetail,
   shouldRecommendDeeperReasoning,
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
+  assertExistingConfigParsable,
+  TESTDATA_CONFIG_UNPARSABLE_KEY,
+  CPP_ORACLE_UNAVAILABLE_KEY,
+  CPP_PROVIDED_STD_COMPILE_FAILED_KEY,
+  CPP_ORACLE_INFRA_FAILURE_KEY,
+  getTestlibCheckerFilename,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import {
   GoJudgeSandboxRunner,
   getTestdataGenerationMode,
+  type TestdataGenerationMode,
 } from '../services/goJudgeSandboxService';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
@@ -41,7 +51,13 @@ import { getDomainId } from '../utils/domainHelper';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import {
   TestdataGenerationJobModel,
+  computeTestdataCheckpointHashes,
+  selectTestdataResumeCheckpoint,
   type TestdataGenerationJob,
+  type TestdataGenerationCheckpoint,
+  type TestdataGenerationCheckpointEnvelope,
+  type TestdataGenerationCheckpointPayload,
+  type TestdataCheckpointHashes,
   type TestdataGenerationJobError,
 } from '../models/testdataGenerationJob';
 
@@ -57,6 +73,76 @@ interface ProblemDocLite {
   owner?: number;
   config?: string;
   data?: Array<{ _id?: string; name?: string; size?: number }>;
+}
+
+interface TestlibCheckerArtifacts {
+  checkerSource: string;
+  checkerHeaders: Record<string, string>;
+}
+
+function normalizeCheckerPath(filename: string): string | undefined {
+  if (!filename || filename.includes('\\') || filename.includes('\0') || pathPosix.isAbsolute(filename)) {
+    return undefined;
+  }
+  const normalized = pathPosix.normalize(filename);
+  if (normalized === '..' || normalized.startsWith('../')) return undefined;
+  return normalized.replace(/^\.\//, '');
+}
+
+async function readStorageText(storagePath: string): Promise<string> {
+  const value = await StorageModel.get(storagePath);
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  const chunks: Buffer[] = [];
+  for await (const chunk of value as unknown as AsyncIterable<Buffer | string>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
+ * 让 service 完整回退到原有自定义 checker 跳过语义。
+ */
+export async function loadTestlibCheckerArtifacts(
+  domainId: string,
+  pdoc: ProblemDocLite,
+): Promise<TestlibCheckerArtifacts | undefined> {
+  let configured: string | undefined;
+  try {
+    configured = getTestlibCheckerFilename(pdoc.config);
+  } catch {
+    // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
+    return undefined;
+  }
+  const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
+  if (!checkerFilename) return undefined;
+
+  const files = (pdoc.data || []).flatMap(item => {
+    const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
+    return storageName ? [{ storageName, logicalName: storageName }] : [];
+  });
+  const checkerFile = files.find(file => file.logicalName === checkerFilename);
+  if (!checkerFile) return undefined;
+  const checkerDir = pathPosix.dirname(checkerFilename);
+  const headerFiles = files.filter(file =>
+    pathPosix.dirname(file.logicalName) === checkerDir
+    && file.logicalName.toLowerCase().endsWith('.h'));
+  const storageBase = `problem/${domainId}/${pdoc.docId}/testdata`;
+
+  try {
+    const checkerSource = await readStorageText(`${storageBase}/${checkerFile.storageName}`);
+    const headerEntries = await Promise.all(headerFiles.map(async file => [
+      pathPosix.basename(file.logicalName),
+      await readStorageText(`${storageBase}/${file.storageName}`),
+    ] as const));
+    return {
+      checkerSource,
+      checkerHeaders: Object.fromEntries(headerEntries),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 interface AcceptedStdRecordLite {
@@ -255,6 +341,45 @@ function sendError(handler: Handler, status: number, code: string, messageKey: s
   handler.response.type = 'application/json';
 }
 
+const CPP_ORACLE_PROBE_SOURCE = '#include <iostream>\nint main() { return 0; }\n';
+
+/** 每次生成只探测一次；任何非取消失败都按无编译能力降级，不影响 Python-only 路径。 */
+async function probeCppOracleAvailability(
+  runner: GoJudgeSandboxRunner,
+  mode: TestdataGenerationMode,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (mode === 'direct') return false;
+  let fileId: string | undefined;
+  try {
+    const result = await runner.compileCpp(CPP_ORACLE_PROBE_SOURCE, { signal });
+    if (result.ok === false) return false;
+    fileId = result.fileId;
+    return true;
+  } catch (err) {
+    if (signal?.aborted || isCancellation(err)) throw err;
+    return false;
+  } finally {
+    if (fileId) {
+      try {
+        await runner.deleteCachedFile(fileId);
+      } catch {
+        // 探针缓存清理失败由 go-judge TTL 兜底，不得阻断生成。
+      }
+    }
+  }
+}
+
+function resolveTestdataUserMessage(
+  translate: (key: string) => string,
+  err: unknown,
+): string | undefined {
+  const key = extractTestdataUserMessageKey(err);
+  if (!key) return undefined;
+  const detail = extractTestdataUserMessageDetail(err);
+  return detail ? `${translate(key)}\n${detail}` : translate(key);
+}
+
 // ─── TestdataGenContextHandler ────────────────────────────────────────────────
 
 /**
@@ -289,7 +414,7 @@ export class TestdataGenContextHandler extends Handler {
         let savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
         if (savedJob?.active && savedJob.leaseExpiresAt?.getTime() <= Date.now()) {
           await jobModel.markExpiredLeaseInterrupted(savedJob._id);
-          savedJob = null;
+          savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
         }
         if (savedJob) {
           restorableJob = { ...serializeGenerationJob(savedJob), plan: undefined };
@@ -336,6 +461,7 @@ interface GenerateRequestBody {
   providedStd?: string;
   acceptedStdRecordId?: string;
   extraRequirements?: string;
+  resumeFromJobId?: string;
   /** @deprecated 旧版前端可能仍会发送；统一自适应流程会安全忽略。 */
   generationProfile?: string;
 }
@@ -400,18 +526,50 @@ interface BackgroundGenerationParams {
   statement: string;
   options: GenerateOptions;
   existingFiles: string[];
+  checkpoint?: TestdataGenerationCheckpoint;
+  checkpointHashes: TestdataCheckpointHashes;
+  checkerArtifacts?: TestlibCheckerArtifacts;
   translate: (key: string) => string;
 }
 
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    translate,
+    checkpoint, checkpointHashes, checkerArtifacts, translate,
   } = params;
   const jobId = String(job._id);
   const ac = new AbortController();
   backgroundGenerationControllers.set(jobId, ac);
   let progressWrites = Promise.resolve();
+  let checkpointWrites = Promise.resolve();
+  let checkpointRevision = 0;
+  const checkpointPayload: TestdataGenerationCheckpointPayload = {};
+  for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
+    if (checkpoint?.[key] !== undefined) checkpointPayload[key] = checkpoint[key] as never;
+  }
+  const persistCheckpoint = (
+    update: TestdataGenerationCheckpointPayload | null,
+  ): Promise<void> => {
+    if (update === null) {
+      for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
+        delete checkpointPayload[key];
+      }
+    } else {
+      for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
+        if (update[key] !== undefined) checkpointPayload[key] = update[key] as never;
+      }
+    }
+    const envelope: TestdataGenerationCheckpointEnvelope = {
+      revision: ++checkpointRevision,
+      ...checkpointPayload,
+    };
+    checkpointWrites = checkpointWrites
+      .then(() => jobModel.updateCheckpoint(job._id, checkpointHashes, envelope))
+      .catch(err => {
+        console.warn('[TestdataGenJob] checkpoint update failed:', err);
+      });
+    return checkpointWrites;
+  };
   const heartbeatTimer = setInterval(() => {
     jobModel.renewLease(job._id).then(active => {
       if (!active) ac.abort();
@@ -425,9 +583,17 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
     const aiClient = await createMultiModelClientFromConfig(ctx, undefined, 'testdataGeneration');
     const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
+    const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
+    const generationMode = getTestdataGenerationMode();
+    const cppOracleAvailable = await probeCppOracleAvailability(
+      sandboxRunner,
+      generationMode,
+      ac.signal,
+    );
     const service = new TestdataGenService(aiClient, {
-      sandboxRunner: new GoJudgeSandboxRunner(sandboxHost),
-      mode: getTestdataGenerationMode(),
+      sandboxRunner,
+      mode: generationMode,
+      cppOracleAvailable,
     });
     const plan = await service.generate({
       problemTitle: pdoc.title || job.problemId,
@@ -435,14 +601,18 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       options,
       existingFiles,
       existingConfig: pdoc.config,
+      ...checkerArtifacts,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
+      checkpoint,
+      onCheckpoint: persistCheckpoint,
       onProgress: progress => {
         progressWrites = progressWrites
           .then(() => jobModel.updateProgress(job._id, progress))
           .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
       },
     });
+    await checkpointWrites;
     await progressWrites;
     if (ac.signal.aborted) {
       throw Object.assign(new Error('canceled'), { name: 'AbortError' });
@@ -464,6 +634,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       'testdata_generation', successfulModel || '', true,
     ).catch(() => { /* best-effort */ });
   } catch (err) {
+    await checkpointWrites;
     if (isCancellation(err)) {
       await jobModel.cancel(job._id);
       return;
@@ -471,6 +642,8 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
 
     console.error('[TestdataGenJob] generation failed:', err);
     const testdataMetadata = extractTestdataErrorMetadata(err);
+    const testdataUserMessageKey = extractTestdataUserMessageKey(err);
+    const testdataUserMessage = resolveTestdataUserMessage(translate, err);
     const aiMetadata = extractAiErrorMetadata(err);
     const usedModels = Array.isArray(testdataMetadata?.usedModels)
       ? testdataMetadata.usedModels.filter((item): item is string => typeof item === 'string')
@@ -496,7 +669,9 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
         retryable: err.isRetryable,
       }
       : {
-        message: err instanceof Error ? err.message : translate('ai_helper_err_internal'),
+        message: testdataUserMessageKey
+          ? testdataUserMessage as string
+          : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
         retryable: true,
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
@@ -536,6 +711,7 @@ export class TestdataGenGenerateHandler extends Handler {
         sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
         return;
       }
+      assertExistingConfigParsable(pdoc.config);
       if (!checkEditPermission(this, pdoc)) return;
 
       // AI 生成开销大：限制每人每 5 分钟 5 次
@@ -577,10 +753,8 @@ export class TestdataGenGenerateHandler extends Handler {
 
       const aiClient = await createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration');
       const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
-      const service = new TestdataGenService(aiClient, {
-        sandboxRunner: new GoJudgeSandboxRunner(sandboxHost),
-        mode: getTestdataGenerationMode(),
-      });
+      const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
+      const generationMode = getTestdataGenerationMode();
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
@@ -618,12 +792,22 @@ export class TestdataGenGenerateHandler extends Handler {
         }, API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
       }
 
+      const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+        probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
+        loadTestlibCheckerArtifacts(domainId, pdoc),
+      ]);
+      const service = new TestdataGenService(aiClient, {
+        sandboxRunner,
+        mode: generationMode,
+        cppOracleAvailable,
+      });
       const plan = await service.generate({
         problemTitle: pdoc.title || problemId,
         statementMarkdown: statement,
         options,
         existingFiles,
         existingConfig: pdoc.config,
+        ...checkerArtifacts,
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
         onProgress: progress => progressStream?.writeEvent('progress', progress),
@@ -669,6 +853,11 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       console.error('[TestdataGenGenerateHandler.post] error:', err);
       const testdataMetadata = extractTestdataErrorMetadata(err);
+      const testdataUserMessageKey = extractTestdataUserMessageKey(err);
+      const testdataUserMessage = resolveTestdataUserMessage(
+        key => this.translate(key),
+        err,
+      );
       const aiMetadata = extractAiErrorMetadata(err);
       const usedModels = Array.isArray(testdataMetadata?.usedModels)
         ? testdataMetadata.usedModels.filter((item): item is string => typeof item === 'string')
@@ -708,7 +897,9 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       // 解析/校验失败等业务错误：消息为中文可直接展示
       const errorBody = {
-        error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
+        error: testdataUserMessageKey
+          ? testdataUserMessage as string
+          : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
         retryable: true,
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
@@ -717,7 +908,7 @@ export class TestdataGenGenerateHandler extends Handler {
         progressStream.writeEvent('error', errorBody);
         progressStream.end();
       } else {
-        this.response.status = 502;
+        this.response.status = testdataUserMessageKey ? 400 : 502;
         this.response.body = errorBody;
         this.response.type = 'application/json';
       }
@@ -749,6 +940,7 @@ export class TestdataGenJobStartHandler extends Handler {
         sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
         return;
       }
+      assertExistingConfigParsable(pdoc.config);
       if (!checkEditPermission(this, pdoc)) return;
 
       const jobModel = this.ctx.get('testdataGenerationJobModel') as TestdataGenerationJobModel | undefined;
@@ -803,6 +995,30 @@ export class TestdataGenJobStartHandler extends Handler {
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
+      const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
+      const checkpointHashes = computeTestdataCheckpointHashes(options, statement, {
+        existingConfig: pdoc.config,
+        checkerSource: checkerArtifacts?.checkerSource,
+        checkerHeaders: checkerArtifacts?.checkerHeaders,
+      });
+      let checkpoint: TestdataGenerationCheckpoint | undefined;
+      const resumeFromJobId = typeof body.resumeFromJobId === 'string'
+        ? body.resumeFromJobId.trim()
+        : '';
+      if (resumeFromJobId) {
+        try {
+          const resumeJob = await jobModel.findById(resumeFromJobId);
+          checkpoint = selectTestdataResumeCheckpoint(resumeJob, {
+            domainId,
+            problemDocId: pdoc.docId,
+            problemId: pdoc.pid || String(pdoc.docId),
+            createdBy: this.user?._id,
+            ...checkpointHashes,
+          });
+        } catch {
+          // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。
+        }
+      }
       const { job, created } = await jobModel.createOrGetActive({
         domainId,
         problemDocId: pdoc.docId,
@@ -815,6 +1031,10 @@ export class TestdataGenJobStartHandler extends Handler {
         // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
         const backgroundTranslations: Record<string, string> = {
           ai_helper_err_internal: this.translate('ai_helper_err_internal'),
+          [TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(TESTDATA_CONFIG_UNPARSABLE_KEY),
+          [CPP_ORACLE_UNAVAILABLE_KEY]: this.translate(CPP_ORACLE_UNAVAILABLE_KEY),
+          [CPP_PROVIDED_STD_COMPILE_FAILED_KEY]: this.translate(CPP_PROVIDED_STD_COMPILE_FAILED_KEY),
+          [CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(CPP_ORACLE_INFRA_FAILURE_KEY),
         };
         for (const key of Object.values(USER_ERROR_MESSAGE_KEYS)) {
           backgroundTranslations[key] = this.translate(key);
@@ -827,6 +1047,9 @@ export class TestdataGenJobStartHandler extends Handler {
           statement,
           options,
           existingFiles,
+          checkpoint,
+          checkpointHashes,
+          checkerArtifacts,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {
           console.error('[TestdataGenJob] unhandled background failure:', err);
@@ -837,6 +1060,11 @@ export class TestdataGenJobStartHandler extends Handler {
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[TestdataGenJobStartHandler.post] error:', err);
+      const testdataUserMessageKey = extractTestdataUserMessageKey(err);
+      if (testdataUserMessageKey) {
+        sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+        return;
+      }
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
   }
@@ -981,6 +1209,11 @@ export class TestdataGenSkeletonHandler extends Handler {
         err instanceof Error ? err.stack : undefined,
         { problemId: String((this.request.body as GenerateRequestBody)?.problemId || '') },
       );
+      const testdataUserMessageKey = extractTestdataUserMessageKey(err);
+      if (testdataUserMessageKey) {
+        sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+        return;
+      }
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
   }

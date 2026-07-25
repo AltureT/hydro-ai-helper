@@ -3,7 +3,8 @@
  * 覆盖：题面多语言解析、权限校验、apply 文件校验与写入顺序
  */
 
-import { db, PERM, PRIV, ProblemModel } from 'hydrooj';
+import { Readable } from 'stream';
+import { db, PERM, PRIV, ProblemModel, StorageModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
@@ -15,13 +16,16 @@ import {
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
   extractStatementMarkdown,
+  loadTestlibCheckerArtifacts,
 } from '../../handlers/testdataGenHandler';
 import * as openaiClient from '../../services/openaiClient';
 import {
   TestdataGenService,
   TestdataGenerationError,
 } from '../../services/testdataGenService';
+import { GoJudgeSandboxRunner } from '../../services/goJudgeSandboxService';
 import { ObjectId } from '../../utils/mongo';
+import { computeTestdataCheckpointHashes } from '../../models/testdataGenerationJob';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -120,8 +124,18 @@ function setupHandler<T extends { new (...args: never[]): object }>(Ctor: T, opt
   return handler;
 }
 
+const compileProbeSpy = jest.spyOn(GoJudgeSandboxRunner.prototype, 'compileCpp')
+  .mockResolvedValue({ ok: false, kind: 'infra', error: 'test sandbox has no compiler' });
+const deleteProbeFileSpy = jest.spyOn(GoJudgeSandboxRunner.prototype, 'deleteCachedFile')
+  .mockResolvedValue(undefined);
+
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+afterAll(() => {
+  compileProbeSpy.mockRestore();
+  deleteProbeFileSpy.mockRestore();
 });
 
 // ─── extractStatementMarkdown ────────────────────────────────────────────────
@@ -148,6 +162,48 @@ describe('extractStatementMarkdown', () => {
 
   it('非 JSON 的花括号开头内容按原文处理', () => {
     expect(extractStatementMarkdown('{not json')).toBe('{not json');
+  });
+});
+
+describe('loadTestlibCheckerArtifacts', () => {
+  it('读取 config.checker 与同目录全部 .h，并使用 basename 传给编译器', async () => {
+    const files: Record<string, string> = {
+      'problem/system/1530/testdata/checker/checker.cc': '#include "testlib.h"\n',
+      'problem/system/1530/testdata/checker/testlib.h': '// testlib\n',
+      'problem/system/1530/testdata/checker/helper.h': '// helper\n',
+    };
+    (StorageModel.get as jest.Mock).mockImplementation(
+      (key: string) => Promise.resolve(Readable.from([files[key]])),
+    );
+
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker/checker.cc\n',
+      data: [
+        { _id: 'checker/checker.cc' },
+        { _id: 'checker/testlib.h' },
+        { _id: 'checker/helper.h' },
+        { _id: 'other/ignored.h' },
+      ],
+    })).resolves.toEqual({
+      checkerSource: '#include "testlib.h"\n',
+      checkerHeaders: {
+        'testlib.h': '// testlib\n',
+        'helper.h': '// helper\n',
+      },
+    });
+    expect(StorageModel.get).not.toHaveBeenCalledWith(
+      'problem/system/1530/testdata/other/ignored.h',
+    );
+  });
+
+  it('checker 或头文件不可读时省略制品并降级', async () => {
+    (StorageModel.get as jest.Mock).mockRejectedValue(new Error('storage unavailable'));
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker.cc\n',
+      data: [{ _id: 'checker.cc' }],
+    })).resolves.toBeUndefined();
   });
 });
 
@@ -312,6 +368,29 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 
+  it('非法既有 config 在创建客户端、编译探针和读取 checker 前立即中止', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'subtasks:\n  - cases: [1\n',
+    });
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102' },
+    });
+
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(400);
+      expect(handler.response.body.error).toBe('ai_helper_testdata_err_config_unparsable');
+      expect(clientSpy).not.toHaveBeenCalled();
+      expect(compileProbeSpy).not.toHaveBeenCalled();
+      expect(StorageModel.get).not.toHaveBeenCalled();
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
   it('兼容忽略旧版 generationProfile 字段并使用统一流程', async () => {
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
@@ -333,6 +412,40 @@ describe('TestdataGenGenerateHandler', () => {
       expect(clientSpy).toHaveBeenCalled();
       expect(genSpy.mock.calls[0][0]).not.toHaveProperty('generationProfile');
       expect(handler.response.body.plan).toEqual(plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('将 testlib checker 源码与同目录头文件传入 service', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker.cc\n',
+      data: [{ _id: 'checker.cc' }, { _id: 'testlib.h' }],
+    });
+    (StorageModel.get as jest.Mock).mockImplementation((key: string) => Promise.resolve(
+      Readable.from([key.endsWith('checker.cc') ? '#include "testlib.h"\n' : '// header\n']),
+    ));
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockResolvedValue({
+        problemType: 'traditional',
+        files: [],
+        caseCount: 0,
+      } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102' },
+    });
+
+    try {
+      await handler.post();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        checkerSource: '#include "testlib.h"\n',
+        checkerHeaders: { 'testlib.h': '// header\n' },
+      }));
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -686,6 +799,38 @@ describe('TestdataGenGenerateHandler', () => {
 // ─── Persistent generation job handlers ─────────────────────────────────────
 
 describe('Testdata generation background jobs', () => {
+  it('后台任务在非法既有 config 上不创建任务或启动任何外部准备', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'subtasks:\n  - cases: [1\n',
+    });
+    const jobModel = {
+      findRestorable: jest.fn(),
+      createOrGetActive: jest.fn(),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102' },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(400);
+      expect(handler.response.body.error).toBe('ai_helper_testdata_err_config_unparsable');
+      expect(jobModel.findRestorable).not.toHaveBeenCalled();
+      expect(jobModel.createOrGetActive).not.toHaveBeenCalled();
+      expect(clientSpy).not.toHaveBeenCalled();
+      expect(compileProbeSpy).not.toHaveBeenCalled();
+      expect(StorageModel.get).not.toHaveBeenCalled();
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
   it('existing active job is returned without starting or rate-limiting another paid call', async () => {
     mockFindOne(PROBLEM_DOC);
     const job = makeGenerationJob();
@@ -761,6 +906,124 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
       expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('resumeFromJobId 校验命中后把 checkpoint 传入服务并异步保存新阶段', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const options = {
+      problemKind: 'traditional' as const,
+      fillInMode: 'auto' as const,
+      caseCount: 1,
+      dataScale: 'auto' as const,
+      languages: [],
+      providedStd: undefined,
+      providedStdSource: undefined,
+      extraRequirements: undefined,
+    };
+    const checkpoint = {
+      revision: 2,
+      ...computeTestdataCheckpointHashes(options, PROBLEM_DOC.content),
+      solution: {
+        problemType: 'traditional' as const,
+        oracleCode: 'print(input())',
+      },
+    };
+    const interruptedJob = makeGenerationJob({
+      status: 'interrupted',
+      active: false,
+      checkpoint,
+    });
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    let activeCheckpointWrites = 0;
+    let maxActiveCheckpointWrites = 0;
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      findById: jest.fn().mockResolvedValue(interruptedJob),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      updateCheckpoint: jest.fn().mockImplementation(async () => {
+        activeCheckpointWrites++;
+        maxActiveCheckpointWrites = Math.max(maxActiveCheckpointWrites, activeCheckpointWrites);
+        await new Promise(resolve => setImmediate(resolve));
+        activeCheckpointWrites--;
+      }),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const plan = {
+      problemType: 'traditional',
+      files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
+      caseCount: 1,
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    let receivedParams: Record<string, unknown> | undefined;
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockImplementation(async params => {
+        receivedParams = params as unknown as Record<string, unknown>;
+        await Promise.all([
+          params.onCheckpoint?.({ killTargets: [] }),
+          params.onCheckpoint?.({
+            artifacts: { generatorCode: 'print(1)' },
+          }),
+        ]);
+        return plan as never;
+      });
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102',
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        resumeFromJobId: String(interruptedJob._id),
+      },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(receivedParams?.checkpoint).toBe(checkpoint);
+      expect(maxActiveCheckpointWrites).toBe(1);
+      expect(jobModel.updateCheckpoint).toHaveBeenNthCalledWith(
+        1,
+        job._id,
+        expect.objectContaining({
+          optionsHash: checkpoint.optionsHash,
+          statementHash: checkpoint.statementHash,
+        }),
+        {
+          revision: 1,
+          solution: checkpoint.solution,
+          killTargets: [],
+        },
+      );
+      expect(jobModel.updateCheckpoint).toHaveBeenNthCalledWith(
+        2,
+        job._id,
+        expect.objectContaining({
+          optionsHash: checkpoint.optionsHash,
+          statementHash: checkpoint.statementHash,
+        }),
+        {
+          revision: 2,
+          solution: checkpoint.solution,
+          artifacts: { generatorCode: 'print(1)' },
+          killTargets: [],
+        },
+      );
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -957,6 +1220,24 @@ describe('TestdataGenSkeletonHandler', () => {
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
+  });
+
+  it('既有 config.yaml 非空且无法解析时返回本地化硬错误', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'subtasks:\n  - cases: [1\n',
+    });
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+    await handler.post();
+
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body).toEqual({
+      error: 'ai_helper_testdata_err_config_unparsable',
+      code: 'INVALID_EXISTING_CONFIG',
+    });
   });
 });
 

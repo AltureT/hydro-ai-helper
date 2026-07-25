@@ -1,6 +1,7 @@
 import {
   buildDiscriminationNotes,
   evaluateDiscrimination,
+  parseIndependentVerifierBlueprint,
   remapDiscriminationCaseNumbers,
   runDiscriminationPhase,
   smokeTestKillTargets,
@@ -10,6 +11,39 @@ const accepted = (stdout: string) => ({
   accepted: true,
   timedOut: false,
   stdout,
+});
+
+const independentVerifierResponse = (complexityGapSection = '') => [
+  complexityGapSection,
+  '@@@BRUTE@@@',
+  'print(input())',
+  '@@@STRESS_GENERATOR@@@',
+  'print(\'{"cases":[]}\')',
+  '@@@VALIDATOR@@@',
+  'raise SystemExit(0)',
+].filter(Boolean).join('\n');
+
+describe('parseIndependentVerifierBlueprint', () => {
+  it.each([
+    ['exists', 'exists'],
+    ['none', 'none'],
+  ] as const)('解析 COMPLEXITY_GAP=%s', (rawValue, expected) => {
+    expect(parseIndependentVerifierBlueprint(independentVerifierResponse(
+      `=== COMPLEXITY_GAP ===\n${rawValue}`,
+    )).complexityGap).toBe(expected);
+  });
+
+  it('分节缺失时保持向后兼容', () => {
+    expect(parseIndependentVerifierBlueprint(
+      independentVerifierResponse(),
+    ).complexityGap).toBeUndefined();
+  });
+
+  it('分节内容非法时保持向后兼容', () => {
+    expect(parseIndependentVerifierBlueprint(independentVerifierResponse(
+      '=== COMPLEXITY_GAP ===\nmaybe',
+    )).complexityGap).toBeUndefined();
+  });
 });
 
 describe('evaluateDiscrimination', () => {
@@ -217,6 +251,20 @@ describe('buildDiscriminationNotes', () => {
     }, 3)).toEqual([]);
   });
 
+  it('不存在复杂度差异时追加跳过说明且不生成规模不足警告', () => {
+    expect(buildDiscriminationNotes({
+      targets: [{
+        kind: 'brute-complexity',
+        description: '独立暴力解复杂度检查',
+        killed: false,
+        skippedReason: 'no-complexity-gap',
+      }],
+      allKilled: false,
+    }, 3)).toEqual([
+      '该题不存在明显更慢的朴素解法，已跳过暴力复杂度检查。',
+    ]);
+  });
+
   it('按实际分配的文件编号映射 killedByCase 与补刀说明', () => {
     const discrimination = {
       targets: [{
@@ -348,6 +396,45 @@ describe('runDiscriminationPhase', () => {
     expect(result.allKilled).toBe(true);
   });
 
+  it('自定义 checker 可用时以 testlib 拒绝结果判定错误解 WA', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([accepted('另一种文本\n')]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      runBatch: jest.fn().mockResolvedValue(['reject']),
+      runChecker: jest.fn().mockResolvedValue('reject'),
+      dispose: jest.fn(),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [{
+        kind: 'wrong-algorithm',
+        description: '输出不合法方案',
+        code: 'print("alternative")',
+      }],
+      cases: [{ input: '1\n', output: '标准答案\n' }],
+      runner,
+      customChecker: true,
+      checkerExecutor,
+    });
+
+    expect(checkerExecutor.runBatch).toHaveBeenCalledWith([{
+      input: '1\n',
+      output: '另一种文本\n',
+      answer: '标准答案\n',
+    }], expect.objectContaining({ deadlineAt: expect.any(Number) }));
+    expect(result.targets[0]).toMatchObject({
+      killed: true,
+      killedBy: 'wa',
+      killedByCase: 1,
+    });
+  });
+
   it('沙箱异常把当前及未运行靶子标为预算跳过而不抛错', async () => {
     const runner = {
       isAvailable: jest.fn(),
@@ -401,5 +488,45 @@ describe('runDiscriminationPhase', () => {
       killedBy: 'tle',
     });
     expect(result.allKilled).toBe(false);
+  });
+
+  it('complexityGap=none 时跳过 BRUTE，错误解仍运行且 allKilled 排除跳过项', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        accepted('wrong\n'),
+      ]),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [{
+        kind: 'wrong-algorithm',
+        description: '错误贪心',
+        code: 'print("wrong")',
+      }],
+      bruteCode: 'print(input())',
+      complexityGap: 'none',
+      cases: [{ input: '1\n', output: '1\n', dataScale: 'large' }],
+      runner,
+      customChecker: false,
+    });
+
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        kind: 'wrong-algorithm',
+        killed: true,
+        killedBy: 'wa',
+      }),
+      {
+        kind: 'brute-complexity',
+        description: '独立暴力解复杂度检查',
+        killed: false,
+        skippedReason: 'no-complexity-gap',
+      },
+    ]);
+    expect(result.allKilled).toBe(true);
   });
 });
