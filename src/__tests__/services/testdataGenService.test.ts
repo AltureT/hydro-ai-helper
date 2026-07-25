@@ -1719,6 +1719,69 @@ describe('TestdataGenService.generate', () => {
     expect(runner.isAvailable).not.toHaveBeenCalled();
   });
 
+  it('checkpoint 命中四项制品时跳过对应 AI 调用但仍完整运行沙箱', async () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 1,
+      languages: [],
+    };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(
+        makeSolutionBlueprint('traditional'),
+        options,
+        [],
+      ),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'),
+        'traditional',
+        [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(
+        makeIndependentVerifierBlueprint(),
+        [],
+      ),
+      killTargets: [],
+    };
+    const mockClient = { chat: jest.fn() };
+    const onCheckpoint = jest.fn().mockRejectedValue(new Error('checkpoint store unavailable'));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '断点续跑',
+      statementMarkdown: '题面',
+      options,
+      checkpoint,
+      onCheckpoint,
+    });
+
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(onCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+      solution: checkpoint.solution,
+      artifacts: checkpoint.artifacts,
+      verifier: checkpoint.verifier,
+      killTargets: [],
+    }));
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
+    expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+  });
+
   it('调用 AI 客户端并返回组装后的计划', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
     const mockClient = {

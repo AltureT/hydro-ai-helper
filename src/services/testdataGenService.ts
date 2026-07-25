@@ -4690,6 +4690,17 @@ export interface GenerateTestdataParams {
   signal?: AbortSignal;
   /** 页面进度事件；回调异常不得影响生成主流程。 */
   onProgress?: (progress: TestdataGenerationProgress) => void;
+  /** 已通过 handler 作用域与 hash 校验的解析后断点制品。 */
+  checkpoint?: TestdataGenerationCheckpointPayload;
+  /** 每个 AI 阶段成功后的异步落盘钩子；失败不得影响生成。 */
+  onCheckpoint?: (update: TestdataGenerationCheckpointPayload) => void | Promise<void>;
+}
+
+export interface TestdataGenerationCheckpointPayload {
+  solution?: SandboxSolutionBlueprint;
+  artifacts?: SandboxGenerationArtifacts;
+  verifier?: IndependentVerifierBlueprint;
+  killTargets?: KillTarget[];
 }
 
 export interface TestdataGenServiceOptions {
@@ -4712,6 +4723,44 @@ interface IndependentVerifierCallState {
 interface GenerationArtifactsCallState {
   artifacts: SandboxGenerationArtifacts;
   sourceContent: string;
+}
+
+function checkpointSolutionFromBlueprint(
+  blueprint: SandboxGenerationBlueprint,
+): SandboxSolutionBlueprint {
+  return {
+    problemType: blueprint.problemType,
+    isFillIn: blueprint.isFillIn,
+    analysis: blueprint.analysis,
+    functionName: blueprint.functionName,
+    oracleCode: blueprint.oracleCode,
+    oracleLanguage: blueprint.oracleLanguage,
+    solutionCode: blueprint.solutionCode,
+    functionSampleInputs: blueprint.functionSampleInputs,
+    notes: blueprint.notes,
+  };
+}
+
+function checkpointArtifactsFromBlueprint(
+  blueprint: SandboxGenerationBlueprint,
+): SandboxGenerationArtifacts {
+  return {
+    generatorCode: blueprint.generatorCode,
+    templates: blueprint.templates,
+    notes: blueprint.notes,
+  };
+}
+
+function checkpointVerifierFromBlueprint(
+  blueprint: SandboxGenerationBlueprint,
+): IndependentVerifierBlueprint {
+  return {
+    bruteCode: blueprint.bruteCode || '',
+    validatorCode: blueprint.validatorCode || '',
+    stressGeneratorCode: blueprint.stressGeneratorCode || '',
+    complexityGap: blueprint.complexityGap,
+    functionSampleInputs: blueprint.functionSampleInputs,
+  };
 }
 
 export class TestdataGenService {
@@ -4746,6 +4795,18 @@ export class TestdataGenService {
 
   private progressForAttempt(percent: number, attempt: number): number {
     return attempt > 1 ? 60 + (percent * 0.39) : percent;
+  }
+
+  private emitCheckpoint(
+    params: Pick<GenerateTestdataParams, 'onCheckpoint'>,
+    update: TestdataGenerationCheckpointPayload,
+  ): void {
+    try {
+      const pending = params.onCheckpoint?.(update);
+      if (pending) void Promise.resolve(pending).catch(() => undefined);
+    } catch {
+      // 断点只用于降低中断重试成本，持久化失败不能改变生成结果。
+    }
   }
 
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
@@ -4869,7 +4930,12 @@ export class TestdataGenService {
       });
       try {
         this.emitProgress(params, 'model_escalation', 60, 2);
-        const plan = await fallbackService.generateWithSandbox(params, runner, 2);
+        // 语义升级说明已有制品质量不足，必须完整重跑；仍保留回调以保存升级后的新制品。
+        const plan = await fallbackService.generateWithSandbox(
+          { ...params, checkpoint: undefined },
+          runner,
+          2,
+        );
         const fallbackModels = plan.usedModel ? plan.usedModel.split(' → ').filter(Boolean) : [];
         const toModel = fallbackModels[0] || 'next configured model';
         const firstModels = firstError.chatResults.map(result =>
@@ -5461,21 +5527,30 @@ export class TestdataGenService {
     const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
     const callOptions = this.getCallOptions(params, attempt);
     report('blueprint', 10);
-    const initialResult = await this.aiClient.chat(
-      [{ role: 'user', content: solutionUserPrompt }],
-      solutionSystemPrompt,
-      callOptions,
-    );
-    const results: ChatResult[] = [initialResult];
+    const results: ChatResult[] = [];
     const expectedFunctionSamples = extractStatementSamples(params.statementMarkdown);
-    report('blueprint', 24);
-    let solutionSourceContent = initialResult.content;
+    let solutionSourceContent = params.checkpoint?.solution
+      ? JSON.stringify(params.checkpoint.solution)
+      : '';
     let solution: SandboxSolutionBlueprint;
     try {
-      solution = this.useProvidedOracle(
-        parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples),
-        params.options,
-      );
+      if (params.checkpoint?.solution) {
+        solution = this.useProvidedOracle(params.checkpoint.solution, params.options);
+      } else {
+        const initialResult = await this.aiClient.chat(
+          [{ role: 'user', content: solutionUserPrompt }],
+          solutionSystemPrompt,
+          callOptions,
+        );
+        results.push(initialResult);
+        solutionSourceContent = initialResult.content;
+        solution = this.useProvidedOracle(
+          parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples),
+          params.options,
+        );
+      }
+      this.emitCheckpoint(params, { solution });
+      report('blueprint', 24);
       report('solution_verification', 28);
       await verifySolutionBlueprintSamples(
         solution,
@@ -5511,7 +5586,7 @@ export class TestdataGenService {
       const repairResult = await this.aiClient.chat(
         [
           { role: 'user', content: solutionUserPrompt },
-          { role: 'assistant', content: initialResult.content },
+          { role: 'assistant', content: solutionSourceContent },
           {
             role: 'user',
             content: `第一阶段解题蓝图未通过解析或样例预验证：${solutionError instanceof Error ? solutionError.message : String(solutionError)}\n`
@@ -5531,6 +5606,7 @@ export class TestdataGenService {
           parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples),
           params.options,
         );
+        this.emitCheckpoint(params, { solution });
         report('solution_verification', 32);
         await verifySolutionBlueprintSamples(
           solution,
@@ -5563,18 +5639,62 @@ export class TestdataGenService {
     const artifactsResults: ChatResult[] = [...results];
     const verifierResults: ChatResult[] = [...results];
     const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
-      this.generateKillTargets({
-        statement: params.statementMarkdown,
-        analysis: solution.analysis || '',
-        samples: killTargetSamples,
-        signal: params.signal,
-      }, optionalDiscriminationResults).catch((err): KillTarget[] => {
-        if (isCancellation(err)) throw err;
-        return [];
-      }),
-      this.generateGenerationArtifacts(params, solution, callOptions, artifactsResults),
-      this.generateIndependentVerifier(params, solution, callOptions, verifierResults, attempt),
+      Array.isArray(params.checkpoint?.killTargets)
+        ? Promise.resolve(params.checkpoint.killTargets)
+        : this.generateKillTargets({
+          statement: params.statementMarkdown,
+          analysis: solution.analysis || '',
+          samples: killTargetSamples,
+          signal: params.signal,
+        }, optionalDiscriminationResults)
+          .then(targets => {
+            this.emitCheckpoint(params, { killTargets: targets });
+            return targets;
+          })
+          .catch((err): KillTarget[] => {
+            if (isCancellation(err)) throw err;
+            return [];
+          }),
+      params.checkpoint?.artifacts
+        ? Promise.resolve({
+          artifacts: params.checkpoint.artifacts,
+          sourceContent: JSON.stringify(params.checkpoint.artifacts),
+        })
+        : this.generateGenerationArtifacts(params, solution, callOptions, artifactsResults)
+          .then(state => {
+            this.emitCheckpoint(params, { artifacts: state.artifacts });
+            return state;
+          }),
+      params.checkpoint?.verifier
+        ? Promise.resolve({
+          verifier: params.checkpoint.verifier,
+          systemPrompt: buildIndependentVerifierSystemPrompt(),
+          userPrompt: buildIndependentVerifierUserPrompt(params, solution),
+          sourceContent: JSON.stringify(params.checkpoint.verifier),
+          expectedFunctionSamples: solution.problemType === 'function'
+            ? expectedFunctionSamples
+            : [],
+        })
+        : this.generateIndependentVerifier(
+          params,
+          solution,
+          callOptions,
+          verifierResults,
+          attempt,
+        ).then(state => {
+          this.emitCheckpoint(params, { verifier: state.verifier });
+          return state;
+        }),
     ]);
+    if (params.checkpoint) {
+      // 恢复任务会创建新 job；把命中的旧制品复制到新断点，保证再次中断仍可续跑。
+      this.emitCheckpoint(params, {
+        solution,
+        artifacts: artifactsState.artifacts,
+        verifier: initialVerifierState.verifier,
+        killTargets,
+      });
+    }
     results.push(
       ...artifactsResults.slice(results.length),
       ...verifierResults.slice(results.length),
@@ -5615,6 +5735,12 @@ export class TestdataGenService {
             true,
           );
         }
+        this.emitCheckpoint(params, {
+          artifacts: {
+            ...artifactsState.artifacts,
+            templates: blueprint.templates,
+          },
+        });
       }
     }
 
@@ -5751,6 +5877,21 @@ export class TestdataGenService {
           blueprintSourceContent = fullRepairResult.content;
         }
         blueprint = this.useProvidedOracle(blueprint, params.options);
+        const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
+        const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
+        if (usedFullRepair) {
+          // 完整修复的 NOTES 只归入解题蓝图，避免恢复后拼接两次。
+          repairedArtifactsCheckpoint.notes = undefined;
+        } else {
+          // 定向修复不改 NOTES 契约，继续保留两个阶段原先各自的说明。
+          repairedSolutionCheckpoint.notes = solution.notes;
+          repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
+        }
+        this.emitCheckpoint(params, {
+          solution: repairedSolutionCheckpoint,
+          artifacts: repairedArtifactsCheckpoint,
+          verifier: checkpointVerifierFromBlueprint(blueprint),
+        });
         const changedArtifacts = usedFullRepair
           ? ['full']
           : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);

@@ -6,6 +6,9 @@ import {
   TestdataGenerationJobModel,
   TESTDATA_JOB_LEASE_MS,
   TESTDATA_JOB_RETENTION_MS,
+  computeTestdataCheckpointHashes,
+  filterTestdataCheckpointUpdate,
+  selectTestdataResumeCheckpoint,
 } from '../../models/testdataGenerationJob';
 
 function createMockCollection() {
@@ -33,6 +36,99 @@ const createParams = {
 };
 
 describe('TestdataGenerationJobModel', () => {
+  it('checkpoint hash 对等价 options 稳定，任一输入变化都会失配', () => {
+    const first = computeTestdataCheckpointHashes(
+      {
+        problemKind: 'traditional',
+        caseCount: 10,
+        languages: [],
+        dataScale: 'auto',
+      },
+      '题面正文',
+    );
+    const reordered = computeTestdataCheckpointHashes(
+      {
+        dataScale: 'auto',
+        languages: [],
+        caseCount: 10,
+        problemKind: 'traditional',
+      },
+      '题面正文',
+    );
+    expect(reordered).toEqual(first);
+    expect(computeTestdataCheckpointHashes(
+      {
+        problemKind: 'traditional',
+        caseCount: 11,
+        languages: [],
+        dataScale: 'auto',
+      },
+      '题面正文',
+    ).optionsHash).not.toBe(first.optionsHash);
+    expect(computeTestdataCheckpointHashes(
+      {
+        problemKind: 'traditional',
+        caseCount: 10,
+        languages: [],
+        dataScale: 'auto',
+      },
+      '修改后的题面',
+    ).statementHash).not.toBe(first.statementHash);
+  });
+
+  it('仅接受同作用域 interrupted 任务且双 hash 一致的 checkpoint', () => {
+    const checkpoint = {
+      optionsHash: 'options',
+      statementHash: 'statement',
+      solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' },
+    };
+    const job = {
+      ...createParams,
+      _id: 'old-job',
+      status: 'interrupted' as const,
+      checkpoint,
+    };
+    const expected = {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      optionsHash: 'options',
+      statementHash: 'statement',
+    };
+    expect(selectTestdataResumeCheckpoint(job, expected)).toBe(checkpoint);
+    for (const mismatch of [
+      { status: 'failed' },
+      { domainId: 'other' },
+      { problemDocId: 999 },
+      { problemId: 'OTHER' },
+      { createdBy: 99 },
+      { checkpoint: { ...checkpoint, optionsHash: 'other' } },
+      { checkpoint: { ...checkpoint, statementHash: 'other' } },
+    ]) {
+      expect(selectTestdataResumeCheckpoint({ ...job, ...mismatch } as never, expected))
+        .toBeUndefined();
+    }
+  });
+
+  it('checkpoint 单字段序列化超过 256KB 时跳过，不影响其他字段', () => {
+    const smallSolution = {
+      problemType: 'traditional' as const,
+      oracleCode: 'print(input())',
+    };
+    const filtered = filterTestdataCheckpointUpdate({
+      solution: smallSolution,
+      artifacts: {
+        generatorCode: 'x'.repeat((256 * 1024) + 1),
+      },
+      killTargets: [],
+    });
+    expect(filtered).toEqual({
+      solution: smallSolution,
+      killTargets: [],
+    });
+  });
+
   it('creates an active uniqueness index and a 24-hour TTL index', async () => {
     const { model, collection } = createModel();
     await model.ensureIndexes();

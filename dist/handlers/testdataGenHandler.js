@@ -27,6 +27,7 @@ const sseHelper_1 = require("../lib/sseHelper");
 const limits_1 = require("../constants/limits");
 const domainHelper_1 = require("../utils/domainHelper");
 const mongo_1 = require("../utils/mongo");
+const testdataGenerationJob_1 = require("../models/testdataGenerationJob");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
 function normalizeCheckerPath(filename) {
@@ -313,7 +314,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
                 let savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
                 if (savedJob?.active && savedJob.leaseExpiresAt?.getTime() <= Date.now()) {
                     await jobModel.markExpiredLeaseInterrupted(savedJob._id);
-                    savedJob = null;
+                    savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
                 }
                 if (savedJob) {
                     restorableJob = { ...serializeGenerationJob(savedJob), plan: undefined };
@@ -397,7 +398,7 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, translate, } = params;
     const jobId = String(job._id);
     const ac = new AbortController();
     backgroundGenerationControllers.set(jobId, ac);
@@ -435,6 +436,12 @@ async function runBackgroundGeneration(params) {
             ...checkerArtifacts,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
+            checkpoint,
+            onCheckpoint: update => {
+                void jobModel.updateCheckpoint(job._id, checkpointHashes, update).catch(err => {
+                    console.warn('[TestdataGenJob] checkpoint update failed:', err);
+                });
+            },
             onProgress: progress => {
                 progressWrites = progressWrites
                     .then(() => jobModel.updateProgress(job._id, progress))
@@ -792,6 +799,26 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
+            const checkpointHashes = (0, testdataGenerationJob_1.computeTestdataCheckpointHashes)(options, statement);
+            let checkpoint;
+            const resumeFromJobId = typeof body.resumeFromJobId === 'string'
+                ? body.resumeFromJobId.trim()
+                : '';
+            if (resumeFromJobId) {
+                try {
+                    const resumeJob = await jobModel.findById(resumeFromJobId);
+                    checkpoint = (0, testdataGenerationJob_1.selectTestdataResumeCheckpoint)(resumeJob, {
+                        domainId,
+                        problemDocId: pdoc.docId,
+                        problemId: pdoc.pid || String(pdoc.docId),
+                        createdBy: this.user?._id,
+                        ...checkpointHashes,
+                    });
+                }
+                catch {
+                    // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。
+                }
+            }
             const { job, created } = await jobModel.createOrGetActive({
                 domainId,
                 problemDocId: pdoc.docId,
@@ -819,6 +846,8 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     statement,
                     options,
                     existingFiles,
+                    checkpoint,
+                    checkpointHashes,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {
                     console.error('[TestdataGenJob] unhandled background failure:', err);

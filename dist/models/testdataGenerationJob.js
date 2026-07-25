@@ -4,12 +4,75 @@
  * solution, so handlers must also enforce creator and problem-edit access.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenerationJobModel = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = void 0;
+exports.TestdataGenerationJobModel = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = void 0;
+exports.computeTestdataCheckpointHashes = computeTestdataCheckpointHashes;
+exports.filterTestdataCheckpointUpdate = filterTestdataCheckpointUpdate;
+exports.selectTestdataResumeCheckpoint = selectTestdataResumeCheckpoint;
+const node_crypto_1 = require("node:crypto");
 const ensureObjectId_1 = require("../utils/ensureObjectId");
+exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = 256 * 1024;
+function normalizeForStableJson(value) {
+    if (Array.isArray(value))
+        return value.map(item => normalizeForStableJson(item));
+    if (!value || typeof value !== 'object')
+        return value;
+    return Object.fromEntries(Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, normalizeForStableJson(item)]));
+}
+function sha256(value) {
+    return (0, node_crypto_1.createHash)('sha256').update(value, 'utf8').digest('hex');
+}
+/** 断点只在完整生成选项与题面均完全一致时可复用。 */
+function computeTestdataCheckpointHashes(options, statementMarkdown) {
+    return {
+        optionsHash: sha256(JSON.stringify(normalizeForStableJson(options))),
+        statementHash: sha256(statementMarkdown),
+    };
+}
+/** MongoDB 单文档安全边界：过大的单项制品静默不落盘，不影响其他断点字段。 */
+function filterTestdataCheckpointUpdate(update) {
+    const filtered = {};
+    const keys = [
+        'solution',
+        'artifacts',
+        'verifier',
+        'killTargets',
+    ];
+    for (const key of keys) {
+        const value = update[key];
+        if (value === undefined)
+            continue;
+        try {
+            if (Buffer.byteLength(JSON.stringify(value), 'utf8') <= exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES) {
+                filtered[key] = value;
+            }
+        }
+        catch {
+            // 不可序列化制品与超大制品一样只跳过当前字段。
+        }
+    }
+    return filtered;
+}
+/** 严格校验断点作用域；任一不符都由调用方静默转为全新生成。 */
+function selectTestdataResumeCheckpoint(job, expected) {
+    if (!job?.checkpoint || job.status !== 'interrupted')
+        return undefined;
+    if (job.domainId !== expected.domainId
+        || job.problemDocId !== expected.problemDocId
+        || job.problemId !== expected.problemId
+        || job.createdBy !== expected.createdBy
+        || job.checkpoint.optionsHash !== expected.optionsHash
+        || job.checkpoint.statementHash !== expected.statementHash) {
+        return undefined;
+    }
+    return job.checkpoint;
+}
 exports.TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
 exports.TESTDATA_JOB_LEASE_MS = 90 * 1000;
 const interruptedError = {
-    message: '生成服务在任务执行期间重启或失去连接，请重新生成。',
+    message: '生成服务在任务执行期间重启或失去连接，可从已保存的断点恢复。',
     code: 'WORKER_INTERRUPTED',
     retryable: true,
 };
@@ -38,7 +101,7 @@ class TestdataGenerationJobModel {
         const now = new Date();
         await this.collection.updateMany({ ...scope, active: true, leaseExpiresAt: { $lte: now } }, {
             $set: {
-                status: 'interrupted', active: false, restorable: false,
+                status: 'interrupted', active: false, restorable: true,
                 updatedAt: now, completedAt: now, error: interruptedError,
             },
         });
@@ -94,6 +157,21 @@ class TestdataGenerationJobModel {
                 leaseExpiresAt: new Date(now.getTime() + exports.TESTDATA_JOB_LEASE_MS),
             } });
     }
+    async updateCheckpoint(id, hashes, update) {
+        const filtered = filterTestdataCheckpointUpdate(update);
+        if (Object.keys(filtered).length === 0)
+            return;
+        const now = new Date();
+        const set = {
+            'checkpoint.optionsHash': hashes.optionsHash,
+            'checkpoint.statementHash': hashes.statementHash,
+            updatedAt: now,
+        };
+        for (const [key, value] of Object.entries(filtered)) {
+            set[`checkpoint.${key}`] = value;
+        }
+        await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true }, { $set: set });
+    }
     async renewLease(id) {
         const now = new Date();
         const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true, cancelRequested: false }, { $set: {
@@ -119,7 +197,7 @@ class TestdataGenerationJobModel {
     async fail(id, error, status = 'failed') {
         const now = new Date();
         await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true }, { $set: {
-                status, active: false, restorable: false, error,
+                status, active: false, restorable: status === 'interrupted', error,
                 updatedAt: now, completedAt: now,
             } });
     }
@@ -139,7 +217,7 @@ class TestdataGenerationJobModel {
     async markExpiredLeaseInterrupted(id) {
         const now = new Date();
         const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: true, leaseExpiresAt: { $lte: now } }, { $set: {
-                status: 'interrupted', active: false, restorable: false,
+                status: 'interrupted', active: false, restorable: true,
                 updatedAt: now, completedAt: now, error: interruptedError,
             } });
         return result.modifiedCount > 0;
@@ -147,7 +225,7 @@ class TestdataGenerationJobModel {
     async markAllExpiredLeasesInterrupted() {
         const now = new Date();
         const result = await this.collection.updateMany({ active: true, leaseExpiresAt: { $lte: now } }, { $set: {
-                status: 'interrupted', active: false, restorable: false,
+                status: 'interrupted', active: false, restorable: true,
                 updatedAt: now, completedAt: now, error: interruptedError,
             } });
         return result.modifiedCount;

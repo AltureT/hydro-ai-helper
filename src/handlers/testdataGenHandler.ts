@@ -51,7 +51,11 @@ import { getDomainId } from '../utils/domainHelper';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import {
   TestdataGenerationJobModel,
+  computeTestdataCheckpointHashes,
+  selectTestdataResumeCheckpoint,
   type TestdataGenerationJob,
+  type TestdataGenerationCheckpoint,
+  type TestdataCheckpointHashes,
   type TestdataGenerationJobError,
 } from '../models/testdataGenerationJob';
 
@@ -408,7 +412,7 @@ export class TestdataGenContextHandler extends Handler {
         let savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
         if (savedJob?.active && savedJob.leaseExpiresAt?.getTime() <= Date.now()) {
           await jobModel.markExpiredLeaseInterrupted(savedJob._id);
-          savedJob = null;
+          savedJob = await jobModel.findRestorable(domainId, pdoc.docId, this.user._id);
         }
         if (savedJob) {
           restorableJob = { ...serializeGenerationJob(savedJob), plan: undefined };
@@ -455,6 +459,7 @@ interface GenerateRequestBody {
   providedStd?: string;
   acceptedStdRecordId?: string;
   extraRequirements?: string;
+  resumeFromJobId?: string;
   /** @deprecated 旧版前端可能仍会发送；统一自适应流程会安全忽略。 */
   generationProfile?: string;
 }
@@ -519,13 +524,15 @@ interface BackgroundGenerationParams {
   statement: string;
   options: GenerateOptions;
   existingFiles: string[];
+  checkpoint?: TestdataGenerationCheckpoint;
+  checkpointHashes: TestdataCheckpointHashes;
   translate: (key: string) => string;
 }
 
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    translate,
+    checkpoint, checkpointHashes, translate,
   } = params;
   const jobId = String(job._id);
   const ac = new AbortController();
@@ -564,6 +571,12 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       ...checkerArtifacts,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
+      checkpoint,
+      onCheckpoint: update => {
+        void jobModel.updateCheckpoint(job._id, checkpointHashes, update).catch(err => {
+          console.warn('[TestdataGenJob] checkpoint update failed:', err);
+        });
+      },
       onProgress: progress => {
         progressWrites = progressWrites
           .then(() => jobModel.updateProgress(job._id, progress))
@@ -951,6 +964,25 @@ export class TestdataGenJobStartHandler extends Handler {
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
+      const checkpointHashes = computeTestdataCheckpointHashes(options, statement);
+      let checkpoint: TestdataGenerationCheckpoint | undefined;
+      const resumeFromJobId = typeof body.resumeFromJobId === 'string'
+        ? body.resumeFromJobId.trim()
+        : '';
+      if (resumeFromJobId) {
+        try {
+          const resumeJob = await jobModel.findById(resumeFromJobId);
+          checkpoint = selectTestdataResumeCheckpoint(resumeJob, {
+            domainId,
+            problemDocId: pdoc.docId,
+            problemId: pdoc.pid || String(pdoc.docId),
+            createdBy: this.user?._id,
+            ...checkpointHashes,
+          });
+        } catch {
+          // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。
+        }
+      }
       const { job, created } = await jobModel.createOrGetActive({
         domainId,
         problemDocId: pdoc.docId,
@@ -979,6 +1011,8 @@ export class TestdataGenJobStartHandler extends Handler {
           statement,
           options,
           existingFiles,
+          checkpoint,
+          checkpointHashes,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {
           console.error('[TestdataGenJob] unhandled background failure:', err);

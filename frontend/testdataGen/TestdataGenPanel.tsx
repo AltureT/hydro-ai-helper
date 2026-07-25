@@ -290,6 +290,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const generationLastEventAtRef = useRef(0);
   const generationHeartbeatAtRef = useRef(0);
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
+  const [resumeCheckpointJobId, setResumeCheckpointJobId] = useState<string | null>(null);
   const restoreCheckedRef = useRef(false);
   const jobStorageKey = `ai-helper:testdata-generation-job:${window.location.pathname}:${problemId}`;
 
@@ -400,6 +401,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const jobId = savedJob?.id || storedJobId;
     if (!jobId) return;
 
+    if (savedJob?.status === 'interrupted') {
+      rememberJob(null);
+      setResumeCheckpointJobId(savedJob.id);
+      setError(i18n('ai_helper_testdata_job_interrupted'));
+      setShowFallbackHint(true);
+      setCollapsed(false);
+      return;
+    }
+
     rememberJob(jobId);
     const startedAt = Date.parse(savedJob?.startedAt || savedJob?.createdAt || '');
     const progressAt = Date.parse(savedJob?.progressUpdatedAt || '');
@@ -458,6 +468,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         } else if (job.status === 'failed' || job.status === 'interrupted') {
           terminal = true;
           rememberJob(null);
+          setResumeCheckpointJobId(job.status === 'interrupted' ? job.id : null);
           setError(job.error?.code === 'WORKER_INTERRUPTED'
             ? i18n('ai_helper_testdata_job_interrupted')
             : (job.error?.message || i18n('ai_helper_testdata_job_failed')));
@@ -504,7 +515,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // ─── 生成 ───────────────────────────────────────────────────────────────────
 
-  const handleGenerate = useCallback(async () => {
+  const handleGenerate = useCallback(async (resumeFromJobId?: string) => {
     setError(null);
     setShowFallbackHint(false);
     setShowDeeperReasoningHint(false);
@@ -540,6 +551,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
+          resumeFromJobId,
         }),
       });
       if (!response.ok) {
@@ -548,6 +560,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       }
       const data = await response.json() as { job: BackgroundGenerationJob };
       if (!data.job?.id) throw new Error(i18n('ai_helper_testdata_job_start_failed'));
+      setResumeCheckpointJobId(null);
       rememberJob(data.job.id);
       const heartbeatAt = Date.parse(data.job.updatedAt || '');
       if (Number.isFinite(heartbeatAt)) generationHeartbeatAtRef.current = heartbeatAt;
@@ -933,12 +946,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               {i18n('ai_helper_testdata_fallback_suggestion')}
             </div>
           )}
+          {resumeCheckpointJobId && (
+            <button
+              style={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
+              onClick={() => void handleGenerate(resumeCheckpointJobId)}
+            >
+              {i18n('ai_helper_testdata_resume_checkpoint_btn')}
+            </button>
+          )}
         </div>
       )}
       <div style={{ display: 'flex', gap: SPACING.sm, alignItems: 'center', flexWrap: 'wrap' }}>
         <button
           style={getButtonStyle('primary')}
-          onClick={handleGenerate}
+          onClick={() => void handleGenerate()}
           disabled={!context.problem.hasStatement}
         >
           {i18n('ai_helper_testdata_generate_btn')}

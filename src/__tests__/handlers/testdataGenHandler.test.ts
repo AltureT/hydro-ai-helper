@@ -25,6 +25,7 @@ import {
 } from '../../services/testdataGenService';
 import { GoJudgeSandboxRunner } from '../../services/goJudgeSandboxService';
 import { ObjectId } from '../../utils/mongo';
+import { computeTestdataCheckpointHashes } from '../../models/testdataGenerationJob';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -905,6 +906,90 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
       expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('resumeFromJobId 校验命中后把 checkpoint 传入服务并异步保存新阶段', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const options = {
+      problemKind: 'traditional' as const,
+      fillInMode: 'auto' as const,
+      caseCount: 1,
+      dataScale: 'auto' as const,
+      languages: [],
+      providedStd: undefined,
+      providedStdSource: undefined,
+      extraRequirements: undefined,
+    };
+    const checkpoint = {
+      ...computeTestdataCheckpointHashes(options, PROBLEM_DOC.content),
+      solution: {
+        problemType: 'traditional' as const,
+        oracleCode: 'print(input())',
+      },
+    };
+    const interruptedJob = makeGenerationJob({
+      status: 'interrupted',
+      active: false,
+      checkpoint,
+    });
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      findById: jest.fn().mockResolvedValue(interruptedJob),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      updateCheckpoint: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const plan = {
+      problemType: 'traditional',
+      files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
+      caseCount: 1,
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    let receivedParams: Record<string, unknown> | undefined;
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockImplementation(async params => {
+        receivedParams = params as unknown as Record<string, unknown>;
+        params.onCheckpoint?.({ killTargets: [] });
+        return plan as never;
+      });
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102',
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        resumeFromJobId: String(interruptedJob._id),
+      },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(receivedParams?.checkpoint).toBe(checkpoint);
+      expect(jobModel.updateCheckpoint).toHaveBeenCalledWith(
+        job._id,
+        expect.objectContaining({
+          optionsHash: checkpoint.optionsHash,
+          statementHash: checkpoint.statementHash,
+        }),
+        { killTargets: [] },
+      );
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
