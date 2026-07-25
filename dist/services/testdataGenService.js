@@ -284,7 +284,8 @@ function allocateCasesToSubtasks(caseCount, subtasks) {
 /**
  * 补刀等后续阶段追加测试点时，前 N 个 case 的「构造档位 ↔ 配置归档」对应关系必须保持不变，
  * 否则按某档约束构造的输入会被归入另一档、破坏子任务约束契约。
- * 追加项一律归入最后一个子任务（题面惯例上约束最宽的完整档）；
+ * 追加项一律归入最后一个子任务：这里采用 OI 题“最后一档约束最宽”的通行约定，
+ * 组装阶段会同时写入人工复核警告，提示教师核对追加输入是否确实符合该档约束；
  * 原分配为空或总数反而变少时返回空数组（调用方降级为扁平配置）。
  */
 function extendTieredAllocations(base, totalCaseCount, subtasks) {
@@ -453,6 +454,14 @@ function resolveTieredSubtaskGeneration(input) {
         return { enabled: false, allocations: [] };
     if ((input.dataScale || 'auto') !== 'auto')
         return { enabled: false, allocations: [] };
+    const scoreTotal = subtasks.reduce((sum, subtask) => sum + subtask.score, 0);
+    if (scoreTotal !== 100) {
+        return {
+            enabled: false,
+            allocations: [],
+            warning: `子任务分值合计为 ${scoreTotal},非 100,已按普通模式输出配置`,
+        };
+    }
     if (input.caseCount < subtasks.length) {
         return {
             enabled: false,
@@ -463,7 +472,11 @@ function resolveTieredSubtaskGeneration(input) {
     }
     const allocations = allocateCasesToSubtasks(input.caseCount, subtasks);
     return allocations.length === input.caseCount
-        ? { enabled: true, allocations }
+        ? {
+            enabled: true,
+            allocations,
+            subtasks: subtasks.map(subtask => ({ ...subtask })),
+        }
         : { enabled: false, allocations: [] };
 }
 function cloneConfigValue(value) {
@@ -492,7 +505,7 @@ function mergeConfigSubtasks(existingSubtasks, newCaseNumbers) {
     const subtasks = cloneConfigValue(existingSubtasks);
     const numbers = normalizeCaseNumbers(newCaseNumbers);
     if (numbers.length === 0)
-        return { subtasks };
+        return { subtasks, newCaseSubtaskIds: {} };
     const allExplicitCases = subtasks.every(subtask => !!subtask
         && typeof subtask === 'object'
         && !Array.isArray(subtask)
@@ -507,6 +520,7 @@ function mergeConfigSubtasks(existingSubtasks, newCaseNumbers) {
                 kind: 'warning',
                 message: `该题已配置子任务;本次新增测试点 ${caseLabels} 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。`,
             },
+            newCaseSubtaskIds: {},
         };
     }
     const lastIndex = subtasks.length - 1;
@@ -522,18 +536,25 @@ function mergeConfigSubtasks(existingSubtasks, newCaseNumbers) {
     const subtaskId = typeof configuredId === 'string' || typeof configuredId === 'number'
         ? configuredId
         : lastIndex + 1;
+    const numericSubtaskId = typeof configuredId === 'number' && Number.isSafeInteger(configuredId)
+        ? configuredId
+        : typeof configuredId === 'string' && /^\d+$/.test(configuredId)
+            ? Number(configuredId)
+            : lastIndex + 1;
     return {
         subtasks,
         note: {
             kind: 'system',
             message: `新增测试点 ${caseLabels} 已并入子任务 ${subtaskId},请核对分值分配。`,
         },
+        newCaseSubtaskIds: Object.fromEntries(numbers.map(number => [number, numericSubtaskId])),
     };
 }
 function buildTieredConfigSubtasks(specs, allocations, caseNumbers, newCaseNumbers) {
     if (!specs?.length
         || allocations?.length !== newCaseNumbers.length
-        || allocations.length === 0)
+        || allocations.length === 0
+        || specs.reduce((sum, spec) => sum + spec.score, 0) !== 100)
         return undefined;
     const byId = new Map(specs.map(spec => [
         spec.id,
@@ -567,13 +588,6 @@ function buildTieredConfigSubtasks(specs, allocations, caseNumbers, newCaseNumbe
         });
     }
     const notes = [];
-    const scoreTotal = specs.reduce((sum, spec) => sum + spec.score, 0);
-    if (scoreTotal !== 100) {
-        notes.push({
-            kind: 'warning',
-            message: `子任务分值合计为 ${scoreTotal},非 100,请核对`,
-        });
-    }
     if (existingNumbers.length > 0) {
         notes.push({
             kind: 'warning',
@@ -729,6 +743,7 @@ function buildConfigYamlWithMetadata(options) {
         content,
         subtaskNotes: tieredSubtasks?.notes
             ?? (subtaskMerge?.note ? [subtaskMerge.note] : []),
+        newCaseSubtaskIds: subtaskMerge?.newCaseSubtaskIds ?? {},
     };
 }
 function buildConfigYaml(options) {
@@ -925,6 +940,19 @@ const DATA_SCALE_TEXT = {
     medium: 'medium（中等规模，题面约束内取中位量级）',
     large: 'large（接近题面约束上限，必须使用可解析构造保证输出正确）',
 };
+function formatCoverageGuidanceLine(slot) {
+    return 'subtaskId' in slot
+        ? `- CASE ${slot.caseNumber}: 子任务 ${slot.subtaskId} — ${slot.guidance}`
+        : `- CASE ${slot.caseNumber}: ${slot.dataScale} — ${slot.guidance}`;
+}
+function buildCoverageGuidanceBlock(coveragePlan) {
+    if (!coveragePlan?.length)
+        return '';
+    return [
+        '【逐测试点覆盖计划（必须按 CASE 编号执行，并把实际覆盖目标写进 label）】',
+        ...coveragePlan.map(formatCoverageGuidanceLine),
+    ].join('\n');
+}
 /**
  * 构建 User Prompt
  */
@@ -962,9 +990,7 @@ function buildTestdataUserPrompt(params, coverageOverride) {
         `- 数据规模策略：${DATA_SCALE_TEXT[options.dataScale || 'auto']}`,
         `- 函数题模板语言：${langText}`,
     ];
-    lines.push('', '【逐测试点覆盖计划（必须按 CASE 编号执行，并把实际覆盖目标写进 label）】', ...coveragePlan.map(slot => ('subtaskId' in slot
-        ? `- CASE ${slot.caseNumber}: 子任务 ${slot.subtaskId} — ${slot.guidance}`
-        : `- CASE ${slot.caseNumber}: ${slot.dataScale} — ${slot.guidance}`)));
+    lines.push('', '【逐测试点覆盖计划（必须按 CASE 编号执行，并把实际覆盖目标写进 label）】', ...coveragePlan.map(formatCoverageGuidanceLine));
     if (options.problemKind !== 'traditional') {
         lines.push(`- 若判定/指定为函数题，必须完整输出这些模板节：${requiredTemplateSections}（不得遗漏）`);
     }
@@ -1094,14 +1120,19 @@ function buildGenerationArtifactsSystemPrompt() {
 
 各节使用原文分节，不要代码围栏、JSON 外壳或额外解释。`;
 }
-function buildGenerationArtifactsUserPrompt(params, solution) {
-    const tiered = resolveTieredSubtaskGeneration({
-        caseCount: params.options.caseCount,
-        dataScale: params.options.dataScale,
-        subtasks: solution.subtasks,
-        existingConfig: params.existingConfig,
-    });
-    const base = buildTestdataUserPrompt(params, tiered.enabled ? tiered.allocations : undefined).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '这是第二阶段：只输出 GENERATOR 与函数题所需 TEMPLATE，不要重复 ORACLE、SOLUTION、BRUTE、VALIDATOR 或 CASE。');
+function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride) {
+    const coveragePlan = coverageOverride ?? (() => {
+        const tiered = resolveTieredSubtaskGeneration({
+            caseCount: params.options.caseCount,
+            dataScale: params.options.dataScale,
+            subtasks: solution.subtasks,
+            existingConfig: params.existingConfig,
+        });
+        return tiered.enabled
+            ? tiered.allocations
+            : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
+    })();
+    const base = buildTestdataUserPrompt(params, coveragePlan).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '这是第二阶段：只输出 GENERATOR 与函数题所需 TEMPLATE，不要重复 ORACLE、SOLUTION、BRUTE、VALIDATOR 或 CASE。');
     return [
         base,
         '',
@@ -1173,8 +1204,8 @@ ${oracleDescription}
 
 各节内容按原文输出，正文行不得以 @@@ 开头。所有说明文字与 label 使用简体中文。`;
 }
-function buildSandboxBlueprintUserPrompt(params) {
-    return buildTestdataUserPrompt(params).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '请严格按照 System 中约定的蓝图分节格式输出 GENERATOR、ORACLE 与所需 TEMPLATE；不要直接输出 CASE 或 .out。');
+function buildSandboxBlueprintUserPrompt(params, coverageOverride) {
+    return buildTestdataUserPrompt(params, coverageOverride).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '请严格按照 System 中约定的蓝图分节格式输出 GENERATOR、ORACLE 与所需 TEMPLATE；不要直接输出 CASE 或 .out。');
 }
 /**
  * 独立验证调用只负责编写 BRUTE、VALIDATOR 与内部小数据生成器。
@@ -3491,14 +3522,15 @@ function assemblePlan(response, options, context = {}) {
     const files = [];
     const caseCount = response.cases.length;
     const coveragePlan = buildCoveragePlan(caseCount, options.dataScale || 'auto');
-    const tieredDecision = resolveTieredSubtaskGeneration({
+    const tieredDecision = context.tieredDecision ?? resolveTieredSubtaskGeneration({
         caseCount: options.caseCount,
         dataScale: options.dataScale,
         subtasks: response.subtasks,
         existingConfig: context.existingConfig,
     });
+    const tieredSubtasks = tieredDecision.subtasks ?? response.subtasks ?? [];
     const subtaskAllocations = tieredDecision.enabled
-        ? extendTieredAllocations(tieredDecision.allocations, caseCount, response.subtasks || [])
+        ? extendTieredAllocations(tieredDecision.allocations, caseCount, tieredSubtasks)
         : [];
     const tieredApplied = tieredDecision.enabled && subtaskAllocations.length === caseCount;
     const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
@@ -3511,7 +3543,7 @@ function assemblePlan(response, options, context = {}) {
         caseNumbers: configCaseNumbers,
         newCaseNumbers,
         existingConfig: context.existingConfig,
-        subtasks: tieredApplied ? response.subtasks : undefined,
+        subtasks: tieredApplied ? tieredSubtasks : undefined,
         subtaskAllocations: tieredApplied ? subtaskAllocations : undefined,
     });
     const tieredNotes = [
@@ -3522,13 +3554,13 @@ function assemblePlan(response, options, context = {}) {
             }] : []),
         ...(tieredApplied ? [{
                 kind: 'system',
-                message: `已按题面子任务表生成 ${response.subtasks?.length || 0} 档分层数据;`
+                message: `已按题面子任务表生成 ${tieredSubtasks.length} 档分层数据;`
                     + 'VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,'
                     + '建议抽查各档 .in 是否符合对应约束',
             }] : []),
         ...(tieredApplied && caseCount > tieredDecision.allocations.length ? [{
                 kind: 'warning',
-                message: `补刀新增测试点 ${newCaseNumbers.slice(tieredDecision.allocations.length).map(n => `#${n}`).join('、')} 已归入子任务 ${response.subtasks?.[response.subtasks.length - 1]?.id ?? ''}(约束最宽档);`
+                message: `补刀新增测试点 ${newCaseNumbers.slice(tieredDecision.allocations.length).map(n => `#${n}`).join('、')} 已归入子任务 ${tieredSubtasks[tieredSubtasks.length - 1]?.id ?? ''}(约束最宽档);`
                     + '其输入仅经全局校验,请人工核对是否符合该档约束',
             }] : []),
     ];
@@ -3644,8 +3676,11 @@ function assemblePlan(response, options, context = {}) {
             caseNumber: index + 1,
             fileNumber: newCaseNumbers[index],
             dataScale: item.dataScale || coveragePlan[index]?.dataScale || 'small',
-            ...(subtaskAllocations[index]
-                ? { subtaskId: subtaskAllocations[index].subtaskId }
+            ...(subtaskAllocations[index] || configBuild.newCaseSubtaskIds[newCaseNumbers[index]] !== undefined
+                ? {
+                    subtaskId: subtaskAllocations[index]?.subtaskId
+                        ?? configBuild.newCaseSubtaskIds[newCaseNumbers[index]],
+                }
                 : {}),
             target: item.label
                 || subtaskAllocations[index]?.guidance
@@ -3875,12 +3910,14 @@ function classifySandboxRepairScope(error) {
         return 'template-py';
     return 'full';
 }
-function buildSandboxRepairPrompt(error, options, scope = classifySandboxRepairScope(error)) {
+function buildSandboxRepairPrompt(error, options, scope = classifySandboxRepairScope(error), coveragePlan) {
     const templates = options.languages.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、') || '（传统题无需模板）';
     const detail = (error instanceof Error ? error.message : String(error)).slice(0, 1600);
+    const coverage = buildCoverageGuidanceBlock(coveragePlan);
     if (scope === 'generator') {
         return `你上一条蓝图的输入生成阶段未通过 Hydro 沙箱验证：
 ${detail}
+${coverage ? `\n${coverage}\n` : ''}
 
 请只输出修复后的 @@@GENERATOR@@@。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
 1. stdout 只能是包含恰好 ${options.caseCount} 个 cases 的紧凑 JSON，使用 json.dumps(..., ensure_ascii=False, separators=(',', ':'))。
@@ -3891,6 +3928,7 @@ ${detail}
     if (scope === 'validator') {
         return `你上一条蓝图的输入校验阶段未通过 Hydro 沙箱验证：
 ${detail}
+${coverage ? `\n${coverage}\n` : ''}
 
 请同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@。先严格依据题面判断是生成输入非法，还是校验器错误地拒绝了合法输入，再修正对应实现；不要通过放弃题面约束、删除校验器或让校验器无条件成功来绕过验证。每个 input 的 UTF-8 内容必须小于 256KB，全部 .in/.out 与辅助文件合计必须小于 1MB。不要输出其他分节、代码围栏或说明文字。`;
     }
@@ -3933,6 +3971,7 @@ ${detail}
     }
     return `你上一条生成蓝图未通过 Hydro 沙箱验证：
 ${detail}
+${coverage ? `\n${coverage}\n` : ''}
 
 请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
 1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
@@ -4352,9 +4391,9 @@ class TestdataGenService {
         };
         return this.applyResultMetadata(plan, results);
     }
-    async generateGenerationArtifacts(params, solution, callOptions, results) {
+    async generateGenerationArtifacts(params, solution, coveragePlan, callOptions, results) {
         const systemPrompt = buildGenerationArtifactsSystemPrompt();
-        const userPrompt = buildGenerationArtifactsUserPrompt(params, solution);
+        const userPrompt = buildGenerationArtifactsUserPrompt(params, solution, coveragePlan);
         const initialResult = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         results.push(initialResult);
         try {
@@ -4663,7 +4702,6 @@ class TestdataGenService {
             // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
             let cppOracleAvailableForAttempt = this.cppOracleAvailable;
             let systemPrompt = buildSandboxBlueprintSystemPrompt(cppOracleAvailableForAttempt);
-            const userPrompt = buildSandboxBlueprintUserPrompt(params);
             let solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(cppOracleAvailableForAttempt);
             const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
             const callOptions = this.getCallOptions(params, attempt);
@@ -4674,6 +4712,7 @@ class TestdataGenService {
                 ? JSON.stringify(params.checkpoint.solution)
                 : '';
             let solution;
+            let originalParsedSubtasks;
             try {
                 if (params.checkpoint?.solution) {
                     solution = this.useProvidedOracle(params.checkpoint.solution, params.options);
@@ -4684,6 +4723,8 @@ class TestdataGenService {
                     solutionSourceContent = initialResult.content;
                     solution = this.useProvidedOracle(parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples), params.options);
                 }
+                if (solution.subtasks?.length)
+                    originalParsedSubtasks = solution.subtasks;
                 void this.emitCheckpoint(params, { solution });
                 report('blueprint', 24);
                 report('solution_verification', 28);
@@ -4720,7 +4761,12 @@ class TestdataGenService {
                 results.push(repairResult);
                 solutionSourceContent = repairResult.content;
                 try {
-                    solution = this.useProvidedOracle(parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples), params.options);
+                    const repairedSolution = parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples);
+                    if (!/^[ \t]*===\s*SUBTASKS\s*===\s*$/im.test(repairResult.content)
+                        && originalParsedSubtasks?.length) {
+                        repairedSolution.subtasks = originalParsedSubtasks;
+                    }
+                    solution = this.useProvidedOracle(repairedSolution, params.options);
                     void this.emitCheckpoint(params, { solution });
                     report('solution_verification', 32);
                     await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, cppOracleAvailableForAttempt, checkerExecutor);
@@ -4731,6 +4777,18 @@ class TestdataGenService {
                     throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true);
                 }
             }
+            // 本轮只在最终解题蓝图确定后计算一次门控与分配。后续外围制品、修复提示、
+            // 补刀扩展和最终配置均消费同一个对象，避免不同阶段重新推导产生档位漂移。
+            const tieredDecision = resolveTieredSubtaskGeneration({
+                caseCount: params.options.caseCount,
+                dataScale: params.options.dataScale,
+                subtasks: solution.subtasks,
+                existingConfig: params.existingConfig,
+            });
+            const generationCoverage = tieredDecision.enabled
+                ? tieredDecision.allocations
+                : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
+            const userPrompt = buildSandboxBlueprintUserPrompt(params, generationCoverage);
             // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
             // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
             report('artifacts', 36);
@@ -4763,7 +4821,7 @@ class TestdataGenService {
                         artifacts: params.checkpoint.artifacts,
                         sourceContent: JSON.stringify(params.checkpoint.artifacts),
                     })
-                    : this.generateGenerationArtifacts(params, solution, callOptions, artifactsResults)
+                    : this.generateGenerationArtifacts(params, solution, generationCoverage, callOptions, artifactsResults)
                         .then(state => {
                         void this.emitCheckpoint(params, { artifacts: state.artifacts });
                         return state;
@@ -4871,7 +4929,10 @@ class TestdataGenService {
                         repairResult = await this.aiClient.chat([
                             { role: 'user', content: userPrompt },
                             { role: 'assistant', content: blueprintSourceContent },
-                            { role: 'user', content: buildSandboxRepairPrompt(firstError, params.options, repairScope) },
+                            {
+                                role: 'user',
+                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage),
+                            },
                         ], systemPrompt, callOptions);
                     }
                 }
@@ -4909,7 +4970,7 @@ class TestdataGenService {
                             { role: 'assistant', content: blueprintSourceContent },
                             {
                                 role: 'user',
-                                content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full'),
+                                content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full', generationCoverage),
                             },
                         ], systemPrompt, callOptions);
                         results.push(fullRepairResult);
@@ -4919,6 +4980,8 @@ class TestdataGenService {
                         };
                         blueprintSourceContent = fullRepairResult.content;
                     }
+                    if (tieredDecision.enabled)
+                        blueprint.subtasks = tieredDecision.subtasks;
                     blueprint = this.useProvidedOracle(blueprint, params.options);
                     const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
                     const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
@@ -4959,6 +5022,7 @@ class TestdataGenService {
                 mode: 'sandbox',
                 existingFiles: params.existingFiles,
                 existingConfig: params.existingConfig,
+                tieredDecision,
             }), [...results, ...optionalDiscriminationResults]);
         }
         finally {
