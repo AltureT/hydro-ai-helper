@@ -584,20 +584,119 @@ export interface BuildConfigYamlOptions {
   languages: TemplateLang[];
   /** 指定实际文件编号；缺省时保持 1..caseCount 的旧行为。 */
   caseNumbers?: number[];
+  /** 本次新分配的文件编号；用于安全并入既有显式 cases 子任务。 */
+  newCaseNumbers?: number[];
   /** 现有 pdoc.config；保留 checker/time/memory 等非测试点设置。 */
   existingConfig?: string;
 }
 
-function parseExistingProblemConfig(raw?: string): Record<string, unknown> {
-  if (!raw?.trim()) return {};
+export const TESTDATA_CONFIG_UNPARSABLE_KEY = 'ai_helper_testdata_err_config_unparsable';
+const TESTDATA_CONFIG_UNPARSABLE_MESSAGE = '现有 config.yaml 无法解析,为避免覆盖丢失配置已中止;请先修复或删除该文件后重试';
+
+function loadExistingProblemConfig(raw?: string): unknown {
+  if (!raw?.trim()) return undefined;
   try {
-    const parsed = yaml.load(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {};
+    return yaml.load(raw);
   } catch {
-    return {};
+    throw new TestdataGenerationError(
+      TESTDATA_CONFIG_UNPARSABLE_MESSAGE,
+      'config_parse',
+      [],
+      false,
+      TESTDATA_CONFIG_UNPARSABLE_KEY,
+    );
   }
+}
+
+/** 非空既有配置若无法解析必须硬失败，避免后续生成覆盖教师原配置。 */
+export function assertExistingConfigParsable(raw?: string): void {
+  loadExistingProblemConfig(raw);
+}
+
+function parseExistingProblemConfig(raw?: string): Record<string, unknown> {
+  const parsed = loadExistingProblemConfig(raw);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
+}
+
+function cloneConfigValue<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(item => cloneConfigValue(item)) as T;
+  }
+  if (value instanceof Date) {
+    return new Date(value.getTime()) as T;
+  }
+  if (value && typeof value === 'object') {
+    const cloned: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      cloned[key] = cloneConfigValue(item);
+    }
+    return cloned as T;
+  }
+  return value;
+}
+
+export interface ConfigSubtaskMergeNote {
+  kind: 'warning' | 'system';
+  message: string;
+}
+
+export interface ConfigSubtaskMergeResult {
+  subtasks: unknown[];
+  note?: ConfigSubtaskMergeNote;
+}
+
+function normalizeCaseNumbers(caseNumbers: number[]): number[] {
+  return [...new Set(caseNumbers)].sort((a, b) => a - b);
+}
+
+/** 保留既有子任务；仅在全部子任务均为显式 cases 写法时安全追加新测试点。 */
+export function mergeConfigSubtasks(
+  existingSubtasks: unknown,
+  newCaseNumbers: number[],
+): ConfigSubtaskMergeResult | undefined {
+  if (!Array.isArray(existingSubtasks) || existingSubtasks.length === 0) return undefined;
+  const subtasks = cloneConfigValue(existingSubtasks);
+  const numbers = normalizeCaseNumbers(newCaseNumbers);
+  if (numbers.length === 0) return { subtasks };
+
+  const allExplicitCases = subtasks.every(subtask =>
+    !!subtask
+    && typeof subtask === 'object'
+    && !Array.isArray(subtask)
+    && Array.isArray((subtask as Record<string, unknown>).cases));
+  const caseLabels = numbers.map(number => `#${number}`).join('、');
+  if (!allExplicitCases) {
+    return {
+      subtasks,
+      note: {
+        kind: 'warning',
+        message: `该题已配置子任务;本次新增测试点 ${caseLabels} 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。`,
+      },
+    };
+  }
+
+  const lastIndex = subtasks.length - 1;
+  const lastSubtask = subtasks[lastIndex] as Record<string, unknown>;
+  lastSubtask.cases = [
+    ...(lastSubtask.cases as unknown[]),
+    ...numbers.map(number => ({
+      input: `${number}.in`,
+      output: `${number}.out`,
+    })),
+  ];
+  const configuredId = lastSubtask.id;
+  const subtaskId = typeof configuredId === 'string' || typeof configuredId === 'number'
+    ? configuredId
+    : lastIndex + 1;
+  return {
+    subtasks,
+    note: {
+      kind: 'system',
+      message: `新增测试点 ${caseLabels} 已并入子任务 ${subtaskId},请核对分值分配。`,
+    },
+  };
 }
 
 /** 判断现有题目是否使用非 default/strict 的自定义 checker。 */
@@ -615,12 +714,18 @@ export function hasCustomChecker(raw?: string): boolean {
  * 写入名为 config.yaml 的测试数据后，HydroOJ 会自动将其内容同步到
  * 题目的评测设置（pdoc.config），无需再手动到「评测设置」页保存。
  */
-export function buildConfigYaml(options: BuildConfigYamlOptions): string {
+function buildConfigYamlWithMetadata(options: BuildConfigYamlOptions): {
+  content: string;
+  subtaskNote?: ConfigSubtaskMergeNote;
+} {
   const { problemType, caseCount, languages } = options;
   const previous = parseExistingProblemConfig(options.existingConfig);
   const caseNumbers = options.caseNumbers?.length
-    ? [...new Set(options.caseNumbers)].sort((a, b) => a - b)
+    ? normalizeCaseNumbers(options.caseNumbers)
     : Array.from({ length: caseCount }, (_, i) => i + 1);
+  const newCaseNumbers = options.newCaseNumbers === undefined
+    ? caseNumbers
+    : normalizeCaseNumbers(options.newCaseNumbers);
   const cases = caseNumbers.map(number => ({
     input: `${number}.in`,
     output: `${number}.out`,
@@ -649,13 +754,14 @@ export function buildConfigYaml(options: BuildConfigYamlOptions): string {
     config.user_extra_files = previousUserExtraFiles;
   }
 
-  config.subtasks = [{
-    score: 100,
-    if: [],
-    id: 1,
-    type: 'sum',
-    cases,
-  }];
+  const subtaskMerge = mergeConfigSubtasks(previous.subtasks, newCaseNumbers);
+  config.subtasks = subtaskMerge?.subtasks ?? [{
+      score: 100,
+      if: [],
+      id: 1,
+      type: 'sum',
+      cases,
+    }];
 
   if (problemType === 'function') {
     config.langs = languages.flatMap(l => LANG_FAMILY_CODES[l]);
@@ -663,7 +769,14 @@ export function buildConfigYaml(options: BuildConfigYamlOptions): string {
     config.langs = previous.langs;
   }
 
-  return yaml.dump(config, { lineWidth: 120, noRefs: true });
+  return {
+    content: yaml.dump(config, { lineWidth: 120, noRefs: true }),
+    ...(subtaskMerge?.note ? { subtaskNote: subtaskMerge.note } : {}),
+  };
+}
+
+export function buildConfigYaml(options: BuildConfigYamlOptions): string {
+  return buildConfigYamlWithMetadata(options).content;
 }
 
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
@@ -3089,12 +3202,24 @@ export function assemblePlan(
   const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
   const existingComplete = getExistingNumericCases(context.existingFiles).complete;
   const configCaseNumbers = [...new Set([...existingComplete, ...newCaseNumbers])].sort((a, b) => a - b);
+  const configBuild = buildConfigYamlWithMetadata({
+    problemType: response.problemType,
+    caseCount: configCaseNumbers.length,
+    languages: options.languages,
+    caseNumbers: configCaseNumbers,
+    newCaseNumbers,
+    existingConfig: context.existingConfig,
+  });
   const discriminationNotes = buildDiscriminationNotes(
     response.verification?.discrimination,
     response.discriminationInitialCaseCount ?? response.cases.length,
     newCaseNumbers,
   );
-  const notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n') || undefined;
+  const notes = [
+    response.notes,
+    ...discriminationNotes,
+    configBuild.subtaskNote?.message,
+  ].filter(Boolean).join('\n') || undefined;
   const sourceNotesStructured = response.notesStructured ?? {
     warnings: [],
     system: [],
@@ -3104,10 +3229,12 @@ export function assemblePlan(
     warnings: [
       ...sourceNotesStructured.warnings,
       ...discriminationNotes.filter(note => note.startsWith('警告:')),
+      ...(configBuild.subtaskNote?.kind === 'warning' ? [configBuild.subtaskNote.message] : []),
     ],
     system: [
       ...sourceNotesStructured.system,
       ...discriminationNotes.filter(note => !note.startsWith('警告:')),
+      ...(configBuild.subtaskNote?.kind === 'system' ? [configBuild.subtaskNote.message] : []),
     ],
     ...(sourceNotesStructured.ai ? { ai: sourceNotesStructured.ai } : {}),
   };
@@ -3194,13 +3321,7 @@ export function assemblePlan(
 
   files.push({
     name: 'config.yaml',
-    content: buildConfigYaml({
-      problemType: response.problemType,
-      caseCount: configCaseNumbers.length,
-      languages: options.languages,
-      caseNumbers: configCaseNumbers,
-      existingConfig: context.existingConfig,
-    }),
+    content: configBuild.content,
     kind: 'config',
     origin: 'deterministic',
   });
@@ -3281,6 +3402,7 @@ export function buildSkeletonPlan(
   existingFiles: string[] = [],
   existingConfig?: string,
 ): GenerationPlan {
+  assertExistingConfigParsable(existingConfig);
   const autoDetectedFunction = options.problemKind === 'auto' && isLikelyFunctionProblem(statementMarkdown);
   const problemType: 'function' | 'traditional' = options.problemKind === 'function' || autoDetectedFunction
     ? 'function'
@@ -3290,6 +3412,14 @@ export function buildSkeletonPlan(
   const existingComplete = getExistingNumericCases(existingFiles).complete;
   const configCaseNumbers = [...new Set([...existingComplete, ...caseNumbers])].sort((a, b) => a - b);
   const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
+  const configBuild = buildConfigYamlWithMetadata({
+    problemType,
+    caseCount: configCaseNumbers.length,
+    languages: options.languages,
+    caseNumbers: configCaseNumbers,
+    newCaseNumbers: caseNumbers,
+    existingConfig,
+  });
 
   // 骨架模式全部为确定性生成/空占位，无沙箱实跑制品
   for (const number of caseNumbers) {
@@ -3316,13 +3446,7 @@ export function buildSkeletonPlan(
 
   files.push({
     name: 'config.yaml',
-    content: buildConfigYaml({
-      problemType,
-      caseCount: configCaseNumbers.length,
-      languages: options.languages,
-      caseNumbers: configCaseNumbers,
-      existingConfig,
-    }),
+    content: configBuild.content,
     kind: 'config',
     origin: 'deterministic',
   });
@@ -3336,11 +3460,22 @@ export function buildSkeletonPlan(
   } else if (options.problemKind === 'auto') {
     noteParts.push('题型未指定，已按传统题生成；如需函数题骨架（模板 + compile.sh），请将题目类型选为"函数题"后重新生成。');
   }
+  const legacyNotes = noteParts.join('');
+  const subtaskNote = configBuild.subtaskNote;
 
   return {
     problemType,
     analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
-    notes: noteParts.join(''),
+    notes: subtaskNote ? `${legacyNotes}\n${subtaskNote.message}` : legacyNotes,
+    ...(subtaskNote ? {
+      notesStructured: {
+        warnings: subtaskNote.kind === 'warning' ? [subtaskNote.message] : [],
+        system: [
+          ...noteParts,
+          ...(subtaskNote.kind === 'system' ? [subtaskNote.message] : []),
+        ],
+      },
+    } : {}),
     files,
     caseCount: options.caseCount,
     totalCaseCount: configCaseNumbers.length,
@@ -3386,17 +3521,20 @@ export class TestdataGenerationError extends Error {
   readonly telemetryMetadata: Record<string, unknown>;
   readonly recommendDeeperReasoning: boolean;
   readonly chatResults: readonly ChatResult[];
+  readonly userMessageKey?: string;
 
   constructor(
     message: string,
     failureStage: string,
     results: ChatResult[] = [],
     recommendDeeperReasoning = false,
+    userMessageKey?: string,
   ) {
     super(message);
     this.name = 'TestdataGenerationError';
     this.recommendDeeperReasoning = recommendDeeperReasoning;
     this.chatResults = [...results];
+    this.userMessageKey = userMessageKey;
     const usedModels = [...new Set(results.map(result =>
       `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
     const lastModel = results[results.length - 1]?.usedModel;
@@ -3415,6 +3553,10 @@ export class TestdataGenerationError extends Error {
 
 export function extractTestdataErrorMetadata(err: unknown): Record<string, unknown> | undefined {
   return err instanceof TestdataGenerationError ? err.telemetryMetadata : undefined;
+}
+
+export function extractTestdataUserMessageKey(err: unknown): string | undefined {
+  return err instanceof TestdataGenerationError ? err.userMessageKey : undefined;
 }
 
 /** 仅在模型已经自动修复、但产物仍未通过解析/机器验证时建议换用更深思考模型。 */
@@ -3681,6 +3823,7 @@ export class TestdataGenService {
   }
 
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
+    assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const requiresAcceptedRecordVerification = !!params.options.providedStd?.trim()
       && params.options.providedStdSource === 'accepted-record';
@@ -4078,7 +4221,7 @@ export class TestdataGenService {
     analysis: string;
     samples: SampleIO[];
     signal?: AbortSignal;
-  }): Promise<KillTarget[]> {
+  }, results?: ChatResult[]): Promise<KillTarget[]> {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
       buildKillTargetsSystemPrompt(),
@@ -4087,6 +4230,7 @@ export class TestdataGenService {
         timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
       },
     );
+    results?.push(result);
     return parseKillTargetsResponse(result.content);
   }
 
@@ -4096,6 +4240,7 @@ export class TestdataGenService {
     target: KillTarget,
     timeoutMs: number,
     signal: AbortSignal,
+    results: ChatResult[],
   ): Promise<HackCandidate[]> {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }],
@@ -4105,6 +4250,7 @@ export class TestdataGenService {
         timeoutMs,
       },
     );
+    results.push(result);
     return parseHackCasesResponse(result.content).slice(0, 3);
   }
 
@@ -4118,6 +4264,7 @@ export class TestdataGenService {
     response: GenerationResponse,
     killTargets: KillTarget[],
     runner: TestdataSandboxRunner,
+    results: ChatResult[],
   ): Promise<GenerationResponse> {
     const discrimination = response.verification?.discrimination;
     const deadlineAt = response.discriminationDeadlineAt;
@@ -4160,6 +4307,7 @@ export class TestdataGenService {
             target,
             remainingBudgetMs,
             deadlineScope.signal,
+            results,
           );
         } catch (err) {
           if (params.signal?.aborted) throw err;
@@ -4374,7 +4522,7 @@ export class TestdataGenService {
         analysis: solution.analysis || '',
         samples: killTargetSamples,
         signal: params.signal,
-      }).catch((err): KillTarget[] => {
+      }, results).catch((err): KillTarget[] => {
         if (isCancellation(err)) throw err;
         return [];
       }),
@@ -4559,6 +4707,7 @@ export class TestdataGenService {
       response,
       response.discriminationKillTargets || [],
       runner,
+      results,
     );
     report('assembling', 96);
     return this.applyResultMetadata(assemblePlan(response, params.options, {

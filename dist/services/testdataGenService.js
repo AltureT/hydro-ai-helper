@@ -18,7 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TestdataGenerationError = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
+exports.TestdataGenService = exports.TestdataGenerationError = exports.TESTDATA_CONFIG_UNPARSABLE_KEY = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
 exports.partitionStressValidation = partitionStressValidation;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
@@ -27,6 +27,8 @@ exports.getExistingNumericCases = getExistingNumericCases;
 exports.allocateCaseNumbers = allocateCaseNumbers;
 exports.detectStdFilename = detectStdFilename;
 exports.buildCompileSh = buildCompileSh;
+exports.assertExistingConfigParsable = assertExistingConfigParsable;
+exports.mergeConfigSubtasks = mergeConfigSubtasks;
 exports.hasCustomChecker = hasCustomChecker;
 exports.buildConfigYaml = buildConfigYaml;
 exports.buildTestdataSystemPrompt = buildTestdataSystemPrompt;
@@ -75,6 +77,7 @@ exports.assemblePlan = assemblePlan;
 exports.isLikelyFunctionProblem = isLikelyFunctionProblem;
 exports.buildSkeletonPlan = buildSkeletonPlan;
 exports.extractTestdataErrorMetadata = extractTestdataErrorMetadata;
+exports.extractTestdataUserMessageKey = extractTestdataUserMessageKey;
 exports.shouldRecommendDeeperReasoning = shouldRecommendDeeperReasoning;
 exports.classifySandboxRepairScope = classifySandboxRepairScope;
 exports.buildSandboxRepairPrompt = buildSandboxRepairPrompt;
@@ -337,18 +340,89 @@ else
 fi
 `;
 }
-function parseExistingProblemConfig(raw) {
+exports.TESTDATA_CONFIG_UNPARSABLE_KEY = 'ai_helper_testdata_err_config_unparsable';
+const TESTDATA_CONFIG_UNPARSABLE_MESSAGE = '现有 config.yaml 无法解析,为避免覆盖丢失配置已中止;请先修复或删除该文件后重试';
+function loadExistingProblemConfig(raw) {
     if (!raw?.trim())
-        return {};
+        return undefined;
     try {
-        const parsed = js_yaml_1.default.load(raw);
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-            ? parsed
-            : {};
+        return js_yaml_1.default.load(raw);
     }
     catch {
-        return {};
+        throw new TestdataGenerationError(TESTDATA_CONFIG_UNPARSABLE_MESSAGE, 'config_parse', [], false, exports.TESTDATA_CONFIG_UNPARSABLE_KEY);
     }
+}
+/** 非空既有配置若无法解析必须硬失败，避免后续生成覆盖教师原配置。 */
+function assertExistingConfigParsable(raw) {
+    loadExistingProblemConfig(raw);
+}
+function parseExistingProblemConfig(raw) {
+    const parsed = loadExistingProblemConfig(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed
+        : {};
+}
+function cloneConfigValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(item => cloneConfigValue(item));
+    }
+    if (value instanceof Date) {
+        return new Date(value.getTime());
+    }
+    if (value && typeof value === 'object') {
+        const cloned = {};
+        for (const [key, item] of Object.entries(value)) {
+            cloned[key] = cloneConfigValue(item);
+        }
+        return cloned;
+    }
+    return value;
+}
+function normalizeCaseNumbers(caseNumbers) {
+    return [...new Set(caseNumbers)].sort((a, b) => a - b);
+}
+/** 保留既有子任务；仅在全部子任务均为显式 cases 写法时安全追加新测试点。 */
+function mergeConfigSubtasks(existingSubtasks, newCaseNumbers) {
+    if (!Array.isArray(existingSubtasks) || existingSubtasks.length === 0)
+        return undefined;
+    const subtasks = cloneConfigValue(existingSubtasks);
+    const numbers = normalizeCaseNumbers(newCaseNumbers);
+    if (numbers.length === 0)
+        return { subtasks };
+    const allExplicitCases = subtasks.every(subtask => !!subtask
+        && typeof subtask === 'object'
+        && !Array.isArray(subtask)
+        && Array.isArray(subtask.cases));
+    const caseLabels = numbers.map(number => `#${number}`).join('、');
+    if (!allExplicitCases) {
+        return {
+            subtasks,
+            note: {
+                kind: 'warning',
+                message: `该题已配置子任务;本次新增测试点 ${caseLabels} 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。`,
+            },
+        };
+    }
+    const lastIndex = subtasks.length - 1;
+    const lastSubtask = subtasks[lastIndex];
+    lastSubtask.cases = [
+        ...lastSubtask.cases,
+        ...numbers.map(number => ({
+            input: `${number}.in`,
+            output: `${number}.out`,
+        })),
+    ];
+    const configuredId = lastSubtask.id;
+    const subtaskId = typeof configuredId === 'string' || typeof configuredId === 'number'
+        ? configuredId
+        : lastIndex + 1;
+    return {
+        subtasks,
+        note: {
+            kind: 'system',
+            message: `新增测试点 ${caseLabels} 已并入子任务 ${subtaskId},请核对分值分配。`,
+        },
+    };
 }
 /** 判断现有题目是否使用非 default/strict 的自定义 checker。 */
 function hasCustomChecker(raw) {
@@ -364,12 +438,15 @@ function hasCustomChecker(raw) {
  * 写入名为 config.yaml 的测试数据后，HydroOJ 会自动将其内容同步到
  * 题目的评测设置（pdoc.config），无需再手动到「评测设置」页保存。
  */
-function buildConfigYaml(options) {
+function buildConfigYamlWithMetadata(options) {
     const { problemType, caseCount, languages } = options;
     const previous = parseExistingProblemConfig(options.existingConfig);
     const caseNumbers = options.caseNumbers?.length
-        ? [...new Set(options.caseNumbers)].sort((a, b) => a - b)
+        ? normalizeCaseNumbers(options.caseNumbers)
         : Array.from({ length: caseCount }, (_, i) => i + 1);
+    const newCaseNumbers = options.newCaseNumbers === undefined
+        ? caseNumbers
+        : normalizeCaseNumbers(options.newCaseNumbers);
     const cases = caseNumbers.map(number => ({
         input: `${number}.in`,
         output: `${number}.out`,
@@ -397,7 +474,8 @@ function buildConfigYaml(options) {
     else if (previousUserExtraFiles.length > 0) {
         config.user_extra_files = previousUserExtraFiles;
     }
-    config.subtasks = [{
+    const subtaskMerge = mergeConfigSubtasks(previous.subtasks, newCaseNumbers);
+    config.subtasks = subtaskMerge?.subtasks ?? [{
             score: 100,
             if: [],
             id: 1,
@@ -410,7 +488,13 @@ function buildConfigYaml(options) {
     else if (Array.isArray(previous.langs)) {
         config.langs = previous.langs;
     }
-    return js_yaml_1.default.dump(config, { lineWidth: 120, noRefs: true });
+    return {
+        content: js_yaml_1.default.dump(config, { lineWidth: 120, noRefs: true }),
+        ...(subtaskMerge?.note ? { subtaskNote: subtaskMerge.note } : {}),
+    };
+}
+function buildConfigYaml(options) {
+    return buildConfigYamlWithMetadata(options).content;
 }
 // ─── 提示词构建 ───────────────────────────────────────────────────────────────
 /** 函数题参考模板：普通函数题（Python 驱动） */
@@ -2553,8 +2637,20 @@ function assemblePlan(response, options, context = {}) {
     const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
     const existingComplete = getExistingNumericCases(context.existingFiles).complete;
     const configCaseNumbers = [...new Set([...existingComplete, ...newCaseNumbers])].sort((a, b) => a - b);
+    const configBuild = buildConfigYamlWithMetadata({
+        problemType: response.problemType,
+        caseCount: configCaseNumbers.length,
+        languages: options.languages,
+        caseNumbers: configCaseNumbers,
+        newCaseNumbers,
+        existingConfig: context.existingConfig,
+    });
     const discriminationNotes = buildDiscriminationNotes(response.verification?.discrimination, response.discriminationInitialCaseCount ?? response.cases.length, newCaseNumbers);
-    const notes = [response.notes, ...discriminationNotes].filter(Boolean).join('\n') || undefined;
+    const notes = [
+        response.notes,
+        ...discriminationNotes,
+        configBuild.subtaskNote?.message,
+    ].filter(Boolean).join('\n') || undefined;
     const sourceNotesStructured = response.notesStructured ?? {
         warnings: [],
         system: [],
@@ -2564,10 +2660,12 @@ function assemblePlan(response, options, context = {}) {
         warnings: [
             ...sourceNotesStructured.warnings,
             ...discriminationNotes.filter(note => note.startsWith('警告:')),
+            ...(configBuild.subtaskNote?.kind === 'warning' ? [configBuild.subtaskNote.message] : []),
         ],
         system: [
             ...sourceNotesStructured.system,
             ...discriminationNotes.filter(note => !note.startsWith('警告:')),
+            ...(configBuild.subtaskNote?.kind === 'system' ? [configBuild.subtaskNote.message] : []),
         ],
         ...(sourceNotesStructured.ai ? { ai: sourceNotesStructured.ai } : {}),
     };
@@ -2638,13 +2736,7 @@ function assemblePlan(response, options, context = {}) {
     }
     files.push({
         name: 'config.yaml',
-        content: buildConfigYaml({
-            problemType: response.problemType,
-            caseCount: configCaseNumbers.length,
-            languages: options.languages,
-            caseNumbers: configCaseNumbers,
-            existingConfig: context.existingConfig,
-        }),
+        content: configBuild.content,
         kind: 'config',
         origin: 'deterministic',
     });
@@ -2715,6 +2807,7 @@ function isLikelyFunctionProblem(statementMarkdown) {
  * 模板机制部分，测试数据内容由教师在预览中手动填写。
  */
 function buildSkeletonPlan(options, statementMarkdown = '', existingFiles = [], existingConfig) {
+    assertExistingConfigParsable(existingConfig);
     const autoDetectedFunction = options.problemKind === 'auto' && isLikelyFunctionProblem(statementMarkdown);
     const problemType = options.problemKind === 'function' || autoDetectedFunction
         ? 'function'
@@ -2724,6 +2817,14 @@ function buildSkeletonPlan(options, statementMarkdown = '', existingFiles = [], 
     const existingComplete = getExistingNumericCases(existingFiles).complete;
     const configCaseNumbers = [...new Set([...existingComplete, ...caseNumbers])].sort((a, b) => a - b);
     const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
+    const configBuild = buildConfigYamlWithMetadata({
+        problemType,
+        caseCount: configCaseNumbers.length,
+        languages: options.languages,
+        caseNumbers: configCaseNumbers,
+        newCaseNumbers: caseNumbers,
+        existingConfig,
+    });
     // 骨架模式全部为确定性生成/空占位，无沙箱实跑制品
     for (const number of caseNumbers) {
         files.push({ name: `${number}.in`, content: '\n', kind: 'case-in', origin: 'deterministic' });
@@ -2746,13 +2847,7 @@ function buildSkeletonPlan(options, statementMarkdown = '', existingFiles = [], 
     }
     files.push({
         name: 'config.yaml',
-        content: buildConfigYaml({
-            problemType,
-            caseCount: configCaseNumbers.length,
-            languages: options.languages,
-            caseNumbers: configCaseNumbers,
-            existingConfig,
-        }),
+        content: configBuild.content,
         kind: 'config',
         origin: 'deterministic',
     });
@@ -2767,10 +2862,21 @@ function buildSkeletonPlan(options, statementMarkdown = '', existingFiles = [], 
     else if (options.problemKind === 'auto') {
         noteParts.push('题型未指定，已按传统题生成；如需函数题骨架（模板 + compile.sh），请将题目类型选为"函数题"后重新生成。');
     }
+    const legacyNotes = noteParts.join('');
+    const subtaskNote = configBuild.subtaskNote;
     return {
         problemType,
         analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
-        notes: noteParts.join(''),
+        notes: subtaskNote ? `${legacyNotes}\n${subtaskNote.message}` : legacyNotes,
+        ...(subtaskNote ? {
+            notesStructured: {
+                warnings: subtaskNote.kind === 'warning' ? [subtaskNote.message] : [],
+                system: [
+                    ...noteParts,
+                    ...(subtaskNote.kind === 'system' ? [subtaskNote.message] : []),
+                ],
+            },
+        } : {}),
         files,
         caseCount: options.caseCount,
         totalCaseCount: configCaseNumbers.length,
@@ -2803,11 +2909,12 @@ function buildTemplateRepairPrompt(missing) {
 }
 /** 携带匿名模型/阶段信息的业务错误，供遥测判断失败是否与模型相关。 */
 class TestdataGenerationError extends Error {
-    constructor(message, failureStage, results = [], recommendDeeperReasoning = false) {
+    constructor(message, failureStage, results = [], recommendDeeperReasoning = false, userMessageKey) {
         super(message);
         this.name = 'TestdataGenerationError';
         this.recommendDeeperReasoning = recommendDeeperReasoning;
         this.chatResults = [...results];
+        this.userMessageKey = userMessageKey;
         const usedModels = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
         const lastModel = results[results.length - 1]?.usedModel;
         this.telemetryMetadata = {
@@ -2825,6 +2932,9 @@ class TestdataGenerationError extends Error {
 exports.TestdataGenerationError = TestdataGenerationError;
 function extractTestdataErrorMetadata(err) {
     return err instanceof TestdataGenerationError ? err.telemetryMetadata : undefined;
+}
+function extractTestdataUserMessageKey(err) {
+    return err instanceof TestdataGenerationError ? err.userMessageKey : undefined;
 }
 /** 仅在模型已经自动修复、但产物仍未通过解析/机器验证时建议换用更深思考模型。 */
 function shouldRecommendDeeperReasoning(err) {
@@ -3018,6 +3128,7 @@ class TestdataGenService {
         return attempt > 1 ? 60 + (percent * 0.39) : percent;
     }
     async generate(params) {
+        assertExistingConfigParsable(params.existingConfig);
         this.emitProgress(params, 'preparing', 2);
         const requiresAcceptedRecordVerification = !!params.options.providedStd?.trim()
             && params.options.providedStdSource === 'accepted-record';
@@ -3318,25 +3429,27 @@ class TestdataGenService {
             }
         }
     }
-    async generateKillTargets(input) {
+    async generateKillTargets(input, results) {
         const result = await this.aiClient.chat([{ role: 'user', content: buildKillTargetsUserPrompt(input) }], buildKillTargetsSystemPrompt(), {
             ...this.getCallOptions({ signal: input.signal }),
             timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
         });
+        results?.push(result);
         return parseKillTargetsResponse(result.content);
     }
-    async generateHackCandidates(params, analysis, target, timeoutMs, signal) {
+    async generateHackCandidates(params, analysis, target, timeoutMs, signal, results) {
         const result = await this.aiClient.chat([{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }], buildHackCasesSystemPrompt(), {
             ...this.getCallOptions({ signal, onProgress: params.onProgress }),
             timeoutMs,
         });
+        results.push(result);
         return parseHackCasesResponse(result.content).slice(0, 3);
     }
     /**
      * 仅为正式数据未卡住的 WA 靶子尝试小规模补刀。所有候选必须依次通过
      * VALIDATOR、ORACLE 与该错误解本身的沙箱复跑，任一基础设施失败均静默停下。
      */
-    async repairSurvivingKillTargets(params, blueprint, response, killTargets, runner) {
+    async repairSurvivingKillTargets(params, blueprint, response, killTargets, runner, results) {
         const discrimination = response.verification?.discrimination;
         const deadlineAt = response.discriminationDeadlineAt;
         if (!discrimination || deadlineAt === undefined || killTargets.length === 0)
@@ -3368,7 +3481,7 @@ class TestdataGenService {
                     const remainingBudgetMs = deadlineAt - Date.now();
                     if (remainingBudgetMs <= 0)
                         break targetLoop;
-                    candidates = await this.generateHackCandidates(params, blueprint.analysis || '', target, remainingBudgetMs, deadlineScope.signal);
+                    candidates = await this.generateHackCandidates(params, blueprint.analysis || '', target, remainingBudgetMs, deadlineScope.signal, results);
                 }
                 catch (err) {
                     if (params.signal?.aborted)
@@ -3541,7 +3654,7 @@ class TestdataGenService {
                 analysis: solution.analysis || '',
                 samples: killTargetSamples,
                 signal: params.signal,
-            }).catch((err) => {
+            }, results).catch((err) => {
                 if (isCancellation(err))
                     throw err;
                 return [];
@@ -3666,7 +3779,7 @@ class TestdataGenService {
         }
         const initialCaseCount = response.cases.length;
         response.discriminationInitialCaseCount = initialCaseCount;
-        response = await this.repairSurvivingKillTargets(params, blueprint, response, response.discriminationKillTargets || [], runner);
+        response = await this.repairSurvivingKillTargets(params, blueprint, response, response.discriminationKillTargets || [], runner, results);
         report('assembling', 96);
         return this.applyResultMetadata(assemblePlan(response, params.options, {
             mode: 'sandbox',

@@ -7,6 +7,8 @@ import {
   isSafeTestdataFilename,
   buildCompileSh,
   buildConfigYaml,
+  mergeConfigSubtasks,
+  assertExistingConfigParsable,
   buildCoveragePlan,
   allocateCaseNumbers,
   getExistingNumericCases,
@@ -462,12 +464,100 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('time: 2500ms');
     expect(yamlText).toContain('memory: 512m');
     expect(yamlText).toContain('input: 1.in');
-    expect(yamlText).not.toContain('old.in');
+    expect(yamlText).toContain('old.in');
   });
 
   it('default/strict checker 不按自定义 checker 处理', () => {
     expect(hasCustomChecker('checker_type: default')).toBe(false);
     expect(hasCustomChecker('checker_type: strict')).toBe(false);
+  });
+});
+
+describe('mergeConfigSubtasks', () => {
+  it('无既有 subtasks 时保持扁平配置生成路径', () => {
+    expect(mergeConfigSubtasks(undefined, [1, 2])).toBeUndefined();
+    expect(mergeConfigSubtasks([], [1, 2])).toBeUndefined();
+  });
+
+  it('全 cases 式 subtasks 深拷贝保留并向最后一项追加排序后的新增测试点', () => {
+    const existing = [
+      {
+        id: 1,
+        score: 40,
+        cases: [{ input: 'old-a.in', output: 'old-a.out' }],
+      },
+      {
+        id: 2,
+        score: 60,
+        cases: [{ input: 'old-b.in', output: 'old-b.out' }],
+      },
+    ];
+    const result = mergeConfigSubtasks(existing, [5, 3, 5]);
+
+    expect(result).toEqual({
+      subtasks: [
+        {
+          id: 1,
+          score: 40,
+          cases: [{ input: 'old-a.in', output: 'old-a.out' }],
+        },
+        {
+          id: 2,
+          score: 60,
+          cases: [
+            { input: 'old-b.in', output: 'old-b.out' },
+            { input: '3.in', output: '3.out' },
+            { input: '5.in', output: '5.out' },
+          ],
+        },
+      ],
+      note: {
+        kind: 'system',
+        message: '新增测试点 #3、#5 已并入子任务 2,请核对分值分配。',
+      },
+    });
+    expect(result?.subtasks).not.toBe(existing);
+    expect(result?.subtasks[0]).not.toBe(existing[0]);
+    expect(existing[1].cases).toEqual([{ input: 'old-b.in', output: 'old-b.out' }]);
+  });
+
+  it('含 if 式 subtask 时深拷贝原样保留并返回未纳入警告', () => {
+    const existing = [
+      { id: 7, score: 100, if: ['1 <= id && id <= 2'], type: 'sum' },
+    ];
+    const result = mergeConfigSubtasks(existing, [4, 3]);
+
+    expect(result).toEqual({
+      subtasks: existing,
+      note: {
+        kind: 'warning',
+        message: '该题已配置子任务;本次新增测试点 #3、#4 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。',
+      },
+    });
+    expect(result?.subtasks).not.toBe(existing);
+    expect(result?.subtasks[0]).not.toBe(existing[0]);
+  });
+});
+
+describe('assertExistingConfigParsable', () => {
+  it('非空非法 YAML 抛出带用户消息 key 的 TestdataGenerationError', () => {
+    expect.assertions(3);
+    try {
+      assertExistingConfigParsable('subtasks:\n  - cases: [1\n');
+    } catch (err) {
+      expect(err).toBeInstanceOf(TestdataGenerationError);
+      expect((err as TestdataGenerationError).userMessageKey)
+        .toBe('ai_helper_testdata_err_config_unparsable');
+      expect((err as Error).message).toContain('为避免覆盖丢失配置已中止');
+    }
+  });
+
+  it.each([
+    ['合法配置', 'type: default\nsubtasks: []\n'],
+    ['空配置', ' \n\t'],
+    ['缺失配置', undefined],
+  ])('%s 不受影响', (_label, raw) => {
+    expect(() => assertExistingConfigParsable(raw)).not.toThrow();
   });
 });
 
@@ -1010,6 +1100,75 @@ describe('assemblePlan', () => {
     expect(config).not.toContain('input: 2.in');
   });
 
+  it('既有显式 cases 子任务保持顺序并将排序后的新增编号追加到最后一项', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    const plan = assemblePlan(response, options, {
+      existingFiles: ['1.in', '1.out', '2.in'],
+      existingConfig: [
+        'type: default',
+        'subtasks:',
+        '  - id: 1',
+        '    score: 40',
+        '    cases:',
+        '      - input: 1.in',
+        '        output: 1.out',
+        '  - id: 9',
+        '    score: 60',
+        '    cases:',
+        '      - input: old.in',
+        '        output: old.out',
+      ].join('\n'),
+    });
+
+    const config = plan.files.find(file => file.name === 'config.yaml')?.content || '';
+    expect(config.indexOf('id: 1')).toBeLessThan(config.indexOf('id: 9'));
+    expect(config).toContain('input: old.in');
+    expect(config.indexOf('input: 3.in')).toBeLessThan(config.indexOf('input: 4.in'));
+    expect(plan.notesStructured?.system).toContain(
+      '新增测试点 #3、#4 已并入子任务 9,请核对分值分配。',
+    );
+    expect(plan.notes).toContain('新增测试点 #3、#4 已并入子任务 9,请核对分值分配。');
+  });
+
+  it('既有 if 式子任务不接收新增测试点并在结构化与 legacy 说明中警告', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      languages: [],
+    };
+    const response = parseGenerationResponse(
+      makeAiJson({ problemType: 'traditional' }),
+      options,
+    );
+    const warning = '该题已配置子任务;本次新增测试点 #3、#4 未纳入任何子任务,评测不会使用它们,请手动调整 config.yaml。';
+    const plan = assemblePlan(response, options, {
+      existingFiles: ['1.in', '1.out', '2.in'],
+      existingConfig: [
+        'type: default',
+        'subtasks:',
+        '  - id: 1',
+        '    score: 100',
+        '    if:',
+        '      - 1 <= id && id <= 2',
+      ].join('\n'),
+    });
+
+    const config = plan.files.find(file => file.name === 'config.yaml')?.content || '';
+    expect(config).toContain('1 <= id && id <= 2');
+    expect(config).not.toContain('input: 3.in');
+    expect(config).not.toContain('input: 4.in');
+    expect(plan.notesStructured?.warnings).toContain(warning);
+    expect(plan.notes).toContain(warning);
+  });
+
   it('区分度命中编号与补刀说明使用实际分配的测试点文件编号', () => {
     const options: GenerateOptions = {
       problemKind: 'traditional',
@@ -1358,6 +1517,32 @@ describe('buildSkeletonPlan', () => {
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
+  it('非法既有 config 在任何 AI 或沙箱调用前中止', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '配置守卫',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      existingConfig: 'subtasks:\n  - cases: [1\n',
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_config_unparsable',
+      telemetryMetadata: expect.objectContaining({ failureStage: 'config_parse' }),
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
   it('调用 AI 客户端并返回组装后的计划', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
     const mockClient = {
@@ -1536,16 +1721,32 @@ describe('TestdataGenService.generate', () => {
 
   it('幸存 WA 靶子补刀成功后把新测试点写入文件计划与 config.yaml', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const killModel = { endpointId: 'ep2', endpointName: 'kill', modelName: 'gpt-kill' };
+    const hackModel = { endpointId: 'ep3', endpointName: 'hack', modelName: 'gpt-hack' };
+    const usage = (totalTokens: number) => ({
+      promptTokens: totalTokens,
+      completionTokens: 0,
+      totalTokens,
+    });
     const mockClient = {
       chat: jest.fn()
-        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
-        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'), usage: usage(1), usedModel,
+        })
+        .mockResolvedValueOnce({
+          content: makeSurvivingKillTargetResponse(), usage: usage(2), usedModel: killModel,
+        })
         .mockResolvedValueOnce({
           content: makeGenerationArtifactsBlueprint('traditional'),
+          usage: usage(3),
           usedModel,
         })
-        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
-        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+        .mockResolvedValueOnce({
+          content: makeIndependentVerifierBlueprint(), usage: usage(4), usedModel,
+        })
+        .mockResolvedValueOnce({
+          content: makeHackCaseResponse(), usage: usage(5), usedModel: hackModel,
+        }),
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -1593,6 +1794,16 @@ describe('TestdataGenService.generate', () => {
       killedBy: 'wa',
       killedByCase: 2,
     });
+    expect(plan.tokenUsage).toEqual({
+      promptTokens: 15,
+      completionTokens: 0,
+      totalTokens: 15,
+    });
+    expect(plan.usedModel?.split(' → ')).toEqual(expect.arrayContaining([
+      'main/gpt-test',
+      'kill/gpt-kill',
+      'hack/gpt-hack',
+    ]));
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 

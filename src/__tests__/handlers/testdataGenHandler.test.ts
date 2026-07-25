@@ -958,6 +958,24 @@ describe('TestdataGenSkeletonHandler', () => {
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
+
+  it('既有 config.yaml 非空且无法解析时返回本地化硬错误', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'subtasks:\n  - cases: [1\n',
+    });
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+    await handler.post();
+
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body).toEqual({
+      error: 'ai_helper_testdata_err_config_unparsable',
+      code: 'INVALID_EXISTING_CONFIG',
+    });
+  });
 });
 
 // ─── ApplyHandler ─────────────────────────────────────────────────────────────

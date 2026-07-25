@@ -356,6 +356,7 @@ async function runBackgroundGeneration(params) {
         }
         console.error('[TestdataGenJob] generation failed:', err);
         const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+        const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
         const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
         const usedModels = Array.isArray(testdataMetadata?.usedModels)
             ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
@@ -372,7 +373,9 @@ async function runBackgroundGeneration(params) {
                 retryable: err.isRetryable,
             }
             : {
-                message: err instanceof Error ? err.message : translate('ai_helper_err_internal'),
+                message: testdataUserMessageKey
+                    ? translate(testdataUserMessageKey)
+                    : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
@@ -537,6 +540,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
             const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+            const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
             const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
             const usedModels = Array.isArray(testdataMetadata?.usedModels)
                 ? testdataMetadata.usedModels.filter((item) => typeof item === 'string')
@@ -569,7 +573,9 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             // 解析/校验失败等业务错误：消息为中文可直接展示
             const errorBody = {
-                error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
+                error: testdataUserMessageKey
+                    ? this.translate(testdataUserMessageKey)
+                    : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
                 retryable: true,
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
@@ -579,7 +585,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 progressStream.end();
             }
             else {
-                this.response.status = 502;
+                this.response.status = testdataUserMessageKey ? 400 : 502;
                 this.response.body = errorBody;
                 this.response.type = 'application/json';
             }
@@ -676,6 +682,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
                 const backgroundTranslations = {
                     ai_helper_err_internal: this.translate('ai_helper_err_internal'),
+                    [testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
                     backgroundTranslations[key] = this.translate(key);
@@ -838,6 +845,11 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[TestdataGenSkeletonHandler.post] error:', err);
             this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || '') });
+            const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+            if (testdataUserMessageKey) {
+                sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+                return;
+            }
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }

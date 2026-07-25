@@ -23,10 +23,12 @@ import {
   isSafeTestdataFilename,
   isCancellation,
   extractTestdataErrorMetadata,
+  extractTestdataUserMessageKey,
   shouldRecommendDeeperReasoning,
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
+  TESTDATA_CONFIG_UNPARSABLE_KEY,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import {
@@ -471,6 +473,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
 
     console.error('[TestdataGenJob] generation failed:', err);
     const testdataMetadata = extractTestdataErrorMetadata(err);
+    const testdataUserMessageKey = extractTestdataUserMessageKey(err);
     const aiMetadata = extractAiErrorMetadata(err);
     const usedModels = Array.isArray(testdataMetadata?.usedModels)
       ? testdataMetadata.usedModels.filter((item): item is string => typeof item === 'string')
@@ -496,7 +499,9 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
         retryable: err.isRetryable,
       }
       : {
-        message: err instanceof Error ? err.message : translate('ai_helper_err_internal'),
+        message: testdataUserMessageKey
+          ? translate(testdataUserMessageKey)
+          : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
         retryable: true,
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
@@ -669,6 +674,7 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       console.error('[TestdataGenGenerateHandler.post] error:', err);
       const testdataMetadata = extractTestdataErrorMetadata(err);
+      const testdataUserMessageKey = extractTestdataUserMessageKey(err);
       const aiMetadata = extractAiErrorMetadata(err);
       const usedModels = Array.isArray(testdataMetadata?.usedModels)
         ? testdataMetadata.usedModels.filter((item): item is string => typeof item === 'string')
@@ -708,7 +714,9 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       // 解析/校验失败等业务错误：消息为中文可直接展示
       const errorBody = {
-        error: err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
+        error: testdataUserMessageKey
+          ? this.translate(testdataUserMessageKey)
+          : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
         retryable: true,
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
@@ -717,7 +725,7 @@ export class TestdataGenGenerateHandler extends Handler {
         progressStream.writeEvent('error', errorBody);
         progressStream.end();
       } else {
-        this.response.status = 502;
+        this.response.status = testdataUserMessageKey ? 400 : 502;
         this.response.body = errorBody;
         this.response.type = 'application/json';
       }
@@ -815,6 +823,7 @@ export class TestdataGenJobStartHandler extends Handler {
         // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
         const backgroundTranslations: Record<string, string> = {
           ai_helper_err_internal: this.translate('ai_helper_err_internal'),
+          [TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(TESTDATA_CONFIG_UNPARSABLE_KEY),
         };
         for (const key of Object.values(USER_ERROR_MESSAGE_KEYS)) {
           backgroundTranslations[key] = this.translate(key);
@@ -981,6 +990,11 @@ export class TestdataGenSkeletonHandler extends Handler {
         err instanceof Error ? err.stack : undefined,
         { problemId: String((this.request.body as GenerateRequestBody)?.problemId || '') },
       );
+      const testdataUserMessageKey = extractTestdataUserMessageKey(err);
+      if (testdataUserMessageKey) {
+        sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+        return;
+      }
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
   }
