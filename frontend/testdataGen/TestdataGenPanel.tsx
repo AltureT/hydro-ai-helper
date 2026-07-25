@@ -91,6 +91,7 @@ interface GenerationPlan {
     caseNumber: number;
     fileNumber: number;
     dataScale: 'small' | 'medium' | 'large';
+    subtaskId?: number;
     target: string;
   }>;
   usedModel?: string;
@@ -1218,7 +1219,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 <div key={item.caseNumber} style={{ fontSize: '13px', display: 'flex', gap: SPACING.sm, alignItems: 'baseline' }}>
                   <code>{item.fileNumber}.in/.out</code>
                   <span style={getBadgeStyle('info')}>
-                    {i18n(`ai_helper_testdata_scale_${item.dataScale}`)}
+                    {item.subtaskId !== undefined
+                      ? i18n('ai_helper_testdata_subtask_label', item.subtaskId)
+                      : i18n(`ai_helper_testdata_scale_${item.dataScale}`)}
                   </span>
                   <span style={{ color: COLORS.textSecondary }}>{item.target}</span>
                 </div>

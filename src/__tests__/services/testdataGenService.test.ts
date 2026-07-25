@@ -2,6 +2,7 @@
  * TestdataGenService 单元测试
  */
 
+import yaml from 'js-yaml';
 import {
   validateGenerateOptions,
   isSafeTestdataFilename,
@@ -12,6 +13,7 @@ import {
   assertExistingConfigParsable,
   buildCoveragePlan,
   allocateCasesToSubtasks,
+  resolveTieredSubtaskGeneration,
   allocateCaseNumbers,
   getExistingNumericCases,
   buildSkeletonPlan,
@@ -392,6 +394,60 @@ describe('parseSubtasksSection / allocateCasesToSubtasks', () => {
   it('测试点数恰好等于子任务数时每个子任务分配一个', () => {
     expect(allocateCasesToSubtasks(3, subtasks).map(item => item.subtaskId)).toEqual([1, 2, 3]);
   });
+
+  it.each([
+    {
+      name: '题面未声明 SUBTASKS',
+      input: { caseCount: 3, dataScale: 'auto' as const },
+      warning: undefined,
+    },
+    {
+      name: '既有 config 已含 subtasks',
+      input: {
+        caseCount: 3,
+        dataScale: 'auto' as const,
+        subtasks,
+        existingConfig: 'subtasks:\n  - id: 9\n    score: 100\n    cases: []\n',
+      },
+      warning: undefined,
+    },
+    {
+      name: '用户选择非 auto 规模',
+      input: { caseCount: 3, dataScale: 'medium' as const, subtasks },
+      warning: undefined,
+    },
+    {
+      name: '测试点少于子任务数',
+      input: { caseCount: 2, dataScale: 'auto' as const, subtasks },
+      warning: '题面含 3 个子任务但仅请求 2 个测试点,已按普通模式生成;建议将测试点数提高到 ≥3 后重新生成以获得分层数据',
+    },
+  ])('四条件门控：$name 时完整回退扁平模式', ({ input, warning }) => {
+    expect(resolveTieredSubtaskGeneration(input)).toEqual({
+      enabled: false,
+      allocations: [],
+      ...(warning ? { warning } : {}),
+    });
+  });
+
+  it('四项条件全部满足时启用分层并返回确定性分配', () => {
+    const result = resolveTieredSubtaskGeneration({
+      caseCount: 3,
+      dataScale: 'auto',
+      subtasks,
+    });
+    expect(result.enabled).toBe(true);
+    expect(result.allocations.map(item => item.subtaskId)).toEqual([1, 2, 3]);
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('既有空 subtasks 沿用原语义视为未配置，不阻止新分层', () => {
+    expect(resolveTieredSubtaskGeneration({
+      caseCount: 3,
+      dataScale: 'auto',
+      subtasks,
+      existingConfig: 'subtasks: []\n',
+    }).enabled).toBe(true);
+  });
 });
 
 // ─── detectStdFilename ────────────────────────────────────────────────────────
@@ -513,6 +569,48 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('input: 3.in');
     expect(yamlText).toContain('input: 5.in');
     expect(yamlText).not.toContain('input: 2.in');
+  });
+
+  it('分层模式按题面 id/score 输出多个子任务，并把既有完整测试点并入第一个子任务', () => {
+    const subtasks = [
+      { id: 1, score: 30, constraints: 'n<=100' },
+      { id: 2, score: 70, constraints: 'n<=100000' },
+    ];
+    const yamlText = buildConfigYaml({
+      problemType: 'traditional',
+      caseCount: 3,
+      languages: [],
+      caseNumbers: [1, 3, 4],
+      newCaseNumbers: [3, 4],
+      subtasks,
+      subtaskAllocations: allocateCasesToSubtasks(2, subtasks),
+    });
+    const parsed = yaml.load(yamlText) as {
+      subtasks: Array<{
+        id: number;
+        score: number;
+        type: string;
+        cases: Array<{ input: string; output: string }>;
+      }>;
+    };
+
+    expect(parsed.subtasks).toEqual([
+      {
+        id: 1,
+        score: 30,
+        type: 'sum',
+        cases: [
+          { input: '1.in', output: '1.out' },
+          { input: '3.in', output: '3.out' },
+        ],
+      },
+      {
+        id: 2,
+        score: 70,
+        type: 'sum',
+        cases: [{ input: '4.in', output: '4.out' }],
+      },
+    ]);
   });
 
   it('更新测试点时保留现有 checker、时限与额外文件配置', () => {
@@ -1256,6 +1354,125 @@ describe('assemblePlan', () => {
     expect(config).toContain('input: 3.in');
     expect(config).toContain('input: 4.in');
     expect(config).not.toContain('input: 2.in');
+  });
+
+  it('启用分层时 config、覆盖元数据与结构化说明共享同一子任务分配', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 2,
+      dataScale: 'auto',
+      languages: [],
+    };
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    response.subtasks = [
+      { id: 1, score: 30, constraints: 'n<=100' },
+      { id: 2, score: 60, constraints: 'n<=100000' },
+    ];
+    const plan = assemblePlan(response, options, {
+      mode: 'sandbox',
+      existingFiles: ['1.in', '1.out', '2.in'],
+    });
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as {
+      subtasks: Array<{
+        id: number;
+        score: number;
+        cases: Array<{ input: string; output: string }>;
+      }>;
+    };
+
+    expect(config.subtasks).toEqual([
+      {
+        id: 1,
+        score: 30,
+        type: 'sum',
+        cases: [
+          { input: '1.in', output: '1.out' },
+          { input: '3.in', output: '3.out' },
+        ],
+      },
+      {
+        id: 2,
+        score: 60,
+        type: 'sum',
+        cases: [{ input: '4.in', output: '4.out' }],
+      },
+    ]);
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
+    expect(plan.notesStructured?.warnings).toEqual(expect.arrayContaining([
+      '子任务分值合计为 90,非 100,请核对',
+      '既有完整测试点 #1 已并入子任务 1,请人工复核其子任务归属。',
+    ]));
+    expect(plan.notesStructured?.system).toContain(
+      '已按题面子任务表生成 2 档分层数据;VALIDATOR 仅machine校验全局约束,各子任务档位约束由生成器构造保证,建议抽查各档 .in 是否符合对应约束',
+    );
+    expect(plan.notes).toContain('子任务分值合计为 90,非 100,请核对');
+  });
+
+  it.each([
+    {
+      name: '无 SUBTASKS',
+      subtasks: undefined,
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] } as GenerateOptions,
+      context: {},
+      warning: undefined,
+    },
+    {
+      name: '既有 config 含 subtasks',
+      subtasks: [
+        { id: 1, score: 30, constraints: 'n<=100' },
+        { id: 2, score: 70, constraints: 'n<=100000' },
+      ],
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] } as GenerateOptions,
+      context: {
+        existingConfig: 'subtasks:\n  - id: 9\n    score: 100\n    cases: []\n',
+      },
+      warning: undefined,
+    },
+    {
+      name: '非 auto 规模',
+      subtasks: [
+        { id: 1, score: 30, constraints: 'n<=100' },
+        { id: 2, score: 70, constraints: 'n<=100000' },
+      ],
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'medium', languages: [] } as GenerateOptions,
+      context: {},
+      warning: undefined,
+    },
+    {
+      name: '请求测试点不足',
+      subtasks: [
+        { id: 1, score: 20, constraints: 'n<=10' },
+        { id: 2, score: 30, constraints: 'n<=100' },
+        { id: 3, score: 50, constraints: 'n<=1000' },
+      ],
+      options: { problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [] } as GenerateOptions,
+      context: {},
+      warning: '题面含 3 个子任务但仅请求 2 个测试点,已按普通模式生成;建议将测试点数提高到 ≥3 后重新生成以获得分层数据',
+    },
+  ])('四条件回退集成：$name 时 config 与 caseCoverage 保持扁平', ({
+    subtasks, options, context, warning,
+  }) => {
+    const response = parseGenerationResponse(makeAiJson({ problemType: 'traditional' }), options);
+    response.subtasks = subtasks;
+    const plan = assemblePlan(response, options, context);
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ score: number }> };
+
+    expect(plan.caseCoverage?.every(item => item.subtaskId === undefined)).toBe(true);
+    expect(plan.notesStructured?.system.some(note => note.includes('已按题面子任务表生成'))).toBe(false);
+    if (context.existingConfig) {
+      expect(config.subtasks[0].score).toBe(100);
+    } else {
+      expect(config.subtasks).toHaveLength(1);
+      expect(config.subtasks[0].score).toBe(100);
+    }
+    if (warning) {
+      expect(plan.notesStructured?.warnings).toContain(warning);
+      expect(plan.notes).toContain(warning);
+    }
   });
 
   it('既有显式 cases 子任务保持顺序并将排序后的新增编号追加到最后一项', () => {
@@ -3076,6 +3293,31 @@ describe('两阶段沙箱蓝图', () => {
     expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
     expect(artifactsUser).toContain(solution.oracleCode.trim());
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
+  });
+
+  it('分层启用时外围制品 Prompt 用子任务分配替换 small/medium/large 覆盖行', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional',
+      caseCount: 3,
+      dataScale: 'auto',
+      languages: [],
+    };
+    const solution = parseSolutionBlueprint([
+      '=== SUBTASKS ===',
+      '1 | 40 | n<=100',
+      '2 | 60 | n<=100000',
+      makeSolutionBlueprint('traditional'),
+    ].join('\n'), options);
+    const prompt = buildGenerationArtifactsUserPrompt({
+      problemTitle: '分层题',
+      statementMarkdown: '题面明确列出两个子任务。',
+      options,
+    }, solution);
+
+    expect(prompt).toContain('CASE 1: 子任务 1 — n<=100;数据必须严格满足本子任务的全部约束');
+    expect(prompt).toContain('CASE 2: 子任务 2 — n<=100000;数据必须严格满足本子任务的全部约束');
+    expect(prompt).toContain('CASE 3: 子任务 2 — n<=100000;数据必须严格满足本子任务的全部约束');
+    expect(prompt).not.toContain('CASE 1: small');
   });
 
   it('解析器拒绝跨阶段夹带或重写制品', () => {

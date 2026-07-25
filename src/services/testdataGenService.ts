@@ -68,6 +68,12 @@ export interface SubtaskCaseAllocation {
   guidance: string;
 }
 
+export interface TieredSubtaskGenerationDecision {
+  enabled: boolean;
+  allocations: SubtaskCaseAllocation[];
+  warning?: string;
+}
+
 /** 支持的模板语言族（对应 HydroOJ 语言键前缀） */
 export type TemplateLang = 'py' | 'java' | 'cc';
 
@@ -110,6 +116,8 @@ export interface GenerationResponse {
   /** 是否为填空题（完善代码） */
   isFillIn?: boolean;
   analysis?: string;
+  /** 第一阶段从题面子任务表提取的规格；仅供沙箱分层生成路径使用。 */
+  subtasks?: SubtaskSpec[];
   functionName?: string;
   templates?: Partial<Record<TemplateLang, string>>;
   stdSolution?: { language?: string; code: string };
@@ -310,6 +318,7 @@ export interface GenerationPlan {
     caseNumber: number;
     fileNumber: number;
     dataScale: CaseDataScale;
+    subtaskId?: number;
     target: string;
   }>;
   tokenUsage?: TokenUsage;
@@ -670,6 +679,10 @@ export interface BuildConfigYamlOptions {
   newCaseNumbers?: number[];
   /** 现有 pdoc.config；保留 checker/time/memory 等非测试点设置。 */
   existingConfig?: string;
+  /** 四项启用条件全部满足后，由题面子任务表解析得到。 */
+  subtasks?: SubtaskSpec[];
+  /** 本次新测试点在子任务之间的确定性分配。 */
+  subtaskAllocations?: SubtaskCaseAllocation[];
 }
 
 export const TESTDATA_CONFIG_UNPARSABLE_KEY = 'ai_helper_testdata_err_config_unparsable';
@@ -700,6 +713,39 @@ function parseExistingProblemConfig(raw?: string): Record<string, unknown> {
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? parsed as Record<string, unknown>
     : {};
+}
+
+function hasConfiguredSubtasks(config: Record<string, unknown>): boolean {
+  return Array.isArray(config.subtasks) && config.subtasks.length > 0;
+}
+
+/**
+ * 分层生成的唯一门控：题面子任务、既有配置、规模策略与测试点数量必须同时满足。
+ * 仅“测试点不足”向教师给出可操作警告，其余条件保持现状静默回退。
+ */
+export function resolveTieredSubtaskGeneration(input: {
+  caseCount: number;
+  dataScale?: DataScale;
+  subtasks?: SubtaskSpec[];
+  existingConfig?: string;
+}): TieredSubtaskGenerationDecision {
+  const subtasks = input.subtasks || [];
+  if (subtasks.length === 0) return { enabled: false, allocations: [] };
+  const previous = parseExistingProblemConfig(input.existingConfig);
+  if (hasConfiguredSubtasks(previous)) return { enabled: false, allocations: [] };
+  if ((input.dataScale || 'auto') !== 'auto') return { enabled: false, allocations: [] };
+  if (input.caseCount < subtasks.length) {
+    return {
+      enabled: false,
+      allocations: [],
+      warning: `题面含 ${subtasks.length} 个子任务但仅请求 ${input.caseCount} 个测试点,`
+        + `已按普通模式生成;建议将测试点数提高到 ≥${subtasks.length} 后重新生成以获得分层数据`,
+    };
+  }
+  const allocations = allocateCasesToSubtasks(input.caseCount, subtasks);
+  return allocations.length === input.caseCount
+    ? { enabled: true, allocations }
+    : { enabled: false, allocations: [] };
 }
 
 function cloneConfigValue<T>(value: T): T {
@@ -780,6 +826,85 @@ export function mergeConfigSubtasks(
       kind: 'system',
       message: `新增测试点 ${caseLabels} 已并入子任务 ${subtaskId},请核对分值分配。`,
     },
+  };
+}
+
+interface TieredConfigSubtasks {
+  subtasks: Array<{
+    id: number;
+    score: number;
+    type: 'sum';
+    cases: Array<{ input: string; output: string }>;
+  }>;
+  notes: ConfigSubtaskMergeNote[];
+}
+
+function buildTieredConfigSubtasks(
+  specs: SubtaskSpec[] | undefined,
+  allocations: SubtaskCaseAllocation[] | undefined,
+  caseNumbers: number[],
+  newCaseNumbers: number[],
+): TieredConfigSubtasks | undefined {
+  if (
+    !specs?.length
+    || allocations?.length !== newCaseNumbers.length
+    || allocations.length === 0
+  ) return undefined;
+  const byId = new Map(specs.map(spec => [
+    spec.id,
+    [] as Array<{ input: string; output: string }>,
+  ]));
+  const allocationNumbers = new Set<number>();
+  for (const allocation of allocations) {
+    if (
+      !byId.has(allocation.subtaskId)
+      || allocation.caseNumber < 1
+      || allocation.caseNumber > newCaseNumbers.length
+      || allocationNumbers.has(allocation.caseNumber)
+    ) return undefined;
+    allocationNumbers.add(allocation.caseNumber);
+  }
+  if (allocationNumbers.size !== newCaseNumbers.length) return undefined;
+
+  const newNumberSet = new Set(newCaseNumbers);
+  const existingNumbers = caseNumbers.filter(number => !newNumberSet.has(number));
+  const firstCases = byId.get(specs[0].id);
+  if (!firstCases) return undefined;
+  firstCases.push(...existingNumbers.map(number => ({
+    input: `${number}.in`,
+    output: `${number}.out`,
+  })));
+  for (const allocation of allocations) {
+    const number = newCaseNumbers[allocation.caseNumber - 1];
+    byId.get(allocation.subtaskId)?.push({
+      input: `${number}.in`,
+      output: `${number}.out`,
+    });
+  }
+
+  const notes: ConfigSubtaskMergeNote[] = [];
+  const scoreTotal = specs.reduce((sum, spec) => sum + spec.score, 0);
+  if (scoreTotal !== 100) {
+    notes.push({
+      kind: 'warning',
+      message: `子任务分值合计为 ${scoreTotal},非 100,请核对`,
+    });
+  }
+  if (existingNumbers.length > 0) {
+    notes.push({
+      kind: 'warning',
+      message: `既有完整测试点 ${existingNumbers.map(number => `#${number}`).join('、')}`
+        + ` 已并入子任务 ${specs[0].id},请人工复核其子任务归属。`,
+    });
+  }
+  return {
+    subtasks: specs.map(spec => ({
+      id: spec.id,
+      score: spec.score,
+      type: 'sum',
+      cases: byId.get(spec.id) || [],
+    })),
+    notes,
   };
 }
 
@@ -872,7 +997,7 @@ export function getTestlibCheckerFilename(raw?: string): string | undefined {
  */
 function buildConfigYamlWithMetadata(options: BuildConfigYamlOptions): {
   content: string;
-  subtaskNote?: ConfigSubtaskMergeNote;
+  subtaskNotes: ConfigSubtaskMergeNote[];
 } {
   const { problemType, caseCount, languages } = options;
   const previous = parseExistingProblemConfig(options.existingConfig);
@@ -910,8 +1035,18 @@ function buildConfigYamlWithMetadata(options: BuildConfigYamlOptions): {
     config.user_extra_files = previousUserExtraFiles;
   }
 
-  const subtaskMerge = mergeConfigSubtasks(previous.subtasks, newCaseNumbers);
-  config.subtasks = subtaskMerge?.subtasks ?? [{
+  const tieredSubtasks = !hasConfiguredSubtasks(previous)
+    ? buildTieredConfigSubtasks(
+      options.subtasks,
+      options.subtaskAllocations,
+      caseNumbers,
+      newCaseNumbers,
+    )
+    : undefined;
+  const subtaskMerge = tieredSubtasks
+    ? undefined
+    : mergeConfigSubtasks(previous.subtasks, newCaseNumbers);
+  config.subtasks = tieredSubtasks?.subtasks ?? subtaskMerge?.subtasks ?? [{
       score: 100,
       if: [],
       id: 1,
@@ -939,7 +1074,8 @@ function buildConfigYamlWithMetadata(options: BuildConfigYamlOptions): {
   }
   return {
     content,
-    ...(subtaskMerge?.note ? { subtaskNote: subtaskMerge.note } : {}),
+    subtaskNotes: tieredSubtasks?.notes
+      ?? (subtaskMerge?.note ? [subtaskMerge.note] : []),
   };
 }
 
@@ -1144,6 +1280,8 @@ export interface BuildUserPromptParams {
   statementMarkdown: string;
   options: GenerateOptions;
   existingFiles?: string[];
+  /** 分层生成门控只检查是否已有 subtasks，不向模型泄漏配置正文。 */
+  existingConfig?: string;
   /** 服务端规则引擎对"题面疑似含填空代码"的初判（仅作为参考信号提供给 AI） */
   fillInDetected?: boolean;
 }
@@ -1158,7 +1296,10 @@ const DATA_SCALE_TEXT: Record<DataScale, string> = {
 /**
  * 构建 User Prompt
  */
-export function buildTestdataUserPrompt(params: BuildUserPromptParams): string {
+export function buildTestdataUserPrompt(
+  params: BuildUserPromptParams,
+  coverageOverride?: Array<CoverageSlot | SubtaskCaseAllocation>,
+): string {
   const { problemTitle, statementMarkdown, options, existingFiles, fillInDetected } = params;
   const kindText = {
     auto: '自动判断（根据题面）',
@@ -1174,7 +1315,8 @@ export function buildTestdataUserPrompt(params: BuildUserPromptParams): string {
   }[options.fillInMode || 'auto'];
   const langText = options.languages.map(l => LANG_DISPLAY[l]).join('、') || '（无）';
   const requiredTemplateSections = options.languages.map(l => `@@@TEMPLATE:${l}@@@`).join('、');
-  const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
+  const coveragePlan = coverageOverride
+    ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
 
   const statement = statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
     ? `${statementMarkdown.slice(0, TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
@@ -1196,7 +1338,11 @@ export function buildTestdataUserPrompt(params: BuildUserPromptParams): string {
   lines.push(
     '',
     '【逐测试点覆盖计划（必须按 CASE 编号执行，并把实际覆盖目标写进 label）】',
-    ...coveragePlan.map(slot => `- CASE ${slot.caseNumber}: ${slot.dataScale} — ${slot.guidance}`),
+    ...coveragePlan.map(slot => (
+      'subtaskId' in slot
+        ? `- CASE ${slot.caseNumber}: 子任务 ${slot.subtaskId} — ${slot.guidance}`
+        : `- CASE ${slot.caseNumber}: ${slot.dataScale} — ${slot.guidance}`
+    )),
   );
   if (options.problemKind !== 'traditional') {
     lines.push(`- 若判定/指定为函数题，必须完整输出这些模板节：${requiredTemplateSections}（不得遗漏）`);
@@ -1350,7 +1496,16 @@ export function buildGenerationArtifactsUserPrompt(
   params: BuildUserPromptParams,
   solution: SandboxSolutionBlueprint,
 ): string {
-  const base = buildTestdataUserPrompt(params).replace(
+  const tiered = resolveTieredSubtaskGeneration({
+    caseCount: params.options.caseCount,
+    dataScale: params.options.dataScale,
+    subtasks: solution.subtasks,
+    existingConfig: params.existingConfig,
+  });
+  const base = buildTestdataUserPrompt(
+    params,
+    tiered.enabled ? tiered.allocations : undefined,
+  ).replace(
     '请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。',
     '这是第二阶段：只输出 GENERATOR 与函数题所需 TEMPLATE，不要重复 ORACLE、SOLUTION、BRUTE、VALIDATOR 或 CASE。',
   );
@@ -4071,6 +4226,7 @@ export async function materializeSandboxBlueprint(
     problemType: blueprint.problemType,
     isFillIn: blueprint.isFillIn,
     analysis: blueprint.analysis,
+    subtasks: blueprint.subtasks,
     functionName: blueprint.functionName,
     templates: blueprint.templates,
     stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
@@ -4174,6 +4330,20 @@ export function assemblePlan(
   const files: PlannedFile[] = [];
   const caseCount = response.cases.length;
   const coveragePlan = buildCoveragePlan(caseCount, options.dataScale || 'auto');
+  const tieredDecision = resolveTieredSubtaskGeneration({
+    caseCount: options.caseCount,
+    dataScale: options.dataScale,
+    subtasks: response.subtasks,
+    existingConfig: context.existingConfig,
+  });
+  const subtaskAllocations = tieredDecision.enabled
+    ? (
+      caseCount === options.caseCount
+        ? tieredDecision.allocations
+        : allocateCasesToSubtasks(caseCount, response.subtasks || [])
+    )
+    : [];
+  const tieredApplied = tieredDecision.enabled && subtaskAllocations.length === caseCount;
   const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
   const existingComplete = getExistingNumericCases(context.existingFiles).complete;
   const configCaseNumbers = [...new Set([...existingComplete, ...newCaseNumbers])].sort((a, b) => a - b);
@@ -4184,7 +4354,22 @@ export function assemblePlan(
     caseNumbers: configCaseNumbers,
     newCaseNumbers,
     existingConfig: context.existingConfig,
+    subtasks: tieredApplied ? response.subtasks : undefined,
+    subtaskAllocations: tieredApplied ? subtaskAllocations : undefined,
   });
+  const tieredNotes: ConfigSubtaskMergeNote[] = [
+    ...configBuild.subtaskNotes,
+    ...(tieredDecision.warning ? [{
+      kind: 'warning' as const,
+      message: tieredDecision.warning,
+    }] : []),
+    ...(tieredApplied ? [{
+      kind: 'system' as const,
+      message: `已按题面子任务表生成 ${response.subtasks?.length || 0} 档分层数据;`
+        + 'VALIDATOR 仅machine校验全局约束,各子任务档位约束由生成器构造保证,'
+        + '建议抽查各档 .in 是否符合对应约束',
+    }] : []),
+  ];
   const discriminationNotes = buildDiscriminationNotes(
     response.verification?.discrimination,
     response.discriminationInitialCaseCount ?? response.cases.length,
@@ -4193,7 +4378,7 @@ export function assemblePlan(
   const notes = [
     response.notes,
     ...discriminationNotes,
-    configBuild.subtaskNote?.message,
+    ...tieredNotes.map(note => note.message),
   ].filter(Boolean).join('\n') || undefined;
   const sourceNotesStructured = response.notesStructured ?? {
     warnings: [],
@@ -4204,12 +4389,12 @@ export function assemblePlan(
     warnings: [
       ...sourceNotesStructured.warnings,
       ...discriminationNotes.filter(note => note.startsWith('警告:')),
-      ...(configBuild.subtaskNote?.kind === 'warning' ? [configBuild.subtaskNote.message] : []),
+      ...tieredNotes.filter(note => note.kind === 'warning').map(note => note.message),
     ],
     system: [
       ...sourceNotesStructured.system,
       ...discriminationNotes.filter(note => !note.startsWith('警告:')),
-      ...(configBuild.subtaskNote?.kind === 'system' ? [configBuild.subtaskNote.message] : []),
+      ...tieredNotes.filter(note => note.kind === 'system').map(note => note.message),
     ],
     ...(sourceNotesStructured.ai ? { ai: sourceNotesStructured.ai } : {}),
   };
@@ -4320,7 +4505,13 @@ export function assemblePlan(
       caseNumber: index + 1,
       fileNumber: newCaseNumbers[index],
       dataScale: item.dataScale || coveragePlan[index]?.dataScale || 'small',
-      target: item.label || coveragePlan[index]?.guidance || '',
+      ...(subtaskAllocations[index]
+        ? { subtaskId: subtaskAllocations[index].subtaskId }
+        : {}),
+      target: item.label
+        || subtaskAllocations[index]?.guidance
+        || coveragePlan[index]?.guidance
+        || '',
     })),
     ...(verification ? { verification } : {}),
   };
@@ -4442,18 +4633,24 @@ export function buildSkeletonPlan(
     noteParts.push('题型未指定，已按传统题生成；如需函数题骨架（模板 + compile.sh），请将题目类型选为"函数题"后重新生成。');
   }
   const legacyNotes = noteParts.join('');
-  const subtaskNote = configBuild.subtaskNote;
+  const subtaskNotes = configBuild.subtaskNotes;
 
   return {
     problemType,
     analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
-    notes: subtaskNote ? `${legacyNotes}\n${subtaskNote.message}` : legacyNotes,
-    ...(subtaskNote ? {
+    notes: subtaskNotes.length > 0
+      ? `${legacyNotes}\n${subtaskNotes.map(note => note.message).join('\n')}`
+      : legacyNotes,
+    ...(subtaskNotes.length > 0 ? {
       notesStructured: {
-        warnings: subtaskNote.kind === 'warning' ? [subtaskNote.message] : [],
+        warnings: subtaskNotes
+          .filter(note => note.kind === 'warning')
+          .map(note => note.message),
         system: [
           ...noteParts,
-          ...(subtaskNote.kind === 'system' ? [subtaskNote.message] : []),
+          ...subtaskNotes
+            .filter(note => note.kind === 'system')
+            .map(note => note.message),
         ],
       },
     } : {}),
