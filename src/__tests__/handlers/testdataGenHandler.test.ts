@@ -124,7 +124,7 @@ function setupHandler<T extends { new (...args: never[]): object }>(Ctor: T, opt
 }
 
 const compileProbeSpy = jest.spyOn(GoJudgeSandboxRunner.prototype, 'compileCpp')
-  .mockResolvedValue({ ok: false, error: 'test sandbox has no compiler' });
+  .mockResolvedValue({ ok: false, kind: 'infra', error: 'test sandbox has no compiler' });
 const deleteProbeFileSpy = jest.spyOn(GoJudgeSandboxRunner.prototype, 'deleteCachedFile')
   .mockResolvedValue(undefined);
 
@@ -365,6 +365,29 @@ describe('TestdataGenGenerateHandler', () => {
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
+  });
+
+  it('非法既有 config 在创建客户端、编译探针和读取 checker 前立即中止', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'subtasks:\n  - cases: [1\n',
+    });
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102' },
+    });
+
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(400);
+      expect(handler.response.body.error).toBe('ai_helper_testdata_err_config_unparsable');
+      expect(clientSpy).not.toHaveBeenCalled();
+      expect(compileProbeSpy).not.toHaveBeenCalled();
+      expect(StorageModel.get).not.toHaveBeenCalled();
+    } finally {
+      clientSpy.mockRestore();
+    }
   });
 
   it('兼容忽略旧版 generationProfile 字段并使用统一流程', async () => {
@@ -775,6 +798,38 @@ describe('TestdataGenGenerateHandler', () => {
 // ─── Persistent generation job handlers ─────────────────────────────────────
 
 describe('Testdata generation background jobs', () => {
+  it('后台任务在非法既有 config 上不创建任务或启动任何外部准备', async () => {
+    mockFindOne({
+      ...PROBLEM_DOC,
+      config: 'subtasks:\n  - cases: [1\n',
+    });
+    const jobModel = {
+      findRestorable: jest.fn(),
+      createOrGetActive: jest.fn(),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig');
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102' },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.status).toBe(400);
+      expect(handler.response.body.error).toBe('ai_helper_testdata_err_config_unparsable');
+      expect(jobModel.findRestorable).not.toHaveBeenCalled();
+      expect(jobModel.createOrGetActive).not.toHaveBeenCalled();
+      expect(clientSpy).not.toHaveBeenCalled();
+      expect(compileProbeSpy).not.toHaveBeenCalled();
+      expect(StorageModel.get).not.toHaveBeenCalled();
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
   it('existing active job is returned without starting or rate-limiting another paid call', async () => {
     mockFindOne(PROBLEM_DOC);
     const job = makeGenerationJob();

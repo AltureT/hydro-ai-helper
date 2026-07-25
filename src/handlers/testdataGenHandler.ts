@@ -30,9 +30,11 @@ import {
   normalizeFileContent,
   buildSkeletonPlan,
   TESTDATA_GEN_LIMITS,
+  assertExistingConfigParsable,
   TESTDATA_CONFIG_UNPARSABLE_KEY,
   CPP_ORACLE_UNAVAILABLE_KEY,
   CPP_PROVIDED_STD_COMPILE_FAILED_KEY,
+  CPP_ORACLE_INFRA_FAILURE_KEY,
   getTestlibCheckerFilename,
 } from '../services/testdataGenService';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
@@ -665,6 +667,7 @@ export class TestdataGenGenerateHandler extends Handler {
         sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
         return;
       }
+      assertExistingConfigParsable(pdoc.config);
       if (!checkEditPermission(this, pdoc)) return;
 
       // AI 生成开销大：限制每人每 5 分钟 5 次
@@ -893,6 +896,7 @@ export class TestdataGenJobStartHandler extends Handler {
         sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
         return;
       }
+      assertExistingConfigParsable(pdoc.config);
       if (!checkEditPermission(this, pdoc)) return;
 
       const jobModel = this.ctx.get('testdataGenerationJobModel') as TestdataGenerationJobModel | undefined;
@@ -962,6 +966,7 @@ export class TestdataGenJobStartHandler extends Handler {
           [TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(TESTDATA_CONFIG_UNPARSABLE_KEY),
           [CPP_ORACLE_UNAVAILABLE_KEY]: this.translate(CPP_ORACLE_UNAVAILABLE_KEY),
           [CPP_PROVIDED_STD_COMPILE_FAILED_KEY]: this.translate(CPP_PROVIDED_STD_COMPILE_FAILED_KEY),
+          [CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(CPP_ORACLE_INFRA_FAILURE_KEY),
         };
         for (const key of Object.values(USER_ERROR_MESSAGE_KEYS)) {
           backgroundTranslations[key] = this.translate(key);
@@ -984,6 +989,11 @@ export class TestdataGenJobStartHandler extends Handler {
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[TestdataGenJobStartHandler.post] error:', err);
+      const testdataUserMessageKey = extractTestdataUserMessageKey(err);
+      if (testdataUserMessageKey) {
+        sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+        return;
+      }
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
   }

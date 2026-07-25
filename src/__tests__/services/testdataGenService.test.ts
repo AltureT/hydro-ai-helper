@@ -8,6 +8,7 @@ import {
   buildCompileSh,
   buildConfigYaml,
   mergeConfigSubtasks,
+  extractRawTopLevelYamlEntry,
   assertExistingConfigParsable,
   buildCoveragePlan,
   allocateCaseNumbers,
@@ -44,6 +45,7 @@ import {
   mergeSandboxBlueprintRepair,
   hasCustomChecker,
   getTestlibCheckerFilename,
+  extendDeadlineByBestEffortElapsed,
   assemblePlan,
   buildTestdataSystemPrompt,
   buildTestdataUserPrompt,
@@ -55,7 +57,10 @@ import {
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
-import { DISCRIMINATION_BUDGET_MS } from '../../services/goJudgeSandboxService';
+import {
+  DISCRIMINATION_BUDGET_MS,
+  SANDBOX_TOTAL_BUDGET_MS,
+} from '../../services/goJudgeSandboxService';
 
 const baseOptions: GenerateOptions = {
   problemKind: 'auto',
@@ -469,6 +474,31 @@ describe('buildConfigYaml', () => {
     expect(yamlText).toContain('memory: 512m');
     expect(yamlText).toContain('input: 1.in');
     expect(yamlText).toContain('old.in');
+  });
+
+  it('if 式 subtasks 原文块逐字保留注释、引号与格式', () => {
+    const rawSubtasks = [
+      'subtasks:',
+      '  # 教师手写规则，不得格式化',
+      '  - id: "phase-a"',
+      '    score: 100 # 行尾说明',
+      '    if: ["1.in", "2.in"]',
+    ].join('\n');
+    const existingConfig = [
+      'type: default',
+      rawSubtasks,
+      'time: 2500ms',
+    ].join('\n');
+
+    expect(extractRawTopLevelYamlEntry(existingConfig, 'subtasks')).toBe(`${rawSubtasks}\n`);
+    const yamlText = buildConfigYaml({
+      problemType: 'traditional',
+      caseCount: 1,
+      languages: [],
+      existingConfig,
+    });
+    expect(yamlText).toContain(rawSubtasks);
+    expect(yamlText).not.toContain('input: 1.in');
   });
 
   it('default/strict checker 不按自定义 checker 处理', () => {
@@ -1081,7 +1111,7 @@ describe('Hydro 沙箱生成蓝图', () => {
       input: expect.any(String),
       output: 'different but valid\n',
       answer: expect.any(String),
-    }], expect.objectContaining({ deadlineAt: expect.any(Number) }));
+    }], { signal: undefined });
     expect(response.verification?.sampleCheck).toEqual({ total: 1, passed: 1 });
   });
 });
@@ -1462,6 +1492,12 @@ describe('stage-specific sandbox repair', () => {
     );
     expect(cppRepair).toContain('当前 ORACLE 语言为 C++17');
     expect(cppRepair).toContain('prog.cc:7: error');
+    const cppInfraRepair = buildSandboxRepairPrompt(
+      new Error('ORACLE_CPP_INFRA：connect ECONNREFUSED'),
+      options,
+    );
+    expect(cppInfraRepair).toContain('改用 Python 3');
+    expect(cppInfraRepair).not.toContain('保持该语言不变');
     expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
       .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
   });
@@ -1585,6 +1621,11 @@ describe('buildSkeletonPlan', () => {
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
+  it('best-effort checker 耗时扩展正确性截止时间，不消耗主预算', () => {
+    expect(extendDeadlineByBestEffortElapsed(10_000, 2_000, 7_500)).toBe(15_500);
+    expect(extendDeadlineByBestEffortElapsed(10_000, 7_500, 2_000)).toBe(10_000);
+  });
+
   it('非法既有 config 在任何 AI 或沙箱调用前中止', async () => {
     const mockClient = { chat: jest.fn() };
     const runner = {
@@ -1791,6 +1832,8 @@ describe('TestdataGenService.generate', () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const killModel = { endpointId: 'ep2', endpointName: 'kill', modelName: 'gpt-kill' };
     const hackModel = { endpointId: 'ep3', endpointName: 'hack', modelName: 'gpt-hack' };
+    const artifactsModel = { endpointId: 'ep4', endpointName: 'artifacts', modelName: 'gpt-artifacts' };
+    const verifierModel = { endpointId: 'ep5', endpointName: 'verifier', modelName: 'gpt-verifier' };
     const usage = (totalTokens: number) => ({
       promptTokens: totalTokens,
       completionTokens: 0,
@@ -1807,10 +1850,10 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({
           content: makeGenerationArtifactsBlueprint('traditional'),
           usage: usage(3),
-          usedModel,
+          usedModel: artifactsModel,
         })
         .mockResolvedValueOnce({
-          content: makeIndependentVerifierBlueprint(), usage: usage(4), usedModel,
+          content: makeIndependentVerifierBlueprint(), usage: usage(4), usedModel: verifierModel,
         })
         .mockResolvedValueOnce({
           content: makeHackCaseResponse(), usage: usage(5), usedModel: hackModel,
@@ -1867,11 +1910,10 @@ describe('TestdataGenService.generate', () => {
       completionTokens: 0,
       totalTokens: 15,
     });
-    expect(plan.usedModel?.split(' → ')).toEqual(expect.arrayContaining([
-      'main/gpt-test',
-      'kill/gpt-kill',
-      'hack/gpt-hack',
-    ]));
+    expect(plan.usedModel).toBe(
+      'main/gpt-test → artifacts/gpt-artifacts → verifier/gpt-verifier'
+      + ' → kill/gpt-kill → hack/gpt-hack',
+    );
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
@@ -2526,6 +2568,77 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).not.toHaveBeenCalled();
   });
 
+  it('教师 C++ 标程在 direct 模式直接拒绝，不生成未由标程导出的输出', async () => {
+    const mockClient = { chat: jest.fn() };
+    await expect(new TestdataGenService(mockClient as never, {
+      mode: 'direct',
+    }).generate({
+      problemTitle: '传统题',
+      statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        providedStd: '#include <iostream>\nint main() {}',
+        providedStdSource: 'manual',
+      },
+    })).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_oracle_unavailable',
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('AI 选择的 C++ ORACLE 遇到编译基础设施失败时禁用 C++ 并定向改用 Python', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const cppSolution = `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`;
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: cppSolution, usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({
+          content: makeGenerationArtifactsBlueprint('traditional'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@ORACLE@@@\nprint(input())', usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'infra',
+        error: 'connect ECONNRESET',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+      cppOracleAvailable: true,
+    }).generate({
+      problemTitle: 'C++ 基础设施降级',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(runner.compileCpp).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('改用 Python 3');
+    expect(plan.files.some(file => file.name === 'std.py')).toBe(true);
+    expect(plan.files.some(file => file.name === 'std.cc')).toBe(false);
+  });
+
   it('历史 AC 候选解在沙箱不可达时拒绝降级直出', async () => {
     const mockClient = { chat: jest.fn() };
     const runner = {
@@ -2872,6 +2985,7 @@ describe('两阶段沙箱蓝图', () => {
       runPythonBatchDetailed: jest.fn(),
       compileCpp: jest.fn().mockResolvedValue({
         ok: false,
+        kind: 'compile',
         error: 'prog.cc:1: error: expected declaration',
       }),
       runCompiledBatchDetailed: jest.fn(),
@@ -2888,6 +3002,40 @@ describe('两阶段沙箱蓝图', () => {
     )).rejects.toMatchObject({
       userMessageKey: 'ai_helper_testdata_err_cpp_std_compile_failed',
       message: expect.stringContaining('prog.cc:1: error'),
+    });
+  });
+
+  it('教师 C++ 标程编译基础设施失败标为可重试生成错误，而非教师代码错误', async () => {
+    const options: GenerateOptions = {
+      ...tradOpts,
+      providedStd: '```cpp\nint main() { return 0; }\n```',
+      providedStdSource: 'manual',
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options);
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'infra',
+        error: 'connect ECONNRESET',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+    await expect(verifySolutionBlueprintSamples(
+      solution,
+      options,
+      '```input1\n42\n```\n```output1\n42\n```',
+      runner,
+      undefined,
+      false,
+      true,
+    )).rejects.toMatchObject({
+      userMessageKey: 'ai_helper_testdata_err_cpp_oracle_infra',
+      message: expect.stringContaining('ECONNRESET'),
     });
   });
 });
@@ -3004,36 +3152,47 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     ].join('\n'), tradOpts);
   }
 
-  it('C++ ORACLE 用缓存二进制生成正式 .out，并在流程结束时清理 fileId', async () => {
+  it('C++ ORACLE 在正确性检查结束后清理 fileId，清理耗时不消耗正确性预算', async () => {
     const bp = parseSandboxBlueprint([
       '=== ORACLE_LANG ===', 'cpp',
       '@@@META@@@', 'problemType: traditional',
       '@@@GENERATOR@@@', 'print(gen())',
       '@@@ORACLE@@@', '#include <iostream>',
+      '@@@BRUTE@@@', 'print(input())',
     ].join('\n'), tradOpts);
+    let clock = 1_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
       runPythonBatch: jest.fn(),
-      runPythonBatchDetailed: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
       compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'materialized-oracle' }),
       runCompiledBatchDetailed: jest.fn().mockResolvedValue([
         detail({ stdout: '1\n' }),
         detail({ stdout: '2\n' }),
       ]),
-      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+      deleteCachedFile: jest.fn().mockImplementation(async () => {
+        clock += SANDBOX_TOTAL_BUDGET_MS + 1;
+      }),
     };
-    const response = await materializeSandboxBlueprint(
-      bp,
-      tradOpts,
-      '',
-      runner,
-      undefined,
-      false,
-      undefined,
-      [],
-      true,
-    );
+    let response: Awaited<ReturnType<typeof materializeSandboxBlueprint>>;
+    try {
+      response = await materializeSandboxBlueprint(
+        bp,
+        tradOpts,
+        '',
+        runner,
+        undefined,
+        false,
+        undefined,
+        [],
+        true,
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
     expect(response.cases.map(item => item.output)).toEqual(['1\n', '2\n']);
     expect(response.oracleLanguage).toBe('cpp');
     expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
@@ -3041,7 +3200,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ['1\n', '2\n'],
       expect.objectContaining({ deadlineAt: expect.any(Number) }),
     );
-    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
     expect(runner.deleteCachedFile).toHaveBeenCalledWith('materialized-oracle');
   });
 
@@ -3633,7 +3792,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
         output: 'alternative-form\n',
         answer: 'oracle-form\n',
       }]),
-      expect.objectContaining({ deadlineAt: expect.any(Number) }),
+      { signal: undefined },
     );
     expect(res.verification?.stressCheck).toMatchObject({
       compared: TESTDATA_GEN_LIMITS.STRESS_CASES,

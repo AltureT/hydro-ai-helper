@@ -268,6 +268,7 @@ describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
     const compileRunner = new GoJudgeSandboxRunner('http://localhost:5050', compileHttp);
     await expect(compileRunner.compileCpp('broken source')).resolves.toEqual({
       ok: false,
+      kind: 'compile',
       error: expect.stringContaining('expected declaration'),
     });
 
@@ -278,8 +279,59 @@ describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
     const unavailableRunner = new GoJudgeSandboxRunner('http://localhost:5050', unavailableHttp);
     await expect(unavailableRunner.compileCpp('int main() {}')).resolves.toEqual({
       ok: false,
+      kind: 'infra',
       error: expect.stringContaining('ECONNREFUSED'),
     });
+  });
+
+  it('compileCpp 对超期或畸形响应中的缓存 fileId 全部尽力清理', async () => {
+    const nowSpy = jest.spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000)
+      .mockReturnValue(3_000);
+    const lateHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [{
+          status: 'Accepted',
+          exitStatus: 0,
+          files: { stdout: '', stderr: '' },
+          fileIds: { prog: 'late-prog' },
+        }],
+      }),
+      delete: jest.fn().mockResolvedValue({ data: undefined }),
+    };
+    const lateRunner = new GoJudgeSandboxRunner('http://localhost:5050', lateHttp);
+    await expect(lateRunner.compileCpp('int main() {}', {
+      deadlineAt: 2_000,
+    })).resolves.toEqual({
+      ok: false,
+      kind: 'infra',
+      error: expect.stringContaining('总时长'),
+    });
+    expect(lateHttp.delete).toHaveBeenCalledWith(
+      'http://localhost:5050/file/late-prog',
+      expect.anything(),
+    );
+    nowSpy.mockRestore();
+
+    const malformedHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [
+          null,
+          { ...goJudgeResult(), fileIds: { prog: 'unexpected-a' } },
+          { ...goJudgeResult(), fileIds: { prog: 'unexpected-b' } },
+        ],
+      }),
+      delete: jest.fn().mockResolvedValue({ data: undefined }),
+    };
+    const malformedRunner = new GoJudgeSandboxRunner('http://localhost:5050', malformedHttp);
+    await expect(malformedRunner.compileCpp('int main() {}')).resolves.toEqual({
+      ok: false,
+      kind: 'infra',
+      error: expect.stringContaining('期望 1 个'),
+    });
+    expect(malformedHttp.delete).toHaveBeenCalledTimes(2);
   });
 
   it('runCompiledBatchDetailed 使用缓存二进制并复用 Python 批量分块与限额语义', async () => {

@@ -8,7 +8,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GoJudgeSandboxRunner = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = void 0;
+exports.GoJudgeSandboxRunner = exports.CHECKER_BUDGET_MS = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = void 0;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
 const textTruncate_1 = require("../lib/textTruncate");
@@ -38,6 +38,8 @@ exports.SANDBOX_RESPONSE_LIMIT_BYTES = (exports.SANDBOX_CHUNK_SIZE * (STDOUT_LIM
 exports.SANDBOX_TOTAL_BUDGET_MS = 300000;
 /** 区分度验证独立预算，不占用正确性验证的总时长预算。 */
 exports.DISCRIMINATION_BUDGET_MS = 180000;
+/** checker 编译与执行共享的独立尽力预算，不占用正确性验证预算。 */
+exports.CHECKER_BUDGET_MS = 120000;
 function normalizeHost(host) {
     const value = (host || '').trim() || 'http://localhost:5050/';
     let parsed;
@@ -171,6 +173,21 @@ function summarizeSandboxError(err) {
         return (0, textTruncate_1.excerptTail)(err.message, 2000);
     return (0, textTruncate_1.excerptTail)(String(err), 2000);
 }
+function collectReturnedFileIds(data) {
+    const candidates = Array.isArray(data)
+        ? data
+        : data && typeof data === 'object' && Array.isArray(data.results)
+            ? data.results
+            : [];
+    return [...new Set(candidates.flatMap(candidate => {
+            if (!candidate || typeof candidate !== 'object')
+                return [];
+            const fileIds = candidate.fileIds;
+            if (!fileIds || typeof fileIds !== 'object' || Array.isArray(fileIds))
+                return [];
+            return Object.values(fileIds).filter((fileId) => typeof fileId === 'string' && !!fileId);
+        }))];
+}
 class GoJudgeSandboxRunner {
     constructor(host, http = axios_1.default) {
         this.http = http;
@@ -193,8 +210,14 @@ class GoJudgeSandboxRunner {
         const remainingBudgetMs = opts.deadlineAt === undefined
             ? Number.POSITIVE_INFINITY
             : opts.deadlineAt - Date.now();
-        if (remainingBudgetMs <= 0)
-            return { ok: false, error: SANDBOX_BUDGET_ERROR };
+        if (remainingBudgetMs <= 0) {
+            return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
+        }
+        let returnedFileIds = [];
+        const cleanupReturnedFiles = async () => {
+            await Promise.all(returnedFileIds.map(fileId => this.deleteCachedFile(fileId)));
+            returnedFileIds = [];
+        };
         try {
             const response = await this.http.post(`${this.host}/run`, { cmd: [buildCppCompileCommand(source, opts.extraFiles)] }, {
                 timeout: Math.max(1, Math.min(CPP_COMPILE_TIMEOUT_MS, remainingBudgetMs)),
@@ -202,15 +225,19 @@ class GoJudgeSandboxRunner {
                 maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES,
                 proxy: false,
             });
-            if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-                return { ok: false, error: SANDBOX_BUDGET_ERROR };
-            }
+            // 响应即使超期或其余字段畸形，也先抢救出所有缓存 ID，确保任何非成功
+            // 返回都能尽力回收 go-judge 产物。
+            returnedFileIds = collectReturnedFileIds(response.data);
             const results = unwrapResults(response.data);
+            const fail = async (kind, error) => {
+                await cleanupReturnedFiles();
+                return { ok: false, kind, error };
+            };
+            if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+                return await fail('infra', SANDBOX_BUDGET_ERROR);
+            }
             if (results.length !== 1) {
-                return {
-                    ok: false,
-                    error: `Hydro 沙箱返回 ${results.length} 个编译结果，期望 1 个`,
-                };
+                return await fail('infra', `Hydro 沙箱返回 ${results.length} 个编译结果，期望 1 个`);
             }
             const result = results[0];
             const detail = toRunDetail(result);
@@ -218,21 +245,24 @@ class GoJudgeSandboxRunner {
                 const info = detail.stderr
                     || detail.error
                     || `${detail.status || 'Unknown'}（exitStatus=${detail.exitStatus ?? 'unknown'}）`;
-                return { ok: false, error: (0, textTruncate_1.excerptTail)(info, 2000) };
+                const kind = /nonzero exit status/i.test(detail.status) ? 'compile' : 'infra';
+                return await fail(kind, (0, textTruncate_1.excerptTail)(info, 2000));
             }
             const fileId = result.fileIds?.prog;
             if (!fileId) {
-                return { ok: false, error: 'Hydro 沙箱编译成功但未返回 prog 缓存文件' };
+                return await fail('infra', 'Hydro 沙箱编译成功但未返回 prog 缓存文件');
             }
+            returnedFileIds = [];
             return { ok: true, fileId };
         }
         catch (err) {
+            await cleanupReturnedFiles();
             if (opts.signal?.aborted)
                 throw err;
             if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-                return { ok: false, error: SANDBOX_BUDGET_ERROR };
+                return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
             }
-            return { ok: false, error: summarizeSandboxError(err) };
+            return { ok: false, kind: 'infra', error: summarizeSandboxError(err) };
         }
     }
     /** 删除 go-judge 缓存文件；清理失败不得遮蔽原流程结果。 */

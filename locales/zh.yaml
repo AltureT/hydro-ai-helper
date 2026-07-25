@@ -1118,6 +1118,7 @@ ai_helper_testdata_err_ac_std_unavailable: "所选 AC 提交不可用、已被�
 ai_helper_testdata_err_config_unparsable: "现有 config.yaml 无法解析，为避免覆盖丢失配置已中止；请先修复或删除该文件后重试"
 ai_helper_testdata_err_cpp_oracle_unavailable: "当前沙箱无 C++ 编译能力，无法使用教师提供的 C++ 标准答案；请检查 g++ 配置或改用 Python 标程"
 ai_helper_testdata_err_cpp_std_compile_failed: "教师提供的 C++ 标准答案编译失败；g++ 错误摘要："
+ai_helper_testdata_err_cpp_oracle_infra: "C++ 编译基础设施暂时不可用，无法执行教师提供的 C++ 标准答案；请稍后重试或检查沙箱服务"
 ai_helper_testdata_fill_in_label: "填空题（完善代码）"
 ai_helper_testdata_fill_in_auto: "自动判断（根据题面）"
 ai_helper_testdata_fill_in_yes: "是（题面含待完善代码）"

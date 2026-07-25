@@ -1118,6 +1118,7 @@ ai_helper_testdata_err_ac_std_unavailable: "The selected accepted submission is 
 ai_helper_testdata_err_config_unparsable: "The existing config.yaml cannot be parsed. Generation was stopped to avoid overwriting and losing its settings; fix or delete the file, then retry."
 ai_helper_testdata_err_cpp_oracle_unavailable: "The current sandbox has no C++ compiler available, so the teacher-provided C++ reference solution cannot be used. Check the g++ setup or provide a Python solution."
 ai_helper_testdata_err_cpp_std_compile_failed: "The teacher-provided C++ reference solution failed to compile. g++ error summary:"
+ai_helper_testdata_err_cpp_oracle_infra: "The C++ compilation infrastructure is temporarily unavailable, so the teacher-provided C++ reference solution cannot be executed. Retry later or check the sandbox service."
 ai_helper_testdata_fill_in_label: "Fill-in-the-blank (complete the code)"
 ai_helper_testdata_fill_in_auto: "Auto detect (from statement)"
 ai_helper_testdata_fill_in_yes: "Yes (statement contains scaffold code)"

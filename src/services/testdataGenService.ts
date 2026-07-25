@@ -17,6 +17,7 @@
 import yaml from 'js-yaml';
 import type { ChatCallOptions, MultiModelClient, TokenUsage } from './openaiClient';
 import {
+  CHECKER_BUDGET_MS,
   DISCRIMINATION_BUDGET_MS,
   SANDBOX_TOTAL_BUDGET_MS,
 } from './goJudgeSandboxService';
@@ -679,6 +680,8 @@ export function mergeConfigSubtasks(
     && typeof subtask === 'object'
     && !Array.isArray(subtask)
     && Array.isArray((subtask as Record<string, unknown>).cases));
+  // 生成说明一直由 service 以中文写入 plan.notes；子任务说明保持同一约定，
+  // 不走 locale key，避免同一份服务端说明中中英文混杂。
   const caseLabels = numbers.map(number => `#${number}`).join('、');
   if (!allExplicitCases) {
     return {
@@ -710,6 +713,68 @@ export function mergeConfigSubtasks(
       message: `新增测试点 ${caseLabels} 已并入子任务 ${subtaskId},请核对分值分配。`,
     },
   };
+}
+
+interface RawYamlEntrySpan {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function findRawTopLevelYamlEntry(raw: string, key: string): RawYamlEntrySpan | undefined {
+  const lines: Array<{ start: number; end: number; content: string }> = [];
+  let start = 0;
+  while (start < raw.length) {
+    const lineFeed = raw.indexOf('\n', start);
+    const end = lineFeed < 0 ? raw.length : lineFeed + 1;
+    const withEnding = raw.slice(start, end);
+    lines.push({
+      start,
+      end,
+      content: withEnding.replace(/\r?\n$/, ''),
+    });
+    start = end;
+  }
+  const entryIndex = lines.findIndex(line =>
+    new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`).test(line.content));
+  if (entryIndex < 0) return undefined;
+  let end = lines[entryIndex].end;
+  for (let index = entryIndex + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.content.trim() === '' || /^[ \t]/.test(line.content)) {
+      end = line.end;
+      continue;
+    }
+    break;
+  }
+  return {
+    start: lines[entryIndex].start,
+    end,
+    text: raw.slice(lines[entryIndex].start, end),
+  };
+}
+
+/** 提取顶层 YAML mapping entry 原文，供保留教师注释与手写格式。 */
+export function extractRawTopLevelYamlEntry(raw: string, key: string): string | undefined {
+  return findRawTopLevelYamlEntry(raw, key)?.text;
+}
+
+function spliceRawTopLevelYamlEntry(
+  generated: string,
+  existing: string,
+  key: string,
+): string | undefined {
+  const generatedEntry = findRawTopLevelYamlEntry(generated, key);
+  const existingEntry = findRawTopLevelYamlEntry(existing, key);
+  if (!generatedEntry || !existingEntry) return undefined;
+  const suffix = generated.slice(generatedEntry.end);
+  const rawEntry = suffix
+    && !existingEntry.text.endsWith('\n')
+    ? `${existingEntry.text}\n`
+    : existingEntry.text;
+  return generated.slice(0, generatedEntry.start)
+    + rawEntry
+    + suffix;
 }
 
 /** 判断现有题目是否使用非 default/strict 的自定义 checker。 */
@@ -792,8 +857,20 @@ function buildConfigYamlWithMetadata(options: BuildConfigYamlOptions): {
     config.langs = previous.langs;
   }
 
+  let content = yaml.dump(config, { lineWidth: 120, noRefs: true });
+  if (
+    subtaskMerge
+    && subtaskMerge.note?.kind !== 'system'
+    && options.existingConfig
+  ) {
+    content = spliceRawTopLevelYamlEntry(
+      content,
+      options.existingConfig,
+      'subtasks',
+    ) ?? content;
+  }
   return {
-    content: yaml.dump(config, { lineWidth: 120, noRefs: true }),
+    content,
     ...(subtaskMerge?.note ? { subtaskNote: subtaskMerge.note } : {}),
   };
 }
@@ -2230,6 +2307,15 @@ export function reduceCheckerExecution(
   return 'infra-error';
 }
 
+/** best-effort 阶段耗时从主正确性预算中剔除；系统时钟回拨时不缩短截止时间。 */
+export function extendDeadlineByBestEffortElapsed(
+  deadlineAt: number,
+  phaseStartedAt: number,
+  phaseFinishedAt: number,
+): number {
+  return deadlineAt + Math.max(0, phaseFinishedAt - phaseStartedAt);
+}
+
 export interface CheckerExecutor {
   readonly status: 'ready' | 'unavailable' | 'compile-failed';
   readonly compileError?: string;
@@ -2273,17 +2359,26 @@ async function createCheckerExecutor(input: {
     return unavailableCheckerExecutor('compile-failed', '当前 Hydro 沙箱不支持 checker 编译或执行');
   }
 
+  let checkerBudgetRemainingMs = CHECKER_BUDGET_MS;
+  const compileStartedAt = Date.now();
+  const compileDeadlineAt = compileStartedAt + checkerBudgetRemainingMs;
   let compiled;
   try {
     compiled = await input.runner.compileCpp(input.source, {
       extraFiles: input.headers,
       signal: input.signal,
+      deadlineAt: compileDeadlineAt,
     });
   } catch (err) {
     if (input.signal?.aborted || isCancellation(err)) throw err;
     return unavailableCheckerExecutor(
       'compile-failed',
       err instanceof Error ? err.message : String(err),
+    );
+  } finally {
+    checkerBudgetRemainingMs = Math.max(
+      0,
+      checkerBudgetRemainingMs - Math.max(0, Date.now() - compileStartedAt),
     );
   }
   if (compiled.ok === false) {
@@ -2297,10 +2392,19 @@ async function createCheckerExecutor(input: {
       return runtimeSkipped;
     },
     runBatch: async (cases, opts = {}) => {
+      if (checkerBudgetRemainingMs <= 0) {
+        runtimeSkipped += cases.length;
+        return cases.map(() => 'infra-error');
+      }
+      const runStartedAt = Date.now();
+      const checkerDeadlineAt = runStartedAt + checkerBudgetRemainingMs;
       try {
         const details = await (input.runner.runCheckerBatchDetailed as NonNullable<
           TestdataSandboxRunner['runCheckerBatchDetailed']
-        >)(compiled.fileId, cases, opts);
+        >)(compiled.fileId, cases, {
+          ...opts,
+          deadlineAt: checkerDeadlineAt,
+        });
         const verdicts = cases.map((_, index) => reduceCheckerExecution(details[index]));
         runtimeSkipped += verdicts.filter(verdict => verdict === 'infra-error').length;
         return verdicts;
@@ -2308,6 +2412,11 @@ async function createCheckerExecutor(input: {
         if (opts.signal?.aborted || input.signal?.aborted || isCancellation(err)) throw err;
         runtimeSkipped += cases.length;
         return cases.map(() => 'infra-error');
+      } finally {
+        checkerBudgetRemainingMs = Math.max(
+          0,
+          checkerBudgetRemainingMs - Math.max(0, Date.now() - runStartedAt),
+        );
       }
     },
     runChecker: async (checkerInput, output, answer, opts = {}) => {
@@ -2752,6 +2861,19 @@ async function createOracleExecutor(input: {
   });
   if (compiled.ok === false) {
     const detail = excerptTail(compiled.error, 2000);
+    if (compiled.kind === 'infra') {
+      if (hardProvidedStdFailure) {
+        throw new TestdataGenerationError(
+          `C++ 编译基础设施暂时不可用，无法执行教师提供的标准答案：${detail}`,
+          'provided_cpp_oracle_infra',
+          [],
+          false,
+          CPP_ORACLE_INFRA_FAILURE_KEY,
+          detail,
+        );
+      }
+      throw new Error(`ORACLE_CPP_INFRA：C++ 编译基础设施不可用：${detail}；请改用 Python ORACLE`);
+    }
     if (hardProvidedStdFailure) {
       throw new TestdataGenerationError(
         `教师提供的 C++ 标准答案编译失败：${detail}`,
@@ -3045,7 +3167,7 @@ export async function materializeSandboxBlueprint(
   checkerExecutor?: CheckerExecutor,
 ): Promise<GenerationResponse> {
   const startedAt = Date.now();
-  const sandboxDeadlineAt = startedAt + SANDBOX_TOTAL_BUDGET_MS;
+  let sandboxDeadlineAt = startedAt + SANDBOX_TOTAL_BUDGET_MS;
   const reportProgress = (stage: TestdataGenerationProgressStage, percent: number) => {
     try { onProgress?.(stage, percent); } catch { /* progress is best-effort */ }
   };
@@ -3061,7 +3183,21 @@ export async function materializeSandboxBlueprint(
       throw new Error('沙箱执行总时长超出预算，请减少测试点数量后重试');
     }
   };
+  const runCheckerOutsideCorrectnessBudget = async <T>(run: () => Promise<T>): Promise<T> => {
+    const checkerStartedAt = Date.now();
+    try {
+      return await run();
+    } finally {
+      sandboxDeadlineAt = extendDeadlineByBestEffortElapsed(
+        sandboxDeadlineAt,
+        checkerStartedAt,
+        Date.now(),
+      );
+    }
+  };
+  let oracleExecutor: OracleExecutor | undefined;
 
+  try {
   // a. GENERATOR 实跑 → 解析出全部 .in
   reportProgress('generating_inputs', 56);
   let generatorResult: PythonRunResult;
@@ -3204,7 +3340,6 @@ export async function materializeSandboxBlueprint(
   reportProgress('running_oracle', 72);
   checkBudget();
   const allInputs = [...inputs, ...sampleInputs, ...stressInputs];
-  let oracleExecutor: OracleExecutor | undefined;
   let oracleLanguage: OracleLanguage;
   let oracleResults: PythonRunDetail[];
   try {
@@ -3225,8 +3360,6 @@ export async function materializeSandboxBlueprint(
     if (isCancellation(err)) throw err;
     if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
     throw new Error(`ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    await oracleExecutor?.dispose();
   }
   if (oracleResults.length !== allInputs.length) {
     throw new Error(`ORACLE（标程）返回 ${oracleResults.length} 个结果，期望 ${allInputs.length} 个`);
@@ -3255,11 +3388,14 @@ export async function materializeSandboxBlueprint(
     return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
   });
   const sampleCheckerVerdicts = customChecker && checkerExecutor?.status === 'ready'
-    ? await checkerExecutor.runBatch(samples.map((sample, index) => ({
-      input: sample.input,
-      output: oracleResults[inputs.length + index]?.stdout || '',
-      answer: sample.output,
-    })), { signal, deadlineAt: sandboxDeadlineAt })
+    ? await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(
+      samples.map((sample, index) => ({
+        input: sample.input,
+        output: oracleResults[inputs.length + index]?.stdout || '',
+        answer: sample.output,
+      })),
+      { signal },
+    ))
     : undefined;
   for (let i = 0; i < samples.length; i++) {
     const actual = oracleResults[inputs.length + i]?.stdout || '';
@@ -3399,11 +3535,14 @@ export async function materializeSandboxBlueprint(
       }
       const stressOracleOffset = inputs.length + samples.length;
       const checkerVerdicts = customChecker && checkerExecutor?.status === 'ready'
-        ? await checkerExecutor.runBatch(stressInputs.map((input, index) => ({
-          input,
-          output: bruteResults[index]?.stdout || '',
-          answer: oracleResults[stressOracleOffset + index]?.stdout || '',
-        })), { signal, deadlineAt: sandboxDeadlineAt })
+        ? await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(
+          stressInputs.map((input, index) => ({
+            input,
+            output: bruteResults[index]?.stdout || '',
+            answer: oracleResults[stressOracleOffset + index]?.stdout || '',
+          })),
+          { signal },
+        ))
         : undefined;
       let compared = 0;
       let agreed = 0;
@@ -3615,6 +3754,10 @@ export async function materializeSandboxBlueprint(
       ...(blueprint.notes ? { ai: blueprint.notes } : {}),
     },
   };
+  } finally {
+    // 编译缓存清理属于资源回收，不参与正确性预算，也不得把已通过的生成判为超时。
+    await oracleExecutor?.dispose();
+  }
 }
 
 /**
@@ -4015,6 +4158,7 @@ type ChatResult = Awaited<ReturnType<MultiModelClient['chat']>>;
 
 export const CPP_ORACLE_UNAVAILABLE_KEY = 'ai_helper_testdata_err_cpp_oracle_unavailable';
 export const CPP_PROVIDED_STD_COMPILE_FAILED_KEY = 'ai_helper_testdata_err_cpp_std_compile_failed';
+export const CPP_ORACLE_INFRA_FAILURE_KEY = 'ai_helper_testdata_err_cpp_oracle_infra';
 
 /** 携带匿名模型/阶段信息的业务错误，供遥测判断失败是否与模型相关。 */
 export class TestdataGenerationError extends Error {
@@ -4123,6 +4267,12 @@ ${detail}
 请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@、@@@SAMPLE_INPUTS@@@ 四个分节。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出 ORACLE、模板、代码围栏或解释。`;
   }
   if (scope === 'oracle') {
+    if (/ORACLE_CPP_INFRA/.test(detail)) {
+      return `你上一条蓝图选择的 C++ ORACLE 因沙箱编译基础设施暂时不可用而无法验证：
+${detail}
+
+请只输出改用 Python 3 的 @@@ORACLE@@@，不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+    }
     const oracleLanguage = /\bORACLE_LANG\s*=\s*cpp\b|C\+\+/.test(detail) ? 'C++17' : 'Python 3';
     return `你上一条蓝图的标程阶段未通过 Hydro 沙箱验证：
 ${detail}
@@ -4341,6 +4491,20 @@ export class TestdataGenService {
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
+    const requiresProvidedCppOracle = params.options.problemKind !== 'function'
+      && !!params.options.providedStd?.trim()
+      && detectStdFilename(params.options.providedStd) === 'std.cc';
+    if (requiresProvidedCppOracle && (this.mode === 'direct' || !this.sandboxRunner)) {
+      const detail = '当前生成模式未配置可执行 C++17 的 Hydro 沙箱';
+      throw new TestdataGenerationError(
+        `当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`,
+        'provided_cpp_oracle',
+        [],
+        false,
+        CPP_ORACLE_UNAVAILABLE_KEY,
+        detail,
+      );
+    }
     const requiresAcceptedRecordVerification = !!params.options.providedStd?.trim()
       && params.options.providedStdSource === 'accepted-record';
     if (requiresAcceptedRecordVerification && hasCustomChecker(params.existingConfig)) {
@@ -4354,11 +4518,7 @@ export class TestdataGenService {
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
         return plan;
       }
-      if (
-        params.options.problemKind === 'traditional'
-        && params.options.providedStd?.trim()
-        && detectStdFilename(params.options.providedStd) === 'std.cc'
-      ) {
+      if (requiresProvidedCppOracle) {
         const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
         throw new TestdataGenerationError(
           `当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`,
@@ -5034,9 +5194,10 @@ export class TestdataGenService {
     });
     try {
     // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
-    const systemPrompt = buildSandboxBlueprintSystemPrompt(this.cppOracleAvailable);
+    let cppOracleAvailableForAttempt = this.cppOracleAvailable;
+    let systemPrompt = buildSandboxBlueprintSystemPrompt(cppOracleAvailableForAttempt);
     const userPrompt = buildSandboxBlueprintUserPrompt(params);
-    const solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(this.cppOracleAvailable);
+    let solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(cppOracleAvailableForAttempt);
     const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
     const callOptions = this.getCallOptions(params, attempt);
     report('blueprint', 10);
@@ -5063,13 +5224,21 @@ export class TestdataGenService {
         runner,
         params.signal,
         customChecker,
-        this.cppOracleAvailable,
+        cppOracleAvailableForAttempt,
         checkerExecutor,
       );
     } catch (solutionError) {
       if (isCancellation(solutionError)) throw solutionError;
       if (solutionError instanceof TestdataGenerationError && solutionError.userMessageKey) {
         throw solutionError;
+      }
+      const cppInfraFailure = /ORACLE_CPP_INFRA/.test(
+        solutionError instanceof Error ? solutionError.message : String(solutionError),
+      );
+      if (cppInfraFailure) {
+        cppOracleAvailableForAttempt = false;
+        systemPrompt = buildSandboxBlueprintSystemPrompt(false);
+        solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(false);
       }
       if (classifySandboxRepairScope(solutionError) === 'accepted-std') {
         throw new TestdataGenerationError(
@@ -5086,6 +5255,9 @@ export class TestdataGenService {
           {
             role: 'user',
             content: `第一阶段解题蓝图未通过解析或样例预验证：${solutionError instanceof Error ? solutionError.message : String(solutionError)}\n`
+              + (cppInfraFailure
+                ? 'C++ 编译基础设施暂时不可用，请把 ORACLE 改写为 Python 3。'
+                : '')
               + '请重新完整输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
           },
         ],
@@ -5107,7 +5279,7 @@ export class TestdataGenService {
           runner,
           params.signal,
           customChecker,
-          this.cppOracleAvailable,
+          cppOracleAvailableForAttempt,
           checkerExecutor,
         );
       } catch (repairParseError) {
@@ -5125,19 +5297,28 @@ export class TestdataGenService {
     // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
     report('artifacts', 36);
     const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples);
+    const optionalDiscriminationResults: ChatResult[] = [];
+    // 并发完成顺序不可作为因果顺序：两个必需阶段各自持有稳定的失败上下文，
+    // 成功后再按“外围制品 → 独立验证器”的固定顺序合并；可选补刀模型单独归档。
+    const artifactsResults: ChatResult[] = [...results];
+    const verifierResults: ChatResult[] = [...results];
     const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
       this.generateKillTargets({
         statement: params.statementMarkdown,
         analysis: solution.analysis || '',
         samples: killTargetSamples,
         signal: params.signal,
-      }, results).catch((err): KillTarget[] => {
+      }, optionalDiscriminationResults).catch((err): KillTarget[] => {
         if (isCancellation(err)) throw err;
         return [];
       }),
-      this.generateGenerationArtifacts(params, solution, callOptions, results),
-      this.generateIndependentVerifier(params, solution, callOptions, results, attempt),
+      this.generateGenerationArtifacts(params, solution, callOptions, artifactsResults),
+      this.generateIndependentVerifier(params, solution, callOptions, verifierResults, attempt),
     ]);
+    results.push(
+      ...artifactsResults.slice(results.length),
+      ...verifierResults.slice(results.length),
+    );
     report('independent_verifier', 54);
     let verifierState = initialVerifierState;
     let blueprintSourceContent = `${solutionSourceContent}\n${artifactsState.sourceContent}`;
@@ -5184,13 +5365,21 @@ export class TestdataGenService {
         customChecker,
         report,
         killTargets,
-        this.cppOracleAvailable,
+        cppOracleAvailableForAttempt,
         checkerExecutor,
       );
     } catch (firstError) {
       if (isCancellation(firstError)) throw firstError;
       if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
         throw firstError;
+      }
+      const cppInfraFailure = /ORACLE_CPP_INFRA/.test(
+        firstError instanceof Error ? firstError.message : String(firstError),
+      );
+      if (cppInfraFailure) {
+        cppOracleAvailableForAttempt = false;
+        systemPrompt = buildSandboxBlueprintSystemPrompt(false);
+        blueprint = { ...blueprint, oracleLanguage: 'python' };
       }
       if (/沙箱执行总时长超出预算/.test(firstError instanceof Error ? firstError.message : String(firstError))) {
         throw new TestdataGenerationError(
@@ -5301,7 +5490,7 @@ export class TestdataGenService {
           customChecker,
           report,
           killTargets,
-          this.cppOracleAvailable,
+          cppOracleAvailableForAttempt,
           checkerExecutor,
         );
       } catch (err) {
@@ -5324,7 +5513,7 @@ export class TestdataGenService {
       response,
       response.discriminationKillTargets || [],
       runner,
-      results,
+      optionalDiscriminationResults,
       checkerExecutor,
     );
     appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
@@ -5333,7 +5522,7 @@ export class TestdataGenService {
       mode: 'sandbox',
       existingFiles: params.existingFiles,
       existingConfig: params.existingConfig,
-    }), results);
+    }), [...results, ...optionalDiscriminationResults]);
     } finally {
       await checkerExecutor.dispose();
     }

@@ -40,7 +40,7 @@ export interface CppCompileOptions {
 
 export type CppCompileResult =
   | { ok: true; fileId: string }
-  | { ok: false; error: string };
+  | { ok: false; kind: 'compile' | 'infra'; error: string };
 
 export interface CheckerRunCase {
   input: string;
@@ -112,6 +112,8 @@ export const SANDBOX_RESPONSE_LIMIT_BYTES = (
 export const SANDBOX_TOTAL_BUDGET_MS = 300_000;
 /** 区分度验证独立预算，不占用正确性验证的总时长预算。 */
 export const DISCRIMINATION_BUDGET_MS = 180_000;
+/** checker 编译与执行共享的独立尽力预算，不占用正确性验证预算。 */
+export const CHECKER_BUDGET_MS = 120_000;
 
 function normalizeHost(host: string): string {
   const value = (host || '').trim() || 'http://localhost:5050/';
@@ -265,6 +267,22 @@ function summarizeSandboxError(err: unknown): string {
   return excerptTail(String(err), 2000);
 }
 
+function collectReturnedFileIds(data: unknown): string[] {
+  const candidates = Array.isArray(data)
+    ? data
+    : data && typeof data === 'object' && Array.isArray((data as { results?: unknown }).results)
+      ? (data as { results: unknown[] }).results
+      : [];
+  return [...new Set(candidates.flatMap(candidate => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const fileIds = (candidate as { fileIds?: unknown }).fileIds;
+    if (!fileIds || typeof fileIds !== 'object' || Array.isArray(fileIds)) return [];
+    return Object.values(fileIds).filter(
+      (fileId): fileId is string => typeof fileId === 'string' && !!fileId,
+    );
+  }))];
+}
+
 export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
   private readonly host: string;
 
@@ -289,8 +307,15 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     const remainingBudgetMs = opts.deadlineAt === undefined
       ? Number.POSITIVE_INFINITY
       : opts.deadlineAt - Date.now();
-    if (remainingBudgetMs <= 0) return { ok: false, error: SANDBOX_BUDGET_ERROR };
+    if (remainingBudgetMs <= 0) {
+      return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
+    }
 
+    let returnedFileIds: string[] = [];
+    const cleanupReturnedFiles = async () => {
+      await Promise.all(returnedFileIds.map(fileId => this.deleteCachedFile(fileId)));
+      returnedFileIds = [];
+    };
     try {
       const response = await this.http.post(
         `${this.host}/run`,
@@ -302,15 +327,25 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
           proxy: false,
         },
       );
-      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-        return { ok: false, error: SANDBOX_BUDGET_ERROR };
-      }
+      // 响应即使超期或其余字段畸形，也先抢救出所有缓存 ID，确保任何非成功
+      // 返回都能尽力回收 go-judge 产物。
+      returnedFileIds = collectReturnedFileIds(response.data);
       const results = unwrapResults(response.data);
+      const fail = async (
+        kind: 'compile' | 'infra',
+        error: string,
+      ): Promise<CppCompileResult> => {
+        await cleanupReturnedFiles();
+        return { ok: false, kind, error };
+      };
+      if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+        return await fail('infra', SANDBOX_BUDGET_ERROR);
+      }
       if (results.length !== 1) {
-        return {
-          ok: false,
-          error: `Hydro 沙箱返回 ${results.length} 个编译结果，期望 1 个`,
-        };
+        return await fail(
+          'infra',
+          `Hydro 沙箱返回 ${results.length} 个编译结果，期望 1 个`,
+        );
       }
       const result = results[0];
       const detail = toRunDetail(result);
@@ -318,19 +353,22 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
         const info = detail.stderr
           || detail.error
           || `${detail.status || 'Unknown'}（exitStatus=${detail.exitStatus ?? 'unknown'}）`;
-        return { ok: false, error: excerptTail(info, 2000) };
+        const kind = /nonzero exit status/i.test(detail.status) ? 'compile' : 'infra';
+        return await fail(kind, excerptTail(info, 2000));
       }
       const fileId = result.fileIds?.prog;
       if (!fileId) {
-        return { ok: false, error: 'Hydro 沙箱编译成功但未返回 prog 缓存文件' };
+        return await fail('infra', 'Hydro 沙箱编译成功但未返回 prog 缓存文件');
       }
+      returnedFileIds = [];
       return { ok: true, fileId };
     } catch (err) {
+      await cleanupReturnedFiles();
       if (opts.signal?.aborted) throw err;
       if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-        return { ok: false, error: SANDBOX_BUDGET_ERROR };
+        return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
       }
-      return { ok: false, error: summarizeSandboxError(err) };
+      return { ok: false, kind: 'infra', error: summarizeSandboxError(err) };
     }
   }
 

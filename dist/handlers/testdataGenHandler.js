@@ -524,6 +524,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
                 return;
             }
+            (0, testdataGenService_1.assertExistingConfigParsable)(pdoc.config);
             if (!checkEditPermission(this, pdoc))
                 return;
             // AI 生成开销大：限制每人每 5 分钟 5 次
@@ -738,6 +739,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 sendError(this, 404, 'PROBLEM_NOT_FOUND', 'ai_helper_testdata_err_problem_not_found');
                 return;
             }
+            (0, testdataGenService_1.assertExistingConfigParsable)(pdoc.config);
             if (!checkEditPermission(this, pdoc))
                 return;
             const jobModel = this.ctx.get('testdataGenerationJobModel');
@@ -804,6 +806,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     [testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY]: this.translate(testdataGenService_1.TESTDATA_CONFIG_UNPARSABLE_KEY),
                     [testdataGenService_1.CPP_ORACLE_UNAVAILABLE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_UNAVAILABLE_KEY),
                     [testdataGenService_1.CPP_PROVIDED_STD_COMPILE_FAILED_KEY]: this.translate(testdataGenService_1.CPP_PROVIDED_STD_COMPILE_FAILED_KEY),
+                    [testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
                     backgroundTranslations[key] = this.translate(key);
@@ -827,6 +830,11 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenJobStartHandler.post] error:', err);
+            const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
+            if (testdataUserMessageKey) {
+                sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
+                return;
+            }
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }
