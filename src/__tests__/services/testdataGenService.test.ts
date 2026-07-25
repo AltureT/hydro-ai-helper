@@ -1426,7 +1426,7 @@ describe('assemblePlan', () => {
       '既有完整测试点 #1 已并入子任务 1,请人工复核其子任务归属。',
     ]));
     expect(plan.notesStructured?.system).toContain(
-      '已按题面子任务表生成 2 档分层数据;VALIDATOR 仅machine校验全局约束,各子任务档位约束由生成器构造保证,建议抽查各档 .in 是否符合对应约束',
+      '已按题面子任务表生成 2 档分层数据;VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,建议抽查各档 .in 是否符合对应约束',
     );
     expect(plan.notes).toContain('子任务分值合计为 90,非 100,请核对');
   });
