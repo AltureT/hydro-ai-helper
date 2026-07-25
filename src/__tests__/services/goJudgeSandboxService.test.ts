@@ -203,6 +203,148 @@ describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
   });
 });
 
+describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
+  it('compileCpp 构造 C++17 编译请求并返回缓存二进制 fileId', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [{
+          status: 'Accepted',
+          exitStatus: 0,
+          files: { stdout: '', stderr: '' },
+          fileIds: { prog: 'cached-prog-1' },
+        }],
+      }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const source = '#include "helper.h"\nint main() { return VALUE; }\n';
+
+    await expect(runner.compileCpp(source, {
+      extraFiles: { 'helper.h': '#define VALUE 0\n' },
+    })).resolves.toEqual({ ok: true, fileId: 'cached-prog-1' });
+
+    expect(http.post).toHaveBeenCalledWith(
+      'http://localhost:5050/run',
+      {
+        cmd: [expect.objectContaining({
+          args: ['/usr/bin/g++', '-O2', '-std=c++17', '-o', 'prog', 'prog.cc'],
+          env: ['PATH=/usr/bin:/bin'],
+          files: [
+            { content: '' },
+            { name: 'stdout', max: 64 * 1024 },
+            { name: 'stderr', max: 64 * 1024 },
+          ],
+          cpuLimit: 30_000_000_000,
+          clockLimit: 60_000_000_000,
+          memoryLimit: 1024 * 1024 * 1024,
+          procLimit: 64,
+          copyIn: {
+            'prog.cc': { content: source },
+            'helper.h': { content: '#define VALUE 0\n' },
+          },
+          copyOut: ['stdout', 'stderr'],
+          copyOutCached: ['prog'],
+        })],
+      },
+      expect.objectContaining({
+        timeout: 75_000,
+        maxContentLength: SANDBOX_RESPONSE_LIMIT_BYTES,
+        proxy: false,
+      }),
+    );
+  });
+
+  it('compileCpp 将编译错误和基础设施错误降级为 ok:false', async () => {
+    const compileHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [{
+          status: 'Nonzero Exit Status',
+          exitStatus: 1,
+          files: { stdout: '', stderr: 'prog.cc:1: error: expected declaration' },
+        }],
+      }),
+    };
+    const compileRunner = new GoJudgeSandboxRunner('http://localhost:5050', compileHttp);
+    await expect(compileRunner.compileCpp('broken source')).resolves.toEqual({
+      ok: false,
+      error: expect.stringContaining('expected declaration'),
+    });
+
+    const unavailableHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED')),
+    };
+    const unavailableRunner = new GoJudgeSandboxRunner('http://localhost:5050', unavailableHttp);
+    await expect(unavailableRunner.compileCpp('int main() {}')).resolves.toEqual({
+      ok: false,
+      error: expect.stringContaining('ECONNREFUSED'),
+    });
+  });
+
+  it('runCompiledBatchDetailed 使用缓存二进制并复用 Python 批量分块与限额语义', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockImplementation(
+        (_url, body: { cmd: Array<{ files: Array<{ content?: string }> }> }) => ({
+          data: body.cmd.map((cmd, index) => (
+            index === 1
+              ? goJudgeResult({ status: 'Time Limit Exceeded', exitStatus: 9, files: {} })
+              : goJudgeResult({ files: { stdout: cmd.files[0].content || '', stderr: '' } })
+          )),
+        }),
+      ),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const inputs = ['a', 'b', 'c', 'd', 'e'];
+    const details = await runner.runCompiledBatchDetailed('cached-prog-1', inputs, {
+      cpuSeconds: 3,
+    });
+
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(http.post.mock.calls[0][1].cmd).toHaveLength(SANDBOX_CHUNK_SIZE);
+    expect(http.post.mock.calls[1][1].cmd).toHaveLength(1);
+    for (const call of http.post.mock.calls) {
+      for (const command of call[1].cmd) {
+        expect(command).toEqual(expect.objectContaining({
+          args: ['prog'],
+          env: ['PATH=/usr/bin:/bin'],
+          cpuLimit: 3_000_000_000,
+          clockLimit: 6_000_000_000,
+          memoryLimit: 256 * 1024 * 1024,
+          procLimit: 16,
+          copyIn: { prog: { fileId: 'cached-prog-1' } },
+          copyOut: ['stdout', 'stderr'],
+        }));
+      }
+      expect(call[2]).toEqual(expect.objectContaining({ timeout: 39_000 }));
+    }
+    expect(details).toHaveLength(inputs.length);
+    expect(details[0]).toMatchObject({ accepted: true, stdout: 'a' });
+    expect(details[1]).toMatchObject({ accepted: false, timedOut: true });
+    expect(details[4]).toMatchObject({ accepted: true, stdout: 'e' });
+  });
+
+  it('deleteCachedFile 调用缓存删除端点且失败静默', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn(),
+      delete: jest.fn()
+        .mockResolvedValueOnce({ data: undefined })
+        .mockRejectedValueOnce(new Error('already gone')),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await expect(runner.deleteCachedFile('cached/prog')).resolves.toBeUndefined();
+    await expect(runner.deleteCachedFile('missing')).resolves.toBeUndefined();
+    expect(http.delete).toHaveBeenNthCalledWith(
+      1,
+      'http://localhost:5050/file/cached%2Fprog',
+      expect.objectContaining({ timeout: 3000, proxy: false }),
+    );
+  });
+});
+
 describe('getTestdataGenerationMode', () => {
   it('支持 auto/sandbox/direct，非法值回退 auto', () => {
     expect(getTestdataGenerationMode('sandbox')).toBe('sandbox');
