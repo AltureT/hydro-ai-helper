@@ -21,6 +21,7 @@ type WorkflowJob = {
 type Workflow = { jobs?: Record<string, WorkflowJob> };
 
 const workflowDirectory = path.resolve(__dirname, '../../../.github/workflows');
+const githubDirectory = path.resolve(__dirname, '../../../.github');
 const workflowFiles = [
   'ci.yml',
   'npm-publish.yml',
@@ -33,6 +34,10 @@ const DISPATCH_TAG_EXPRESSION = '${{ github.event.inputs.tag_name }}';
 
 function readWorkflow(name: string): string {
   return fs.readFileSync(path.join(workflowDirectory, name), 'utf8');
+}
+
+function readGitHubDocument(name: string): string {
+  return fs.readFileSync(path.join(githubDirectory, name), 'utf8');
 }
 
 function parseWorkflow(source: string): Workflow {
@@ -182,6 +187,24 @@ function legacyMirrorSubstringPolicy(source: string): boolean {
 }
 
 describe('workflow security policy', () => {
+  test('security policy documents supported 3.x releases and verified private reporting', () => {
+    const securityPolicy = readGitHubDocument('SECURITY.md');
+
+    expect(securityPolicy).toMatch(/^\| 3\.x\s+\|\s+:white_check_mark: \|$/m);
+    expect(securityPolicy).not.toMatch(/^\| 1\.x\s+\|\s+:white_check_mark: \|$/m);
+    expect(securityPolicy).toContain('https://github.com/AltureT/hydro-ai-helper/security/advisories/new');
+  });
+
+  test('automation guide documents release security gates and trusted publishing', () => {
+    const automationGuide = readGitHubDocument('AUTOMATION.md');
+
+    expect(automationGuide).toContain('签名');
+    expect(automationGuide).toContain('npm run lint');
+    expect(automationGuide).toContain('npm test -- --runInBand --silent');
+    expect(automationGuide).toContain('npm publish --provenance');
+    expect(automationGuide).toContain('Trusted Publishing');
+  });
+
   test.each(workflowFiles)('%s pins every GitHub Action to an immutable SHA', (workflowFile) => {
     const usesLines = readWorkflow(workflowFile)
       .split('\n')

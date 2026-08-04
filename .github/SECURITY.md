@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.x     | :white_check_mark: |
+| 3.x     | :white_check_mark: |
+| 2.x and earlier | :x: |
 
 ## Reporting a Vulnerability
 
@@ -15,7 +16,7 @@ If you discover a security vulnerability in this project, please report it respo
 ### How to Report
 
 1. **Email**: Send details to [myalture@gmail.com](mailto:myalture@gmail.com)
-2. **GitHub Private Advisory**: Use [GitHub Security Advisories](https://github.com/AltureT/hydro-ai-helper/security/advisories/new) to report privately
+2. **GitHub Private Advisory**: Private vulnerability reporting is enabled for this repository. Use [GitHub Security Advisories](https://github.com/AltureT/hydro-ai-helper/security/advisories/new) to report privately.
 
 ### What to Include
 
