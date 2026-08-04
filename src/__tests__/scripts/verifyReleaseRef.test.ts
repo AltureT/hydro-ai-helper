@@ -24,8 +24,15 @@ function loadVerifier(): { verifyReleaseRef: (options: VerificationOptions) => P
 function createExecFile(mergeBaseError?: Error): VerificationOptions['execFile'] {
   return (command, args) => {
     expect(command).toBe('git');
-    if (args[0] === 'rev-list') return `${COMMIT_SHA}\n`;
-    if (args[0] === 'merge-base' && mergeBaseError) throw mergeBaseError;
+    if (args[0] === 'fetch') expect(args).toEqual(['fetch', 'origin', 'main', '--no-tags']);
+    if (args[0] === 'rev-list') {
+      expect(args).toEqual(['rev-list', '-n', '1', 'v3.2.0']);
+      return `${COMMIT_SHA}\n`;
+    }
+    if (args[0] === 'merge-base') {
+      expect(args).toEqual(['merge-base', '--is-ancestor', COMMIT_SHA, 'origin/main']);
+      if (mergeBaseError) throw mergeBaseError;
+    }
     return undefined;
   };
 }
@@ -33,11 +40,13 @@ function createExecFile(mergeBaseError?: Error): VerificationOptions['execFile']
 function createFetch(overrides: {
   refType?: 'tag' | 'commit';
   commitVerified?: boolean;
+  tagTargetSha?: string;
   tagVerified?: boolean;
 } = {}): VerificationOptions['fetchImpl'] {
   const {
     refType = 'tag',
     commitVerified = true,
+    tagTargetSha = COMMIT_SHA,
     tagVerified = true,
   } = overrides;
 
@@ -49,7 +58,7 @@ function createFetch(overrides: {
       return {
         ok: true,
         json: async () => ({
-          object: { type: 'commit', sha: COMMIT_SHA },
+          object: { type: 'commit', sha: tagTargetSha },
           verification: { verified: tagVerified },
         }),
       };
@@ -68,11 +77,17 @@ describe('verifyReleaseRef', () => {
 
   test('accepts an annotated tag whose verified commit is on origin/main', async () => {
     const { verifyReleaseRef } = loadVerifier();
+    const execFile = jest.fn(createExecFile());
 
-    await expect(verifyReleaseRef({ env, execFile: createExecFile(), fetchImpl: createFetch() })).resolves.toEqual({
+    await expect(verifyReleaseRef({ env, execFile, fetchImpl: createFetch() })).resolves.toEqual({
       tagName: 'v3.2.0',
       commitSha: COMMIT_SHA,
     });
+    expect(execFile.mock.calls).toEqual([
+      ['git', ['fetch', 'origin', 'main', '--no-tags']],
+      ['git', ['rev-list', '-n', '1', 'v3.2.0']],
+      ['git', ['merge-base', '--is-ancestor', COMMIT_SHA, 'origin/main']],
+    ]);
   });
 
   test('rejects a commit outside origin/main', async () => {
@@ -104,5 +119,15 @@ describe('verifyReleaseRef', () => {
 
     await expect(verifyReleaseRef({ env, execFile: createExecFile(), fetchImpl: createFetch({ tagVerified: false }) }))
       .rejects.toThrow('tag');
+  });
+
+  test('rejects an annotated tag object that targets a different commit', async () => {
+    const { verifyReleaseRef } = loadVerifier();
+
+    await expect(verifyReleaseRef({
+      env,
+      execFile: createExecFile(),
+      fetchImpl: createFetch({ tagTargetSha: 'c'.repeat(40) }),
+    })).rejects.toThrow(`does not directly reference ${COMMIT_SHA}`);
   });
 });

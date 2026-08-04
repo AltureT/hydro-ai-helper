@@ -26,17 +26,27 @@ npm publish --provenance --access public
 
 ## 发行流程
 
-1. 在 feature 分支完成改动并通过本地检查。
-2. 创建面向 `main` 的 Pull Request，等待 CI 通过。
-3. 在 GitHub 网页使用 squash-merge 合并，确认生成受信任签名的 `web-flow` 提交。
-4. 在该 `main` 提交上创建已签名 annotated tag，例如：
+1. 从最新 `main` 创建专用 release feature 分支。在该分支更新 `package.json`、`package-lock.json` 和 `CHANGELOG.md`，只修改版本文件而不创建本地提交或标签：
 
    ```bash
-   npm version patch --sign-git-tag
-   git push origin main --tags
+   npm version patch --no-git-tag-version
    ```
 
-5. 观察 `Publish to npm` 工作流；它会验证发布引用、执行门禁、以 provenance 发布 npm 包、创建 GitHub Release，并触发 Gitee Release 同步。
+2. 提交 release 分支并创建面向 `main` 的 Pull Request，等待 lint、测试和构建 CI 全部通过。
+3. 在 GitHub 网页使用 squash-merge 合并，确认新 `main` 是受信任签名的 `web-flow` 提交；版本和 changelog 变更必须已经包含在这个 squash commit 中。
+4. 获取远端 `main`，记录并检查刚验证的 squash commit，然后在这个**精确 SHA** 上创建已签名 annotated tag，并且只推送该标签：
+
+   ```bash
+   git fetch origin main --tags
+   RELEASE_SHA="$(git rev-parse origin/main)"
+   git show --show-signature --no-patch "$RELEASE_SHA"
+   git tag -s -a vX.Y.Z "$RELEASE_SHA" -m "Release vX.Y.Z"
+   git push origin refs/tags/vX.Y.Z
+   ```
+
+   不要在合并后运行会产生新版本提交的 `npm version`，也不要推送 `main --tags`；标签必须直接指向已经过 CI 和网页签名 squash 的远端 `main` SHA。
+
+5. 观察 `Publish to npm` 工作流；它会先验证发布引用，再执行依赖安装和发布门禁，以 provenance 发布 npm 包、创建 GitHub Release，并触发 Gitee Release 同步。
 
 ## Trusted Publishing 与凭据迁移
 
