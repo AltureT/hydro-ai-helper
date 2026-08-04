@@ -3,6 +3,7 @@ import path from 'path';
 import yaml from 'js-yaml';
 
 type WorkflowStep = {
+  'continue-on-error'?: boolean;
   env?: Record<string, unknown>;
   name?: string;
   run?: string;
@@ -11,6 +12,7 @@ type WorkflowStep = {
 };
 
 type WorkflowJob = {
+  'continue-on-error'?: boolean;
   env?: Record<string, unknown>;
   permissions?: Record<string, unknown>;
   steps?: WorkflowStep[];
@@ -59,6 +61,10 @@ function commandIndex(steps: WorkflowStep[], command: string): number {
   return steps.findIndex((step) => step.run?.trim() === command);
 }
 
+function permitsFailure(value: unknown): boolean {
+  return value !== undefined && value !== false;
+}
+
 function expressionPaths(value: unknown, target: string, currentPath = ''): string[] {
   if (typeof value === 'string' && value.includes(target)) return [currentPath];
   if (Array.isArray(value)) {
@@ -86,6 +92,7 @@ function releasePolicyViolations(workflow: Workflow): string[] {
   const publish = steps[publishIndex];
 
   if (job.permissions?.['id-token'] !== 'write') violations.push('id-token permission must be write');
+  if (permitsFailure(job['continue-on-error'])) violations.push('release job must not continue after failure');
   if (!checkout || checkout.with?.['fetch-depth'] !== 0) violations.push('checkout must fetch complete history');
   if (!verifier || verifier.env?.GITHUB_TOKEN !== '${{ secrets.GITHUB_TOKEN }}') {
     violations.push('release verifier must receive GITHUB_TOKEN');
@@ -98,17 +105,28 @@ function releasePolicyViolations(workflow: Workflow): string[] {
   } else if (![verifierIndex, lintIndex, testIndex, buildIndex].every((index) => index < publishIndex)) {
     violations.push('release gates must run before publish');
   }
+  if ([verifier, steps[lintIndex], steps[testIndex], steps[buildIndex], publish].some(
+    (step) => step && permitsFailure(step['continue-on-error']),
+  )) {
+    violations.push('release security gates must not continue after failure');
+  }
 
   return violations;
 }
 
 function mirrorPolicyViolations(workflow: Workflow): string[] {
-  const commands = getSteps(getJob(workflow, 'sync')).flatMap((step) => activeShellLines(step.run));
+  const job = getJob(workflow, 'sync');
+  const steps = getSteps(job);
+  const commands = steps.flatMap((step) => activeShellLines(step.run));
   const strictHostKeyLines = commands.filter((line) => /^StrictHostKeyChecking\s+\S+$/.test(line));
   const tagPushLines = commands.filter((line) => line.startsWith('git push gitee --tags'));
   const disablesExitOnError = commands.some((line) => /^set\s+\+(?:e|o\s+errexit)(?:\s|$)/.test(line));
   const violations: string[] = [];
 
+  if (permitsFailure(job['continue-on-error'])) violations.push('mirror job must not continue after failure');
+  if (steps.some((step) => permitsFailure(step['continue-on-error']))) {
+    violations.push('mirror steps must not continue after failure');
+  }
   if (!commands.includes(`echo '${GITEE_HOST_KEY}' >> ~/.ssh/known_hosts`)) {
     violations.push('pinned Gitee host key is missing');
   }
@@ -233,5 +251,77 @@ jobs:
     expect(mirrorPolicyViolations(parseWorkflow(conflictingMirror))).not.toEqual([]);
     expect(interpolatedDispatch).not.toContain('TAG_NAME="${{ github.event.inputs.tag_name }}"');
     expect(dispatchPolicyViolations(parseWorkflow(interpolatedDispatch))).not.toEqual([]);
+  });
+
+  test('continue-on-error adversarial fixtures must fail release and mirror policies', () => {
+    const releaseJobBypass = parseWorkflow(`
+jobs:
+  publish:
+    continue-on-error: true
+    permissions:
+      id-token: write
+    steps:
+      - uses: ${CHECKOUT_ACTION}
+        with:
+          fetch-depth: 0
+      - run: node scripts/verifyReleaseRef.js
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      - run: npm run lint
+      - run: npm test -- --runInBand --silent
+      - run: npm run build:plugin
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}
+`);
+    const releaseStepBypass = parseWorkflow(`
+jobs:
+  publish:
+    permissions:
+      id-token: write
+    steps:
+      - uses: ${CHECKOUT_ACTION}
+        with:
+          fetch-depth: 0
+      - run: node scripts/verifyReleaseRef.js
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      - run: npm run lint
+        continue-on-error: true
+      - run: npm test -- --runInBand --silent
+      - run: npm run build:plugin
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}
+`);
+    const mirrorJobBypass = parseWorkflow(`
+jobs:
+  sync:
+    continue-on-error: true
+    steps:
+      - run: |
+          echo '${GITEE_HOST_KEY}' >> ~/.ssh/known_hosts
+          cat >> ~/.ssh/config << EOF
+          StrictHostKeyChecking yes
+          EOF
+          git push gitee --tags --force
+`);
+    const mirrorStepBypass = parseWorkflow(`
+jobs:
+  sync:
+    steps:
+      - run: |
+          echo '${GITEE_HOST_KEY}' >> ~/.ssh/known_hosts
+          cat >> ~/.ssh/config << EOF
+          StrictHostKeyChecking yes
+          EOF
+          git push gitee --tags --force
+        continue-on-error: true
+`);
+
+    expect(releasePolicyViolations(releaseJobBypass)).toContain('release job must not continue after failure');
+    expect(releasePolicyViolations(releaseStepBypass)).toContain('release security gates must not continue after failure');
+    expect(mirrorPolicyViolations(mirrorJobBypass)).toContain('mirror job must not continue after failure');
+    expect(mirrorPolicyViolations(mirrorStepBypass)).toContain('mirror steps must not continue after failure');
   });
 });
