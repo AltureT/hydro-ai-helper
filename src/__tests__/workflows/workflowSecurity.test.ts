@@ -1,5 +1,22 @@
 import fs from 'fs';
 import path from 'path';
+import yaml from 'js-yaml';
+
+type WorkflowStep = {
+  env?: Record<string, unknown>;
+  name?: string;
+  run?: string;
+  uses?: string;
+  with?: Record<string, unknown>;
+};
+
+type WorkflowJob = {
+  env?: Record<string, unknown>;
+  permissions?: Record<string, unknown>;
+  steps?: WorkflowStep[];
+};
+
+type Workflow = { jobs?: Record<string, WorkflowJob> };
 
 const workflowDirectory = path.resolve(__dirname, '../../../.github/workflows');
 const workflowFiles = [
@@ -8,9 +25,142 @@ const workflowFiles = [
   'sync-releases-to-gitee.yml',
   'sync-to-gitee.yml',
 ];
+const CHECKOUT_ACTION = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
+const GITEE_HOST_KEY = 'gitee.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEKxHSJ7084RmkJ4YdEi5tngynE8aZe2uEoVVsB/OvYN';
+const DISPATCH_TAG_EXPRESSION = '${{ github.event.inputs.tag_name }}';
 
 function readWorkflow(name: string): string {
   return fs.readFileSync(path.join(workflowDirectory, name), 'utf8');
+}
+
+function parseWorkflow(source: string): Workflow {
+  return yaml.load(source) as Workflow;
+}
+
+function getJob(workflow: Workflow, name: string): WorkflowJob {
+  const job = workflow.jobs?.[name];
+  if (!job) throw new Error(`Missing ${name} job`);
+  return job;
+}
+
+function getSteps(job: WorkflowJob): WorkflowStep[] {
+  if (!job.steps) throw new Error('Job has no steps');
+  return job.steps;
+}
+
+function activeShellLines(run: string | undefined): string[] {
+  return (run || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+function commandIndex(steps: WorkflowStep[], command: string): number {
+  return steps.findIndex((step) => step.run?.trim() === command);
+}
+
+function expressionPaths(value: unknown, target: string, currentPath = ''): string[] {
+  if (typeof value === 'string' && value.includes(target)) return [currentPath];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) => expressionPaths(entry, target, `${currentPath}[${index}]`));
+  }
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).flatMap(([key, entry]) => expressionPaths(
+    entry,
+    target,
+    currentPath ? `${currentPath}.${key}` : key,
+  ));
+}
+
+function releasePolicyViolations(workflow: Workflow): string[] {
+  const job = getJob(workflow, 'publish');
+  const steps = getSteps(job);
+  const violations: string[] = [];
+  const checkout = steps.find((step) => step.uses === CHECKOUT_ACTION);
+  const verifierIndex = commandIndex(steps, 'node scripts/verifyReleaseRef.js');
+  const lintIndex = commandIndex(steps, 'npm run lint');
+  const testIndex = commandIndex(steps, 'npm test -- --runInBand --silent');
+  const buildIndex = commandIndex(steps, 'npm run build:plugin');
+  const publishIndex = commandIndex(steps, 'npm publish --provenance --access public');
+  const verifier = steps[verifierIndex];
+  const publish = steps[publishIndex];
+
+  if (job.permissions?.['id-token'] !== 'write') violations.push('id-token permission must be write');
+  if (!checkout || checkout.with?.['fetch-depth'] !== 0) violations.push('checkout must fetch complete history');
+  if (!verifier || verifier.env?.GITHUB_TOKEN !== '${{ secrets.GITHUB_TOKEN }}') {
+    violations.push('release verifier must receive GITHUB_TOKEN');
+  }
+  if (!publish || publish.env?.NODE_AUTH_TOKEN !== '${{ secrets.NPM_TOKEN }}') {
+    violations.push('provenance publish must retain NODE_AUTH_TOKEN');
+  }
+  if ([verifierIndex, lintIndex, testIndex, buildIndex, publishIndex].some((index) => index < 0)) {
+    violations.push('release gate command is missing');
+  } else if (![verifierIndex, lintIndex, testIndex, buildIndex].every((index) => index < publishIndex)) {
+    violations.push('release gates must run before publish');
+  }
+
+  return violations;
+}
+
+function mirrorPolicyViolations(workflow: Workflow): string[] {
+  const commands = getSteps(getJob(workflow, 'sync')).flatMap((step) => activeShellLines(step.run));
+  const strictHostKeyLines = commands.filter((line) => /^StrictHostKeyChecking\s+\S+$/.test(line));
+  const tagPushLines = commands.filter((line) => line.startsWith('git push gitee --tags'));
+  const disablesExitOnError = commands.some((line) => /^set\s+\+(?:e|o\s+errexit)(?:\s|$)/.test(line));
+  const violations: string[] = [];
+
+  if (!commands.includes(`echo '${GITEE_HOST_KEY}' >> ~/.ssh/known_hosts`)) {
+    violations.push('pinned Gitee host key is missing');
+  }
+  if (commands.some((line) => line.includes('ssh-keyscan'))) violations.push('dynamic host-key discovery is forbidden');
+  if (!commands.includes('cat >> ~/.ssh/config << EOF')
+    || strictHostKeyLines.length !== 1
+    || strictHostKeyLines[0] !== 'StrictHostKeyChecking yes') {
+    violations.push('SSH config must contain exactly one strict host-key setting');
+  }
+  if (tagPushLines.length !== 1 || tagPushLines[0] !== 'git push gitee --tags --force' || disablesExitOnError) {
+    violations.push('tag push must propagate failures');
+  }
+
+  return violations;
+}
+
+function dispatchPolicyViolations(workflow: Workflow): string[] {
+  const job = getJob(workflow, 'sync-release');
+  const commands = getSteps(job).flatMap((step) => activeShellLines(step.run));
+  const violations: string[] = [];
+
+  if (job.env?.DISPATCH_TAG_NAME !== DISPATCH_TAG_EXPRESSION) {
+    violations.push('dispatch tag must be assigned through job environment');
+  }
+  if (!commands.includes('TAG_NAME="$DISPATCH_TAG_NAME"')) {
+    violations.push('dispatch tag must be expanded from DISPATCH_TAG_NAME');
+  }
+  if (expressionPaths(workflow, DISPATCH_TAG_EXPRESSION).join(',') !== 'jobs.sync-release.env.DISPATCH_TAG_NAME') {
+    violations.push('dispatch tag expression must only appear in job environment');
+  }
+
+  return violations;
+}
+
+function legacyReleaseSubstringPolicy(source: string): boolean {
+  return [
+    'fetch-depth: 0',
+    'node scripts/verifyReleaseRef.js',
+    'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}',
+    'npm run lint',
+    'npm test -- --runInBand --silent',
+    'npm run build:plugin',
+    'npm publish --provenance --access public',
+    'id-token: write',
+  ].every((required) => source.includes(required));
+}
+
+function legacyMirrorSubstringPolicy(source: string): boolean {
+  return source.includes(GITEE_HOST_KEY)
+    && source.includes('StrictHostKeyChecking yes')
+    && !source.includes('ssh-keyscan')
+    && !/git push gitee --tags --force\s*\|\|\s*true/.test(source);
 }
 
 describe('workflow security policy', () => {
@@ -24,33 +174,64 @@ describe('workflow security policy', () => {
     }
   });
 
-  test('npm publishing verifies a complete trusted release before provenance publishing', () => {
-    const workflow = readWorkflow('npm-publish.yml');
-
-    expect(workflow).toContain('fetch-depth: 0');
-    expect(workflow).toContain('node scripts/verifyReleaseRef.js');
-    expect(workflow).toContain('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}');
-    expect(workflow).toContain('npm run lint');
-    expect(workflow).toContain('npm test -- --runInBand --silent');
-    expect(workflow).toContain('npm run build:plugin');
-    expect(workflow).toContain('npm publish --provenance --access public');
-    expect(workflow).toContain('id-token: write');
+  test('npm publishing executes trusted release gates before authenticated provenance publishing', () => {
+    expect(releasePolicyViolations(parseWorkflow(readWorkflow('npm-publish.yml')))).toEqual([]);
   });
 
-  test('Gitee mirror pins its SSH host identity and does not hide tag push failures', () => {
-    const workflow = readWorkflow('sync-to-gitee.yml');
-
-    expect(workflow).toContain('gitee.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEKxHSJ7084RmkJ4YdEi5tngynE8aZe2uEoVVsB/OvYN');
-    expect(workflow).toContain('StrictHostKeyChecking yes');
-    expect(workflow).not.toContain('ssh-keyscan');
-    expect(workflow).not.toMatch(/git push gitee --tags --force\s*\|\|\s*true/);
+  test('Gitee mirror uses an active pinned SSH policy and a failure-propagating tag push', () => {
+    expect(mirrorPolicyViolations(parseWorkflow(readWorkflow('sync-to-gitee.yml')))).toEqual([]);
   });
 
-  test('release dispatch data is passed through environment instead of shell interpolation', () => {
-    const workflow = readWorkflow('sync-releases-to-gitee.yml');
+  test('release dispatch data appears only in job environment and shell variable expansion', () => {
+    expect(dispatchPolicyViolations(parseWorkflow(readWorkflow('sync-releases-to-gitee.yml')))).toEqual([]);
+  });
 
-    expect(workflow).toContain('DISPATCH_TAG_NAME: ${{ github.event.inputs.tag_name }}');
-    expect(workflow).toContain('TAG_NAME="$DISPATCH_TAG_NAME"');
-    expect(workflow).not.toContain('TAG_NAME="${{ github.event.inputs.tag_name }}"');
+  test('adversarial workflow fixtures bypass legacy substring checks but fail parsed policy checks', () => {
+    const misleadingRelease = `
+jobs:
+  publish:
+    permissions:
+      id-token: read # id-token: write
+    steps:
+      - uses: ${CHECKOUT_ACTION}
+        with:
+          fetch-depth: 1 # fetch-depth: 0
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}
+      - run: node scripts/verifyReleaseRef.js
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+      - run: npm run lint
+      - run: npm test -- --runInBand --silent
+      - run: npm run build:plugin
+`;
+    const conflictingMirror = `
+jobs:
+  sync:
+    steps:
+      - run: |
+          echo '${GITEE_HOST_KEY}' >> ~/.ssh/known_hosts
+          StrictHostKeyChecking yes
+          StrictHostKeyChecking no
+          git push gitee --tags --force || :
+`;
+    const interpolatedDispatch = `
+jobs:
+  sync-release:
+    env:
+      DISPATCH_TAG_NAME: \${{ github.event.inputs.tag_name }}
+    steps:
+      - run: |
+          TAG_NAME="$DISPATCH_TAG_NAME"
+          EXTRA="\${{ github.event.inputs.tag_name }}"
+`;
+
+    expect(legacyReleaseSubstringPolicy(misleadingRelease)).toBe(true);
+    expect(releasePolicyViolations(parseWorkflow(misleadingRelease))).not.toEqual([]);
+    expect(legacyMirrorSubstringPolicy(conflictingMirror)).toBe(true);
+    expect(mirrorPolicyViolations(parseWorkflow(conflictingMirror))).not.toEqual([]);
+    expect(interpolatedDispatch).not.toContain('TAG_NAME="${{ github.event.inputs.tag_name }}"');
+    expect(dispatchPolicyViolations(parseWorkflow(interpolatedDispatch))).not.toEqual([]);
   });
 });
