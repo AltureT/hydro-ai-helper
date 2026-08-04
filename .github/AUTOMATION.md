@@ -40,9 +40,9 @@ npm publish --provenance --access public
 
 ## Trusted Publishing 与凭据迁移
 
-本仓库正使用 npm 的 **Trusted Publishing** / OIDC provenance 能力。当前发布工作流仍保留 `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`，以保证现有发布链不断裂。
+当前发布工作流使用 OIDC provenance，同时保留令牌认证：`NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` 仍为 npm 发布提供认证，以保证现有发布链不断裂。
 
-在 npm Trusted Publishing 配置完成、通过一次受控发布验证并确认不再需要令牌前，**暂不删除 `NPM_TOKEN`**。届时应先更新工作流和发布验证，再移除 GitHub Secret；不得在未验证的情况下删除凭据或将令牌写入仓库、日志或 `.npmrc`。
+**Trusted Publishing 尚待 npm 包设置和一次受控发布确认**。在该迁移完成并确认不再需要令牌前，**暂不删除 `NPM_TOKEN`**。届时应先更新工作流和发布验证，再移除 GitHub Secret；不得在未验证的情况下删除凭据或将令牌写入仓库、日志或 `.npmrc`。
 
 ## 版本通道
 

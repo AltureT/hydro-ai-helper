@@ -192,6 +192,8 @@ describe('workflow security policy', () => {
 
     expect(securityPolicy).toMatch(/^\| 3\.x\s+\|\s+:white_check_mark: \|$/m);
     expect(securityPolicy).not.toMatch(/^\| 1\.x\s+\|\s+:white_check_mark: \|$/m);
+    expect(securityPolicy).toMatch(/^\| 2\.x and earlier\s+\|\s+:x: \|$/m);
+    expect(securityPolicy).toContain('mailto:myalture@gmail.com');
     expect(securityPolicy).toContain('https://github.com/AltureT/hydro-ai-helper/security/advisories/new');
   });
 
@@ -203,6 +205,9 @@ describe('workflow security policy', () => {
     expect(automationGuide).toContain('npm test -- --runInBand --silent');
     expect(automationGuide).toContain('npm publish --provenance');
     expect(automationGuide).toContain('Trusted Publishing');
+    expect(automationGuide).toContain('当前发布工作流使用 OIDC provenance，同时保留令牌认证');
+    expect(automationGuide).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
+    expect(automationGuide).toContain('Trusted Publishing 尚待 npm 包设置和一次受控发布确认');
   });
 
   test.each(workflowFiles)('%s pins every GitHub Action to an immutable SHA', (workflowFile) => {
