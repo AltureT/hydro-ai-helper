@@ -229,9 +229,9 @@ export class StudentSummaryModel {
     try {
       const result = await this.collection.insertMany(docs as StudentSummary[], { ordered: false });
       return result.insertedCount;
-    } catch (err: any) {
-      if (err.code === 11000 || err.writeErrors) {
-        return err.result?.insertedCount ?? 0;
+    } catch (err: unknown) {
+      if ((err as { code?: number; writeErrors?: unknown; result?: { insertedCount?: number } }).code === 11000 || (err as { writeErrors?: unknown }).writeErrors) {
+        return (err as { result?: { insertedCount?: number } }).result?.insertedCount ?? 0;
       }
       throw err;
     }

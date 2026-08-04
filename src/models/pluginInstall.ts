@@ -80,7 +80,7 @@ export class PluginInstallModel {
       return;
     }
 
-    const updates: Record<string, any> = { lastVersion: version };
+    const updates: Record<string, unknown> = { lastVersion: version };
     // 一次性迁移：v2.0.x 的「确定性哈希」instanceId 因 serverInfo() 无 host 字段，
     // 退化为 sha256('unknown:'+dbName)，导致所有部署共享同一个 ID。
     // 凡是非 UUID 格式的旧值，替换为唯一 UUID 以解除碰撞。

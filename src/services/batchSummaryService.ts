@@ -187,7 +187,7 @@ function computeStudentStats(snapshots: ProblemSnapshot[]): {
     for (const st of snap.allStatuses) {
       const parts = st.split(':');
       const status = parts[parts.length - 1];
-      if (status in dist) (dist as any)[status]++;
+      if (status in dist) dist[status as keyof typeof dist]++;
     }
   }
 
@@ -273,26 +273,24 @@ export class BatchSummaryService {
   private db: Db;
   private jobModel: BatchSummaryJobModel;
   private summaryModel: StudentSummaryModel;
-  private aiClient: any;
-  private tokenUsageModel: any;
-  private historyModel: any;
+  private aiClient: { chat: (messages: Array<{ role: string; content: string }>, system: string) => Promise<{ content: string; usage?: { prompt_tokens?: number; completion_tokens?: number } }> };
+  private tokenUsageModel: unknown;
+  private historyModel: { create: (record: unknown) => Promise<unknown>; findRecent: (domainId: string, userId: number, limit: number) => Promise<StudentHistoryRecord[]> } | null;
   private sampler: SubmissionSampler;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private featureStatsModel: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private errorReporter: any;
+  private featureStatsModel: { recordAttempt: (name: string) => Promise<unknown>; recordSuccess: (name: string) => Promise<unknown> } | null;
+  private errorReporter: { capture: (...args: unknown[]) => unknown } | null;
 
   constructor(
     db: Db,
     jobModel: BatchSummaryJobModel,
     summaryModel: StudentSummaryModel,
-    aiClient: any,
-    tokenUsageModel: any,
-    historyModel?: any,
+    aiClient: BatchSummaryService['aiClient'],
+    tokenUsageModel: unknown,
+    historyModel?: BatchSummaryService['historyModel'],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    featureStatsModel?: any,
+    featureStatsModel?: BatchSummaryService['featureStatsModel'],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    errorReporter?: any,
+    errorReporter?: BatchSummaryService['errorReporter'],
   ) {
     this.db = db;
     this.jobModel = jobModel;
@@ -438,11 +436,11 @@ export class BatchSummaryService {
         .toArray();
 
       // Group records by pid
-      const recordsByPid = new Map<string, any[]>();
+      const recordsByPid = new Map<string, Array<{ _id: RawSubmission['recordId']; code?: string; status: number; score?: number; lang?: string; judgeAt?: Date; time?: number; memory?: number }>>();
       for (const r of allRecords) {
         const pid = String(r.pid);
         if (!recordsByPid.has(pid)) recordsByPid.set(pid, []);
-        recordsByPid.get(pid)!.push(r);
+        (recordsByPid.get(pid) as Array<{ _id: RawSubmission['recordId']; code?: string; status: number; score?: number; lang?: string; judgeAt?: Date; time?: number; memory?: number }>).push(r as unknown as { _id: RawSubmission['recordId']; code?: string; status: number; score?: number; lang?: string; judgeAt?: Date; time?: number; memory?: number });
       }
 
       // c. Sample per problem
@@ -451,7 +449,7 @@ export class BatchSummaryService {
 
       for (const problem of problems) {
         const rawRecords = recordsByPid.get(problem.pid) ?? [];
-        const rawSubmissions: RawSubmission[] = rawRecords.map((r: any) => ({
+        const rawSubmissions: RawSubmission[] = rawRecords.map((r) => ({
           recordId: r._id,
           code: r.code ?? '',
           status: STATUS_MAP[r.status] ?? String(r.status),
@@ -536,7 +534,7 @@ export class BatchSummaryService {
           ...stats,
           actionableAdvice: advice,
           createdAt: new Date(),
-          }).catch((histErr: any) => {
+          }).catch((histErr: unknown) => {
             console.warn('[BatchSummaryService] Failed to save history record:', histErr);
           });
       }
@@ -552,8 +550,8 @@ export class BatchSummaryService {
       });
 
       return promptTokens + completionTokens;
-    } catch (err: any) {
-      const errorMessage = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const errorMessage = (err as { message?: string })?.message ?? String(err);
 
       await this.summaryModel.markFailed(summary._id, errorMessage);
       await this.jobModel.incrementFailed(job._id);

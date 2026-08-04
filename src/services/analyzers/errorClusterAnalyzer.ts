@@ -66,7 +66,7 @@ export function analyzeErrorClusters(
   const recordsByPid = new Map<number, ClusterRecord[]>();
   for (const rec of records) {
     if (!recordsByPid.has(rec.pid)) recordsByPid.set(rec.pid, []);
-    recordsByPid.get(rec.pid)!.push(rec);
+    (recordsByPid.get(rec.pid) as ClusterRecord[]).push(rec);
   }
 
   for (const pid of pids) {
@@ -83,7 +83,7 @@ export function analyzeErrorClusters(
     const sigStudents = new Map<string, Set<number>>();
     for (const [uid, sig] of studentSignatures) {
       if (!sigStudents.has(sig)) sigStudents.set(sig, new Set());
-      sigStudents.get(sig)!.add(uid);
+      (sigStudents.get(sig) as Set<number>).add(uid);
     }
 
     const threshold = Math.max(MIN_AFFECTED, Math.ceil(totalStudents * 0.3));

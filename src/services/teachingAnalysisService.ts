@@ -6,6 +6,7 @@
  */
 
 import type { Db } from 'mongodb';
+import type { ObjectIdType } from '../utils/mongo';
 import { TeachingFinding, FindingDimension } from '../models/teachingSummary';
 import { analyzeErrorClusters } from './analyzers/errorClusterAnalyzer';
 import { analyzeTemporalPatterns } from './analyzers/temporalPatternAnalyzer';
@@ -50,7 +51,7 @@ const STATUS_LABEL: Record<number, string> = {
 
 export interface AnalyzeInput {
   domainId: string;
-  contestId: any;
+  contestId: ObjectIdType | string;
   pids: number[];
   studentUids: number[];
   contestStartTime?: Date;
@@ -74,7 +75,7 @@ export interface AnalyzeResult {
 // ─── Internal Data Structures ────────────────────────────────────────────────
 
 interface RecordDoc {
-  _id: any;
+  _id: unknown;
   domainId: string;
   pid: number;
   uid: number;
@@ -85,7 +86,7 @@ interface RecordDoc {
 }
 
 interface ConversationDoc {
-  _id: any;
+  _id: unknown;
   domainId: string;
   userId: number;
   problemId: string;
@@ -93,8 +94,8 @@ interface ConversationDoc {
 }
 
 interface MessageDoc {
-  _id: any;
-  conversationId: any;
+  _id: unknown;
+  conversationId: unknown;
   role: string;
   questionType?: string;
   content: string;
@@ -102,7 +103,7 @@ interface MessageDoc {
 }
 
 interface JailbreakDoc {
-  _id: any;
+  _id: unknown;
   domainId?: string;
   userId?: number;
   category?: string;
@@ -198,7 +199,7 @@ export class TeachingAnalysisService {
 
     // Error clustering dimension (uses separate query data)
     const errorClusterFindings = analyzeErrorClusters(
-      clusteringRecords,
+      clusteringRecords as Parameters<typeof analyzeErrorClusters>[0],
       input.pids,
       input.studentUids.length,
       input.pidTitles,
@@ -216,7 +217,7 @@ export class TeachingAnalysisService {
     // Temporal pattern analysis
     const temporalProfiles: StudentTemporalProfile[] = [];
     const temporalFindings = analyzeTemporalPatterns(
-      records as any[], input.pids, input.studentUids,
+      records as unknown as Parameters<typeof analyzeTemporalPatterns>[0], input.pids, input.studentUids,
       conversationsByUserPid,
       input.contestStartTime, input.contestEndTime,
       temporalProfiles,
@@ -228,7 +229,7 @@ export class TeachingAnalysisService {
     // Cross-dimensional correlations
     const correlationFindings = analyzeCorrelations(
       findings, temporalProfiles, input.studentUids.length,
-      aiUserUids, recordsByPidUid as any,
+      aiUserUids, recordsByPidUid as unknown as Parameters<typeof analyzeCorrelations>[4],
     );
     for (const f of correlationFindings) {
       findings.push(f);
@@ -288,7 +289,7 @@ export class TeachingAnalysisService {
       for (const r of acRecords) {
         if (!r.code) continue;
         if (!acByPid.has(r.pid)) acByPid.set(r.pid, []);
-        acByPid.get(r.pid)!.push({
+        (acByPid.get(r.pid) as ACSubmission[]).push({
           uid: r.uid, code: r.code, lang: r.lang || 'unknown', score: 0,
         });
       }
@@ -325,7 +326,7 @@ export class TeachingAnalysisService {
   // ─── Layer 1: Data Fetching ──────────────────────────────────────────────
 
   private async fetchRecords(input: AnalyzeInput): Promise<RecordDoc[]> {
-    const filter: any = {
+    const filter: Record<string, unknown> & { judgeAt?: Record<string, Date> } = {
       domainId: input.domainId,
       pid: { $in: input.pids },
       uid: { $in: input.studentUids },
@@ -340,7 +341,7 @@ export class TeachingAnalysisService {
 
   private async fetchConversations(input: AnalyzeInput): Promise<ConversationDoc[]> {
     const pidStrings = input.pids.map(String);
-    const filter: any = {
+    const filter: Record<string, unknown> = {
       domainId: input.domainId,
       userId: { $in: input.studentUids },
       problemId: { $in: pidStrings },
@@ -353,8 +354,8 @@ export class TeachingAnalysisService {
    * Separate query to avoid loading heavy fields for all dimensions.
    * Records are sorted by judgeAt ascending (required by errorClusterAnalyzer).
    */
-  private async fetchRecordsForClustering(input: AnalyzeInput): Promise<any[]> {
-    const matchStage: any = {
+  private async fetchRecordsForClustering(input: AnalyzeInput): Promise<unknown[]> {
+    const matchStage: Record<string, unknown> & { judgeAt?: Record<string, Date> } = {
       domainId: input.domainId,
       pid: { $in: input.pids },
       uid: { $in: input.studentUids },
@@ -375,12 +376,12 @@ export class TeachingAnalysisService {
         code: 1,
       }},
       { $sort: { judgeAt: 1 } },
-    ]).toArray();
+    ]).toArray() as Promise<Array<{ pid: number; uid: number; code?: string; lang?: string }>>;
   }
 
-  private async fetchACSubmissions(input: AnalyzeInput, pids: number[]): Promise<any[]> {
+  private async fetchACSubmissions(input: AnalyzeInput, pids: number[]): Promise<Array<{ pid: number; uid: number; code?: string; lang?: string }>> {
     if (pids.length === 0) return [];
-    const matchStage: any = {
+    const matchStage: Record<string, unknown> & { judgeAt?: Record<string, Date> } = {
       domainId: input.domainId,
       pid: { $in: pids },
       uid: { $in: input.studentUids },
@@ -395,11 +396,11 @@ export class TeachingAnalysisService {
       { $match: matchStage },
       { $project: { pid: 1, uid: 1, code: 1, lang: 1 } },
       { $sort: { judgeAt: -1 } },
-    ]).toArray();
+    ]).toArray() as unknown as Promise<Array<{ pid: number; uid: number; code?: string; lang?: string }>>;
   }
 
   private async fetchJailbreakLogs(input: AnalyzeInput): Promise<JailbreakDoc[]> {
-    const filter: any = {
+    const filter: Record<string, unknown> & { createdAt?: Record<string, Date> } = {
       domainId: input.domainId,
       userId: { $in: input.studentUids },
       category: { $in: ['prompt_injection', 'prompt_exfiltration', 'obfuscated_injection'] },
@@ -420,19 +421,19 @@ export class TeachingAnalysisService {
     for (const r of records) {
       const key = `${r.pid}:${r.uid}`;
       if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(r);
+      (map.get(key) as RecordDoc[]).push(r);
     }
     return map;
   }
 
-  private groupByField<T>(items: T[], field: string): Map<any, T[]> {
-    const map = new Map<any, T[]>();
+  private groupByField<T>(items: T[], field: string): Map<string, T[]> {
+    const map = new Map<string, T[]>();
     for (const item of items) {
-      const key = (item as any)[field];
+      const key = (item as Record<string, unknown>)[field];
       if (key === undefined || key === null) continue;
       const keyStr = String(key);
       if (!map.has(keyStr)) map.set(keyStr, []);
-      map.get(keyStr)!.push(item);
+      (map.get(keyStr) as T[]).push(item);
     }
     return map;
   }
@@ -502,7 +503,7 @@ export class TeachingAnalysisService {
         // Record each non-AC status this student encountered
         for (const status of statusCounts.keys()) {
           if (!statusStudents.has(status)) statusStudents.set(status, new Set());
-          statusStudents.get(status)!.add(uid);
+          (statusStudents.get(status) as Set<number>).add(uid);
         }
       }
 
@@ -533,8 +534,8 @@ export class TeachingAnalysisService {
    */
   private analyzeComprehension(
     input: AnalyzeInput,
-    conversationsByUser: Map<any, ConversationDoc[]>,
-    messagesByConversation: Map<any, MessageDoc[]>,
+    conversationsByUser: Map<string, ConversationDoc[]>,
+    messagesByConversation: Map<string, MessageDoc[]>,
     aiUserUids: Set<number>,
   ): (TeachingFinding | null)[] {
     const comprehensionStudents: number[] = [];
@@ -587,8 +588,8 @@ export class TeachingAnalysisService {
    */
   private analyzeStrategy(
     input: AnalyzeInput,
-    jailbreaksByUser: Map<any, JailbreakDoc[]>,
-    conversationsByUser: Map<any, ConversationDoc[]>,
+    jailbreaksByUser: Map<string, JailbreakDoc[]>,
+    conversationsByUser: Map<string, ConversationDoc[]>,
     aiUserUids: Set<number>,
   ): (TeachingFinding | null)[] {
     const findings: (TeachingFinding | null)[] = [];
