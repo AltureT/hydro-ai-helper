@@ -238,10 +238,10 @@ export function buildMainPrompt(input: MainPromptInput): PromptMessages {
 
   const behaviorSection = hasBehavior
     ? `\n## 学生行为模式分类（behaviorSummary）\n${JSON.stringify({
-        persistent_learner: { label: '持续努力型', count: input.behaviorSummary!.persistent_learner },
-        burst_then_quit: { label: '受挫放弃型', count: input.behaviorSummary!.burst_then_quit },
-        stuck_silent: { label: '沉默挣扎型', count: input.behaviorSummary!.stuck_silent },
-        disengaged: { label: '未参与型', count: input.behaviorSummary!.disengaged },
+        persistent_learner: { label: '持续努力型', count: input.behaviorSummary.persistent_learner },
+        burst_then_quit: { label: '受挫放弃型', count: input.behaviorSummary.burst_then_quit },
+        stuck_silent: { label: '沉默挣扎型', count: input.behaviorSummary.stuck_silent },
+        disengaged: { label: '未参与型', count: input.behaviorSummary.disengaged },
       }, null, 2)}`
     : '';
 
@@ -338,9 +338,14 @@ ${codeSamples}${conversationSamples}`;
 // ─── 服务类 ──────────────────────────────────────────────
 
 export class TeachingSuggestionService {
-  private aiClient: any;
+  private aiClient: {
+    chat: (messages: Array<{ role: string; content: string }>, system: string) => Promise<{
+      content: string;
+      usage?: { promptTokens?: number; completionTokens?: number; prompt_tokens?: number; completion_tokens?: number };
+    }>;
+  };
 
-  constructor(aiClient: any) {
+  constructor(aiClient: TeachingSuggestionService['aiClient']) {
     this.aiClient = aiClient;
   }
 

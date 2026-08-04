@@ -6,8 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name to sync (e.g., v1.5.5)'
+        description: 'Stable tag to sync (for example, v3.1.0)'
         required: true
+
+permissions:
+  contents: read
 
 jobs:
   sync-release:
@@ -15,125 +18,142 @@ jobs:
     steps:
       - name: Get release info
         id: release
+        env:
+          DISPATCH_TAG_NAME: ${{ github.event.inputs.tag_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_EVENT_TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME="${{ github.event.inputs.tag_name }}"
-            # Fetch release info from GitHub API
-            RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG_NAME}")
-            RELEASE_NAME=$(echo "$RELEASE_INFO" | jq -r '.name // .tag_name')
-            RELEASE_BODY=$(echo "$RELEASE_INFO" | jq -r '.body // ""')
-            PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.prerelease')
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG_NAME="$DISPATCH_TAG_NAME"
+          elif [ "$EVENT_NAME" = "release" ]; then
+            TAG_NAME="$RELEASE_EVENT_TAG_NAME"
           else
-            TAG_NAME="${{ github.event.release.tag_name }}"
-            # Fetch release info via API to avoid shell injection from release body/name
-            RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG_NAME}")
-            RELEASE_NAME=$(echo "$RELEASE_INFO" | jq -r '.name // .tag_name')
-            RELEASE_BODY=$(echo "$RELEASE_INFO" | jq -r '.body // ""')
-            PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.prerelease')
+            printf 'Unsupported workflow event: %s\n' "$EVENT_NAME" >&2
+            exit 1
           fi
 
-          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-          echo "release_name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
-          echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid stable release tag: %s\n' "$TAG_NAME" >&2
+            exit 1
+          fi
 
-          # Save body to file to handle multiline
-          echo "$RELEASE_BODY" > /tmp/release_body.txt
+          gh api "repos/${GH_REPO}/releases/tags/${TAG_NAME}" > /tmp/release_info.json
+          jq -e --arg tag "$TAG_NAME" 'type == "object" and .tag_name == $tag' /tmp/release_info.json > /dev/null
+          jq -rj '.name // .tag_name' /tmp/release_info.json > /tmp/release_name.txt
+          jq -rj '.body // ""' /tmp/release_info.json > /tmp/release_body.txt
+          PRERELEASE="$(jq -r '.prerelease' /tmp/release_info.json)"
+
+          if [ "$PRERELEASE" != "true" ] && [ "$PRERELEASE" != "false" ]; then
+            printf 'Invalid prerelease value for %s\n' "$TAG_NAME" >&2
+            exit 1
+          fi
+
+          printf 'tag_name=%s\n' "$TAG_NAME" >> "$GITHUB_OUTPUT"
+          printf 'prerelease=%s\n' "$PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Check if release exists on Gitee
         id: check
+        env:
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
         run: |
-          # 获取 release 信息，如果不存在会返回错误信息
-          RESPONSE=$(curl -s \
-            "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/tags/${{ steps.release.outputs.tag_name }}?access_token=${{ secrets.GITEE_ACCESS_TOKEN }}")
+          set -euo pipefail
 
-          # 检查返回的 JSON 是否包含 id 字段（存在）或 message 字段（不存在）
-          RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid stable release tag: %s\n' "$TAG_NAME" >&2
+            exit 1
+          fi
 
-          if [ -n "$RELEASE_ID" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "release_id=${RELEASE_ID}" >> $GITHUB_OUTPUT
-            echo "Release already exists on Gitee (ID: ${RELEASE_ID}), will update"
+          HTTP_CODE="$(curl --silent --show-error \
+            --output /tmp/gitee_check.json \
+            --write-out '%{http_code}' \
+            --get \
+            --data-urlencode "access_token=${GITEE_ACCESS_TOKEN}" \
+            "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/tags/${TAG_NAME}")"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            RELEASE_ID="$(jq -r '.id // empty' /tmp/gitee_check.json)"
+            if [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]; then
+              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
+              printf 'release_id=%s\n' "$RELEASE_ID" >> "$GITHUB_OUTPUT"
+            else
+              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+              printf 'release_id=\n' >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "$HTTP_CODE" = "404" ]; then
+            printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+            printf 'release_id=\n' >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Release does not exist on Gitee, will create"
+            printf 'Gitee release lookup failed with HTTP %s\n' "$HTTP_CODE" >&2
+            exit 1
           fi
 
       - name: Create or Update release on Gitee
+        env:
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
+          RELEASE_EXISTS: ${{ steps.check.outputs.exists }}
+          RELEASE_ID: ${{ steps.check.outputs.release_id }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
         run: |
-          RELEASE_BODY=$(cat /tmp/release_body.txt)
-          TAG_NAME="${{ steps.release.outputs.tag_name }}"
-          RELEASE_NAME="${{ steps.release.outputs.release_name }}"
-          PRERELEASE="${{ steps.release.outputs.prerelease }}"
+          set -euo pipefail
 
-          # Convert prerelease to boolean
-          if [ "$PRERELEASE" = "true" ]; then
-            PRERELEASE_PARAM="true"
-          else
-            PRERELEASE_PARAM="false"
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid stable release tag: %s\n' "$TAG_NAME" >&2
+            exit 1
+          fi
+          if [ "$PRERELEASE" != "true" ] && [ "$PRERELEASE" != "false" ]; then
+            printf 'Invalid prerelease value for %s\n' "$TAG_NAME" >&2
+            exit 1
+          fi
+          if [ "$RELEASE_EXISTS" != "true" ] && [ "$RELEASE_EXISTS" != "false" ]; then
+            printf 'Invalid Gitee release existence value\n' >&2
+            exit 1
+          fi
+          if [ "$RELEASE_EXISTS" = "true" ] && [[ ! "$RELEASE_ID" =~ ^[0-9]+$ ]]; then
+            printf 'Invalid Gitee release id\n' >&2
+            exit 1
           fi
 
-          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
-            # Update existing release using the ID from check step
-            RELEASE_ID="${{ steps.check.outputs.release_id }}"
+          jq -n \
+            --arg token "$GITEE_ACCESS_TOKEN" \
+            --arg tag "$TAG_NAME" \
+            --rawfile name /tmp/release_name.txt \
+            --rawfile body /tmp/release_body.txt \
+            --arg branch "main" \
+            --argjson prerelease "$PRERELEASE" \
+            '{
+              access_token: $token,
+              tag_name: $tag,
+              name: $name,
+              body: $body,
+              target_commitish: $branch,
+              prerelease: $prerelease
+            }' > /tmp/gitee_payload.json
 
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH \
-              "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/${RELEASE_ID}" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n \
-                --arg token "${{ secrets.GITEE_ACCESS_TOKEN }}" \
-                --arg tag "$TAG_NAME" \
-                --arg name "$RELEASE_NAME" \
-                --arg body "$RELEASE_BODY" \
-                --argjson prerelease "$PRERELEASE_PARAM" \
-                '{
-                  access_token: $token,
-                  tag_name: $tag,
-                  name: $name,
-                  body: $body,
-                  prerelease: $prerelease
-                }')")
-
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            BODY=$(echo "$RESPONSE" | sed '$d')
-
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
-              echo "✅ Release updated on Gitee successfully"
-            else
-              echo "❌ Failed to update release on Gitee (HTTP $HTTP_CODE)"
-              echo "Response: $BODY"
-              exit 1
-            fi
+          if [ "$RELEASE_EXISTS" = "true" ]; then
+            METHOD="PATCH"
+            ENDPOINT="https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases/${RELEASE_ID}"
           else
-            # Create new release
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-              "https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n \
-                --arg token "${{ secrets.GITEE_ACCESS_TOKEN }}" \
-                --arg tag "$TAG_NAME" \
-                --arg name "$RELEASE_NAME" \
-                --arg body "$RELEASE_BODY" \
-                --arg branch "main" \
-                --argjson prerelease "$PRERELEASE_PARAM" \
-                '{
-                  access_token: $token,
-                  tag_name: $tag,
-                  name: $name,
-                  body: $body,
-                  target_commitish: $branch,
-                  prerelease: $prerelease
-                }')")
-
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            BODY=$(echo "$RESPONSE" | sed '$d')
-
-            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
-              echo "✅ Release created on Gitee successfully"
-            else
-              echo "❌ Failed to create release on Gitee (HTTP $HTTP_CODE)"
-              echo "Response: $BODY"
-              exit 1
-            fi
+            METHOD="POST"
+            ENDPOINT="https://gitee.com/api/v5/repos/alture/hydro-ai-helper/releases"
           fi
+
+          HTTP_CODE="$(curl --silent --show-error \
+            --output /tmp/gitee_response.json \
+            --write-out '%{http_code}' \
+            -X "$METHOD" \
+            "$ENDPOINT" \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/gitee_payload.json)"
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            printf 'Gitee release sync failed with HTTP %s\n' "$HTTP_CODE" >&2
+            exit 1
+          fi
+
+          printf 'Gitee release %s completed for %s\n' "$METHOD" "$TAG_NAME"

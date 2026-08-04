@@ -12,19 +12,34 @@ jobs:
     permissions:
       contents: write  # 需要写入权限以创建 Release
       actions: write   # 创建 Release 后显式触发 Gitee 镜像同步
+      id-token: write  # npm provenance attestation
 
     steps:
       - name: Checkout 代码
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: 设置 Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: 验证受信任的发布引用
+        run: node scripts/verifyReleaseRef.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: 安装依赖
         run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: 测试
+        run: npm test -- --runInBand --silent
 
       - name: 构建插件
         run: npm run build:plugin
@@ -59,12 +74,12 @@ jobs:
           echo "✅ 已提取 ${TAG_NAME} 的独立发布说明"
 
       - name: 发布到 npm
-        run: npm publish --access public
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: 创建 GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           # Curated, user-facing notes only. Auto-generation is OFF so internal
           # commit titles (infra/telemetry/etc.) are never surfaced publicly.

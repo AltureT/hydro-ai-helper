@@ -6,28 +6,32 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
       - name: Setup SSH
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           echo "${{ secrets.GITEE_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -t ed25519,rsa gitee.com >> ~/.ssh/known_hosts 2>/dev/null
+          echo 'gitee.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEKxHSJ7084RmkJ4YdEi5tngynE8aZe2uEoVVsB/OvYN' >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           cat >> ~/.ssh/config << EOF
           Host gitee.com
             HostName gitee.com
             User git
             IdentityFile ~/.ssh/id_rsa
-            StrictHostKeyChecking accept-new
+            StrictHostKeyChecking yes
             ServerAliveInterval 60
             ServerAliveCountMax 3
             TCPKeepAlive yes
@@ -36,6 +40,7 @@ jobs:
 
       - name: Push to Gitee
         run: |
+          set -euo pipefail
           git remote add gitee git@gitee.com:alture/hydro-ai-helper.git 2>/dev/null || true
 
           # Retry logic for push
@@ -52,4 +57,4 @@ jobs:
             sleep 10
           done
 
-          git push gitee --tags --force || true
+          git push gitee --tags --force

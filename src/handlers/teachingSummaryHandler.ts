@@ -114,7 +114,7 @@ export class TeachingSummaryHandler extends Handler {
       const tsdocs = await statusColl
         .find({ domainId, docType: 30, docId: contestObjId }, { projection: { uid: 1 } })
         .toArray();
-      const studentUids: number[] = tsdocs.map((s: any) => Number(s.uid)).filter((uid: number) => uid > 0);
+      const studentUids: number[] = tsdocs.map((s: { uid?: unknown }) => Number(s.uid)).filter((uid: number) => uid > 0);
 
       if (studentUids.length === 0) {
         this.response.status = 400;
@@ -175,9 +175,9 @@ export class TeachingSummaryHandler extends Handler {
 
       const userDocs = await this.ctx.db.collection('user')
         .find({ _id: { $in: Array.from(uids) } }, { projection: { _id: 1, uname: 1 } })
-        .toArray();
+        .toArray() as unknown as Array<{ _id: unknown; uname?: string }>;
       for (const u of userDocs) {
-        names[String(u._id)] = (u as any).uname || `User #${u._id}`;
+        names[String(u._id)] = u.uname || `User #${u._id}`;
       }
     } catch (err) {
       console.error('[TeachingSummaryHandler] resolveStudentNames failed:', err);
@@ -188,9 +188,9 @@ export class TeachingSummaryHandler extends Handler {
   private async generateAsync(
     model: TeachingSummaryModel,
     domainId: string,
-    summaryId: any,
+    summaryId: ObjectIdType,
     contestObjId: ObjectIdType,
-    tdoc: any,
+    tdoc: { pids?: unknown[]; title?: unknown; content?: unknown; beginAt?: unknown; endAt?: unknown },
     studentUids: number[],
     teachingFocus?: string,
   ): Promise<void> {
@@ -213,7 +213,7 @@ export class TeachingSummaryHandler extends Handler {
         .toArray();
 
       const pidTitles = new Map<number, string>();
-      const problemContexts = problemDocs.map((doc: any) => {
+      const problemContexts = problemDocs.map((doc: { docId: number; title?: unknown; content?: unknown }) => {
         const pid = doc.docId as number;
         const title = (doc.title || String(doc.docId)) as string;
         pidTitles.set(pid, title);
@@ -229,13 +229,13 @@ export class TeachingSummaryHandler extends Handler {
         pids,
         studentUids,
         pidTitles,
-        contestStartTime: tdoc.beginAt ? new Date(tdoc.beginAt) : undefined,
-        contestEndTime: tdoc.endAt ? new Date(tdoc.endAt) : undefined,
+        contestStartTime: tdoc.beginAt ? new Date(tdoc.beginAt as string) : undefined,
+        contestEndTime: tdoc.endAt ? new Date(tdoc.endAt as string) : undefined,
       });
 
       // Prepare fill-in candidates with problem content for template detection
       const fillInCandidatesForPrompt = analysisResult.fillInCandidates.map(c => {
-        const problemDoc = problemDocs.find((d: any) => d.docId === c.pid);
+        const problemDoc = problemDocs.find((d: { docId: number }) => d.docId === c.pid);
         const problemContent = (problemDoc?.content || '') as string;
         return {
           pid: c.pid,
@@ -314,7 +314,7 @@ export class TeachingSummaryHandler extends Handler {
       // Deep dives only for primary findings — secondary ones are shown as
       // one-liners in the UI and don't warrant an extra LLM call each
       const deepDiveResults: Record<string, string> = {};
-      const problemDocMap = new Map(problemDocs.map((doc: any) => [doc.docId as number, doc]));
+      const problemDocMap = new Map(problemDocs.map((doc: { docId: number; title?: unknown; content?: unknown }) => [doc.docId, doc]));
 
       const deepDiveFindings = analysisResult.findings.filter(f => f.needsDeepDive && !f.isSecondary);
 
@@ -341,7 +341,7 @@ export class TeachingSummaryHandler extends Handler {
         for (const r of allSampleRecords) {
           const key = `${r.pid}:${r.uid}`;
           if (!samplesByPidUid.has(key)) {
-            samplesByPidUid.set(key, String((r as any).code).slice(0, 500));
+            samplesByPidUid.set(key, String((r as unknown as { code?: unknown }).code).slice(0, 500));
           }
         }
 

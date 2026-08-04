@@ -10,9 +10,9 @@ import { ObjectId } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { createSSEWriter } from '../lib/sseHelper';
 import { createMultiModelClientFromConfig } from '../services/openaiClient';
-import { BatchSummaryJobModel } from '../models/batchSummaryJob';
+import { BatchSummaryJobModel, BatchSummaryJob } from '../models/batchSummaryJob';
 import { StudentSummaryModel } from '../models/studentSummary';
-import { BatchSummaryService, ProblemInfo } from '../services/batchSummaryService';
+import { BatchSummaryService, ProblemInfo, SSEEvent } from '../services/batchSummaryService';
 
 // ─── CSV helper ───────────────────────────────────────────────────────────────
 
@@ -72,7 +72,7 @@ export class BatchSummaryGenerateHandler extends Handler {
       const tsdocs = await statusColl
         .find({ domainId, docType: 30, docId: contestObjId }, { projection: { uid: 1 } })
         .toArray();
-      const allAttendees: number[] = tsdocs.map((s: any) => Number(s.uid)).filter((uid: number) => uid > 0);
+      const allAttendees: number[] = tsdocs.map((s: { uid?: unknown }) => Number(s.uid)).filter((uid: number) => uid > 0);
 
       // Check for existing active job
       const existingJob = await jobModel.findActiveJob(domainId, contestObjId);
@@ -80,7 +80,7 @@ export class BatchSummaryGenerateHandler extends Handler {
       // Determine effective mode
       const effectiveMode = mode || (existingJob ? 'new_only' : 'regenerate');
 
-      let job: any;
+      let job: BatchSummaryJob;
       let newStudentIds: number[];
       let previousCompleted = 0;
       let previousFailed = 0;
@@ -164,14 +164,14 @@ export class BatchSummaryGenerateHandler extends Handler {
       const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
         .toArray();
-      const problems: ProblemInfo[] = problemDocs.map((doc: any) => ({
+      const problems: ProblemInfo[] = problemDocs.map((doc: { docId?: unknown; title?: unknown; content?: unknown }) => ({
         pid: String(doc.docId),
-        title: doc.title || `Problem ${doc.docId}`,
-        content: doc.content || '',
+        title: doc.title as string || `Problem ${doc.docId}`,
+        content: doc.content as string || '',
       }));
 
       // Setup SSE
-      const koaCtx = (this as any).context;
+      const koaCtx = (this as unknown as { context?: { res?: ServerResponse; respond?: boolean; compress?: boolean; req?: { socket?: { setNoDelay?: (value: boolean) => void; setTimeout?: (value: number) => void } } } }).context;
       const rawRes: ServerResponse | undefined = koaCtx?.res;
       if (!rawRes) {
         this.response.status = 500;
@@ -222,7 +222,7 @@ export class BatchSummaryGenerateHandler extends Handler {
         if (!sse.closed) {
           const uid = Number(event.userId);
           if (uid && userNameMap.has(uid)) {
-            (event as any).userName = userNameMap.get(uid);
+            (event as SSEEvent & { userName?: string }).userName = userNameMap.get(uid);
           }
           sse.writeEvent(event.type, event);
         }
@@ -683,10 +683,10 @@ export class BatchSummaryContinueHandler extends Handler {
       const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
         .toArray();
-      const problems: ProblemInfo[] = problemDocs.map((doc: any) => ({
+      const problems: ProblemInfo[] = problemDocs.map((doc: { docId?: unknown; title?: unknown; content?: unknown }) => ({
         pid: String(doc.docId),
-        title: doc.title || `Problem ${doc.docId}`,
-        content: doc.content || '',
+        title: doc.title as string || `Problem ${doc.docId}`,
+        content: doc.content as string || '',
       }));
 
       // Fetch user names for SSE enrichment
@@ -703,7 +703,7 @@ export class BatchSummaryContinueHandler extends Handler {
 
       // Setup SSE
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const koaCtx = (this as any).context;
+      const koaCtx = (this as unknown as { context?: { res?: ServerResponse; respond?: boolean; compress?: boolean; req?: { socket?: { setNoDelay?: (value: boolean) => void; setTimeout?: (value: number) => void } } } }).context;
       const rawRes: ServerResponse | undefined = koaCtx?.res;
       if (!rawRes) {
         this.response.status = 500;
@@ -749,7 +749,7 @@ export class BatchSummaryContinueHandler extends Handler {
         if (!sse.closed) {
           const uid = Number(event.userId);
           if (uid && userNameMap.has(uid)) {
-            (event as any).userName = userNameMap.get(uid);
+            (event as SSEEvent & { userName?: string }).userName = userNameMap.get(uid);
           }
           sse.writeEvent(event.type, event);
         }

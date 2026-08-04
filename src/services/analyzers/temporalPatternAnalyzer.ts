@@ -227,7 +227,7 @@ export function analyzeTemporalPatterns(
   for (const rec of records) {
     const key = `${rec.uid}:${rec.pid}`;
     if (!recordsByUidPid.has(key)) recordsByUidPid.set(key, []);
-    recordsByUidPid.get(key)!.push(rec);
+    (recordsByUidPid.get(key) as TimedRecord[]).push(rec);
   }
 
   // Classify each uid:pid pair, aggregate to student level
@@ -283,7 +283,7 @@ export function analyzeTemporalPatterns(
   const patternStudents = new Map<TemporalPatternLabel, number[]>();
   for (const [uid, pattern] of studentPatterns) {
     if (!patternStudents.has(pattern)) patternStudents.set(pattern, []);
-    patternStudents.get(pattern)!.push(uid);
+    (patternStudents.get(pattern) as number[]).push(uid);
   }
 
   const totalStudents = studentUids.length || 1;
