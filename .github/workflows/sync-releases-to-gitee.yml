@@ -12,12 +12,14 @@ on:
 jobs:
   sync-release:
     runs-on: ubuntu-latest
+    env:
+      DISPATCH_TAG_NAME: ${{ github.event.inputs.tag_name }}
     steps:
       - name: Get release info
         id: release
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_NAME="${{ github.event.inputs.tag_name }}"
+            TAG_NAME="$DISPATCH_TAG_NAME"
             # Fetch release info from GitHub API
             RELEASE_INFO=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG_NAME}")
