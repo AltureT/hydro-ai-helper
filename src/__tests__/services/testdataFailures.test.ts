@@ -188,6 +188,20 @@ describe('typed test-data pipeline failures', () => {
       .toBe('ai_helper_testdata_failure_cancelled');
     expect(getUserMessageKeyForFailure('UNKNOWN'))
       .toBe('ai_helper_testdata_failure_unknown');
+    expect(getUserMessageKeyForFailure('DIRECT_FALLBACK_CONFIRMATION_REQUIRED'))
+      .toBe('ai_helper_testdata_failure_direct_fallback_confirmation_required');
+  });
+
+  it('uses a stable no-retry contract when medium-risk direct fallback lacks confirmation', () => {
+    const error = toPipelineError(new Error('confirmation missing'), {
+      code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+      stage: 'sandbox_check',
+      artifact: 'pipeline',
+    });
+    expect(error).toMatchObject({
+      code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+      retryPolicy: 'no-retry',
+    });
   });
 
   it('exposes generator parser failures as typed production errors', () => {

@@ -369,6 +369,29 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 
+  it('同步成功路径将显式 direct fallback 确认传给生成服务', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true },
+    });
+
+    try {
+      await handler.post();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        options: expect.objectContaining({ confirmDirectFallback: true }),
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
   it('非法既有 config 在创建客户端、编译探针和读取 checker 前立即中止', async () => {
     mockFindOne({
       ...PROBLEM_DOC,
@@ -820,17 +843,16 @@ describe('TestdataGenGenerateHandler', () => {
     }
   });
 
-  it('同步生成接口透传类型化失败字段', async () => {
+  it('同步生成接口透传 direct fallback 确认所需的类型化失败字段', async () => {
     mockFindOne(PROBLEM_DOC);
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);
     const error = new TestdataPipelineError(
-      'technical divergence detail',
-      'ORACLE_BRUTE_DIVERGENCE',
-      'stress_testing',
-      'brute',
-      'adjudicate',
-      { caseIndex: 3 },
+      'confirmation required',
+      'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+      'sandbox_check',
+      'pipeline',
+      'no-retry',
     );
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
     const capture = jest.fn();
@@ -845,12 +867,12 @@ describe('TestdataGenGenerateHandler', () => {
       await handler.post();
       expect(handler.response.body).toEqual(expect.objectContaining({
         code: 'GENERATION_FAILED',
-        failureCode: 'ORACLE_BRUTE_DIVERGENCE',
-        stage: 'stress_testing',
-        artifact: 'brute',
-        retryPolicy: 'adjudicate',
-        retryable: true,
-        error: 'ai_helper_testdata_failure_oracle_brute_divergence',
+        failureCode: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+        stage: 'sandbox_check',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+        error: 'ai_helper_testdata_failure_direct_fallback_confirmation_required',
       }));
       expect(capture).toHaveBeenCalledWith(
         'api_failure',
@@ -859,11 +881,10 @@ describe('TestdataGenGenerateHandler', () => {
         undefined,
         undefined,
         {
-          failureCode: 'ORACLE_BRUTE_DIVERGENCE',
-          stage: 'stress_testing',
-          artifact: 'brute',
-          retryPolicy: 'adjudicate',
-          caseIndex: 3,
+          failureCode: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+          stage: 'sandbox_check',
+          artifact: 'pipeline',
+          retryPolicy: 'no-retry',
         },
       );
     } finally {
@@ -1042,7 +1063,7 @@ describe('Testdata generation background jobs', () => {
     }
   });
 
-  it('background job persists typed failure routing fields', async () => {
+  it('background job persists direct fallback confirmation routing fields', async () => {
     mockFindOne(PROBLEM_DOC);
     const job = makeGenerationJob({ status: 'pending', startedAt: null });
     const jobModel = {
@@ -1059,12 +1080,11 @@ describe('Testdata generation background jobs', () => {
       .mockResolvedValue({} as never);
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(
       new TestdataPipelineError(
-        'technical budget detail',
-        'PIPELINE_BUDGET_EXHAUSTED',
-        'sandbox_budget',
+        'confirmation required',
+        'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+        'sandbox_check',
         'pipeline',
         'no-retry',
-        { elapsedMs: 120000 },
       ),
     );
     const handler = setupHandler(TestdataGenJobStartHandler, {
@@ -1082,10 +1102,10 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.fail).toHaveBeenCalledWith(job._id, {
-        message: 'ai_helper_testdata_failure_pipeline_budget_exhausted',
+        message: 'ai_helper_testdata_failure_direct_fallback_confirmation_required',
         code: 'GENERATION_FAILED',
-        failureCode: 'PIPELINE_BUDGET_EXHAUSTED',
-        stage: 'sandbox_budget',
+        failureCode: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+        stage: 'sandbox_check',
         artifact: 'pipeline',
         retryPolicy: 'no-retry',
         retryable: false,
@@ -1098,11 +1118,10 @@ describe('Testdata generation background jobs', () => {
         undefined,
         undefined,
         {
-          failureCode: 'PIPELINE_BUDGET_EXHAUSTED',
-          stage: 'sandbox_budget',
+          failureCode: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+          stage: 'sandbox_check',
           artifact: 'pipeline',
           retryPolicy: 'no-retry',
-          elapsedMs: 120000,
         },
       );
     } finally {
@@ -1176,6 +1195,7 @@ describe('Testdata generation background jobs', () => {
       providedStd: undefined,
       providedStdSource: undefined,
       extraRequirements: undefined,
+      confirmDirectFallback: true,
     };
     const checkpoint = {
       revision: 2,
@@ -1236,6 +1256,7 @@ describe('Testdata generation background jobs', () => {
         problemKind: 'traditional',
         caseCount: 1,
         languages: [],
+        confirmDirectFallback: true,
         resumeFromJobId: String(interruptedJob._id),
       },
     });
@@ -1249,6 +1270,8 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
 
       expect(receivedParams?.checkpoint).toBe(checkpoint);
+      expect((receivedParams?.options as { confirmDirectFallback?: boolean } | undefined)
+        ?.confirmDirectFallback).toBe(true);
       expect(maxActiveCheckpointWrites).toBe(1);
       expect(jobModel.updateCheckpoint).toHaveBeenNthCalledWith(
         1,

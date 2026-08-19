@@ -466,6 +466,7 @@ interface GenerateRequestBody {
   providedStd?: string;
   acceptedStdRecordId?: string;
   extraRequirements?: string;
+  confirmDirectFallback?: boolean;
   resumeFromJobId?: string;
   /** @deprecated 旧版前端可能仍会发送；统一自适应流程会安全忽略。 */
   generationProfile?: string;
@@ -821,6 +822,7 @@ export class TestdataGenGenerateHandler extends Handler {
         providedStd: resolvedStd.providedStd,
         providedStdSource: resolvedStd.providedStdSource,
         extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+        confirmDirectFallback: body.confirmDirectFallback === true,
       };
       const optionError = validateGenerateOptions(options);
       if (optionError) {
@@ -1061,6 +1063,7 @@ export class TestdataGenJobStartHandler extends Handler {
         providedStd: resolvedStd.providedStd,
         providedStdSource: resolvedStd.providedStdSource,
         extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+        confirmDirectFallback: body.confirmDirectFallback === true,
       };
       const optionError = validateGenerateOptions(options);
       if (optionError) {

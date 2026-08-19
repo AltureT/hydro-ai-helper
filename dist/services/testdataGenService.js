@@ -18,7 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TestdataGenerationError = exports.CPP_ORACLE_INFRA_FAILURE_KEY = exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY = exports.CPP_ORACLE_UNAVAILABLE_KEY = exports.TESTDATA_CONFIG_UNPARSABLE_KEY = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = void 0;
+exports.TestdataGenService = exports.TestdataGenerationError = exports.CPP_ORACLE_INFRA_FAILURE_KEY = exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY = exports.CPP_ORACLE_UNAVAILABLE_KEY = exports.TESTDATA_CONFIG_UNPARSABLE_KEY = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = exports.extractStatementSamples = void 0;
 exports.partitionStressValidation = partitionStressValidation;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
@@ -69,7 +69,6 @@ exports.parseDelimitedResponse = parseDelimitedResponse;
 exports.parseAiResponse = parseAiResponse;
 exports.getMissingTemplateLanguages = getMissingTemplateLanguages;
 exports.findAssignmentStyleCaseInput = findAssignmentStyleCaseInput;
-exports.extractStatementSamples = extractStatementSamples;
 exports.reduceCheckerExecution = reduceCheckerExecution;
 exports.extendDeadlineByBestEffortElapsed = extendDeadlineByBestEffortElapsed;
 exports.evaluateDiscrimination = evaluateDiscrimination;
@@ -98,6 +97,19 @@ const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
+const risk_1 = require("./testdata/risk");
+const statementSamples_1 = require("./testdata/statementSamples");
+var statementSamples_2 = require("./testdata/statementSamples");
+Object.defineProperty(exports, "extractStatementSamples", { enumerable: true, get: function () { return statementSamples_2.extractStatementSamples; } });
+function comparableFileContent(content) {
+    return content
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map(line => line.trimEnd())
+        .join('\n')
+        .trimEnd();
+}
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
@@ -673,6 +685,14 @@ function getTestlibCheckerFilename(raw) {
     const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
     return checkerType === 'testlib' && checker ? checker : undefined;
 }
+function isStatementTruncatedForGeneration(statementMarkdown) {
+    return statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH;
+}
+function truncateStatementForGenerationPrompt(statementMarkdown) {
+    return isStatementTruncatedForGeneration(statementMarkdown)
+        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
+        : statementMarkdown;
+}
 /**
  * 生成 config.yaml（评测设置）
  *
@@ -968,9 +988,7 @@ function buildTestdataUserPrompt(params, coverageOverride) {
     const requiredTemplateSections = options.languages.map(l => `@@@TEMPLATE:${l}@@@`).join('、');
     const coveragePlan = coverageOverride
         ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
-    const statement = statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : statementMarkdown;
+    const statement = truncateStatementForGenerationPrompt(statementMarkdown);
     const lines = [
         `【题目标题】${problemTitle}`,
         '',
@@ -1061,9 +1079,7 @@ function buildSolutionBlueprintUserPrompt(params) {
         yes: '是（标程必须是补全后的题面代码）',
         no: '否',
     }[options.fillInMode || 'auto'];
-    const statement = statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : statementMarkdown;
+    const statement = truncateStatementForGenerationPrompt(statementMarkdown);
     const lines = [
         `【题目标题】${problemTitle}`,
         '',
@@ -1231,11 +1247,9 @@ exists 或 none
 函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`;
 }
 function buildIndependentVerifierUserPrompt(params, blueprint) {
-    const statement = params.statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-        ? `${params.statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : params.statementMarkdown;
+    const statement = truncateStatementForGenerationPrompt(params.statementMarkdown);
     const functionSamples = blueprint.problemType === 'function'
-        ? extractStatementSamples(params.statementMarkdown)
+        ? (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown)
         : [];
     const sampleTask = functionSamples.length > 0
         ? [
@@ -2026,68 +2040,6 @@ function findAssignmentStyleCaseInput(cases) {
     }
     return null;
 }
-/**
- * 提取题面样例：优先支持 Hydro 的 inputN/outputN 围栏，同时覆盖常见的
- * LeetCode 单行“输入：... / 输出：...”展示。后者仍是逻辑参数展示，函数题
- * 必须再由独立验证调用转换为主蓝图约定的原始 stdin，不能直接写入 .in。
- */
-function extractStatementSamples(statementMarkdown) {
-    const inputs = [];
-    const outputs = [];
-    const fenceRe = /```(input|output)(\d*)[^\n]*\r?\n([\s\S]*?)```/gi;
-    let match;
-    while ((match = fenceRe.exec(statementMarkdown)) !== null) {
-        let content = match[3].replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-        if (content.endsWith('\n'))
-            content = content.slice(0, -1);
-        const entry = { id: match[2], content: normalizeFileContent(content) };
-        if (match[1].toLowerCase() === 'input')
-            inputs.push(entry);
-        else
-            outputs.push(entry);
-    }
-    const samples = inputs.flatMap((input, index) => {
-        const output = input.id
-            ? outputs.find(candidate => candidate.id === input.id)
-            : outputs[index];
-        return output ? [{ id: input.id || String(index + 1), input: input.content, output: output.content }] : [];
-    });
-    const normalized = statementMarkdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const lines = normalized.split('\n');
-    const inputLineRe = /^\s*(?:输入|Input)\s*[:：]\s*(\S[\s\S]*?)\s*$/i;
-    const outputLineRe = /^\s*(?:输出|Output)\s*[:：]\s*(\S[\s\S]*?)\s*$/i;
-    for (let i = 0; i < lines.length; i++) {
-        const inputMatch = lines[i].match(inputLineRe);
-        if (!inputMatch)
-            continue;
-        for (let j = i + 1; j < lines.length; j++) {
-            if (inputLineRe.test(lines[j]))
-                break;
-            const outputMatch = lines[j].match(outputLineRe);
-            if (!outputMatch)
-                continue;
-            const input = normalizeFileContent(inputMatch[1].replace(/^`([\s\S]*)`$/, '$1'));
-            const output = normalizeFileContent(outputMatch[1].replace(/^`([\s\S]*)`$/, '$1'));
-            const duplicate = samples.some(sample => comparableFileContent(sample.input) === comparableFileContent(input)
-                && comparableFileContent(sample.output) === comparableFileContent(output));
-            if (!duplicate) {
-                samples.push({ id: String(samples.length + 1), input, output });
-            }
-            i = j;
-            break;
-        }
-    }
-    return samples;
-}
-function comparableFileContent(content) {
-    return content
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n')
-        .split('\n')
-        .map(line => line.trimEnd())
-        .join('\n')
-        .trimEnd();
-}
 /** 将 checker 沙箱结果归约为业务三态；基础设施异常永远不能被当成 WA。 */
 function reduceCheckerExecution(detail, infrastructureError = false) {
     if (infrastructureError
@@ -2641,7 +2593,7 @@ async function createOracleExecutor(input) {
  * 先确认 ORACLE 至少能够执行并通过题面中可解析的样例。
  */
 async function verifySolutionBlueprintSamples(solution, options, statementMarkdown, runner, signal, customChecker = false, cppOracleAvailable = false, checkerExecutor) {
-    const statementSamples = extractStatementSamples(statementMarkdown);
+    const statementSamples = (0, statementSamples_1.extractStatementSamples)(statementMarkdown);
     if (statementSamples.length === 0)
         return { total: 0, passed: 0 };
     let samples = statementSamples;
@@ -3132,7 +3084,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         // 函数题的题面输入通常是 nums = [...] 之类逻辑展示，不能直接作为 stdin。
         // 仅使用独立验证调用按主蓝图编码转换后的输入；期望输出始终保留服务端从题面提取的原文。
-        const statementSamples = extractStatementSamples(statementMarkdown);
+        const statementSamples = (0, statementSamples_1.extractStatementSamples)(statementMarkdown);
         let samples = [];
         if (blueprint.problemType === 'traditional') {
             samples = statementSamples;
@@ -4533,6 +4485,42 @@ class TestdataGenService {
         this.mode = serviceOptions.mode || (serviceOptions.sandboxRunner ? 'auto' : 'direct');
         this.cppOracleAvailable = serviceOptions.cppOracleAvailable === true;
         this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
+        this.reliabilityMode = serviceOptions.reliabilityMode || (0, risk_1.getTestdataReliabilityMode)();
+    }
+    assessRisk(params) {
+        const customChecker = hasCustomChecker(params.existingConfig);
+        return (0, risk_1.assessTestdataRisk)({
+            statement: params.statementMarkdown,
+            hasCustomChecker: customChecker,
+            unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
+            statementTruncated: isStatementTruncatedForGeneration(params.statementMarkdown),
+            directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
+            confirmDirectFallback: params.options.confirmDirectFallback,
+            reliabilityMode: this.reliabilityMode,
+        });
+    }
+    attachRisk(plan, risk) {
+        plan.risk = risk;
+        plan.reliabilityMode = this.reliabilityMode;
+        return plan;
+    }
+    throwDirectFallbackBlocked(risk) {
+        if (risk.tier === 'medium'
+            && (0, risk_1.getTestdataDirectFallbackEnabled)()
+            && !risk.allowsDirectFallback) {
+            throw (0, failures_1.toPipelineError)(new Error('中风险题目需要教师再次确认，才可使用未经沙箱验证的直出模式。'), {
+                code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+                stage: 'sandbox_check',
+                artifact: 'pipeline',
+                retryPolicy: 'no-retry',
+            });
+        }
+        throw (0, failures_1.toPipelineError)(new Error('当前风险策略不允许未经 Hydro 沙箱验证的直出模式。'), {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+        });
     }
     emitProgress(params, stage, percent, attempt = 1) {
         try {
@@ -4562,6 +4550,14 @@ class TestdataGenService {
     async generate(params) {
         assertExistingConfigParsable(params.existingConfig);
         this.emitProgress(params, 'preparing', 2);
+        const risk = this.assessRisk(params);
+        if (isStatementTruncatedForGeneration(params.statementMarkdown)) {
+            throw (0, failures_1.toPipelineError)(new Error('题面超过安全生成长度，无法在截断语义下生成测试数据。'), {
+                code: 'SPEC_STATEMENT_TRUNCATED',
+                stage: 'pipeline',
+                artifact: 'statement',
+            });
+        }
         const requiresProvidedCppOracle = params.options.problemKind !== 'function'
             && !!params.options.providedStd?.trim()
             && detectStdFilename(params.options.providedStd) === 'std.cc';
@@ -4585,17 +4581,23 @@ class TestdataGenService {
             if (available) {
                 const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
                 this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-                return plan;
+                return this.attachRisk(plan, risk);
             }
             if (requiresProvidedCppOracle) {
                 const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
                 throw new TestdataGenerationError(`当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_ORACLE_UNAVAILABLE_KEY, detail);
             }
             if (requiresAcceptedRecordVerification) {
-                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'), { code: 'SANDBOX_UNAVAILABLE', stage: 'sandbox_check', artifact: 'pipeline' });
+                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'), {
+                    code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+                    stage: 'sandbox_check', artifact: 'pipeline',
+                });
             }
             if (this.mode === 'sandbox') {
-                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'), { code: 'SANDBOX_UNAVAILABLE', stage: 'sandbox_check', artifact: 'pipeline' });
+                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'), {
+                    code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+                    stage: 'sandbox_check', artifact: 'pipeline',
+                });
             }
         }
         else if (this.mode === 'sandbox') {
@@ -4608,6 +4610,9 @@ class TestdataGenService {
         if (requiresAcceptedRecordVerification) {
             throw (0, failures_1.toPipelineError)(new Error('历史 AC 候选解必须在 Hydro 沙箱中通过题面样例与独立 BRUTE 压力验证，不能用于未经验证的直出模式。'), { code: 'SANDBOX_REQUIRED', stage: 'sandbox_check', artifact: 'pipeline' });
         }
+        if (!risk.allowsDirectFallback) {
+            this.throwDirectFallbackBlocked(risk);
+        }
         const plan = await this.generateDirect(params);
         if (this.mode === 'auto') {
             const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
@@ -4618,7 +4623,7 @@ class TestdataGenService {
             plan.notesStructured?.warnings.push(fallbackWarning);
         }
         this.emitProgress(params, 'complete', 100);
-        return plan;
+        return this.attachRisk(plan, risk);
     }
     getCallOptions(params, attempt = 1) {
         return {
@@ -4881,7 +4886,7 @@ class TestdataGenService {
         const systemPrompt = buildIndependentVerifierSystemPrompt();
         const userPrompt = buildIndependentVerifierUserPrompt(params, blueprint);
         const expectedFunctionSamples = blueprint.problemType === 'function'
-            ? extractStatementSamples(params.statementMarkdown)
+            ? (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown)
             : [];
         const initialResult = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         results.push(initialResult);
@@ -5173,7 +5178,7 @@ class TestdataGenService {
             const callOptions = this.getCallOptions(params, attempt);
             report('blueprint', 10);
             const results = [];
-            const expectedFunctionSamples = extractStatementSamples(params.statementMarkdown);
+            const expectedFunctionSamples = (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown);
             let solutionSourceContent = params.checkpoint?.solution
                 ? JSON.stringify(params.checkpoint.solution)
                 : '';
