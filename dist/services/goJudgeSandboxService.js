@@ -166,6 +166,30 @@ function buildCppCompileCommand(source, extraFiles = {}) {
         copyOutCached: ['prog'],
     };
 }
+function buildJavaCompileCommand(mainSource, solutionSource) {
+    return {
+        args: [
+            '/usr/bin/bash', '-c',
+            'javac -d /w -encoding utf8 ./Main.java ./Solution.java && jar cvf Main.jar *.class >/dev/null',
+        ],
+        env: ['PATH=/usr/bin:/bin'],
+        files: [
+            { content: '' },
+            { name: 'stdout', max: STDERR_LIMIT_BYTES },
+            { name: 'stderr', max: STDERR_LIMIT_BYTES },
+        ],
+        cpuLimit: CPP_COMPILE_CPU_LIMIT_NS,
+        clockLimit: CPP_COMPILE_CLOCK_LIMIT_NS,
+        memoryLimit: CPP_COMPILE_MEMORY_LIMIT_BYTES,
+        procLimit: CPP_COMPILE_PROC_LIMIT,
+        copyIn: {
+            'Main.java': { content: mainSource },
+            'Solution.java': { content: solutionSource },
+        },
+        copyOut: ['stdout', 'stderr'],
+        copyOutCached: ['Main.jar'],
+    };
+}
 function buildCompiledCommand(fileId, stdin, limits = {}) {
     return {
         args: ['prog'],
@@ -182,6 +206,27 @@ function buildCompiledCommand(fileId, stdin, limits = {}) {
         procLimit: 16,
         copyIn: {
             prog: { fileId },
+        },
+        copyOut: ['stdout', 'stderr'],
+        copyOutMax: STDOUT_LIMIT_BYTES,
+    };
+}
+function buildJavaCommand(fileId, stdin, limits = {}) {
+    return {
+        args: ['/usr/bin/java', '-cp', 'Main.jar', 'Main'],
+        env: ['PATH=/usr/bin:/bin'],
+        files: [
+            { content: stdin },
+            { name: 'stdout', max: STDOUT_LIMIT_BYTES },
+            { name: 'stderr', max: STDERR_LIMIT_BYTES },
+        ],
+        cpuLimit: limits.cpuLimit ?? CPU_LIMIT_NS,
+        clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
+        memoryLimit: MEMORY_LIMIT_BYTES,
+        stackLimit: 64 * 1024 * 1024,
+        procLimit: 16,
+        copyIn: {
+            'Main.jar': { fileId },
         },
         copyOut: ['stdout', 'stderr'],
         copyOutMax: STDOUT_LIMIT_BYTES,
@@ -276,11 +321,20 @@ class GoJudgeSandboxRunner {
      * ok:false，便于上层按降级铁律回到 Python-only；仅用户主动取消原样上抛。
      */
     async compileCpp(source, opts = {}) {
+        return this.compileCachedArtifact(buildCppCompileCommand(source, opts.extraFiles), 'prog', opts);
+    }
+    async compileJava(mainSource, solutionSource, opts = {}) {
+        return this.compileCachedArtifact(buildJavaCompileCommand(mainSource, solutionSource), 'Main.jar', opts);
+    }
+    async compileCachedArtifact(command, cachedName, opts) {
         const remainingBudgetMs = opts.deadlineAt === undefined
             ? Number.POSITIVE_INFINITY
             : opts.deadlineAt - Date.now();
         if (remainingBudgetMs <= 0) {
             throw new SandboxBudgetExceededError();
+        }
+        if (opts.signal?.aborted) {
+            throw opts.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
         }
         let returnedFileIds = [];
         const cleanupReturnedFiles = async () => {
@@ -288,7 +342,7 @@ class GoJudgeSandboxRunner {
             returnedFileIds = [];
         };
         try {
-            const response = await this.http.post(`${this.host}/run`, { cmd: [buildCppCompileCommand(source, opts.extraFiles)] }, {
+            const response = await this.http.post(`${this.host}/run`, { cmd: [command] }, {
                 timeout: Math.max(1, Math.min(CPP_COMPILE_TIMEOUT_MS, remainingBudgetMs)),
                 signal: opts.signal,
                 maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES,
@@ -297,6 +351,10 @@ class GoJudgeSandboxRunner {
             // 响应即使超期或其余字段畸形，也先抢救出所有缓存 ID，确保任何非成功
             // 返回都能尽力回收 go-judge 产物。
             returnedFileIds = collectReturnedFileIds(response.data);
+            if (opts.signal?.aborted) {
+                await cleanupReturnedFiles();
+                throw opts.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            }
             const results = unwrapResults(response.data);
             const fail = async (kind, error) => {
                 await cleanupReturnedFiles();
@@ -318,10 +376,12 @@ class GoJudgeSandboxRunner {
                 const kind = /nonzero exit status/i.test(detail.status) ? 'compile' : 'infra';
                 return await fail(kind, (0, textTruncate_1.excerptTail)(info, 2000));
             }
-            const fileId = result.fileIds?.prog;
+            const fileId = result.fileIds?.[cachedName];
             if (!fileId) {
-                return await fail('infra', 'Hydro 沙箱编译成功但未返回 prog 缓存文件');
+                return await fail('infra', `Hydro 沙箱编译成功但未返回 ${cachedName} 缓存文件`);
             }
+            await Promise.all(returnedFileIds.filter(returnedFileId => returnedFileId !== fileId)
+                .map(returnedFileId => this.deleteCachedFile(returnedFileId)));
             returnedFileIds = [];
             return { ok: true, fileId };
         }
@@ -375,6 +435,10 @@ class GoJudgeSandboxRunner {
     /** 宽容执行已缓存的二进制，分块、限额与绝对截止时间语义和 Python 完全一致。 */
     async runCompiledBatchDetailed(fileId, inputs, opts = {}) {
         return this.runBatchDetailed(inputs, opts, (input, limits) => buildCompiledCommand(fileId, input, limits));
+    }
+    /** 宽容执行已缓存的 Java JAR，批处理和预算语义与 Python 完全一致。 */
+    async runJavaBatchDetailed(fileId, inputs, opts = {}) {
+        return this.runBatchDetailed(inputs, opts, (input, limits) => buildJavaCommand(fileId, input, limits));
     }
     /** testlib checker：argv 依次传入输入、选手输出与标准答案文件。 */
     async runCheckerBatchDetailed(fileId, cases, opts = {}) {
