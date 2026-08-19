@@ -2811,7 +2811,7 @@ async function createCheckerExecutor(input: {
   }
   if (!input.runner.compileCpp || !input.runner.runCheckerBatchDetailed) {
     const message = '当前 Hydro 沙箱不支持 checker 编译或执行';
-    return checkerPreparationFailure(check, input.reliabilityMode, 'compile', message);
+    return checkerPreparationFailure(check, input.reliabilityMode, 'infra', message);
   }
 
   let checkerBudgetRemainingMs = CHECKER_BUDGET_MS;
@@ -2837,6 +2837,9 @@ async function createCheckerExecutor(input: {
       0,
       checkerBudgetRemainingMs - Math.max(0, Date.now() - compileStartedAt),
     );
+  }
+  if (input.signal?.aborted) {
+    throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
   }
   if (compiled.ok === false) {
     const failureKind = compiled.kind === 'compile' ? 'compile' : 'infra';
@@ -2965,9 +2968,15 @@ function appendCheckerExecutionNotes(
       text: '题目 testlib checker 已编译并实跑，用于样例回归、压力对拍、区分度与定向补刀判定。',
     });
   } else if (checkerExecutor.status === 'compile-failed') {
+    const failureKind = checkerExecutor.check.failureKind;
+    const failureLabel = failureKind === 'compile'
+      ? 'checker 编译失败'
+      : failureKind === 'budget'
+        ? 'checker 准备阶段预算耗尽'
+        : 'checker 准备基础设施失败';
     notes.push({
       kind: 'warning',
-      text: `checker 编译失败，已记录为不可验证，本计划不得视为已验证：${excerptTail(checkerExecutor.compileError || '未知错误', 500)}`,
+      text: `${failureLabel}，已记录为不可验证，本计划不得视为已验证。`,
     });
   }
   if (checkerExecutor.runtimeSkipped > 0) {

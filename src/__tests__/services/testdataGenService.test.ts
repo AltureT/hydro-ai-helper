@@ -4187,6 +4187,137 @@ describe('TestdataGenService.generate', () => {
     });
   });
 
+  it.each([
+    ['compileCpp', { runCheckerBatchDetailed: jest.fn() }],
+    ['runCheckerBatchDetailed', {
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'unused-checker-bin' }),
+    }],
+  ] as const)(
+    'enforce treats missing checker runner capability %s as preparation infrastructure failure',
+    async (_missingCapability, capabilities) => {
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        ...capabilities,
+      };
+
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      }).generate({
+        problemTitle: 'checker capability',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({
+        code: 'CHECKER_RUNTIME_FAILED',
+        artifact: 'checker',
+        retryPolicy: 'manual-review',
+        safeDetails: { failureKind: 'infra' },
+      });
+    },
+  );
+
+  it.each([
+    ['compileCpp', { runCheckerBatchDetailed: jest.fn() }],
+    ['runCheckerBatchDetailed', {
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'unused-checker-bin' }),
+    }],
+  ] as const)(
+    'observe reports missing checker runner capability %s as generic preparation infrastructure failure',
+    async (_missingCapability, capabilities) => {
+      const options: GenerateOptions = {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        ...capabilities,
+        runPython: jest.fn().mockResolvedValue({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+        }),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+          Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+        )),
+      };
+
+      const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      }).generate({
+        problemTitle: 'checker capability',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint: {
+          solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+          artifacts: parseGenerationArtifacts(
+            makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+          ),
+          verifier: {
+            bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+          },
+          killTargets: [],
+        },
+      });
+
+      expect(plan.verification).toMatchObject({
+        verified: false,
+        wouldBlock: true,
+        checkerCheck: {
+          configured: true,
+          read: true,
+          compiled: false,
+          executed: false,
+          total: 0,
+          passed: 0,
+          infraFailures: 0,
+          failureKind: 'infra',
+        },
+      });
+      expect(plan.notes).toContain('checker 准备基础设施失败');
+      expect(plan.notes).not.toContain('checker 编译失败');
+      expect(plan.notesStructured?.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining('checker 准备基础设施失败'),
+      ]));
+    },
+  );
+
+  it('checker preparation rethrows the exact ordinary signal reason when compile resolves after abort', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('checker preparation caller cancellation');
+    const mockClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        return { ok: false, kind: 'infra', error: 'late infrastructure result' };
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'checker cancellation boundary',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+  });
+
   it('enforce 在 checker 编译失败时保留 checker 类型化契约', async () => {
     const privateDiagnostic = 'SECRET_CHECKER_SENTINEL /private/checker/path.cc:1: error';
     const runner = {
@@ -4278,13 +4409,16 @@ describe('TestdataGenService.generate', () => {
       ok: false,
       kind: 'compile',
       error: 'SECRET_CHECKER_SENTINEL /private/checker/path.cc syntax error',
-    }), 'compile'],
+    }), 'compile', 'checker 编译失败'],
     ['compiler transport failure', () => Promise.reject(
       new Error('SECRET_CHECKER_SENTINEL at /private/checker/path.cc ECONNRESET'),
-    ), 'infra'],
+    ), 'infra', 'checker 准备基础设施失败'],
+    ['compiler budget exhaustion', () => Promise.reject(
+      new SandboxBudgetExceededError(),
+    ), 'budget', 'checker 准备阶段预算耗尽'],
   ] as const)(
     'observe sanitizes checker %s and returns failed evidence',
-    async (_label, compileCpp, failureKind) => {
+    async (_label, compileCpp, failureKind, expectedNote) => {
       const options: GenerateOptions = {
         problemKind: 'traditional', caseCount: 1, languages: [],
       };
@@ -4339,6 +4473,7 @@ describe('TestdataGenService.generate', () => {
       });
       expect(plan.notes).not.toContain('SECRET_CHECKER_SENTINEL');
       expect(plan.notes).not.toContain('/private/checker/path.cc');
+      expect(plan.notes).toContain(expectedNote);
       expect(JSON.stringify(plan)).not.toContain('SECRET_CHECKER_SENTINEL');
       expect(JSON.stringify(plan)).not.toContain('/private/checker/path.cc');
     },
