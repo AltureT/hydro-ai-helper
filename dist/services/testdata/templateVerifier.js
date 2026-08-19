@@ -48,6 +48,14 @@ function throwExecutionError(input, language, check, error) {
         fail(language, 'budget', check);
     fail(language, 'runtime', check);
 }
+function throwIfCancelledOrExpired(input, language, check) {
+    if (input.signal?.aborted) {
+        throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+    }
+    if (input.deadlineAt !== undefined && Date.now() >= input.deadlineAt) {
+        fail(language, 'budget', check);
+    }
+}
 async function deleteCachedFile(runner, fileId) {
     try {
         await runner.deleteCachedFile?.(fileId);
@@ -131,6 +139,7 @@ async function adjudicate(input, language, results) {
     if (badExecution !== -1)
         fail(language, 'runtime', check, badExecution);
     if (!input.adjudicator.customChecker) {
+        throwIfCancelledOrExpired(input, language, check);
         const mismatch = results.findIndex((result, index) => (comparableFileContent(result.stdout) !== comparableFileContent(input.cases[index].answer)));
         check.passed = mismatch === -1 ? check.total : mismatch;
         if (mismatch !== -1)
@@ -139,16 +148,20 @@ async function adjudicate(input, language, results) {
     }
     let verdicts;
     try {
+        throwIfCancelledOrExpired(input, language, check);
         verdicts = await input.adjudicator.adjudicate(results.map((result, index) => ({
             input: input.cases[index].input,
             output: result.stdout,
             answer: input.cases[index].answer,
-        })));
+        })), { signal: input.signal, deadlineAt: input.deadlineAt });
+        throwIfCancelledOrExpired(input, language, check);
     }
     catch (error) {
         if (input.signal?.aborted)
             throw input.signal.reason ?? error;
         if (isCancellation(error))
+            throw error;
+        if (error instanceof TemplateVerificationError)
             throw error;
         if ((0, goJudgeSandboxService_1.isSandboxBudgetExceededError)(error))
             fail(language, 'budget', check);
@@ -175,6 +188,12 @@ async function verifySelectedTemplates(input) {
     const checks = {};
     for (const language of input.languages) {
         const results = await runLanguage(input, language);
+        throwIfCancelledOrExpired(input, language, {
+            compiled: true,
+            executed: results.length === input.cases.length,
+            total: input.cases.length,
+            passed: 0,
+        });
         checks[language] = await adjudicate(input, language, results);
     }
     return checks;

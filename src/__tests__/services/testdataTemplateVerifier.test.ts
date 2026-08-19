@@ -33,6 +33,14 @@ function makeRunner() {
   } as unknown as TestdataSandboxRunner;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(nextResolve => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 const ordinaryAdjudicator: TemplateOutputAdjudicator = {
   customChecker: false,
   adjudicate: async () => {
@@ -153,6 +161,84 @@ describe('verifySelectedTemplates', () => {
       allowCheckerInfraResult: false,
     })).rejects.toBe(cancellation);
     expect(runner.deleteCachedFile).toHaveBeenCalledWith('cpp-cache');
+  });
+
+  it('preserves cancellation when a runner resolves after the caller aborts', async () => {
+    const runner = makeRunner();
+    const completed = deferred<ReturnType<typeof acceptedOutputs>>();
+    runner.runPythonBatchDetailed = jest.fn().mockReturnValue(completed.promise);
+    const controller = new AbortController();
+    const cancellation = new Error('runner completed after cancellation');
+
+    const verification = verifySelectedTemplates({
+      languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
+      cases, runner, adjudicator: ordinaryAdjudicator, signal: controller.signal,
+      allowCheckerInfraResult: false,
+    });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
+    controller.abort(cancellation);
+    completed.resolve(acceptedOutputs());
+
+    await expect(verification).rejects.toBe(cancellation);
+  });
+
+  it('preserves cancellation when a custom checker accepts after the caller aborts', async () => {
+    const runner = makeRunner();
+    const checkerStarted = deferred<void>();
+    const checkerCompleted = deferred<Array<'accept' | 'reject' | 'infra-error'>>();
+    const controller = new AbortController();
+    const cancellation = new Error('checker completed after cancellation');
+    const deadlineAt = Date.now() + 60_000;
+    const adjudicator: TemplateOutputAdjudicator = {
+      customChecker: true,
+      adjudicate: async (_received, controls) => {
+        expect(controls).toEqual(expect.objectContaining({
+          signal: controller.signal,
+          deadlineAt,
+        }));
+        checkerStarted.resolve();
+        return checkerCompleted.promise;
+      },
+    };
+
+    const verification = verifySelectedTemplates({
+      languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
+      cases, runner, adjudicator, signal: controller.signal, deadlineAt,
+      allowCheckerInfraResult: false,
+    });
+    await checkerStarted.promise;
+    controller.abort(cancellation);
+    checkerCompleted.resolve(['accept', 'accept', 'accept', 'accept']);
+
+    await expect(verification).rejects.toBe(cancellation);
+  });
+
+  it('classifies a custom checker that accepts after deadline as budget', async () => {
+    const runner = makeRunner();
+    const checkerStarted = deferred<void>();
+    const checkerCompleted = deferred<Array<'accept' | 'reject' | 'infra-error'>>();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(100);
+    const adjudicator: TemplateOutputAdjudicator = {
+      customChecker: true,
+      adjudicate: async () => {
+        checkerStarted.resolve();
+        return checkerCompleted.promise;
+      },
+    };
+
+    try {
+      const verification = verifySelectedTemplates({
+        languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
+        cases, runner, adjudicator, deadlineAt: 150, allowCheckerInfraResult: false,
+      });
+      await checkerStarted.promise;
+      now.mockReturnValue(151);
+      checkerCompleted.resolve(['accept', 'accept', 'accept', 'accept']);
+
+      await expect(verification).rejects.toMatchObject({ language: 'py', kind: 'budget' });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('classifies ordinary output differences as mismatch after all cases run', async () => {
