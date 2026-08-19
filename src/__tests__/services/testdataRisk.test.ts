@@ -98,6 +98,40 @@ describe('deterministic test-data risk assessment', () => {
     expect(JSON.stringify(assess({ statement: secretStatement }))).not.toContain('secret-title');
   });
 
+  it.each(['legacy', 'observe', 'enforce'] as const)(
+    '%s derives sandbox requirements from the currently safe direct path',
+    reliabilityMode => {
+      const lowDisabled = assess({ reliabilityMode, directFallbackEnabled: false });
+      const lowEnabled = assess({ reliabilityMode, directFallbackEnabled: true });
+      const mediumUnconfirmed = assess({
+        reliabilityMode,
+        statement: `${sampleStatement}\nFloating point output has absolute error.`,
+        directFallbackEnabled: true,
+        confirmDirectFallback: false,
+      });
+      const mediumConfirmed = assess({
+        reliabilityMode,
+        statement: `${sampleStatement}\nFloating point output has absolute error.`,
+        directFallbackEnabled: true,
+        confirmDirectFallback: true,
+      });
+      const highConfirmed = assess({
+        reliabilityMode,
+        statement: `${sampleStatement}\nFloating point output. Given a graph. Subtask 1.`,
+        directFallbackEnabled: true,
+        confirmDirectFallback: true,
+      });
+
+      expect(lowDisabled).toMatchObject({ tier: 'low', allowsDirectFallback: false, requiresSandbox: true });
+      expect(lowEnabled).toMatchObject({ tier: 'low', allowsDirectFallback: true, requiresSandbox: false });
+      expect(mediumUnconfirmed).toMatchObject({ tier: 'medium', allowsDirectFallback: false, requiresSandbox: true });
+      expect(mediumConfirmed).toMatchObject({ tier: 'medium', allowsDirectFallback: true, requiresSandbox: false });
+      expect(highConfirmed).toMatchObject({ tier: 'high', allowsDirectFallback: false, requiresSandbox: true });
+      expect(lowDisabled.wouldBlock).toBe(reliabilityMode === 'observe' ? true : undefined);
+      expect(mediumConfirmed.wouldBlock).toBe(reliabilityMode === 'observe' ? false : undefined);
+    },
+  );
+
   it('normalizes reliability mode and records observe-only wouldBlock', () => {
     process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'ENFORCE';
     expect(getTestdataReliabilityMode()).toBe('enforce');

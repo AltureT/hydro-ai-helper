@@ -66,7 +66,7 @@ function assessTestdataRisk(input) {
         : tier === 'medium'
             ? input.directFallbackEnabled && input.confirmDirectFallback === true
             : false;
-    const requiresSandbox = tier !== 'low';
+    const requiresSandbox = !allowsDirectFallback;
     const requiresSpecConsensus = !!input.specConflict || tier === 'high' || tier === 'blocked';
     const requiresIndependentModels = tier === 'high' || tier === 'blocked';
     return {

@@ -1054,6 +1054,16 @@ export function getTestlibCheckerFilename(raw?: string): string | undefined {
   return checkerType === 'testlib' && checker ? checker : undefined;
 }
 
+function isStatementTruncatedForGeneration(statementMarkdown: string): boolean {
+  return statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH;
+}
+
+function truncateStatementForGenerationPrompt(statementMarkdown: string): string {
+  return isStatementTruncatedForGeneration(statementMarkdown)
+    ? `${statementMarkdown.slice(0, TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
+    : statementMarkdown;
+}
+
 /**
  * 生成 config.yaml（评测设置）
  *
@@ -1395,9 +1405,7 @@ export function buildTestdataUserPrompt(
   const coveragePlan = coverageOverride
     ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
 
-  const statement = statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-    ? `${statementMarkdown.slice(0, TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-    : statementMarkdown;
+  const statement = truncateStatementForGenerationPrompt(statementMarkdown);
 
   const lines = [
     `【题目标题】${problemTitle}`,
@@ -1501,9 +1509,7 @@ export function buildSolutionBlueprintUserPrompt(params: BuildUserPromptParams):
     yes: '是（标程必须是补全后的题面代码）',
     no: '否',
   }[options.fillInMode || 'auto'];
-  const statement = statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-    ? `${statementMarkdown.slice(0, TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-    : statementMarkdown;
+  const statement = truncateStatementForGenerationPrompt(statementMarkdown);
   const lines = [
     `【题目标题】${problemTitle}`,
     '',
@@ -1707,9 +1713,7 @@ export function buildIndependentVerifierUserPrompt(
   params: BuildUserPromptParams,
   blueprint: Pick<SandboxGenerationBlueprint, 'problemType' | 'functionName' | 'analysis'>,
 ): string {
-  const statement = params.statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-    ? `${params.statementMarkdown.slice(0, TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-    : params.statementMarkdown;
+  const statement = truncateStatementForGenerationPrompt(params.statementMarkdown);
   const functionSamples = blueprint.problemType === 'function'
     ? extractStatementSamples(params.statementMarkdown)
     : [];
@@ -5708,9 +5712,12 @@ export class TestdataGenService {
   }
 
   private assessRisk(params: GenerateTestdataParams): TestdataRiskAssessment {
+    const customChecker = hasCustomChecker(params.existingConfig);
     return assessTestdataRisk({
       statement: params.statementMarkdown,
-      hasCustomChecker: hasCustomChecker(params.existingConfig),
+      hasCustomChecker: customChecker,
+      unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
+      statementTruncated: isStatementTruncatedForGeneration(params.statementMarkdown),
       directFallbackEnabled: getTestdataDirectFallbackEnabled(),
       confirmDirectFallback: params.options.confirmDirectFallback,
       reliabilityMode: this.reliabilityMode,
@@ -5829,13 +5836,19 @@ export class TestdataGenService {
       if (requiresAcceptedRecordVerification) {
         throw toPipelineError(
           new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'),
-          { code: 'SANDBOX_UNAVAILABLE', stage: 'sandbox_check', artifact: 'pipeline' },
+          {
+            code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+            stage: 'sandbox_check', artifact: 'pipeline',
+          },
         );
       }
       if (this.mode === 'sandbox') {
         throw toPipelineError(
           new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'),
-          { code: 'SANDBOX_UNAVAILABLE', stage: 'sandbox_check', artifact: 'pipeline' },
+          {
+            code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+            stage: 'sandbox_check', artifact: 'pipeline',
+          },
         );
       }
     } else if (this.mode === 'sandbox') {
@@ -5853,9 +5866,7 @@ export class TestdataGenService {
       );
     }
 
-    // Existing custom-checker handling remains stricter than the general medium-risk rule:
-    // no AI-direct output can establish checker semantics.
-    if (hasCustomChecker(params.existingConfig) || !risk.allowsDirectFallback) {
+    if (!risk.allowsDirectFallback) {
       this.throwDirectFallbackBlocked(risk);
     }
 

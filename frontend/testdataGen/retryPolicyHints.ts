@@ -14,3 +14,10 @@ export function resolveTestdataRetryGuidance(
   if (retryPolicy === 'switch-model') return 'switch-model';
   return 'none';
 }
+
+/** The server emits this code only for a confirmable medium-risk direct path. */
+export function shouldOfferTestdataDirectFallbackConfirmation(
+  failureCode: string | undefined,
+): boolean {
+  return failureCode === 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED';
+}

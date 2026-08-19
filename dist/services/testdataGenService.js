@@ -674,6 +674,14 @@ function getTestlibCheckerFilename(raw) {
     const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
     return checkerType === 'testlib' && checker ? checker : undefined;
 }
+function isStatementTruncatedForGeneration(statementMarkdown) {
+    return statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH;
+}
+function truncateStatementForGenerationPrompt(statementMarkdown) {
+    return isStatementTruncatedForGeneration(statementMarkdown)
+        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
+        : statementMarkdown;
+}
 /**
  * 生成 config.yaml（评测设置）
  *
@@ -969,9 +977,7 @@ function buildTestdataUserPrompt(params, coverageOverride) {
     const requiredTemplateSections = options.languages.map(l => `@@@TEMPLATE:${l}@@@`).join('、');
     const coveragePlan = coverageOverride
         ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
-    const statement = statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : statementMarkdown;
+    const statement = truncateStatementForGenerationPrompt(statementMarkdown);
     const lines = [
         `【题目标题】${problemTitle}`,
         '',
@@ -1062,9 +1068,7 @@ function buildSolutionBlueprintUserPrompt(params) {
         yes: '是（标程必须是补全后的题面代码）',
         no: '否',
     }[options.fillInMode || 'auto'];
-    const statement = statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : statementMarkdown;
+    const statement = truncateStatementForGenerationPrompt(statementMarkdown);
     const lines = [
         `【题目标题】${problemTitle}`,
         '',
@@ -1232,9 +1236,7 @@ exists 或 none
 函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`;
 }
 function buildIndependentVerifierUserPrompt(params, blueprint) {
-    const statement = params.statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH
-        ? `${params.statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : params.statementMarkdown;
+    const statement = truncateStatementForGenerationPrompt(params.statementMarkdown);
     const functionSamples = blueprint.problemType === 'function'
         ? extractStatementSamples(params.statementMarkdown)
         : [];
@@ -4537,9 +4539,12 @@ class TestdataGenService {
         this.reliabilityMode = serviceOptions.reliabilityMode || (0, risk_1.getTestdataReliabilityMode)();
     }
     assessRisk(params) {
+        const customChecker = hasCustomChecker(params.existingConfig);
         return (0, risk_1.assessTestdataRisk)({
             statement: params.statementMarkdown,
-            hasCustomChecker: hasCustomChecker(params.existingConfig),
+            hasCustomChecker: customChecker,
+            unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
+            statementTruncated: isStatementTruncatedForGeneration(params.statementMarkdown),
             directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
             confirmDirectFallback: params.options.confirmDirectFallback,
             reliabilityMode: this.reliabilityMode,
@@ -4627,10 +4632,16 @@ class TestdataGenService {
                 throw new TestdataGenerationError(`当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_ORACLE_UNAVAILABLE_KEY, detail);
             }
             if (requiresAcceptedRecordVerification) {
-                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'), { code: 'SANDBOX_UNAVAILABLE', stage: 'sandbox_check', artifact: 'pipeline' });
+                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'), {
+                    code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+                    stage: 'sandbox_check', artifact: 'pipeline',
+                });
             }
             if (this.mode === 'sandbox') {
-                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'), { code: 'SANDBOX_UNAVAILABLE', stage: 'sandbox_check', artifact: 'pipeline' });
+                throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'), {
+                    code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+                    stage: 'sandbox_check', artifact: 'pipeline',
+                });
             }
         }
         else if (this.mode === 'sandbox') {
@@ -4643,9 +4654,7 @@ class TestdataGenService {
         if (requiresAcceptedRecordVerification) {
             throw (0, failures_1.toPipelineError)(new Error('历史 AC 候选解必须在 Hydro 沙箱中通过题面样例与独立 BRUTE 压力验证，不能用于未经验证的直出模式。'), { code: 'SANDBOX_REQUIRED', stage: 'sandbox_check', artifact: 'pipeline' });
         }
-        // Existing custom-checker handling remains stricter than the general medium-risk rule:
-        // no AI-direct output can establish checker semantics.
-        if (hasCustomChecker(params.existingConfig) || !risk.allowsDirectFallback) {
+        if (!risk.allowsDirectFallback) {
             this.throwDirectFallbackBlocked(risk);
         }
         const plan = await this.generateDirect(params);

@@ -1,8 +1,7 @@
 import {
   resolveTestdataRetryGuidance,
+  shouldOfferTestdataDirectFallbackConfirmation,
 } from '../../../frontend/testdataGen/retryPolicyHints';
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
 
 describe('test-data retry-policy guidance', () => {
   it.each([
@@ -19,11 +18,13 @@ describe('test-data retry-policy guidance', () => {
 });
 
 describe('test-data direct fallback confirmation UI', () => {
-  it('only offers a confirmation action for medium risk', () => {
-    const panel = readFileSync(resolve(process.cwd(), 'frontend/testdataGen/TestdataGenPanel.tsx'), 'utf8');
-    expect(panel).toContain("risk?.tier === 'medium'");
-    expect(panel).toContain('confirmDirectFallback');
-    expect(panel).not.toContain("risk.tier === 'high' && risk.allowsDirectFallback");
-    expect(panel).not.toContain("risk.tier === 'blocked' && risk.allowsDirectFallback");
+  it.each([
+    ['DIRECT_FALLBACK_CONFIRMATION_REQUIRED', true],
+    ['SANDBOX_REQUIRED', false],
+    ['SANDBOX_UNAVAILABLE', false],
+    ['CHECKER_REQUIRED_UNAVAILABLE', false],
+    [undefined, false],
+  ] as const)('offers confirmation for %s only when the server requests it', (failureCode, expected) => {
+    expect(shouldOfferTestdataDirectFallbackConfirmation(failureCode)).toBe(expected);
   });
 });

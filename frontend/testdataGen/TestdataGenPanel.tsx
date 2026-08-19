@@ -15,6 +15,7 @@ import {
 } from '../utils/styles';
 import {
   resolveTestdataRetryGuidance,
+  shouldOfferTestdataDirectFallbackConfirmation,
   type TestdataRetryGuidance,
 } from './retryPolicyHints';
 
@@ -113,12 +114,6 @@ interface GenerationPlan {
   verification?: PlanVerification;
   risk?: TestdataRiskAssessment;
   reliabilityMode?: 'legacy' | 'observe' | 'enforce';
-}
-
-export function canConfirmDirectFallback(
-  risk: Pick<TestdataRiskAssessment, 'tier' | 'allowsDirectFallback'> | undefined,
-): boolean {
-  return risk?.tier === 'medium' && risk.allowsDirectFallback === false;
 }
 
 type BackgroundGenerationJobStatus =
@@ -526,7 +521,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               job.error?.message || i18n('ai_helper_testdata_job_failed'),
             ));
           setDirectFallbackConfirmationRequired(
-            job.error?.failureCode === 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+            shouldOfferTestdataDirectFallbackConfirmation(job.error?.failureCode),
           );
           setRetryGuidance(resolveTestdataRetryGuidance(job.error?.retryPolicy));
           setPhase('form');
@@ -637,7 +632,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(err instanceof Error ? err.message : String(err));
       setDirectFallbackConfirmationRequired(
         err instanceof TestdataRequestError
-        && err.failureCode === 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+        && shouldOfferTestdataDirectFallbackConfirmation(err.failureCode),
       );
       setRetryGuidance(resolveTestdataRetryGuidance(
         err instanceof TestdataRequestError ? err.retryPolicy : undefined,

@@ -3663,7 +3663,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
     });
     expect(plan).toMatchObject({
-      risk: { tier: 'low', allowsDirectFallback: true, wouldBlock: false },
+      risk: { tier: 'low', allowsDirectFallback: true, requiresSandbox: false, wouldBlock: false },
       verification: { mode: 'direct' },
     });
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
@@ -3718,13 +3718,49 @@ describe('TestdataGenService.generate', () => {
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 
-  it('custom-checker rules remain stricter than medium-risk confirmation', async () => {
+  it('long statements truncated from the prompt never use direct fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = { chat: jest.fn() };
+    await expect(new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'long statement',
+      statementMarkdown: `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20001)}`,
+      options: { problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true },
+    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('supported testlib custom checkers allow confirmed medium-risk direct fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      options: {
+        problemKind: 'function', caseCount: 2, languages: ['py'], confirmDirectFallback: true,
+      },
+    });
+    expect(plan).toMatchObject({
+      risk: { tier: 'medium', allowsDirectFallback: true, requiresSandbox: false },
+      verification: { mode: 'direct' },
+    });
+    expect(mockClient.chat).toHaveBeenCalled();
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('unsupported custom checkers never use direct fallback', async () => {
     process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
     const mockClient = { chat: jest.fn() };
     await expect(new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
       problemTitle: 'checker',
       statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
-      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      existingConfig: 'checker_type: custom\nchecker: checker.cc\n',
       options: {
         problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
       },
@@ -3732,6 +3768,44 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).not.toHaveBeenCalled();
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
+
+  it.each(['auto', 'sandbox', 'direct'] as const)(
+    'enforce %s mode returns SANDBOX_REQUIRED when no safe direct path exists',
+    async mode => {
+      delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(false),
+        runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+      };
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        mode,
+        reliabilityMode: 'enforce',
+        ...(mode === 'direct' ? {} : { sandboxRunner: runner }),
+      });
+      await expect(service.generate({
+        problemTitle: 'low risk',
+        statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    },
+  );
+
+  it.each(['legacy', 'observe'] as const)(
+    '%s sandbox mode preserves SANDBOX_UNAVAILABLE when the configured sandbox is unavailable',
+    async reliabilityMode => {
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(false),
+        runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+      };
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner, reliabilityMode,
+      }).generate({
+        problemTitle: 'low risk',
+        statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_UNAVAILABLE' });
+    },
+  );
 
   it('教师 C++ 标程在 auto 模式沙箱不可达时给出编译能力硬错误，不降级直出', async () => {
     const mockClient = { chat: jest.fn() };
