@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataPipelineError = exports.TESTDATA_FAILURE_CODES = void 0;
+exports.TestdataPipelineError = exports.TESTDATA_FAILURE_STAGES = exports.TESTDATA_FAILURE_CODES = void 0;
+exports.normalizeTestdataFailureStage = normalizeTestdataFailureStage;
 exports.repairPolicyForFailure = repairPolicyForFailure;
 exports.toPipelineError = toPipelineError;
 exports.extractTestdataFailureMetadata = extractTestdataFailureMetadata;
@@ -43,6 +44,58 @@ exports.TESTDATA_FAILURE_CODES = [
     'CANCELLED',
     'UNKNOWN',
 ];
+exports.TESTDATA_FAILURE_STAGES = [
+    'accepted-std',
+    'accepted_std_verification',
+    'artifacts_parse',
+    'brute',
+    'canceled',
+    'checker',
+    'config_parse',
+    'direct_parse',
+    'direct_repair',
+    'full',
+    'function-samples',
+    'generator',
+    'independent_verifier_parse',
+    'oracle',
+    'pipeline',
+    'pipeline_repair',
+    'provided_cpp_oracle',
+    'provided_cpp_oracle_infra',
+    'sandbox_budget',
+    'sandbox_check',
+    'solution_blueprint',
+    'solution_verification',
+    'stress-generator',
+    'stress_testing',
+    'template',
+    'template-py',
+    'template_missing',
+    'unknown',
+    'validator',
+];
+const TESTDATA_FAILURE_STAGE_SET = new Set(exports.TESTDATA_FAILURE_STAGES);
+/** Keep legacy callers source-compatible while storing only canonical stage values. */
+function normalizeTestdataFailureStage(stage) {
+    const canonical = stage === 'function_samples'
+        ? 'function-samples'
+        : stage === 'stress_generator'
+            ? 'stress-generator'
+            : stage;
+    if (TESTDATA_FAILURE_STAGE_SET.has(canonical)) {
+        return canonical;
+    }
+    const semanticFallbackPrefix = 'semantic_fallback:';
+    if (canonical.startsWith(semanticFallbackPrefix)) {
+        const nested = normalizeTestdataFailureStage(canonical.slice(semanticFallbackPrefix.length));
+        const base = nested.startsWith(semanticFallbackPrefix)
+            ? 'unknown'
+            : nested;
+        return `semantic_fallback:${base}`;
+    }
+    return 'unknown';
+}
 const SAFE_DETAIL_STRING_MAX = 128;
 const SAFE_DETAIL_ARRAY_MAX = 64;
 const SAFE_ENUM_OR_HASH = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -107,11 +160,11 @@ class TestdataPipelineError extends Error {
     constructor(message, code, stage, artifact, retryPolicy, safeDetails = {}, cause) {
         super(message);
         this.code = code;
-        this.stage = stage;
         this.artifact = artifact;
         this.retryPolicy = retryPolicy;
         this.cause = cause;
         this.name = 'TestdataPipelineError';
+        this.stage = normalizeTestdataFailureStage(stage);
         this.safeDetails = copyValidatedSafeDetails(safeDetails);
     }
 }

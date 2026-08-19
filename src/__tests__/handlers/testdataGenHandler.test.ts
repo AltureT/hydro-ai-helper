@@ -916,7 +916,7 @@ describe('TestdataGenGenerateHandler', () => {
         'testdata_gen',
         'Untyped test-data generation failure',
         undefined,
-        undefined,
+        error.stack,
         { aiCategory: 'network', retryable: true, attemptCount: 2 },
       );
     } finally {
@@ -1111,7 +1111,7 @@ describe('Testdata generation background jobs', () => {
     }
   });
 
-  it('后台普通错误遥测丢弃消息、栈、ID、URL 与任意元数据', async () => {
+  it('后台普通错误不上传 message，但把 stack 交给 ErrorReporter 做帧级脱敏', async () => {
     mockFindOne(PROBLEM_DOC);
     const job = makeGenerationJob({ status: 'pending', startedAt: null });
     const jobModel = {
@@ -1156,7 +1156,7 @@ describe('Testdata generation background jobs', () => {
         'testdata_gen',
         'Untyped test-data generation failure',
         undefined,
-        undefined,
+        sensitiveError.stack,
         {},
       );
     } finally {
@@ -1513,7 +1513,7 @@ describe('TestdataGenSkeletonHandler', () => {
     });
   });
 
-  it('骨架接口普通异常遥测丢弃消息、栈、problemId 与任意元数据', async () => {
+  it('骨架接口普通异常不上传 message，但把 stack 交给 ErrorReporter', async () => {
     const sensitiveError = Object.assign(
       new Error('input=SECRET_INPUT output=SECRET_OUTPUT https://private.example/v1 key=sk-secret'),
       {
@@ -1547,7 +1547,7 @@ describe('TestdataGenSkeletonHandler', () => {
       'testdata_skeleton',
       'Untyped test-data generation failure',
       undefined,
-      undefined,
+      sensitiveError.stack,
       {},
     );
   });
@@ -1749,7 +1749,7 @@ describe('TestdataGenApplyHandler', () => {
       'testdata_apply',
       'Untyped test-data generation failure',
       undefined,
-      undefined,
+      sensitiveError.stack,
       { aiCategory: 'unknown', retryable: true, attemptCount: 3 },
     );
   });

@@ -6,7 +6,10 @@ import {
   getTelemetryToken,
   sendToEndpoint,
 } from './telemetryService';
-import { TESTDATA_FAILURE_CODES } from './testdata/failures';
+import {
+  TESTDATA_FAILURE_CODES,
+  TESTDATA_FAILURE_STAGES,
+} from './testdata/failures';
 
 export type TelemetryErrorType = 'api_failure' | 'api_degraded' | 'startup_failure' | 'config' | 'db' | 'background_job';
 
@@ -68,39 +71,7 @@ const SAFE_FAILURE_CODES = new Set<string>(TESTDATA_FAILURE_CODES);
 const SAFE_AI_CATEGORIES = new Set([
   'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
 ]);
-const SAFE_TESTDATA_STAGES = new Set([
-  'accepted-std',
-  'accepted_std_verification',
-  'artifacts_parse',
-  'brute',
-  'canceled',
-  'checker',
-  'config_parse',
-  'direct_parse',
-  'direct_repair',
-  'full',
-  'function-samples',
-  'function_samples',
-  'generator',
-  'independent_verifier_parse',
-  'oracle',
-  'pipeline',
-  'pipeline_repair',
-  'provided_cpp_oracle',
-  'provided_cpp_oracle_infra',
-  'sandbox_budget',
-  'sandbox_check',
-  'solution_blueprint',
-  'solution_verification',
-  'stress-generator',
-  'stress_generator',
-  'stress_testing',
-  'template',
-  'template-py',
-  'template_missing',
-  'unknown',
-  'validator',
-]);
+const SAFE_TESTDATA_STAGES = new Set<string>(TESTDATA_FAILURE_STAGES);
 
 function isSafeTestdataStage(value: unknown): value is string {
   if (typeof value !== 'string') return false;

@@ -18,39 +18,7 @@ const SAFE_FAILURE_CODES = new Set(failures_1.TESTDATA_FAILURE_CODES);
 const SAFE_AI_CATEGORIES = new Set([
     'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
 ]);
-const SAFE_TESTDATA_STAGES = new Set([
-    'accepted-std',
-    'accepted_std_verification',
-    'artifacts_parse',
-    'brute',
-    'canceled',
-    'checker',
-    'config_parse',
-    'direct_parse',
-    'direct_repair',
-    'full',
-    'function-samples',
-    'function_samples',
-    'generator',
-    'independent_verifier_parse',
-    'oracle',
-    'pipeline',
-    'pipeline_repair',
-    'provided_cpp_oracle',
-    'provided_cpp_oracle_infra',
-    'sandbox_budget',
-    'sandbox_check',
-    'solution_blueprint',
-    'solution_verification',
-    'stress-generator',
-    'stress_generator',
-    'stress_testing',
-    'template',
-    'template-py',
-    'template_missing',
-    'unknown',
-    'validator',
-]);
+const SAFE_TESTDATA_STAGES = new Set(failures_1.TESTDATA_FAILURE_STAGES);
 function isSafeTestdataStage(value) {
     if (typeof value !== 'string')
         return false;

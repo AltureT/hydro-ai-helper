@@ -19,6 +19,7 @@ import type {
 import type {
   TestdataArtifact,
   TestdataFailureCode,
+  TestdataFailureStage,
   TestdataRetryPolicy,
 } from '../services/testdata/failures';
 
@@ -35,7 +36,7 @@ export interface TestdataGenerationJobError {
   code: string;
   category?: string;
   failureCode?: TestdataFailureCode;
-  stage?: string;
+  stage?: TestdataFailureStage;
   artifact?: TestdataArtifact;
   retryPolicy?: TestdataRetryPolicy;
   retryable: boolean;

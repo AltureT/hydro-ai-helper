@@ -7,9 +7,9 @@
 import yaml from 'js-yaml';
 import {
   TestdataGenService,
+  buildConfigYaml,
   buildIndependentVerifierUserPrompt,
   materializeSandboxBlueprint,
-  mergeConfigSubtasks,
   parseSandboxBlueprint,
   reduceCheckerExecution,
   type GenerateOptions,
@@ -166,13 +166,41 @@ describe('test-data generation current guarantees', () => {
     expect(reduceCheckerExecution(undefined, true)).toBe('infra-error');
   });
 
-  it('merges generated subtasks without silently replacing existing config fields', () => {
-    // Mutation caught: rebuilding config.yaml from generated values and dropping existing settings.
-    const existing = yaml.load('time_limit: 1000\nchecker_type: default\nsubtasks:\n  - score: 30\n    cases: [1]\n') as Record<string, any>;
-    const merged = mergeConfigSubtasks(existing.subtasks, [2]);
+  it('preserves the complete existing top-level config in the final generated YAML', () => {
+    // Mutation caught: testing only the input object or a subtask helper misses fields dropped
+    // while buildConfigYaml reconstructs the final document from a fragile allowlist.
+    const existingConfig = yaml.dump({
+      type: 'default',
+      time_limit: 1000,
+      memory_limit: 512,
+      checker_type: 'testlib',
+      checker: 'checker.cc',
+      detail: true,
+      langs: ['py.py3'],
+      user_extra_files: ['helper.txt'],
+      subtasks: [{ score: 30, cases: [1] }],
+    });
+    const finalConfig = yaml.load(buildConfigYaml({
+      problemType: 'traditional',
+      caseCount: 1,
+      languages: [],
+      caseNumbers: [1, 2],
+      newCaseNumbers: [2],
+      existingConfig,
+    })) as Record<string, any>;
 
-    expect(existing.time_limit).toBe(1000);
-    expect(existing.checker_type).toBe('default');
-    expect(merged?.subtasks).toEqual([{ score: 30, cases: [1, { input: '2.in', output: '2.out' }] }]);
+    expect(finalConfig).toEqual(expect.objectContaining({
+      time_limit: 1000,
+      memory_limit: 512,
+      checker_type: 'testlib',
+      checker: 'checker.cc',
+      detail: true,
+      langs: ['py.py3'],
+      user_extra_files: ['helper.txt'],
+    }));
+    expect(finalConfig.subtasks).toEqual([{
+      score: 30,
+      cases: [1, { input: '2.in', output: '2.out' }],
+    }]);
   });
 });

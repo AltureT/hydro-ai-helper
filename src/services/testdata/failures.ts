@@ -99,12 +99,72 @@ export type TestdataRetryPolicy =
   | 'manual-review'
   | 'no-retry';
 
+export const TESTDATA_FAILURE_STAGES = [
+  'accepted-std',
+  'accepted_std_verification',
+  'artifacts_parse',
+  'brute',
+  'canceled',
+  'checker',
+  'config_parse',
+  'direct_parse',
+  'direct_repair',
+  'full',
+  'function-samples',
+  'generator',
+  'independent_verifier_parse',
+  'oracle',
+  'pipeline',
+  'pipeline_repair',
+  'provided_cpp_oracle',
+  'provided_cpp_oracle_infra',
+  'sandbox_budget',
+  'sandbox_check',
+  'solution_blueprint',
+  'solution_verification',
+  'stress-generator',
+  'stress_testing',
+  'template',
+  'template-py',
+  'template_missing',
+  'unknown',
+  'validator',
+] as const;
+
+export type TestdataBaseFailureStage = typeof TESTDATA_FAILURE_STAGES[number];
+export type TestdataFailureStage =
+  | TestdataBaseFailureStage
+  | `semantic_fallback:${TestdataBaseFailureStage}`;
+
+const TESTDATA_FAILURE_STAGE_SET = new Set<string>(TESTDATA_FAILURE_STAGES);
+
+/** Keep legacy callers source-compatible while storing only canonical stage values. */
+export function normalizeTestdataFailureStage(stage: string): TestdataFailureStage {
+  const canonical = stage === 'function_samples'
+    ? 'function-samples'
+    : stage === 'stress_generator'
+      ? 'stress-generator'
+      : stage;
+  if (TESTDATA_FAILURE_STAGE_SET.has(canonical)) {
+    return canonical as TestdataBaseFailureStage;
+  }
+  const semanticFallbackPrefix = 'semantic_fallback:';
+  if (canonical.startsWith(semanticFallbackPrefix)) {
+    const nested = normalizeTestdataFailureStage(canonical.slice(semanticFallbackPrefix.length));
+    const base: TestdataBaseFailureStage = nested.startsWith(semanticFallbackPrefix)
+      ? 'unknown'
+      : nested as TestdataBaseFailureStage;
+    return `semantic_fallback:${base}`;
+  }
+  return 'unknown';
+}
+
 export type TestdataSafeDetail = string | number | boolean | string[];
 export type TestdataSafeDetails = Record<string, TestdataSafeDetail>;
 
 export interface TestdataPipelineErrorContext {
   code: TestdataFailureCode;
-  stage: string;
+  stage: TestdataFailureStage;
   artifact: TestdataArtifact;
   retryPolicy?: TestdataRetryPolicy;
   safeDetails?: TestdataSafeDetails;
@@ -174,11 +234,12 @@ function copyValidatedSafeDetails(details: TestdataSafeDetails): TestdataSafeDet
 
 export class TestdataPipelineError extends Error {
   readonly safeDetails: TestdataSafeDetails;
+  readonly stage: TestdataFailureStage;
 
   constructor(
     message: string,
     readonly code: TestdataFailureCode,
-    readonly stage: string,
+    stage: string,
     readonly artifact: TestdataArtifact,
     readonly retryPolicy: TestdataRetryPolicy,
     safeDetails: TestdataSafeDetails = {},
@@ -186,6 +247,7 @@ export class TestdataPipelineError extends Error {
   ) {
     super(message);
     this.name = 'TestdataPipelineError';
+    this.stage = normalizeTestdataFailureStage(stage);
     this.safeDetails = copyValidatedSafeDetails(safeDetails);
   }
 }
@@ -245,7 +307,7 @@ export function extractTestdataFailureMetadata(
   error: unknown,
 ): {
   failureCode: TestdataFailureCode;
-  stage: string;
+  stage: TestdataFailureStage;
   artifact: TestdataArtifact;
   retryPolicy: TestdataRetryPolicy;
   safeDetails: TestdataSafeDetails;

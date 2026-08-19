@@ -548,7 +548,7 @@ function captureTestdataGenerationFailure(
     feature,
     'Untyped test-data generation failure',
     undefined,
-    undefined,
+    err instanceof Error ? err.stack : undefined,
     safeMetadata,
   );
 }

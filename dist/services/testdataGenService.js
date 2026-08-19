@@ -692,16 +692,9 @@ function buildConfigYamlWithMetadata(options) {
         input: `${number}.in`,
         output: `${number}.out`,
     }));
-    const config = {};
-    const preservedKeys = [
-        'type', 'subType', 'target', 'score', 'time', 'memory', 'filename',
-        'checker_type', 'checker', 'interactor', 'manager', 'num_processes',
-        'judge_extra_files', 'detail', 'validator', 'time_limit_rate', 'memory_limit_rate',
-    ];
-    for (const key of preservedKeys) {
-        if (previous[key] !== undefined)
-            config[key] = previous[key];
-    }
+    // Existing top-level judge settings belong to the problem owner. Clone the
+    // complete document, then overwrite only fields managed by this generator.
+    const config = cloneConfigValue(previous);
     if (!config.type)
         config.type = 'default';
     const previousUserExtraFiles = Array.isArray(previous.user_extra_files)
@@ -2237,6 +2230,15 @@ function appendCheckerExecutionNotes(response, customChecker, checkerExecutor) {
         }
     }
 }
+function reduceTargetExecution(detail) {
+    if (detail.timedOut || detail.status === 'Time Limit Exceeded')
+        return 'timeout';
+    if (detail.accepted)
+        return 'accepted';
+    if (detail.status === 'Nonzero Exit Status')
+        return 'runtime-failure';
+    return 'infra-error';
+}
 /** 根据沙箱逐点结果判定正式数据是否能够卡掉错误解靶子。 */
 function evaluateDiscrimination(inputs) {
     const targets = inputs.targetRuns.map((target) => {
@@ -2252,9 +2254,11 @@ function evaluateDiscrimination(inputs) {
             };
         }
         let checkerInfraError = false;
+        let executionInfraError = false;
         for (let index = 0; index < target.perCase.length; index++) {
             const detail = target.perCase[index];
-            if (detail.timedOut) {
+            const executionVerdict = reduceTargetExecution(detail);
+            if (executionVerdict === 'timeout') {
                 return {
                     kind: target.kind,
                     description: target.description,
@@ -2263,7 +2267,11 @@ function evaluateDiscrimination(inputs) {
                     killedByCase: index + 1,
                 };
             }
-            if (!detail.accepted) {
+            if (executionVerdict === 'infra-error') {
+                executionInfraError = true;
+                continue;
+            }
+            if (executionVerdict === 'runtime-failure' && target.kind !== 'brute-complexity') {
                 return {
                     kind: target.kind,
                     description: `${target.description}(运行失败)`,
@@ -2297,7 +2305,7 @@ function evaluateDiscrimination(inputs) {
                 };
             }
         }
-        if (checkerInfraError) {
+        if (checkerInfraError || executionInfraError) {
             return {
                 kind: target.kind,
                 description: target.description,
@@ -3057,7 +3065,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         throw err;
                     throw toSandboxExecutionPipelineError(err, {
                         code: 'UNKNOWN',
-                        stage: 'stress_generator',
+                        stage: 'stress-generator',
                         artifact: 'stress-generator',
                         message: `STRESS_GENERATOR 实跑失败：${err instanceof Error ? err.message : String(err)}`,
                     });
@@ -3070,7 +3078,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         && err.code === 'GENERATOR_WRONG_CASE_COUNT'
                         ? 'STRESS_INSUFFICIENT_VALID_INPUTS'
                         : err instanceof failures_1.TestdataPipelineError ? err.code : 'GENERATOR_INVALID_JSON';
-                    throw new failures_1.TestdataPipelineError(`STRESS_GENERATOR 输出无效：${err instanceof Error ? err.message : String(err)}`, code, 'stress_generator', 'stress-generator', (0, failures_1.repairPolicyForFailure)({ code, artifact: 'stress-generator' }), err instanceof failures_1.TestdataPipelineError ? err.safeDetails : {}, err);
+                    throw new failures_1.TestdataPipelineError(`STRESS_GENERATOR 输出无效：${err instanceof Error ? err.message : String(err)}`, code, 'stress-generator', 'stress-generator', (0, failures_1.repairPolicyForFailure)({ code, artifact: 'stress-generator' }), err instanceof failures_1.TestdataPipelineError ? err.safeDetails : {}, err);
                 }
                 stressGeneratedCount = stressGenerated.length;
                 stressInputs = stressGenerated.map(item => item.input);
@@ -3081,7 +3089,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     throw (0, failures_1.toPipelineError)(new Error(`STRESS_GENERATOR 压力数据多样性不足：${stressInputs.length} 组中仅 ${stressUniqueInputs} 组 input 唯一`
                         + `，至少需要 ${minimumUnique} 组；禁止用重复输入凑数`), {
                         code: 'STRESS_LOW_DIVERSITY',
-                        stage: 'stress_generator',
+                        stage: 'stress-generator',
                         artifact: 'stress-generator',
                         safeDetails: {
                             generatedCount: stressInputs.length,
@@ -3095,7 +3103,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     if (assignment) {
                         throw (0, failures_1.toPipelineError)(new Error(`压力对拍第 ${assignment.caseNumber} 个 .in 仍是源码赋值写法：${assignment.line}`), {
                             code: 'GENERATOR_INVALID_INPUT',
-                            stage: 'stress_generator',
+                            stage: 'stress-generator',
                             artifact: 'stress-generator',
                             safeDetails: { caseIndex: assignment.caseNumber },
                         });
@@ -3135,7 +3143,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             if (missingSample) {
                 throw (0, failures_1.toPipelineError)(new Error(`函数题样例 ${missingSample.id} 缺少独立 stdin 转码`), {
                     code: 'GENERATOR_INVALID_INPUT',
-                    stage: 'function_samples',
+                    stage: 'function-samples',
                     artifact: 'stress-generator',
                 });
             }
@@ -3147,7 +3155,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             if (assignment) {
                 throw (0, failures_1.toPipelineError)(new Error(`函数题样例 ${samples[assignment.caseNumber - 1].id} 转码后仍是源码赋值写法：${assignment.line}`), {
                     code: 'GENERATOR_INVALID_INPUT',
-                    stage: 'function_samples',
+                    stage: 'function-samples',
                     artifact: 'stress-generator',
                     safeDetails: { caseIndex: assignment.caseNumber },
                 });
@@ -4212,7 +4220,8 @@ class TestdataGenerationError extends failures_1.TestdataPipelineError {
     constructor(message, failureStage, results = [], recommendDeeperReasoning = false, userMessageKey, userMessageDetail, pipelineContext) {
         const legacyContract = legacyFailureContract(failureStage);
         const contract = pipelineContext || legacyContract;
-        super(message, contract.code, failureStage, contract.artifact, pipelineContext?.retryPolicy || contract.retryPolicy || (0, failures_1.repairPolicyForFailure)(contract), pipelineContext?.safeDetails);
+        const canonicalStage = (0, failures_1.normalizeTestdataFailureStage)(failureStage);
+        super(message, contract.code, canonicalStage, contract.artifact, pipelineContext?.retryPolicy || contract.retryPolicy || (0, failures_1.repairPolicyForFailure)(contract), pipelineContext?.safeDetails);
         this.name = 'TestdataGenerationError';
         this.recommendDeeperReasoning = recommendDeeperReasoning;
         this.chatResults = [...results];
@@ -4221,7 +4230,7 @@ class TestdataGenerationError extends failures_1.TestdataPipelineError {
         const usedModels = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
         const lastModel = results[results.length - 1]?.usedModel;
         this.telemetryMetadata = {
-            failureStage,
+            failureStage: canonicalStage,
             ...(lastModel ? {
                 endpointName: lastModel.endpointName,
                 modelName: lastModel.modelName,
@@ -4233,6 +4242,15 @@ class TestdataGenerationError extends failures_1.TestdataPipelineError {
     }
 }
 exports.TestdataGenerationError = TestdataGenerationError;
+function wrapHistoricalCandidateFailure(error, message, results) {
+    const original = error instanceof TestdataGenerationError ? error : undefined;
+    return new TestdataGenerationError(message, error.stage, results, false, original?.userMessageKey, original?.userMessageDetail, {
+        code: error.code,
+        artifact: error.artifact,
+        retryPolicy: error.retryPolicy,
+        safeDetails: { ...error.safeDetails, candidate: true },
+    });
+}
 function extractTestdataErrorMetadata(err) {
     const failureMetadata = (0, failures_1.extractTestdataFailureMetadata)(err);
     if (err instanceof TestdataGenerationError) {
@@ -4280,11 +4298,13 @@ function classifySandboxRepairScope(error) {
     return 'full';
 }
 function repairScopeForPipelineFailure(error) {
+    if (error.stage === 'function-samples')
+        return 'function-samples';
+    if (error.stage === 'stress-generator')
+        return 'stress-generator';
     switch (error.artifact) {
         case 'generator': return 'generator';
-        case 'stress-generator': return error.code === 'GENERATOR_INVALID_INPUT'
-            ? 'function-samples'
-            : 'stress-generator';
+        case 'stress-generator': return 'stress-generator';
         case 'validator': return 'validator';
         case 'oracle': return 'oracle';
         case 'brute': return 'brute';
@@ -5027,15 +5047,22 @@ class TestdataGenService {
                             if (targetRun.length !== 1)
                                 throw new Error('定向补刀错误解未返回单条结果');
                             const detail = targetRun[0];
+                            const executionVerdict = reduceTargetExecution(detail);
                             let killedBy;
-                            if (detail.timedOut)
+                            if (executionVerdict === 'timeout')
                                 killedBy = 'tle';
-                            else if (!detail.accepted)
+                            else if (executionVerdict === 'runtime-failure')
                                 killedBy = 'wa';
+                            else if (executionVerdict === 'infra-error') {
+                                targetResult.skippedReason = 'checker-infra-error';
+                                continue targetLoop;
+                            }
                             else if (checkerExecutor?.status === 'ready') {
                                 const verdict = await checkerExecutor.runChecker(candidate.input, detail.stdout, output, { signal: params.signal, deadlineAt });
-                                if (verdict === 'infra-error')
-                                    continue;
+                                if (verdict === 'infra-error') {
+                                    targetResult.skippedReason = 'checker-infra-error';
+                                    continue targetLoop;
+                                }
                                 if (verdict === 'reject')
                                     killedBy = 'wa';
                             }
@@ -5051,7 +5078,7 @@ class TestdataGenService {
                             targetResult.killed = true;
                             targetResult.killedBy = killedBy;
                             targetResult.killedByCase = cases.length;
-                            if (!detail.accepted && !detail.timedOut) {
+                            if (executionVerdict === 'runtime-failure') {
                                 targetResult.description = `${targetResult.description}(运行失败)`;
                             }
                             continue targetLoop;
@@ -5172,9 +5199,6 @@ class TestdataGenService {
             catch (solutionError) {
                 if (isCancellation(solutionError))
                     throw solutionError;
-                if (solutionError instanceof TestdataGenerationError && solutionError.userMessageKey) {
-                    throw solutionError;
-                }
                 const typedSolutionError = solutionError instanceof failures_1.TestdataPipelineError
                     ? solutionError
                     : (0, failures_1.toPipelineError)(solutionError, {
@@ -5182,21 +5206,19 @@ class TestdataGenService {
                         stage: 'solution_blueprint',
                         artifact: 'spec',
                     });
+                if (params.options.providedStdSource === 'accepted-record'
+                    && typedSolutionError.artifact === 'oracle') {
+                    throw wrapHistoricalCandidateFailure(typedSolutionError, `所选历史 AC 候选解未通过第一阶段题面样例验证，已拒绝使用。技术细节：${solutionError instanceof Error ? solutionError.message : String(solutionError)}`, results);
+                }
+                if (solutionError instanceof TestdataGenerationError && solutionError.userMessageKey) {
+                    throw solutionError;
+                }
                 const cppInfraFailure = typedSolutionError.code === 'ORACLE_COMPILE_FAILED'
                     && typedSolutionError.safeDetails.failureKind === 'infra';
                 if (cppInfraFailure) {
                     cppOracleAvailableForAttempt = false;
                     systemPrompt = buildSandboxBlueprintSystemPrompt(false);
                     solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(false);
-                }
-                if (params.options.providedStdSource === 'accepted-record'
-                    && typedSolutionError.artifact === 'oracle') {
-                    throw new TestdataGenerationError(`所选历史 AC 候选解未通过第一阶段题面样例验证，已拒绝使用。技术细节：${solutionError instanceof Error ? solutionError.message : String(solutionError)}`, 'accepted_std_verification', results, false, undefined, undefined, {
-                        code: 'TRUSTED_SOLUTIONS_DIVERGED',
-                        artifact: 'oracle',
-                        retryPolicy: 'adjudicate',
-                        safeDetails: typedSolutionError.safeDetails,
-                    });
                 }
                 report('blueprint_repair', 30);
                 const repairResult = await this.aiClient.chat([
@@ -5237,7 +5259,7 @@ class TestdataGenService {
                     throw new TestdataGenerationError(`AI 自动修复解题蓝图后仍未通过解析或样例预验证：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'solution_blueprint', results, true, undefined, undefined, {
                         code: typedRepairError.code,
                         artifact: typedRepairError.artifact,
-                        retryPolicy: (0, failures_1.repairPolicyForFailure)(typedRepairError),
+                        retryPolicy: typedRepairError.retryPolicy,
                         safeDetails: typedRepairError.safeDetails,
                     });
                 }
@@ -5388,15 +5410,10 @@ class TestdataGenService {
                         retryPolicy: 'no-retry',
                     });
                 }
-                const repairPolicy = (0, failures_1.repairPolicyForFailure)(typedFirstError);
+                const repairPolicy = typedFirstError.retryPolicy;
                 if (params.options.providedStdSource === 'accepted-record'
                     && typedFirstError.artifact === 'oracle') {
-                    throw new TestdataGenerationError(`所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, 'accepted_std_verification', results, false, undefined, undefined, {
-                        code: 'TRUSTED_SOLUTIONS_DIVERGED',
-                        artifact: 'oracle',
-                        retryPolicy: 'adjudicate',
-                        safeDetails: typedFirstError.safeDetails,
-                    });
+                    throw wrapHistoricalCandidateFailure(typedFirstError, `所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, results);
                 }
                 if (repairPolicy === 'adjudicate' || repairPolicy === 'manual-review' || repairPolicy === 'no-retry') {
                     throw new TestdataGenerationError(typedFirstError.message, typedFirstError.stage, results, false, undefined, undefined, {
@@ -5435,7 +5452,12 @@ class TestdataGenService {
                 catch (err) {
                     if (isCancellation(err))
                         throw err;
-                    throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, repairScope, results);
+                    throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, typedFirstError.stage, results, false, undefined, undefined, {
+                        code: typedFirstError.code,
+                        artifact: typedFirstError.artifact,
+                        retryPolicy: typedFirstError.retryPolicy,
+                        safeDetails: typedFirstError.safeDetails,
+                    });
                 }
                 results.push(repairResult);
                 try {
@@ -5514,7 +5536,7 @@ class TestdataGenService {
                             artifact: 'pipeline',
                             retryPolicy: 'switch-model',
                         });
-                    const finalPolicy = (0, failures_1.repairPolicyForFailure)(typedRepairError);
+                    const finalPolicy = typedRepairError.retryPolicy;
                     throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, typedRepairError.stage, results, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
                         code: typedRepairError.code,
                         artifact: typedRepairError.artifact,

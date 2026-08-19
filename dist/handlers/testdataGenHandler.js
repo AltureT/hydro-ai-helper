@@ -401,7 +401,7 @@ function captureTestdataGenerationFailure(ctx, feature, err) {
             safeMetadata.attemptCount = totalAttempts;
         }
     }
-    reporter.capture('api_failure', feature, 'Untyped test-data generation failure', undefined, undefined, safeMetadata);
+    reporter.capture('api_failure', feature, 'Untyped test-data generation failure', undefined, err instanceof Error ? err.stack : undefined, safeMetadata);
 }
 function serializeGenerationJob(job) {
     return {

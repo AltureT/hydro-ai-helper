@@ -153,6 +153,31 @@ describe('ErrorReporter', () => {
       expect((reporter as any).buffer.size).toBe(2);
     });
 
+    it('accepts only canonical hyphenated function/stress stages', () => {
+      for (const stage of [
+        'function-samples',
+        'stress-generator',
+        'function_samples',
+        'stress_generator',
+      ]) {
+        reporter.capture(
+          'api_failure',
+          'testdata_gen',
+          'fixed safe message',
+          undefined,
+          undefined,
+          { stage },
+        );
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serialized = JSON.stringify([...(reporter as any).buffer.values()]);
+      expect(serialized).toContain('function-samples');
+      expect(serialized).toContain('stress-generator');
+      expect(serialized).not.toContain('function_samples');
+      expect(serialized).not.toContain('stress_generator');
+    });
+
     it('keeps closed typed failure codes and AI categories in separate safe fingerprints', () => {
       reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
         failureCode: 'ORACLE_RUNTIME_FAILED', stage: 'oracle', artifact: 'oracle', retryPolicy: 'repair-artifact',

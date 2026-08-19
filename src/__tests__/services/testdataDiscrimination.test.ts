@@ -134,11 +134,18 @@ describe('evaluateDiscrimination', () => {
   });
 
   it('运行崩溃视为 WA 命中并在描述中标记运行失败', () => {
+    const runtimeFailure = {
+      accepted: false,
+      timedOut: false,
+      stdout: '',
+      status: 'Nonzero Exit Status',
+      exitStatus: 1,
+    };
     const result = evaluateDiscrimination({
       targetRuns: [{
         kind: 'boundary',
         description: '空结构处理错误',
-        perCase: [{ accepted: false, timedOut: false, stdout: '' }],
+        perCase: [runtimeFailure],
       }],
       oracleOutputs: ['0\n'],
       customChecker: false,
@@ -152,6 +159,29 @@ describe('evaluateDiscrimination', () => {
       killedByCase: 1,
     });
     expect(result.allKilled).toBe(true);
+  });
+
+  it.each([
+    ['System Error', { status: 'System Error', accepted: false, timedOut: false, stdout: '' }],
+    ['missing result status', { status: '', accepted: false, timedOut: false, stdout: '' }],
+  ])('%s is infrastructure failure rather than a wrong answer', (_label, infraDetail) => {
+    const result = evaluateDiscrimination({
+      targetRuns: [{
+        kind: 'wrong-algorithm',
+        description: '错误解执行基础设施异常',
+        perCase: [infraDetail],
+      }],
+      oracleOutputs: ['0\n'],
+      customChecker: false,
+    });
+
+    expect(result.targets[0]).toEqual({
+      kind: 'wrong-algorithm',
+      description: '错误解执行基础设施异常',
+      killed: false,
+      skippedReason: 'checker-infra-error',
+    });
+    expect(result.allKilled).toBe(false);
   });
 
   it('brute-complexity 只以超时作为复杂度命中', () => {
@@ -433,6 +463,35 @@ describe('runDiscriminationPhase', () => {
       killedBy: 'wa',
       killedByCase: 1,
     });
+  });
+
+  it.each([
+    ['System Error', { status: 'System Error', accepted: false, timedOut: false, stdout: '', stderr: '' }],
+    ['missing result status', { status: '', accepted: false, timedOut: false, stdout: '', stderr: '' }],
+  ])('区分度执行遇到 %s 时不把靶子标成 WA', async (_label, infraDetail) => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([infraDetail]),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [{
+        kind: 'wrong-algorithm',
+        description: '基础设施异常靶子',
+        code: 'print(1)',
+      }],
+      cases: [{ input: '1\n', output: '1\n' }],
+      runner,
+      customChecker: false,
+    });
+
+    expect(result.targets[0]).toMatchObject({
+      killed: false,
+      skippedReason: 'checker-infra-error',
+    });
+    expect(result.allKilled).toBe(false);
   });
 
   it('沙箱异常把当前及未运行靶子标为预算跳过而不抛错', async () => {

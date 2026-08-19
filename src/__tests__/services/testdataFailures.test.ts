@@ -1,10 +1,12 @@
 import {
+  TESTDATA_FAILURE_STAGES,
   TestdataPipelineError,
   extractTestdataFailureMetadata,
   getUserMessageKeyForFailure,
   repairPolicyForFailure,
   toPipelineError,
   type TestdataFailureCode,
+  type TestdataFailureStage,
 } from '../../services/testdata/failures';
 import {
   TestdataGenerationError,
@@ -12,10 +14,32 @@ import {
 } from '../../services/testdataGenService';
 
 describe('typed test-data pipeline failures', () => {
+  it('publishes one canonical stage allowlist without underscore aliases', () => {
+    expect(TESTDATA_FAILURE_STAGES).toEqual(expect.arrayContaining([
+      'function-samples',
+      'stress-generator',
+    ]));
+    expect(TESTDATA_FAILURE_STAGES).not.toContain('function_samples');
+    expect(TESTDATA_FAILURE_STAGES).not.toContain('stress_generator');
+  });
+
+  it.each([
+    ['function_samples', 'function-samples'],
+    ['stress_generator', 'stress-generator'],
+  ])('normalizes legacy stage input %s to canonical %s', (legacyStage, canonicalStage) => {
+    expect(new TestdataPipelineError(
+      'legacy caller',
+      'GENERATOR_INVALID_INPUT',
+      legacyStage,
+      'stress-generator',
+      'repair-artifact',
+    ).stage).toBe(canonicalStage);
+  });
+
   it.each<{
     label: string;
     code: TestdataFailureCode;
-    stage: string;
+    stage: TestdataFailureStage;
     artifact: ConstructorParameters<typeof TestdataPipelineError>[3];
   }>([
     { label: 'solution blueprint parse', code: 'SPEC_PARSE_FAILED', stage: 'solution_blueprint', artifact: 'spec' },
