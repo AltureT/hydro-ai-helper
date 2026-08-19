@@ -101,6 +101,7 @@ const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
 const statementSamples_1 = require("./testdata/statementSamples");
 const templateVerifier_1 = require("./testdata/templateVerifier");
+const runTelemetry_1 = require("./testdata/runTelemetry");
 var statementSamples_2 = require("./testdata/statementSamples");
 Object.defineProperty(exports, "extractStatementSamples", { enumerable: true, get: function () { return statementSamples_2.extractStatementSamples; } });
 function comparableFileContent(content) {
@@ -4119,6 +4120,12 @@ function assemblePlan(response, options, context = {}) {
         origin: 'deterministic',
     });
     return {
+        runId: (0, runTelemetry_1.createTestdataRunId)(),
+        promptVersion: runTelemetry_1.TESTDATA_PROMPT_VERSION,
+        originalFileHashes: (0, runTelemetry_1.computeOriginalFileHashes)(files.map(file => ({
+            name: file.name,
+            content: normalizeFileContent(file.content),
+        }))),
         problemType: response.problemType,
         isFillIn: response.isFillIn,
         analysis: response.analysis,
@@ -4317,6 +4324,12 @@ function buildSkeletonPlan(options, statementMarkdown = '', existingFiles = [], 
     const legacyNotes = noteParts.join('');
     const subtaskNotes = configBuild.subtaskNotes;
     return {
+        runId: (0, runTelemetry_1.createTestdataRunId)(),
+        promptVersion: runTelemetry_1.TESTDATA_PROMPT_VERSION,
+        originalFileHashes: (0, runTelemetry_1.computeOriginalFileHashes)(files.map(file => ({
+            name: file.name,
+            content: normalizeFileContent(file.content),
+        }))),
         problemType,
         analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
         notes: subtaskNotes.length > 0
@@ -4777,6 +4790,15 @@ class TestdataGenService {
         plan.reliabilityMode = this.reliabilityMode;
         return plan;
     }
+    attachRunMetadata(plan, params) {
+        plan.runId = params.runId || plan.runId || (0, runTelemetry_1.createTestdataRunId)();
+        plan.promptVersion = runTelemetry_1.TESTDATA_PROMPT_VERSION;
+        plan.originalFileHashes = (0, runTelemetry_1.computeOriginalFileHashes)(plan.files.map(file => ({
+            name: file.name,
+            content: normalizeFileContent(file.content),
+        })));
+        return plan;
+    }
     throwDirectFallbackBlocked(risk) {
         if (risk.tier === 'medium'
             && (0, risk_1.getTestdataDirectFallbackEnabled)()
@@ -4860,7 +4882,7 @@ class TestdataGenService {
             if (available) {
                 const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
                 this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-                return this.attachRisk(plan, risk);
+                return this.attachRunMetadata(this.attachRisk(plan, risk), params);
             }
             if (requiresProvidedCppOracle) {
                 const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -4905,7 +4927,7 @@ class TestdataGenService {
             plan.notesStructured?.warnings.push(fallbackWarning);
         }
         this.emitProgress(params, 'complete', 100);
-        return this.attachRisk(plan, risk);
+        return this.attachRunMetadata(this.attachRisk(plan, risk), params);
     }
     getCallOptions(params, attempt = 1) {
         return {

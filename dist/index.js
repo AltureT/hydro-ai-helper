@@ -66,6 +66,7 @@ const versionService_1 = require("./services/versionService");
 const telemetryService_1 = require("./services/telemetryService");
 const effectivenessService_1 = require("./services/effectivenessService");
 const errorReporter_1 = require("./services/errorReporter");
+const runTelemetry_1 = require("./services/testdata/runTelemetry");
 const requestStats_1 = require("./models/requestStats");
 const featureStats_1 = require("./models/featureStats");
 console.log('[AI-Helper] services OK');
@@ -196,6 +197,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const packageJson = require('../package.json');
         const currentVersion = packageJson.version || '1.8.0';
         await pluginInstallModel.createIfMissing(currentVersion);
+        // 专用质量遥测独立于通用错误分诊；发送前每次重读 telemetryEnabled，
+        // 构造和发送失败均由 service 内部吞掉，不得阻断插件 apply 或业务 apply。
+        const testdataRunTelemetry = new runTelemetry_1.TestdataRunTelemetryService(pluginInstallModel, { pluginVersion: currentVersion });
         // 密钥轮换：当 OLD_ENCRYPTION_KEY 存在时，自动重加密所有 API Key
         if (process.env.OLD_ENCRYPTION_KEY) {
             try {
@@ -229,6 +233,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('studentHistoryModel', studentHistoryModel);
         ctx.provide('teachingSummaryModel', teachingSummaryModel);
         ctx.provide('errorReporter', errorReporter);
+        ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
         // 初始化版本服务
         const versionService = new versionService_1.VersionService(versionCacheModel);
         ctx.provide('versionService', versionService);

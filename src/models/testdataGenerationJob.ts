@@ -23,6 +23,12 @@ import type {
   TestdataFailureStage,
   TestdataRetryPolicy,
 } from '../services/testdata/failures';
+import {
+  createTestdataRunId,
+  type TestdataChangedFileKind,
+  type TestdataTeacherOutcome,
+  type TestdataTeacherOutcomeReason,
+} from '../services/testdata/runTelemetry';
 
 export type TestdataGenerationJobStatus =
   | 'pending'
@@ -212,6 +218,7 @@ export function selectTestdataResumeCheckpoint(
 
 export interface TestdataGenerationJob {
   _id: ObjectIdType;
+  runId: string;
   domainId: string;
   problemDocId: number;
   problemId: string;
@@ -225,6 +232,9 @@ export interface TestdataGenerationJob {
   checkpoint?: TestdataGenerationCheckpoint;
   plan?: GenerationPlan;
   error?: TestdataGenerationJobError;
+  teacherOutcome?: TestdataTeacherOutcomeRecord;
+  teacherOutcomeClaim?: TestdataTeacherOutcomeClaim;
+  appliedAt?: Date;
   createdAt: Date;
   startedAt: Date | null;
   updatedAt: Date;
@@ -232,6 +242,27 @@ export interface TestdataGenerationJob {
   completedAt: Date | null;
   leaseExpiresAt: Date;
   expiresAt: Date;
+}
+
+export interface TestdataTeacherOutcomeClaim {
+  claimId: string;
+}
+
+export interface TestdataTeacherOutcomeRecord {
+  eventId: string;
+  outcome: TestdataTeacherOutcome;
+  reason?: TestdataTeacherOutcomeReason;
+  editedFileCount?: number;
+  changedFileKinds?: TestdataChangedFileKind[];
+  recordedAt: Date;
+}
+
+export interface TestdataTeacherOutcomeInput {
+  eventId: string;
+  outcome: TestdataTeacherOutcome;
+  reason?: TestdataTeacherOutcomeReason;
+  editedFileCount?: number;
+  changedFileKinds?: readonly TestdataChangedFileKind[];
 }
 
 export const TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -309,6 +340,7 @@ export class TestdataGenerationJobModel {
 
     const doc: Omit<TestdataGenerationJob, '_id'> = {
       ...params,
+      runId: createTestdataRunId(),
       status: 'pending',
       active: true,
       restorable: true,
@@ -454,8 +486,85 @@ export class TestdataGenerationJobModel {
     );
   }
 
-  async markApplied(id: string | ObjectIdType): Promise<void> {
-    await this.dismiss(id);
+  async claimTeacherOutcome(id: string | ObjectIdType, claimId: string): Promise<boolean> {
+    const now = new Date();
+    const result = await this.collection.updateOne(
+      {
+        _id: ensureObjectId(id),
+        status: 'completed',
+        teacherOutcome: { $exists: false },
+        appliedAt: { $exists: false },
+        teacherOutcomeClaim: { $exists: false },
+      } as never,
+      { $set: {
+        teacherOutcomeClaim: { claimId },
+        updatedAt: now,
+      } },
+    );
+    return result.modifiedCount > 0;
+  }
+
+  async releaseTeacherOutcomeClaim(id: string | ObjectIdType, claimId: string): Promise<void> {
+    await this.collection.updateOne(
+      { _id: ensureObjectId(id), 'teacherOutcomeClaim.claimId': claimId } as never,
+      { $unset: { teacherOutcomeClaim: '' }, $set: { updatedAt: new Date() } } as never,
+    );
+  }
+
+  async markApplied(id: string | ObjectIdType, claimId: string): Promise<boolean> {
+    const now = new Date();
+    const result = await this.collection.updateOne(
+      { _id: ensureObjectId(id), 'teacherOutcomeClaim.claimId': claimId } as never,
+      {
+        $set: { appliedAt: now, restorable: false, updatedAt: now },
+        $unset: { teacherOutcomeClaim: '' },
+      } as never,
+    );
+    return result.modifiedCount > 0;
+  }
+
+  async recordTeacherOutcome(
+    id: string | ObjectIdType,
+    input: TestdataTeacherOutcomeInput,
+    claimId?: string,
+  ): Promise<{
+    state: 'recorded' | 'duplicate' | 'conflict';
+    record: TestdataTeacherOutcomeRecord;
+  }> {
+    const now = new Date();
+    const record: TestdataTeacherOutcomeRecord = {
+      eventId: input.eventId,
+      outcome: input.outcome,
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.editedFileCount !== undefined ? { editedFileCount: input.editedFileCount } : {}),
+      ...(input.changedFileKinds ? { changedFileKinds: [...input.changedFileKinds] } : {}),
+      recordedAt: now,
+    };
+    const objectId = ensureObjectId(id);
+    const result = await this.collection.updateOne(
+      {
+        _id: objectId,
+        status: 'completed',
+        teacherOutcome: { $exists: false },
+        appliedAt: { $exists: false },
+        ...(claimId
+          ? { 'teacherOutcomeClaim.claimId': claimId }
+          : { teacherOutcomeClaim: { $exists: false } }),
+      } as never,
+      { $set: { teacherOutcome: record, restorable: false, updatedAt: now } },
+    );
+    if (result.modifiedCount > 0) return { state: 'recorded', record };
+    const existing = await this.collection.findOne(
+      { _id: objectId } as never,
+      { projection: { teacherOutcome: 1 } },
+    );
+    const stored = existing?.teacherOutcome;
+    if (!stored) return { state: 'conflict', record };
+    const duplicate = stored.outcome === input.outcome
+      && stored.reason === input.reason
+      && stored.editedFileCount === input.editedFileCount
+      && JSON.stringify(stored.changedFileKinds || []) === JSON.stringify(input.changedFileKinds || []);
+    return { state: duplicate ? 'duplicate' : 'conflict', record: stored };
   }
 
   async markExpiredLeaseInterrupted(id: string | ObjectIdType): Promise<boolean> {

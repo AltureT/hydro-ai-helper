@@ -7446,11 +7446,17 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       }),
     };
     const plan = await new TestdataGenService(mockClient as never).generate({
+      runId: '11111111-1111-4111-8111-111111111111',
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     });
     expect(plan.verification).toEqual({
       mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
     });
+    expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
+    expect(plan.promptVersion).toBe('testdata-generation-v1');
+    expect(plan.originalFileHashes).toEqual(Object.fromEntries(
+      plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
+    ));
   });
 });

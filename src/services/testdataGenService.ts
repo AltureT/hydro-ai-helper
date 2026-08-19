@@ -59,6 +59,11 @@ import {
   type TemplateChecks,
   type TemplateOutputAdjudicator,
 } from './testdata/templateVerifier';
+import {
+  TESTDATA_PROMPT_VERSION,
+  computeOriginalFileHashes,
+  createTestdataRunId,
+} from './testdata/runTelemetry';
 
 export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
 
@@ -357,6 +362,12 @@ export interface PlannedFile {
 
 /** 完整生成计划（返回给前端预览） */
 export interface GenerationPlan {
+  /** 独立于 job/problem/user 的本次质量遥测随机 UUID。 */
+  runId: string;
+  /** 生成提示契约的静态版本，不包含题面或模型响应。 */
+  promptVersion: string;
+  /** 仅保存在 Hydro 本地，apply 时用于判断教师是否修改。 */
+  originalFileHashes?: Record<string, string>;
   problemType: 'function' | 'traditional';
   /** 是否为填空题（完善代码） */
   isFillIn?: boolean;
@@ -5180,6 +5191,12 @@ export function assemblePlan(
   });
 
   return {
+    runId: createTestdataRunId(),
+    promptVersion: TESTDATA_PROMPT_VERSION,
+    originalFileHashes: computeOriginalFileHashes(files.map(file => ({
+      name: file.name,
+      content: normalizeFileContent(file.content),
+    }))),
     problemType: response.problemType,
     isFillIn: response.isFillIn,
     analysis: response.analysis,
@@ -5409,6 +5426,12 @@ export function buildSkeletonPlan(
   const subtaskNotes = configBuild.subtaskNotes;
 
   return {
+    runId: createTestdataRunId(),
+    promptVersion: TESTDATA_PROMPT_VERSION,
+    originalFileHashes: computeOriginalFileHashes(files.map(file => ({
+      name: file.name,
+      content: normalizeFileContent(file.content),
+    }))),
     problemType,
     analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
     notes: subtaskNotes.length > 0
@@ -5904,6 +5927,8 @@ export interface TestlibCheckerArtifacts {
 }
 
 export interface GenerateTestdataParams {
+  /** Handler/job 创建的独立质量遥测 UUID；旧调用缺省时由 service 安全生成。 */
+  runId?: string;
   problemTitle: string;
   statementMarkdown: string;
   options: GenerateOptions;
@@ -6028,6 +6053,16 @@ export class TestdataGenService {
     return plan;
   }
 
+  private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
+    plan.runId = params.runId || plan.runId || createTestdataRunId();
+    plan.promptVersion = TESTDATA_PROMPT_VERSION;
+    plan.originalFileHashes = computeOriginalFileHashes(plan.files.map(file => ({
+      name: file.name,
+      content: normalizeFileContent(file.content),
+    })));
+    return plan;
+  }
+
   private throwDirectFallbackBlocked(risk: TestdataRiskAssessment): never {
     if (risk.tier === 'medium'
       && getTestdataDirectFallbackEnabled()
@@ -6137,7 +6172,7 @@ export class TestdataGenService {
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-        return this.attachRisk(plan, risk);
+        return this.attachRunMetadata(this.attachRisk(plan, risk), params);
       }
       if (requiresProvidedCppOracle) {
         const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -6204,7 +6239,7 @@ export class TestdataGenService {
       plan.notesStructured?.warnings.push(fallbackWarning);
     }
     this.emitProgress(params, 'complete', 100);
-    return this.attachRisk(plan, risk);
+    return this.attachRunMetadata(this.attachRisk(plan, risk), params);
   }
 
   private getCallOptions(

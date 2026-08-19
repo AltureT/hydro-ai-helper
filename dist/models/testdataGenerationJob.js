@@ -14,6 +14,7 @@ exports.selectTestdataResumeCheckpoint = selectTestdataResumeCheckpoint;
 const node_crypto_1 = require("node:crypto");
 const js_yaml_1 = __importDefault(require("js-yaml"));
 const ensureObjectId_1 = require("../utils/ensureObjectId");
+const runTelemetry_1 = require("../services/testdata/runTelemetry");
 exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = 256 * 1024;
 function normalizeForStableJson(value) {
     if (Array.isArray(value))
@@ -162,6 +163,7 @@ class TestdataGenerationJobModel {
         await this.collection.updateMany({ ...scope, active: false, restorable: true }, { $set: { restorable: false, updatedAt: now } });
         const doc = {
             ...params,
+            runId: (0, runTelemetry_1.createTestdataRunId)(),
             status: 'pending',
             active: true,
             restorable: true,
@@ -261,8 +263,62 @@ class TestdataGenerationJobModel {
     async dismiss(id) {
         await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), active: false }, { $set: { restorable: false, updatedAt: new Date() } });
     }
-    async markApplied(id) {
-        await this.dismiss(id);
+    async claimTeacherOutcome(id, claimId) {
+        const now = new Date();
+        const result = await this.collection.updateOne({
+            _id: (0, ensureObjectId_1.ensureObjectId)(id),
+            status: 'completed',
+            teacherOutcome: { $exists: false },
+            appliedAt: { $exists: false },
+            teacherOutcomeClaim: { $exists: false },
+        }, { $set: {
+                teacherOutcomeClaim: { claimId },
+                updatedAt: now,
+            } });
+        return result.modifiedCount > 0;
+    }
+    async releaseTeacherOutcomeClaim(id, claimId) {
+        await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), 'teacherOutcomeClaim.claimId': claimId }, { $unset: { teacherOutcomeClaim: '' }, $set: { updatedAt: new Date() } });
+    }
+    async markApplied(id, claimId) {
+        const now = new Date();
+        const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), 'teacherOutcomeClaim.claimId': claimId }, {
+            $set: { appliedAt: now, restorable: false, updatedAt: now },
+            $unset: { teacherOutcomeClaim: '' },
+        });
+        return result.modifiedCount > 0;
+    }
+    async recordTeacherOutcome(id, input, claimId) {
+        const now = new Date();
+        const record = {
+            eventId: input.eventId,
+            outcome: input.outcome,
+            ...(input.reason ? { reason: input.reason } : {}),
+            ...(input.editedFileCount !== undefined ? { editedFileCount: input.editedFileCount } : {}),
+            ...(input.changedFileKinds ? { changedFileKinds: [...input.changedFileKinds] } : {}),
+            recordedAt: now,
+        };
+        const objectId = (0, ensureObjectId_1.ensureObjectId)(id);
+        const result = await this.collection.updateOne({
+            _id: objectId,
+            status: 'completed',
+            teacherOutcome: { $exists: false },
+            appliedAt: { $exists: false },
+            ...(claimId
+                ? { 'teacherOutcomeClaim.claimId': claimId }
+                : { teacherOutcomeClaim: { $exists: false } }),
+        }, { $set: { teacherOutcome: record, restorable: false, updatedAt: now } });
+        if (result.modifiedCount > 0)
+            return { state: 'recorded', record };
+        const existing = await this.collection.findOne({ _id: objectId }, { projection: { teacherOutcome: 1 } });
+        const stored = existing?.teacherOutcome;
+        if (!stored)
+            return { state: 'conflict', record };
+        const duplicate = stored.outcome === input.outcome
+            && stored.reason === input.reason
+            && stored.editedFileCount === input.editedFileCount
+            && JSON.stringify(stored.changedFileKinds || []) === JSON.stringify(input.changedFileKinds || []);
+        return { state: duplicate ? 'duplicate' : 'conflict', record: stored };
     }
     async markExpiredLeaseInterrupted(id) {
         const now = new Date();

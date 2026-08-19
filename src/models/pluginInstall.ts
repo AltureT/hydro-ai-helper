@@ -5,7 +5,7 @@
  */
 
 import type { Db, Collection } from 'mongodb';
-import { randomUUID } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 
 /**
  * 插件安装记录接口
@@ -22,6 +22,8 @@ export interface PluginInstall {
   telemetryEnabled: boolean;// 是否允许远程上报（默认 true）
   lastReportAt?: Date;      // 最后一次上报时间
   preferredTelemetryEndpoint?: string; // 最近成功上报的端点（用于自动选择可用端点）
+  /** 仅保存在本机 MongoDB，用于不可逆匿名化模型身份；绝不上传。 */
+  testdataTelemetryHmacKey?: string;
 }
 
 /**
@@ -36,6 +38,7 @@ export class PluginInstallModel {
   // v2.0.x 残留的「确定性哈希」ID，需要迁移为唯一 UUID。
   private static readonly UUID_RE =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  private static readonly HMAC_KEY_RE = /^[a-f0-9]{64}$/;
 
   constructor(db: Db) {
     this.collection = db.collection<PluginInstall>('ai_plugin_install');
@@ -73,7 +76,8 @@ export class PluginInstallModel {
         installedVersion: version,
         lastVersion: version,
         domainsSeen: [],
-        telemetryEnabled: true
+        telemetryEnabled: true,
+        testdataTelemetryHmacKey: randomBytes(32).toString('hex'),
       } as PluginInstall);
 
       console.log('[PluginInstallModel] Install record created');
@@ -87,6 +91,9 @@ export class PluginInstallModel {
     if (!PluginInstallModel.UUID_RE.test(existing.instanceId || '')) {
       updates.instanceId = randomUUID();
       console.log('[PluginInstallModel] Replaced legacy deterministic instanceId with unique UUID');
+    }
+    if (!PluginInstallModel.HMAC_KEY_RE.test(existing.testdataTelemetryHmacKey || '')) {
+      updates.testdataTelemetryHmacKey = randomBytes(32).toString('hex');
     }
     await this.collection.updateOne(
       { _id: this.FIXED_ID },

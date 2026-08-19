@@ -138,6 +138,682 @@ function isAuthorized(request, env) {
   return value === token;
 }
 
+const TESTDATA_EVENT_MAX_BYTES = 128 * 1024;
+const TESTDATA_EVENT_MAX_BATCH = 50;
+const TESTDATA_EVENT_DAILY_LIMIT = 2000;
+const TESTDATA_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TESTDATA_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+const TESTDATA_HASH = /^[a-f0-9]{64}$/;
+const TESTDATA_EVENT_TYPES = new Set([
+  'run_started', 'stage_completed', 'stage_failed', 'run_completed', 'teacher_outcome',
+]);
+const TESTDATA_RELIABILITY_MODES = new Set(['legacy', 'observe', 'enforce']);
+const TESTDATA_GENERATION_MODES = new Set(['direct', 'sandbox']);
+const TESTDATA_RISK_TIERS = new Set(['low', 'medium', 'high', 'blocked']);
+const TESTDATA_PROBLEM_KINDS = new Set(['traditional', 'function']);
+const TESTDATA_STATEMENT_BUCKETS = new Set(['0-4k', '4k-16k', '16k-20k', 'over-20k']);
+const TESTDATA_MODEL_ROLES = new Set(['primary', 'fallback']);
+const TESTDATA_TEMPLATE_LANGUAGES = new Set(['py', 'java', 'cc']);
+const TESTDATA_TEMPLATE_FAILURE_KINDS = new Set(['compile', 'runtime', 'budget', 'mismatch', 'checker-infra']);
+const TESTDATA_CHECKER_FAILURE_KINDS = new Set(['unavailable', 'compile', 'infra', 'budget', 'reject']);
+const TESTDATA_TEACHER_OUTCOMES = new Set(['accepted_unchanged', 'accepted_edited', 'discarded', 'regenerated']);
+const TESTDATA_TEACHER_REASONS = new Set([
+  'wrong_answer', 'invalid_input', 'weak_coverage', 'template_problem', 'checker_problem', 'other',
+]);
+const TESTDATA_CHANGED_FILE_KINDS = new Set([
+  'case-in', 'case-out', 'template', 'compile', 'config', 'std', 'generator', 'brute', 'validator',
+]);
+const TESTDATA_FAILURE_CODES = new Set([
+  'SPEC_STATEMENT_TOO_LONG', 'SPEC_STATEMENT_TRUNCATED', 'SPEC_PARSE_FAILED',
+  'SPEC_EVIDENCE_NOT_FOUND', 'SPEC_CONFLICT', 'SPEC_CONSENSUS_REQUIRED',
+  'SANDBOX_REQUIRED', 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED', 'SANDBOX_UNAVAILABLE',
+  'GENERATOR_INVALID_JSON', 'GENERATOR_WRONG_CASE_COUNT', 'GENERATOR_INVALID_INPUT',
+  'GENERATOR_OUTPUT_TOO_LARGE', 'STRESS_LOW_DIVERSITY', 'STRESS_INSUFFICIENT_VALID_INPUTS',
+  'VALIDATOR_FALSE_REJECT', 'VALIDATOR_FALSE_ACCEPT', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+  'ORACLE_COMPILE_FAILED', 'ORACLE_RUNTIME_FAILED', 'ORACLE_SAMPLE_MISMATCH',
+  'ORACLE_BRUTE_DIVERGENCE', 'BRUTE_RUNTIME_FAILED', 'BRUTE_TIMEOUT',
+  'TEMPLATE_COMPILE_FAILED', 'TEMPLATE_RUNTIME_FAILED', 'TEMPLATE_OUTPUT_MISMATCH',
+  'CHECKER_REQUIRED_UNAVAILABLE', 'CHECKER_COMPILE_FAILED', 'CHECKER_RUNTIME_FAILED',
+  'SUBTASK_CONSTRAINT_VIOLATION', 'MUTATION_SCORE_TOO_LOW', 'TRUSTED_SOLUTIONS_DIVERGED',
+  'COVERAGE_REQUIREMENT_MISSING', 'PIPELINE_BUDGET_EXHAUSTED', 'CANCELLED', 'UNKNOWN',
+]);
+const TESTDATA_ARTIFACTS = new Set([
+  'statement', 'spec', 'generator', 'stress-generator', 'validator', 'oracle', 'brute',
+  'template-py', 'template-java', 'template-cc', 'checker', 'coverage', 'mutation', 'pipeline',
+]);
+const TESTDATA_RETRY_POLICIES = new Set([
+  'repair-artifact', 'rerun-spec', 'adjudicate', 'switch-model', 'manual-review', 'no-retry',
+]);
+const TESTDATA_STAGES = new Set([
+  'preparing', 'sandbox_check', 'blueprint', 'blueprint_repair', 'solution_verification',
+  'artifacts', 'templates', 'independent_verifier', 'verifier_repair', 'generating_inputs',
+  'validating_inputs', 'running_oracle', 'checking_templates', 'stress_testing',
+  'discrimination_testing', 'pipeline_repair', 'model_fallback', 'model_escalation',
+  'assembling', 'complete', 'apply', 'semantic_fallback', 'accepted-std',
+  'accepted_std_verification', 'artifacts_parse', 'brute', 'canceled', 'checker',
+  'config_parse', 'direct_parse', 'direct_repair', 'full', 'function-samples', 'generator',
+  'independent_verifier_parse', 'oracle', 'pipeline', 'provided_cpp_oracle',
+  'provided_cpp_oracle_infra', 'sandbox_budget', 'solution_blueprint', 'stress-generator',
+  'template', 'template-py', 'template_missing', 'unknown', 'validator',
+]);
+const TESTDATA_EVENT_FIELDS = new Set([
+  'schemaVersion', 'eventId', 'runId', 'sequence', 'eventType', 'occurredAt', 'pluginVersion',
+  'promptVersion', 'generationMode', 'reliabilityMode', 'riskTier', 'problemKind',
+  'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
+  'statementLengthBucket', 'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
+  'durationMs', 'tokenCount', 'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated',
+  'stressGenerated', 'stressValid', 'stressDroppedInvalid', 'stressUnique', 'stressCompared',
+  'stressAgreed', 'templateLanguagesRequested', 'templateLanguagesVerified',
+  'templateFailureKinds', 'checkerConfigured', 'checkerRead', 'checkerCompiled',
+  'checkerExecuted', 'checkerInfraFailures', 'checkerFailureKind', 'modelRole',
+  'modelIdentityHash', 'teacherOutcome', 'teacherOutcomeReason', 'editedFileCount',
+  'changedFileKinds',
+]);
+const TESTDATA_BOOLEAN_FIELDS = [
+  'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
+  'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated', 'checkerConfigured',
+  'checkerRead', 'checkerCompiled', 'checkerExecuted',
+];
+const TESTDATA_NUMBER_LIMITS = {
+  sequence: [1, 1_000_000], attempt: [1, 10], durationMs: [0, 86_400_000],
+  tokenCount: [0, 100_000_000], stressGenerated: [0, 1_000_000],
+  stressValid: [0, 1_000_000], stressDroppedInvalid: [0, 1_000_000],
+  stressUnique: [0, 1_000_000], stressCompared: [0, 1_000_000],
+  stressAgreed: [0, 1_000_000], checkerInfraFailures: [0, 1_000_000],
+  editedFileCount: [0, 80],
+};
+
+function canonicalTestdataValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalTestdataValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().filter(key => value[key] !== undefined)
+      .map(key => [key, canonicalTestdataValue(value[key])]),
+  );
+}
+
+export async function testdataEventFingerprint(event) {
+  const encoded = new TextEncoder().encode(JSON.stringify(canonicalTestdataValue(event)));
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', encoded);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function assertTestdataEnum(value, allowed, field) {
+  if (value !== undefined && (typeof value !== 'string' || !allowed.has(value))) {
+    throw new HttpError(400, `${field} is invalid`);
+  }
+}
+
+function assertTestdataArray(value, allowed, field, maxLength) {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > maxLength || new Set(value).size !== value.length
+    || value.some(item => typeof item !== 'string' || !allowed.has(item))) {
+    throw new HttpError(400, `${field} is invalid`);
+  }
+}
+
+export function validateTestdataQualityEventPayload(value) {
+  if (!isRecord(value)) throw new HttpError(400, 'event must be an object');
+  for (const key of Object.keys(value)) {
+    if (!TESTDATA_EVENT_FIELDS.has(key)) throw new HttpError(400, `unknown field: ${key}`);
+  }
+  if (value.schemaVersion !== 1) throw new HttpError(400, 'schemaVersion is invalid');
+  if (typeof value.eventId !== 'string' || !TESTDATA_UUID_V4.test(value.eventId)) throw new HttpError(400, 'eventId is invalid');
+  if (typeof value.runId !== 'string' || !TESTDATA_UUID_V4.test(value.runId)) throw new HttpError(400, 'runId is invalid');
+  if (typeof value.eventType !== 'string' || !TESTDATA_EVENT_TYPES.has(value.eventType)) throw new HttpError(400, 'eventType is invalid');
+  if (typeof value.occurredAt !== 'string' || value.occurredAt.length > 40
+    || Number.isNaN(new Date(value.occurredAt).getTime())) throw new HttpError(400, 'occurredAt is invalid');
+  if (typeof value.pluginVersion !== 'string' || !TESTDATA_VERSION.test(value.pluginVersion)) throw new HttpError(400, 'pluginVersion is invalid');
+  if (value.promptVersion !== 'testdata-generation-v1') throw new HttpError(400, 'promptVersion is invalid');
+  for (const [field, [min, max]] of Object.entries(TESTDATA_NUMBER_LIMITS)) {
+    if (value[field] === undefined) continue;
+    if (!Number.isSafeInteger(value[field]) || value[field] < min || value[field] > max) {
+      throw new HttpError(400, `${field} is invalid`);
+    }
+  }
+  for (const field of TESTDATA_BOOLEAN_FIELDS) {
+    if (value[field] !== undefined && typeof value[field] !== 'boolean') {
+      throw new HttpError(400, `${field} is invalid`);
+    }
+  }
+  assertTestdataEnum(value.generationMode, TESTDATA_GENERATION_MODES, 'generationMode');
+  assertTestdataEnum(value.reliabilityMode, TESTDATA_RELIABILITY_MODES, 'reliabilityMode');
+  assertTestdataEnum(value.riskTier, TESTDATA_RISK_TIERS, 'riskTier');
+  assertTestdataEnum(value.problemKind, TESTDATA_PROBLEM_KINDS, 'problemKind');
+  assertTestdataEnum(value.statementLengthBucket, TESTDATA_STATEMENT_BUCKETS, 'statementLengthBucket');
+  assertTestdataEnum(value.stage, TESTDATA_STAGES, 'stage');
+  assertTestdataEnum(value.failureCode, TESTDATA_FAILURE_CODES, 'failureCode');
+  assertTestdataEnum(value.artifact, TESTDATA_ARTIFACTS, 'artifact');
+  assertTestdataEnum(value.retryPolicy, TESTDATA_RETRY_POLICIES, 'retryPolicy');
+  assertTestdataEnum(value.checkerFailureKind, TESTDATA_CHECKER_FAILURE_KINDS, 'checkerFailureKind');
+  assertTestdataEnum(value.modelRole, TESTDATA_MODEL_ROLES, 'modelRole');
+  assertTestdataEnum(value.teacherOutcome, TESTDATA_TEACHER_OUTCOMES, 'teacherOutcome');
+  assertTestdataEnum(value.teacherOutcomeReason, TESTDATA_TEACHER_REASONS, 'teacherOutcomeReason');
+  if (value.modelIdentityHash !== undefined
+    && (typeof value.modelIdentityHash !== 'string' || !TESTDATA_HASH.test(value.modelIdentityHash))) {
+    throw new HttpError(400, 'modelIdentityHash is invalid');
+  }
+  assertTestdataArray(value.templateLanguagesRequested, TESTDATA_TEMPLATE_LANGUAGES, 'templateLanguagesRequested', 3);
+  assertTestdataArray(value.templateLanguagesVerified, TESTDATA_TEMPLATE_LANGUAGES, 'templateLanguagesVerified', 3);
+  assertTestdataArray(value.templateFailureKinds, TESTDATA_TEMPLATE_FAILURE_KINDS, 'templateFailureKinds', 3);
+  assertTestdataArray(value.changedFileKinds, TESTDATA_CHANGED_FILE_KINDS, 'changedFileKinds', 9);
+  if (value.eventType === 'stage_completed' && value.stage === undefined) throw new HttpError(400, 'stage is required');
+  if (value.eventType === 'stage_failed'
+    && [value.stage, value.failureCode, value.artifact, value.retryPolicy].some(item => item === undefined)) {
+    throw new HttpError(400, 'typed failure fields are required');
+  }
+  if (value.eventType === 'run_completed'
+    && [value.pipelineCompleted, value.verified, value.wouldBlock].some(item => typeof item !== 'boolean')) {
+    throw new HttpError(400, 'authoritative completion fields are required');
+  }
+  if (value.eventType === 'run_completed' && value.pipelineCompleted === false
+    && (value.verified === true || value.wouldBlock === true)) {
+    throw new HttpError(400, 'verified/wouldBlock require pipelineCompleted');
+  }
+  if (value.eventType === 'teacher_outcome' && value.teacherOutcome === undefined) {
+    throw new HttpError(400, 'teacherOutcome is required');
+  }
+  if (value.teacherOutcomeReason !== undefined && value.teacherOutcome !== 'discarded') {
+    throw new HttpError(400, 'teacherOutcomeReason is invalid');
+  }
+  if ((value.editedFileCount !== undefined || value.changedFileKinds !== undefined)
+    && value.teacherOutcome !== 'accepted_edited') {
+    throw new HttpError(400, 'edit fields are invalid');
+  }
+  return { ...value };
+}
+
+export function parseTestdataQualityDays(url) {
+  const raw = url.searchParams.get('days');
+  if (raw === null || raw === '') return 30;
+  if (!/^\d+$/.test(raw)) throw new HttpError(400, 'days must be an integer from 1 to 400');
+  const days = Number(raw);
+  if (!Number.isSafeInteger(days) || days < 1 || days > 400) {
+    throw new HttpError(400, 'days must be an integer from 1 to 400');
+  }
+  return days;
+}
+
+// D1's datetime('now') defaults use this sortable UTC representation. Keep
+// received_at predicates in the same TEXT format so indexed boundary checks do
+// not compare a space with ISO's "T" separator.
+export function toSqliteUtcTimestamp(date) {
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function nullableBoolean(value) {
+  return value === undefined ? null : value ? 1 : 0;
+}
+
+function nullableNumber(value) {
+  return value === undefined ? null : value;
+}
+
+function hasLanguage(event, field, language) {
+  return event[field] === undefined ? null : event[field].includes(language) ? 1 : 0;
+}
+
+function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
+  if (event.eventType === 'run_started') {
+    return env.DB.prepare(
+      `INSERT INTO testdata_runs (
+         instance_id, run_id, started_event_id, plugin_version, prompt_version, started_at,
+         generation_mode, reliability_mode, risk_tier, problem_kind, has_subtasks,
+         has_custom_checker, has_samples, has_stateful_operations, statement_length_bucket,
+         template_py_requested, template_java_requested, template_cc_requested,
+         checker_configured, checker_read
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM testdata_event_slots
+         WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
+           AND event_type = ? AND payload_hash = ?
+       )
+       ON CONFLICT(instance_id, run_id) DO UPDATE SET
+         started_at = MIN(testdata_runs.started_at, excluded.started_at),
+         started_event_id = COALESCE(testdata_runs.started_event_id, excluded.started_event_id),
+         plugin_version = excluded.plugin_version,
+         prompt_version = excluded.prompt_version,
+         generation_mode = COALESCE(testdata_runs.generation_mode, excluded.generation_mode),
+         reliability_mode = COALESCE(testdata_runs.reliability_mode, excluded.reliability_mode),
+         risk_tier = COALESCE(testdata_runs.risk_tier, excluded.risk_tier),
+         problem_kind = COALESCE(testdata_runs.problem_kind, excluded.problem_kind),
+         has_subtasks = COALESCE(excluded.has_subtasks, testdata_runs.has_subtasks),
+         has_custom_checker = COALESCE(excluded.has_custom_checker, testdata_runs.has_custom_checker),
+         has_samples = COALESCE(excluded.has_samples, testdata_runs.has_samples),
+         has_stateful_operations = COALESCE(excluded.has_stateful_operations, testdata_runs.has_stateful_operations),
+         statement_length_bucket = COALESCE(excluded.statement_length_bucket, testdata_runs.statement_length_bucket)
+       WHERE testdata_runs.started_event_id IS NULL
+          OR testdata_runs.started_event_id = excluded.started_event_id`,
+    ).bind(
+      instanceId, event.runId, event.eventId, event.pluginVersion, event.promptVersion,
+      event.occurredAt, event.generationMode ?? null, event.reliabilityMode ?? null,
+      event.riskTier ?? null, event.problemKind ?? null, nullableBoolean(event.hasSubtasks),
+      nullableBoolean(event.hasCustomChecker), nullableBoolean(event.hasSamples),
+      nullableBoolean(event.hasStatefulOperations), event.statementLengthBucket ?? null,
+      hasLanguage(event, 'templateLanguagesRequested', 'py'),
+      hasLanguage(event, 'templateLanguagesRequested', 'java'),
+      hasLanguage(event, 'templateLanguagesRequested', 'cc'),
+      nullableBoolean(event.checkerConfigured), nullableBoolean(event.checkerRead),
+      event.eventId, instanceId, event.runId, event.sequence, event.eventType, payloadHash,
+    );
+  }
+  if (event.eventType === 'run_completed') {
+    return env.DB.prepare(
+      `INSERT INTO testdata_runs (
+         instance_id, run_id, completed_event_id, plugin_version, prompt_version, started_at,
+         completed_at, generation_mode, reliability_mode, risk_tier, problem_kind,
+         has_subtasks, has_custom_checker, has_samples, has_stateful_operations, statement_length_bucket,
+         pipeline_completed, verified, would_block, model_escalated,
+         stress_generated, stress_valid, stress_dropped_invalid, stress_unique,
+         stress_compared, stress_agreed, template_py_requested, template_py_verified,
+         template_java_requested, template_java_verified, template_cc_requested,
+         template_cc_verified, template_failure_kinds, checker_configured, checker_read,
+         checker_compiled, checker_executed, checker_infra_failures, checker_failure_kind,
+         model_role, model_identity_hash
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM testdata_event_slots
+         WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
+           AND event_type = ? AND payload_hash = ?
+       )
+       ON CONFLICT(instance_id, run_id) DO UPDATE SET
+         completed_event_id = excluded.completed_event_id,
+         completed_at = excluded.completed_at,
+         plugin_version = excluded.plugin_version,
+         prompt_version = excluded.prompt_version,
+         generation_mode = COALESCE(excluded.generation_mode, testdata_runs.generation_mode),
+         reliability_mode = COALESCE(excluded.reliability_mode, testdata_runs.reliability_mode),
+         risk_tier = COALESCE(excluded.risk_tier, testdata_runs.risk_tier),
+         problem_kind = COALESCE(excluded.problem_kind, testdata_runs.problem_kind),
+         has_subtasks = COALESCE(excluded.has_subtasks, testdata_runs.has_subtasks),
+         has_custom_checker = COALESCE(excluded.has_custom_checker, testdata_runs.has_custom_checker),
+         has_samples = COALESCE(excluded.has_samples, testdata_runs.has_samples),
+         has_stateful_operations = COALESCE(excluded.has_stateful_operations, testdata_runs.has_stateful_operations),
+         statement_length_bucket = COALESCE(excluded.statement_length_bucket, testdata_runs.statement_length_bucket),
+         pipeline_completed = excluded.pipeline_completed,
+         verified = excluded.verified,
+         would_block = excluded.would_block,
+         model_escalated = excluded.model_escalated,
+         stress_generated = excluded.stress_generated,
+         stress_valid = excluded.stress_valid,
+         stress_dropped_invalid = excluded.stress_dropped_invalid,
+         stress_unique = excluded.stress_unique,
+         stress_compared = excluded.stress_compared,
+         stress_agreed = excluded.stress_agreed,
+         template_py_requested = COALESCE(excluded.template_py_requested, testdata_runs.template_py_requested),
+         template_py_verified = excluded.template_py_verified,
+         template_java_requested = COALESCE(excluded.template_java_requested, testdata_runs.template_java_requested),
+         template_java_verified = excluded.template_java_verified,
+         template_cc_requested = COALESCE(excluded.template_cc_requested, testdata_runs.template_cc_requested),
+         template_cc_verified = excluded.template_cc_verified,
+         template_failure_kinds = excluded.template_failure_kinds,
+         checker_configured = COALESCE(excluded.checker_configured, testdata_runs.checker_configured),
+         checker_read = COALESCE(excluded.checker_read, testdata_runs.checker_read),
+         checker_compiled = excluded.checker_compiled,
+         checker_executed = excluded.checker_executed,
+         checker_infra_failures = excluded.checker_infra_failures,
+         checker_failure_kind = excluded.checker_failure_kind,
+         model_role = excluded.model_role,
+         model_identity_hash = excluded.model_identity_hash
+       WHERE testdata_runs.completed_event_id IS NULL
+          OR testdata_runs.completed_event_id = excluded.completed_event_id`,
+    ).bind(
+      instanceId, event.runId, event.eventId, event.pluginVersion, event.promptVersion,
+      event.occurredAt, event.occurredAt, event.generationMode ?? null,
+      event.reliabilityMode ?? null, event.riskTier ?? null, event.problemKind ?? null,
+      nullableBoolean(event.hasSubtasks), nullableBoolean(event.hasCustomChecker),
+      nullableBoolean(event.hasSamples), nullableBoolean(event.hasStatefulOperations),
+      event.statementLengthBucket ?? null,
+      nullableBoolean(event.pipelineCompleted), nullableBoolean(event.verified),
+      nullableBoolean(event.wouldBlock), nullableBoolean(event.modelEscalated),
+      nullableNumber(event.stressGenerated), nullableNumber(event.stressValid),
+      nullableNumber(event.stressDroppedInvalid), nullableNumber(event.stressUnique),
+      nullableNumber(event.stressCompared), nullableNumber(event.stressAgreed),
+      hasLanguage(event, 'templateLanguagesRequested', 'py'),
+      hasLanguage(event, 'templateLanguagesVerified', 'py'),
+      hasLanguage(event, 'templateLanguagesRequested', 'java'),
+      hasLanguage(event, 'templateLanguagesVerified', 'java'),
+      hasLanguage(event, 'templateLanguagesRequested', 'cc'),
+      hasLanguage(event, 'templateLanguagesVerified', 'cc'),
+      event.templateFailureKinds ? JSON.stringify(event.templateFailureKinds) : null,
+      nullableBoolean(event.checkerConfigured), nullableBoolean(event.checkerRead),
+      nullableBoolean(event.checkerCompiled), nullableBoolean(event.checkerExecuted),
+      nullableNumber(event.checkerInfraFailures), event.checkerFailureKind ?? null,
+      event.modelRole ?? null, event.modelIdentityHash ?? null,
+      event.eventId, instanceId, event.runId, event.sequence, event.eventType, payloadHash,
+    );
+  }
+  if (event.eventType === 'teacher_outcome') {
+    return env.DB.prepare(
+      `INSERT INTO testdata_teacher_outcomes (
+         event_id, instance_id, run_id, outcome, reason, edited_file_count, changed_file_kinds
+       ) SELECT ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM testdata_event_slots
+         WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
+           AND event_type = ? AND payload_hash = ?
+       )
+       ON CONFLICT DO NOTHING`,
+    ).bind(
+      event.eventId, instanceId, event.runId, event.teacherOutcome,
+      event.teacherOutcomeReason ?? null, nullableNumber(event.editedFileCount),
+      event.changedFileKinds ? JSON.stringify(event.changedFileKinds) : null,
+      event.eventId, instanceId, event.runId, event.sequence, event.eventType, payloadHash,
+    );
+  }
+  return env.DB.prepare(
+    `INSERT INTO testdata_stage_events (
+       event_id, instance_id, run_id, sequence, event_type, stage, failure_code,
+       artifact, retry_policy, duration_ms, attempt, token_count
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM testdata_event_slots
+       WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
+         AND event_type = ? AND payload_hash = ?
+     )
+     ON CONFLICT DO NOTHING`,
+  ).bind(
+    event.eventId, instanceId, event.runId, event.sequence, event.eventType, event.stage,
+    event.failureCode ?? null, event.artifact ?? null, event.retryPolicy ?? null,
+    nullableNumber(event.durationMs), nullableNumber(event.attempt), nullableNumber(event.tokenCount),
+    event.eventId, instanceId, event.runId, event.sequence, event.eventType, payloadHash,
+  );
+}
+
+function buildTestdataEventSlotStatement(env, instanceId, event, payloadHash) {
+  return env.DB.prepare(
+    `INSERT INTO testdata_event_slots (
+       event_id, instance_id, run_id, sequence, event_type, payload_hash
+     ) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT DO NOTHING`,
+  ).bind(
+    event.eventId, instanceId, event.runId, event.sequence, event.eventType, payloadHash,
+  );
+}
+
+async function classifyExistingTestdataEvent(env, instanceId, event, payloadHash) {
+  const row = await env.DB.prepare(
+    `SELECT /* testdata_existing_event_slot */
+       event_id, instance_id, run_id, sequence, event_type, payload_hash
+     FROM testdata_event_slots
+     WHERE event_id = ? OR (instance_id = ? AND run_id = ? AND sequence = ?)
+     ORDER BY CASE WHEN event_id = ? THEN 0 ELSE 1 END
+     LIMIT 1`,
+  ).bind(
+    event.eventId, instanceId, event.runId, event.sequence, event.eventId,
+  ).first();
+  if (!row) return 'new';
+  const exact = row.event_id === event.eventId
+    && row.instance_id === instanceId
+    && row.run_id === event.runId
+    && Number(row.sequence) === event.sequence
+    && row.event_type === event.eventType
+    && row.payload_hash === payloadHash;
+  return exact ? 'duplicate' : 'conflict';
+}
+
+async function handleTestdataEvents(request, env) {
+  if (request.method !== 'POST') return json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  if (!isAuthorized(request, env)) return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  const raw = await request.text();
+  if (new TextEncoder().encode(raw).byteLength > TESTDATA_EVENT_MAX_BYTES) {
+    return json({ success: false, error: 'Payload Too Large' }, { status: 413 });
+  }
+  let body;
+  try { body = JSON.parse(raw); } catch { return json({ success: false, error: 'Invalid JSON body' }, { status: 400 }); }
+  try {
+    if (!isRecord(body)) throw new HttpError(400, 'Invalid JSON body');
+    for (const key of Object.keys(body)) {
+      if (key !== 'instanceId' && key !== 'events') throw new HttpError(400, `unknown field: ${key}`);
+    }
+    if (typeof body.instanceId !== 'string' || !TESTDATA_UUID_V4.test(body.instanceId)) {
+      throw new HttpError(400, 'instanceId is invalid');
+    }
+    if (!Array.isArray(body.events) || body.events.length < 1 || body.events.length > TESTDATA_EVENT_MAX_BATCH) {
+      throw new HttpError(400, 'events must contain 1..50 items');
+    }
+    const validated = body.events.map(validateTestdataQualityEventPayload);
+    const unique = [];
+    const eventIds = new Map();
+    const sequences = new Map();
+    const outcomes = new Map();
+    let duplicates = 0;
+    for (const item of validated) {
+      const serialized = JSON.stringify(canonicalTestdataValue(item));
+      if (eventIds.has(item.eventId)) {
+        if (eventIds.get(item.eventId) !== serialized) throw new HttpError(409, 'eventId conflict');
+        duplicates++;
+        continue;
+      }
+      const sequenceKey = `${item.runId}:${item.sequence}`;
+      if (sequences.has(sequenceKey) && sequences.get(sequenceKey) !== item.eventId) {
+        throw new HttpError(409, 'sequence conflict');
+      }
+      if (item.eventType === 'teacher_outcome') {
+        if (outcomes.has(item.runId) && outcomes.get(item.runId) !== serialized) {
+          throw new HttpError(409, 'teacher outcome conflict');
+        }
+        outcomes.set(item.runId, serialized);
+      }
+      eventIds.set(item.eventId, serialized);
+      sequences.set(sequenceKey, item.eventId);
+      unique.push(item);
+    }
+    const fingerprinted = await Promise.all(unique.map(async item => ({
+      event: item,
+      payloadHash: await testdataEventFingerprint(item),
+    })));
+    const pending = [];
+    for (const item of fingerprinted) {
+      const existing = await classifyExistingTestdataEvent(
+        env, body.instanceId, item.event, item.payloadHash,
+      );
+      if (existing === 'conflict') throw new HttpError(409, 'event slot conflict');
+      if (existing === 'duplicate') duplicates++;
+      else pending.push(item);
+    }
+    if (pending.length === 0) return json({ success: true, accepted: 0, duplicates });
+    const cutoff = toSqliteUtcTimestamp(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    const rate = await env.DB.prepare(
+      `SELECT /* testdata_rate_count */ COUNT(*) AS event_count
+       FROM testdata_event_slots WHERE instance_id = ? AND received_at >= ?`,
+    ).bind(body.instanceId, cutoff).first();
+    if (Number(rate?.event_count || 0) + pending.length > TESTDATA_EVENT_DAILY_LIMIT) {
+      throw new HttpError(429, 'rate limit exceeded');
+    }
+    const statements = pending.flatMap(item => [
+      buildTestdataEventSlotStatement(env, body.instanceId, item.event, item.payloadHash),
+      buildTestdataIngestStatement(env, body.instanceId, item.event, item.payloadHash),
+    ]);
+    const results = await env.DB.batch(statements);
+    let accepted = 0;
+    for (let index = 0; index < pending.length; index++) {
+      if (Number(results[index * 2]?.meta?.changes || 0) > 0) {
+        accepted++;
+        continue;
+      }
+      const item = pending[index];
+      const existing = await classifyExistingTestdataEvent(
+        env, body.instanceId, item.event, item.payloadHash,
+      );
+      if (existing === 'duplicate') duplicates++;
+      else throw new HttpError(409, 'event slot conflict');
+    }
+    return json({ success: true, accepted, duplicates });
+  } catch (error) {
+    if (error instanceof HttpError) return json({ success: false, error: error.message }, { status: error.status });
+    return json({ success: false, error: 'Failed to store events' }, { status: 500 });
+  }
+}
+
+function testdataRateMetric(count, total) {
+  const safeCount = Number(count) || 0;
+  const safeTotal = Number(total) || 0;
+  return { count: safeCount, total: safeTotal, rate: safeTotal > 0 ? safeCount / safeTotal : null };
+}
+
+async function handleDashboardTestdataQuality(request, env) {
+  if (!isDashboardAuthorized(request, env)) return json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  let days;
+  try { days = parseTestdataQualityDays(new URL(request.url)); } catch (error) {
+    return json({ success: false, error: error.message }, { status: error.status || 400 });
+  }
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const cutoff = cutoffDate.toISOString();
+  const receivedAtCutoff = toSqliteUtcTimestamp(cutoffDate);
+  const queries = [
+    env.DB.prepare(
+      `SELECT /* testdata_quality_totals */
+        COUNT(*) AS total_runs,
+        COALESCE(SUM(CASE WHEN pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS pipeline_completed,
+        COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
+        COALESCE(SUM(CASE WHEN would_block = 1 THEN 1 ELSE 0 END), 0) AS would_block,
+        COALESCE(SUM(stress_generated), 0) AS stress_generated,
+        COALESCE(SUM(stress_valid), 0) AS stress_valid,
+        COALESCE(SUM(stress_dropped_invalid), 0) AS stress_dropped_invalid,
+        COALESCE(SUM(stress_unique), 0) AS stress_unique,
+        COALESCE(SUM(stress_compared), 0) AS stress_compared,
+        COALESCE(SUM(stress_agreed), 0) AS stress_agreed,
+        COALESCE(SUM(CASE WHEN checker_configured = 1 THEN 1 ELSE 0 END), 0) AS checker_configured,
+        COALESCE(SUM(CASE WHEN checker_read = 1 THEN 1 ELSE 0 END), 0) AS checker_read,
+        COALESCE(SUM(CASE WHEN checker_compiled = 1 THEN 1 ELSE 0 END), 0) AS checker_compiled,
+        COALESCE(SUM(CASE WHEN checker_executed = 1 THEN 1 ELSE 0 END), 0) AS checker_executed,
+        COALESCE(SUM(checker_infra_failures), 0) AS checker_infra_failures,
+        COALESCE(SUM(CASE WHEN checker_infra_failures > 0 THEN 1 ELSE 0 END), 0) AS checker_infra_failed_runs
+       FROM testdata_runs WHERE started_at >= ?`,
+    ).bind(cutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_outcomes */ COUNT(*) AS total_outcomes,
+        COALESCE(SUM(CASE WHEN outcome = 'accepted_unchanged' THEN 1 ELSE 0 END), 0) AS accepted_unchanged,
+        COALESCE(SUM(CASE WHEN outcome = 'accepted_edited' THEN 1 ELSE 0 END), 0) AS accepted_edited,
+        COALESCE(SUM(CASE WHEN outcome = 'discarded' THEN 1 ELSE 0 END), 0) AS discarded,
+        COALESCE(SUM(CASE WHEN outcome = 'regenerated' THEN 1 ELSE 0 END), 0) AS regenerated
+       FROM testdata_teacher_outcomes WHERE received_at >= ?`,
+    ).bind(receivedAtCutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_failures */ failure_code AS key, COUNT(*) AS count
+       FROM testdata_stage_events WHERE event_type = 'stage_failed' AND received_at >= ?
+       GROUP BY failure_code ORDER BY count DESC`,
+    ).bind(receivedAtCutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_stages */ stage AS key, COUNT(*) AS count
+       FROM testdata_stage_events WHERE event_type = 'stage_failed' AND received_at >= ?
+       GROUP BY stage ORDER BY count DESC`,
+    ).bind(receivedAtCutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_artifacts */ artifact AS key, COUNT(*) AS count
+       FROM testdata_stage_events WHERE event_type = 'stage_failed' AND received_at >= ?
+       GROUP BY artifact ORDER BY count DESC`,
+    ).bind(receivedAtCutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_risks */ risk_tier AS key, COUNT(*) AS count
+       FROM testdata_runs WHERE started_at >= ? AND risk_tier IS NOT NULL
+       GROUP BY risk_tier ORDER BY count DESC`,
+    ).bind(cutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_templates */ 'py' AS language,
+          COALESCE(SUM(template_py_requested), 0) AS requested,
+          COALESCE(SUM(template_py_verified), 0) AS verified
+       FROM testdata_runs WHERE started_at >= ?
+       UNION ALL SELECT 'java', COALESCE(SUM(template_java_requested), 0), COALESCE(SUM(template_java_verified), 0)
+       FROM testdata_runs WHERE started_at >= ?
+       UNION ALL SELECT 'cc', COALESCE(SUM(template_cc_requested), 0), COALESCE(SUM(template_cc_verified), 0)
+       FROM testdata_runs WHERE started_at >= ?`,
+    ).bind(cutoff, cutoff, cutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_fallback */
+        COALESCE(SUM(CASE WHEN model_escalated = 1 THEN 1 ELSE 0 END), 0) AS attempts,
+        COALESCE(SUM(CASE WHEN model_escalated = 1 AND pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS rescued
+       FROM testdata_runs WHERE started_at >= ?`,
+    ).bind(cutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_verified_outcomes */
+        COUNT(*) AS denominator,
+        COALESCE(SUM(CASE WHEN o.outcome IN ('accepted_edited', 'discarded') THEN 1 ELSE 0 END), 0) AS changed
+       FROM testdata_runs r JOIN testdata_teacher_outcomes o
+         ON o.instance_id = r.instance_id AND o.run_id = r.run_id
+       WHERE r.started_at >= ? AND r.verified = 1`,
+    ).bind(cutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_versions */ plugin_version, COUNT(*) AS runs,
+        COALESCE(SUM(CASE WHEN pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS pipeline_completed,
+        COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
+        COALESCE(SUM(CASE WHEN would_block = 1 THEN 1 ELSE 0 END), 0) AS would_block
+       FROM testdata_runs WHERE started_at >= ? GROUP BY plugin_version ORDER BY runs DESC`,
+    ).bind(cutoff),
+  ];
+  const results = await env.DB.batch(queries);
+  const rows = results.map(result => result?.results || []);
+  const totals = rows[0][0] || {};
+  const outcomes = rows[1][0] || {};
+  const fallback = rows[7][0] || {};
+  const verifiedOutcomes = rows[8][0] || {};
+  const totalRuns = Number(totals.total_runs) || 0;
+  const completed = Number(totals.pipeline_completed) || 0;
+  const totalOutcomes = Number(outcomes.total_outcomes) || 0;
+  const templates = {};
+  for (const item of rows[6]) {
+    if (!TESTDATA_TEMPLATE_LANGUAGES.has(item.language)) continue;
+    const requested = Number(item.requested) || 0;
+    const verified = Number(item.verified) || 0;
+    templates[item.language] = {
+      requested, verified, rate: requested > 0 ? verified / requested : null,
+    };
+  }
+  const distribution = (items, allowed) => items
+    .filter(item => allowed.has(item.key))
+    .map(item => ({ key: item.key, count: Number(item.count) || 0 }));
+  return json({
+    window_days: days,
+    total_runs: totalRuns,
+    metrics: {
+      pipeline_completion: testdataRateMetric(completed, totalRuns),
+      verified: testdataRateMetric(totals.verified, completed),
+      would_block: testdataRateMetric(totals.would_block, completed),
+      accepted_unchanged: testdataRateMetric(outcomes.accepted_unchanged, totalOutcomes),
+      accepted_edited: testdataRateMetric(outcomes.accepted_edited, totalOutcomes),
+      discarded: testdataRateMetric(outcomes.discarded, totalOutcomes),
+      regenerated: testdataRateMetric(outcomes.regenerated, totalOutcomes),
+      model_escalation_rescue: testdataRateMetric(fallback.rescued, fallback.attempts),
+      verified_but_teacher_changed: testdataRateMetric(
+        verifiedOutcomes.changed,
+        verifiedOutcomes.denominator,
+      ),
+    },
+    failure_codes: distribution(rows[2], TESTDATA_FAILURE_CODES),
+    failure_stages: distribution(rows[3], TESTDATA_STAGES),
+    failure_artifacts: distribution(rows[4], TESTDATA_ARTIFACTS),
+    risk_tiers: distribution(rows[5], TESTDATA_RISK_TIERS),
+    templates,
+    checker: {
+      configured: testdataRateMetric(totals.checker_configured, totalRuns),
+      read: testdataRateMetric(totals.checker_read, totals.checker_configured),
+      compiled: testdataRateMetric(totals.checker_compiled, totals.checker_configured),
+      executed: testdataRateMetric(totals.checker_executed, totals.checker_configured),
+      infra_failure: testdataRateMetric(
+        totals.checker_infra_failed_runs,
+        totals.checker_configured,
+      ),
+      infra_failures: Number(totals.checker_infra_failures) || 0,
+    },
+    stress: {
+      generated: Number(totals.stress_generated) || 0,
+      valid: Number(totals.stress_valid) || 0,
+      dropped_invalid: Number(totals.stress_dropped_invalid) || 0,
+      unique: Number(totals.stress_unique) || 0,
+      compared: Number(totals.stress_compared) || 0,
+      agreed: Number(totals.stress_agreed) || 0,
+    },
+    version_trend: rows[9].map(item => ({
+      plugin_version: item.plugin_version,
+      runs: Number(item.runs) || 0,
+      pipeline_completed: Number(item.pipeline_completed) || 0,
+      verified: Number(item.verified) || 0,
+      would_block: Number(item.would_block) || 0,
+    })),
+  });
+}
+
 async function handleReport(request, env) {
   if (request.method === 'OPTIONS') {
     const headers = new Headers();
@@ -1374,12 +2050,16 @@ export default {
     switch (pathname) {
       case '/api/report':
         return handleReport(request, env);
+      case '/api/testdata-events':
+        return handleTestdataEvents(request, env);
       case '/api/errors':
         return handleErrors(request, env);
       case '/api/feedback':
         return handleFeedback(request, env);
       case '/api/dashboard/overview':
         return handleDashboardOverview(request, env);
+      case '/api/dashboard/testdata-quality':
+        return handleDashboardTestdataQuality(request, env);
       case '/api/dashboard/instances':
         return handleDashboardInstances(request, env);
       case '/api/dashboard/errors':
@@ -1428,6 +2108,9 @@ export default {
       const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
       const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
       const cutoff400dDate = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const cutoff400dReceivedAt = toSqliteUtcTimestamp(
+        new Date(Date.now() - 400 * 24 * 60 * 60 * 1000),
+      );
 
       // Clean up stale plugin stats. 270 days（原 90 天）：学校寒暑假可长达
       // 2-3 个月，服务器假期停机不应导致实例记录被清、活跃统计断档。
@@ -1462,6 +2145,18 @@ export default {
         ).bind(cutoff400dDate).run();
       } catch (e) {
         console.error('[cron] plugin_model_daily cleanup failed (migration 0009 applied?)', e);
+      }
+
+      // Dedicated test-data quality telemetry: keep one school-year plus a margin.
+      try {
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM testdata_event_slots WHERE received_at < ?').bind(cutoff400dReceivedAt),
+          env.DB.prepare('DELETE FROM testdata_stage_events WHERE received_at < ?').bind(cutoff400dReceivedAt),
+          env.DB.prepare('DELETE FROM testdata_teacher_outcomes WHERE received_at < ?').bind(cutoff400dReceivedAt),
+          env.DB.prepare('DELETE FROM testdata_runs WHERE received_at < ?').bind(cutoff400dReceivedAt),
+        ]);
+      } catch (e) {
+        console.error('[cron] testdata quality cleanup failed (migration 0010 applied?)', e);
       }
 
       // Clean up old feedback (90 days)

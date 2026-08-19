@@ -38,6 +38,8 @@ function functionBlueprint() {
 
 function fullyGreenFunctionPlan(): GenerationPlan {
   return {
+    runId: '11111111-1111-4111-8111-111111111111',
+    promptVersion: 'testdata-generation-v1',
     problemType: 'function',
     files: [
       { name: '1.in', content: '1\n', kind: 'case-in', origin: 'executed' },
