@@ -20,6 +20,10 @@ import {
   resolveTestdataRetryGuidance,
   type TestdataRetryGuidance,
 } from './retryPolicyHints';
+import {
+  VerificationSummaryView,
+  type VerificationSummaryData,
+} from './VerificationSummaryView';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -50,7 +54,7 @@ interface PlannedFile {
   origin?: 'executed' | 'deterministic' | 'ai-only';
 }
 
-interface PlanVerification {
+interface PlanVerification extends VerificationSummaryData {
   mode: 'sandbox' | 'direct';
   oracleKind: 'provided-std' | 'accepted-record' | 'ai-solution';
   modelEscalation?: { fromModel: string; toModel: string };
@@ -66,8 +70,6 @@ interface PlanVerification {
     skippedReason?: 'custom-checker';
   };
   validator?: { ran: boolean; casesChecked: number };
-  templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
-  checkerCheck?: { status: 'executed' | 'compile-failed'; runtimeSkipped: number };
   discrimination?: {
     targets: Array<{
       kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
@@ -1190,7 +1192,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const risk = plan.risk;
     const bruteSkipped = verification?.bruteCheck?.skippedTimeout ?? [];
     const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
-    const templateSkipped = verification?.templateCheck?.skippedTimeout ?? [];
     const stressCheck = verification?.stressCheck;
     const discrimination = verification?.mode === 'sandbox'
       ? verification.discrimination
@@ -1205,26 +1206,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       && discrimination.allKilled
       && discriminationCheckedTargets.length > 0
       && discriminationKilled === discriminationCheckedTargets.length;
-    const hasAiOnlyCases = plan.files.some(
-      f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
-    );
-    const stressPassed = !!stressCheck
-      && !stressCheck.skippedReason
-      && stressCheck.compared > 0
-      && stressCheck.agreed === stressCheck.compared
-      && (stressCheck.uniqueInputs === undefined
-        || stressCheck.uniqueInputs >= Math.ceil(stressCheck.generated * 0.8));
-    const legacyBrutePassed = !stressCheck
-      && (verification?.bruteCheck?.compared ?? 0) > 0
-      && bruteDisagreed.length === 0
-      && bruteSkipped.length === 0;
-    // 全绿门槛：优先要求内部压力对拍全量通过；旧后端回退原 BRUTE 判定。
-    const verificationAllGreen = verification?.mode === 'sandbox'
-      && !hasAiOnlyCases
-      && (stressPassed || legacyBrutePassed)
-      && templateSkipped.length === 0
-      && (!discrimination || discriminationAllKilled);
-
     return (
       <div>
         {risk && (
@@ -1320,10 +1301,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           </div>
         )}
         {verification && (
-          <div style={{ ...getAlertStyle(verificationAllGreen ? 'success' : 'warning'), marginBottom: SPACING.md }}>
+          <div style={{ ...getAlertStyle(verification.verified === true ? 'success' : 'warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
               {i18n('ai_helper_testdata_verify_title')}
             </div>
+            <VerificationSummaryView verification={verification} translate={i18n} />
             <div style={{ fontSize: '13px' }}>
               {i18n(verification.mode === 'sandbox' ? 'ai_helper_testdata_verify_mode_sandbox' : 'ai_helper_testdata_verify_mode_direct')}
             </div>
@@ -1367,23 +1349,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {verification.validator && (
               <div style={{ fontSize: '13px' }}>
                 {i18n('ai_helper_testdata_verify_validator')}: {verification.validator.ran ? verification.validator.casesChecked : i18n('ai_helper_testdata_verify_validator_none')}
-              </div>
-            )}
-            {verification.templateCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_template')}: {verification.templateCheck.passed}/{verification.templateCheck.total}
-              </div>
-            )}
-            {verification.checkerCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n(verification.checkerCheck.status === 'executed'
-                  ? 'ai_helper_testdata_verify_checker_executed'
-                  : 'ai_helper_testdata_verify_checker_fallback')}
-                {verification.checkerCheck.runtimeSkipped > 0
-                  && ` · ${i18n(
-                    'ai_helper_testdata_verify_checker_runtime_skipped',
-                    verification.checkerCheck.runtimeSkipped,
-                  )}`}
               </div>
             )}
             {discrimination && (
