@@ -2213,6 +2213,12 @@ async function createCheckerExecutor(input) {
             return { ...check };
         },
         runBatch: async (cases, opts = {}) => {
+            if (opts.signal?.aborted) {
+                throw opts.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            }
+            if (input.signal?.aborted) {
+                throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            }
             check.total += cases.length;
             if (checkerBudgetRemainingMs <= 0) {
                 runtimeSkipped += cases.length;
@@ -5470,6 +5476,8 @@ class TestdataGenService {
                 await verifySolutionBlueprintSamples(solution, params.options, params.statementMarkdown, runner, params.signal, customChecker, cppOracleAvailableForAttempt, checkerExecutor);
             }
             catch (solutionError) {
+                if (params.signal?.aborted)
+                    throw params.signal.reason ?? solutionError;
                 if (isCancellation(solutionError))
                     throw solutionError;
                 const typedSolutionError = solutionError instanceof failures_1.TestdataPipelineError
@@ -5801,6 +5809,8 @@ class TestdataGenService {
                     response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, { ...materializationResume, cache: materializationCache });
                 }
                 catch (err) {
+                    if (params.signal?.aborted)
+                        throw params.signal.reason ?? err;
                     if (isCancellation(err))
                         throw err;
                     if (err instanceof TestdataGenerationError && err.userMessageKey)

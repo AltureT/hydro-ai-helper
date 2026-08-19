@@ -3412,6 +3412,58 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
+  it('post-repair materialization cancellation rethrows the ordinary reason without model escalation', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const controller = new AbortController();
+    const cancellation = new Error('post-repair materialization cancellation');
+    const transportCancellation = Object.assign(new Error('post-repair transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"input":"1"}]}))',
+        usedModel,
+      }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: 'not-json', stderr: '' })
+        .mockImplementationOnce(async () => {
+          controller.abort(cancellation);
+          throw transportCancellation;
+        }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'post-repair cancellation',
+      statementMarkdown: '题面',
+      options,
+      checkpoint,
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
   it('STRESS_GENERATOR 自动修复请求失败时完整保留原失败契约', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const duplicatedStress = JSON.stringify({
@@ -4267,6 +4319,107 @@ describe('TestdataGenService.generate', () => {
       checkpoint,
       signal: controller.signal,
     })).rejects.toBe(cancellation);
+  });
+
+  it('solution sample checker cancellation rethrows the ordinary signal reason without AI repair', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const controller = new AbortController();
+    const cancellation = new Error('solution sample checker cancellation');
+    const transportCancellation = Object.assign(new Error('checker transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const mockClient = {
+      chat: jest.fn().mockRejectedValue(new Error('solution repair must not run')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportCancellation;
+      }),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'solution sample cancellation',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint: {
+        solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('caller cancellation beats an exhausted checker budget and keeps the ordinary reason identity', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const controller = new AbortController();
+    const cancellation = new Error('cancellation before exhausted checker budget');
+    const mockClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+    let now = 10_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockImplementation(async () => {
+        now += CHECKER_BUDGET_MS;
+        controller.abort(cancellation);
+        return { ok: true, fileId: 'checker-bin' };
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+        Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+      )),
+      deleteCachedFile: jest.fn(),
+    };
+
+    try {
+      const failure = await new TestdataGenService(mockClient as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      }).generate({
+        problemTitle: 'checker cancellation priority',
+        statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint: {
+          solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+          artifacts: parseGenerationArtifacts(
+            makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+          ),
+          verifier: {
+            bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+          },
+          killTargets: [],
+        },
+        signal: controller.signal,
+      }).catch(error => error);
+
+      expect(failure).toBe(cancellation);
+      expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+      expect(mockClient.chat).not.toHaveBeenCalled();
+      expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('observe 保留 testlib _fail 基础设施证据并对未裁决样例记零分', async () => {

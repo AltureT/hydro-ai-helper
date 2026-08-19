@@ -2848,6 +2848,12 @@ async function createCheckerExecutor(input: {
       return { ...check };
     },
     runBatch: async (cases, opts = {}) => {
+      if (opts.signal?.aborted) {
+        throw opts.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      }
+      if (input.signal?.aborted) {
+        throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      }
       check.total += cases.length;
       if (checkerBudgetRemainingMs <= 0) {
         runtimeSkipped += cases.length;
@@ -6935,6 +6941,7 @@ export class TestdataGenService {
         checkerExecutor,
       );
     } catch (solutionError) {
+      if (params.signal?.aborted) throw params.signal.reason ?? solutionError;
       if (isCancellation(solutionError)) throw solutionError;
       const typedSolutionError = solutionError instanceof TestdataPipelineError
         ? solutionError
@@ -7390,6 +7397,7 @@ export class TestdataGenService {
           { ...materializationResume, cache: materializationCache },
         );
       } catch (err) {
+        if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
         if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
         const typedRepairError = err instanceof TestdataPipelineError
