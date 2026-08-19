@@ -15,6 +15,7 @@ import type {
   SandboxGenerationArtifacts,
   SandboxSolutionBlueprint,
   TestdataGenerationProgress,
+  TestlibCheckerArtifacts,
 } from '../services/testdataGenService';
 import type {
   TestdataArtifact,
@@ -69,8 +70,10 @@ export interface TestdataCheckpointHashes {
 
 export interface TestdataCheckpointContext {
   existingConfig?: string;
-  checkerSource?: string;
-  checkerHeaders?: Record<string, string>;
+  checkerArtifacts?: Pick<
+    TestlibCheckerArtifacts,
+    'configured' | 'read' | 'failureKind' | 'checkerSource' | 'checkerHeaders'
+  >;
 }
 
 interface TestdataResumeScope extends TestdataCheckpointHashes {
@@ -136,9 +139,10 @@ export function computeTestdataCheckpointHashes(
   statementMarkdown: string,
   context: TestdataCheckpointContext = {},
 ): TestdataCheckpointHashes {
-  const checkerPresent = context.checkerSource !== undefined;
+  const checkerArtifacts = context.checkerArtifacts;
+  const checkerPresent = checkerArtifacts?.checkerSource !== undefined;
   const checkerHeaders = Object.fromEntries(
-    Object.entries(context.checkerHeaders || {})
+    Object.entries(checkerArtifacts?.checkerHeaders || {})
       .map(([name, content]) => [name, sha256(normalizeTextForHash(content))]),
   );
   return {
@@ -146,9 +150,12 @@ export function computeTestdataCheckpointHashes(
       options: normalizeCheckpointOptions(options),
       existingConfig: normalizeExistingConfig(context.existingConfig),
       checker: {
+        configured: checkerArtifacts?.configured ?? false,
+        read: checkerArtifacts?.read ?? false,
+        failureKind: checkerArtifacts?.failureKind ?? null,
         present: checkerPresent,
         contentHash: checkerPresent
-          ? sha256(normalizeTextForHash(context.checkerSource as string))
+          ? sha256(normalizeTextForHash(checkerArtifacts?.checkerSource as string))
           : null,
         headers: checkerHeaders,
       },

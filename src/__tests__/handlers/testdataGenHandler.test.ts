@@ -167,6 +167,40 @@ describe('extractStatementMarkdown', () => {
 });
 
 describe('loadTestlibCheckerArtifacts', () => {
+  it('未配置 checker 时返回显式未配置状态', async () => {
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'time: 1s\n',
+    })).resolves.toEqual({ configured: false, read: false });
+    expect(StorageModel.get).not.toHaveBeenCalled();
+  });
+
+  it('已配置 checker 但制品清单缺失时返回 missing', async () => {
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker.cc\n',
+    })).resolves.toEqual({ configured: true, read: false, failureKind: 'missing' });
+    expect(StorageModel.get).not.toHaveBeenCalled();
+  });
+
+  it('checker 或头文件不可读时返回 read failure', async () => {
+    (StorageModel.get as jest.Mock).mockRejectedValue(new Error('storage unavailable'));
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: checker.cc\n',
+      data: [{ _id: 'checker.cc' }],
+    })).resolves.toEqual({ configured: true, read: false, failureKind: 'read' });
+  });
+
+  it('checker 路径越界时返回 invalid-path 且不访问存储', async () => {
+    await expect(loadTestlibCheckerArtifacts('system', {
+      ...PROBLEM_DOC,
+      config: 'checker_type: testlib\nchecker: ../checker.cc\n',
+      data: [{ _id: '../checker.cc' }],
+    })).resolves.toEqual({ configured: true, read: false, failureKind: 'invalid-path' });
+    expect(StorageModel.get).not.toHaveBeenCalled();
+  });
+
   it('读取 config.checker 与同目录全部 .h，并使用 basename 传给编译器', async () => {
     const files: Record<string, string> = {
       'problem/system/1530/testdata/checker/checker.cc': '#include "testlib.h"\n',
@@ -187,6 +221,8 @@ describe('loadTestlibCheckerArtifacts', () => {
         { _id: 'other/ignored.h' },
       ],
     })).resolves.toEqual({
+      configured: true,
+      read: true,
       checkerSource: '#include "testlib.h"\n',
       checkerHeaders: {
         'testlib.h': '// testlib\n',
@@ -196,15 +232,6 @@ describe('loadTestlibCheckerArtifacts', () => {
     expect(StorageModel.get).not.toHaveBeenCalledWith(
       'problem/system/1530/testdata/other/ignored.h',
     );
-  });
-
-  it('checker 或头文件不可读时省略制品并降级', async () => {
-    (StorageModel.get as jest.Mock).mockRejectedValue(new Error('storage unavailable'));
-    await expect(loadTestlibCheckerArtifacts('system', {
-      ...PROBLEM_DOC,
-      config: 'checker_type: testlib\nchecker: checker.cc\n',
-      data: [{ _id: 'checker.cc' }],
-    })).resolves.toBeUndefined();
   });
 });
 
@@ -467,8 +494,12 @@ describe('TestdataGenGenerateHandler', () => {
     try {
       await handler.post();
       expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
-        checkerSource: '#include "testlib.h"\n',
-        checkerHeaders: { 'testlib.h': '// header\n' },
+        checkerArtifacts: {
+          configured: true,
+          read: true,
+          checkerSource: '#include "testlib.h"\n',
+          checkerHeaders: { 'testlib.h': '// header\n' },
+        },
       }));
     } finally {
       genSpy.mockRestore();

@@ -44,6 +44,15 @@ export type CppCompileResult =
   | { ok: true; fileId: string }
   | { ok: false; kind: 'compile' | 'infra'; error: string };
 
+export interface JavaCompileOptions {
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}
+
+export type JavaCompileResult =
+  | { ok: true; fileId: string }
+  | { ok: false; kind: 'compile' | 'infra'; error: string };
+
 export interface CheckerRunCase {
   input: string;
   output: string;
@@ -57,7 +66,17 @@ export interface TestdataSandboxRunner {
   runPythonBatchDetailed(code: string, inputs: string[], opts?: PythonBatchOptions): Promise<PythonRunDetail[]>;
   /** 可选编译能力；缺失时上层必须保持 Python-only 降级行为。 */
   compileCpp?(source: string, opts?: CppCompileOptions): Promise<CppCompileResult>;
+  compileJava?(
+    mainSource: string,
+    solutionSource: string,
+    opts?: JavaCompileOptions,
+  ): Promise<JavaCompileResult>;
   runCompiledBatchDetailed?(
+    fileId: string,
+    inputs: string[],
+    opts?: PythonBatchOptions,
+  ): Promise<PythonRunDetail[]>;
+  runJavaBatchDetailed?(
     fileId: string,
     inputs: string[],
     opts?: PythonBatchOptions,
@@ -94,6 +113,7 @@ const CPP_COMPILE_CPU_LIMIT_NS = 30_000_000_000;
 const CPP_COMPILE_CLOCK_LIMIT_NS = 60_000_000_000;
 const CPP_COMPILE_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024;
 const CPP_COMPILE_PROC_LIMIT = 64;
+const JAVA_RUNTIME_PROC_LIMIT = 64;
 const CPP_COMPILE_TIMEOUT_MS = 75_000;
 const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测试点数量后重试';
 
@@ -252,6 +272,31 @@ function buildCppCompileCommand(source: string, extraFiles: Record<string, strin
   };
 }
 
+function buildJavaCompileCommand(mainSource: string, solutionSource: string) {
+  return {
+    args: [
+      '/usr/bin/bash', '-c',
+      'javac -d /w -encoding utf8 ./Main.java ./Solution.java && jar cvf Main.jar *.class >/dev/null',
+    ],
+    env: ['PATH=/usr/bin:/bin'],
+    files: [
+      { content: '' },
+      { name: 'stdout', max: STDERR_LIMIT_BYTES },
+      { name: 'stderr', max: STDERR_LIMIT_BYTES },
+    ],
+    cpuLimit: CPP_COMPILE_CPU_LIMIT_NS,
+    clockLimit: CPP_COMPILE_CLOCK_LIMIT_NS,
+    memoryLimit: CPP_COMPILE_MEMORY_LIMIT_BYTES,
+    procLimit: CPP_COMPILE_PROC_LIMIT,
+    copyIn: {
+      'Main.java': { content: mainSource },
+      'Solution.java': { content: solutionSource },
+    },
+    copyOut: ['stdout', 'stderr'],
+    copyOutCached: ['Main.jar'],
+  };
+}
+
 function buildCompiledCommand(
   fileId: string,
   stdin: string,
@@ -272,6 +317,32 @@ function buildCompiledCommand(
     procLimit: 16,
     copyIn: {
       prog: { fileId },
+    },
+    copyOut: ['stdout', 'stderr'],
+    copyOutMax: STDOUT_LIMIT_BYTES,
+  };
+}
+
+function buildJavaCommand(
+  fileId: string,
+  stdin: string,
+  limits: { cpuLimit?: number; clockLimit?: number } = {},
+) {
+  return {
+    args: ['/usr/bin/java', '-cp', 'Main.jar', 'Main'],
+    env: ['PATH=/usr/bin:/bin'],
+    files: [
+      { content: stdin },
+      { name: 'stdout', max: STDOUT_LIMIT_BYTES },
+      { name: 'stderr', max: STDERR_LIMIT_BYTES },
+    ],
+    cpuLimit: limits.cpuLimit ?? CPU_LIMIT_NS,
+    clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
+    memoryLimit: MEMORY_LIMIT_BYTES,
+    stackLimit: 64 * 1024 * 1024,
+    procLimit: JAVA_RUNTIME_PROC_LIMIT,
+    copyIn: {
+      'Main.jar': { fileId },
     },
     copyOut: ['stdout', 'stderr'],
     copyOutMax: STDOUT_LIMIT_BYTES,
@@ -376,11 +447,34 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
    * ok:false，便于上层按降级铁律回到 Python-only；仅用户主动取消原样上抛。
    */
   async compileCpp(source: string, opts: CppCompileOptions = {}): Promise<CppCompileResult> {
+    return this.compileCachedArtifact(buildCppCompileCommand(source, opts.extraFiles), 'prog', opts);
+  }
+
+  async compileJava(
+    mainSource: string,
+    solutionSource: string,
+    opts: JavaCompileOptions = {},
+  ): Promise<JavaCompileResult> {
+    return this.compileCachedArtifact(
+      buildJavaCompileCommand(mainSource, solutionSource),
+      'Main.jar',
+      opts,
+    );
+  }
+
+  private async compileCachedArtifact(
+    command: unknown,
+    cachedName: string,
+    opts: JavaCompileOptions,
+  ): Promise<CppCompileResult> {
     const remainingBudgetMs = opts.deadlineAt === undefined
       ? Number.POSITIVE_INFINITY
       : opts.deadlineAt - Date.now();
     if (remainingBudgetMs <= 0) {
       throw new SandboxBudgetExceededError();
+    }
+    if (opts.signal?.aborted) {
+      throw opts.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
     }
 
     let returnedFileIds: string[] = [];
@@ -391,7 +485,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     try {
       const response = await this.http.post(
         `${this.host}/run`,
-        { cmd: [buildCppCompileCommand(source, opts.extraFiles)] },
+        { cmd: [command] },
         {
           timeout: Math.max(1, Math.min(CPP_COMPILE_TIMEOUT_MS, remainingBudgetMs)),
           signal: opts.signal,
@@ -402,6 +496,10 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
       // 响应即使超期或其余字段畸形，也先抢救出所有缓存 ID，确保任何非成功
       // 返回都能尽力回收 go-judge 产物。
       returnedFileIds = collectReturnedFileIds(response.data);
+      if (opts.signal?.aborted) {
+        await cleanupReturnedFiles();
+        throw opts.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      }
       const results = unwrapResults(response.data);
       const fail = async (
         kind: 'compile' | 'infra',
@@ -429,15 +527,19 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
         const kind = /nonzero exit status/i.test(detail.status) ? 'compile' : 'infra';
         return await fail(kind, excerptTail(info, 2000));
       }
-      const fileId = result.fileIds?.prog;
+      const fileId = result.fileIds?.[cachedName];
       if (!fileId) {
-        return await fail('infra', 'Hydro 沙箱编译成功但未返回 prog 缓存文件');
+        return await fail('infra', `Hydro 沙箱编译成功但未返回 ${cachedName} 缓存文件`);
       }
+      await Promise.all(
+        returnedFileIds.filter(returnedFileId => returnedFileId !== fileId)
+          .map(returnedFileId => this.deleteCachedFile(returnedFileId)),
+      );
       returnedFileIds = [];
       return { ok: true, fileId };
     } catch (err) {
       await cleanupReturnedFiles();
-      if (opts.signal?.aborted) throw err;
+      if (opts.signal?.aborted) throw opts.signal.reason ?? err;
       if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
         throw new SandboxBudgetExceededError();
       }
@@ -517,6 +619,19 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
       inputs,
       opts,
       (input, limits) => buildCompiledCommand(fileId, input, limits),
+    );
+  }
+
+  /** 宽容执行已缓存的 Java JAR，批处理和预算语义与 Python 完全一致。 */
+  async runJavaBatchDetailed(
+    fileId: string,
+    inputs: string[],
+    opts: PythonBatchOptions = {},
+  ): Promise<PythonRunDetail[]> {
+    return this.runBatchDetailed(
+      inputs,
+      opts,
+      (input, limits) => buildJavaCommand(fileId, input, limits),
     );
   }
 

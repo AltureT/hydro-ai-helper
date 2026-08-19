@@ -53,8 +53,7 @@ async function readStorageText(storagePath) {
     return Buffer.concat(chunks).toString('utf8');
 }
 /**
- * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
- * 让 service 完整回退到原有自定义 checker 跳过语义。
+ * 读取 testlib checker 与同目录头文件，并对每个路径返回显式制品状态。
  */
 async function loadTestlibCheckerArtifacts(domainId, pdoc) {
     let configured;
@@ -62,19 +61,22 @@ async function loadTestlibCheckerArtifacts(domainId, pdoc) {
         configured = (0, testdataGenService_1.getTestlibCheckerFilename)(pdoc.config);
     }
     catch {
-        // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
-        return undefined;
+        // config 解析硬错误由 service 的统一 guard 报出；这里仍保持显式未配置状态。
+        return { configured: false, read: false };
     }
-    const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
-    if (!checkerFilename)
-        return undefined;
+    if (!configured)
+        return { configured: false, read: false };
+    const checkerFilename = normalizeCheckerPath(configured);
+    if (!checkerFilename) {
+        return { configured: true, read: false, failureKind: 'invalid-path' };
+    }
     const files = (pdoc.data || []).flatMap(item => {
         const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
         return storageName ? [{ storageName, logicalName: storageName }] : [];
     });
     const checkerFile = files.find(file => file.logicalName === checkerFilename);
     if (!checkerFile)
-        return undefined;
+        return { configured: true, read: false, failureKind: 'missing' };
     const checkerDir = path_1.posix.dirname(checkerFilename);
     const headerFiles = files.filter(file => path_1.posix.dirname(file.logicalName) === checkerDir
         && file.logicalName.toLowerCase().endsWith('.h'));
@@ -86,12 +88,14 @@ async function loadTestlibCheckerArtifacts(domainId, pdoc) {
             await readStorageText(`${storageBase}/${file.storageName}`),
         ]));
         return {
+            configured: true,
+            read: true,
             checkerSource,
             checkerHeaders: Object.fromEntries(headerEntries),
         };
     }
     catch {
-        return undefined;
+        return { configured: true, read: false, failureKind: 'read' };
     }
 }
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
@@ -512,7 +516,7 @@ async function runBackgroundGeneration(params) {
             options,
             existingFiles,
             existingConfig: pdoc.config,
-            ...checkerArtifacts,
+            checkerArtifacts,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
             checkpoint,
@@ -708,7 +712,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 options,
                 existingFiles,
                 existingConfig: pdoc.config,
-                ...checkerArtifacts,
+                checkerArtifacts,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
                 onProgress: progress => progressStream?.writeEvent('progress', progress),
@@ -889,8 +893,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
             const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
             const checkpointHashes = (0, testdataGenerationJob_1.computeTestdataCheckpointHashes)(options, statement, {
                 existingConfig: pdoc.config,
-                checkerSource: checkerArtifacts?.checkerSource,
-                checkerHeaders: checkerArtifacts?.checkerHeaders,
+                checkerArtifacts,
             });
             let checkpoint;
             const resumeFromJobId = typeof body.resumeFromJobId === 'string'
