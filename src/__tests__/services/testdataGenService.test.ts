@@ -2772,6 +2772,86 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
+  it('checker rejecting a deliberate wrong target leaves a verified plan without reject failure evidence', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({
+          content: ['=== COMPLEXITY_GAP ===', 'none', makeIndependentVerifierBlueprint()].join('\n'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(
+        (_fileId: string, cases: Array<{ output: string }>) => Promise.resolve(
+          cases.map(item => item.output === 'wrong\n'
+            ? detail({
+              accepted: false,
+              status: 'Nonzero Exit Status',
+              exitStatus: 1,
+            })
+            : detail()),
+        ),
+      ),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('surviving wrong solution')) {
+            return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'checker expected reject',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(plan.verification).toMatchObject({
+      verified: true,
+      wouldBlock: false,
+      discrimination: {
+        allKilled: true,
+        targets: expect.arrayContaining([
+          expect.objectContaining({ killed: true, killedBy: 'wa' }),
+        ]),
+      },
+      checkerCheck: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        infraFailures: 0,
+      },
+    });
+    expect(plan.verification?.checkerCheck).not.toHaveProperty('failureKind');
+  });
+
   it('补刀候选触发 System Error 时不追加 hack case 且不设置 killed', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const mockClient = {
@@ -4108,13 +4188,16 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('enforce 在 checker 编译失败时保留 checker 类型化契约', async () => {
+    const privateDiagnostic = 'SECRET_CHECKER_SENTINEL /private/checker/path.cc:1: error';
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
-      compileCpp: jest.fn().mockResolvedValue({ ok: false, kind: 'compile', error: 'bad checker' }),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false, kind: 'compile', error: privateDiagnostic,
+      }),
       runCheckerBatchDetailed: jest.fn(),
     };
 
-    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+    const failure = await new TestdataGenService({ chat: jest.fn() } as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
     }).generate({
       problemTitle: 'checker',
@@ -4124,13 +4207,142 @@ describe('TestdataGenService.generate', () => {
         configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
       },
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
-    })).rejects.toMatchObject({
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
       code: 'CHECKER_COMPILE_FAILED',
       artifact: 'checker',
       retryPolicy: 'manual-review',
       safeDetails: { failureKind: 'compile' },
     });
+    expect(failure.message).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(failure.message).not.toContain('/private/checker/path.cc');
+    expect(String(failure.cause)).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(String(failure.cause)).not.toContain('/private/checker/path.cc');
+    expect(String(failure.stack)).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(String(failure.stack)).not.toContain('/private/checker/path.cc');
+    expect(JSON.stringify(failure)).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(JSON.stringify(failure)).not.toContain('/private/checker/path.cc');
   });
+
+  it.each([
+    ['compiler infrastructure result', () => Promise.resolve({
+      ok: false,
+      kind: 'infra',
+      error: 'SECRET_CHECKER_SENTINEL /private/checker/path.cc transport protocol',
+    }), 'infra'],
+    ['compiler transport failure', () => Promise.reject(
+      new Error('SECRET_CHECKER_SENTINEL at /private/checker/path.cc ECONNRESET'),
+    ), 'infra'],
+    ['compiler budget exhaustion', () => Promise.reject(new SandboxBudgetExceededError()), 'budget'],
+  ] as const)(
+    'enforce maps checker %s to a sanitized CHECKER_RUNTIME_FAILED',
+    async (_label, compileCpp, failureKind) => {
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        compileCpp: jest.fn().mockImplementation(compileCpp),
+        runCheckerBatchDetailed: jest.fn(),
+      };
+
+      const failure = await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      }).generate({
+        problemTitle: 'checker',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }).catch(error => error);
+
+      expect(failure).toMatchObject({
+        code: 'CHECKER_RUNTIME_FAILED',
+        artifact: 'checker',
+        retryPolicy: 'manual-review',
+        safeDetails: { failureKind },
+      });
+      expect(failure.message).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(failure.message).not.toContain('/private/checker/path.cc');
+      expect(String(failure.cause)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(String(failure.cause)).not.toContain('/private/checker/path.cc');
+      expect(String(failure.stack)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(String(failure.stack)).not.toContain('/private/checker/path.cc');
+      expect(JSON.stringify(failure)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(JSON.stringify(failure)).not.toContain('/private/checker/path.cc');
+    },
+  );
+
+  it.each([
+    ['compiler rejection', () => Promise.resolve({
+      ok: false,
+      kind: 'compile',
+      error: 'SECRET_CHECKER_SENTINEL /private/checker/path.cc syntax error',
+    }), 'compile'],
+    ['compiler transport failure', () => Promise.reject(
+      new Error('SECRET_CHECKER_SENTINEL at /private/checker/path.cc ECONNRESET'),
+    ), 'infra'],
+  ] as const)(
+    'observe sanitizes checker %s and returns failed evidence',
+    async (_label, compileCpp, failureKind) => {
+      const options: GenerateOptions = {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        compileCpp: jest.fn().mockImplementation(compileCpp),
+        runCheckerBatchDetailed: jest.fn(),
+        runPython: jest.fn().mockResolvedValue({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+        }),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+          Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+        )),
+      };
+
+      const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      }).generate({
+        problemTitle: 'checker privacy',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint: {
+          solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+          artifacts: parseGenerationArtifacts(
+            makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+          ),
+          verifier: {
+            bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+          },
+          killTargets: [],
+        },
+      });
+
+      expect(plan.verification).toMatchObject({
+        verified: false,
+        wouldBlock: true,
+        checkerCheck: {
+          configured: true,
+          read: true,
+          compiled: false,
+          executed: false,
+          total: 0,
+          passed: 0,
+          infraFailures: 0,
+          failureKind,
+        },
+      });
+      expect(plan.notes).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(plan.notes).not.toContain('/private/checker/path.cc');
+      expect(JSON.stringify(plan)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(JSON.stringify(plan)).not.toContain('/private/checker/path.cc');
+    },
+  );
 
   it.each([
     ['TLE', jest.fn().mockResolvedValue([

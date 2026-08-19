@@ -2128,6 +2128,16 @@ function unavailableCheckerExecutor(status, check, compileError) {
         dispose: async () => { },
     };
 }
+function checkerPreparationFailure(check, reliabilityMode, failureKind, safeMessage) {
+    check.failureKind = failureKind;
+    const code = failureKind === 'compile'
+        ? 'CHECKER_COMPILE_FAILED'
+        : 'CHECKER_RUNTIME_FAILED';
+    if (reliabilityMode === 'enforce') {
+        throw checkerPipelineError(code, failureKind, safeMessage);
+    }
+    return unavailableCheckerExecutor('compile-failed', check, safeMessage);
+}
 function checkerPipelineError(code, failureKind, message) {
     return (0, failures_1.toPipelineError)(new Error(message), {
         code,
@@ -2160,12 +2170,8 @@ async function createCheckerExecutor(input) {
         return unavailableCheckerExecutor('unavailable', check);
     }
     if (!input.runner.compileCpp || !input.runner.runCheckerBatchDetailed) {
-        check.failureKind = 'compile';
         const message = '当前 Hydro 沙箱不支持 checker 编译或执行';
-        if (input.reliabilityMode === 'enforce') {
-            throw checkerPipelineError('CHECKER_COMPILE_FAILED', 'compile', message);
-        }
-        return unavailableCheckerExecutor('compile-failed', check, message);
+        return checkerPreparationFailure(check, input.reliabilityMode, 'compile', message);
     }
     let checkerBudgetRemainingMs = goJudgeSandboxService_1.CHECKER_BUDGET_MS;
     const compileStartedAt = Date.now();
@@ -2183,23 +2189,21 @@ async function createCheckerExecutor(input) {
             throw input.signal.reason ?? err;
         if (isCancellation(err))
             throw err;
-        const message = err instanceof Error ? err.message : String(err);
-        check.failureKind = 'compile';
-        if (input.reliabilityMode === 'enforce') {
-            throw checkerPipelineError('CHECKER_COMPILE_FAILED', 'compile', message);
-        }
-        return unavailableCheckerExecutor('compile-failed', check, message);
+        const failureKind = (0, goJudgeSandboxService_1.isSandboxBudgetExceededError)(err) ? 'budget' : 'infra';
+        const message = failureKind === 'budget'
+            ? 'checker 编译阶段超出执行预算'
+            : 'checker 编译基础设施未返回可信结果';
+        return checkerPreparationFailure(check, input.reliabilityMode, failureKind, message);
     }
     finally {
         checkerBudgetRemainingMs = Math.max(0, checkerBudgetRemainingMs - Math.max(0, Date.now() - compileStartedAt));
     }
     if (compiled.ok === false) {
-        const message = (0, textTruncate_1.excerptTail)(compiled.error, 2000);
-        check.failureKind = 'compile';
-        if (input.reliabilityMode === 'enforce') {
-            throw checkerPipelineError('CHECKER_COMPILE_FAILED', 'compile', message);
-        }
-        return unavailableCheckerExecutor('compile-failed', check, message);
+        const failureKind = compiled.kind === 'compile' ? 'compile' : 'infra';
+        const message = failureKind === 'compile'
+            ? 'checker 源码未通过编译'
+            : 'checker 编译基础设施未返回可信结果';
+        return checkerPreparationFailure(check, input.reliabilityMode, failureKind, message);
     }
     check.compiled = true;
     delete check.failureKind;
@@ -2252,12 +2256,8 @@ async function createCheckerExecutor(input) {
                         throw checkerPipelineError('CHECKER_RUNTIME_FAILED', check.failureKind, 'checker 沙箱执行未返回可信判定');
                     }
                 }
-                else if (check.infraFailures === 0) {
-                    if (verdicts.some(verdict => verdict === 'reject'))
-                        check.failureKind = 'reject';
-                    else
-                        delete check.failureKind;
-                }
+                else if (check.infraFailures === 0)
+                    delete check.failureKind;
                 return verdicts;
             }
             catch (err) {
