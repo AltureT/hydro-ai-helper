@@ -213,10 +213,11 @@ async function adjudicate(
 
   if (!input.adjudicator.customChecker) {
     throwIfCancelledOrExpired(input, language, check);
-    const mismatch = results.findIndex((result, index) => (
-      comparableFileContent(result.stdout) !== comparableFileContent(input.cases[index].answer)
+    const matches = results.map((result, index) => (
+      comparableFileContent(result.stdout) === comparableFileContent(input.cases[index].answer)
     ));
-    check.passed = mismatch === -1 ? check.total : mismatch;
+    const mismatch = matches.findIndex(match => !match);
+    check.passed = matches.filter(Boolean).length;
     if (mismatch !== -1) fail(language, 'mismatch', check, mismatch);
     return check;
   }
@@ -240,13 +241,13 @@ async function adjudicate(
     if (isSandboxBudgetExceededError(error)) fail(language, 'budget', check);
     return checkerInfraResult(input, language, check);
   }
+  check.passed = verdicts.filter(verdict => verdict === 'accept').length;
   if (verdicts.length !== check.total) return checkerInfraResult(input, language, check);
   const infraIndex = verdicts.findIndex(verdict => (
     verdict === 'infra-error' || (verdict !== 'accept' && verdict !== 'reject')
   ));
   if (infraIndex !== -1) return checkerInfraResult(input, language, check, infraIndex);
   const rejected = verdicts.findIndex(verdict => verdict !== 'accept');
-  check.passed = rejected === -1 ? check.total : rejected;
   if (rejected !== -1) fail(language, 'mismatch', check, rejected);
   return check;
 }

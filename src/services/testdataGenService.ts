@@ -310,6 +310,8 @@ export interface DiscriminationCheck {
 export interface PlanVerification {
   mode: 'sandbox' | 'direct';
   oracleKind: 'provided-std' | 'accepted-record' | 'ai-solution';
+  /** 服务端记录的函数题所选模板语言；前端据此对缺失证据 fail closed。 */
+  templateLanguages?: TemplateLang[];
   /** 服务端统一收口的权威验证结论。 */
   verified: boolean;
   /** observe 模式下表示同一证据在 enforce 中会被阻断。 */
@@ -5214,6 +5216,12 @@ export function finalizePlanVerification(
 ): GenerationPlan {
   const verification = plan.verification;
   if (!verification) return plan;
+
+  if (plan.problemType === 'function') {
+    verification.templateLanguages = SUPPORTED_TEMPLATE_LANGS.filter(language => (
+      selectedLanguages.includes(language)
+    ));
+  }
 
   const sampleGreen = !verification.sampleCheck
     || verification.sampleCheck.passed === verification.sampleCheck.total;

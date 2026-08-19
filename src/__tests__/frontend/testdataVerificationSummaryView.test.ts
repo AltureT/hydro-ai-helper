@@ -8,6 +8,7 @@ jest.mock('../../../frontend/utils/i18n', () => ({
 type VerificationSummaryData = {
   verified?: boolean;
   wouldBlock?: boolean;
+  templateLanguages?: Array<'py' | 'java' | 'cc'>;
   templateChecks?: Partial<Record<'py' | 'java' | 'cc', {
     compiled: boolean;
     executed: boolean;
@@ -127,6 +128,32 @@ describe('VerificationSummaryView', () => {
     expect(markup).not.toContain('Python');
     expect(markup).not.toContain('Java');
     expect(markup).not.toContain('C++');
+  });
+
+  it.each([
+    ['direct', undefined],
+    ['incomplete sandbox', {
+      py: { compiled: true, executed: true, total: 4, passed: 4 },
+    }],
+  ])('renders a fail-closed row for every selected language in %s evidence', (_label, templateChecks) => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      templateLanguages: ['cc', 'py', 'java', 'py'],
+      templateChecks,
+    });
+
+    expect(markup.indexOf('Python')).toBeLessThan(markup.indexOf('Java'));
+    expect(markup.indexOf('Java')).toBeLessThan(markup.indexOf('C++'));
+    expect(markup.match(/aria-label="Python"/g)).toHaveLength(1);
+    expect(markup.match(/aria-label="Java"/g)).toHaveLength(1);
+    expect(markup.match(/aria-label="C\+\+"/g)).toHaveLength(1);
+    if (templateChecks) {
+      expect(markup).toContain('4/4');
+      expect(markup.match(/0\/0/g)).toHaveLength(2);
+    } else {
+      expect(markup.match(/0\/0/g)).toHaveLength(3);
+    }
   });
 
   it('fails closed for legacy verification data without authoritative evidence', () => {

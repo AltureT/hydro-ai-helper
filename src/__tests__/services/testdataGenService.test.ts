@@ -2507,6 +2507,89 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
   });
 
+  it('完整三语言 checkpoint 跳过 AI 调用并仍实跑全部模板沙箱门槛', async () => {
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(
+        makeSolutionBlueprint('function'),
+        options,
+        [],
+      ),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('function'),
+        'function',
+        options.languages,
+      ),
+      verifier: parseIndependentVerifierBlueprint(
+        makeIndependentVerifierBlueprint(),
+        [],
+      ),
+      killTargets: [],
+    };
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'resume-cc' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'resume-java' }),
+      runJavaBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '三语言断点续跑',
+      statementMarkdown: '题面',
+      options,
+      checkpoint,
+    });
+
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.runPythonBatchDetailed.mock.calls.some(([code]: [string]) => (
+      code.includes('def solve(value)') && code.includes('print(solve(input().strip()))')
+    ))).toBe(true);
+    expect(runner.compileCpp).toHaveBeenCalledWith(
+      expect.stringContaining('#include "foo.cc"'),
+      expect.objectContaining({ extraFiles: { 'foo.cc': expect.stringContaining('string solve') } }),
+    );
+    expect(runner.compileJava).toHaveBeenCalledWith(
+      expect.stringContaining('public class Main'),
+      expect.stringContaining('class Solution'),
+      expect.any(Object),
+    );
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'resume-cc', ['1\n'], expect.any(Object),
+    );
+    expect(runner.runJavaBatchDetailed).toHaveBeenCalledWith(
+      'resume-java', ['1\n'], expect.any(Object),
+    );
+    expect(plan.verification).toMatchObject({
+      templateLanguages: ['py', 'java', 'cc'],
+      templateChecks: {
+        py: { compiled: true, executed: true, total: 1, passed: 1 },
+        java: { compiled: true, executed: true, total: 1, passed: 1 },
+        cc: { compiled: true, executed: true, total: 1, passed: 1 },
+      },
+    });
+  });
+
   it('调用 AI 客户端并返回组装后的计划', async () => {
     const progress: Array<{ stage: string; percent: number; attempt: number }> = [];
     const mockClient = {
@@ -4155,12 +4238,18 @@ describe('TestdataGenService.generate', () => {
     const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
       problemTitle: 'low risk',
       statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
-      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
     });
     expect(plan).toMatchObject({
       risk: { tier: 'low', allowsDirectFallback: true, requiresSandbox: false, wouldBlock: false },
-      verification: { mode: 'direct' },
+      verification: {
+        mode: 'direct',
+        templateLanguages: ['py', 'java', 'cc'],
+        verified: false,
+        wouldBlock: true,
+      },
     });
+    expect(plan.verification?.templateChecks).toBeUndefined();
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 

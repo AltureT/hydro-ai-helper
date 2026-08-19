@@ -4147,6 +4147,9 @@ function finalizePlanVerification(plan, selectedLanguages, customChecker, reliab
     const verification = plan.verification;
     if (!verification)
         return plan;
+    if (plan.problemType === 'function') {
+        verification.templateLanguages = exports.SUPPORTED_TEMPLATE_LANGS.filter(language => (selectedLanguages.includes(language)));
+    }
     const sampleGreen = !verification.sampleCheck
         || verification.sampleCheck.passed === verification.sampleCheck.total;
     const stress = verification.stressCheck;

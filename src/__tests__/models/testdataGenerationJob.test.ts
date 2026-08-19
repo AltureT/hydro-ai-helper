@@ -259,6 +259,45 @@ describe('TestdataGenerationJobModel', () => {
     );
   });
 
+  it('三语言 solution checkpoint 经过 filter、持久化与读取后精确保真', async () => {
+    const { model, collection } = createModel();
+    const solutions = {
+      py: 'def solve(value):\n    return value\n',
+      java: 'class Solution { String solve(String value) { return value; } }\n',
+      cc: 'string solve(string value) { return value; }\n',
+    };
+    const solution = {
+      problemType: 'function' as const,
+      oracleCode: 'print(input())',
+      solutions,
+      solutionCode: solutions.py,
+    };
+    const filtered = filterTestdataCheckpointUpdate({ revision: 5, solution });
+
+    expect(filtered.solution?.solutions).toEqual(solutions);
+    await model.updateCheckpoint(
+      'job1',
+      { optionsHash: 'options', statementHash: 'statement' },
+      filtered,
+    );
+    const persisted = collection.updateOne.mock.calls.at(-1)?.[1].$set.checkpoint;
+    expect(persisted.solution.solutions).toEqual(solutions);
+
+    const restored = selectTestdataResumeCheckpoint({
+      ...createParams,
+      status: 'interrupted',
+      checkpoint: persisted,
+    }, {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      optionsHash: 'options',
+      statementHash: 'statement',
+    });
+    expect(restored?.solution?.solutions).toEqual(solutions);
+  });
+
   it('creates an active uniqueness index and a 24-hour TTL index', async () => {
     const { model, collection } = createModel();
     await model.ensureIndexes();

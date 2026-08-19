@@ -274,7 +274,10 @@ describe('verifySelectedTemplates', () => {
     await expect(verifySelectedTemplates({
       languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
       cases, runner, adjudicator: ordinaryAdjudicator, allowCheckerInfraResult: false,
-    })).rejects.toMatchObject({ language: 'py', kind: 'mismatch', caseIndex: 1 });
+    })).rejects.toMatchObject({
+      language: 'py', kind: 'mismatch', caseIndex: 1,
+      check: { total: 4, passed: 3, failureKind: 'mismatch' },
+    });
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
       expect.any(String), cases.map(testcase => testcase.input), expect.any(Object),
     );
@@ -296,7 +299,10 @@ describe('verifySelectedTemplates', () => {
     await expect(verifySelectedTemplates({
       languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
       cases, runner, adjudicator, allowCheckerInfraResult: false,
-    })).rejects.toMatchObject({ language: 'py', kind: 'mismatch', caseIndex: 1 });
+    })).rejects.toMatchObject({
+      language: 'py', kind: 'mismatch', caseIndex: 1,
+      check: { total: 4, passed: 3, failureKind: 'mismatch' },
+    });
   });
 
   it('returns checker-infra evidence when checker verdicts are missing and explicitly allowed', async () => {
@@ -310,7 +316,7 @@ describe('verifySelectedTemplates', () => {
       languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
       cases, runner, adjudicator, allowCheckerInfraResult: true,
     })).resolves.toEqual({
-      py: { compiled: true, executed: true, total: 4, passed: 0, failureKind: 'checker-infra' },
+      py: { compiled: true, executed: true, total: 4, passed: 3, failureKind: 'checker-infra' },
     });
   });
 
@@ -324,6 +330,9 @@ describe('verifySelectedTemplates', () => {
     await expect(verifySelectedTemplates({
       languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
       cases, runner, adjudicator, allowCheckerInfraResult: false,
-    })).rejects.toMatchObject({ language: 'py', kind: 'checker-infra', caseIndex: 1 });
+    })).rejects.toMatchObject({
+      language: 'py', kind: 'checker-infra', caseIndex: 1,
+      check: { total: 4, passed: 3, failureKind: 'checker-infra' },
+    });
   });
 });

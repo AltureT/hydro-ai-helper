@@ -4,6 +4,7 @@ import { i18n } from '../utils/i18n';
 export interface VerificationSummaryData {
   verified?: boolean;
   wouldBlock?: boolean;
+  templateLanguages?: Array<'py' | 'java' | 'cc'>;
   templateChecks?: Partial<Record<'py' | 'java' | 'cc', {
     compiled: boolean;
     executed: boolean;
@@ -99,9 +100,16 @@ export function VerificationSummaryView(props: {
     ),
   ];
 
-  for (const language of LANGUAGE_ORDER) {
-    const check = verification.templateChecks?.[language];
-    if (!check) continue;
+  const templateLanguages = verification.templateLanguages
+    ? LANGUAGE_ORDER.filter(language => verification.templateLanguages?.includes(language))
+    : LANGUAGE_ORDER.filter(language => !!verification.templateChecks?.[language]);
+  for (const language of templateLanguages) {
+    const check = verification.templateChecks?.[language] ?? {
+      compiled: false,
+      executed: false,
+      total: 0,
+      passed: 0,
+    };
     const languageLabel = translate(`ai_helper_testdata_verify_language_${language}`);
     rows.push(React.createElement(
       'div',

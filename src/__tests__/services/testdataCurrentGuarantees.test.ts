@@ -396,6 +396,26 @@ describe('test-data generation current guarantees', () => {
     expect(direct.risk?.wouldBlock).toBe(false);
   });
 
+  it('records canonical selected-language evidence for direct and incomplete function plans', () => {
+    const direct = fullyGreenFunctionPlan();
+    direct.verification!.mode = 'direct';
+    delete direct.verification!.templateChecks;
+    const incomplete = fullyGreenFunctionPlan();
+    incomplete.verification!.templateChecks = {
+      py: { compiled: true, executed: true, total: 5, passed: 5 },
+    };
+
+    finalizePlanVerification(direct, ['cc', 'py', 'java', 'py'], false, 'observe');
+    finalizePlanVerification(incomplete, ['java', 'cc', 'py', 'java'], false, 'observe');
+
+    expect(direct.verification).toMatchObject({
+      templateLanguages: ['py', 'java', 'cc'], verified: false, wouldBlock: true,
+    });
+    expect(incomplete.verification).toMatchObject({
+      templateLanguages: ['py', 'java', 'cc'], verified: false, wouldBlock: true,
+    });
+  });
+
   it.each([
     ['failed sample', (plan: GenerationPlan) => { plan.verification!.sampleCheck = { total: 2, passed: 1 }; }],
     ['failed stress', (plan: GenerationPlan) => { plan.verification!.stressCheck!.agreed = 4; }],
