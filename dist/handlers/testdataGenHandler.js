@@ -367,13 +367,19 @@ function buildCancellationResponse(translate) {
     const { message, ...contract } = buildCancellationJobError(translate);
     return { error: message, ...contract };
 }
-function captureTestdataGenerationFailure(ctx, err) {
+const KNOWN_AI_ERROR_CATEGORIES = new Set([
+    'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
+]);
+function isKnownAIErrorCategory(value) {
+    return typeof value === 'string' && KNOWN_AI_ERROR_CATEGORIES.has(value);
+}
+function captureTestdataGenerationFailure(ctx, feature, err) {
     const reporter = ctx.get?.('errorReporter');
     if (!reporter?.capture)
         return;
     const failure = (0, failures_1.extractTestdataFailureMetadata)(err);
     if (failure) {
-        reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+        reporter.capture('api_failure', feature, 'Typed test-data pipeline failure', undefined, undefined, {
             failureCode: failure.failureCode,
             stage: failure.stage,
             artifact: failure.artifact,
@@ -384,8 +390,9 @@ function captureTestdataGenerationFailure(ctx, err) {
     }
     const safeMetadata = {};
     if (err instanceof openaiClient_1.AIServiceError) {
-        safeMetadata.aiCategory = err.category;
-        safeMetadata.retryable = err.isRetryable;
+        safeMetadata.aiCategory = isKnownAIErrorCategory(err.category) ? err.category : 'unknown';
+        if (typeof err.isRetryable === 'boolean')
+            safeMetadata.retryable = err.isRetryable;
         const totalAttempts = err.context?.totalAttempts;
         if (typeof totalAttempts === 'number'
             && Number.isSafeInteger(totalAttempts)
@@ -394,7 +401,7 @@ function captureTestdataGenerationFailure(ctx, err) {
             safeMetadata.attemptCount = totalAttempts;
         }
     }
-    reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, safeMetadata);
+    reporter.capture('api_failure', feature, 'Untyped test-data generation failure', undefined, undefined, safeMetadata);
 }
 function serializeGenerationJob(job) {
     return {
@@ -552,7 +559,7 @@ async function runBackgroundGeneration(params) {
         const failedModel = usedModels[usedModels.length - 1]
             || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-        captureTestdataGenerationFailure(ctx, err);
+        captureTestdataGenerationFailure(ctx, 'testdata_gen', err);
         const jobError = err instanceof openaiClient_1.AIServiceError
             ? {
                 message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -749,7 +756,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const failedModel = usedModels[usedModels.length - 1]
                 || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-            captureTestdataGenerationFailure(this.ctx, err);
+            captureTestdataGenerationFailure(this.ctx, 'testdata_gen', err);
             if (err instanceof openaiClient_1.AIServiceError) {
                 const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -1090,7 +1097,7 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenSkeletonHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || '') });
+            captureTestdataGenerationFailure(this.ctx, 'testdata_skeleton', err);
             const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
             if (testdataUserMessageKey) {
                 sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
@@ -1212,7 +1219,7 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenApplyHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_apply', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || '') });
+            captureTestdataGenerationFailure(this.ctx, 'testdata_apply', err);
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
     }

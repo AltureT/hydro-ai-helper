@@ -493,8 +493,18 @@ function buildCancellationResponse(translate: (key: string) => string) {
   return { error: message, ...contract };
 }
 
+type TestdataTelemetryFeature = 'testdata_gen' | 'testdata_skeleton' | 'testdata_apply';
+const KNOWN_AI_ERROR_CATEGORIES = new Set([
+  'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
+]);
+
+function isKnownAIErrorCategory(value: unknown): value is keyof typeof USER_ERROR_MESSAGE_KEYS {
+  return typeof value === 'string' && KNOWN_AI_ERROR_CATEGORIES.has(value);
+}
+
 function captureTestdataGenerationFailure(
   ctx: unknown,
+  feature: TestdataTelemetryFeature,
   err: unknown,
 ): void {
   const reporter = (ctx as {
@@ -505,7 +515,7 @@ function captureTestdataGenerationFailure(
   if (failure) {
     reporter.capture(
       'api_failure',
-      'testdata_gen',
+      feature,
       'Typed test-data pipeline failure',
       undefined,
       undefined,
@@ -521,8 +531,8 @@ function captureTestdataGenerationFailure(
   }
   const safeMetadata: Record<string, unknown> = {};
   if (err instanceof AIServiceError) {
-    safeMetadata.aiCategory = err.category;
-    safeMetadata.retryable = err.isRetryable;
+    safeMetadata.aiCategory = isKnownAIErrorCategory(err.category) ? err.category : 'unknown';
+    if (typeof err.isRetryable === 'boolean') safeMetadata.retryable = err.isRetryable;
     const totalAttempts = err.context?.totalAttempts;
     if (
       typeof totalAttempts === 'number'
@@ -535,7 +545,7 @@ function captureTestdataGenerationFailure(
   }
   reporter.capture(
     'api_failure',
-    'testdata_gen',
+    feature,
     'Untyped test-data generation failure',
     undefined,
     undefined,
@@ -728,7 +738,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     ctx.get('featureStatsModel')?.recordModelOutcome?.(
       'testdata_generation', failedModel, false,
     ).catch(() => { /* best-effort */ });
-    captureTestdataGenerationFailure(ctx, err);
+    captureTestdataGenerationFailure(ctx, 'testdata_gen', err);
 
     const jobError: TestdataGenerationJobError = err instanceof AIServiceError
       ? {
@@ -939,7 +949,7 @@ export class TestdataGenGenerateHandler extends Handler {
       this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
         'testdata_generation', failedModel, false,
       ).catch(() => { /* best-effort */ });
-      captureTestdataGenerationFailure(this.ctx, err);
+      captureTestdataGenerationFailure(this.ctx, 'testdata_gen', err);
       if (err instanceof AIServiceError) {
         const errorBody = {
           error: this.translate(USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -1279,13 +1289,7 @@ export class TestdataGenSkeletonHandler extends Handler {
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[TestdataGenSkeletonHandler.post] error:', err);
-      this.ctx.get('errorReporter')?.capture(
-        'api_failure', 'testdata_skeleton',
-        err instanceof Error ? err.message : String(err),
-        undefined,
-        err instanceof Error ? err.stack : undefined,
-        { problemId: String((this.request.body as GenerateRequestBody)?.problemId || '') },
-      );
+      captureTestdataGenerationFailure(this.ctx, 'testdata_skeleton', err);
       const testdataUserMessageKey = extractTestdataUserMessageKey(err);
       if (testdataUserMessageKey) {
         sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
@@ -1423,13 +1427,7 @@ export class TestdataGenApplyHandler extends Handler {
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[TestdataGenApplyHandler.post] error:', err);
-      this.ctx.get('errorReporter')?.capture(
-        'api_failure', 'testdata_apply',
-        err instanceof Error ? err.message : String(err),
-        undefined,
-        err instanceof Error ? err.stack : undefined,
-        { problemId: String((this.request.body as ApplyRequestBody)?.problemId || '') },
-      );
+      captureTestdataGenerationFailure(this.ctx, 'testdata_apply', err);
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     }
   }

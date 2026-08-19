@@ -1512,6 +1512,45 @@ describe('TestdataGenSkeletonHandler', () => {
       code: 'INVALID_EXISTING_CONFIG',
     });
   });
+
+  it('骨架接口普通异常遥测丢弃消息、栈、problemId 与任意元数据', async () => {
+    const sensitiveError = Object.assign(
+      new Error('input=SECRET_INPUT output=SECRET_OUTPUT https://private.example/v1 key=sk-secret'),
+      {
+        stack: 'STACK_WITH_SECRET_INPUT_AND_OUTPUT',
+        problemId: 'D3102',
+        jobId: 'secret-job-id',
+        metadata: { nested: { response: 'SECRET_OUTPUT' } },
+      },
+    );
+    (db.collection as jest.Mock).mockReturnValue({
+      findOne: jest.fn().mockRejectedValue(sensitiveError),
+    });
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(500);
+    expect(handler.response.body).toEqual({
+      error: 'ai_helper_err_internal',
+      code: 'INTERNAL_ERROR',
+    });
+    expect(capture).toHaveBeenCalledWith(
+      'api_failure',
+      'testdata_skeleton',
+      'Untyped test-data generation failure',
+      undefined,
+      undefined,
+      {},
+    );
+  });
 });
 
 // ─── ApplyHandler ─────────────────────────────────────────────────────────────
@@ -1654,5 +1693,64 @@ describe('TestdataGenApplyHandler', () => {
     const calls = (ProblemModel.addTestdata as jest.Mock).mock.calls;
     expect(calls).toHaveLength(1);
     expect(calls[0][3].toString()).toBe('first\n');
+  });
+
+  it('写入接口恶意 AI category 遥测降级为安全枚举且不泄漏上下文', async () => {
+    const sensitiveError = new openaiClient.AIServiceError(
+      'input=SECRET_INPUT output=SECRET_OUTPUT key=sk-secret https://private.example/v1',
+      'network',
+      undefined,
+      {
+        endpointId: 'endpoint-secret-id',
+        endpointName: 'https://private.example/v1',
+        modelName: 'private-model',
+        totalAttempts: 3,
+        skippedEndpoints: ['secret-skipped-endpoint'],
+        attempts: [{
+          endpoint: 'endpoint-secret-id',
+          model: 'private-model',
+          category: 'network',
+          message: 'raw input and output excerpt',
+        }],
+      },
+    );
+    Object.assign(sensitiveError, {
+      category: 'https://attacker.example/input/SECRET_INPUT',
+      stack: 'STACK_WITH_SECRET_INPUT_AND_OUTPUT',
+      problemId: 'D3102',
+      jobId: 'secret-job-id',
+      metadata: { apiKey: 'sk-secret' },
+    });
+    (db.collection as jest.Mock).mockReturnValue({
+      findOne: jest.fn().mockRejectedValue(sensitiveError),
+    });
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102',
+        jobId: 'secret-job-id',
+        files: [{ name: '1.in', content: 'SECRET_INPUT\n' }],
+      },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(500);
+    expect(handler.response.body).toEqual({
+      error: 'ai_helper_err_internal',
+      code: 'INTERNAL_ERROR',
+    });
+    expect(capture).toHaveBeenCalledWith(
+      'api_failure',
+      'testdata_apply',
+      'Untyped test-data generation failure',
+      undefined,
+      undefined,
+      { aiCategory: 'unknown', retryable: true, attemptCount: 3 },
+    );
   });
 });
