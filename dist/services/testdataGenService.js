@@ -2596,9 +2596,9 @@ function createDeadlineAbortScope(userSignal, deadlineAt) {
     const controller = new AbortController();
     let triggeredByDeadline = false;
     let deadlineTimer;
-    const onUserAbort = () => controller.abort();
+    const onUserAbort = () => controller.abort(userSignal?.reason);
     if (userSignal?.aborted) {
-        controller.abort();
+        controller.abort(userSignal.reason);
     }
     else {
         userSignal?.addEventListener('abort', onUserAbort, { once: true });
@@ -2666,6 +2666,8 @@ async function smokeTestKillTargets(input) {
                 validTargets.push(target);
         }
         catch (err) {
+            if (input.signal?.aborted)
+                throw input.signal.reason ?? err;
             if (isCancellation(err))
                 throw err;
             // 单个靶子烟测失败仅丢弃该靶子，不影响正确性管线和其余靶子。
@@ -2953,6 +2955,8 @@ async function runDiscriminationPhase(input) {
                 results.push(evaluated);
         }
         catch (err) {
+            if (input.signal?.aborted)
+                throw input.signal.reason ?? err;
             if (isCancellation(err))
                 throw err;
             for (let index = targetIndex; index < pending.length; index++) {
@@ -5262,6 +5266,8 @@ class TestdataGenService {
             });
         }
         catch (err) {
+            if (params.signal?.aborted)
+                throw params.signal.reason ?? err;
             if (isCancellation(err))
                 throw err;
             // 定向补刀是非关键增强；主流程 ORACLE 已验证成功，二次编译失败只跳过补刀。
@@ -5290,7 +5296,7 @@ class TestdataGenService {
                     }
                     catch (err) {
                         if (params.signal?.aborted)
-                            throw err;
+                            throw params.signal.reason ?? err;
                         if (deadlineScope.deadlineTriggered())
                             break targetLoop;
                         if (isCancellation(err))
@@ -5369,6 +5375,8 @@ class TestdataGenService {
                             continue targetLoop;
                         }
                         catch (err) {
+                            if (params.signal?.aborted)
+                                throw params.signal.reason ?? err;
                             if (isCancellation(err))
                                 throw err;
                             break targetLoop;
@@ -5426,6 +5434,8 @@ class TestdataGenService {
                         targetResult.killedByCase = initialCaseCount + evaluated.killedByCase;
                     }
                     catch (err) {
+                        if (params.signal?.aborted)
+                            throw params.signal.reason ?? err;
                         if (isCancellation(err))
                             throw err;
                         break;

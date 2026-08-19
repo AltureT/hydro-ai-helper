@@ -3045,10 +3045,14 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
-  it('补刀模型等待期间的用户取消仍原样上抛', async () => {
+  it('补刀模型派生 signal 转发调用方的普通 Error 原因并原样上抛', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
-    const userAbort = Object.assign(new Error('user abort'), { name: 'AbortError' });
+    const cancellation = new Error('hack generation caller cancellation');
+    const transportCancellation = Object.assign(new Error('hack generation transport cancellation'), {
+      name: 'CanceledError',
+    });
     const controller = new AbortController();
+    let hackSignal: AbortSignal | undefined;
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
@@ -3058,13 +3062,14 @@ describe('TestdataGenService.generate', () => {
           usedModel,
         })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
-        .mockImplementationOnce((_messages, _systemPrompt, options) => new Promise(
-          (_resolve, reject) => options.signal.addEventListener(
+        .mockImplementationOnce((_messages, _systemPrompt, options) => {
+          hackSignal = options.signal;
+          return new Promise((_resolve, reject) => options.signal.addEventListener(
             'abort',
-            () => reject(userAbort),
+            () => reject(transportCancellation),
             { once: true },
-          ),
-        )),
+          ));
+        }),
       createClientStartingAfter: jest.fn(),
     };
     const runner = {
@@ -3095,9 +3100,129 @@ describe('TestdataGenService.generate', () => {
 
     await new Promise(resolve => setImmediate(resolve));
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    controller.abort();
+    controller.abort(cancellation);
 
-    await expect(generationPromise).rejects.toBe(userAbort);
+    await expect(generationPromise).rejects.toBe(cancellation);
+    expect(hackSignal?.reason).toBe(cancellation);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('补刀候选校验在调用方取消后抛出原始原因且不返回追加计划', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const controller = new AbortController();
+    const cancellation = new Error('hack candidate caller cancellation');
+    const transportCancellation = Object.assign(new Error('hack candidate transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        async (code: string, inputs: string[]) => {
+          if (code.includes('sys.exit(0)') && inputs.length === 1 && inputs[0].trim() === '2') {
+            controller.abort(cancellation);
+            throw transportCancellation;
+          }
+          return inputs.map(input => {
+            if (code.includes('sys.exit(0)')) return detail();
+            if (code.includes('surviving wrong solution')) return detail({ stdout: input });
+            return detail({ stdout: input });
+          });
+        },
+      ),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀候选取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('补刀新增点复跑在调用方取消后抛出原始原因且不返回追加计划', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const controller = new AbortController();
+    const cancellation = new Error('hack replay caller cancellation');
+    const transportCancellation = Object.assign(new Error('hack replay transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel })
+        .mockRejectedValueOnce(new Error('second target hack generation failed'))
+        .mockRejectedValueOnce(new Error('second target hack retry failed')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        async (code: string, inputs: string[]) => {
+          if (
+            code.includes('shared hack target two')
+            && inputs.length === 1
+            && inputs[0].trim() === '2'
+          ) {
+            controller.abort(cancellation);
+            throw transportCancellation;
+          }
+          return inputs.map(input => {
+            if (code.includes('sys.exit(0)')) return detail();
+            if (code.includes('shared hack target one')) {
+              return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+            }
+            if (code.includes('shared hack target two')) return detail({ stdout: input });
+            return detail({ stdout: input });
+          });
+        },
+      ),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀复跑取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).toHaveBeenCalledTimes(7);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 

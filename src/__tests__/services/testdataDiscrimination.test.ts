@@ -404,6 +404,30 @@ describe('smokeTestKillTargets', () => {
       deadlineAt: Date.now() + 10_000,
     })).resolves.toEqual([target]);
   });
+
+  it('样例烟测在调用方取消后抛出原始原因而不是下游普通错误', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('smoke caller cancellation');
+    const transportError = new Error('smoke transport failed after caller cancellation');
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportError;
+      }),
+    };
+
+    await expect(smokeTestKillTargets({
+      killTargets: [{ kind: 'boundary', description: '取消边界', code: 'print(1)' }],
+      samples: [{ input: '1\n', output: '1\n' }],
+      runner,
+      signal: controller.signal,
+      customChecker: false,
+      deadlineAt: Date.now() + 10_000,
+    })).rejects.toBe(cancellation);
+  });
 });
 
 describe('runDiscriminationPhase', () => {
@@ -597,6 +621,32 @@ describe('runDiscriminationPhase', () => {
     expect(result.targets.every(target =>
       target.skippedReason === 'budget-exhausted' && !target.killed)).toBe(true);
     expect(result.allKilled).toBe(false);
+  });
+
+  it('区分度执行在调用方取消后抛出原始原因而不是合成预算耗尽', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('discrimination caller cancellation');
+    const transportCancellation = Object.assign(
+      new Error('discrimination transport cancellation'),
+      { name: 'CanceledError' },
+    );
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportCancellation;
+      }),
+    };
+
+    await expect(runDiscriminationPhase({
+      killTargets: [{ kind: 'boundary', description: '取消边界', code: 'print(1)' }],
+      cases: [{ input: '1\n', output: '1\n' }],
+      runner,
+      signal: controller.signal,
+      customChecker: false,
+    })).rejects.toBe(cancellation);
   });
 
   it('无错误解靶子时记录 no-targets 并继续执行 BRUTE 复杂度检查', async () => {
