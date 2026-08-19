@@ -4,7 +4,7 @@
 
 - Verdict: **PASS** for the post-fix run described below.
 - Evaluated branch: `codex/task3-hard-template-checker-verification`.
-- Evaluated SHA: `2c61084e2cd22e0effc6493c41d01b7a76edb30c`.
+- Evaluated SHA: `5545328605151f90d90fadbb3294714cd584a8a4`.
 - This evidence report is committed after the evaluated code SHA, so the report commit itself follows that revision.
 - Endpoint class: local loopback HTTP endpoint with no credentials (`http://127.0.0.1:5050`).
 - Adapter: built `dist/services/goJudgeSandboxService.js`; no mocked HTTP client.
@@ -56,12 +56,12 @@ The temporary script was outside the repository and imported the built adapter b
 
 ## Deadline and total timing
 
-- Start epoch: `1787144042828` ms.
-- Start ISO: `2026-08-19T12:54:02.828Z`.
-- Absolute deadline epoch: `1787144162828` ms.
-- Absolute deadline ISO: `2026-08-19T12:56:02.828Z`.
+- Start epoch: `1787149992846` ms.
+- Start ISO: `2026-08-19T14:33:12.846Z`.
+- Absolute deadline epoch: `1787150112846` ms.
+- Absolute deadline ISO: `2026-08-19T14:35:12.846Z`.
 - Initial absolute-deadline budget: `120000` ms.
-- Total wall time: `945` ms.
+- Total wall time: `940` ms.
 
 Every compile and execution request in the final smoke used that one absolute deadline.
 
@@ -69,9 +69,9 @@ Every compile and execution request in the final smoke used that one absolute de
 
 | Language | Compile/prepare kind | compiled | executed | passed/total | Wall time |
 |---|---:|---:|---:|---:|---:|
-| Python (`solution + template.py`) | `interpreted-prepare` | true | 4 | 4/4 | 41 ms |
-| C++ (`template.cc + foo.cc`) | `success` | true | 4 | 4/4 | 558 ms |
-| Java (`Main.java + Solution.java`) | `success` | true | 4 | 4/4 | 334 ms |
+| Python (`solution + template.py`) | `interpreted-prepare` | true | 4 | 4/4 | 35 ms |
+| C++ (`template.cc + foo.cc`) | `success` | true | 4 | 4/4 | 578 ms |
+| Java (`Main.java + Solution.java`) | `success` | true | 4 | 4/4 | 315 ms |
 
 ## Per-case results
 
@@ -98,23 +98,23 @@ Raw go-judge cache IDs were neither printed nor committed. The report records on
 
 | Language | Redacted token | Delete attempted | Post-delete runner result | Confirmed unusable |
 |---|---|---:|---|---:|
-| C++ | `sha256:0c9a2ef16d71` | true | HTTP 500 from go-judge because the cached file no longer existed | true |
-| Java | `sha256:f397ba7a9618` | true | HTTP 500 from go-judge because the cached file no longer existed | true |
+| C++ | `sha256:dd9178e3125d` | true | HTTP 500 from go-judge because the cached file no longer existed | true |
+| Java | `sha256:8fd13b52be50` | true | HTTP 500 from go-judge because the cached file no longer existed | true |
 
 The smoke also retained `finally` cleanup for any cached artifact if an earlier step failed.
 
 ## Complete gates at the evaluated SHA
 
-The required gates ran in this exact order after the observed report existed:
+The required gates ran in this exact order immediately before the final smoke rerun:
 
 | Order | Command | Observed result | EXIT |
 |---:|---|---|---:|
 | 1 | `npm run gen:locale` | generated `frontend/generated/localeFallback.ts`; zh 1169 keys, en 1169 keys | 0 |
-| 2 | `npm test -- --runInBand` | 70/70 suites, 1547/1547 tests, 0 snapshots, 2.956 seconds | 0 |
+| 2 | `npm test -- --runInBand` | 70/70 suites, 1570/1570 tests, 0 snapshots, 2.992 seconds | 0 |
 | 3 | `npm run lint` | zero reported warnings or errors | 0 |
 | 4 | `npm run build:plugin` | TypeScript build completed | 0 |
 | 5 | `git diff --check` | no whitespace errors | 0 |
-| 6 | `git status --short` | only the intentional temporary untracked `node_modules` symlink was visible; this ignored report was not yet staged | 0 |
+| 6 | `git status --short` | only the intentional temporary untracked `node_modules` symlink was visible before this report update | 0 |
 
 ## Deviations and investigation history
 
