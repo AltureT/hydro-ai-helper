@@ -2109,11 +2109,107 @@ describe('TestdataGenService.generate', () => {
     });
 
     await expect(promise).rejects.toMatchObject({
+      code: 'SPEC_PARSE_FAILED',
+      stage: 'config_parse',
+      artifact: 'spec',
+      retryPolicy: 'no-retry',
       userMessageKey: 'ai_helper_testdata_err_config_unparsable',
       telemetryMetadata: expect.objectContaining({ failureStage: 'config_parse' }),
     });
     expect(mockClient.chat).not.toHaveBeenCalled();
     expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
+  it('真实外围制品二次解析失败保持 artifacts_parse 契约且不误启完整模型重跑', async () => {
+    // Mutation caught: artifacts_parse falling back to UNKNOWN/pipeline or input-validity routing.
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: 'not generation artifacts', usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: 'still not generation artifacts', usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '外围制品解析守卫',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'artifacts_parse',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      recommendDeeperReasoning: true,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('重新完整输出 @@@GENERATOR@@@');
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalledWith(usedModel);
+    expect(runner.runPython).not.toHaveBeenCalled();
+  });
+
+  it('真实函数题压力输入赋值写法在修复请求失败后保持 function-samples 契约', async () => {
+    // Mutation caught: function-samples falling back to UNKNOWN/pipeline or repairing the main generator.
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const assignmentStressCases = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, index) => ({ label: `stress-${index}`, input: `value = ${index}` }),
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair endpoint unavailable')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: assignmentStressCases }), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '函数输入协议守卫',
+      statementMarkdown: '函数题无公开样例',
+      options: { problemKind: 'function', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_INPUT',
+      stage: 'function-samples',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('独立验证制品未通过');
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('同一原始 stdin 编码');
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
   it('checkpoint 命中四项制品时跳过对应 AI 调用但仍完整运行沙箱', async () => {

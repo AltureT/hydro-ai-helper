@@ -871,6 +871,59 @@ describe('TestdataGenGenerateHandler', () => {
       clientSpy.mockRestore();
     }
   });
+
+  it('同步 AIServiceError 遥测仅保留类别、重试布尔值与尝试次数', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const error = new openaiClient.AIServiceError(
+      'input=SECRET_INPUT output=SECRET_OUTPUT key=sk-secret https://private.example/v1',
+      'network',
+      undefined,
+      {
+        endpointId: 'endpoint-secret-id',
+        endpointName: 'https://private.example/v1',
+        modelName: 'private-model',
+        totalAttempts: 2,
+        skippedEndpoints: ['secret-skipped-endpoint'],
+        attempts: [{
+          endpoint: 'endpoint-secret-id',
+          model: 'private-model',
+          category: 'network',
+          message: 'raw request and response excerpt',
+        }],
+      },
+    );
+    error.stack = 'STACK_WITH_SECRET_INPUT_AND_OUTPUT';
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'AI_SERVICE_ERROR',
+        category: 'network',
+        retryable: true,
+      }));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Untyped test-data generation failure',
+        undefined,
+        undefined,
+        { aiCategory: 'network', retryable: true, attemptCount: 2 },
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
 });
 
 // ─── Persistent generation job handlers ─────────────────────────────────────
@@ -1051,6 +1104,60 @@ describe('Testdata generation background jobs', () => {
           retryPolicy: 'no-retry',
           elapsedMs: 120000,
         },
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('后台普通错误遥测丢弃消息、栈、ID、URL 与任意元数据', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const sensitiveError = Object.assign(
+      new Error('input=SECRET_INPUT output=SECRET_OUTPUT https://private.example/v1 key=sk-secret'),
+      {
+        stack: 'STACK_WITH_SECRET_INPUT_AND_OUTPUT',
+        problemId: 'D3102',
+        jobId: String(job._id),
+        metadata: { nested: { response: 'SECRET_OUTPUT' } },
+      },
+    );
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockRejectedValue(sensitiveError);
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'testdataGenerationJobModel') return jobModel;
+      if (name === 'errorReporter') return { capture };
+      return undefined;
+    });
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Untyped test-data generation failure',
+        undefined,
+        undefined,
+        {},
       );
     } finally {
       genSpy.mockRestore();

@@ -367,7 +367,7 @@ function buildCancellationResponse(translate) {
     const { message, ...contract } = buildCancellationJobError(translate);
     return { error: message, ...contract };
 }
-function captureTestdataGenerationFailure(ctx, err, fallbackMetadata) {
+function captureTestdataGenerationFailure(ctx, err) {
     const reporter = ctx.get?.('errorReporter');
     if (!reporter?.capture)
         return;
@@ -382,7 +382,19 @@ function captureTestdataGenerationFailure(ctx, err, fallbackMetadata) {
         });
         return;
     }
-    reporter.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, fallbackMetadata);
+    const safeMetadata = {};
+    if (err instanceof openaiClient_1.AIServiceError) {
+        safeMetadata.aiCategory = err.category;
+        safeMetadata.retryable = err.isRetryable;
+        const totalAttempts = err.context?.totalAttempts;
+        if (typeof totalAttempts === 'number'
+            && Number.isSafeInteger(totalAttempts)
+            && totalAttempts >= 0
+            && totalAttempts <= 1000) {
+            safeMetadata.attemptCount = totalAttempts;
+        }
+    }
+    reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, safeMetadata);
 }
 function serializeGenerationJob(job) {
     return {
@@ -540,7 +552,7 @@ async function runBackgroundGeneration(params) {
         const failedModel = usedModels[usedModels.length - 1]
             || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-        captureTestdataGenerationFailure(ctx, err, { ...testdataMetadata, ...aiMetadata });
+        captureTestdataGenerationFailure(ctx, err);
         const jobError = err instanceof openaiClient_1.AIServiceError
             ? {
                 message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -737,7 +749,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const failedModel = usedModels[usedModels.length - 1]
                 || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-            captureTestdataGenerationFailure(this.ctx, err, { ...testdataMetadata, ...aiMetadata });
+            captureTestdataGenerationFailure(this.ctx, err);
             if (err instanceof openaiClient_1.AIServiceError) {
                 const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),

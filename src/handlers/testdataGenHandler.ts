@@ -496,7 +496,6 @@ function buildCancellationResponse(translate: (key: string) => string) {
 function captureTestdataGenerationFailure(
   ctx: unknown,
   err: unknown,
-  fallbackMetadata: Record<string, unknown>,
 ): void {
   const reporter = (ctx as {
     get?(name: string): { capture?: (...args: unknown[]) => void } | undefined;
@@ -520,13 +519,27 @@ function captureTestdataGenerationFailure(
     );
     return;
   }
+  const safeMetadata: Record<string, unknown> = {};
+  if (err instanceof AIServiceError) {
+    safeMetadata.aiCategory = err.category;
+    safeMetadata.retryable = err.isRetryable;
+    const totalAttempts = err.context?.totalAttempts;
+    if (
+      typeof totalAttempts === 'number'
+      && Number.isSafeInteger(totalAttempts)
+      && totalAttempts >= 0
+      && totalAttempts <= 1000
+    ) {
+      safeMetadata.attemptCount = totalAttempts;
+    }
+  }
   reporter.capture(
     'api_failure',
     'testdata_gen',
-    err instanceof Error ? err.message : String(err),
+    'Untyped test-data generation failure',
     undefined,
-    err instanceof Error ? err.stack : undefined,
-    fallbackMetadata,
+    undefined,
+    safeMetadata,
   );
 }
 
@@ -715,7 +728,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     ctx.get('featureStatsModel')?.recordModelOutcome?.(
       'testdata_generation', failedModel, false,
     ).catch(() => { /* best-effort */ });
-    captureTestdataGenerationFailure(ctx, err, { ...testdataMetadata, ...aiMetadata });
+    captureTestdataGenerationFailure(ctx, err);
 
     const jobError: TestdataGenerationJobError = err instanceof AIServiceError
       ? {
@@ -926,7 +939,7 @@ export class TestdataGenGenerateHandler extends Handler {
       this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
         'testdata_generation', failedModel, false,
       ).catch(() => { /* best-effort */ });
-      captureTestdataGenerationFailure(this.ctx, err, { ...testdataMetadata, ...aiMetadata });
+      captureTestdataGenerationFailure(this.ctx, err);
       if (err instanceof AIServiceError) {
         const errorBody = {
           error: this.translate(USER_ERROR_MESSAGE_KEYS[err.category]),
