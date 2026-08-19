@@ -50,6 +50,7 @@ type VerificationInput = {
   adjudicator: TemplateOutputAdjudicator;
   signal?: AbortSignal;
   deadlineAt?: number;
+  deadlineAtProvider?: () => number | undefined;
   allowCheckerInfraResult: boolean;
 };
 
@@ -112,7 +113,8 @@ function throwIfCancelledOrExpired(
   if (input.signal?.aborted) {
     throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
   }
-  if (input.deadlineAt !== undefined && Date.now() >= input.deadlineAt) {
+  const deadlineAt = input.deadlineAtProvider?.() ?? input.deadlineAt;
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
     fail(language, 'budget', check);
   }
 }
@@ -128,7 +130,10 @@ async function deleteCachedFile(runner: TestdataSandboxRunner, fileId: string): 
 async function runLanguage(input: VerificationInput, language: TemplateVerificationLanguage): Promise<PythonRunDetail[]> {
   const { solution, template } = assertPresentSource(input, language);
   const inputs = input.cases.map(testcase => testcase.input);
-  const options = { signal: input.signal, deadlineAt: input.deadlineAt };
+  const options = {
+    signal: input.signal,
+    deadlineAt: input.deadlineAtProvider?.() ?? input.deadlineAt,
+  };
   const baseCheck: TemplateVerificationCheck = {
     compiled: language === 'py', executed: false, total: inputs.length, passed: 0,
   };
@@ -215,7 +220,10 @@ async function adjudicate(
       input: input.cases[index].input,
       output: result.stdout,
       answer: input.cases[index].answer,
-    })), { signal: input.signal, deadlineAt: input.deadlineAt });
+    })), {
+      signal: input.signal,
+      deadlineAt: input.deadlineAtProvider?.() ?? input.deadlineAt,
+    });
     throwIfCancelledOrExpired(input, language, check);
   } catch (error) {
     if (input.signal?.aborted) throw input.signal.reason ?? error;

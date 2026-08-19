@@ -114,6 +114,8 @@ function validPlan(): GenerationPlan {
     verification: {
       mode: 'sandbox',
       oracleKind: 'ai-solution',
+      verified: false,
+      wouldBlock: false,
       sampleCheck: { total: 1, passed: 1 },
       validator: { ran: true, casesChecked: 69 },
       stressCheck: {

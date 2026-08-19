@@ -83,6 +83,7 @@ exports.resolveMaterializationResume = resolveMaterializationResume;
 exports.materializeSandboxBlueprint = materializeSandboxBlueprint;
 exports.parseTemplateSections = parseTemplateSections;
 exports.assemblePlan = assemblePlan;
+exports.finalizePlanVerification = finalizePlanVerification;
 exports.isLikelyFunctionProblem = isLikelyFunctionProblem;
 exports.buildSkeletonPlan = buildSkeletonPlan;
 exports.extractTestdataErrorMetadata = extractTestdataErrorMetadata;
@@ -99,6 +100,7 @@ const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
 const statementSamples_1 = require("./testdata/statementSamples");
+const templateVerifier_1 = require("./testdata/templateVerifier");
 var statementSamples_2 = require("./testdata/statementSamples");
 Object.defineProperty(exports, "extractStatementSamples", { enumerable: true, get: function () { return statementSamples_2.extractStatementSamples; } });
 function comparableFileContent(content) {
@@ -3109,8 +3111,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             delete cache.validation;
             delete cache.oracle;
             delete cache.templateCompleted;
-            delete cache.pyTemplateExecuted;
-            delete cache.templateCheck;
+            delete cache.templateChecks;
         }
         else {
             generatedInputs = cache.generatedInputs;
@@ -3203,8 +3204,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             delete cache.validation;
             delete cache.oracle;
             delete cache.templateCompleted;
-            delete cache.pyTemplateExecuted;
-            delete cache.templateCheck;
+            delete cache.templateChecks;
         }
         else {
             const cachedStress = cache.stress;
@@ -3324,8 +3324,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             stressGenerated = keptStressIndices.map(index => stressGenerated[index]);
             delete cache.oracle;
             delete cache.templateCompleted;
-            delete cache.pyTemplateExecuted;
-            delete cache.templateCheck;
+            delete cache.templateChecks;
         }
         else {
             const cachedValidation = cache.validation;
@@ -3448,8 +3447,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 sampleCheckerVerdicts,
             };
             delete cache.templateCompleted;
-            delete cache.pyTemplateExecuted;
-            delete cache.templateCheck;
+            delete cache.templateChecks;
         }
         else {
             const cachedOracle = cache.oracle;
@@ -3458,100 +3456,85 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             cases = cachedOracle.cases;
             sampleCheckerVerdicts = cachedOracle.sampleCheckerVerdicts;
         }
-        // f. 函数题：solution + template.py 组合实跑，验证模板与输入编码
-        let pyTemplateExecuted = false;
-        let templateCheck;
+        // f. 函数题：所有所选语言在每个正式点与题面样例上统一验证。
+        let templateChecks;
         if (startsAtOrBefore('template')) {
-            if (blueprint.problemType === 'function'
-                && options.languages.includes('py')
-                && blueprint.solutionCode
-                && blueprint.templates?.py) {
+            if (blueprint.problemType === 'function') {
                 reportProgress('checking_templates', 79);
                 checkBudget();
-                const combined = `${blueprint.solutionCode}\n${blueprint.templates.py}`;
-                const templateInputs = [...inputs, ...sampleInputs];
-                let templateResults;
+                const verificationCases = [
+                    ...inputs.map((input, index) => ({ input, answer: cases[index]?.output || '' })),
+                    ...sampleInputs.map((input, index) => ({
+                        input,
+                        answer: oracleResults[inputs.length + index]?.stdout || '',
+                    })),
+                ];
+                const adjudicator = {
+                    customChecker,
+                    adjudicate: async (adjudicationCases, controls = {}) => {
+                        if (!customChecker || checkerExecutor?.status !== 'ready') {
+                            return adjudicationCases.map(() => 'infra-error');
+                        }
+                        return runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(adjudicationCases, controls));
+                    },
+                };
                 try {
-                    templateResults = await runner.runPythonBatchDetailed(combined, templateInputs, { signal, deadlineAt: sandboxDeadlineAt });
+                    templateChecks = await (0, templateVerifier_1.verifySelectedTemplates)({
+                        languages: options.languages,
+                        solutions: {
+                            ...(blueprint.solutionCode ? { py: blueprint.solutionCode } : {}),
+                            ...blueprint.solutions,
+                        },
+                        templates: blueprint.templates || {},
+                        cases: verificationCases,
+                        runner,
+                        adjudicator,
+                        signal,
+                        deadlineAt: sandboxDeadlineAt,
+                        deadlineAtProvider: () => sandboxDeadlineAt,
+                        allowCheckerInfraResult: true,
+                    });
                 }
                 catch (err) {
                     if (isCancellation(err))
                         throw err;
-                    throw toSandboxExecutionPipelineError(err, {
-                        code: 'TEMPLATE_RUNTIME_FAILED',
-                        stage: 'template',
-                        artifact: 'template-py',
-                        message: `template.py 实跑失败：${err instanceof Error ? err.message : String(err)}`,
-                    });
-                }
-                if (templateResults.length !== templateInputs.length) {
-                    throw (0, failures_1.toPipelineError)(new Error(`template.py 返回 ${templateResults.length} 个结果，期望 ${templateInputs.length} 个`), {
-                        code: 'TEMPLATE_RUNTIME_FAILED',
-                        stage: 'template',
-                        artifact: 'template-py',
-                        safeDetails: { actualCount: templateResults.length, expectedCount: templateInputs.length },
-                    });
-                }
-                let passed = 0;
-                const skippedTimeout = [];
-                for (let i = 0; i < templateResults.length; i++) {
-                    const detail = templateResults[i];
-                    const caseNo = i + 1;
-                    if (detail.timedOut) {
-                        skippedTimeout.push(caseNo);
-                        continue;
+                    if (!(err instanceof templateVerifier_1.TemplateVerificationError))
+                        throw err;
+                    const safeDetails = {
+                        ...(err.caseIndex !== undefined ? { caseIndex: err.caseIndex + 1 } : {}),
+                        failureKind: err.kind,
+                    };
+                    if (err.kind === 'checker-infra') {
+                        const checkerFailureKind = checkerExecutor?.check.failureKind === 'budget'
+                            ? 'budget'
+                            : 'infra';
+                        throw checkerPipelineError('CHECKER_RUNTIME_FAILED', checkerFailureKind, '模板输出未能完成可信 checker 裁决');
                     }
-                    const expectedOutput = i < inputs.length
-                        ? cases[i].output
-                        : oracleResults[i]?.stdout || '';
-                    if (!detail.accepted) {
-                        const target = i < inputs.length
-                            ? `第 ${caseNo} 个测试点`
-                            : `函数题样例 ${samples[i - inputs.length].id}`;
-                        throw (0, failures_1.toPipelineError)(new Error(`template.py 在${target}执行失败`), {
-                            code: 'TEMPLATE_RUNTIME_FAILED', stage: 'template', artifact: 'template-py',
-                            safeDetails: { caseIndex: i + 1 },
+                    if (err.kind === 'budget') {
+                        throw (0, failures_1.toPipelineError)(err, {
+                            code: 'PIPELINE_BUDGET_EXHAUSTED',
+                            stage: 'sandbox_budget',
+                            artifact: 'pipeline',
+                            retryPolicy: 'no-retry',
+                            safeDetails,
                         });
                     }
-                    let outputAccepted;
-                    if (customChecker) {
-                        if (checkerExecutor?.status !== 'ready')
-                            continue;
-                        const verdict = await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runChecker(templateInputs[i], detail.stdout, expectedOutput, { signal, deadlineAt: sandboxDeadlineAt }));
-                        if (verdict === 'infra-error')
-                            continue;
-                        outputAccepted = verdict === 'accept';
-                    }
-                    else {
-                        outputAccepted = comparableFileContent(detail.stdout) === comparableFileContent(expectedOutput);
-                    }
-                    if (outputAccepted) {
-                        passed++;
-                        continue;
-                    }
-                    const target = i < inputs.length
-                        ? `第 ${caseNo} 个测试点`
-                        : `函数题样例 ${samples[i - inputs.length].id}`;
-                    throw (0, failures_1.toPipelineError)(new Error(`template.py 与标程在${target}不一致\n`
-                        + `输入：${(0, textTruncate_1.excerpt)(templateInputs[i], 300)}\n`
-                        + `模板输出：${(0, textTruncate_1.excerpt)(detail.stdout || detail.stderr || detail.status, 300)}\n`
-                        + `标程输出：${(0, textTruncate_1.excerpt)(expectedOutput, 300)}`), {
-                        code: 'TEMPLATE_OUTPUT_MISMATCH',
+                    const code = err.kind === 'compile'
+                        ? 'TEMPLATE_COMPILE_FAILED'
+                        : err.kind === 'runtime' ? 'TEMPLATE_RUNTIME_FAILED' : 'TEMPLATE_OUTPUT_MISMATCH';
+                    throw (0, failures_1.toPipelineError)(err, {
+                        code,
                         stage: 'template',
-                        artifact: 'template-py',
-                        safeDetails: { caseIndex: i + 1 },
+                        artifact: artifactForTemplateLanguage(err.language),
+                        safeDetails,
                     });
                 }
-                pyTemplateExecuted = true;
-                templateCheck = { lang: 'py', total: templateInputs.length, passed, skippedTimeout };
             }
             cache.templateCompleted = true;
-            cache.pyTemplateExecuted = pyTemplateExecuted;
-            cache.templateCheck = templateCheck;
+            cache.templateChecks = templateChecks;
         }
         else {
-            pyTemplateExecuted = cache.pyTemplateExecuted === true;
-            templateCheck = cache.templateCheck;
+            templateChecks = cache.templateChecks;
         }
         // g. 独立 BRUTE 优先跑内部小数据；兼容旧蓝图时回退到正式测试点。
         const oracleMatchesProvidedStd = !!(providedStd
@@ -3790,6 +3773,8 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             oracleKind: oracleIsAcceptedRecord
                 ? 'accepted-record'
                 : oracleIsManualStd ? 'provided-std' : 'ai-solution',
+            verified: false,
+            wouldBlock: false,
             validator: { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
         };
         if (blueprint.problemType === 'traditional' || samples.length > 0) {
@@ -3804,8 +3789,8 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             verification.bruteCheck = bruteCheck;
         if (stressCheck)
             verification.stressCheck = stressCheck;
-        if (templateCheck)
-            verification.templateCheck = templateCheck;
+        if (templateChecks)
+            verification.templateChecks = templateChecks;
         verification.discrimination = discrimination;
         const noteParts = [blueprint.notes];
         const noteWarnings = [];
@@ -3816,7 +3801,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         };
         appendNote('system', `测试输入由生成器产生，所有 .out 已在 Hydro 沙箱中实际运行 ${oracleLanguage === 'cpp' ? 'C++17' : 'Python'} 标程生成。`);
         if (blueprint.problemType === 'function' && samples.length > 0) {
-            appendNote('system', `已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateCheck ? ' 与 template.py' : ''}。`);
+            appendNote('system', `已由独立验证调用将 ${samples.length} 个函数题题面样例转换为原始 stdin，并回归 ORACLE${templateChecks ? ' 与全部所选语言模板' : ''}。`);
         }
         if (oracleIsAcceptedRecord) {
             appendNote('warning', samples.length > 0
@@ -3841,9 +3826,6 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         if (bruteCheck && bruteCheck.skippedTimeout.length > 0) {
             appendNote('warning', `暴力解在测试点 ${bruteCheck.skippedTimeout.join('、')} 超时，已跳过对拍。`);
         }
-        if (templateCheck && templateCheck.skippedTimeout.length > 0) {
-            appendNote('warning', `模板实跑在测试点 ${templateCheck.skippedTimeout.join('、')} 超时，已跳过。`);
-        }
         return {
             problemType: blueprint.problemType,
             isFillIn: blueprint.isFillIn,
@@ -3862,7 +3844,6 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             verification,
             discriminationDeadlineAt,
             discriminationKillTargets,
-            pyTemplateExecuted,
             cases,
             notes: noteParts.filter(Boolean).join('\n'),
             notesStructured: {
@@ -4038,8 +4019,12 @@ function assemblePlan(response, options, context = {}) {
         for (const lang of options.languages) {
             const content = response.templates?.[lang];
             if (content) {
-                // template.py 走过步骤 e（solution+模板实跑）才算 executed，其余语言维持 AI 自证
-                const origin = lang === 'py' && sandbox && response.pyTemplateExecuted
+                const check = response.verification?.templateChecks?.[lang];
+                const origin = sandbox
+                    && check?.compiled === true
+                    && check.executed === true
+                    && check.total > 0
+                    && check.passed === check.total
                     ? 'executed'
                     : 'ai-only';
                 pushCode(exports.TEMPLATE_FILENAMES[lang], content, 'template', origin, FILE_PURPOSES.template);
@@ -4048,7 +4033,7 @@ function assemblePlan(response, options, context = {}) {
         files.push({ name: 'compile.sh', content: buildCompileSh(options.languages), kind: 'compile', origin: 'deterministic' });
     }
     if (response.generatorCode?.trim()) {
-        pushCode('generator.py', response.generatorCode, 'generator', 'executed', FILE_PURPOSES.generator);
+        pushCode('generator.py', response.generatorCode, 'generator', sandbox ? 'executed' : 'ai-only', FILE_PURPOSES.generator);
     }
     if (sandbox && response.bruteCode?.trim()) {
         pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
@@ -4120,6 +4105,68 @@ function assemblePlan(response, options, context = {}) {
         })),
         ...(verification ? { verification } : {}),
     };
+}
+// ─── 服务端权威验证结论 ─────────────────────────────────────────────────────
+function isTemplateVerificationGreen(check) {
+    return check?.compiled === true
+        && check.executed === true
+        && check.total > 0
+        && check.passed === check.total;
+}
+/** 只依据服务端已产生的完整证据计算计划的权威验证结论。 */
+function finalizePlanVerification(plan, selectedLanguages, customChecker, reliabilityMode) {
+    const verification = plan.verification;
+    if (!verification)
+        return plan;
+    const sampleGreen = !verification.sampleCheck
+        || verification.sampleCheck.passed === verification.sampleCheck.total;
+    const stress = verification.stressCheck;
+    const stressGreen = !!stress
+        && !stress.skippedReason
+        && stress.compared > 0
+        && stress.agreed === stress.compared
+        && (stress.uniqueInputs === undefined
+            || stress.uniqueInputs >= Math.ceil(stress.generated * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO));
+    const brute = verification.bruteCheck;
+    const legacyBruteGreen = !stress
+        && !!brute
+        && brute.compared > 0
+        && brute.agreed === brute.compared
+        && brute.disagreed.length === 0
+        && brute.skippedTimeout.length === 0;
+    const discriminationGreen = !verification.discrimination
+        || (verification.discrimination.allKilled
+            && areAllApplicableDiscriminationTargetsKilled(verification.discrimination.targets));
+    const templatesGreen = plan.problemType !== 'function'
+        || selectedLanguages.every(language => (isTemplateVerificationGreen(verification.templateChecks?.[language])));
+    const checker = verification.checkerCheck;
+    const checkerGreen = !customChecker || (!!checker
+        && checker.configured
+        && checker.read
+        && checker.compiled
+        && checker.executed
+        && checker.total > 0
+        && checker.passed === checker.total
+        && checker.infraFailures === 0);
+    const selectedTemplateNames = new Set(selectedLanguages.map(language => exports.TEMPLATE_FILENAMES[language]));
+    const hasAiOnlyCriticalFile = plan.files.some(file => file.origin === 'ai-only' && (file.kind === 'case-in'
+        || file.kind === 'case-out'
+        || file.kind === 'std'
+        || file.kind === 'generator'
+        || file.kind === 'brute'
+        || file.kind === 'validator'
+        || (file.kind === 'template' && selectedTemplateNames.has(file.name))));
+    const verified = reliabilityMode !== 'legacy'
+        && verification.mode === 'sandbox'
+        && sampleGreen
+        && (stressGreen || legacyBruteGreen)
+        && discriminationGreen
+        && templatesGreen
+        && checkerGreen
+        && !hasAiOnlyCriticalFile;
+    verification.verified = verified;
+    verification.wouldBlock = reliabilityMode === 'observe' && !verified;
+    return plan;
 }
 // ─── 骨架模式（AI 故障降级，不调用 AI） ──────────────────────────────────────
 /** 骨架模板：可直接编译/运行，教师按 TODO 补全输入输出部分 */
@@ -5038,6 +5085,8 @@ class TestdataGenService {
             oracleKind: params.options.providedStd?.trim()
                 ? params.options.providedStdSource === 'accepted-record' ? 'accepted-record' : 'provided-std'
                 : 'ai-solution',
+            verified: false,
+            wouldBlock: false,
         };
         if (hasCustomChecker(params.existingConfig)) {
             const checkerArtifacts = params.checkerArtifacts
@@ -5049,7 +5098,7 @@ class TestdataGenService {
             plan.verification.verified = false;
             plan.verification.wouldBlock = true;
         }
-        return this.applyResultMetadata(plan, results);
+        return this.applyResultMetadata(finalizePlanVerification(plan, params.options.languages, hasCustomChecker(params.existingConfig), this.reliabilityMode), results);
     }
     async generateGenerationArtifacts(params, solution, coveragePlan, callOptions, results) {
         const systemPrompt = buildGenerationArtifactsSystemPrompt();
@@ -5775,12 +5824,13 @@ class TestdataGenService {
                 }
             }
             report('assembling', 96);
-            return this.applyResultMetadata(assemblePlan(response, params.options, {
+            const plan = assemblePlan(response, params.options, {
                 mode: 'sandbox',
                 existingFiles: params.existingFiles,
                 existingConfig: params.existingConfig,
                 tieredDecision,
-            }), [...results, ...optionalDiscriminationResults]);
+            });
+            return this.applyResultMetadata(finalizePlanVerification(plan, params.options.languages, customChecker, this.reliabilityMode), [...results, ...optionalDiscriminationResults]);
         }
         finally {
             await checkerExecutor.dispose();

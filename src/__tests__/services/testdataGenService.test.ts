@@ -69,6 +69,7 @@ import {
   DISCRIMINATION_BUDGET_MS,
   GoJudgeSandboxRunner,
   SANDBOX_TOTAL_BUDGET_MS,
+  SandboxBudgetExceededError,
 } from '../../services/goJudgeSandboxService';
 
 const baseOptions: GenerateOptions = {
@@ -1684,6 +1685,8 @@ describe('assemblePlan', () => {
     response.verification = {
       mode: 'sandbox',
       oracleKind: 'ai-solution',
+      verified: false,
+      wouldBlock: false,
       discrimination: {
         targets: [{
           kind: 'wrong-algorithm',
@@ -1726,6 +1729,8 @@ describe('assemblePlan', () => {
     response.verification = {
       mode: 'sandbox',
       oracleKind: 'ai-solution',
+      verified: false,
+      wouldBlock: false,
       discrimination: {
         targets: [
           {
@@ -2416,6 +2421,13 @@ describe('TestdataGenService.generate', () => {
         (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
           code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
       ),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checkpoint-cc' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'checkpoint-java' }),
+      runJavaBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
     };
 
     await new TestdataGenService(mockClient as never, {
@@ -3595,6 +3607,13 @@ describe('TestdataGenService.generate', () => {
         })
         .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'repair-cc' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'repair-java' }),
+      runJavaBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
     };
     const plan = await new TestdataGenService(mockClient as never, {
       sandboxRunner: runner, mode: 'sandbox',
@@ -5973,7 +5992,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.notes).toContain('题目 checker');
   });
 
-  it('函数题 solution+template.py 组合实跑，一致则记 templateCheck.passed', async () => {
+  it('函数题 solution+template.py 组合实跑，一致则记 templateChecks.py', async () => {
     const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
     const bp = parseSandboxBlueprint([
       '@@@META@@@', 'problemType: function', 'functionName: f',
@@ -5989,12 +6008,265 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '5\n' })]),
     };
     const res = await materializeSandboxBlueprint(bp, fnOpts, '', runner);
-    expect(res.pyTemplateExecuted).toBe(true);
-    expect(res.verification?.templateCheck).toEqual({ lang: 'py', total: 1, passed: 1, skippedTimeout: [] });
+    expect(res).not.toHaveProperty('pyTemplateExecuted');
+    expect(res.verification?.templateChecks?.py).toEqual({
+      compiled: true, executed: true, total: 1, passed: 1,
+    });
     // 组合程序 = solution + '\n' + template.py
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
       expect.stringContaining('def f(a, b):'), ['2 3\n'], expect.anything(),
     );
+  });
+
+  it('selected languages execute every formal point and statement sample into templateChecks', async () => {
+    const fnOpts: GenerateOptions = {
+      problemKind: 'function', caseCount: 3, dataScale: 'auto', languages: ['py', 'java', 'cc'],
+    };
+    const statement = [
+      '## 样例',
+      '```input1', '4', '```', '```output1', '4', '```',
+      '```input2', '5', '```', '```output2', '5', '```',
+    ].join('\n');
+    const bp = {
+      ...parseSandboxBlueprint([
+        '@@@META@@@', 'problemType: function', 'functionName: echo',
+        '@@@GENERATOR@@@', 'print(gen())',
+        '@@@ORACLE@@@', 'print(input())',
+        '@@@SOLUTION:py@@@', 'def echo(value): return value',
+        '@@@SOLUTION:java@@@', 'class Solution { String echo(String value) { return value; } }',
+        '@@@SOLUTION:cc@@@', 'string echo(string value) { return value; }',
+        '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+        '@@@TEMPLATE:java@@@', 'public class Main { public static void main(String[] args) {} }',
+        '@@@TEMPLATE:cc@@@', '#include "foo.cc"', 'int main() { return 0; }',
+      ].join('\n'), fnOpts),
+      functionSampleInputs: [{ id: '1', input: '4\n' }, { id: '2', input: '5\n' }],
+    };
+    const allInputs = ['1\n', '2\n', '3\n', '4\n', '5\n'];
+    const accepted = allInputs.map(input => detail({ stdout: input }));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: 'small', input: '1' },
+          { label: 'medium', input: '2' },
+          { label: 'large', input: '3' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'template-cc-cache' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'template-java-cache' }),
+      runJavaBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await materializeSandboxBlueprint(bp, fnOpts, statement, runner);
+
+    expect(result.verification?.templateChecks).toEqual({
+      py: { compiled: true, executed: true, total: 5, passed: 5 },
+      java: { compiled: true, executed: true, total: 5, passed: 5 },
+      cc: { compiled: true, executed: true, total: 5, passed: 5 },
+    });
+    expect(result.cases.map(item => item.dataScale)).toEqual(['small', 'medium', 'large']);
+    expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
+      2, expect.stringContaining('def echo(value)'), allInputs, expect.anything(),
+    );
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'template-cc-cache', allInputs, expect.anything(),
+    );
+    expect(runner.runJavaBatchDetailed).toHaveBeenCalledWith(
+      'template-java-cache', allInputs, expect.anything(),
+    );
+  });
+
+  it.each([
+    {
+      label: 'C++ compile', language: 'cc' as const,
+      mutate: (runner: any) => runner.compileCpp.mockResolvedValue({
+        ok: false, kind: 'compile', error: 'bad C++ template',
+      }),
+      expected: {
+        code: 'TEMPLATE_COMPILE_FAILED', artifact: 'template-cc',
+        safeDetails: { failureKind: 'compile' },
+      },
+    },
+    {
+      label: 'Java runtime', language: 'java' as const,
+      mutate: (runner: any) => runner.runJavaBatchDetailed.mockResolvedValue([
+        detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1 }),
+      ]),
+      expected: {
+        code: 'TEMPLATE_RUNTIME_FAILED', artifact: 'template-java',
+        safeDetails: { caseIndex: 1, failureKind: 'runtime' },
+      },
+    },
+    {
+      label: 'Python mismatch', language: 'py' as const,
+      mutate: (runner: any) => runner.runPythonBatchDetailed
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockResolvedValueOnce([detail({ stdout: 'wrong\n' })]),
+      expected: {
+        code: 'TEMPLATE_OUTPUT_MISMATCH', artifact: 'template-py',
+        safeDetails: { caseIndex: 1, failureKind: 'mismatch' },
+      },
+    },
+  ])('maps $label failure to its typed template artifact', async ({ language, mutate, expected }) => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: [language] };
+    const solutions = {
+      py: ['@@@SOLUTION:py@@@', 'def echo(value): return value'],
+      java: ['@@@SOLUTION:java@@@', 'class Solution {}'],
+      cc: ['@@@SOLUTION:cc@@@', 'string echo(string value) { return value; }'],
+    }[language];
+    const templates = {
+      py: ['@@@TEMPLATE:py@@@', 'print(echo(input().strip()))'],
+      java: ['@@@TEMPLATE:java@@@', 'public class Main {}'],
+      cc: ['@@@TEMPLATE:cc@@@', '#include "foo.cc"', 'int main() { return 0; }'],
+    }[language];
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      ...solutions,
+      ...templates,
+    ].join('\n'), fnOpts);
+    const accepted = [detail({ stdout: '1\n' })];
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'cc-cache' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'java-cache' }),
+      runJavaBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    mutate(runner);
+
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject(expected);
+  });
+
+  it('template TLE is a runtime failure and never reduces the selected-language total', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 3, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:py@@@', 'def echo(value): return value',
+      '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+    ].join('\n'), fnOpts);
+    const allInputs = ['1\n', '2\n', '3\n'];
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: allInputs.map((input, index) => ({
+          label: `formal-${index + 1}`, input,
+        })) }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(allInputs.map(input => detail({ stdout: input })))
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }),
+          detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+          detail({ stdout: '3\n' }),
+        ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject({
+      code: 'TEMPLATE_RUNTIME_FAILED',
+      artifact: 'template-py',
+      safeDetails: { caseIndex: 2, failureKind: 'runtime' },
+    });
+    expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
+      2, expect.any(String), allInputs, expect.anything(),
+    );
+  });
+
+  it('template budget exhaustion maps to the pipeline budget without skipping a language', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['java'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:java@@@', 'class Solution {}',
+      '@@@TEMPLATE:java@@@', 'public class Main {}',
+    ].join('\n'), fnOpts);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      compileJava: jest.fn().mockRejectedValue(new SandboxBudgetExceededError()),
+      runJavaBatchDetailed: jest.fn(),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED',
+      artifact: 'pipeline',
+      safeDetails: { failureKind: 'budget' },
+    });
+    expect(runner.compileJava).toHaveBeenCalledTimes(1);
+  });
+
+  it('custom checker template adjudication keeps its independent budget outside the pipeline deadline', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:py@@@', 'def echo(value): return value',
+      '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+    ].join('\n'), fnOpts);
+    const startedAt = 10_000;
+    let now = startedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockImplementationOnce(async () => {
+          now = startedAt + SANDBOX_TOTAL_BUDGET_MS - 1_000;
+          return [detail({ stdout: '1\n' })];
+        }),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: 1, passed: 1, infraFailures: 0,
+      },
+      runBatch: jest.fn().mockImplementation(async () => {
+        now += 2_000;
+        return ['accept' as const];
+      }),
+      runChecker: jest.fn(),
+      dispose: jest.fn(),
+    };
+
+    try {
+      const result = await materializeSandboxBlueprint(
+        bp, fnOpts, '', runner, undefined, true, undefined, [], false, checkerExecutor,
+      );
+      expect(result.verification?.templateChecks?.py).toEqual({
+        compiled: true, executed: true, total: 1, passed: 1,
+      });
+      expect(checkerExecutor.runBatch).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('函数题将题面展示样例独立转码后回归 ORACLE 与 template.py', async () => {
@@ -6042,8 +6314,8 @@ describe('materializeSandboxBlueprint 双重验证', () => {
 
     const res = await materializeSandboxBlueprint(bp, fnOpts, statement, runner);
     expect(res.verification?.sampleCheck).toEqual({ total: 1, passed: 1 });
-    expect(res.verification?.templateCheck).toEqual({
-      lang: 'py', total: 2, passed: 2, skippedTimeout: [],
+    expect(res.verification?.templateChecks?.py).toEqual({
+      compiled: true, executed: true, total: 2, passed: 2,
     });
     expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
     expect(runner.runPythonBatchDetailed.mock.calls[0][2]).toEqual(expect.objectContaining({
@@ -6079,8 +6351,11 @@ describe('materializeSandboxBlueprint 双重验证', () => {
         .mockResolvedValueOnce([detail({ stdout: '5\n' })]) // ORACLE
         .mockResolvedValueOnce([detail({ stdout: '6\n' })]), // solution+template 实跑
     };
-    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner))
-      .rejects.toThrow(/template\.py 与标程在第 1 个测试点不一致/);
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject({
+      code: 'TEMPLATE_OUTPUT_MISMATCH',
+      artifact: 'template-py',
+      safeDetails: { caseIndex: 1, failureKind: 'mismatch' },
+    });
   });
 
   it('超过总时长预算时在阶段间报错', async () => {
@@ -6176,7 +6451,12 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       solutionCode: 'def f():\n    return 5',
       oracleCode: 'print(5)',
       stdSolution: { language: 'python', code: 'print(5)' },
-      pyTemplateExecuted: true,
+      verification: {
+        mode: 'sandbox', oracleKind: 'ai-solution', verified: false, wouldBlock: false,
+        templateChecks: {
+          py: { compiled: true, executed: true, total: 1, passed: 1 },
+        },
+      },
       generatorCode: 'print(1)',
     } as never;
     const opts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
@@ -6196,7 +6476,12 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       solutionCode: 'def f():\n    return 5',
       oracleCode: 'print(5)',
       stdSolution: { language: 'python', code: 'print(5)' },
-      pyTemplateExecuted: true,
+      verification: {
+        mode: 'sandbox', oracleKind: 'ai-solution', verified: false, wouldBlock: false,
+        templateChecks: {
+          py: { compiled: true, executed: true, total: 1, passed: 1 },
+        },
+      },
       generatorCode: 'print(1)',
       bruteCode: 'print(0)',
       validatorCode: 'import sys',
@@ -6246,6 +6531,8 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     });
-    expect(plan.verification).toEqual({ mode: 'direct', oracleKind: 'ai-solution' });
+    expect(plan.verification).toEqual({
+      mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
+    });
   });
 });
