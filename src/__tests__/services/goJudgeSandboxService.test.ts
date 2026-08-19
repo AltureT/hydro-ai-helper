@@ -238,9 +238,14 @@ describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
   it('绝对截止时间已耗尽时不再发起新的沙箱分块请求', async () => {
     const http = { get: jest.fn(), post: jest.fn() };
     const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
-    await expect(runner.runPythonBatchDetailed('print(1)', ['a'], {
+    const failure = await runner.runPythonBatchDetailed('print(1)', ['a'], {
       deadlineAt: Date.now() - 1,
-    })).rejects.toThrow(/沙箱执行总时长超出预算/);
+    }).catch(error => error);
+    expect(failure).toMatchObject({
+      name: 'SandboxBudgetExceededError',
+      code: 'SANDBOX_BUDGET_EXHAUSTED',
+    });
+    expect(failure.message).toMatch(/沙箱执行总时长超出预算/);
     expect(http.post).not.toHaveBeenCalled();
   });
 
@@ -359,10 +364,9 @@ describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
     const lateRunner = new GoJudgeSandboxRunner('http://localhost:5050', lateHttp);
     await expect(lateRunner.compileCpp('int main() {}', {
       deadlineAt: 2_000,
-    })).resolves.toEqual({
-      ok: false,
-      kind: 'infra',
-      error: expect.stringContaining('总时长'),
+    })).rejects.toMatchObject({
+      name: 'SandboxBudgetExceededError',
+      code: 'SANDBOX_BUDGET_EXHAUSTED',
     });
     expect(lateHttp.delete).toHaveBeenCalledWith(
       'http://localhost:5050/file/late-prog',

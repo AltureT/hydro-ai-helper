@@ -63,8 +63,10 @@ import {
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
+import { TestdataPipelineError } from '../../services/testdata/failures';
 import {
   DISCRIMINATION_BUDGET_MS,
+  GoJudgeSandboxRunner,
   SANDBOX_TOTAL_BUDGET_MS,
 } from '../../services/goJudgeSandboxService';
 
@@ -1929,23 +1931,75 @@ describe('stage-specific sandbox repair', () => {
     expect(classifySandboxRepairScope(new Error('AC 候选标程与独立 BRUTE 不一致'))).toBe('accepted-std');
     expect(classifySandboxRepairScope(new Error('template.py 与标程不一致'))).toBe('template-py');
     expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
-    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
-    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
+    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options, 'generator')).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options, 'validator'))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+    const cppCompileFailure = new TestdataPipelineError(
+      'arbitrary compile wording A',
+      'ORACLE_COMPILE_FAILED',
+      'oracle',
+      'oracle',
+      'repair-artifact',
+      { failureKind: 'compile', oracleLanguage: 'cpp' },
+    );
     const cppRepair = buildSandboxRepairPrompt(
-      new Error('ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：prog.cc:7: error'),
+      cppCompileFailure,
       options,
+      'oracle',
     );
     expect(cppRepair).toContain('当前 ORACLE 语言为 C++17');
-    expect(cppRepair).toContain('prog.cc:7: error');
-    const cppInfraRepair = buildSandboxRepairPrompt(
-      new Error('ORACLE_CPP_INFRA：connect ECONNREFUSED'),
+    const sameTypedCppRepair = buildSandboxRepairPrompt(
+      new TestdataPipelineError(
+        'completely different localized wording B',
+        'ORACLE_COMPILE_FAILED',
+        'oracle',
+        'oracle',
+        'repair-artifact',
+        { failureKind: 'compile', oracleLanguage: 'cpp' },
+      ),
       options,
+      'oracle',
+    );
+    expect(sameTypedCppRepair).toContain('当前 ORACLE 语言为 C++17');
+    const cppInfraRepair = buildSandboxRepairPrompt(
+      new TestdataPipelineError(
+        'arbitrary infrastructure wording',
+        'ORACLE_COMPILE_FAILED',
+        'oracle',
+        'oracle',
+        'repair-artifact',
+        { failureKind: 'infra', oracleLanguage: 'cpp' },
+      ),
+      options,
+      'oracle',
     );
     expect(cppInfraRepair).toContain('改用 Python 3');
     expect(cppInfraRepair).not.toContain('保持该语言不变');
     expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
       .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
+
+    const invalidStressInput = new TestdataPipelineError(
+      'STRESS_GENERATOR produced an invalid stdin payload',
+      'GENERATOR_INVALID_INPUT',
+      'stress-generator',
+      'stress-generator',
+      'repair-artifact',
+      { caseIndex: 2 },
+    );
+    const stressRepair = buildSandboxRepairPrompt(invalidStressInput, options);
+    expect(stressRepair).toContain('独立验证器的 STRESS_GENERATOR 未通过沙箱验证');
+    expect(stressRepair).not.toContain('@@@SAMPLE_INPUTS@@@');
+
+    const invalidFunctionSample = new TestdataPipelineError(
+      'function sample transcoding failed',
+      'GENERATOR_INVALID_INPUT',
+      'function-samples',
+      'stress-generator',
+      'repair-artifact',
+      { caseIndex: 1 },
+    );
+    expect(buildSandboxRepairPrompt(invalidFunctionSample, options))
+      .toContain('@@@SAMPLE_INPUTS@@@');
     const tieredCoverage = allocateCasesToSubtasks(3, [
       { id: 1, score: 40, constraints: 'n<=100' },
       { id: 2, score: 60, constraints: 'n<=100000' },
@@ -2106,11 +2160,108 @@ describe('TestdataGenService.generate', () => {
     });
 
     await expect(promise).rejects.toMatchObject({
+      code: 'SPEC_PARSE_FAILED',
+      stage: 'config_parse',
+      artifact: 'spec',
+      retryPolicy: 'no-retry',
       userMessageKey: 'ai_helper_testdata_err_config_unparsable',
       telemetryMetadata: expect.objectContaining({ failureStage: 'config_parse' }),
     });
     expect(mockClient.chat).not.toHaveBeenCalled();
     expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
+  it('真实外围制品二次解析失败保持 artifacts_parse 契约且不误启完整模型重跑', async () => {
+    // Mutation caught: artifacts_parse falling back to UNKNOWN/pipeline or input-validity routing.
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: 'not generation artifacts', usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: 'still not generation artifacts', usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '外围制品解析守卫',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'artifacts_parse',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      recommendDeeperReasoning: true,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('重新完整输出 @@@GENERATOR@@@');
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalledWith(usedModel);
+    expect(runner.runPython).not.toHaveBeenCalled();
+  });
+
+  it('真实函数题 STRESS_GENERATOR 非法输入在修复请求失败后保持 stress-generator 契约', async () => {
+    // Mutation caught: stress-generator invalid input being misrouted as function sample transcoding.
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const assignmentStressCases = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, index) => ({ label: `stress-${index}`, input: `value = ${index}` }),
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair endpoint unavailable')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: assignmentStressCases }), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '函数输入协议守卫',
+      statementMarkdown: '函数题无公开样例',
+      options: { problemKind: 'function', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_INPUT',
+      stage: 'stress-generator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 1 },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('独立验证制品未通过');
+    expect(mockClient.chat.mock.calls[4][0][2].content).not.toContain('@@@SAMPLE_INPUTS@@@');
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
   it('checkpoint 命中四项制品时跳过对应 AI 调用但仍完整运行沙箱', async () => {
@@ -2441,6 +2592,67 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
+  it('补刀候选触发 System Error 时不追加 hack case 且不设置 killed', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('surviving wrong solution') && input.trim() === '2') {
+            return detail({
+              status: 'System Error',
+              accepted: false,
+              timedOut: false,
+              exitStatus: undefined,
+              stdout: '',
+              stderr: 'sandbox protocol failure',
+            });
+          }
+          if (code.includes('surviving wrong solution')) return detail({ stdout: input });
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀基础设施保护',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(plan.caseCount).toBe(1);
+    expect(plan.totalCaseCount).toBe(1);
+    expect(plan.files.some(file => file.name === '2.in')).toBe(false);
+    expect(plan.files.find(file => file.name === 'config.yaml')?.content)
+      .not.toContain('input: 2.in');
+    expect(plan.verification?.discrimination?.targets[0]).toMatchObject({
+      kind: 'wrong-algorithm',
+      killed: false,
+    });
+    expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedBy');
+    expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedByCase');
+  });
+
   it('补刀模型链到达区分度绝对截止时间时中止并静默保留未完成状态', async () => {
     jest.useFakeTimers();
     try {
@@ -2672,6 +2884,8 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: deeperModel }),
     };
+    // Mutation caught: recursively applying semantic escalation after the second full run fails.
+    const thirdClient = { chat: jest.fn() };
     const primaryClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: brokenBlueprint, usage, usedModel: primaryModel })
@@ -2683,7 +2897,7 @@ describe('TestdataGenService.generate', () => {
           usage,
           usedModel: primaryModel,
         }),
-      createClientStartingAfter: jest.fn().mockReturnValue(fallbackClient),
+      createClientStartingAfter: jest.fn().mockReturnValueOnce(fallbackClient).mockReturnValueOnce(thirdClient),
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -2713,6 +2927,8 @@ describe('TestdataGenService.generate', () => {
 
     expect(primaryClient.chat).toHaveBeenCalledTimes(5);
     expect(primaryClient.createClientStartingAfter).toHaveBeenCalledWith(primaryModel);
+    expect(primaryClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+    expect(thirdClient.chat).not.toHaveBeenCalled();
     expect(fallbackClient.chat).toHaveBeenCalledTimes(4);
     expect(plan.verification?.modelEscalation).toEqual({
       fromModel: 'primary/model-a',
@@ -2784,9 +3000,13 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ input: '1' }] }), stderr: '' })
         .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
-      runPythonBatchDetailed: jest.fn().mockRejectedValue(
-        new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'),
-      ),
+      runPythonBatchDetailed: jest.fn().mockRejectedValue(new TestdataPipelineError(
+        '沙箱执行总时长超出预算，请减少测试点数量后重试',
+        'PIPELINE_BUDGET_EXHAUSTED',
+        'sandbox_budget',
+        'pipeline',
+        'no-retry',
+      )),
     };
 
     const promise = new TestdataGenService(mockClient as never, {
@@ -2804,6 +3024,268 @@ describe('TestdataGenService.generate', () => {
     await expect(promise).rejects.toThrow(/停止后续修复与模型升级/);
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('真实 runner 预算错误穿过 generator 包装后仍为 no-retry 且零修复零模型升级', async () => {
+    const lowLevelRunner = new GoJudgeSandboxRunner('http://localhost:5050', {
+      get: jest.fn(),
+      post: jest.fn(),
+    });
+    const lowLevelBudgetError = await lowLevelRunner.runPythonBatchDetailed('print(1)', ['1'], {
+      deadlineAt: Date.now() - 1,
+    }).catch(error => error);
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('artifact repair must not run')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(lowLevelBudgetError),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '真实预算错误传播',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED',
+      stage: 'sandbox_budget',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('首次沙箱失败直接消费错误自带的 no-retry 策略，不按 code 重新推导', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const terminal = new TestdataPipelineError(
+      'terminal generator contract',
+      'GENERATOR_INVALID_JSON',
+      'generator',
+      'generator',
+      'no-retry',
+      { caseIndex: 1 },
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair request must not run')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(terminal),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'retry policy source of truth',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'generator',
+      artifact: 'generator',
+      retryPolicy: 'no-retry',
+      safeDetails: { caseIndex: 1 },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('修复后再次失败仍消费新错误自带的 no-retry 策略', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const repairedTerminal = new TestdataPipelineError(
+      'repaired generator reached a terminal contract',
+      'GENERATOR_INVALID_JSON',
+      'generator',
+      'generator',
+      'no-retry',
+      { caseIndex: 2 },
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({
+          content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"input":"1"}]}))',
+          usedModel,
+        }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: 'not-json', stderr: '' })
+        .mockRejectedValueOnce(repairedTerminal),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'repaired retry policy source of truth',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'generator',
+      artifact: 'generator',
+      retryPolicy: 'no-retry',
+      safeDetails: { caseIndex: 2 },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('STRESS_GENERATOR 自动修复请求失败时完整保留原失败契约', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const duplicatedStress = JSON.stringify({
+      cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, index) => ({
+        label: `duplicate-${index + 1}`,
+        input: '1',
+      })),
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair endpoint unavailable')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: duplicatedStress, stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'stress repair contract',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'STRESS_LOW_DIVERSITY',
+      stage: 'stress-generator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: {
+        generatedCount: TESTDATA_GEN_LIMITS.STRESS_CASES,
+        uniqueCount: 1,
+        minimumUnique: Math.ceil(
+          TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO,
+        ),
+      },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ORACLE_BRUTE_DIVERGENCE', 'brute', 'adjudicate'],
+    ['PIPELINE_BUDGET_EXHAUSTED', 'pipeline', 'no-retry'],
+    ['ORACLE_COMPILE_FAILED', 'oracle', 'manual-review'],
+  ] as const)('第二模型最终 %s 保留终局策略且不再升级', async (code, artifact, retryPolicy) => {
+    const primaryModel = { endpointId: 'ep1', endpointName: 'primary', modelName: 'model-a' };
+    const fallbackModel = { endpointId: 'ep2', endpointName: 'fallback', modelName: 'model-b' };
+    const firstError = new TestdataGenerationError(
+      'primary repair failed',
+      'oracle',
+      [{ content: 'primary', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      { code: 'ORACLE_RUNTIME_FAILED', artifact: 'oracle', retryPolicy: 'repair-artifact' },
+    );
+    const fallbackError = new TestdataGenerationError(
+      'fallback reached a terminal typed failure',
+      code === 'PIPELINE_BUDGET_EXHAUSTED' ? 'sandbox_budget' : 'stress_testing',
+      [{ content: 'fallback', usedModel: fallbackModel }] as never,
+      false,
+      undefined,
+      undefined,
+      { code, artifact, retryPolicy },
+    );
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as { generateWithSandbox: (...args: unknown[]) => Promise<never> },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockRejectedValueOnce(fallbackError);
+    const fallbackClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+    const primaryClient = {
+      chat: jest.fn(),
+      createClientStartingAfter: jest.fn().mockReturnValue(fallbackClient),
+    };
+    const runner = { isAvailable: jest.fn().mockResolvedValue(true) };
+
+    try {
+      const promise = new TestdataGenService(primaryClient as never, {
+        sandboxRunner: runner as never,
+        mode: 'sandbox',
+      }).generate({
+        problemTitle: '第二模型终局策略',
+        statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      });
+
+      await expect(promise).rejects.toMatchObject({
+        code,
+        artifact,
+        retryPolicy,
+        recommendDeeperReasoning: false,
+      });
+      expect(primaryClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+      expect(fallbackClient.createClientStartingAfter).not.toHaveBeenCalled();
+      expect(generateWithSandbox).toHaveBeenCalledTimes(2);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
   });
 
   it('修复请求本身被中止（AIServiceError aborted 形态）：原样上抛不包装', async () => {
@@ -3024,7 +3506,7 @@ describe('TestdataGenService.generate', () => {
     expect(config.subtasks.map(subtask => subtask.score)).toEqual([40, 60]);
   });
 
-  it('压力对拍失败时只重生成独立验证器，不把 ORACLE 源码放入修复上下文', async () => {
+  it('ORACLE 与 BRUTE 分歧时进入裁决并停止自动修复', async () => {
     const brokenVerifier = makeIndependentVerifierBlueprint().replace(
       'print(input())  # independent brute',
       'print("wrong")  # broken independent brute',
@@ -3065,20 +3547,20 @@ describe('TestdataGenService.generate', () => {
         ins.map(input => detail({ stdout: code.includes('broken independent brute') ? 'wrong\n' : input })),
       )),
     };
-    const plan = await new TestdataGenService(mockClient as never, {
+    const promise = new TestdataGenService(mockClient as never, {
       sandboxRunner: runner, mode: 'sandbox',
     }).generate({
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    const repairMessages = mockClient.chat.mock.calls[4][0];
-    expect(repairMessages[2].content).toContain('独立验证制品未通过');
-    expect(repairMessages[0].content).not.toContain('print(input())');
-    expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
-    // 仅 BRUTE 发生变化：正式 GENERATOR 与 STRESS_GENERATOR 各只执行一次。
+    await expect(promise).rejects.toMatchObject({
+      code: 'ORACLE_BRUTE_DIVERGENCE',
+      artifact: 'brute',
+      retryPolicy: 'adjudicate',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(runner.runPython).toHaveBeenCalledTimes(2);
-    expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
   });
 
   it('初始蓝图分节损坏时请求完整蓝图后继续验证', async () => {
@@ -3277,6 +3759,123 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'ORACLE_RUNTIME_FAILED',
+      detail({
+        accepted: false,
+        status: 'Nonzero Exit Status',
+        exitStatus: 1,
+        stderr: 'candidate runtime failed',
+      }),
+      { caseIndex: 1, candidate: true },
+    ],
+    [
+      'ORACLE_SAMPLE_MISMATCH',
+      detail({ stdout: 'wrong\n' }),
+      { caseIndex: 1, checkerUsed: false, candidate: true },
+    ],
+  ] as const)(
+    '历史 AC 候选第一阶段失败保留 %s，只增加 candidate 标记',
+    async (failureCode, oracleDetail, safeDetails) => {
+      const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+      const mockClient = {
+        chat: jest.fn().mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'),
+          usedModel,
+        }),
+        createClientStartingAfter: jest.fn(),
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        runPython: jest.fn(),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockResolvedValue([oracleDetail]),
+      };
+
+      const promise = new TestdataGenService(mockClient as never, {
+        sandboxRunner: runner,
+        mode: 'sandbox',
+      }).generate({
+        problemTitle: 'historical AC candidate',
+        statementMarkdown: '```input1\n42\n```\n```output1\n42\n```',
+        options: {
+          problemKind: 'traditional',
+          caseCount: 1,
+          languages: [],
+          providedStd: 'print(input())',
+          providedStdSource: 'accepted-record',
+        },
+      });
+
+      await expect(promise).rejects.toMatchObject({
+        code: failureCode,
+        stage: 'solution_verification',
+        artifact: 'oracle',
+        retryPolicy: 'repair-artifact',
+        safeDetails,
+        recommendDeeperReasoning: false,
+      });
+      expect(mockClient.chat).toHaveBeenCalledTimes(1);
+      expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('历史 AC 候选编译失败保留 ORACLE_COMPILE_FAILED 契约并增加 candidate 标记', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn().mockResolvedValueOnce({
+        content: makeSolutionBlueprint('traditional'),
+        usedModel,
+      }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'compile',
+        error: 'candidate.cc:1: compile failed',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+      cppOracleAvailable: true,
+    }).generate({
+      problemTitle: 'historical C++ AC candidate',
+      statementMarkdown: '```input1\n42\n```\n```output1\n42\n```',
+      options: {
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        providedStd: '#include <iostream>\nint main() { return broken; }',
+        providedStdSource: 'accepted-record',
+      },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'ORACLE_COMPILE_FAILED',
+      stage: 'provided_cpp_oracle',
+      artifact: 'oracle',
+      retryPolicy: 'manual-review',
+      safeDetails: {
+        failureKind: 'compile',
+        oracleLanguage: 'cpp',
+        candidate: true,
+      },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
   it('历史 AC 与独立 BRUTE 冲突时直接拒绝，不发起修复或模型升级', async () => {
     const mockClient = {
       chat: jest.fn()
@@ -3333,7 +3932,12 @@ describe('TestdataGenService.generate', () => {
       },
     });
     await expect(promise).rejects.toMatchObject({
-      telemetryMetadata: expect.objectContaining({ failureStage: 'accepted_std_verification' }),
+      code: 'TRUSTED_SOLUTIONS_DIVERGED',
+      stage: 'stress_testing',
+      artifact: 'oracle',
+      retryPolicy: 'adjudicate',
+      safeDetails: { caseIndex: 1, candidate: true },
+      telemetryMetadata: expect.objectContaining({ failureStage: 'stress_testing' }),
     });
     await expect(promise).rejects.toThrow(/系统不会修复 BRUTE 来迁就它/);
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
@@ -3379,6 +3983,112 @@ describe('TestdataGenService.generate', () => {
     expect(plan.tokenUsage?.totalTokens).toBe(350);
   });
 
+  it('直出模板补全仍缺失时抛出对应语言的类型化失败', async () => {
+    const initial = makeDelimitedResponse().replace(
+      /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,
+      '',
+    );
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: initial, usedModel })
+        .mockResolvedValueOnce({ content: '@@@NOTES@@@\nstill missing', usedModel }),
+    };
+
+    const promise = new TestdataGenService(mockClient as never).generate({
+      problemTitle: '约束子串',
+      statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'TEMPLATE_COMPILE_FAILED',
+      stage: 'template_missing',
+      artifact: 'template-java',
+      retryPolicy: 'repair-artifact',
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['java', 'template-java'],
+    ['cc', 'template-cc'],
+  ] as const)('沙箱模板补全仍缺失 %s 时归因到对应 artifact', async (language, artifact) => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const marker = language === 'java'
+      ? /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/
+      : /@@@TEMPLATE:cc@@@[\s\S]*?(?=@@@NOTES@@@)/;
+    const artifacts = makeGenerationArtifactsBlueprint('function').replace(marker, '');
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: artifacts, usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@NOTES@@@\nstill missing', usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '模板 artifact 归因',
+      statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 1, languages: [language] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'TEMPLATE_COMPILE_FAILED',
+      stage: 'template_missing',
+      artifact,
+      retryPolicy: 'repair-artifact',
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+  });
+
+  it('独立验证器二次解析失败映射到 coverage 并停止当前模型调用', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const invalidVerifier = '@@@BRUTE@@@\nprint(1)';
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: invalidVerifier, usedModel })
+        .mockResolvedValueOnce({ content: invalidVerifier, usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 't',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      stage: 'independent_verifier_parse',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+      telemetryMetadata: expect.objectContaining({ failureStage: 'independent_verifier_parse' }),
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+  });
+
   it('AI 把变量赋值写入 .in 时要求完整修复后再组装', async () => {
     const invalid = makeDelimitedResponse().replace(
       '@@@CASE:1:IN:样例1@@@\n10101\n1',
@@ -3409,11 +4119,19 @@ describe('TestdataGenService.generate', () => {
   it('AI 返回非法内容时抛出中文错误', async () => {
     const mockClient = { chat: jest.fn().mockResolvedValue({ content: 'oops', usedModel: { endpointId: 'e', endpointName: 'n', modelName: 'm' } }) };
     const service = new TestdataGenService(mockClient as never);
-    await expect(service.generate({
+    const promise = service.generate({
       problemTitle: 't',
       statementMarkdown: 's',
       options: baseOptions,
-    })).rejects.toThrow(/JSON/);
+    });
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'direct_parse',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+    });
+    await expect(promise).rejects.toThrow(/JSON/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3955,8 +4673,18 @@ describe('materializeSandboxBlueprint 双重验证', () => {
         detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: '数值超出范围' }),
       ]),
     };
-    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
-      .rejects.toThrow(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    const failure = await materializeSandboxBlueprint(bp, tradOpts, '', runner)
+      .catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'GENERATOR_INVALID_INPUT',
+      stage: 'validator',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 2 },
+    });
+    expect(failure.message).toMatch(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('请只输出修复后的 @@@GENERATOR@@@');
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
@@ -3978,12 +4706,22 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ]),
     };
 
-    await expect(materializeSandboxBlueprint(
+    const failure = await materializeSandboxBlueprint(
       bp,
       tradOpts,
       '```input1\n3\n```\n```output1\n3\n```',
       runner,
-    )).rejects.toThrow(/题面样例 1 未通过输入校验：样例非法/);
+    ).catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_FALSE_REJECT',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 3, sample: true },
+    });
+    expect(failure.message).toMatch(/题面样例 1 未通过输入校验：样例非法/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
@@ -4296,9 +5034,17 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ]),
     };
 
-    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
-      /第 1 个压力 \.in 未通过输入校验：invalid-1/,
-    );
+    const failure = await materializeSandboxBlueprint(bp, tradOpts, '', runner)
+      .catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'STRESS_INSUFFICIENT_VALID_INPUTS',
+      stage: 'validator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+    });
+    expect(failure.message).toMatch(/第 1 个压力 \.in 未通过输入校验：invalid-1/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 

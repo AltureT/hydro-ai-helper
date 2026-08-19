@@ -16,6 +16,12 @@ import type {
   SandboxSolutionBlueprint,
   TestdataGenerationProgress,
 } from '../services/testdataGenService';
+import type {
+  TestdataArtifact,
+  TestdataFailureCode,
+  TestdataFailureStage,
+  TestdataRetryPolicy,
+} from '../services/testdata/failures';
 
 export type TestdataGenerationJobStatus =
   | 'pending'
@@ -29,6 +35,10 @@ export interface TestdataGenerationJobError {
   message: string;
   code: string;
   category?: string;
+  failureCode?: TestdataFailureCode;
+  stage?: TestdataFailureStage;
+  artifact?: TestdataArtifact;
+  retryPolicy?: TestdataRetryPolicy;
   retryable: boolean;
   recommendDeeperReasoning?: boolean;
 }
@@ -415,13 +425,17 @@ export class TestdataGenerationJobModel {
     );
   }
 
-  async cancel(id: string | ObjectIdType): Promise<void> {
+  async cancel(
+    id: string | ObjectIdType,
+    error?: TestdataGenerationJobError,
+  ): Promise<void> {
     const now = new Date();
     await this.collection.updateOne(
       { _id: ensureObjectId(id), status: { $in: ['pending', 'running'] } },
       { $set: {
         status: 'canceled', active: false, restorable: false,
         cancelRequested: true, updatedAt: now, completedAt: now,
+        ...(error ? { error } : {}),
       } },
     );
   }

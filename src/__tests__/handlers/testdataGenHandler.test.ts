@@ -24,6 +24,7 @@ import {
   TestdataGenerationError,
 } from '../../services/testdataGenService';
 import { GoJudgeSandboxRunner } from '../../services/goJudgeSandboxService';
+import { TestdataPipelineError } from '../../services/testdata/failures';
 import { ObjectId } from '../../utils/mongo';
 import { computeTestdataCheckpointHashes } from '../../models/testdataGenerationJob';
 
@@ -676,6 +677,15 @@ describe('TestdataGenGenerateHandler', () => {
       listeners.close?.();   // 响应连接提前关闭 = 真实客户端断开
       await done;
       expect(handler.response.status).toBe(499);
+      expect(handler.response.body).toEqual({
+        error: 'ai_helper_err_ai_aborted',
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+      });
       expect(capture).not.toHaveBeenCalled();
       expect(removeListener).toHaveBeenCalledWith('close', listeners.close);
     } finally {
@@ -699,6 +709,15 @@ describe('TestdataGenGenerateHandler', () => {
     try {
       await handler.post();
       expect(handler.response.status).toBe(499);
+      expect(handler.response.body).toEqual({
+        error: 'ai_helper_err_ai_aborted',
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+      });
       expect(genSpy).not.toHaveBeenCalled();
     } finally {
       genSpy.mockRestore();
@@ -783,11 +802,122 @@ describe('TestdataGenGenerateHandler', () => {
         recommendDeeperReasoning: true,
       }));
       expect(capture).toHaveBeenCalledWith(
-        'api_failure', 'testdata_gen', expect.any(String), undefined, expect.any(String),
-        expect.objectContaining({ recommendDeeperReasoning: true, failureStage: 'oracle' }),
+        'api_failure', 'testdata_gen', 'Typed test-data pipeline failure',
+        undefined, undefined,
+        {
+          failureCode: 'ORACLE_RUNTIME_FAILED',
+          stage: 'oracle',
+          artifact: 'oracle',
+          retryPolicy: 'repair-artifact',
+        },
       );
       expect(recordModelOutcome).toHaveBeenCalledWith(
         'testdata_generation', 'primary/model-a', false,
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('同步生成接口透传类型化失败字段', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const error = new TestdataPipelineError(
+      'technical divergence detail',
+      'ORACLE_BRUTE_DIVERGENCE',
+      'stress_testing',
+      'brute',
+      'adjudicate',
+      { caseIndex: 3 },
+    );
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'GENERATION_FAILED',
+        failureCode: 'ORACLE_BRUTE_DIVERGENCE',
+        stage: 'stress_testing',
+        artifact: 'brute',
+        retryPolicy: 'adjudicate',
+        retryable: true,
+        error: 'ai_helper_testdata_failure_oracle_brute_divergence',
+      }));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Typed test-data pipeline failure',
+        undefined,
+        undefined,
+        {
+          failureCode: 'ORACLE_BRUTE_DIVERGENCE',
+          stage: 'stress_testing',
+          artifact: 'brute',
+          retryPolicy: 'adjudicate',
+          caseIndex: 3,
+        },
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('同步 AIServiceError 遥测仅保留类别、重试布尔值与尝试次数', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const error = new openaiClient.AIServiceError(
+      'input=SECRET_INPUT output=SECRET_OUTPUT key=sk-secret https://private.example/v1',
+      'network',
+      undefined,
+      {
+        endpointId: 'endpoint-secret-id',
+        endpointName: 'https://private.example/v1',
+        modelName: 'private-model',
+        totalAttempts: 2,
+        skippedEndpoints: ['secret-skipped-endpoint'],
+        attempts: [{
+          endpoint: 'endpoint-secret-id',
+          model: 'private-model',
+          category: 'network',
+          message: 'raw request and response excerpt',
+        }],
+      },
+    );
+    error.stack = 'STACK_WITH_SECRET_INPUT_AND_OUTPUT';
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'AI_SERVICE_ERROR',
+        category: 'network',
+        retryable: true,
+      }));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Untyped test-data generation failure',
+        undefined,
+        error.stack,
+        { aiCategory: 'network', retryable: true, attemptCount: 2 },
       );
     } finally {
       genSpy.mockRestore();
@@ -906,6 +1036,129 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
       expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('background job persists typed failure routing fields', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(
+      new TestdataPipelineError(
+        'technical budget detail',
+        'PIPELINE_BUDGET_EXHAUSTED',
+        'sandbox_budget',
+        'pipeline',
+        'no-retry',
+        { elapsedMs: 120000 },
+      ),
+    );
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 1 },
+    });
+    const capture = jest.fn();
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'testdataGenerationJobModel') return jobModel;
+      if (name === 'errorReporter') return { capture };
+      return undefined;
+    });
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(jobModel.fail).toHaveBeenCalledWith(job._id, {
+        message: 'ai_helper_testdata_failure_pipeline_budget_exhausted',
+        code: 'GENERATION_FAILED',
+        failureCode: 'PIPELINE_BUDGET_EXHAUSTED',
+        stage: 'sandbox_budget',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+        recommendDeeperReasoning: false,
+      });
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Typed test-data pipeline failure',
+        undefined,
+        undefined,
+        {
+          failureCode: 'PIPELINE_BUDGET_EXHAUSTED',
+          stage: 'sandbox_budget',
+          artifact: 'pipeline',
+          retryPolicy: 'no-retry',
+          elapsedMs: 120000,
+        },
+      );
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('后台普通错误不上传 message，但把 stack 交给 ErrorReporter 做帧级脱敏', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const sensitiveError = Object.assign(
+      new Error('input=SECRET_INPUT output=SECRET_OUTPUT https://private.example/v1 key=sk-secret'),
+      {
+        stack: 'STACK_WITH_SECRET_INPUT_AND_OUTPUT',
+        problemId: 'D3102',
+        jobId: String(job._id),
+        metadata: { nested: { response: 'SECRET_OUTPUT' } },
+      },
+    );
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockRejectedValue(sensitiveError);
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'testdataGenerationJobModel') return jobModel;
+      if (name === 'errorReporter') return { capture };
+      return undefined;
+    });
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Untyped test-data generation failure',
+        undefined,
+        sensitiveError.stack,
+        {},
+      );
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -1091,8 +1344,20 @@ describe('Testdata generation background jobs', () => {
       ));
       await cancelHandler.post();
       for (let i = 0; i < 20 && !capturedSignal?.aborted; i++) await Promise.resolve();
+      for (let i = 0; i < 20 && !jobModel.cancel.mock.calls.some(call => call[1]?.failureCode); i++) {
+        await Promise.resolve();
+      }
 
       expect(capturedSignal?.aborted).toBe(true);
+      expect(jobModel.cancel).toHaveBeenCalledWith(job._id, {
+        message: 'ai_helper_err_ai_aborted',
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+      });
       expect(cancelHandler.response.body.job).toEqual(expect.objectContaining({ status: 'canceled' }));
     } finally {
       jest.useRealTimers();
@@ -1140,7 +1405,15 @@ describe('Testdata generation background jobs', () => {
     ));
 
     await handler.post();
-    expect(jobModel.cancel).toHaveBeenCalledWith(job._id);
+    expect(jobModel.cancel).toHaveBeenCalledWith(job._id, {
+      message: 'ai_helper_err_ai_aborted',
+      code: 'CLIENT_ABORTED',
+      failureCode: 'CANCELLED',
+      stage: 'canceled',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+      retryable: false,
+    });
     expect(handler.response.body.job).toEqual(expect.objectContaining({ status: 'canceled' }));
   });
 });
@@ -1238,6 +1511,45 @@ describe('TestdataGenSkeletonHandler', () => {
       error: 'ai_helper_testdata_err_config_unparsable',
       code: 'INVALID_EXISTING_CONFIG',
     });
+  });
+
+  it('骨架接口普通异常不上传 message，但把 stack 交给 ErrorReporter', async () => {
+    const sensitiveError = Object.assign(
+      new Error('input=SECRET_INPUT output=SECRET_OUTPUT https://private.example/v1 key=sk-secret'),
+      {
+        stack: 'STACK_WITH_SECRET_INPUT_AND_OUTPUT',
+        problemId: 'D3102',
+        jobId: 'secret-job-id',
+        metadata: { nested: { response: 'SECRET_OUTPUT' } },
+      },
+    );
+    (db.collection as jest.Mock).mockReturnValue({
+      findOne: jest.fn().mockRejectedValue(sensitiveError),
+    });
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenSkeletonHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(500);
+    expect(handler.response.body).toEqual({
+      error: 'ai_helper_err_internal',
+      code: 'INTERNAL_ERROR',
+    });
+    expect(capture).toHaveBeenCalledWith(
+      'api_failure',
+      'testdata_skeleton',
+      'Untyped test-data generation failure',
+      undefined,
+      sensitiveError.stack,
+      {},
+    );
   });
 });
 
@@ -1381,5 +1693,64 @@ describe('TestdataGenApplyHandler', () => {
     const calls = (ProblemModel.addTestdata as jest.Mock).mock.calls;
     expect(calls).toHaveLength(1);
     expect(calls[0][3].toString()).toBe('first\n');
+  });
+
+  it('写入接口恶意 AI category 遥测降级为安全枚举且不泄漏上下文', async () => {
+    const sensitiveError = new openaiClient.AIServiceError(
+      'input=SECRET_INPUT output=SECRET_OUTPUT key=sk-secret https://private.example/v1',
+      'network',
+      undefined,
+      {
+        endpointId: 'endpoint-secret-id',
+        endpointName: 'https://private.example/v1',
+        modelName: 'private-model',
+        totalAttempts: 3,
+        skippedEndpoints: ['secret-skipped-endpoint'],
+        attempts: [{
+          endpoint: 'endpoint-secret-id',
+          model: 'private-model',
+          category: 'network',
+          message: 'raw input and output excerpt',
+        }],
+      },
+    );
+    Object.assign(sensitiveError, {
+      category: 'https://attacker.example/input/SECRET_INPUT',
+      stack: 'STACK_WITH_SECRET_INPUT_AND_OUTPUT',
+      problemId: 'D3102',
+      jobId: 'secret-job-id',
+      metadata: { apiKey: 'sk-secret' },
+    });
+    (db.collection as jest.Mock).mockReturnValue({
+      findOne: jest.fn().mockRejectedValue(sensitiveError),
+    });
+    const capture = jest.fn();
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true,
+      body: {
+        problemId: 'D3102',
+        jobId: 'secret-job-id',
+        files: [{ name: '1.in', content: 'SECRET_INPUT\n' }],
+      },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(500);
+    expect(handler.response.body).toEqual({
+      error: 'ai_helper_err_internal',
+      code: 'INTERNAL_ERROR',
+    });
+    expect(capture).toHaveBeenCalledWith(
+      'api_failure',
+      'testdata_apply',
+      'Untyped test-data generation failure',
+      undefined,
+      sensitiveError.stack,
+      { aiCategory: 'unknown', retryable: true, attemptCount: 3 },
+    );
   });
 });

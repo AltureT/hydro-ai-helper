@@ -153,6 +153,86 @@ describe('ErrorReporter', () => {
       expect((reporter as any).buffer.size).toBe(2);
     });
 
+    it('accepts only canonical hyphenated function/stress stages', () => {
+      for (const stage of [
+        'function-samples',
+        'stress-generator',
+        'function_samples',
+        'stress_generator',
+      ]) {
+        reporter.capture(
+          'api_failure',
+          'testdata_gen',
+          'fixed safe message',
+          undefined,
+          undefined,
+          { stage },
+        );
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serialized = JSON.stringify([...(reporter as any).buffer.values()]);
+      expect(serialized).toContain('function-samples');
+      expect(serialized).toContain('stress-generator');
+      expect(serialized).not.toContain('function_samples');
+      expect(serialized).not.toContain('stress_generator');
+    });
+
+    it('keeps closed typed failure codes and AI categories in separate safe fingerprints', () => {
+      reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+        failureCode: 'ORACLE_RUNTIME_FAILED', stage: 'oracle', artifact: 'oracle', retryPolicy: 'repair-artifact',
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+        failureCode: 'PIPELINE_BUDGET_EXHAUSTED', stage: 'sandbox_budget', artifact: 'pipeline', retryPolicy: 'no-retry',
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, {
+        aiCategory: 'network', retryable: true, attemptCount: 2,
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, {
+        aiCategory: 'timeout', retryable: true, attemptCount: 2,
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entries = [...(reporter as any).buffer.values()];
+      expect(entries).toHaveLength(4);
+      expect(new Set(entries.map(entry => entry.stackFingerprint)).size).toBe(4);
+    });
+
+    it('drops unsafe typed discriminator values from metadata and fingerprint inputs', () => {
+      const unsafe = {
+        failureCode: 'https://private.example/SECRET_INPUT',
+        aiCategory: 'sk-secret-key',
+        stage: '../../SECRET_OUTPUT',
+      };
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, unsafe);
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, {
+        failureCode: 'another-sensitive-value',
+        aiCategory: 'https://private.example/v1',
+        stage: 'SECRET_OUTPUT',
+      });
+
+      // Invalid discriminators must neither split the group nor survive in buffered metadata.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entries = [...(reporter as any).buffer.values()];
+      expect(entries).toHaveLength(1);
+      expect(JSON.stringify(entries[0])).not.toMatch(/SECRET|sk-secret|private\.example/);
+    });
+
+    it('drops lowercase secret-shaped stages from metadata and fingerprint inputs', () => {
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, {
+        stage: 'sk-secret-key',
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, {
+        failureStage: 'private-auth-token',
+      });
+
+      // Unknown stages fail closed: they must neither split the group nor survive in metadata.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entries = [...(reporter as any).buffer.values()];
+      expect(entries).toHaveLength(1);
+      expect(JSON.stringify(entries[0])).not.toMatch(/sk-secret-key|private-auth-token/);
+    });
+
     it('keeps different categories separate even when stack frames match', () => {
       const stack = [
         'Error: dynamic',

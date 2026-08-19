@@ -13,6 +13,10 @@ import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
 } from '../utils/styles';
+import {
+  resolveTestdataRetryGuidance,
+  type TestdataRetryGuidance,
+} from './retryPolicyHints';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -116,6 +120,10 @@ interface BackgroundGenerationJob {
     message: string;
     code: string;
     category?: string;
+    failureCode?: string;
+    stage?: string;
+    artifact?: string;
+    retryPolicy?: string;
     retryable: boolean;
     recommendDeeperReasoning?: boolean;
   };
@@ -229,13 +237,27 @@ const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', mon
 interface ApiErrorDetails {
   message: string;
   recommendDeeperReasoning: boolean;
+  failureCode?: string;
+  stage?: string;
+  artifact?: string;
+  retryPolicy?: string;
 }
 
 class TestdataRequestError extends Error {
-  constructor(message: string, readonly recommendDeeperReasoning = false) {
+  constructor(
+    message: string,
+    readonly recommendDeeperReasoning = false,
+    readonly failureCode?: string,
+    readonly retryPolicy?: string,
+  ) {
     super(message);
     this.name = 'TestdataRequestError';
   }
+}
+
+function localizedFailureMessage(failureCode: string | undefined, fallback: string): string {
+  if (!failureCode) return fallback;
+  return i18n(`ai_helper_testdata_failure_${failureCode.toLowerCase()}`);
 }
 
 async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
@@ -243,8 +265,12 @@ async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
     const data = await response.json();
     if (data?.error) {
       return {
-        message: String(data.error),
+        message: localizedFailureMessage(data.failureCode, String(data.error)),
         recommendDeeperReasoning: data.recommendDeeperReasoning === true,
+        failureCode: typeof data.failureCode === 'string' ? data.failureCode : undefined,
+        stage: typeof data.stage === 'string' ? data.stage : undefined,
+        artifact: typeof data.artifact === 'string' ? data.artifact : undefined,
+        retryPolicy: typeof data.retryPolicy === 'string' ? data.retryPolicy : undefined,
       };
     }
   } catch { /* ignore */ }
@@ -262,10 +288,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [collapsed, setCollapsed] = useState(true);
   const [phase, setPhase] = useState<PanelPhase>('form');
   const [error, setError] = useState<string | null>(null);
-  // 生成请求真正失败（AI 故障/超时）时提示骨架降级；本地校验错误不提示
-  const [showFallbackHint, setShowFallbackHint] = useState(false);
-  // 仅后端确认“自动修复后仍未通过解析/机器验证”时提示换用更深思考模型。
-  const [showDeeperReasoningHint, setShowDeeperReasoningHint] = useState(false);
+  const [retryGuidance, setRetryGuidance] = useState<TestdataRetryGuidance>('none');
   const [generationProgress, setGenerationProgress] = useState<GenerationProgressEvent>({
     stage: 'preparing', percent: 2, attempt: 1,
   });
@@ -406,7 +429,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       rememberJob(null);
       setResumeCheckpointJobId(savedJob.id);
       setError(i18n('ai_helper_testdata_job_interrupted'));
-      setShowFallbackHint(true);
+      setRetryGuidance('none');
       setCollapsed(false);
       return;
     }
@@ -445,7 +468,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         if (!response.ok) {
           const details = await parseErrorDetails(response);
           if (response.status === 404 || response.status === 403) {
-            throw new TestdataRequestError(details.message);
+            throw new TestdataRequestError(
+              details.message,
+              details.recommendDeeperReasoning,
+              details.failureCode,
+              details.retryPolicy,
+            );
           }
           throw new Error(details.message);
         }
@@ -472,15 +500,17 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           setResumeCheckpointJobId(job.status === 'interrupted' ? job.id : null);
           setError(job.error?.code === 'WORKER_INTERRUPTED'
             ? i18n('ai_helper_testdata_job_interrupted')
-            : (job.error?.message || i18n('ai_helper_testdata_job_failed')));
-          setShowFallbackHint(true);
-          setShowDeeperReasoningHint(job.error?.recommendDeeperReasoning === true);
+            : localizedFailureMessage(
+              job.error?.failureCode,
+              job.error?.message || i18n('ai_helper_testdata_job_failed'),
+            ));
+          setRetryGuidance(resolveTestdataRetryGuidance(job.error?.retryPolicy));
           setPhase('form');
         } else if (job.status === 'canceled') {
           terminal = true;
           rememberJob(null);
           setError(i18n('ai_helper_testdata_err_canceled'));
-          setShowFallbackHint(false);
+          setRetryGuidance('none');
           setPhase('form');
         }
       } catch (err) {
@@ -489,7 +519,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           terminal = true;
           rememberJob(null);
           setError(err instanceof Error ? err.message : String(err));
-          setShowFallbackHint(true);
+          setRetryGuidance(resolveTestdataRetryGuidance(
+            err instanceof TestdataRequestError ? err.retryPolicy : undefined,
+          ));
           setPhase('form');
         } else {
           console.warn('[AI-Helper] testdata generation job poll failed:', err);
@@ -518,8 +550,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const handleGenerate = useCallback(async (resumeFromJobId?: string) => {
     setError(null);
-    setShowFallbackHint(false);
-    setShowDeeperReasoningHint(false);
+    setRetryGuidance('none');
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
@@ -557,7 +588,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       });
       if (!response.ok) {
         const details = await parseErrorDetails(response);
-        throw new TestdataRequestError(details.message, details.recommendDeeperReasoning);
+        throw new TestdataRequestError(
+          details.message,
+          details.recommendDeeperReasoning,
+          details.failureCode,
+          details.retryPolicy,
+        );
       }
       const data = await response.json() as { job: BackgroundGenerationJob };
       if (!data.job?.id) throw new Error(i18n('ai_helper_testdata_job_start_failed'));
@@ -570,10 +606,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setShowFallbackHint(true);
-      setShowDeeperReasoningHint(
-        err instanceof TestdataRequestError && err.recommendDeeperReasoning,
-      );
+      setRetryGuidance(resolveTestdataRetryGuidance(
+        err instanceof TestdataRequestError ? err.retryPolicy : undefined,
+      ));
       setPhase('form');
     }
   }, [
@@ -597,7 +632,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       if (!response.ok) throw new Error((await parseErrorDetails(response)).message);
       rememberJob(null);
       setError(i18n('ai_helper_testdata_err_canceled'));
-      setShowFallbackHint(false);
+      setRetryGuidance('none');
       setPhase('form');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -610,8 +645,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const handleSkeleton = useCallback(async () => {
     setError(null);
-    setShowFallbackHint(false);
-    setShowDeeperReasoningHint(false);
+    setRetryGuidance('none');
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
@@ -937,14 +971,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       {error && (
         <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.base }}>
           <div>{error}</div>
-          {showDeeperReasoningHint && (
+          {retryGuidance === 'switch-model' && (
             <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs, fontWeight: 600 }}>
               {i18n('ai_helper_testdata_deeper_reasoning_suggestion')}
             </div>
           )}
-          {showFallbackHint && (
+          {retryGuidance === 'manual-review' && (
+            <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs, fontWeight: 600 }}>
+              {i18n('ai_helper_testdata_manual_review_suggestion')}
+            </div>
+          )}
+          {retryGuidance === 'retry' && (
             <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs }}>
-              {i18n('ai_helper_testdata_fallback_suggestion')}
+              {i18n('ai_helper_testdata_retry_suggestion')}
             </div>
           )}
           {resumeCheckpointJobId && (
