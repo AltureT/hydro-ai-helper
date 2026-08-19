@@ -2179,7 +2179,9 @@ async function createCheckerExecutor(input) {
         });
     }
     catch (err) {
-        if (input.signal?.aborted || isCancellation(err))
+        if (input.signal?.aborted)
+            throw input.signal.reason ?? err;
+        if (isCancellation(err))
             throw err;
         const message = err instanceof Error ? err.message : String(err);
         check.failureKind = 'compile';
@@ -2222,7 +2224,10 @@ async function createCheckerExecutor(input) {
                 return cases.map(() => 'infra-error');
             }
             const runStartedAt = Date.now();
-            const checkerDeadlineAt = runStartedAt + checkerBudgetRemainingMs;
+            const checkerBudgetDeadlineAt = runStartedAt + checkerBudgetRemainingMs;
+            const checkerDeadlineAt = opts.deadlineAt === undefined
+                ? checkerBudgetDeadlineAt
+                : Math.min(opts.deadlineAt, checkerBudgetDeadlineAt);
             try {
                 const details = await input.runner.runCheckerBatchDetailed(compiled.fileId, cases, {
                     ...opts,
@@ -2250,7 +2255,11 @@ async function createCheckerExecutor(input) {
                 return verdicts;
             }
             catch (err) {
-                if (opts.signal?.aborted || input.signal?.aborted || isCancellation(err))
+                if (opts.signal?.aborted)
+                    throw opts.signal.reason ?? err;
+                if (input.signal?.aborted)
+                    throw input.signal.reason ?? err;
+                if (isCancellation(err))
                     throw err;
                 if (err instanceof failures_1.TestdataPipelineError)
                     throw err;
@@ -3047,8 +3056,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         requestedPhase = 'generator';
     }
     const startsAtOrBefore = (phase) => MATERIALIZATION_PHASE_ORDER[requestedPhase] <= MATERIALIZATION_PHASE_ORDER[phase];
-    let sandboxDeadlineAt = startedAt
-        + (cache.correctnessBudgetRemainingMs ?? goJudgeSandboxService_1.SANDBOX_TOTAL_BUDGET_MS);
+    const correctnessBudgetMs = cache.correctnessBudgetRemainingMs ?? goJudgeSandboxService_1.SANDBOX_TOTAL_BUDGET_MS;
+    const materializationHardDeadlineAt = startedAt + correctnessBudgetMs + goJudgeSandboxService_1.CHECKER_BUDGET_MS;
+    let sandboxDeadlineAt = startedAt + correctnessBudgetMs;
     const reportProgress = (stage, percent) => {
         try {
             onProgress?.(stage, percent);
@@ -3490,7 +3500,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         runner,
                         adjudicator,
                         signal,
-                        deadlineAt: sandboxDeadlineAt,
+                        deadlineAt: materializationHardDeadlineAt,
                         deadlineAtProvider: () => sandboxDeadlineAt,
                         allowCheckerInfraResult: true,
                     });
@@ -5647,6 +5657,8 @@ class TestdataGenService {
                 response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, { ...initialMaterialization, cache: materializationCache });
             }
             catch (firstError) {
+                if (params.signal?.aborted)
+                    throw params.signal.reason ?? firstError;
                 if (isCancellation(firstError))
                     throw firstError;
                 if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {

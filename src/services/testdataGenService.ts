@@ -2813,7 +2813,8 @@ async function createCheckerExecutor(input: {
       deadlineAt: compileDeadlineAt,
     });
   } catch (err) {
-    if (input.signal?.aborted || isCancellation(err)) throw err;
+    if (input.signal?.aborted) throw input.signal.reason ?? err;
+    if (isCancellation(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     check.failureKind = 'compile';
     if (input.reliabilityMode === 'enforce') {
@@ -2860,7 +2861,10 @@ async function createCheckerExecutor(input: {
         return cases.map(() => 'infra-error');
       }
       const runStartedAt = Date.now();
-      const checkerDeadlineAt = runStartedAt + checkerBudgetRemainingMs;
+      const checkerBudgetDeadlineAt = runStartedAt + checkerBudgetRemainingMs;
+      const checkerDeadlineAt = opts.deadlineAt === undefined
+        ? checkerBudgetDeadlineAt
+        : Math.min(opts.deadlineAt, checkerBudgetDeadlineAt);
       try {
         const details = await (input.runner.runCheckerBatchDetailed as NonNullable<
           TestdataSandboxRunner['runCheckerBatchDetailed']
@@ -2888,7 +2892,9 @@ async function createCheckerExecutor(input: {
         }
         return verdicts;
       } catch (err) {
-        if (opts.signal?.aborted || input.signal?.aborted || isCancellation(err)) throw err;
+        if (opts.signal?.aborted) throw opts.signal.reason ?? err;
+        if (input.signal?.aborted) throw input.signal.reason ?? err;
+        if (isCancellation(err)) throw err;
         if (err instanceof TestdataPipelineError) throw err;
         check.executed = true;
         runtimeSkipped += cases.length;
@@ -3952,8 +3958,9 @@ export async function materializeSandboxBlueprint(
   }
   const startsAtOrBefore = (phase: MaterializationPhase) =>
     MATERIALIZATION_PHASE_ORDER[requestedPhase] <= MATERIALIZATION_PHASE_ORDER[phase];
-  let sandboxDeadlineAt = startedAt
-    + (cache.correctnessBudgetRemainingMs ?? SANDBOX_TOTAL_BUDGET_MS);
+  const correctnessBudgetMs = cache.correctnessBudgetRemainingMs ?? SANDBOX_TOTAL_BUDGET_MS;
+  const materializationHardDeadlineAt = startedAt + correctnessBudgetMs + CHECKER_BUDGET_MS;
+  let sandboxDeadlineAt = startedAt + correctnessBudgetMs;
   const reportProgress = (stage: TestdataGenerationProgressStage, percent: number) => {
     try { onProgress?.(stage, percent); } catch { /* progress is best-effort */ }
   };
@@ -4457,7 +4464,7 @@ export async function materializeSandboxBlueprint(
           runner,
           adjudicator,
           signal,
-          deadlineAt: sandboxDeadlineAt,
+          deadlineAt: materializationHardDeadlineAt,
           deadlineAtProvider: () => sandboxDeadlineAt,
           allowCheckerInfraResult: true,
         });
@@ -7181,6 +7188,7 @@ export class TestdataGenService {
         { ...initialMaterialization, cache: materializationCache },
       );
     } catch (firstError) {
+      if (params.signal?.aborted) throw params.signal.reason ?? firstError;
       if (isCancellation(firstError)) throw firstError;
       if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
         throw firstError;

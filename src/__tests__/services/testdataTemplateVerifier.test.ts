@@ -241,6 +241,28 @@ describe('verifySelectedTemplates', () => {
     }
   });
 
+  it('enforces an expired immutable hard deadline even when the correctness provider is later', async () => {
+    const runner = makeRunner();
+    const now = jest.spyOn(Date, 'now').mockReturnValue(200);
+
+    try {
+      await expect(verifySelectedTemplates({
+        languages: ['py'], solutions: { py: 'PY_SOLUTION' }, templates: { py: 'PY_TEMPLATE' },
+        cases, runner, adjudicator: ordinaryAdjudicator,
+        deadlineAt: 150,
+        deadlineAtProvider: () => 300,
+        allowCheckerInfraResult: false,
+      })).rejects.toMatchObject({ language: 'py', kind: 'budget' });
+      expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
+        'PY_SOLUTION\nPY_TEMPLATE',
+        cases.map(testcase => testcase.input),
+        expect.objectContaining({ deadlineAt: 150 }),
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('classifies ordinary output differences as mismatch after all cases run', async () => {
     const runner = makeRunner();
     runner.runPythonBatchDetailed = jest.fn().mockResolvedValue([

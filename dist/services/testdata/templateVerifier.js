@@ -52,10 +52,19 @@ function throwIfCancelledOrExpired(input, language, check) {
     if (input.signal?.aborted) {
         throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
     }
-    const deadlineAt = input.deadlineAtProvider?.() ?? input.deadlineAt;
+    const deadlineAt = earliestVerifierDeadline(input);
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
         fail(language, 'budget', check);
     }
+}
+function earliestVerifierDeadline(input) {
+    const hardDeadlineAt = input.deadlineAt;
+    const correctnessDeadlineAt = input.deadlineAtProvider?.();
+    if (hardDeadlineAt === undefined)
+        return correctnessDeadlineAt;
+    if (correctnessDeadlineAt === undefined)
+        return hardDeadlineAt;
+    return Math.min(hardDeadlineAt, correctnessDeadlineAt);
 }
 async function deleteCachedFile(runner, fileId) {
     try {
@@ -70,7 +79,7 @@ async function runLanguage(input, language) {
     const inputs = input.cases.map(testcase => testcase.input);
     const options = {
         signal: input.signal,
-        deadlineAt: input.deadlineAtProvider?.() ?? input.deadlineAt,
+        deadlineAt: earliestVerifierDeadline(input),
     };
     const baseCheck = {
         compiled: language === 'py', executed: false, total: inputs.length, passed: 0,
@@ -159,7 +168,7 @@ async function adjudicate(input, language, results) {
             answer: input.cases[index].answer,
         })), {
             signal: input.signal,
-            deadlineAt: input.deadlineAtProvider?.() ?? input.deadlineAt,
+            deadlineAt: input.deadlineAt,
         });
         throwIfCancelledOrExpired(input, language, check);
     }

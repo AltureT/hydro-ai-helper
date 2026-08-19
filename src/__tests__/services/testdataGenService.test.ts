@@ -4165,6 +4165,110 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
+  it('real checker executor keeps an earlier caller deadline than its remaining checker budget', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: 'print(input()) # independent brute',
+        validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    };
+    const startedAt = 10_000;
+    let now = startedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockResolvedValue([detail()]),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockImplementationOnce(async () => {
+          now = startedAt + SANDBOX_TOTAL_BUDGET_MS - 1_000;
+          return [detail({ stdout: '1\n' })];
+        }),
+      deleteCachedFile: jest.fn(),
+    };
+
+    try {
+      await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      }).generate({
+        problemTitle: 'checker deadline',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint,
+      });
+      expect(runner.runCheckerBatchDetailed).toHaveBeenCalledWith(
+        'checker-bin',
+        [{ input: '1\n', output: '1\n', answer: '1\n' }],
+        expect.objectContaining({ deadlineAt: startedAt + SANDBOX_TOTAL_BUDGET_MS }),
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('real checker executor preserves the exact caller cancellation reason identity', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: 'print(input()) # independent brute',
+        validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    };
+    const controller = new AbortController();
+    const cancellation = new Error('caller cancellation identity');
+    const transportCancellation = Object.assign(new Error('transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportCancellation;
+      }),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'checker cancellation',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint,
+      signal: controller.signal,
+    })).rejects.toBe(cancellation);
+  });
+
   it('observe 保留 testlib _fail 基础设施证据并对未裁决样例记零分', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
     const checkpoint = {
@@ -6263,7 +6367,66 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       expect(result.verification?.templateChecks?.py).toEqual({
         compiled: true, executed: true, total: 1, passed: 1,
       });
-      expect(checkerExecutor.runBatch).toHaveBeenCalledTimes(1);
+      expect(checkerExecutor.runBatch).toHaveBeenCalledWith(
+        [{ input: '1\n', output: '1\n', answer: '1\n' }],
+        {
+          signal: undefined,
+          deadlineAt: startedAt + SANDBOX_TOTAL_BUDGET_MS + CHECKER_BUDGET_MS,
+        },
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('custom checker cannot extend template adjudication past the immutable hard deadline', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:py@@@', 'def echo(value): return value',
+      '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+    ].join('\n'), fnOpts);
+    const startedAt = 10_000;
+    let now = startedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockImplementationOnce(async () => {
+          now = startedAt + SANDBOX_TOTAL_BUDGET_MS - 1_000;
+          return [detail({ stdout: '1\n' })];
+        }),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: 1, passed: 1, infraFailures: 0,
+      },
+      runBatch: jest.fn().mockImplementation(async () => {
+        now += CHECKER_BUDGET_MS + 1_001;
+        return ['accept' as const];
+      }),
+      runChecker: jest.fn(),
+      dispose: jest.fn(),
+    };
+
+    try {
+      await expect(materializeSandboxBlueprint(
+        bp, fnOpts, '', runner, undefined, true, undefined, [], false, checkerExecutor,
+      )).rejects.toMatchObject({
+        code: 'PIPELINE_BUDGET_EXHAUSTED',
+        artifact: 'pipeline',
+        safeDetails: { failureKind: 'budget' },
+      });
     } finally {
       nowSpy.mockRestore();
     }
