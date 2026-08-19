@@ -21,3 +21,17 @@ export function shouldOfferTestdataDirectFallbackConfirmation(
 ): boolean {
   return failureCode === 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED';
 }
+
+export function resolveTestdataGenerationFailureUi(
+  failureCode: string | undefined,
+  retryPolicy: string | undefined,
+): { showDirectFallbackConfirmation: boolean; retryGuidance: TestdataRetryGuidance } {
+  return {
+    showDirectFallbackConfirmation: shouldOfferTestdataDirectFallbackConfirmation(failureCode),
+    retryGuidance: resolveTestdataRetryGuidance(retryPolicy),
+  };
+}
+
+export function buildTestdataDirectFallbackRetryPayload(): { confirmDirectFallback: true } {
+  return { confirmDirectFallback: true };
+}

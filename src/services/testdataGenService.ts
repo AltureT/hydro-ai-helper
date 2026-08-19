@@ -49,6 +49,22 @@ import {
   type TestdataReliabilityMode,
   type TestdataRiskAssessment,
 } from './testdata/risk';
+import {
+  extractStatementSamples,
+  type StatementSample,
+} from './testdata/statementSamples';
+
+export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
+
+function comparableFileContent(content: string): string {
+  return content
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .join('\n')
+    .trimEnd();
+}
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -2567,74 +2583,6 @@ export function findAssignmentStyleCaseInput(cases: GeneratedCase[]): Assignment
     }
   }
   return null;
-}
-
-export interface StatementSample {
-  id: string;
-  input: string;
-  output: string;
-}
-
-/**
- * 提取题面样例：优先支持 Hydro 的 inputN/outputN 围栏，同时覆盖常见的
- * LeetCode 单行“输入：... / 输出：...”展示。后者仍是逻辑参数展示，函数题
- * 必须再由独立验证调用转换为主蓝图约定的原始 stdin，不能直接写入 .in。
- */
-export function extractStatementSamples(statementMarkdown: string): StatementSample[] {
-  const inputs: Array<{ id: string; content: string }> = [];
-  const outputs: Array<{ id: string; content: string }> = [];
-  const fenceRe = /```(input|output)(\d*)[^\n]*\r?\n([\s\S]*?)```/gi;
-  let match: RegExpExecArray | null;
-  while ((match = fenceRe.exec(statementMarkdown)) !== null) {
-    let content = match[3].replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    if (content.endsWith('\n')) content = content.slice(0, -1);
-    const entry = { id: match[2], content: normalizeFileContent(content) };
-    if (match[1].toLowerCase() === 'input') inputs.push(entry);
-    else outputs.push(entry);
-  }
-
-  const samples = inputs.flatMap((input, index) => {
-    const output = input.id
-      ? outputs.find(candidate => candidate.id === input.id)
-      : outputs[index];
-    return output ? [{ id: input.id || String(index + 1), input: input.content, output: output.content }] : [];
-  });
-
-  const normalized = statementMarkdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const lines = normalized.split('\n');
-  const inputLineRe = /^\s*(?:输入|Input)\s*[:：]\s*(\S[\s\S]*?)\s*$/i;
-  const outputLineRe = /^\s*(?:输出|Output)\s*[:：]\s*(\S[\s\S]*?)\s*$/i;
-  for (let i = 0; i < lines.length; i++) {
-    const inputMatch = lines[i].match(inputLineRe);
-    if (!inputMatch) continue;
-    for (let j = i + 1; j < lines.length; j++) {
-      if (inputLineRe.test(lines[j])) break;
-      const outputMatch = lines[j].match(outputLineRe);
-      if (!outputMatch) continue;
-      const input = normalizeFileContent(inputMatch[1].replace(/^`([\s\S]*)`$/, '$1'));
-      const output = normalizeFileContent(outputMatch[1].replace(/^`([\s\S]*)`$/, '$1'));
-      const duplicate = samples.some(sample =>
-        comparableFileContent(sample.input) === comparableFileContent(input)
-        && comparableFileContent(sample.output) === comparableFileContent(output));
-      if (!duplicate) {
-        samples.push({ id: String(samples.length + 1), input, output });
-      }
-      i = j;
-      break;
-    }
-  }
-
-  return samples;
-}
-
-function comparableFileContent(content: string): string {
-  return content
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .map(line => line.trimEnd())
-    .join('\n')
-    .trimEnd();
 }
 
 export type CheckerExecutionVerdict = 'accept' | 'reject' | 'infra-error';
@@ -5787,6 +5735,13 @@ export class TestdataGenService {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const risk = this.assessRisk(params);
+    if (isStatementTruncatedForGeneration(params.statementMarkdown)) {
+      throw toPipelineError(new Error('题面超过安全生成长度，无法在截断语义下生成测试数据。'), {
+        code: 'SPEC_STATEMENT_TRUNCATED',
+        stage: 'pipeline',
+        artifact: 'statement',
+      });
+    }
     const requiresProvidedCppOracle = params.options.problemKind !== 'function'
       && !!params.options.providedStd?.trim()
       && detectStdFilename(params.options.providedStd) === 'std.cc';

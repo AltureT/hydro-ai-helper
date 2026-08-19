@@ -14,8 +14,9 @@ import {
   getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
 } from '../utils/styles';
 import {
+  buildTestdataDirectFallbackRetryPayload,
   resolveTestdataRetryGuidance,
-  shouldOfferTestdataDirectFallbackConfirmation,
+  resolveTestdataGenerationFailureUi,
   type TestdataRetryGuidance,
 } from './retryPolicyHints';
 
@@ -520,10 +521,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               job.error?.failureCode,
               job.error?.message || i18n('ai_helper_testdata_job_failed'),
             ));
-          setDirectFallbackConfirmationRequired(
-            shouldOfferTestdataDirectFallbackConfirmation(job.error?.failureCode),
+          const failureUi = resolveTestdataGenerationFailureUi(
+            job.error?.failureCode,
+            job.error?.retryPolicy,
           );
-          setRetryGuidance(resolveTestdataRetryGuidance(job.error?.retryPolicy));
+          setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
+          setRetryGuidance(failureUi.retryGuidance);
           setPhase('form');
         } else if (job.status === 'canceled') {
           terminal = true;
@@ -606,7 +609,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
-          confirmDirectFallback: directFallbackConfirmed,
+          ...(directFallbackConfirmed
+            ? buildTestdataDirectFallbackRetryPayload()
+            : { confirmDirectFallback: false }),
           resumeFromJobId,
         }),
       });
@@ -630,13 +635,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setDirectFallbackConfirmationRequired(
-        err instanceof TestdataRequestError
-        && shouldOfferTestdataDirectFallbackConfirmation(err.failureCode),
-      );
-      setRetryGuidance(resolveTestdataRetryGuidance(
+      const failureUi = resolveTestdataGenerationFailureUi(
+        err instanceof TestdataRequestError ? err.failureCode : undefined,
         err instanceof TestdataRequestError ? err.retryPolicy : undefined,
-      ));
+      );
+      setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
+      setRetryGuidance(failureUi.retryGuidance);
       setPhase('form');
     }
   }, [
@@ -1560,7 +1564,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               <button
                 type="button"
                 style={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
-                onClick={() => { setConfirmDirectFallback(true); void handleGenerate(undefined, true); }}
+                onClick={() => {
+                  const retryPayload = buildTestdataDirectFallbackRetryPayload();
+                  setConfirmDirectFallback(retryPayload.confirmDirectFallback);
+                  void handleGenerate(undefined, retryPayload.confirmDirectFallback);
+                }}
               >
                 {i18n('ai_helper_testdata_direct_confirmation_action')}
               </button>

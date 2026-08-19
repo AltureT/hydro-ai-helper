@@ -1,3 +1,5 @@
+import { hasParseableStatementSamples } from './statementSamples';
+
 export type TestdataReliabilityMode = 'legacy' | 'observe' | 'enforce';
 
 export type TestdataRiskTier = 'low' | 'medium' | 'high' | 'blocked';
@@ -44,11 +46,14 @@ const RISK_PATTERNS = {
   floatingPoint: /\b(?:floating(?:\s|-)?point|absolute\s+(?:or\s+)?relative\s+error|precision)\b|(?:浮点|精度|误差)/i,
   statefulOperations: /\b(?:ADD|DEL|DELETE|ROLLBACK|UNDO|DYNAMIC\s+(?:UPDATE|MODIFICATION)|MODIFY)\b|(?:添加|删除|撤销|回滚|动态(?:修改|操作))/i,
   subtasks: /\bsubtasks?\b|(?:子任务|部分分)/i,
-  graphOrTree: /\b(?:graph|tree|vertices|edges|adjacency)\b|(?:图|树|节点|边|邻接)/i,
-  complexStructure: /\b(?:nested|matrix|multidimensional|linked\s+list|struct(?:ure)?)\b|(?:嵌套|矩阵|二维|多维|链表|结构体)/i,
+  structure: /\b(?:graph|tree|vertices|edges|adjacency|nested|matrix|multidimensional|linked\s+list|struct(?:ure)?)\b|(?:图|树|节点|邻接|嵌套|矩阵|二维|多维|链表|结构体)/i,
   countedCases: /\b(?:first\s+line\s+(?:contains|has)\s+T(?:\s+(?:test\s+)?cases?)?|T\s+test\s+cases?)\b|(?:第一行.*(?:T|t).*?(?:组|测试)|(?:多组|T\s*组)测试)/i,
-  parseableSample: /(?:^|\n)\s*(?:#{1,6}\s*)?(?:input|输入)(?:\s*(?:sample|样例|example|\d+))?\s*\n?\s*```[^\n]*\n[\s\S]*?\n```[\s\S]{0,400}?(?:^|\n)\s*(?:#{1,6}\s*)?(?:output|输出)(?:\s*(?:sample|样例|example|\d+))?\s*\n?\s*```[^\n]*\n[\s\S]*?\n```/i,
 } as const;
+
+function hasMultipleGuaranteesOrConventions(statement: string): boolean {
+  const matches = statement.match(/(?:保证|约定|guarantee(?:s)?|convention(?:s)?)/gi) || [];
+  return matches.length >= 2;
+}
 
 function signal(code: string, weight: number, messageKey: string): RiskSignal {
   return { code, weight, messageKey };
@@ -93,11 +98,8 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
   addIf(RISK_PATTERNS.subtasks.test(statement), signal(
     'SUBTASKS', 2, 'ai_helper_testdata_risk_subtasks',
   ));
-  addIf(RISK_PATTERNS.graphOrTree.test(statement), signal(
-    'GRAPH_OR_TREE', 2, 'ai_helper_testdata_risk_graph_or_tree',
-  ));
-  addIf(RISK_PATTERNS.complexStructure.test(statement), signal(
-    'COMPLEX_STRUCTURE', 2, 'ai_helper_testdata_risk_complex_structure',
+  addIf(RISK_PATTERNS.structure.test(statement), signal(
+    'STRUCTURE', 2, 'ai_helper_testdata_risk_structure',
   ));
   addIf(statement.length > 16000, signal(
     'STATEMENT_TOO_LONG', 2, 'ai_helper_testdata_risk_statement_too_long',
@@ -105,8 +107,11 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
   addIf(RISK_PATTERNS.countedCases.test(statement), signal(
     'COUNTED_TEST_CASES', 1, 'ai_helper_testdata_risk_counted_test_cases',
   ));
-  addIf(!RISK_PATTERNS.parseableSample.test(statement), signal(
+  addIf(!hasParseableStatementSamples(statement), signal(
     'NO_PARSEABLE_SAMPLES', 1, 'ai_helper_testdata_risk_no_parseable_samples',
+  ));
+  addIf(hasMultipleGuaranteesOrConventions(statement), signal(
+    'MULTIPLE_GUARANTEES_OR_CONVENTIONS', 1, 'ai_helper_testdata_risk_multiple_guarantees_or_conventions',
   ));
   addIf(!!input.specConflict, signal(
     'SPEC_CONFLICT', 3, 'ai_helper_testdata_risk_spec_conflict',

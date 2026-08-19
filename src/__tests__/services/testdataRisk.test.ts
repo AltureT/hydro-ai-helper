@@ -4,6 +4,7 @@ import {
   getTestdataReliabilityMode,
   type TestdataRiskInput,
 } from '../../services/testdata/risk';
+import { extractStatementSamples } from '../../services/testdataGenService';
 
 const sampleStatement = '## Input\n```input\n1\n```\n## Output\n```output\n1\n```';
 
@@ -28,13 +29,14 @@ describe('deterministic test-data risk assessment', () => {
     ['floating point tolerance', { statement: `${sampleStatement}\nAbsolute or relative error is accepted.` }, 'FLOATING_POINT'],
     ['state operations', { statement: `${sampleStatement}\nProcess ADD, DEL and ROLLBACK operations.` }, 'STATEFUL_OPERATIONS'],
     ['subtasks', { statement: `${sampleStatement}\nSubtask 1: n <= 10.` }, 'SUBTASKS'],
-    ['graph structure', { statement: `${sampleStatement}\nGiven a graph with vertices and edges.` }, 'GRAPH_OR_TREE'],
-    ['complex nested structure', { statement: `${sampleStatement}\nThe input is a nested matrix structure.` }, 'COMPLEX_STRUCTURE'],
+    ['graph structure', { statement: `${sampleStatement}\nGiven a graph with vertices and edges.` }, 'STRUCTURE'],
+    ['complex nested structure', { statement: `${sampleStatement}\nThe input is a nested matrix structure.` }, 'STRUCTURE'],
     ['long statement', { statement: `${sampleStatement}${'x'.repeat(16001)}` }, 'STATEMENT_TOO_LONG'],
     ['counted test cases', { statement: `${sampleStatement}\nThe first line contains T test cases.` }, 'COUNTED_TEST_CASES'],
     ['no parseable samples', { statement: 'There is no example section.' }, 'NO_PARSEABLE_SAMPLES'],
     ['spec conflict', { specConflict: true }, 'SPEC_CONFLICT'],
     ['truncated statement', { statementTruncated: true }, 'STATEMENT_TRUNCATED'],
+    ['multiple guarantees or conventions', { statement: `${sampleStatement}\n保证输入合法。约定下标从 1 开始。` }, 'MULTIPLE_GUARANTEES_OR_CONVENTIONS'],
   ] as const)('detects %s without AI or database access', (_label, input, code) => {
     expect(assess(input).reasons).toEqual(expect.arrayContaining([
       expect.objectContaining({ code }),
@@ -48,6 +50,51 @@ describe('deterministic test-data risk assessment', () => {
     expect(assess({ statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.` })).toMatchObject({ score: 5, tier: 'medium' });
     expect(assess({ statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.\nSubtask 1.` })).toMatchObject({ score: 7, tier: 'high' });
     expect(assess({ statement: `${sampleStatement}\nProcess ADD operations.\nGiven a graph.\nSubtask 1.` })).toMatchObject({ score: 6, tier: 'high' });
+  });
+
+  it.each([
+    ['Hydro numbered fences without headings', '```input1\n1\n```\n```output1\n1\n```'],
+    ['Hydro unnumbered fences without headings', '```input\n1\n```\n```output\n1\n```'],
+    ['Chinese inline pair', '输入：x = 1\n输出：1'],
+    ['English inline pair', 'Input: x = 1\nOutput: 1'],
+  ])('shares production sample recognition for %s', (_label, sampleSyntax) => {
+    const statement = `${sampleSyntax}\nProcess ADD operations.`;
+    expect(extractStatementSamples(statement)).not.toHaveLength(0);
+    expect(assess({ statement })).toMatchObject({ score: 2, tier: 'low' });
+  });
+
+  it('treats headed untyped fences as no sample because production does not parse them', () => {
+    const statement = '## Input\n```\n1\n```\n## Output\n```\n1\n```\nProcess ADD operations.';
+    expect(extractStatementSamples(statement)).toHaveLength(0);
+    expect(assess({ statement })).toMatchObject({ score: 3, tier: 'medium' });
+  });
+
+  it('counts graph, tree, and complex structure as one +2 category', () => {
+    const assessment = assess({
+      statement: `${sampleStatement}\nGiven a graph with an adjacency matrix and nested structure.`,
+    });
+    expect(assessment).toMatchObject({ score: 2, tier: 'low' });
+    expect(assessment.reasons.filter(reason => reason.code === 'STRUCTURE')).toHaveLength(1);
+  });
+
+  it('does not classify 边界 as a graph or tree signal', () => {
+    const assessment = assess({ statement: `${sampleStatement}\n请注意数组边界条件。` });
+    expect(assessment.reasons.map(reason => reason.code)).not.toContain('STRUCTURE');
+    expect(assessment.score).toBe(0);
+  });
+
+  it('weights multiple guarantees or conventions at +1 without statement leakage', () => {
+    const statement = `${sampleStatement}\n保证所有输入合法；约定结果非负。`;
+    const assessment = assess({ statement });
+    expect(assessment).toMatchObject({ score: 1, tier: 'low' });
+    expect(assessment.reasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'MULTIPLE_GUARANTEES_OR_CONVENTIONS',
+        weight: 1,
+        messageKey: 'ai_helper_testdata_risk_multiple_guarantees_or_conventions',
+      }),
+    ]));
+    expect(JSON.stringify(assessment)).not.toContain('结果非负');
   });
 
   it('blocks unsupported custom checkers regardless of score', () => {

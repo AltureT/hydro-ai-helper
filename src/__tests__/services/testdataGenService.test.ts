@@ -3725,9 +3725,29 @@ describe('TestdataGenService.generate', () => {
       problemTitle: 'long statement',
       statementMarkdown: `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20001)}`,
       options: { problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true },
-    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    })).rejects.toMatchObject({ code: 'SPEC_STATEMENT_TRUNCATED', retryPolicy: 'rerun-spec' });
     expect(mockClient.chat).not.toHaveBeenCalled();
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('rejects a prompt-truncated statement before an available sandbox or AI call', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+    };
+    await expect(new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner,
+    }).generate({
+      problemTitle: 'long statement',
+      statementMarkdown: `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH + 1)}`,
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_STATEMENT_TRUNCATED',
+      retryPolicy: 'rerun-spec',
+    });
+    expect(runner.isAvailable).not.toHaveBeenCalled();
+    expect(mockClient.chat).not.toHaveBeenCalled();
   });
 
   it('supported testlib custom checkers allow confirmed medium-risk direct fallback', async () => {
