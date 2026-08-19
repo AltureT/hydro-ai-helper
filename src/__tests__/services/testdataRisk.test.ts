@@ -77,6 +77,16 @@ describe('deterministic test-data risk assessment', () => {
     expect(assessment.reasons.filter(reason => reason.code === 'STRUCTURE')).toHaveLength(1);
   });
 
+  it.each([
+    ['ListNode', 'ListNode head is provided.'],
+    ['TreeNode', 'TreeNode root is provided.'],
+    ['combined vocabulary', 'Graph adjacency ListNode TreeNode structure.'],
+  ])('recognizes %s as exactly one unified structure signal', (_label, structureStatement) => {
+    const assessment = assess({ statement: `${sampleStatement}\n${structureStatement}` });
+    expect(assessment).toMatchObject({ score: 2, tier: 'low' });
+    expect(assessment.reasons.filter(reason => reason.code === 'STRUCTURE')).toHaveLength(1);
+  });
+
   it('does not classify 边界 as a graph or tree signal', () => {
     const assessment = assess({ statement: `${sampleStatement}\n请注意数组边界条件。` });
     expect(assessment.reasons.map(reason => reason.code)).not.toContain('STRUCTURE');

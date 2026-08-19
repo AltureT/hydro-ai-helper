@@ -14,9 +14,10 @@ import {
   getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
 } from '../utils/styles';
 import {
-  buildTestdataDirectFallbackRetryPayload,
+  adaptBackgroundTestdataGenerationFailure,
+  adaptSynchronousTestdataGenerationFailure,
+  DirectFallbackConfirmationView,
   resolveTestdataRetryGuidance,
-  resolveTestdataGenerationFailureUi,
   type TestdataRetryGuidance,
 } from './retryPolicyHints';
 
@@ -521,10 +522,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               job.error?.failureCode,
               job.error?.message || i18n('ai_helper_testdata_job_failed'),
             ));
-          const failureUi = resolveTestdataGenerationFailureUi(
-            job.error?.failureCode,
-            job.error?.retryPolicy,
-          );
+          const failureUi = adaptBackgroundTestdataGenerationFailure(job.error || {});
           setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
           setRetryGuidance(failureUi.retryGuidance);
           setPhase('form');
@@ -609,9 +607,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
-          ...(directFallbackConfirmed
-            ? buildTestdataDirectFallbackRetryPayload()
-            : { confirmDirectFallback: false }),
+          confirmDirectFallback: directFallbackConfirmed,
           resumeFromJobId,
         }),
       });
@@ -635,10 +631,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      const failureUi = resolveTestdataGenerationFailureUi(
-        err instanceof TestdataRequestError ? err.failureCode : undefined,
-        err instanceof TestdataRequestError ? err.retryPolicy : undefined,
-      );
+      const failureUi = adaptSynchronousTestdataGenerationFailure({
+        failureCode: err instanceof TestdataRequestError ? err.failureCode : undefined,
+        retryPolicy: err instanceof TestdataRequestError ? err.retryPolicy : undefined,
+      });
       setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
       setRetryGuidance(failureUi.retryGuidance);
       setPhase('form');
@@ -1558,21 +1554,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {i18n('ai_helper_testdata_panel_subtitle')}
           </div>
           {phase === 'form' && renderForm()}
-          {phase === 'form' && directFallbackConfirmationRequired && (
-            <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
-              <div>{i18n('ai_helper_testdata_direct_confirmation_required')}</div>
-              <button
-                type="button"
-                style={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
-                onClick={() => {
-                  const retryPayload = buildTestdataDirectFallbackRetryPayload();
-                  setConfirmDirectFallback(retryPayload.confirmDirectFallback);
-                  void handleGenerate(undefined, retryPayload.confirmDirectFallback);
-                }}
-              >
-                {i18n('ai_helper_testdata_direct_confirmation_action')}
-              </button>
-            </div>
+          {phase === 'form' && (
+            <DirectFallbackConfirmationView
+              visible={directFallbackConfirmationRequired}
+              message={i18n('ai_helper_testdata_direct_confirmation_required')}
+              actionLabel={i18n('ai_helper_testdata_direct_confirmation_action')}
+              containerStyle={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}
+              buttonStyle={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
+              onConfirm={retryPayload => {
+                setConfirmDirectFallback(retryPayload.confirmDirectFallback);
+                void handleGenerate(undefined, retryPayload.confirmDirectFallback);
+              }}
+            />
           )}
           {phase === 'generating' && renderGenerating()}
           {phase === 'preview' && renderPreview()}

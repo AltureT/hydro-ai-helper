@@ -12,7 +12,7 @@ const RISK_PATTERNS = {
     floatingPoint: /\b(?:floating(?:\s|-)?point|absolute\s+(?:or\s+)?relative\s+error|precision)\b|(?:浮点|精度|误差)/i,
     statefulOperations: /\b(?:ADD|DEL|DELETE|ROLLBACK|UNDO|DYNAMIC\s+(?:UPDATE|MODIFICATION)|MODIFY)\b|(?:添加|删除|撤销|回滚|动态(?:修改|操作))/i,
     subtasks: /\bsubtasks?\b|(?:子任务|部分分)/i,
-    structure: /\b(?:graph|tree|vertices|edges|adjacency|nested|matrix|multidimensional|linked\s+list|struct(?:ure)?)\b|(?:图|树|节点|邻接|嵌套|矩阵|二维|多维|链表|结构体)/i,
+    structure: /\b(?:graph|tree|vertices|edges|adjacency|nested|matrix|multidimensional|linked\s+list|struct(?:ure)?|ListNode|TreeNode)\b|(?:图|树|节点|邻接|嵌套|矩阵|二维|多维|链表|结构体)/i,
     countedCases: /\b(?:first\s+line\s+(?:contains|has)\s+T(?:\s+(?:test\s+)?cases?)?|T\s+test\s+cases?)\b|(?:第一行.*(?:T|t).*?(?:组|测试)|(?:多组|T\s*组)测试)/i,
 };
 function hasMultipleGuaranteesOrConventions(statement) {

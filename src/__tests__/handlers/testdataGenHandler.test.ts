@@ -369,6 +369,29 @@ describe('TestdataGenGenerateHandler', () => {
     expect(handler.response.body.code).toBe('INVALID_OPTIONS');
   });
 
+  it('同步成功路径将显式 direct fallback 确认传给生成服务', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true },
+    });
+
+    try {
+      await handler.post();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        options: expect.objectContaining({ confirmDirectFallback: true }),
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
   it('非法既有 config 在创建客户端、编译探针和读取 checker 前立即中止', async () => {
     mockFindOne({
       ...PROBLEM_DOC,
