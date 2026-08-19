@@ -67,6 +67,32 @@ describe('test-data generation current guarantees', () => {
     })).rejects.toThrow(/未配置 Hydro 沙箱执行器/);
   });
 
+  it('runs generated inputs and ORACLE only through the sandbox adapter', async () => {
+    // Mutation caught: replacing sandbox execution with a local direct-output path.
+    const blueprint = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: traditional',
+      '@@@GENERATOR@@@', 'GENERATOR_SENTINEL',
+      '@@@ORACLE@@@', 'ORACLE_SENTINEL',
+    ].join('\n'), traditional);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn((code: string) => Promise.resolve({
+        stdout: code.includes('GENERATOR_SENTINEL')
+          ? JSON.stringify({ cases: [{ label: 'c', input: '7' }] }) : '', stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn((code: string) => Promise.resolve([
+        code.includes('ORACLE_SENTINEL')
+          ? { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: '7\n', stderr: '' }
+          : { status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus: 1, stdout: '', stderr: 'wrong adapter code' },
+      ])),
+    };
+    const result = await materializeSandboxBlueprint(blueprint, traditional, '', runner);
+    expect(result.cases).toEqual([expect.objectContaining({ label: 'c', input: '7\n', output: '7\n' })]);
+    expect(runner.runPython.mock.calls[0][0]).toContain('GENERATOR_SENTINEL');
+    expect(runner.runPythonBatchDetailed.mock.calls[0][0]).toContain('ORACLE_SENTINEL');
+  });
+
   it('executes a function solution together with template.py before accepting it', async () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -74,9 +100,11 @@ describe('test-data generation current guarantees', () => {
         stdout: JSON.stringify({ cases: [{ label: 'sum', input: '2 3' }] }), stderr: '',
       }),
       runPythonBatch: jest.fn(),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([
-        { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: '5\n', stderr: '' },
-      ]),
+      runPythonBatchDetailed: jest.fn((code: string) => Promise.resolve([
+        (code.includes('a,b=map(int,input().split())') || (code.includes('def add(a, b):') && code.includes('print(add(a,b))')))
+          ? { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: '5\n', stderr: '' }
+          : { status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus: 1, stdout: '', stderr: 'missing composed program' },
+      ])),
     };
 
     const result = await materializeSandboxBlueprint(
@@ -130,6 +158,7 @@ describe('test-data generation current guarantees', () => {
   });
 
   it('classifies custom-checker infrastructure failures separately from wrong answers', () => {
+    // Mutation caught: treating a checker timeout/transport failure as WA.
     expect(reduceCheckerExecution({ status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus: 1 }))
       .toBe('reject');
     expect(reduceCheckerExecution({ status: 'Time Limit Exceeded', accepted: false, timedOut: true }))
@@ -138,6 +167,7 @@ describe('test-data generation current guarantees', () => {
   });
 
   it('merges generated subtasks without silently replacing existing config fields', () => {
+    // Mutation caught: rebuilding config.yaml from generated values and dropping existing settings.
     const existing = yaml.load('time_limit: 1000\nchecker_type: default\nsubtasks:\n  - score: 30\n    cases: [1]\n') as Record<string, any>;
     const merged = mergeConfigSubtasks(existing.subtasks, [2]);
 

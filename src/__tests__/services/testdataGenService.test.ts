@@ -2672,6 +2672,8 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: deeperModel }),
     };
+    // Mutation caught: recursively applying semantic escalation after the second full run fails.
+    const thirdClient = { chat: jest.fn() };
     const primaryClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: brokenBlueprint, usage, usedModel: primaryModel })
@@ -2683,7 +2685,7 @@ describe('TestdataGenService.generate', () => {
           usage,
           usedModel: primaryModel,
         }),
-      createClientStartingAfter: jest.fn().mockReturnValue(fallbackClient),
+      createClientStartingAfter: jest.fn().mockReturnValueOnce(fallbackClient).mockReturnValueOnce(thirdClient),
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -2713,6 +2715,8 @@ describe('TestdataGenService.generate', () => {
 
     expect(primaryClient.chat).toHaveBeenCalledTimes(5);
     expect(primaryClient.createClientStartingAfter).toHaveBeenCalledWith(primaryModel);
+    expect(primaryClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+    expect(thirdClient.chat).not.toHaveBeenCalled();
     expect(fallbackClient.chat).toHaveBeenCalledTimes(4);
     expect(plan.verification?.modelEscalation).toEqual({
       fromModel: 'primary/model-a',
