@@ -2199,7 +2199,17 @@ async function createCheckerExecutor(input) {
         checkerBudgetRemainingMs = Math.max(0, checkerBudgetRemainingMs - Math.max(0, Date.now() - compileStartedAt));
     }
     if (input.signal?.aborted) {
-        throw input.signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        const reason = input.signal.reason
+            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        if (compiled.ok === true) {
+            try {
+                await input.runner.deleteCachedFile?.(compiled.fileId);
+            }
+            catch {
+                // Preserve the caller's cancellation even when best-effort cleanup fails.
+            }
+        }
+        throw reason;
     }
     if (compiled.ok === false) {
         const failureKind = compiled.kind === 'compile' ? 'compile' : 'infra';

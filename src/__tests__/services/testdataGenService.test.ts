@@ -4532,6 +4532,47 @@ describe('TestdataGenService.generate', () => {
     expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['successful cleanup', () => Promise.resolve()],
+    ['rejected cleanup', () => Promise.reject(new Error('cache cleanup unavailable'))],
+  ] as const)(
+    'checker preparation deletes a successful late cache after caller abort with %s',
+    async (_label, cleanup) => {
+      const controller = new AbortController();
+      const cancellation = new Error('checker cached compile caller cancellation');
+      const mockClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        compileCpp: jest.fn().mockImplementation(async () => {
+          controller.abort(cancellation);
+          return { ok: true, fileId: 'late-checker-cache' };
+        }),
+        runCheckerBatchDetailed: jest.fn(),
+        deleteCachedFile: jest.fn().mockImplementation(cleanup),
+      };
+
+      const failure = await new TestdataGenService(mockClient as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      }).generate({
+        problemTitle: 'checker cached cancellation boundary',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+        signal: controller.signal,
+      }).catch(error => error);
+
+      expect(failure).toBe(cancellation);
+      expect(runner.deleteCachedFile).toHaveBeenCalledTimes(1);
+      expect(runner.deleteCachedFile).toHaveBeenCalledWith('late-checker-cache');
+      expect(mockClient.chat).not.toHaveBeenCalled();
+      expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+      expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+    },
+  );
+
   it('enforce 在 checker 编译失败时保留 checker 类型化契约', async () => {
     const privateDiagnostic = 'SECRET_CHECKER_SENTINEL /private/checker/path.cc:1: error';
     const runner = {
