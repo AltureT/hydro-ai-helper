@@ -116,6 +116,10 @@ interface BackgroundGenerationJob {
     message: string;
     code: string;
     category?: string;
+    failureCode?: string;
+    stage?: string;
+    artifact?: string;
+    retryPolicy?: string;
     retryable: boolean;
     recommendDeeperReasoning?: boolean;
   };
@@ -229,13 +233,26 @@ const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', mon
 interface ApiErrorDetails {
   message: string;
   recommendDeeperReasoning: boolean;
+  failureCode?: string;
+  stage?: string;
+  artifact?: string;
+  retryPolicy?: string;
 }
 
 class TestdataRequestError extends Error {
-  constructor(message: string, readonly recommendDeeperReasoning = false) {
+  constructor(
+    message: string,
+    readonly recommendDeeperReasoning = false,
+    readonly failureCode?: string,
+  ) {
     super(message);
     this.name = 'TestdataRequestError';
   }
+}
+
+function localizedFailureMessage(failureCode: string | undefined, fallback: string): string {
+  if (!failureCode) return fallback;
+  return i18n(`ai_helper_testdata_failure_${failureCode.toLowerCase()}`);
 }
 
 async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
@@ -243,8 +260,12 @@ async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
     const data = await response.json();
     if (data?.error) {
       return {
-        message: String(data.error),
+        message: localizedFailureMessage(data.failureCode, String(data.error)),
         recommendDeeperReasoning: data.recommendDeeperReasoning === true,
+        failureCode: typeof data.failureCode === 'string' ? data.failureCode : undefined,
+        stage: typeof data.stage === 'string' ? data.stage : undefined,
+        artifact: typeof data.artifact === 'string' ? data.artifact : undefined,
+        retryPolicy: typeof data.retryPolicy === 'string' ? data.retryPolicy : undefined,
       };
     }
   } catch { /* ignore */ }
@@ -472,7 +493,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           setResumeCheckpointJobId(job.status === 'interrupted' ? job.id : null);
           setError(job.error?.code === 'WORKER_INTERRUPTED'
             ? i18n('ai_helper_testdata_job_interrupted')
-            : (job.error?.message || i18n('ai_helper_testdata_job_failed')));
+            : localizedFailureMessage(
+              job.error?.failureCode,
+              job.error?.message || i18n('ai_helper_testdata_job_failed'),
+            ));
           setShowFallbackHint(true);
           setShowDeeperReasoningHint(job.error?.recommendDeeperReasoning === true);
           setPhase('form');
@@ -557,7 +581,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       });
       if (!response.ok) {
         const details = await parseErrorDetails(response);
-        throw new TestdataRequestError(details.message, details.recommendDeeperReasoning);
+        throw new TestdataRequestError(
+          details.message,
+          details.recommendDeeperReasoning,
+          details.failureCode,
+        );
       }
       const data = await response.json() as { job: BackgroundGenerationJob };
       if (!data.job?.id) throw new Error(i18n('ai_helper_testdata_job_start_failed'));

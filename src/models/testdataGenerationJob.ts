@@ -16,6 +16,11 @@ import type {
   SandboxSolutionBlueprint,
   TestdataGenerationProgress,
 } from '../services/testdataGenService';
+import type {
+  TestdataArtifact,
+  TestdataFailureCode,
+  TestdataRetryPolicy,
+} from '../services/testdata/failures';
 
 export type TestdataGenerationJobStatus =
   | 'pending'
@@ -29,6 +34,10 @@ export interface TestdataGenerationJobError {
   message: string;
   code: string;
   category?: string;
+  failureCode?: TestdataFailureCode;
+  stage?: string;
+  artifact?: TestdataArtifact;
+  retryPolicy?: TestdataRetryPolicy;
   retryable: boolean;
   recommendDeeperReasoning?: boolean;
 }

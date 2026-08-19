@@ -63,6 +63,7 @@ import {
   GenerateOptions,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
+import { TestdataPipelineError } from '../../services/testdata/failures';
 import {
   DISCRIMINATION_BUDGET_MS,
   SANDBOX_TOTAL_BUDGET_MS,
@@ -1929,18 +1930,20 @@ describe('stage-specific sandbox repair', () => {
     expect(classifySandboxRepairScope(new Error('AC 候选标程与独立 BRUTE 不一致'))).toBe('accepted-std');
     expect(classifySandboxRepairScope(new Error('template.py 与标程不一致'))).toBe('template-py');
     expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
-    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
-    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
+    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options, 'generator')).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options, 'validator'))
       .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
     const cppRepair = buildSandboxRepairPrompt(
       new Error('ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：prog.cc:7: error'),
       options,
+      'oracle',
     );
     expect(cppRepair).toContain('当前 ORACLE 语言为 C++17');
     expect(cppRepair).toContain('prog.cc:7: error');
     const cppInfraRepair = buildSandboxRepairPrompt(
       new Error('ORACLE_CPP_INFRA：connect ECONNREFUSED'),
       options,
+      'oracle',
     );
     expect(cppInfraRepair).toContain('改用 Python 3');
     expect(cppInfraRepair).not.toContain('保持该语言不变');
@@ -2788,9 +2791,13 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ input: '1' }] }), stderr: '' })
         .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
-      runPythonBatchDetailed: jest.fn().mockRejectedValue(
-        new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'),
-      ),
+      runPythonBatchDetailed: jest.fn().mockRejectedValue(new TestdataPipelineError(
+        '沙箱执行总时长超出预算，请减少测试点数量后重试',
+        'PIPELINE_BUDGET_EXHAUSTED',
+        'sandbox_budget',
+        'pipeline',
+        'no-retry',
+      )),
     };
 
     const promise = new TestdataGenService(mockClient as never, {
@@ -3028,7 +3035,7 @@ describe('TestdataGenService.generate', () => {
     expect(config.subtasks.map(subtask => subtask.score)).toEqual([40, 60]);
   });
 
-  it('压力对拍失败时只重生成独立验证器，不把 ORACLE 源码放入修复上下文', async () => {
+  it('ORACLE 与 BRUTE 分歧时进入裁决并停止自动修复', async () => {
     const brokenVerifier = makeIndependentVerifierBlueprint().replace(
       'print(input())  # independent brute',
       'print("wrong")  # broken independent brute',
@@ -3069,20 +3076,20 @@ describe('TestdataGenService.generate', () => {
         ins.map(input => detail({ stdout: code.includes('broken independent brute') ? 'wrong\n' : input })),
       )),
     };
-    const plan = await new TestdataGenService(mockClient as never, {
+    const promise = new TestdataGenService(mockClient as never, {
       sandboxRunner: runner, mode: 'sandbox',
     }).generate({
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    const repairMessages = mockClient.chat.mock.calls[4][0];
-    expect(repairMessages[2].content).toContain('独立验证制品未通过');
-    expect(repairMessages[0].content).not.toContain('print(input())');
-    expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
-    // 仅 BRUTE 发生变化：正式 GENERATOR 与 STRESS_GENERATOR 各只执行一次。
+    await expect(promise).rejects.toMatchObject({
+      code: 'ORACLE_BRUTE_DIVERGENCE',
+      artifact: 'brute',
+      retryPolicy: 'adjudicate',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(runner.runPython).toHaveBeenCalledTimes(2);
-    expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
   });
 
   it('初始蓝图分节损坏时请求完整蓝图后继续验证', async () => {

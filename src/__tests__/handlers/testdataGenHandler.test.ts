@@ -24,6 +24,7 @@ import {
   TestdataGenerationError,
 } from '../../services/testdataGenService';
 import { GoJudgeSandboxRunner } from '../../services/goJudgeSandboxService';
+import { TestdataPipelineError } from '../../services/testdata/failures';
 import { ObjectId } from '../../utils/mongo';
 import { computeTestdataCheckpointHashes } from '../../models/testdataGenerationJob';
 
@@ -794,6 +795,40 @@ describe('TestdataGenGenerateHandler', () => {
       clientSpy.mockRestore();
     }
   });
+
+  it('同步生成接口透传类型化失败字段', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const error = new TestdataPipelineError(
+      'technical divergence detail',
+      'ORACLE_BRUTE_DIVERGENCE',
+      'stress_testing',
+      'brute',
+      'adjudicate',
+      { caseIndex: 3 },
+    );
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 5 },
+    });
+
+    try {
+      await handler.post();
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'GENERATION_FAILED',
+        failureCode: 'ORACLE_BRUTE_DIVERGENCE',
+        stage: 'stress_testing',
+        artifact: 'brute',
+        retryPolicy: 'adjudicate',
+        retryable: true,
+        error: 'ai_helper_testdata_failure_oracle_brute_divergence',
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
 });
 
 // ─── Persistent generation job handlers ─────────────────────────────────────
@@ -906,6 +941,58 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
       expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('background job persists typed failure routing fields', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(
+      new TestdataPipelineError(
+        'technical budget detail',
+        'PIPELINE_BUDGET_EXHAUSTED',
+        'sandbox_budget',
+        'pipeline',
+        'no-retry',
+        { elapsedMs: 120000 },
+      ),
+    );
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true, body: { problemId: 'D3102', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(jobModel.fail).toHaveBeenCalledWith(job._id, {
+        message: 'ai_helper_testdata_failure_pipeline_budget_exhausted',
+        code: 'GENERATION_FAILED',
+        failureCode: 'PIPELINE_BUDGET_EXHAUSTED',
+        stage: 'sandbox_budget',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+        recommendDeeperReasoning: false,
+      });
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();

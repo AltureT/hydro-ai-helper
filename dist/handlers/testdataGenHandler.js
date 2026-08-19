@@ -19,6 +19,7 @@ const hydrooj_1 = require("hydrooj");
 const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
 const testdataGenService_1 = require("../services/testdataGenService");
+const failures_1 = require("../services/testdata/failures");
 const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
 const goJudgeSandboxService_1 = require("../services/goJudgeSandboxService");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
@@ -497,6 +498,7 @@ async function runBackgroundGeneration(params) {
         }
         console.error('[TestdataGenJob] generation failed:', err);
         const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+        const failureMetadata = (0, failures_1.extractTestdataFailureMetadata)(err);
         const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
         const testdataUserMessage = resolveTestdataUserMessage(translate, err);
         const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
@@ -519,7 +521,13 @@ async function runBackgroundGeneration(params) {
                     ? testdataUserMessage
                     : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
-                retryable: true,
+                ...(failureMetadata ? {
+                    failureCode: failureMetadata.failureCode,
+                    stage: failureMetadata.stage,
+                    artifact: failureMetadata.artifact,
+                    retryPolicy: failureMetadata.retryPolicy,
+                } : {}),
+                retryable: failureMetadata?.retryPolicy !== 'no-retry',
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
             };
         await jobModel.fail(job._id, jobError);
@@ -691,6 +699,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
             const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+            const failureMetadata = (0, failures_1.extractTestdataFailureMetadata)(err);
             const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
             const testdataUserMessage = resolveTestdataUserMessage(key => this.translate(key), err);
             const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
@@ -729,7 +738,13 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     ? testdataUserMessage
                     : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
-                retryable: true,
+                ...(failureMetadata ? {
+                    failureCode: failureMetadata.failureCode,
+                    stage: failureMetadata.stage,
+                    artifact: failureMetadata.artifact,
+                    retryPolicy: failureMetadata.retryPolicy,
+                } : {}),
+                retryable: failureMetadata?.retryPolicy !== 'no-retry',
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
             };
             if (progressStream) {
@@ -737,7 +752,9 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 progressStream.end();
             }
             else {
-                this.response.status = testdataUserMessageKey ? 400 : 502;
+                this.response.status = err?.userMessageKey
+                    ? 400
+                    : 502;
                 this.response.body = errorBody;
                 this.response.type = 'application/json';
             }
@@ -866,6 +883,10 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     [testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
+                    backgroundTranslations[key] = this.translate(key);
+                }
+                for (const code of failures_1.TESTDATA_FAILURE_CODES) {
+                    const key = (0, failures_1.getUserMessageKeyForFailure)(code);
                     backgroundTranslations[key] = this.translate(key);
                 }
                 void runBackgroundGeneration({

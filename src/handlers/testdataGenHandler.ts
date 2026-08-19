@@ -37,6 +37,11 @@ import {
   CPP_ORACLE_INFRA_FAILURE_KEY,
   getTestlibCheckerFilename,
 } from '../services/testdataGenService';
+import {
+  TESTDATA_FAILURE_CODES,
+  extractTestdataFailureMetadata,
+  getUserMessageKeyForFailure,
+} from '../services/testdata/failures';
 import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
 import {
   GoJudgeSandboxRunner,
@@ -642,6 +647,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
 
     console.error('[TestdataGenJob] generation failed:', err);
     const testdataMetadata = extractTestdataErrorMetadata(err);
+    const failureMetadata = extractTestdataFailureMetadata(err);
     const testdataUserMessageKey = extractTestdataUserMessageKey(err);
     const testdataUserMessage = resolveTestdataUserMessage(translate, err);
     const aiMetadata = extractAiErrorMetadata(err);
@@ -673,7 +679,13 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
           ? testdataUserMessage as string
           : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
-        retryable: true,
+        ...(failureMetadata ? {
+          failureCode: failureMetadata.failureCode,
+          stage: failureMetadata.stage,
+          artifact: failureMetadata.artifact,
+          retryPolicy: failureMetadata.retryPolicy,
+        } : {}),
+        retryable: failureMetadata?.retryPolicy !== 'no-retry',
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
       };
     await jobModel.fail(job._id, jobError);
@@ -853,6 +865,7 @@ export class TestdataGenGenerateHandler extends Handler {
       }
       console.error('[TestdataGenGenerateHandler.post] error:', err);
       const testdataMetadata = extractTestdataErrorMetadata(err);
+      const failureMetadata = extractTestdataFailureMetadata(err);
       const testdataUserMessageKey = extractTestdataUserMessageKey(err);
       const testdataUserMessage = resolveTestdataUserMessage(
         key => this.translate(key),
@@ -901,14 +914,22 @@ export class TestdataGenGenerateHandler extends Handler {
           ? testdataUserMessage as string
           : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
         code: 'GENERATION_FAILED',
-        retryable: true,
+        ...(failureMetadata ? {
+          failureCode: failureMetadata.failureCode,
+          stage: failureMetadata.stage,
+          artifact: failureMetadata.artifact,
+          retryPolicy: failureMetadata.retryPolicy,
+        } : {}),
+        retryable: failureMetadata?.retryPolicy !== 'no-retry',
         recommendDeeperReasoning: shouldRecommendDeeperReasoning(err),
       };
       if (progressStream) {
         progressStream.writeEvent('error', errorBody);
         progressStream.end();
       } else {
-        this.response.status = testdataUserMessageKey ? 400 : 502;
+        this.response.status = (err as { userMessageKey?: string } | null)?.userMessageKey
+          ? 400
+          : 502;
         this.response.body = errorBody;
         this.response.type = 'application/json';
       }
@@ -1037,6 +1058,10 @@ export class TestdataGenJobStartHandler extends Handler {
           [CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(CPP_ORACLE_INFRA_FAILURE_KEY),
         };
         for (const key of Object.values(USER_ERROR_MESSAGE_KEYS)) {
+          backgroundTranslations[key] = this.translate(key);
+        }
+        for (const code of TESTDATA_FAILURE_CODES) {
+          const key = getUserMessageKeyForFailure(code);
           backgroundTranslations[key] = this.translate(key);
         }
         void runBackgroundGeneration({
