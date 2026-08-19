@@ -538,7 +538,7 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
       return { ok: true, fileId };
     } catch (err) {
       await cleanupReturnedFiles();
-      if (opts.signal?.aborted) throw err;
+      if (opts.signal?.aborted) throw opts.signal.reason ?? err;
       if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
         throw new SandboxBudgetExceededError();
       }

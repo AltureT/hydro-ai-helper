@@ -388,7 +388,7 @@ class GoJudgeSandboxRunner {
         catch (err) {
             await cleanupReturnedFiles();
             if (opts.signal?.aborted)
-                throw err;
+                throw opts.signal.reason ?? err;
             if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
                 throw new SandboxBudgetExceededError();
             }

@@ -637,6 +637,24 @@ describe('GoJudgeSandboxRunner Java cached artifact infrastructure', () => {
     );
   });
 
+  it('compileJava rethrows the caller cancellation when the in-flight HTTP request rejects differently', async () => {
+    const cancellation = Object.assign(new Error('caller canceled'), { name: 'AbortError' });
+    const axiosCancellation = Object.assign(new Error('axios canceled'), { name: 'CanceledError' });
+    const controller = new AbortController();
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw axiosCancellation;
+      }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await expect(runner.compileJava('public class Main {}', 'class Solution {}', {
+      signal: controller.signal,
+    })).rejects.toBe(cancellation);
+  });
+
   it('runJavaBatchDetailed reuses cached batch chunk, limit, and deadline semantics', async () => {
     const http = {
       get: jest.fn(),
