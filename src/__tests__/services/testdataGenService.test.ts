@@ -2097,6 +2097,35 @@ describe('stage-specific sandbox repair', () => {
     expect(merged.templates?.java).toBe(original.templates?.java);
   });
 
+  it('legacy Python solution survives Java and C++ template repairs', () => {
+    const legacy = {
+      problemType: 'function' as const,
+      generatorCode: 'print("{}")',
+      oracleCode: 'print(input())',
+      solutionCode: 'def solve(value):\n    return value\n',
+      templates: {
+        py: 'print(solve(input()))\n',
+        java: 'public class Main {}\n',
+        cc: '#include "foo.cc"\nint main() { return 0; }\n',
+      },
+    };
+    const javaRepaired = mergeSandboxBlueprintRepair(
+      legacy,
+      '@@@SOLUTION:java@@@\nclass Solution {}\n@@@TEMPLATE:java@@@\npublic class Main { }',
+      'template-java',
+    );
+    const ccRepaired = mergeSandboxBlueprintRepair(
+      legacy,
+      '@@@SOLUTION:cc@@@\nint solve() { return 1; }\n@@@TEMPLATE:cc@@@\n#include "foo.cc"\nint main() { return 0; }',
+      'template-cc',
+    );
+
+    for (const repaired of [javaRepaired, ccRepaired]) {
+      expect(repaired.solutions?.py).toBe(legacy.solutionCode);
+      expect(repaired.solutionCode).toBe(legacy.solutionCode);
+    }
+  });
+
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
     const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
     const merged = mergeSandboxBlueprintRepair(
@@ -2342,6 +2371,61 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat.mock.calls[4][0][2].content).toContain('独立验证制品未通过');
     expect(mockClient.chat.mock.calls[4][0][2].content).not.toContain('@@@SAMPLE_INPUTS@@@');
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('恢复 checkpoint 缺少已选 Java/C++ 解时重新生成全部依赖制品', async () => {
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    };
+    const checkpoint = {
+      solution: {
+        problemType: 'function' as const,
+        oracleCode: 'print(input())',
+        solutionCode: 'def solve(value):\n    return value\n',
+      },
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('function'),
+        'function',
+        options.languages,
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    };
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+
+    await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '断点函数题', statementMarkdown: '题面', options, checkpoint,
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[0][0][0].content).toContain('断点函数题');
+    expect(mockClient.chat.mock.calls.some((call: unknown[]) =>
+      String((call[0] as Array<{ content?: string }>)[0]?.content).includes('第一阶段已验证且必须保持不变的解题蓝图'),
+    )).toBe(true);
   });
 
   it('checkpoint 命中四项制品时跳过对应 AI 调用但仍完整运行沙箱', async () => {

@@ -1545,6 +1545,29 @@ function parseTemplateSolutions(sections) {
     }
     return solutions;
 }
+/** 将旧的 Python solutionCode 与新 solutions map 收敛为同一个兼容视图。 */
+function normalizeTemplateSolutions(blueprint) {
+    return {
+        ...(blueprint.solutionCode?.trim() ? { py: blueprint.solutionCode } : {}),
+        ...blueprint.solutions,
+    };
+}
+function normalizeSolutionBlueprintCompatibility(blueprint) {
+    const solutions = normalizeTemplateSolutions(blueprint);
+    if (Object.keys(solutions).length === 0)
+        return blueprint;
+    return { ...blueprint, solutions, solutionCode: solutions.py };
+}
+/** 旧 checkpoint 缺失本轮函数题语言解时，必须整链重跑，不能混用下游制品。 */
+function normalizeReusableCheckpoint(checkpoint, options) {
+    if (!checkpoint?.solution)
+        return checkpoint;
+    const solution = normalizeSolutionBlueprintCompatibility(checkpoint.solution);
+    if (solution.problemType === 'function'
+        && options.languages.some(language => !solution.solutions?.[language]?.trim()))
+        return undefined;
+    return { ...checkpoint, solution };
+}
 function assertSelectedTemplateSolutions(problemType, solutions, options, owner) {
     if (problemType !== 'function')
         return;
@@ -4414,8 +4437,10 @@ function mergeSandboxBlueprintRepair(original, raw, scope) {
     const sections = splitDelimitedSections(raw);
     if (sections.length === 0)
         throw new Error('AI 定向修复未返回分节标记');
+    const solutions = normalizeTemplateSolutions(original);
     const merged = {
         ...original,
+        ...(Object.keys(solutions).length > 0 ? { solutions, solutionCode: solutions.py } : {}),
         templates: original.templates ? { ...original.templates } : undefined,
     };
     if (scope === 'generator' || scope === 'validator') {
@@ -5233,14 +5258,15 @@ class TestdataGenService {
             report('blueprint', 10);
             const results = [];
             const expectedFunctionSamples = (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown);
-            let solutionSourceContent = params.checkpoint?.solution
-                ? JSON.stringify(params.checkpoint.solution)
+            const checkpoint = normalizeReusableCheckpoint(params.checkpoint, params.options);
+            let solutionSourceContent = checkpoint?.solution
+                ? JSON.stringify(checkpoint.solution)
                 : '';
             let solution;
             let originalParsedSubtasks;
             try {
-                if (params.checkpoint?.solution) {
-                    solution = this.useProvidedOracle(params.checkpoint.solution, params.options);
+                if (checkpoint?.solution) {
+                    solution = this.useProvidedOracle(checkpoint.solution, params.options);
                 }
                 else {
                     const initialResult = await this.aiClient.chat([{ role: 'user', content: solutionUserPrompt }], solutionSystemPrompt, callOptions);
@@ -5345,8 +5371,8 @@ class TestdataGenService {
             const artifactsResults = [...results];
             const verifierResults = [...results];
             const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
-                Array.isArray(params.checkpoint?.killTargets)
-                    ? Promise.resolve(params.checkpoint.killTargets)
+                Array.isArray(checkpoint?.killTargets)
+                    ? Promise.resolve(checkpoint.killTargets)
                     : this.generateKillTargets({
                         statement: params.statementMarkdown,
                         analysis: solution.analysis || '',
@@ -5362,22 +5388,22 @@ class TestdataGenService {
                             throw err;
                         return [];
                     }),
-                params.checkpoint?.artifacts
+                checkpoint?.artifacts
                     ? Promise.resolve({
-                        artifacts: params.checkpoint.artifacts,
-                        sourceContent: JSON.stringify(params.checkpoint.artifacts),
+                        artifacts: checkpoint.artifacts,
+                        sourceContent: JSON.stringify(checkpoint.artifacts),
                     })
                     : this.generateGenerationArtifacts(params, solution, generationCoverage, callOptions, artifactsResults)
                         .then(state => {
                         void this.emitCheckpoint(params, { artifacts: state.artifacts });
                         return state;
                     }),
-                params.checkpoint?.verifier
+                checkpoint?.verifier
                     ? Promise.resolve({
-                        verifier: params.checkpoint.verifier,
+                        verifier: checkpoint.verifier,
                         systemPrompt: buildIndependentVerifierSystemPrompt(),
                         userPrompt: buildIndependentVerifierUserPrompt(params, solution),
-                        sourceContent: JSON.stringify(params.checkpoint.verifier),
+                        sourceContent: JSON.stringify(checkpoint.verifier),
                         expectedFunctionSamples: solution.problemType === 'function'
                             ? expectedFunctionSamples
                             : [],
@@ -5387,7 +5413,7 @@ class TestdataGenService {
                         return state;
                     }),
             ]);
-            if (params.checkpoint) {
+            if (checkpoint) {
                 // 恢复任务会创建新 job；把命中的旧制品复制到新断点，保证再次中断仍可续跑。
                 void this.emitCheckpoint(params, {
                     solution,
