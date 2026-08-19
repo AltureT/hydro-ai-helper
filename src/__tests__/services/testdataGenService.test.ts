@@ -117,9 +117,13 @@ ACB
 
 function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
   const solutionSections = problemType === 'function' ? [
-    '@@@SOLUTION@@@',
+    '@@@SOLUTION:py@@@',
     'def solve(value):',
     '    return value',
+    '@@@SOLUTION:java@@@',
+    'class Solution { String solve(String value) { return value; } }',
+    '@@@SOLUTION:cc@@@',
+    'string solve(string value) { return value; }',
   ] : [];
   const templateSections = problemType === 'function' ? [
     '@@@TEMPLATE:py@@@',
@@ -150,9 +154,13 @@ function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditi
 
 function makeSolutionBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
   const solutionSections = problemType === 'function' ? [
-    '@@@SOLUTION@@@',
+    '@@@SOLUTION:py@@@',
     'def solve(value):',
     '    return value',
+    '@@@SOLUTION:java@@@',
+    'class Solution { String solve(String value) { return value; } }',
+    '@@@SOLUTION:cc@@@',
+    'string solve(string value) { return value; }',
   ] : [];
   return [
     '@@@META@@@',
@@ -1179,6 +1187,10 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(blueprint.generatorCode).toContain('json.dumps');
     expect(blueprint.oracleCode).toContain('print(input())');
     expect(blueprint.templates?.java).toContain('public class Main');
+    expect(blueprint.solutions).toEqual(expect.objectContaining({
+      py: expect.any(String), java: expect.any(String), cc: expect.any(String),
+    }));
+    expect(blueprint.solutionCode).toBe(blueprint.solutions?.py);
   });
 
   it('剥离每个蓝图代码节各自携带的 Markdown 围栏', () => {
@@ -2028,6 +2040,63 @@ describe('stage-specific sandbox repair', () => {
     }
   });
 
+  it('solution marker prompts require a qualified section for every selected language', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
+    const solutionPrompt = buildSolutionBlueprintUserPrompt({
+      problemTitle: '两数之和', statementMarkdown: '输入两个整数。', options: fnOptions,
+    });
+    const blueprintPrompt = buildSandboxBlueprintSystemPrompt();
+
+    for (const marker of ['@@@SOLUTION:py@@@', '@@@SOLUTION:java@@@', '@@@SOLUTION:cc@@@']) {
+      expect(solutionPrompt).toContain(marker);
+      expect(blueprintPrompt).toContain(marker);
+    }
+  });
+
+  it('template-java repair scope replaces only the Java solution and template', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
+    const prompt = buildSandboxRepairPrompt(new Error('template.java 与标程不一致'), fnOptions, 'template-java');
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions);
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@SOLUTION:java@@@\nclass Solution { String solve(String v) { return v + "!"; } }\n@@@TEMPLATE:java@@@\npublic class Main {}',
+      'template-java',
+    );
+
+    expect(prompt).toContain('@@@SOLUTION:java@@@');
+    expect(prompt).toContain('@@@TEMPLATE:java@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:py@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:cc@@@');
+    expect(merged.solutions?.java).toContain('return v + "!"');
+    expect(merged.templates?.java).toContain('public class Main');
+    expect(merged.solutions?.py).toBe(original.solutions?.py);
+    expect(merged.solutions?.cc).toBe(original.solutions?.cc);
+    expect(merged.templates?.py).toBe(original.templates?.py);
+    expect(merged.templates?.cc).toBe(original.templates?.cc);
+  });
+
+  it('template-cc repair scope replaces only the C++ solution and template', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
+    const prompt = buildSandboxRepairPrompt(new Error('template.cc 与标程不一致'), fnOptions, 'template-cc');
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions);
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@SOLUTION:cc@@@\nstring solve(string value) { return value + "!"; }\n@@@TEMPLATE:cc@@@\n#include "foo.cc"\nint main() { return 0; }',
+      'template-cc',
+    );
+
+    expect(prompt).toContain('@@@SOLUTION:cc@@@');
+    expect(prompt).toContain('@@@TEMPLATE:cc@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:py@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:java@@@');
+    expect(merged.solutions?.cc).toContain('return value + "!"');
+    expect(merged.templates?.cc).toContain('#include "foo.cc"');
+    expect(merged.solutions?.py).toBe(original.solutions?.py);
+    expect(merged.solutions?.java).toBe(original.solutions?.java);
+    expect(merged.templates?.py).toBe(original.templates?.py);
+    expect(merged.templates?.java).toBe(original.templates?.java);
+  });
+
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
     const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
     const merged = mergeSandboxBlueprintRepair(
@@ -2044,7 +2113,7 @@ describe('stage-specific sandbox repair', () => {
     const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions, { allowMissingTemplates: true });
     const merged = mergeSandboxBlueprintRepair(
       original,
-      '@@@SOLUTION@@@\ndef solve(x):\n    return x\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
+      '@@@SOLUTION:py@@@\ndef solve(x):\n    return x\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
       'template-py',
     );
     expect(merged.solutionCode).toContain('def solve');
@@ -4342,6 +4411,39 @@ function twoCaseGen(): string {
 }
 
 describe('两阶段沙箱蓝图', () => {
+  it('qualified solution sections retain every selected language and expose Python compatibility alias', () => {
+    const blueprint = parseSolutionBlueprint([
+      '@@@META@@@', 'problemType: function',
+      '@@@ORACLE@@@', 'print(3)',
+      '@@@SOLUTION:py@@@', 'def add(a, b): return a + b',
+      '@@@SOLUTION:java@@@', 'class Solution { int add(int a,int b){ return a+b; } }',
+      '@@@SOLUTION:cc@@@', 'int add(int a,int b){ return a+b; }',
+    ].join('\n'), {
+      problemKind: 'function', caseCount: 3, languages: ['py', 'java', 'cc'],
+    });
+
+    expect(blueprint.solutions).toEqual(expect.objectContaining({
+      py: expect.any(String), java: expect.any(String), cc: expect.any(String),
+    }));
+    expect(blueprint.solutionCode).toBe(blueprint.solutions?.py);
+  });
+
+  it('legacy solution satisfies Python only and rejects a missing selected solution language', () => {
+    const legacyRaw = [
+      '@@@META@@@', 'problemType: function',
+      '@@@ORACLE@@@', 'print(3)',
+      '@@@SOLUTION@@@', 'def add(a, b): return a + b',
+    ].join('\n');
+    const legacy = parseSolutionBlueprint(legacyRaw, {
+      problemKind: 'function', caseCount: 1, languages: ['py'],
+    });
+    expect(legacy.solutions).toEqual({ py: legacy.solutionCode });
+
+    expect(() => parseSolutionBlueprint(legacyRaw, {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    })).toThrow(/java/);
+  });
+
   it('解析可选 ORACLE_LANG，缺失或非法回退 Python，函数题忽略 C++', () => {
     expect(parseOracleLanguage('=== ORACLE_LANG ===\npython', 'traditional')).toBe('python');
     expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'traditional')).toBe('cpp');
@@ -4623,7 +4725,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
 
   it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
-    expect(sp).toContain('@@@SOLUTION@@@');
+    expect(sp).toContain('@@@SOLUTION:py@@@');
     expect(sp).toContain('=== SUBTASKS ===');
     expect(sp).not.toContain('@@@BRUTE@@@');
     expect(sp).not.toContain('@@@VALIDATOR@@@');

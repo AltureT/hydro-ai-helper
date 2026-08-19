@@ -117,6 +117,9 @@ export type TemplateLang = 'py' | 'java' | 'cc';
 
 export const SUPPORTED_TEMPLATE_LANGS: readonly TemplateLang[] = ['py', 'java', 'cc'] as const;
 
+/** 函数题各评测语言对应的学生提交形式参考解。 */
+export type TemplateSolutions = Partial<Record<TemplateLang, string>>;
+
 /** 生成选项（来自前端表单） */
 export interface GenerateOptions {
   /** 题型：auto 由 AI 根据题面判断 */
@@ -173,6 +176,8 @@ export interface GenerationResponse {
   oracleLanguage?: OracleLanguage;
   // ─ 以下为沙箱模式的验证制品载体，供 assemblePlan 决定文件写入与 origin ─
   /** 学生提交形式的解（函数题）：写入 std.py，供教师本地复验。 */
+  solutions?: TemplateSolutions;
+  /** Python 解的兼容别名；新函数题蓝图改从 solutions.py 读取。 */
   solutionCode?: string;
   /** 暴力解（对拍用）：写入 brute.py。 */
   bruteCode?: string;
@@ -202,6 +207,8 @@ export interface SandboxGenerationBlueprint {
   generatorCode: string;
   oracleCode: string;        // 自包含 stdin→stdout 完整标程（Python 3 或 C++17）
   oracleLanguage?: OracleLanguage;
+  solutions?: TemplateSolutions;
+  /** Python 解的兼容别名；新函数题蓝图改从 solutions.py 读取。 */
   solutionCode?: string;     // 学生提交形式的解（函数题=函数/类；传统题可省略）
   /** 独立验证调用生成；兼容旧蓝图时也接受主调用中的同名分节。 */
   bruteCode?: string;        // 自包含完整程序的暴力解（读同一 stdin 编码）
@@ -225,6 +232,8 @@ export interface SandboxSolutionBlueprint {
   functionName?: string;
   oracleCode: string;
   oracleLanguage?: OracleLanguage;
+  solutions?: TemplateSolutions;
+  /** Python 解的兼容别名；新函数题蓝图改从 solutions.py 读取。 */
   solutionCode?: string;
   /** 第一阶段用于尽早回归函数题题面样例；最终仍以独立验证调用的转码为准。 */
   functionSampleInputs?: Array<{ id: string; input: string }>;
@@ -1482,7 +1491,7 @@ export function buildSolutionBlueprintSystemPrompt(cppOracleAvailable = false): 
 核心规则：
 1. 先确定唯一、语言无关的原始 stdin 编码，并在 ANALYSIS 中逐行说明输入、输出、约束、算法正确性理由与复杂度。
 ${oracleRule}
-3. 函数题仍要在 ORACLE 内包含完整实现与 stdin 驱动，并额外输出 SOLUTION：与学生提交形式一致的函数或类定义，不含读输入和打印。
+3. 函数题仍要在 ORACLE 内包含完整实现与 stdin 驱动，并为用户选定的每种语言额外输出 SOLUTION:语言：与学生提交形式一致的函数或类定义，不含读输入和打印。未带语言的旧 SOLUTION 仅兼容 Python。
 4. 若函数题题面包含样例，必须输出 SAMPLE_INPUTS，把每个题面展示参数转换为 ANALYSIS 确定的原始 stdin；只转换输入，id 不得遗漏或增加。
 5. 教师手动标程是权威；历史 AC 仅是可能误 AC 的候选，禁止把 AC 状态当作正确性证明。
 6. 仅当题面明确给出子任务/分数表时输出该分节（SUBTASKS）；约束摘要为该子任务的完整生效约束（含继承的全局约束收紧），一行一个，按 id 升序。
@@ -1501,8 +1510,12 @@ functionName: 函数题函数名（传统题省略）
 stdin 编码、题意、算法正确性与复杂度（不超过 500 字）
 @@@ORACLE@@@
 ${oracleDescription}
-@@@SOLUTION@@@
-函数题学生提交形式的实现（传统题省略）
+@@@SOLUTION:py@@@
+函数题 Python 学生提交形式的实现（仅在选择 Python 时输出）
+@@@SOLUTION:java@@@
+函数题 Java 学生提交形式的实现（仅在选择 Java 时输出）
+@@@SOLUTION:cc@@@
+函数题 C++ 学生提交形式的实现（仅在选择 C++ 时输出）
 @@@SAMPLE_INPUTS@@@
 函数题存在题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}
 @@@NOTES@@@
@@ -1535,7 +1548,7 @@ export function buildSolutionBlueprintUserPrompt(params: BuildUserPromptParams):
     '【本阶段解题要求】',
     `- 题型：${kindText}`,
     `- 填空题（完善代码）：${fillInText}`,
-    '- 只分析题意、证明算法并编写可执行 ORACLE；测试点数量、覆盖计划和模板语言留给后续阶段。',
+    '- 只分析题意、证明算法并编写可执行 ORACLE；测试点数量与覆盖计划留给后续阶段。',
   ];
   if (options.extraRequirements?.trim()) {
     lines.push(`- 教师补充要求：${options.extraRequirements.trim()}`);
@@ -1551,6 +1564,9 @@ export function buildSolutionBlueprintUserPrompt(params: BuildUserPromptParams):
       options.providedStd.trim(),
       '```',
     );
+  }
+  if (options.problemKind !== 'traditional') {
+    lines.push(`- 若判定/指定为函数题，必须为每个选定语言输出学生解分节：${options.languages.map(language => `@@@SOLUTION:${language}@@@`).join('、')}。`);
   }
   lines.push(
     '',
@@ -1592,6 +1608,7 @@ export function buildGenerationArtifactsUserPrompt(
   solution: SandboxSolutionBlueprint,
   coverageOverride?: Array<CoverageSlot | SubtaskCaseAllocation>,
 ): string {
+  const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
   const coveragePlan = coverageOverride ?? (() => {
     const tiered = resolveTieredSubtaskGeneration({
       caseCount: params.options.caseCount,
@@ -1620,7 +1637,9 @@ export function buildGenerationArtifactsUserPrompt(
     solution.analysis || '严格按题面与 ORACLE 的读入方式生成原始 stdin。',
     'ORACLE（只用于对齐读入输出，禁止在响应中重复或修改）：',
     solution.oracleCode,
-    solution.solutionCode ? `SOLUTION（模板必须调用此接口）：\n${solution.solutionCode}` : '',
+    ...Object.entries(solutions).map(([language, code]) =>
+      `SOLUTION:${language}（对应语言模板必须调用此接口）：\n${code}`,
+    ),
   ].filter(Boolean).join('\n');
 }
 
@@ -1646,7 +1665,7 @@ export function buildSandboxBlueprintSystemPrompt(cppOracleAvailable = false): s
 3. ACM/传统题：每个 input 是一份独立完整的输入文件。若题面首行是 T，默认每个文件固定 T=1，并紧跟恰好一组完整数据；只有教师明确要求批处理时才使用 T>1。
 4. LeetCode/函数题：每个 input 只表示一次函数调用，不额外添加 T。默认每个参数占一行；一维数组用空格分隔，字符串不带源码引号。所有模板与 ORACLE 必须使用完全相同的输入编码。
 ${oracleRule}
-6. 函数题必须输出 SOLUTION 节：与学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印），它将与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
+6. 函数题必须为用户选定的每一种语言输出 SOLUTION:语言 节：与该语言学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印）。Python 解会与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
 7. 数据必须严格遵守用户消息中的逐 CASE 覆盖计划，并根据题面真实约束交叉变化不同维度；所有生成过程必须确定性，固定随机种子。
 8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），stdout 总量必须小于 1MB。每个 input 的 UTF-8 内容必须小于 256KB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须小于 1MB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
@@ -1669,8 +1688,12 @@ functionName: 函数题函数名（传统题省略）
 完整 Python 3 输入生成器
 @@@ORACLE@@@
 ${oracleDescription}
-@@@SOLUTION@@@
-函数题：学生提交形式的函数/类实现（传统题省略）
+@@@SOLUTION:py@@@
+函数题：Python 学生提交形式的函数/类实现（仅在选择 Python 时输出）
+@@@SOLUTION:java@@@
+函数题：Java 学生提交形式的函数/类实现（仅在选择 Java 时输出）
+@@@SOLUTION:cc@@@
+函数题：C++ 学生提交形式的函数/类实现（仅在选择 C++ 时输出）
 @@@TEMPLATE:py@@@
 函数题 Python 驱动模板
 @@@TEMPLATE:java@@@
@@ -2040,6 +2063,33 @@ function splitDelimitedSections(raw: string): ParsedSection[] {
   return sections;
 }
 
+/** 解析学生提交形式的解；未限定语言的旧 SOLUTION 仅兼容为 Python。 */
+function parseTemplateSolutions(sections: ParsedSection[]): TemplateSolutions {
+  const solutions: TemplateSolutions = {};
+  for (const section of sections) {
+    const [rawKind, rawLanguage] = section.header.split(':');
+    if (rawKind.trim().toUpperCase() !== 'SOLUTION') continue;
+    const content = normalizeExecutableContent(trimBlankEdges(section.content));
+    const language = rawLanguage?.trim().toLowerCase() as TemplateLang | undefined;
+    if (!language && !solutions.py) solutions.py = content;
+    else if (language && SUPPORTED_TEMPLATE_LANGS.includes(language)) solutions[language] = content;
+  }
+  return solutions;
+}
+
+function assertSelectedTemplateSolutions(
+  problemType: SandboxSolutionBlueprint['problemType'],
+  solutions: TemplateSolutions,
+  options: GenerateOptions,
+  owner: string,
+): void {
+  if (problemType !== 'function') return;
+  const missing = options.languages.filter(language => !solutions[language]?.trim());
+  if (missing.length > 0) {
+    throw new Error(`${owner}未返回已选语言的 SOLUTION：${missing.join('、')}`);
+  }
+}
+
 /** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
 export function parseKillTargetsResponse(raw: string): KillTarget[] {
   const allowedKinds = new Set<KillTargetKind>(['boundary', 'wrong-algorithm', 'overflow-sim']);
@@ -2199,7 +2249,6 @@ export function parseSandboxBlueprint(
   let notes: string | undefined;
   let generatorCode = '';
   let oracleCode = '';
-  let solutionCode = '';
   let bruteCode = '';
   let validatorCode = '';
 
@@ -2216,7 +2265,6 @@ export function parseSandboxBlueprint(
     else if (kind === 'NOTES') notes = content;
     else if (kind === 'GENERATOR') generatorCode = content;
     else if (kind === 'ORACLE') oracleCode = content;
-    else if (kind === 'SOLUTION') solutionCode = content;
     else if (kind === 'BRUTE') bruteCode = content;
     else if (kind === 'VALIDATOR') validatorCode = content;
     else if (kind === 'TEMPLATE') {
@@ -2234,6 +2282,8 @@ export function parseSandboxBlueprint(
   const problemType = options.problemKind === 'auto' ? returnedType : options.problemKind;
   if (!generatorCode.trim()) throw new Error('AI 未返回可执行的 GENERATOR');
   if (!oracleCode.trim()) throw new Error('AI 未返回可执行的 ORACLE');
+  const solutions = parseTemplateSolutions(sections);
+  assertSelectedTemplateSolutions(problemType, solutions, options, 'AI 蓝图');
 
   if (problemType === 'function' && !parseOptions.allowMissingTemplates) {
     const missing = options.languages.filter(lang => !templates[lang]?.trim());
@@ -2257,8 +2307,8 @@ export function parseSandboxBlueprint(
     generatorCode: normalizeExecutableContent(generatorCode),
     oracleCode: normalizeExecutableContent(oracleCode),
     oracleLanguage: parseOracleLanguage(raw, problemType),
-    // SOLUTION/BRUTE/VALIDATOR 均可缺失（宽容）；缺失后果在 verification 中体现
-    solutionCode: solutionCode.trim() ? normalizeExecutableContent(solutionCode) : undefined,
+    solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
+    solutionCode: solutions.py,
     bruteCode: bruteCode.trim() ? normalizeExecutableContent(bruteCode) : undefined,
     validatorCode: validatorCode.trim() ? normalizeExecutableContent(validatorCode) : undefined,
     notes,
@@ -2327,7 +2377,6 @@ export function parseSolutionBlueprint(
   let analysis: string | undefined;
   let notes: string | undefined;
   let oracleCode = '';
-  let solutionCode = '';
   for (const section of sections) {
     const kind = section.header.split(':')[0].trim().toUpperCase();
     const content = trimBlankEdges(section.content);
@@ -2339,7 +2388,6 @@ export function parseSolutionBlueprint(
     } else if (kind === 'ANALYSIS') analysis = content;
     else if (kind === 'NOTES') notes = content;
     else if (kind === 'ORACLE') oracleCode = content;
-    else if (kind === 'SOLUTION') solutionCode = content;
   }
   const returnedType = meta.problemType === 'function' ? 'function'
     : meta.problemType === 'traditional' ? 'traditional'
@@ -2347,9 +2395,8 @@ export function parseSolutionBlueprint(
   if (!returnedType) throw new Error('AI 解题蓝图的 problemType 非法（应为 function 或 traditional）');
   const problemType = options.problemKind === 'auto' ? returnedType : options.problemKind;
   if (!oracleCode.trim()) throw new Error('AI 解题蓝图未返回可执行的 ORACLE');
-  if (problemType === 'function' && !solutionCode.trim()) {
-    throw new Error('AI 解题蓝图未返回函数题学生提交形式的 SOLUTION');
-  }
+  const solutions = parseTemplateSolutions(sections);
+  assertSelectedTemplateSolutions(problemType, solutions, options, 'AI 解题蓝图');
   const fillInMode = options.fillInMode || 'auto';
   return {
     problemType,
@@ -2361,7 +2408,8 @@ export function parseSolutionBlueprint(
     functionName: meta.functionName || undefined,
     oracleCode: normalizeExecutableContent(oracleCode),
     oracleLanguage: parseOracleLanguage(raw, problemType),
-    solutionCode: solutionCode.trim() ? normalizeExecutableContent(solutionCode) : undefined,
+    solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
+    solutionCode: solutions.py,
     functionSampleInputs: problemType === 'function'
       ? parseFunctionSampleInputsSection(sections, expectedFunctionSamples, '解题蓝图')
       : undefined,
@@ -4668,6 +4716,7 @@ export async function materializeSandboxBlueprint(
     generatorCode: blueprint.generatorCode,
     oracleCode: blueprint.oracleCode,
     oracleLanguage,
+    solutions: blueprint.solutions,
     solutionCode: blueprint.solutionCode,
     bruteCode: blueprint.bruteCode,
     validatorCode: blueprint.validatorCode,
@@ -5144,7 +5193,10 @@ function buildTemplateRepairPrompt(missing: TemplateLang[]): string {
 4. 只使用 @@@TEMPLATE:语言@@@ 标记和源码原文，不要输出 JSON、代码围栏或解释文字。`;
 }
 
-export type SandboxRepairScope = 'generator' | 'stress-generator' | 'function-samples' | 'accepted-std' | 'validator' | 'oracle' | 'brute' | 'template-py' | 'full';
+export type SandboxRepairScope =
+  | 'generator' | 'stress-generator' | 'function-samples' | 'accepted-std'
+  | 'validator' | 'oracle' | 'brute'
+  | 'template-py' | 'template-java' | 'template-cc' | 'full';
 
 type ChatResult = Awaited<ReturnType<MultiModelClient['chat']>>;
 
@@ -5313,6 +5365,8 @@ export function classifySandboxRepairScope(error: unknown): SandboxRepairScope {
   if (/压力对拍 BRUTE/.test(detail)) return 'brute';
   if (/ORACLE|题面样例/.test(detail)) return 'oracle';
   if (/暴力解|\bBRUTE\b/.test(detail)) return 'brute';
+  if (/template\.java|template-java/.test(detail)) return 'template-java';
+  if (/template\.cc|template-cc/.test(detail)) return 'template-cc';
   if (/template\.py|模板输出|SOLUTION/.test(detail)) return 'template-py';
   return 'full';
 }
@@ -5327,6 +5381,8 @@ function repairScopeForPipelineFailure(error: TestdataPipelineError): SandboxRep
     case 'oracle': return 'oracle';
     case 'brute': return 'brute';
     case 'template-py': return 'template-py';
+    case 'template-java': return 'template-java';
+    case 'template-cc': return 'template-cc';
     default: return 'full';
   }
 }
@@ -5394,11 +5450,16 @@ ${detail}
 
 请只输出修复后的 @@@BRUTE@@@。它必须读取原有 GENERATOR 的同一 stdin 编码，独立实现题意，不得调用或复制 ORACLE 的核心函数。不要输出其他分节或代码围栏。`;
   }
-  if (scope === 'template-py') {
-    return `你上一条蓝图的 Python 学生解与模板组合未通过验证：
+  const templateLanguage = scope === 'template-py' ? 'py'
+    : scope === 'template-java' ? 'java'
+      : scope === 'template-cc' ? 'cc'
+        : undefined;
+  if (templateLanguage) {
+    const display = LANG_DISPLAY[templateLanguage];
+    return `你上一条蓝图的 ${display} 学生解与模板组合未通过验证：
 ${detail}
 
-请只输出同步修复后的 @@@SOLUTION@@@ 与 @@@TEMPLATE:py@@@。两者必须沿用原有 GENERATOR 的 stdin 编码，拼接运行后的输出与 ORACLE 完全一致。不要输出其他分节或代码围栏。`;
+请只输出同步修复后的 @@@SOLUTION:${templateLanguage}@@@ 与 @@@TEMPLATE:${templateLanguage}@@@。两者必须沿用原有 GENERATOR 的 stdin 编码，组合运行后的输出与 ORACLE 完全一致。不要输出其他分节或代码围栏。`;
   }
   return `你上一条生成蓝图未通过 Hydro 沙箱验证：
 ${detail}
@@ -5408,9 +5469,9 @@ ${coverage ? `\n${coverage}\n` : ''}
 1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
 3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
-4. 函数题必须完整包含 SOLUTION（学生提交形式）与全部模板：${templates}。
+4. 函数题必须完整包含每个已选语言的学生解 ${options.languages.map(lang => `@@@SOLUTION:${lang}@@@`).join('、')} 与全部模板：${templates}。
 5. 不要输出 BRUTE、STRESS_GENERATOR 或 VALIDATOR；它们由隔离的独立验证调用生成。
-6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
+6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
 7. 若输出 @@@NOTES@@@，NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。`;
 }
 
@@ -5473,11 +5534,17 @@ export function mergeSandboxBlueprintRepair(
     if (!bruteCode) throw new Error('AI 定向修复未返回 BRUTE');
     merged.bruteCode = bruteCode;
   } else {
-    const solutionCode = repairSectionContent(sections, 'SOLUTION');
-    const templatePy = repairSectionContent(sections, 'TEMPLATE:py');
-    if (!solutionCode || !templatePy) throw new Error('AI 定向修复必须同时返回 SOLUTION 与 TEMPLATE:py');
-    merged.solutionCode = solutionCode;
-    merged.templates = { ...merged.templates, py: templatePy };
+    const language: TemplateLang = scope === 'template-java' ? 'java'
+      : scope === 'template-cc' ? 'cc'
+        : 'py';
+    const solutionCode = repairSectionContent(sections, `SOLUTION:${language}`);
+    const templateCode = repairSectionContent(sections, `TEMPLATE:${language}`);
+    if (!solutionCode || !templateCode) {
+      throw new Error(`AI 定向修复必须同时返回 SOLUTION:${language} 与 TEMPLATE:${language}`);
+    }
+    merged.solutions = { ...merged.solutions, [language]: solutionCode };
+    merged.solutionCode = merged.solutions.py;
+    merged.templates = { ...merged.templates, [language]: templateCode };
   }
   return merged;
 }
@@ -5498,9 +5565,11 @@ function findChangedMaterializationArtifacts(
     before.oracleCode !== after.oracleCode
     || before.oracleLanguage !== after.oracleLanguage
   ) changed.push('ORACLE');
-  if (before.solutionCode !== after.solutionCode) changed.push('SOLUTION');
+  if (!sameMaterializationValue(before.solutions, after.solutions)) changed.push('SOLUTION');
   if (before.bruteCode !== after.bruteCode) changed.push('BRUTE');
   if (before.templates?.py !== after.templates?.py) changed.push('template.py');
+  if (before.templates?.java !== after.templates?.java) changed.push('template.java');
+  if (before.templates?.cc !== after.templates?.cc) changed.push('template.cc');
   if (before.complexityGap !== after.complexityGap) changed.push('COMPLEXITY_GAP');
   if (
     before.problemType !== after.problemType
@@ -5616,6 +5685,7 @@ function checkpointSolutionFromBlueprint(
     functionName: blueprint.functionName,
     oracleCode: blueprint.oracleCode,
     oracleLanguage: blueprint.oracleLanguage,
+    solutions: blueprint.solutions,
     solutionCode: blueprint.solutionCode,
     functionSampleInputs: blueprint.functionSampleInputs,
     notes: blueprint.notes,
