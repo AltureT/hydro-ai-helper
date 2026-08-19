@@ -677,6 +677,15 @@ describe('TestdataGenGenerateHandler', () => {
       listeners.close?.();   // 响应连接提前关闭 = 真实客户端断开
       await done;
       expect(handler.response.status).toBe(499);
+      expect(handler.response.body).toEqual({
+        error: 'ai_helper_err_ai_aborted',
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+      });
       expect(capture).not.toHaveBeenCalled();
       expect(removeListener).toHaveBeenCalledWith('close', listeners.close);
     } finally {
@@ -700,6 +709,15 @@ describe('TestdataGenGenerateHandler', () => {
     try {
       await handler.post();
       expect(handler.response.status).toBe(499);
+      expect(handler.response.body).toEqual({
+        error: 'ai_helper_err_ai_aborted',
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+      });
       expect(genSpy).not.toHaveBeenCalled();
     } finally {
       genSpy.mockRestore();
@@ -784,8 +802,14 @@ describe('TestdataGenGenerateHandler', () => {
         recommendDeeperReasoning: true,
       }));
       expect(capture).toHaveBeenCalledWith(
-        'api_failure', 'testdata_gen', expect.any(String), undefined, expect.any(String),
-        expect.objectContaining({ recommendDeeperReasoning: true, failureStage: 'oracle' }),
+        'api_failure', 'testdata_gen', 'Typed test-data pipeline failure',
+        undefined, undefined,
+        {
+          failureCode: 'ORACLE_RUNTIME_FAILED',
+          stage: 'oracle',
+          artifact: 'oracle',
+          retryPolicy: 'repair-artifact',
+        },
       );
       expect(recordModelOutcome).toHaveBeenCalledWith(
         'testdata_generation', 'primary/model-a', false,
@@ -809,9 +833,13 @@ describe('TestdataGenGenerateHandler', () => {
       { caseIndex: 3 },
     );
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
+    const capture = jest.fn();
     const handler = setupHandler(TestdataGenGenerateHandler, {
       own: true, body: { problemId: 'D3102', caseCount: 5 },
     });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'errorReporter' ? { capture } : undefined
+    ));
 
     try {
       await handler.post();
@@ -824,6 +852,20 @@ describe('TestdataGenGenerateHandler', () => {
         retryable: true,
         error: 'ai_helper_testdata_failure_oracle_brute_divergence',
       }));
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Typed test-data pipeline failure',
+        undefined,
+        undefined,
+        {
+          failureCode: 'ORACLE_BRUTE_DIVERGENCE',
+          stage: 'stress_testing',
+          artifact: 'brute',
+          retryPolicy: 'adjudicate',
+          caseIndex: 3,
+        },
+      );
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -975,9 +1017,12 @@ describe('Testdata generation background jobs', () => {
     const handler = setupHandler(TestdataGenJobStartHandler, {
       own: true, body: { problemId: 'D3102', caseCount: 1 },
     });
-    handler.ctx.get = jest.fn((name: string) => (
-      name === 'testdataGenerationJobModel' ? jobModel : undefined
-    ));
+    const capture = jest.fn();
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'testdataGenerationJobModel') return jobModel;
+      if (name === 'errorReporter') return { capture };
+      return undefined;
+    });
 
     try {
       await handler.post();
@@ -993,6 +1038,20 @@ describe('Testdata generation background jobs', () => {
         retryable: false,
         recommendDeeperReasoning: false,
       });
+      expect(capture).toHaveBeenCalledWith(
+        'api_failure',
+        'testdata_gen',
+        'Typed test-data pipeline failure',
+        undefined,
+        undefined,
+        {
+          failureCode: 'PIPELINE_BUDGET_EXHAUSTED',
+          stage: 'sandbox_budget',
+          artifact: 'pipeline',
+          retryPolicy: 'no-retry',
+          elapsedMs: 120000,
+        },
+      );
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -1178,8 +1237,20 @@ describe('Testdata generation background jobs', () => {
       ));
       await cancelHandler.post();
       for (let i = 0; i < 20 && !capturedSignal?.aborted; i++) await Promise.resolve();
+      for (let i = 0; i < 20 && !jobModel.cancel.mock.calls.some(call => call[1]?.failureCode); i++) {
+        await Promise.resolve();
+      }
 
       expect(capturedSignal?.aborted).toBe(true);
+      expect(jobModel.cancel).toHaveBeenCalledWith(job._id, {
+        message: 'ai_helper_err_ai_aborted',
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+      });
       expect(cancelHandler.response.body.job).toEqual(expect.objectContaining({ status: 'canceled' }));
     } finally {
       jest.useRealTimers();
@@ -1227,7 +1298,15 @@ describe('Testdata generation background jobs', () => {
     ));
 
     await handler.post();
-    expect(jobModel.cancel).toHaveBeenCalledWith(job._id);
+    expect(jobModel.cancel).toHaveBeenCalledWith(job._id, {
+      message: 'ai_helper_err_ai_aborted',
+      code: 'CLIENT_ABORTED',
+      failureCode: 'CANCELLED',
+      stage: 'canceled',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+      retryable: false,
+    });
     expect(handler.response.body.job).toEqual(expect.objectContaining({ status: 'canceled' }));
   });
 });

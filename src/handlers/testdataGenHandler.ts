@@ -474,6 +474,62 @@ interface GenerateRequestBody {
 const backgroundGenerationControllers = new Map<string, AbortController>();
 const TESTDATA_JOB_HEARTBEAT_MS = 30_000;
 
+function buildCancellationJobError(
+  translate: (key: string) => string,
+): TestdataGenerationJobError {
+  return {
+    message: translate('ai_helper_err_ai_aborted'),
+    code: 'CLIENT_ABORTED',
+    failureCode: 'CANCELLED',
+    stage: 'canceled',
+    artifact: 'pipeline',
+    retryPolicy: 'no-retry',
+    retryable: false,
+  };
+}
+
+function buildCancellationResponse(translate: (key: string) => string) {
+  const { message, ...contract } = buildCancellationJobError(translate);
+  return { error: message, ...contract };
+}
+
+function captureTestdataGenerationFailure(
+  ctx: unknown,
+  err: unknown,
+  fallbackMetadata: Record<string, unknown>,
+): void {
+  const reporter = (ctx as {
+    get?(name: string): { capture?: (...args: unknown[]) => void } | undefined;
+  }).get?.('errorReporter');
+  if (!reporter?.capture) return;
+  const failure = extractTestdataFailureMetadata(err);
+  if (failure) {
+    reporter.capture(
+      'api_failure',
+      'testdata_gen',
+      'Typed test-data pipeline failure',
+      undefined,
+      undefined,
+      {
+        failureCode: failure.failureCode,
+        stage: failure.stage,
+        artifact: failure.artifact,
+        retryPolicy: failure.retryPolicy,
+        ...failure.safeDetails,
+      },
+    );
+    return;
+  }
+  reporter.capture(
+    'api_failure',
+    'testdata_gen',
+    err instanceof Error ? err.message : String(err),
+    undefined,
+    err instanceof Error ? err.stack : undefined,
+    fallbackMetadata,
+  );
+}
+
 function serializeGenerationJob(job: TestdataGenerationJob) {
   return {
     id: String(job._id),
@@ -641,7 +697,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
   } catch (err) {
     await checkpointWrites;
     if (isCancellation(err)) {
-      await jobModel.cancel(job._id);
+      await jobModel.cancel(job._id, buildCancellationJobError(translate));
       return;
     }
 
@@ -659,13 +715,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     ctx.get('featureStatsModel')?.recordModelOutcome?.(
       'testdata_generation', failedModel, false,
     ).catch(() => { /* best-effort */ });
-    ctx.get('errorReporter')?.capture(
-      'api_failure', 'testdata_gen',
-      err instanceof Error ? err.message : String(err),
-      undefined,
-      err instanceof Error ? err.stack : undefined,
-      { problemId: job.problemId, jobId, ...testdataMetadata, ...aiMetadata },
-    );
+    captureTestdataGenerationFailure(ctx, err, { ...testdataMetadata, ...aiMetadata });
 
     const jobError: TestdataGenerationJobError = err instanceof AIServiceError
       ? {
@@ -785,7 +835,7 @@ export class TestdataGenGenerateHandler extends Handler {
       // （aborted / 底层 socket 已销毁），此时直接 499，不白跑整条管线。
       if (rawReq?.aborted || rawReq?.socket?.destroyed) {
         this.response.status = 499;
-        this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+        this.response.body = buildCancellationResponse(key => this.translate(key));
         this.response.type = 'application/json';
         return;
       }
@@ -850,15 +900,11 @@ export class TestdataGenGenerateHandler extends Handler {
       // 客户端主动断开：非故障，不上报也不打 error 日志
       if (isCancellation(err)) {
         if (progressStream) {
-          progressStream.writeEvent('error', {
-            error: this.translate('ai_helper_err_ai_aborted'),
-            code: 'CLIENT_ABORTED',
-            retryable: true,
-          });
+          progressStream.writeEvent('error', buildCancellationResponse(key => this.translate(key)));
           progressStream.end();
         } else {
           this.response.status = 499;
-          this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+          this.response.body = buildCancellationResponse(key => this.translate(key));
           this.response.type = 'application/json';
         }
         return;
@@ -880,17 +926,7 @@ export class TestdataGenGenerateHandler extends Handler {
       this.ctx.get('featureStatsModel')?.recordModelOutcome?.(
         'testdata_generation', failedModel, false,
       ).catch(() => { /* best-effort */ });
-      this.ctx.get('errorReporter')?.capture(
-        'api_failure', 'testdata_gen',
-        err instanceof Error ? err.message : String(err),
-        undefined,
-        err instanceof Error ? err.stack : undefined,
-        {
-          problemId: String((this.request.body as GenerateRequestBody)?.problemId || ''),
-          ...testdataMetadata,
-          ...aiMetadata,
-        },
-      );
+      captureTestdataGenerationFailure(this.ctx, err, { ...testdataMetadata, ...aiMetadata });
       if (err instanceof AIServiceError) {
         const errorBody = {
           error: this.translate(USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -1130,7 +1166,10 @@ export class TestdataGenJobCancelHandler extends Handler {
       const jobId = String(this.request.params.jobId || '');
       const authorized = await findAuthorizedGenerationJob(this, jobModel, jobId);
       if (!authorized) return;
-      await jobModel.cancel(authorized.job._id);
+      await jobModel.cancel(
+        authorized.job._id,
+        buildCancellationJobError(key => this.translate(key)),
+      );
       backgroundGenerationControllers.get(jobId)?.abort();
       const updated = await jobModel.findById(authorized.job._id);
       this.response.body = { job: updated ? serializeGenerationJob(updated) : undefined };

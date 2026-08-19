@@ -352,6 +352,38 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
 exports.TestdataGenContextHandler = TestdataGenContextHandler;
 const backgroundGenerationControllers = new Map();
 const TESTDATA_JOB_HEARTBEAT_MS = 30000;
+function buildCancellationJobError(translate) {
+    return {
+        message: translate('ai_helper_err_ai_aborted'),
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+    };
+}
+function buildCancellationResponse(translate) {
+    const { message, ...contract } = buildCancellationJobError(translate);
+    return { error: message, ...contract };
+}
+function captureTestdataGenerationFailure(ctx, err, fallbackMetadata) {
+    const reporter = ctx.get?.('errorReporter');
+    if (!reporter?.capture)
+        return;
+    const failure = (0, failures_1.extractTestdataFailureMetadata)(err);
+    if (failure) {
+        reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+            failureCode: failure.failureCode,
+            stage: failure.stage,
+            artifact: failure.artifact,
+            retryPolicy: failure.retryPolicy,
+            ...failure.safeDetails,
+        });
+        return;
+    }
+    reporter.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, fallbackMetadata);
+}
 function serializeGenerationJob(job) {
     return {
         id: String(job._id),
@@ -493,7 +525,7 @@ async function runBackgroundGeneration(params) {
     catch (err) {
         await checkpointWrites;
         if ((0, testdataGenService_1.isCancellation)(err)) {
-            await jobModel.cancel(job._id);
+            await jobModel.cancel(job._id, buildCancellationJobError(translate));
             return;
         }
         console.error('[TestdataGenJob] generation failed:', err);
@@ -508,7 +540,7 @@ async function runBackgroundGeneration(params) {
         const failedModel = usedModels[usedModels.length - 1]
             || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-        ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: job.problemId, jobId, ...testdataMetadata, ...aiMetadata });
+        captureTestdataGenerationFailure(ctx, err, { ...testdataMetadata, ...aiMetadata });
         const jobError = err instanceof openaiClient_1.AIServiceError
             ? {
                 message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -622,7 +654,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             // （aborted / 底层 socket 已销毁），此时直接 499，不白跑整条管线。
             if (rawReq?.aborted || rawReq?.socket?.destroyed) {
                 this.response.status = 499;
-                this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                this.response.body = buildCancellationResponse(key => this.translate(key));
                 this.response.type = 'application/json';
                 return;
             }
@@ -683,16 +715,12 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             // 客户端主动断开：非故障，不上报也不打 error 日志
             if ((0, testdataGenService_1.isCancellation)(err)) {
                 if (progressStream) {
-                    progressStream.writeEvent('error', {
-                        error: this.translate('ai_helper_err_ai_aborted'),
-                        code: 'CLIENT_ABORTED',
-                        retryable: true,
-                    });
+                    progressStream.writeEvent('error', buildCancellationResponse(key => this.translate(key)));
                     progressStream.end();
                 }
                 else {
                     this.response.status = 499;
-                    this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                    this.response.body = buildCancellationResponse(key => this.translate(key));
                     this.response.type = 'application/json';
                 }
                 return;
@@ -709,11 +737,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const failedModel = usedModels[usedModels.length - 1]
                 || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, {
-                problemId: String(this.request.body?.problemId || ''),
-                ...testdataMetadata,
-                ...aiMetadata,
-            });
+            captureTestdataGenerationFailure(this.ctx, err, { ...testdataMetadata, ...aiMetadata });
             if (err instanceof openaiClient_1.AIServiceError) {
                 const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -958,7 +982,7 @@ class TestdataGenJobCancelHandler extends hydrooj_1.Handler {
             const authorized = await findAuthorizedGenerationJob(this, jobModel, jobId);
             if (!authorized)
                 return;
-            await jobModel.cancel(authorized.job._id);
+            await jobModel.cancel(authorized.job._id, buildCancellationJobError(key => this.translate(key)));
             backgroundGenerationControllers.get(jobId)?.abort();
             const updated = await jobModel.findById(authorized.job._id);
             this.response.body = { job: updated ? serializeGenerationJob(updated) : undefined };

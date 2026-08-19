@@ -291,6 +291,35 @@ describe('TestdataGenerationJobModel', () => {
     );
   });
 
+  it('persists the typed cancellation contract while keeping canceled status', async () => {
+    const { model, collection } = createModel();
+    const cancellation = {
+      message: 'ai_helper_err_ai_aborted',
+      code: 'CLIENT_ABORTED',
+      failureCode: 'CANCELLED' as const,
+      stage: 'canceled',
+      artifact: 'pipeline' as const,
+      retryPolicy: 'no-retry' as const,
+      retryable: false,
+    };
+
+    await (model.cancel as unknown as (
+      id: string,
+      error: typeof cancellation,
+    ) => Promise<void>)('job1', cancellation);
+
+    expect(collection.updateOne).toHaveBeenCalledWith(
+      { _id: 'job1', status: { $in: ['pending', 'running'] } },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          status: 'canceled',
+          active: false,
+          error: cancellation,
+        }),
+      }),
+    );
+  });
+
   it('heartbeat extends both the worker lease and the active job retention window', async () => {
     const { model, collection } = createModel();
     const before = Date.now();

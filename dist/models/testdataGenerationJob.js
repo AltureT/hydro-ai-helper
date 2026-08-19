@@ -246,11 +246,12 @@ class TestdataGenerationJobModel {
                 updatedAt: now, completedAt: now,
             } });
     }
-    async cancel(id) {
+    async cancel(id, error) {
         const now = new Date();
         await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), status: { $in: ['pending', 'running'] } }, { $set: {
                 status: 'canceled', active: false, restorable: false,
                 cancelRequested: true, updatedAt: now, completedAt: now,
+                ...(error ? { error } : {}),
             } });
     }
     async dismiss(id) {

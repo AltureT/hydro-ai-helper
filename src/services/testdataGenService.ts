@@ -38,6 +38,7 @@ import {
   type TestdataArtifact,
   type TestdataFailureCode,
   type TestdataPipelineErrorContext,
+  type TestdataRetryPolicy,
 } from './testdata/failures';
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
@@ -4018,16 +4019,17 @@ export async function materializeSandboxBlueprint(
       for (let i = 0; i < formalAndSampleCount; i++) {
         const detail = validatorResults[i];
         if (!detail.accepted) {
-          const target = i < inputs.length
+          const generatedInput = i < inputs.length;
+          const target = generatedInput
             ? `第 ${i + 1} 个 .in `
             : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `;
           throw toPipelineError(
             new Error(`${target}未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`),
             {
-              code: 'VALIDATOR_FALSE_REJECT',
+              code: generatedInput ? 'GENERATOR_INVALID_INPUT' : 'VALIDATOR_FALSE_REJECT',
               stage: 'validator',
-              artifact: 'validator',
-              safeDetails: { caseIndex: i + 1, sample: i >= inputs.length },
+              artifact: generatedInput ? 'generator' : 'validator',
+              safeDetails: { caseIndex: i + 1, sample: !generatedInput },
             },
           );
         }
@@ -4046,7 +4048,7 @@ export async function materializeSandboxBlueprint(
           {
             code: 'STRESS_INSUFFICIENT_VALID_INPUTS',
             stage: 'validator',
-            artifact: 'validator',
+            artifact: 'stress-generator',
             safeDetails: {
               droppedCount: stressPartition.dropped.length,
               validCount: stressPartition.keptIndices.length,
@@ -4706,6 +4708,12 @@ export function parseTemplateSections(raw: string): Partial<Record<TemplateLang,
   return templates;
 }
 
+function artifactForTemplateLanguage(language: TemplateLang): TestdataArtifact {
+  if (language === 'java') return 'template-java';
+  if (language === 'cc') return 'template-cc';
+  return 'template-py';
+}
+
 // ─── 计划组装 ─────────────────────────────────────────────────────────────────
 
 /**
@@ -5130,6 +5138,7 @@ export const CPP_ORACLE_INFRA_FAILURE_KEY = 'ai_helper_testdata_err_cpp_oracle_i
 function legacyFailureContract(failureStage: string): {
   code: TestdataFailureCode;
   artifact: TestdataArtifact;
+  retryPolicy?: TestdataRetryPolicy;
 } {
   if (failureStage === 'sandbox_budget') {
     return { code: 'PIPELINE_BUDGET_EXHAUSTED', artifact: 'pipeline' };
@@ -5137,20 +5146,36 @@ function legacyFailureContract(failureStage: string): {
   if (failureStage === 'accepted_std_verification') {
     return { code: 'TRUSTED_SOLUTIONS_DIVERGED', artifact: 'oracle' };
   }
+  if (failureStage === 'config_parse') {
+    return { code: 'SPEC_PARSE_FAILED', artifact: 'spec', retryPolicy: 'no-retry' };
+  }
   if (failureStage.startsWith('provided_cpp_oracle')) {
     return { code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle' };
   }
   if (failureStage === 'solution_blueprint') {
     return { code: 'SPEC_PARSE_FAILED', artifact: 'spec' };
   }
+  if (failureStage === 'independent_verifier_parse') {
+    return {
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+    };
+  }
   if (failureStage === 'template_missing' || failureStage === 'template-py') {
     return { code: 'TEMPLATE_COMPILE_FAILED', artifact: 'template-py' };
   }
-  if (failureStage === 'generator' || failureStage === 'artifacts_parse') {
+  if (failureStage === 'artifacts_parse') {
+    return { code: 'GENERATOR_INVALID_JSON', artifact: 'generator' };
+  }
+  if (failureStage === 'generator') {
     return { code: 'GENERATOR_INVALID_INPUT', artifact: 'generator' };
   }
   if (failureStage === 'stress-generator') {
     return { code: 'STRESS_INSUFFICIENT_VALID_INPUTS', artifact: 'stress-generator' };
+  }
+  if (failureStage === 'function-samples') {
+    return { code: 'GENERATOR_INVALID_INPUT', artifact: 'stress-generator' };
   }
   if (failureStage === 'validator') {
     return { code: 'VALIDATOR_FALSE_REJECT', artifact: 'validator' };
@@ -5187,7 +5212,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
       contract.code,
       failureStage,
       contract.artifact,
-      pipelineContext?.retryPolicy || repairPolicyForFailure(contract),
+      pipelineContext?.retryPolicy || contract.retryPolicy || repairPolicyForFailure(contract),
       pipelineContext?.safeDetails,
     );
     this.name = 'TestdataGenerationError';
@@ -5859,7 +5884,16 @@ export class TestdataGenService {
     const results = [initialResult];
     this.emitProgress(params, 'blueprint', 48);
 
-    let response = parseAiResponse(initialResult.content, params.options, { allowMissingTemplates: true });
+    let response: GenerationResponse;
+    try {
+      response = parseAiResponse(initialResult.content, params.options, { allowMissingTemplates: true });
+    } catch (err) {
+      throw toPipelineError(err, {
+        code: 'GENERATOR_INVALID_JSON',
+        stage: 'direct_parse',
+        artifact: 'generator',
+      });
+    }
     const assignmentIssue = response.problemType === 'function'
       ? findAssignmentStyleCaseInput(response.cases)
       : null;
@@ -5878,10 +5912,13 @@ export class TestdataGenService {
           callOptions,
         );
       } catch (err) {
-        throw new Error(
-          'AI 生成的 .in 使用了“变量名 = 值”的错误格式，自动修复请求又失败了。'
-          + `请重试；若 AI 服务持续不可用，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`,
-        );
+        throw toPipelineError(err, {
+          code: 'GENERATOR_INVALID_INPUT',
+          stage: 'direct_repair',
+          artifact: 'generator',
+          message: 'AI 生成的 .in 使用了“变量名 = 值”的错误格式，自动修复请求又失败了。'
+            + `请重试；若 AI 服务持续不可用，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`,
+        });
       }
       results.push(repairResult);
       try {
@@ -5893,9 +5930,12 @@ export class TestdataGenService {
           throw new Error(`第 ${remainingIssue.caseNumber} 个 .in 仍含错误写法：${remainingIssue.line}`);
         }
       } catch (err) {
-        throw new Error(
-          `AI 自动修复 .in 格式后仍未返回可用的完整文件计划。请重试；若持续失败，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`,
-        );
+        throw toPipelineError(err, {
+          code: 'GENERATOR_INVALID_INPUT',
+          stage: 'direct_repair',
+          artifact: 'generator',
+          message: `AI 自动修复 .in 格式后仍未返回可用的完整文件计划。请重试；若持续失败，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`,
+        });
       }
     } else {
       const missingTemplates = getMissingTemplateLanguages(response, params.options);
@@ -5913,10 +5953,13 @@ export class TestdataGenService {
             callOptions,
           );
         } catch (err) {
-          throw new Error(
-            `AI 未返回 ${missingTemplates.map(lang => LANG_DISPLAY[lang]).join('、')}，自动补全请求又失败了。`
-            + `请重试；若 AI 服务持续不可用，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`,
-          );
+          throw toPipelineError(err, {
+            code: 'TEMPLATE_COMPILE_FAILED',
+            stage: 'template_missing',
+            artifact: artifactForTemplateLanguage(missingTemplates[0]),
+            message: `AI 未返回 ${missingTemplates.map(lang => LANG_DISPLAY[lang]).join('、')}，自动补全请求又失败了。`
+              + `请重试；若 AI 服务持续不可用，可用「生成骨架文件（不调用 AI）」手动填写。技术细节：${err instanceof Error ? err.message : String(err)}`,
+          });
         }
         results.push(repairResult);
         const repairedTemplates = parseTemplateSections(repairResult.content);
@@ -5926,9 +5969,16 @@ export class TestdataGenService {
         }
         const stillMissing = getMissingTemplateLanguages(response, params.options);
         if (stillMissing.length > 0) {
-          throw new Error(
-            `AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`
-            + '请重试；若持续失败，可用「生成骨架文件（不调用 AI）」手动填写。',
+          throw toPipelineError(
+            new Error(
+              `AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`
+              + '请重试；若持续失败，可用「生成骨架文件（不调用 AI）」手动填写。',
+            ),
+            {
+              code: 'TEMPLATE_COMPILE_FAILED',
+              stage: 'template_missing',
+              artifact: artifactForTemplateLanguage(stillMissing[0]),
+            },
           );
         }
       }
@@ -6063,6 +6113,14 @@ export class TestdataGenService {
           `AI 独立验证器格式无法解析，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`,
           'independent_verifier_parse',
           results,
+          false,
+          undefined,
+          undefined,
+          {
+            code: 'COVERAGE_REQUIREMENT_MISSING',
+            artifact: 'coverage',
+            retryPolicy: 'switch-model',
+          },
         );
       }
       results.push(repairResult);
@@ -6080,6 +6138,13 @@ export class TestdataGenService {
           'independent_verifier_parse',
           results,
           true,
+          undefined,
+          undefined,
+          {
+            code: 'COVERAGE_REQUIREMENT_MISSING',
+            artifact: 'coverage',
+            retryPolicy: 'switch-model',
+          },
         );
       }
     }

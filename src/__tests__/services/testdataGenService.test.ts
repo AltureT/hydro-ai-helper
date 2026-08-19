@@ -3390,6 +3390,70 @@ describe('TestdataGenService.generate', () => {
     expect(plan.tokenUsage?.totalTokens).toBe(350);
   });
 
+  it('直出模板补全仍缺失时抛出对应语言的类型化失败', async () => {
+    const initial = makeDelimitedResponse().replace(
+      /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,
+      '',
+    );
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: initial, usedModel })
+        .mockResolvedValueOnce({ content: '@@@NOTES@@@\nstill missing', usedModel }),
+    };
+
+    const promise = new TestdataGenService(mockClient as never).generate({
+      problemTitle: '约束子串',
+      statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'TEMPLATE_COMPILE_FAILED',
+      stage: 'template_missing',
+      artifact: 'template-java',
+      retryPolicy: 'repair-artifact',
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('独立验证器二次解析失败映射到 coverage 并停止当前模型调用', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const invalidVerifier = '@@@BRUTE@@@\nprint(1)';
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: invalidVerifier, usedModel })
+        .mockResolvedValueOnce({ content: invalidVerifier, usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 't',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      stage: 'independent_verifier_parse',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+      telemetryMetadata: expect.objectContaining({ failureStage: 'independent_verifier_parse' }),
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+  });
+
   it('AI 把变量赋值写入 .in 时要求完整修复后再组装', async () => {
     const invalid = makeDelimitedResponse().replace(
       '@@@CASE:1:IN:样例1@@@\n10101\n1',
@@ -3420,11 +3484,19 @@ describe('TestdataGenService.generate', () => {
   it('AI 返回非法内容时抛出中文错误', async () => {
     const mockClient = { chat: jest.fn().mockResolvedValue({ content: 'oops', usedModel: { endpointId: 'e', endpointName: 'n', modelName: 'm' } }) };
     const service = new TestdataGenService(mockClient as never);
-    await expect(service.generate({
+    const promise = service.generate({
       problemTitle: 't',
       statementMarkdown: 's',
       options: baseOptions,
-    })).rejects.toThrow(/JSON/);
+    });
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'direct_parse',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+    });
+    await expect(promise).rejects.toThrow(/JSON/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3966,8 +4038,18 @@ describe('materializeSandboxBlueprint 双重验证', () => {
         detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: '数值超出范围' }),
       ]),
     };
-    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
-      .rejects.toThrow(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    const failure = await materializeSandboxBlueprint(bp, tradOpts, '', runner)
+      .catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'GENERATOR_INVALID_INPUT',
+      stage: 'validator',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 2 },
+    });
+    expect(failure.message).toMatch(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('请只输出修复后的 @@@GENERATOR@@@');
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
@@ -3989,12 +4071,22 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ]),
     };
 
-    await expect(materializeSandboxBlueprint(
+    const failure = await materializeSandboxBlueprint(
       bp,
       tradOpts,
       '```input1\n3\n```\n```output1\n3\n```',
       runner,
-    )).rejects.toThrow(/题面样例 1 未通过输入校验：样例非法/);
+    ).catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_FALSE_REJECT',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 3, sample: true },
+    });
+    expect(failure.message).toMatch(/题面样例 1 未通过输入校验：样例非法/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
@@ -4307,9 +4399,17 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ]),
     };
 
-    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
-      /第 1 个压力 \.in 未通过输入校验：invalid-1/,
-    );
+    const failure = await materializeSandboxBlueprint(bp, tradOpts, '', runner)
+      .catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'STRESS_INSUFFICIENT_VALID_INPUTS',
+      stage: 'validator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+    });
+    expect(failure.message).toMatch(/第 1 个压力 \.in 未通过输入校验：invalid-1/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 

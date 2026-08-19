@@ -424,13 +424,17 @@ export class TestdataGenerationJobModel {
     );
   }
 
-  async cancel(id: string | ObjectIdType): Promise<void> {
+  async cancel(
+    id: string | ObjectIdType,
+    error?: TestdataGenerationJobError,
+  ): Promise<void> {
     const now = new Date();
     await this.collection.updateOne(
       { _id: ensureObjectId(id), status: { $in: ['pending', 'running'] } },
       { $set: {
         status: 'canceled', active: false, restorable: false,
         cancelRequested: true, updatedAt: now, completedAt: now,
+        ...(error ? { error } : {}),
       } },
     );
   }

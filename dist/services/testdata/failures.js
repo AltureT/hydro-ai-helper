@@ -45,14 +45,31 @@ exports.TESTDATA_FAILURE_CODES = [
 ];
 const SAFE_DETAIL_STRING_MAX = 128;
 const SAFE_DETAIL_ARRAY_MAX = 64;
-const SAFE_DETAIL_KEY = /^[a-z][A-Za-z0-9]{0,63}$/;
 const SAFE_ENUM_OR_HASH = /^[A-Za-z0-9_.:-]{1,128}$/;
-const UNSAFE_DETAIL_KEY = /(statement|source|code|input|output|url|uri|api|key|token|secret|password|problemId|userId|recordId|jobId|domainId|endpointId)/i;
+const SAFE_DETAIL_KEYS = new Set([
+    'actualBytes',
+    'actualCount',
+    'candidate',
+    'caseIndex',
+    'checkerUsed',
+    'contentHash',
+    'droppedCount',
+    'elapsedMs',
+    'expectedCount',
+    'failureKind',
+    'generatedCount',
+    'indexes',
+    'maxBytes',
+    'minimumUnique',
+    'sample',
+    'status',
+    'uniqueCount',
+    'validCount',
+]);
 function copyValidatedSafeDetails(details) {
     const safe = {};
     for (const [key, value] of Object.entries(details)) {
-        if (!SAFE_DETAIL_KEY.test(key)
-            || (UNSAFE_DETAIL_KEY.test(key) && key.toLowerCase() !== 'contenthash')) {
+        if (!SAFE_DETAIL_KEYS.has(key)) {
             throw new TypeError(`Unsafe test-data failure detail key: ${key}`);
         }
         if (typeof value === 'number') {
@@ -66,7 +83,8 @@ function copyValidatedSafeDetails(details) {
             continue;
         }
         if (typeof value === 'string') {
-            if (value.length > SAFE_DETAIL_STRING_MAX || !SAFE_ENUM_OR_HASH.test(value)) {
+            const validContentHash = key !== 'contentHash' || /^[a-f0-9]{16,128}$/i.test(value);
+            if (value.length > SAFE_DETAIL_STRING_MAX || !SAFE_ENUM_OR_HASH.test(value) || !validContentHash) {
                 throw new TypeError(`Unsafe test-data failure detail value: ${key}`);
             }
             safe[key] = value;

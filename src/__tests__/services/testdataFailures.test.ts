@@ -99,8 +99,42 @@ describe('typed test-data pipeline failures', () => {
     expect(make({ status: 'x'.repeat(129) })).toThrow(TypeError);
     expect(make({ rawInput: '1 2 3' })).toThrow(TypeError);
     expect(make({ problemId: 'P1000' })).toThrow(TypeError);
+    expect(make({ id: 'P1000' })).toThrow(TypeError);
+    expect(make({ pid: 'P1000' })).toThrow(TypeError);
+    expect(make({ uid: '42' })).toThrow(TypeError);
+    expect(make({ traceId: 'trace-123' })).toThrow(TypeError);
+    expect(make({ recordIds: ['1', '2'] })).toThrow(TypeError);
     expect(make({ apiUrl: 'https://example.invalid' })).toThrow(TypeError);
     expect(make({ apiKey: 'secret' })).toThrow(TypeError);
+  });
+
+  it('accepts only the enum/count/duration/index/bool/hash details used by production', () => {
+    const error = new TestdataPipelineError(
+      'failed',
+      'GENERATOR_OUTPUT_TOO_LARGE',
+      'generator',
+      'generator',
+      'repair-artifact',
+      {
+        failureKind: 'compile',
+        actualCount: 3,
+        expectedCount: 4,
+        elapsedMs: 1500,
+        caseIndex: 2,
+        checkerUsed: false,
+        contentHash: '0123456789abcdef0123456789abcdef',
+      },
+    );
+
+    expect(error.safeDetails).toEqual({
+      failureKind: 'compile',
+      actualCount: 3,
+      expectedCount: 4,
+      elapsedMs: 1500,
+      caseIndex: 2,
+      checkerUsed: false,
+      contentHash: '0123456789abcdef0123456789abcdef',
+    });
   });
 
   it('extracts only stable typed metadata and validated safe details', () => {
@@ -156,5 +190,40 @@ describe('typed test-data pipeline failures', () => {
       artifact: 'oracle',
       retryPolicy: 'repair-artifact',
     });
+  });
+
+  it.each([
+    {
+      stage: 'artifacts_parse',
+      code: 'GENERATOR_INVALID_JSON',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+    },
+    {
+      stage: 'independent_verifier_parse',
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+    },
+    {
+      stage: 'template_missing',
+      code: 'TEMPLATE_COMPILE_FAILED',
+      artifact: 'template-py',
+      retryPolicy: 'repair-artifact',
+    },
+    {
+      stage: 'function-samples',
+      code: 'GENERATOR_INVALID_INPUT',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+    },
+    {
+      stage: 'config_parse',
+      code: 'SPEC_PARSE_FAILED',
+      artifact: 'spec',
+      retryPolicy: 'no-retry',
+    },
+  ])('maps real legacy stage $stage without UNKNOWN/pipeline fallback', expected => {
+    expect(new TestdataGenerationError('failed', expected.stage)).toMatchObject(expected);
   });
 });
