@@ -18,7 +18,48 @@ const SAFE_FAILURE_CODES = new Set(failures_1.TESTDATA_FAILURE_CODES);
 const SAFE_AI_CATEGORIES = new Set([
     'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
 ]);
-const SAFE_STAGE = /^[a-z][a-z0-9_:-]{0,63}$/;
+const SAFE_TESTDATA_STAGES = new Set([
+    'accepted-std',
+    'accepted_std_verification',
+    'artifacts_parse',
+    'brute',
+    'canceled',
+    'checker',
+    'config_parse',
+    'direct_parse',
+    'direct_repair',
+    'full',
+    'function-samples',
+    'function_samples',
+    'generator',
+    'independent_verifier_parse',
+    'oracle',
+    'pipeline',
+    'pipeline_repair',
+    'provided_cpp_oracle',
+    'provided_cpp_oracle_infra',
+    'sandbox_budget',
+    'sandbox_check',
+    'solution_blueprint',
+    'solution_verification',
+    'stress-generator',
+    'stress_generator',
+    'stress_testing',
+    'template',
+    'template-py',
+    'template_missing',
+    'unknown',
+    'validator',
+]);
+function isSafeTestdataStage(value) {
+    if (typeof value !== 'string')
+        return false;
+    if (SAFE_TESTDATA_STAGES.has(value))
+        return true;
+    const semanticFallbackPrefix = 'semantic_fallback:';
+    return value.startsWith(semanticFallbackPrefix)
+        && SAFE_TESTDATA_STAGES.has(value.slice(semanticFallbackPrefix.length));
+}
 class ErrorReporter {
     constructor(pluginInstallModel) {
         this.pluginInstallModel = pluginInstallModel;
@@ -264,7 +305,7 @@ class ErrorReporter {
         }
         for (const key of ['stage', 'failureStage']) {
             const value = metadata[key];
-            if (typeof value === 'string' && SAFE_STAGE.test(value))
+            if (isSafeTestdataStage(value))
                 parts.push(`${key}=${value}`);
         }
         return parts.join(':') || undefined;
@@ -279,7 +320,7 @@ class ErrorReporter {
             if (key === 'aiCategory' && (typeof val !== 'string' || !SAFE_AI_CATEGORIES.has(val)))
                 continue;
             if ((key === 'stage' || key === 'failureStage')
-                && (typeof val !== 'string' || !SAFE_STAGE.test(val)))
+                && !isSafeTestdataStage(val))
                 continue;
             if (typeof val === 'string') {
                 sanitized[key] = val.substring(0, 200);

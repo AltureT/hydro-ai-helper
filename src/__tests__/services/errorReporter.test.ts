@@ -193,6 +193,21 @@ describe('ErrorReporter', () => {
       expect(JSON.stringify(entries[0])).not.toMatch(/SECRET|sk-secret|private\.example/);
     });
 
+    it('drops lowercase secret-shaped stages from metadata and fingerprint inputs', () => {
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, {
+        stage: 'sk-secret-key',
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, {
+        failureStage: 'private-auth-token',
+      });
+
+      // Unknown stages fail closed: they must neither split the group nor survive in metadata.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entries = [...(reporter as any).buffer.values()];
+      expect(entries).toHaveLength(1);
+      expect(JSON.stringify(entries[0])).not.toMatch(/sk-secret-key|private-auth-token/);
+    });
+
     it('keeps different categories separate even when stack frames match', () => {
       const stack = [
         'Error: dynamic',

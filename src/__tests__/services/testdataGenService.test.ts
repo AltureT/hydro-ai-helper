@@ -2989,6 +2989,7 @@ describe('TestdataGenService.generate', () => {
   it.each([
     ['ORACLE_BRUTE_DIVERGENCE', 'brute', 'adjudicate'],
     ['PIPELINE_BUDGET_EXHAUSTED', 'pipeline', 'no-retry'],
+    ['ORACLE_COMPILE_FAILED', 'oracle', 'manual-review'],
   ] as const)('第二模型最终 %s 保留终局策略且不再升级', async (code, artifact, retryPolicy) => {
     const primaryModel = { endpointId: 'ep1', endpointName: 'primary', modelName: 'model-a' };
     const fallbackModel = { endpointId: 'ep2', endpointName: 'fallback', modelName: 'model-b' };

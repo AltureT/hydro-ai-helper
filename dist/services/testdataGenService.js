@@ -4677,7 +4677,7 @@ class TestdataGenService {
                         ...firstError.chatResults,
                         ...fallbackError.chatResults,
                     ];
-                    const finalPolicy = (0, failures_1.repairPolicyForFailure)(fallbackError);
+                    const finalPolicy = fallbackError.retryPolicy;
                     throw new TestdataGenerationError(`首选模型自动修复失败，切换下一配置模型后仍未通过机器验证。技术细节：${fallbackError.message}`, `semantic_fallback:${String(fallbackError.telemetryMetadata.failureStage || 'unknown')}`, combinedResults, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
                         code: fallbackError.code,
                         artifact: fallbackError.artifact,
