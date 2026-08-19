@@ -640,6 +640,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 providedStd: resolvedStd.providedStd,
                 providedStdSource: resolvedStd.providedStdSource,
                 extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+                confirmDirectFallback: body.confirmDirectFallback === true,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
             if (optionError) {
@@ -870,6 +871,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 providedStd: resolvedStd.providedStd,
                 providedStdSource: resolvedStd.providedStdSource,
                 extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+                confirmDirectFallback: body.confirmDirectFallback === true,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
             if (optionError) {

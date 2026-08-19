@@ -42,6 +42,13 @@ import {
   type TestdataPipelineErrorContext,
   type TestdataRetryPolicy,
 } from './testdata/failures';
+import {
+  assessTestdataRisk,
+  getTestdataDirectFallbackEnabled,
+  getTestdataReliabilityMode,
+  type TestdataReliabilityMode,
+  type TestdataRiskAssessment,
+} from './testdata/risk';
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -112,6 +119,8 @@ export interface GenerateOptions {
   providedStdSource?: 'manual' | 'accepted-record';
   /** 教师补充要求（如“链表用类实现”“数据范围控制在 100 以内”） */
   extraRequirements?: string;
+  /** Medium-risk direct fallback requires an explicit second confirmation. */
+  confirmDirectFallback?: boolean;
 }
 
 /** AI 返回的单个测试点 */
@@ -340,6 +349,9 @@ export interface GenerationPlan {
   usedModel?: string;
   /** 验证元数据；沙箱/直出模式提供，骨架模式与旧后端缺省。 */
   verification?: PlanVerification;
+  /** Deterministic privacy-safe risk metadata for this generation request. */
+  risk?: TestdataRiskAssessment;
+  reliabilityMode?: TestdataReliabilityMode;
 }
 
 /** AI 响应解析选项；常规调用保持严格，服务层可先宽松解析再补齐缺失模板。 */
@@ -5624,6 +5636,8 @@ export interface TestdataGenServiceOptions {
   cppOracleAvailable?: boolean;
   /** 内部开关：语义失败后最多从下一配置模型重跑一次，防止递归升级。 */
   semanticModelFallback?: boolean;
+  /** Injectable only to keep deterministic reliability-mode tests independent of process env. */
+  reliabilityMode?: TestdataReliabilityMode;
 }
 
 interface IndependentVerifierCallState {
@@ -5683,12 +5697,49 @@ export class TestdataGenService {
   private readonly mode: TestdataGenerationMode;
   private readonly cppOracleAvailable: boolean;
   private readonly semanticModelFallback: boolean;
+  private readonly reliabilityMode: TestdataReliabilityMode;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
     this.mode = serviceOptions.mode || (serviceOptions.sandboxRunner ? 'auto' : 'direct');
     this.cppOracleAvailable = serviceOptions.cppOracleAvailable === true;
     this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
+    this.reliabilityMode = serviceOptions.reliabilityMode || getTestdataReliabilityMode();
+  }
+
+  private assessRisk(params: GenerateTestdataParams): TestdataRiskAssessment {
+    return assessTestdataRisk({
+      statement: params.statementMarkdown,
+      hasCustomChecker: hasCustomChecker(params.existingConfig),
+      directFallbackEnabled: getTestdataDirectFallbackEnabled(),
+      confirmDirectFallback: params.options.confirmDirectFallback,
+      reliabilityMode: this.reliabilityMode,
+    });
+  }
+
+  private attachRisk(plan: GenerationPlan, risk: TestdataRiskAssessment): GenerationPlan {
+    plan.risk = risk;
+    plan.reliabilityMode = this.reliabilityMode;
+    return plan;
+  }
+
+  private throwDirectFallbackBlocked(risk: TestdataRiskAssessment): never {
+    if (risk.tier === 'medium'
+      && getTestdataDirectFallbackEnabled()
+      && !risk.allowsDirectFallback) {
+      throw toPipelineError(new Error('中风险题目需要教师再次确认，才可使用未经沙箱验证的直出模式。'), {
+        code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+        stage: 'sandbox_check',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+      });
+    }
+    throw toPipelineError(new Error('当前风险策略不允许未经 Hydro 沙箱验证的直出模式。'), {
+      code: 'SANDBOX_REQUIRED',
+      stage: 'sandbox_check',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+    });
   }
 
   private emitProgress(
@@ -5728,6 +5779,7 @@ export class TestdataGenService {
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
+    const risk = this.assessRisk(params);
     const requiresProvidedCppOracle = params.options.problemKind !== 'function'
       && !!params.options.providedStd?.trim()
       && detectStdFilename(params.options.providedStd) === 'std.cc';
@@ -5761,7 +5813,7 @@ export class TestdataGenService {
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-        return plan;
+        return this.attachRisk(plan, risk);
       }
       if (requiresProvidedCppOracle) {
         const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -5801,6 +5853,12 @@ export class TestdataGenService {
       );
     }
 
+    // Existing custom-checker handling remains stricter than the general medium-risk rule:
+    // no AI-direct output can establish checker semantics.
+    if (hasCustomChecker(params.existingConfig) || !risk.allowsDirectFallback) {
+      this.throwDirectFallbackBlocked(risk);
+    }
+
     const plan = await this.generateDirect(params);
     if (this.mode === 'auto') {
       const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
@@ -5811,7 +5869,7 @@ export class TestdataGenService {
       plan.notesStructured?.warnings.push(fallbackWarning);
     }
     this.emitProgress(params, 'complete', 100);
-    return plan;
+    return this.attachRisk(plan, risk);
   }
 
   private getCallOptions(

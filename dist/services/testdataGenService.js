@@ -98,6 +98,7 @@ const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
+const risk_1 = require("./testdata/risk");
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
@@ -4533,6 +4534,39 @@ class TestdataGenService {
         this.mode = serviceOptions.mode || (serviceOptions.sandboxRunner ? 'auto' : 'direct');
         this.cppOracleAvailable = serviceOptions.cppOracleAvailable === true;
         this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
+        this.reliabilityMode = serviceOptions.reliabilityMode || (0, risk_1.getTestdataReliabilityMode)();
+    }
+    assessRisk(params) {
+        return (0, risk_1.assessTestdataRisk)({
+            statement: params.statementMarkdown,
+            hasCustomChecker: hasCustomChecker(params.existingConfig),
+            directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
+            confirmDirectFallback: params.options.confirmDirectFallback,
+            reliabilityMode: this.reliabilityMode,
+        });
+    }
+    attachRisk(plan, risk) {
+        plan.risk = risk;
+        plan.reliabilityMode = this.reliabilityMode;
+        return plan;
+    }
+    throwDirectFallbackBlocked(risk) {
+        if (risk.tier === 'medium'
+            && (0, risk_1.getTestdataDirectFallbackEnabled)()
+            && !risk.allowsDirectFallback) {
+            throw (0, failures_1.toPipelineError)(new Error('中风险题目需要教师再次确认，才可使用未经沙箱验证的直出模式。'), {
+                code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+                stage: 'sandbox_check',
+                artifact: 'pipeline',
+                retryPolicy: 'no-retry',
+            });
+        }
+        throw (0, failures_1.toPipelineError)(new Error('当前风险策略不允许未经 Hydro 沙箱验证的直出模式。'), {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+        });
     }
     emitProgress(params, stage, percent, attempt = 1) {
         try {
@@ -4562,6 +4596,7 @@ class TestdataGenService {
     async generate(params) {
         assertExistingConfigParsable(params.existingConfig);
         this.emitProgress(params, 'preparing', 2);
+        const risk = this.assessRisk(params);
         const requiresProvidedCppOracle = params.options.problemKind !== 'function'
             && !!params.options.providedStd?.trim()
             && detectStdFilename(params.options.providedStd) === 'std.cc';
@@ -4585,7 +4620,7 @@ class TestdataGenService {
             if (available) {
                 const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
                 this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-                return plan;
+                return this.attachRisk(plan, risk);
             }
             if (requiresProvidedCppOracle) {
                 const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -4608,6 +4643,11 @@ class TestdataGenService {
         if (requiresAcceptedRecordVerification) {
             throw (0, failures_1.toPipelineError)(new Error('历史 AC 候选解必须在 Hydro 沙箱中通过题面样例与独立 BRUTE 压力验证，不能用于未经验证的直出模式。'), { code: 'SANDBOX_REQUIRED', stage: 'sandbox_check', artifact: 'pipeline' });
         }
+        // Existing custom-checker handling remains stricter than the general medium-risk rule:
+        // no AI-direct output can establish checker semantics.
+        if (hasCustomChecker(params.existingConfig) || !risk.allowsDirectFallback) {
+            this.throwDirectFallbackBlocked(risk);
+        }
         const plan = await this.generateDirect(params);
         if (this.mode === 'auto') {
             const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
@@ -4618,7 +4658,7 @@ class TestdataGenService {
             plan.notesStructured?.warnings.push(fallbackWarning);
         }
         this.emitProgress(params, 'complete', 100);
-        return plan;
+        return this.attachRisk(plan, risk);
     }
     getCallOptions(params, attempt = 1) {
         return {

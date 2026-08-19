@@ -1176,6 +1176,7 @@ describe('Testdata generation background jobs', () => {
       providedStd: undefined,
       providedStdSource: undefined,
       extraRequirements: undefined,
+      confirmDirectFallback: true,
     };
     const checkpoint = {
       revision: 2,
@@ -1236,6 +1237,7 @@ describe('Testdata generation background jobs', () => {
         problemKind: 'traditional',
         caseCount: 1,
         languages: [],
+        confirmDirectFallback: true,
         resumeFromJobId: String(interruptedJob._id),
       },
     });
@@ -1249,6 +1251,8 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
 
       expect(receivedParams?.checkpoint).toBe(checkpoint);
+      expect((receivedParams?.options as { confirmDirectFallback?: boolean } | undefined)
+        ?.confirmDirectFallback).toBe(true);
       expect(maxActiveCheckpointWrites).toBe(1);
       expect(jobModel.updateCheckpoint).toHaveBeenNthCalledWith(
         1,

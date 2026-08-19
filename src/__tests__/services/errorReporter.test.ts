@@ -185,6 +185,9 @@ describe('ErrorReporter', () => {
       reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
         failureCode: 'PIPELINE_BUDGET_EXHAUSTED', stage: 'sandbox_budget', artifact: 'pipeline', retryPolicy: 'no-retry',
       });
+      reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+        failureCode: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED', stage: 'sandbox_check', artifact: 'pipeline', retryPolicy: 'no-retry',
+      });
       reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, {
         aiCategory: 'network', retryable: true, attemptCount: 2,
       });
@@ -194,8 +197,8 @@ describe('ErrorReporter', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const entries = [...(reporter as any).buffer.values()];
-      expect(entries).toHaveLength(4);
-      expect(new Set(entries.map(entry => entry.stackFingerprint)).size).toBe(4);
+      expect(entries).toHaveLength(5);
+      expect(new Set(entries.map(entry => entry.stackFingerprint)).size).toBe(5);
     });
 
     it('drops unsafe typed discriminator values from metadata and fingerprint inputs', () => {

@@ -14,6 +14,7 @@ exports.TESTDATA_FAILURE_CODES = [
     'SPEC_CONFLICT',
     'SPEC_CONSENSUS_REQUIRED',
     'SANDBOX_REQUIRED',
+    'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
     'SANDBOX_UNAVAILABLE',
     'GENERATOR_INVALID_JSON',
     'GENERATOR_WRONG_CASE_COUNT',
@@ -182,6 +183,7 @@ function repairPolicyForFailure(error) {
         case 'SPEC_EVIDENCE_NOT_FOUND':
             return 'rerun-spec';
         case 'SANDBOX_REQUIRED':
+        case 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED':
         case 'PIPELINE_BUDGET_EXHAUSTED':
         case 'CANCELLED':
             return 'no-retry';

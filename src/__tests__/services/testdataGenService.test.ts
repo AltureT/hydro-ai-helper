@@ -76,6 +76,17 @@ const baseOptions: GenerateOptions = {
   languages: ['py', 'java', 'cc'],
 };
 
+// Older direct-mode unit coverage exercises parsing/assembly only. Keep its legacy
+// fixture path explicit while individual risk-gate tests override it as needed.
+beforeEach(() => {
+  process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+});
+
+afterEach(() => {
+  delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  delete process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE;
+});
+
 const groupedCoinStatement = `## 输入格式
 
 第一行仅有一个正整数 $T$，表示测试数据的组数，对于每组测试数据包含三行，每行给出一个比较结果。
@@ -3610,7 +3621,8 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
 
-  it('auto 模式在沙箱不可达时回退兼容直出并明确提示', async () => {
+  it('沙箱不可达且管理员未显式允许时拒绝 low 风险直出', async () => {
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
     const mockClient = {
       chat: jest.fn().mockResolvedValue({
         content: makeAiJson(),
@@ -3623,16 +3635,102 @@ describe('TestdataGenService.generate', () => {
       runPython: jest.fn(),
       runPythonBatch: jest.fn(),
     };
-    const plan = await new TestdataGenService(mockClient as never, {
+    await expect(new TestdataGenService(mockClient as never, {
       sandboxRunner: runner,
       mode: 'auto',
     }).generate({
-      problemTitle: '提莫攻击', statementMarkdown: '题面',
+      problemTitle: '提莫攻击', statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({
+      code: 'SANDBOX_REQUIRED',
+      retryPolicy: 'no-retry',
+    });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.runPython).not.toHaveBeenCalled();
+  });
+
+  it('管理员显式允许时只为 low 风险使用未验证 direct fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'low risk',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
     });
-    expect(plan.notes).toContain('沙箱当前不可达');
-    expect(plan.notesStructured?.warnings.some(note => note.includes('沙箱当前不可达'))).toBe(true);
-    expect(runner.runPython).not.toHaveBeenCalled();
+    expect(plan).toMatchObject({
+      risk: { tier: 'low', allowsDirectFallback: true, wouldBlock: false },
+      verification: { mode: 'direct' },
+    });
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('medium risk requires an explicit direct-fallback confirmation', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const service = new TestdataGenService({ chat: jest.fn() } as never, { mode: 'direct' });
+    await expect(service.generate({
+      problemTitle: 'float',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```\nFloating point output has absolute error.',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+      retryPolicy: 'no-retry',
+    });
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('medium risk can direct only after confirmation and is never marked sandbox verified', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'float',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```\nFloating point output has absolute error.',
+      options: {
+        problemKind: 'function', caseCount: 2, languages: ['py'], confirmDirectFallback: true,
+      },
+    });
+    expect(plan).toMatchObject({ risk: { tier: 'medium', allowsDirectFallback: true } });
+    expect(plan.verification).toEqual(expect.objectContaining({ mode: 'direct' }));
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it.each(['observe', 'enforce', 'legacy'] as const)('%s never permits confirmed high-risk direct fallback', async reliabilityMode => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'direct', reliabilityMode,
+    });
+    await expect(service.generate({
+      problemTitle: 'high risk',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```\nFloating point output. Given a graph. Subtask 1.',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
+      },
+    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('custom-checker rules remain stricter than medium-risk confirmation', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = { chat: jest.fn() };
+    await expect(new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
+      },
+    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 
   it('教师 C++ 标程在 auto 模式沙箱不可达时给出编译能力硬错误，不降级直出', async () => {

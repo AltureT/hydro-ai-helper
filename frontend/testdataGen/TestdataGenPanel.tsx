@@ -78,6 +78,17 @@ interface PlanVerification {
   };
 }
 
+interface TestdataRiskAssessment {
+  tier: 'low' | 'medium' | 'high' | 'blocked';
+  score: number;
+  reasons: Array<{ code: string; weight: number; messageKey: string }>;
+  requiresSandbox: boolean;
+  requiresSpecConsensus: boolean;
+  requiresIndependentModels: boolean;
+  allowsDirectFallback: boolean;
+  wouldBlock?: boolean;
+}
+
 interface GenerationPlan {
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
@@ -100,6 +111,14 @@ interface GenerationPlan {
   }>;
   usedModel?: string;
   verification?: PlanVerification;
+  risk?: TestdataRiskAssessment;
+  reliabilityMode?: 'legacy' | 'observe' | 'enforce';
+}
+
+export function canConfirmDirectFallback(
+  risk: Pick<TestdataRiskAssessment, 'tier' | 'allowsDirectFallback'> | undefined,
+): boolean {
+  return risk?.tier === 'medium' && risk.allowsDirectFallback === false;
 }
 
 type BackgroundGenerationJobStatus =
@@ -330,6 +349,8 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // 生成结果状态
   const [plan, setPlan] = useState<GenerationPlan | null>(null);
+  const [confirmDirectFallback, setConfirmDirectFallback] = useState(false);
+  const [directFallbackConfirmationRequired, setDirectFallbackConfirmationRequired] = useState(false);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [selectedFiles, setSelectedFiles] = useState<Record<string, boolean>>({});
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -504,6 +525,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               job.error?.failureCode,
               job.error?.message || i18n('ai_helper_testdata_job_failed'),
             ));
+          setDirectFallbackConfirmationRequired(
+            job.error?.failureCode === 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+          );
           setRetryGuidance(resolveTestdataRetryGuidance(job.error?.retryPolicy));
           setPhase('form');
         } else if (job.status === 'canceled') {
@@ -548,9 +572,13 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // ─── 生成 ───────────────────────────────────────────────────────────────────
 
-  const handleGenerate = useCallback(async (resumeFromJobId?: string) => {
+  const handleGenerate = useCallback(async (
+    resumeFromJobId?: string,
+    directFallbackConfirmed = confirmDirectFallback,
+  ) => {
     setError(null);
     setRetryGuidance('none');
+    setDirectFallbackConfirmationRequired(false);
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
@@ -583,6 +611,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
+          confirmDirectFallback: directFallbackConfirmed,
           resumeFromJobId,
         }),
       });
@@ -606,6 +635,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setDirectFallbackConfirmationRequired(
+        err instanceof TestdataRequestError
+        && err.failureCode === 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+      );
       setRetryGuidance(resolveTestdataRetryGuidance(
         err instanceof TestdataRequestError ? err.retryPolicy : undefined,
       ));
@@ -613,7 +646,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     }
   }, [
     problemId, problemKind, fillInMode, caseCount,
-    dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements,
+    dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements, confirmDirectFallback,
     rememberJob,
   ]);
 
@@ -1159,6 +1192,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const active = activeFile && plan.files.some(f => f.name === activeFile) ? activeFile : orderedFiles[0]?.name;
     const selectedCount = plan.files.filter(f => selectedFiles[f.name]).length;
     const verification = plan.verification;
+    const risk = plan.risk;
     const bruteSkipped = verification?.bruteCheck?.skippedTimeout ?? [];
     const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
     const templateSkipped = verification?.templateCheck?.skippedTimeout ?? [];
@@ -1198,6 +1232,28 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
     return (
       <div>
+        {risk && (
+          <div style={{ ...getAlertStyle(risk.wouldBlock ? 'warning' : 'info'), marginBottom: SPACING.md }}>
+            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
+              {i18n('ai_helper_testdata_risk_title')}: {i18n(`ai_helper_testdata_risk_tier_${risk.tier}`)} · {risk.score}
+            </div>
+            <div style={{ fontSize: '13px' }}>
+              {i18n('ai_helper_testdata_risk_requires_sandbox')}: {i18n(risk.requiresSandbox ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
+              {' · '}{i18n('ai_helper_testdata_risk_direct_allowed')}: {i18n(risk.allowsDirectFallback ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
+              {' · '}{i18n('ai_helper_testdata_risk_requires_consensus')}: {i18n(risk.requiresSpecConsensus ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
+              {' · '}{i18n('ai_helper_testdata_risk_requires_independent_models')}: {i18n(risk.requiresIndependentModels ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
+              {' · '}{i18n('ai_helper_testdata_risk_mode')}: {plan.reliabilityMode || 'observe'}
+              {risk.wouldBlock && ` · ${i18n('ai_helper_testdata_risk_would_block')}`}
+            </div>
+            <ul style={{ margin: `${SPACING.xs} 0 0`, paddingLeft: SPACING.lg }}>
+              {risk.reasons.map(reason => (
+                <li key={reason.code} style={{ fontSize: '13px' }}>
+                  {i18n(reason.messageKey)} (+{reason.weight})
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
           <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
@@ -1503,6 +1559,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {i18n('ai_helper_testdata_panel_subtitle')}
           </div>
           {phase === 'form' && renderForm()}
+          {phase === 'form' && directFallbackConfirmationRequired && (
+            <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
+              <div>{i18n('ai_helper_testdata_direct_confirmation_required')}</div>
+              <button
+                type="button"
+                style={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
+                onClick={() => { setConfirmDirectFallback(true); void handleGenerate(undefined, true); }}
+              >
+                {i18n('ai_helper_testdata_direct_confirmation_action')}
+              </button>
+            </div>
+          )}
           {phase === 'generating' && renderGenerating()}
           {phase === 'preview' && renderPreview()}
           {phase === 'applying' && renderApplying()}
