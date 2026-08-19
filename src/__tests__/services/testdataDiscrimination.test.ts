@@ -133,6 +133,32 @@ describe('evaluateDiscrimination', () => {
     });
   });
 
+  it('一个已命中靶子不能掩盖另一个 checker 基础设施阻断', () => {
+    const result = evaluateDiscrimination({
+      targetRuns: [
+        {
+          kind: 'wrong-algorithm',
+          description: '已被拒绝的错误解',
+          perCase: [{ ...accepted('alternative\n'), checkerVerdict: 'reject' }],
+        },
+        {
+          kind: 'boundary',
+          description: '未裁决的错误解',
+          perCase: [{ ...accepted('unknown\n'), checkerVerdict: 'infra-error' }],
+        },
+      ],
+      oracleOutputs: ['official\n'],
+      customChecker: true,
+      checkerAvailable: true,
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({ killed: true, killedBy: 'wa' }),
+      expect.objectContaining({ killed: false, skippedReason: 'checker-infra-error' }),
+    ]);
+    expect(result.allKilled).toBe(false);
+  });
+
   it('运行崩溃视为 WA 命中并在描述中标记运行失败', () => {
     const runtimeFailure = {
       accepted: false,
@@ -472,6 +498,51 @@ describe('runDiscriminationPhase', () => {
       killedBy: 'wa',
       killedByCase: 1,
     });
+  });
+
+  it('区分度一个 checker 拒绝与一个基础设施失败混合时不得 allKilled', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([accepted('alternative\n')]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 1,
+      check: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        total: 2,
+        passed: 1,
+        infraFailures: 1,
+        failureKind: 'infra' as const,
+      },
+      runBatch: jest.fn()
+        .mockResolvedValueOnce(['reject'])
+        .mockResolvedValueOnce(['infra-error']),
+      runChecker: jest.fn(),
+      dispose: jest.fn(),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [
+        { kind: 'wrong-algorithm', description: '已被拒绝', code: 'print(1)' },
+        { kind: 'boundary', description: '未裁决', code: 'print(2)' },
+      ],
+      cases: [{ input: '1\n', output: 'official\n' }],
+      runner,
+      customChecker: true,
+      checkerExecutor,
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({ killed: true, killedBy: 'wa' }),
+      expect.objectContaining({ killed: false, skippedReason: 'checker-infra-error' }),
+    ]);
+    expect(result.allKilled).toBe(false);
   });
 
   it.each([

@@ -2821,6 +2821,68 @@ describe('TestdataGenService.generate', () => {
     expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedByCase');
   });
 
+  it('补刀收尾时已命中靶子不能掩盖另一个基础设施阻断', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({
+          content: [
+            '=== COMPLEXITY_GAP ===',
+            'none',
+            makeIndependentVerifierBlueprint(),
+          ].join('\n'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('shared hack target one')) return detail({ stdout: 'wrong\n' });
+          if (code.includes('shared hack target two') && input.trim() === '2') {
+            return detail({
+              status: 'System Error',
+              accepted: false,
+              timedOut: false,
+              exitStatus: undefined,
+              stdout: '',
+              stderr: 'sandbox protocol failure',
+            });
+          }
+          if (code.includes('shared hack target two')) return detail({ stdout: input });
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀混合阻断',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(plan.verification?.discrimination?.targets.slice(0, 2)).toEqual([
+      expect.objectContaining({ killed: true, killedBy: 'wa' }),
+      expect.objectContaining({ killed: false, skippedReason: 'checker-infra-error' }),
+    ]);
+    expect(plan.verification?.discrimination?.allKilled).toBe(false);
+  });
+
   it('补刀模型链到达区分度绝对截止时间时中止并静默保留未完成状态', async () => {
     jest.useFakeTimers();
     try {
@@ -4003,6 +4065,15 @@ describe('TestdataGenService.generate', () => {
     ['TLE', jest.fn().mockResolvedValue([
       detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
     ]), 'budget'],
+    ['testlib _fail', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: false, status: 'Nonzero Exit Status', exitStatus: 3 }),
+    ]), 'infra'],
+    ['unknown exit', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: false, status: 'Nonzero Exit Status', exitStatus: 9 }),
+    ]), 'infra'],
+    ['malformed status', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: false, status: 'System Error', exitStatus: 1 }),
+    ]), 'infra'],
     ['malformed response', jest.fn().mockResolvedValue([]), 'infra'],
     ['transport failure', jest.fn().mockRejectedValue(new Error('ECONNRESET')), 'infra'],
   ] as const)('enforce 将 checker %s 映射为 CHECKER_RUNTIME_FAILED', async (_label, runChecker, failureKind) => {
@@ -4075,7 +4146,7 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
-  it('observe 保留 checker 运行失败证据并对未裁决样例记零分', async () => {
+  it('observe 保留 testlib _fail 基础设施证据并对未裁决样例记零分', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
     const checkpoint = {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
@@ -4091,7 +4162,12 @@ describe('TestdataGenService.generate', () => {
       isAvailable: jest.fn().mockResolvedValue(true),
       compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
       runCheckerBatchDetailed: jest.fn().mockResolvedValue([
-        detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+        detail({
+          accepted: false,
+          timedOut: false,
+          status: 'Nonzero Exit Status',
+          exitStatus: 3,
+        }),
       ]),
       runPython: jest.fn().mockResolvedValue({
         stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
@@ -4126,7 +4202,7 @@ describe('TestdataGenService.generate', () => {
         compiled: true,
         executed: true,
         infraFailures: expect.any(Number),
-        failureKind: 'budget',
+        failureKind: 'infra',
       },
     });
     expect(plan.verification?.checkerCheck?.infraFailures).toBeGreaterThan(0);

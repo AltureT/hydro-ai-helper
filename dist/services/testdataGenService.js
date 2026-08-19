@@ -2095,16 +2095,19 @@ function findAssignmentStyleCaseInput(cases) {
     }
     return null;
 }
+const TESTLIB_PARTICIPANT_REJECT_EXIT_STATUSES = new Set([1, 2, 4, 7, 8]);
 /** 将 checker 沙箱结果归约为业务三态；基础设施异常永远不能被当成 WA。 */
 function reduceCheckerExecution(detail, infrastructureError = false) {
     if (infrastructureError
         || !detail
         || detail.timedOut)
         return 'infra-error';
-    if (detail.accepted && detail.exitStatus === 0)
+    if (detail.status === 'Accepted' && detail.accepted && detail.exitStatus === 0)
         return 'accept';
-    if (/nonzero exit status/i.test(detail.status || '')
-        || (detail.status === '' && typeof detail.exitStatus === 'number' && detail.exitStatus !== 0))
+    if (detail.status === 'Nonzero Exit Status'
+        && !detail.accepted
+        && typeof detail.exitStatus === 'number'
+        && TESTLIB_PARTICIPANT_REJECT_EXIT_STATUSES.has(detail.exitStatus))
         return 'reject';
     return 'infra-error';
 }
@@ -2406,11 +2409,16 @@ function evaluateDiscrimination(inputs) {
             killed: false,
         };
     });
-    const countedTargets = targets.filter(target => !target.skippedReason);
     return {
         targets,
-        allKilled: countedTargets.length > 0 && countedTargets.every(target => target.killed),
+        allKilled: areAllApplicableDiscriminationTargetsKilled(targets),
     };
+}
+/** 只有明确不适用的复杂度靶子可排除；未裁决状态必须阻断聚合通过。 */
+function areAllApplicableDiscriminationTargetsKilled(targets) {
+    const applicableTargets = targets.filter(target => target.skippedReason !== 'no-complexity-gap');
+    return applicableTargets.length > 0
+        && applicableTargets.every(target => target.killed);
 }
 /** 将响应内部的从 1 开始本地序号映射为最终分配的测试点文件编号。 */
 function remapDiscriminationCaseNumbers(discrimination, allocatedCaseNumbers) {
@@ -2940,12 +2948,9 @@ async function runDiscriminationPhase(input) {
             skippedReason: 'no-targets',
         });
     }
-    const countedTargets = results.filter(target => !target.skippedReason);
     return {
         targets: results,
-        allKilled: input.killTargets.length > 0
-            && countedTargets.length > 0
-            && countedTargets.every(target => target.killed),
+        allKilled: areAllApplicableDiscriminationTargetsKilled(results),
     };
 }
 const NO_MATERIALIZATION_REUSE = {
@@ -5167,9 +5172,7 @@ class TestdataGenService {
         const initialCaseCount = cases.length;
         const finish = () => {
             response.cases = cases;
-            const countedTargets = discrimination.targets.filter(target => !target.skippedReason);
-            discrimination.allKilled = countedTargets.length > 0
-                && countedTargets.every(target => target.killed);
+            discrimination.allKilled = areAllApplicableDiscriminationTargetsKilled(discrimination.targets);
             return response;
         };
         let oracleExecutor;

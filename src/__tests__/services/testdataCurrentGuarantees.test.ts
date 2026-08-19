@@ -166,9 +166,24 @@ describe('test-data generation current guarantees', () => {
   });
 
   it('classifies custom-checker infrastructure failures separately from wrong answers', () => {
-    // Mutation caught: treating a checker timeout/transport failure as WA.
-    expect(reduceCheckerExecution({ status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus: 1 }))
-      .toBe('reject');
+    // Mutation caught: treating testlib _fail or malformed sandbox output as contestant WA.
+    for (const exitStatus of [1, 2, 4, 7, 8]) {
+      expect(reduceCheckerExecution({
+        status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus,
+      })).toBe('reject');
+    }
+    expect(reduceCheckerExecution({
+      status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus: 3,
+    })).toBe('infra-error');
+    expect(reduceCheckerExecution({
+      status: 'Nonzero Exit Status', accepted: false, timedOut: false, exitStatus: 9,
+    })).toBe('infra-error');
+    expect(reduceCheckerExecution({
+      status: 'Nonzero Exit Status', accepted: false, timedOut: false,
+    })).toBe('infra-error');
+    expect(reduceCheckerExecution({
+      status: 'System Error', accepted: false, timedOut: false, exitStatus: 1,
+    })).toBe('infra-error');
     expect(reduceCheckerExecution({ status: 'Time Limit Exceeded', accepted: false, timedOut: true }))
       .toBe('infra-error');
     expect(reduceCheckerExecution(undefined, true)).toBe('infra-error');
