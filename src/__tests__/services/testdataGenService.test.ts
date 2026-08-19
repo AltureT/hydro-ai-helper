@@ -65,6 +65,7 @@ import {
 } from '../../services/testdataGenService';
 import { TestdataPipelineError } from '../../services/testdata/failures';
 import {
+  CHECKER_BUDGET_MS,
   DISCRIMINATION_BUDGET_MS,
   GoJudgeSandboxRunner,
   SANDBOX_TOTAL_BUDGET_MS,
@@ -1263,7 +1264,7 @@ describe('Hydro 沙箱生成蓝图', () => {
     );
   });
 
-  it('自定义 checker 题只验证标程可运行，不用纯文本相等误拒多解输出', async () => {
+  it('自定义 checker 不可用时不用纯文本判定并对未裁决样例记零分', async () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({
@@ -1288,8 +1289,7 @@ describe('Hydro 沙箱生成蓝图', () => {
       undefined,
       true,
     );
-    expect(response.verification?.sampleCheck).toBeUndefined();
-    expect(response.notes).toContain('自定义 checker');
+    expect(response.verification?.sampleCheck).toEqual({ total: 1, passed: 0 });
   });
 
   it('可执行 checker 用 testlib 语义回归题面样例，而非纯文本比较', async () => {
@@ -1308,6 +1308,10 @@ describe('Hydro 沙箱生成蓝图', () => {
     const checkerExecutor = {
       status: 'ready' as const,
       runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: 1, passed: 1, infraFailures: 0,
+      },
       runBatch: jest.fn().mockResolvedValue(['accept']),
       runChecker: jest.fn().mockResolvedValue('accept'),
       dispose: jest.fn(),
@@ -3911,20 +3915,221 @@ describe('TestdataGenService.generate', () => {
         usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
       }),
     };
-    const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
       problemTitle: 'checker',
       statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
       existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true,
+        read: true,
+        checkerSource: '#include "testlib.h"\nint main() {}\n',
+        checkerHeaders: { 'testlib.h': '// header\n' },
+      },
       options: {
         problemKind: 'function', caseCount: 2, languages: ['py'], confirmDirectFallback: true,
       },
     });
     expect(plan).toMatchObject({
       risk: { tier: 'medium', allowsDirectFallback: true, requiresSandbox: false },
-      verification: { mode: 'direct' },
+      verification: {
+        mode: 'direct',
+        verified: false,
+        wouldBlock: true,
+        checkerCheck: {
+          configured: true,
+          read: true,
+          compiled: false,
+          executed: false,
+          total: 0,
+          passed: 0,
+          infraFailures: 0,
+          failureKind: 'unavailable',
+        },
+      },
     });
     expect(mockClient.chat).toHaveBeenCalled();
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('enforce 在 checker 未读取时返回显式人工复核失败', async () => {
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      sandboxRunner: { isAvailable: jest.fn().mockResolvedValue(true) } as never,
+    });
+
+    await expect(service.generate({
+      problemTitle: 'checker',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: { configured: true, read: false, failureKind: 'missing' },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'CHECKER_REQUIRED_UNAVAILABLE',
+      artifact: 'checker',
+      retryPolicy: 'manual-review',
+      safeDetails: { failureKind: 'missing' },
+    });
+  });
+
+  it('enforce 在 checker 编译失败时保留 checker 类型化契约', async () => {
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: false, kind: 'compile', error: 'bad checker' }),
+      runCheckerBatchDetailed: jest.fn(),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'CHECKER_COMPILE_FAILED',
+      artifact: 'checker',
+      retryPolicy: 'manual-review',
+      safeDetails: { failureKind: 'compile' },
+    });
+  });
+
+  it.each([
+    ['TLE', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+    ]), 'budget'],
+    ['malformed response', jest.fn().mockResolvedValue([]), 'infra'],
+    ['transport failure', jest.fn().mockRejectedValue(new Error('ECONNRESET')), 'infra'],
+  ] as const)('enforce 将 checker %s 映射为 CHECKER_RUNTIME_FAILED', async (_label, runChecker, failureKind) => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: runChecker,
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    await expect(new TestdataGenService({
+      chat: jest.fn().mockResolvedValue({ content: makeSolutionBlueprint('traditional'), usedModel }),
+    } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'CHECKER_RUNTIME_FAILED',
+      artifact: 'checker',
+      retryPolicy: 'manual-review',
+      safeDetails: { failureKind },
+    });
+  });
+
+  it('enforce 将 checker 总预算耗尽映射为 CHECKER_RUNTIME_FAILED', async () => {
+    let now = 10_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockImplementation(async () => {
+        now += CHECKER_BUDGET_MS;
+        return { ok: true, fileId: 'checker-bin' };
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    try {
+      await expect(new TestdataGenService({
+        chat: jest.fn().mockResolvedValue({ content: makeSolutionBlueprint('traditional'), usedModel }),
+      } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      }).generate({
+        problemTitle: 'checker',
+        statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({
+        code: 'CHECKER_RUNTIME_FAILED',
+        artifact: 'checker',
+        retryPolicy: 'manual-review',
+        safeDetails: { failureKind: 'budget' },
+      });
+      expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('observe 保留 checker 运行失败证据并对未裁决样例记零分', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+      ]),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+        Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+      )),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint,
+    });
+
+    expect(plan.verification).toMatchObject({
+      verified: false,
+      wouldBlock: true,
+      sampleCheck: { total: 1, passed: 0 },
+      checkerCheck: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        infraFailures: expect.any(Number),
+        failureKind: 'budget',
+      },
+    });
+    expect(plan.verification?.checkerCheck?.infraFailures).toBeGreaterThan(0);
   });
 
   it('unsupported custom checkers never use direct fallback', async () => {
@@ -5191,6 +5396,27 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.verification?.bruteCheck).toEqual({ compared: 2, agreed: 2, skippedTimeout: [], disagreed: [] });
   });
 
+  it('自定义 checker 不可用时正式 BRUTE 未裁决记零比较且不误报分歧', async () => {
+    const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: 'official-a\n' }), detail({ stdout: 'official-b\n' })])
+        .mockResolvedValueOnce([detail({ stdout: 'alternative-a\n' }), detail({ stdout: 'alternative-b\n' })]),
+    };
+
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner, undefined, true);
+
+    expect(res.verification?.bruteCheck).toEqual({
+      compared: 0,
+      agreed: 0,
+      skippedTimeout: [],
+      disagreed: [],
+    });
+  });
+
   it('BRUTE 与 AI 标程不一致：硬失败并带证据摘录', async () => {
     const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
     const runner = {
@@ -5568,7 +5794,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       .rejects.toThrow(/压力对拍 BRUTE 在第 1 组小数据超时；压力阶段不允许跳过/);
   });
 
-  it('自定义 checker 题仍实跑独立 BRUTE，但不做纯文本压力比较', async () => {
+  it('自定义 checker 不可用时仍实跑独立 BRUTE，但未裁决对拍记零分', async () => {
     const bp = {
       ...tradBlueprint(),
       ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
@@ -5598,9 +5824,8 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       duplicateInputs: 0,
       compared: 0,
       agreed: 0,
-      skippedReason: 'custom-checker',
     });
-    expect(res.notes).toContain('跳过纯文本压力对拍');
+    expect(res.notes).not.toContain('纯文本压力对拍');
   });
 
   it('可执行 checker 对 BRUTE 与 ORACLE 的不同文本做压力判定', async () => {
@@ -5630,6 +5855,12 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const checkerExecutor = {
       status: 'ready' as const,
       runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: TESTDATA_GEN_LIMITS.STRESS_CASES,
+        passed: TESTDATA_GEN_LIMITS.STRESS_CASES,
+        infraFailures: 0,
+      },
       runBatch: jest.fn().mockResolvedValue(
         Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => 'accept'),
       ),

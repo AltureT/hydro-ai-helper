@@ -306,6 +306,9 @@ export interface DiscriminationCheck {
 export interface PlanVerification {
   mode: 'sandbox' | 'direct';
   oracleKind: 'provided-std' | 'accepted-record' | 'ai-solution';
+  /** Task 4 暂存的可靠性结论；Task 5 会统一收口所有验证门。 */
+  verified?: boolean;
+  wouldBlock?: boolean;
   /** 首选模型自动修复后仍失败，整条管线从下一配置模型重新运行并成功。 */
   modelEscalation?: { fromModel: string; toModel: string };
   sampleCheck?: { total: number; passed: number };
@@ -322,11 +325,7 @@ export interface PlanVerification {
   };
   validator?: { ran: boolean; casesChecked: number };
   templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
-  /** testlib checker 尽力实跑状态；缺失表示未提供可执行 checker。 */
-  checkerCheck?: {
-    status: 'executed' | 'compile-failed';
-    runtimeSkipped: number;
-  };
+  checkerCheck?: CheckerVerificationCheck;
   discrimination?: DiscriminationCheck;
 }
 
@@ -1069,7 +1068,7 @@ export function hasCustomChecker(raw?: string): boolean {
     || (!!checker && !['default', 'strict'].includes(checkerType));
 }
 
-/** 仅精确支持 testlib；其他 checker 类型继续沿用既有跳过行为。 */
+/** 仅精确支持 testlib；其他 checker 类型由风险门禁拒绝降级。 */
 export function getTestlibCheckerFilename(raw?: string): string | undefined {
   const config = parseExistingProblemConfig(raw);
   const checkerType = typeof config.checker_type === 'string'
@@ -2667,6 +2666,17 @@ export function findAssignmentStyleCaseInput(cases: GeneratedCase[]): Assignment
 
 export type CheckerExecutionVerdict = 'accept' | 'reject' | 'infra-error';
 
+export interface CheckerVerificationCheck {
+  configured: boolean;
+  read: boolean;
+  compiled: boolean;
+  executed: boolean;
+  total: number;
+  passed: number;
+  infraFailures: number;
+  failureKind?: 'unavailable' | 'compile' | 'infra' | 'budget' | 'reject';
+}
+
 /** 将 checker 沙箱结果归约为业务三态；基础设施异常永远不能被当成 WA。 */
 export function reduceCheckerExecution(
   detail?: Pick<PythonRunDetail, 'status' | 'accepted' | 'timedOut' | 'exitStatus'>,
@@ -2698,6 +2708,7 @@ export interface CheckerExecutor {
   readonly status: 'ready' | 'unavailable' | 'compile-failed';
   readonly compileError?: string;
   readonly runtimeSkipped: number;
+  readonly check: CheckerVerificationCheck;
   runBatch(
     cases: CheckerRunCase[],
     opts?: { signal?: AbortSignal; deadlineAt?: number },
@@ -2713,28 +2724,73 @@ export interface CheckerExecutor {
 
 function unavailableCheckerExecutor(
   status: 'unavailable' | 'compile-failed',
+  check: CheckerVerificationCheck,
   compileError?: string,
 ): CheckerExecutor {
   return {
     status,
     compileError,
     runtimeSkipped: 0,
+    get check() { return { ...check }; },
     runBatch: async cases => cases.map(() => 'infra-error'),
     runChecker: async () => 'infra-error',
     dispose: async () => {},
   };
 }
 
-/** checker 属于尽力增强：编译失败只记录状态，绝不阻断已存在的正确性管线。 */
+function checkerPipelineError(
+  code: 'CHECKER_REQUIRED_UNAVAILABLE' | 'CHECKER_COMPILE_FAILED' | 'CHECKER_RUNTIME_FAILED',
+  failureKind: CheckerArtifactFailureKind | CheckerVerificationCheck['failureKind'],
+  message: string,
+): TestdataPipelineError {
+  return toPipelineError(new Error(message), {
+    code,
+    stage: 'checker',
+    artifact: 'checker',
+    retryPolicy: 'manual-review',
+    safeDetails: failureKind ? { failureKind } : undefined,
+  });
+}
+
+function freshCheckerCheck(artifacts?: TestlibCheckerArtifacts): CheckerVerificationCheck {
+  return {
+    configured: artifacts?.configured ?? false,
+    read: artifacts?.read ?? false,
+    compiled: false,
+    executed: false,
+    total: 0,
+    passed: 0,
+    infraFailures: 0,
+    ...((artifacts?.configured && !artifacts.read) ? { failureKind: 'unavailable' as const } : {}),
+  };
+}
+
 async function createCheckerExecutor(input: {
-  source?: string;
-  headers?: Record<string, string>;
+  artifacts?: TestlibCheckerArtifacts;
   runner: TestdataSandboxRunner;
   signal?: AbortSignal;
+  reliabilityMode: TestdataReliabilityMode;
 }): Promise<CheckerExecutor> {
-  if (!input.source?.trim()) return unavailableCheckerExecutor('unavailable');
+  const check = freshCheckerCheck(input.artifacts);
+  const source = input.artifacts?.checkerSource;
+  if (!source?.trim()) {
+    check.failureKind = 'unavailable';
+    if (input.reliabilityMode === 'enforce' && check.configured) {
+      throw checkerPipelineError(
+        'CHECKER_REQUIRED_UNAVAILABLE',
+        input.artifacts?.failureKind || 'unavailable',
+        '已配置的 checker 制品不可用，无法完成语义验证',
+      );
+    }
+    return unavailableCheckerExecutor('unavailable', check);
+  }
   if (!input.runner.compileCpp || !input.runner.runCheckerBatchDetailed) {
-    return unavailableCheckerExecutor('compile-failed', '当前 Hydro 沙箱不支持 checker 编译或执行');
+    check.failureKind = 'compile';
+    const message = '当前 Hydro 沙箱不支持 checker 编译或执行';
+    if (input.reliabilityMode === 'enforce') {
+      throw checkerPipelineError('CHECKER_COMPILE_FAILED', 'compile', message);
+    }
+    return unavailableCheckerExecutor('compile-failed', check, message);
   }
 
   let checkerBudgetRemainingMs = CHECKER_BUDGET_MS;
@@ -2742,17 +2798,19 @@ async function createCheckerExecutor(input: {
   const compileDeadlineAt = compileStartedAt + checkerBudgetRemainingMs;
   let compiled;
   try {
-    compiled = await input.runner.compileCpp(input.source, {
-      extraFiles: input.headers,
+    compiled = await input.runner.compileCpp(source, {
+      extraFiles: input.artifacts?.checkerHeaders,
       signal: input.signal,
       deadlineAt: compileDeadlineAt,
     });
   } catch (err) {
     if (input.signal?.aborted || isCancellation(err)) throw err;
-    return unavailableCheckerExecutor(
-      'compile-failed',
-      err instanceof Error ? err.message : String(err),
-    );
+    const message = err instanceof Error ? err.message : String(err);
+    check.failureKind = 'compile';
+    if (input.reliabilityMode === 'enforce') {
+      throw checkerPipelineError('CHECKER_COMPILE_FAILED', 'compile', message);
+    }
+    return unavailableCheckerExecutor('compile-failed', check, message);
   } finally {
     checkerBudgetRemainingMs = Math.max(
       0,
@@ -2760,8 +2818,15 @@ async function createCheckerExecutor(input: {
     );
   }
   if (compiled.ok === false) {
-    return unavailableCheckerExecutor('compile-failed', excerptTail(compiled.error, 2000));
+    const message = excerptTail(compiled.error, 2000);
+    check.failureKind = 'compile';
+    if (input.reliabilityMode === 'enforce') {
+      throw checkerPipelineError('CHECKER_COMPILE_FAILED', 'compile', message);
+    }
+    return unavailableCheckerExecutor('compile-failed', check, message);
   }
+  check.compiled = true;
+  delete check.failureKind;
 
   let runtimeSkipped = 0;
   const executor: CheckerExecutor = {
@@ -2769,9 +2834,20 @@ async function createCheckerExecutor(input: {
     get runtimeSkipped() {
       return runtimeSkipped;
     },
+    get check() {
+      return { ...check };
+    },
     runBatch: async (cases, opts = {}) => {
+      check.total += cases.length;
       if (checkerBudgetRemainingMs <= 0) {
         runtimeSkipped += cases.length;
+        check.infraFailures += cases.length;
+        check.failureKind = 'budget';
+        if (input.reliabilityMode === 'enforce') {
+          throw checkerPipelineError(
+            'CHECKER_RUNTIME_FAILED', 'budget', 'checker 执行总预算已耗尽',
+          );
+        }
         return cases.map(() => 'infra-error');
       }
       const runStartedAt = Date.now();
@@ -2783,12 +2859,37 @@ async function createCheckerExecutor(input: {
           ...opts,
           deadlineAt: checkerDeadlineAt,
         });
+        check.executed = true;
         const verdicts = cases.map((_, index) => reduceCheckerExecution(details[index]));
-        runtimeSkipped += verdicts.filter(verdict => verdict === 'infra-error').length;
+        const infraFailures = verdicts.filter(verdict => verdict === 'infra-error').length;
+        runtimeSkipped += infraFailures;
+        check.infraFailures += infraFailures;
+        check.passed += verdicts.length - infraFailures;
+        if (infraFailures > 0) {
+          const timedOut = cases.some((_, index) => details[index]?.timedOut);
+          check.failureKind = timedOut ? 'budget' : 'infra';
+          if (input.reliabilityMode === 'enforce') {
+            throw checkerPipelineError(
+              'CHECKER_RUNTIME_FAILED', check.failureKind, 'checker 沙箱执行未返回可信判定',
+            );
+          }
+        } else if (check.infraFailures === 0) {
+          if (verdicts.some(verdict => verdict === 'reject')) check.failureKind = 'reject';
+          else delete check.failureKind;
+        }
         return verdicts;
       } catch (err) {
         if (opts.signal?.aborted || input.signal?.aborted || isCancellation(err)) throw err;
+        if (err instanceof TestdataPipelineError) throw err;
+        check.executed = true;
         runtimeSkipped += cases.length;
+        check.infraFailures += cases.length;
+        check.failureKind = isSandboxBudgetExceededError(err) ? 'budget' : 'infra';
+        if (input.reliabilityMode === 'enforce') {
+          throw checkerPipelineError(
+            'CHECKER_RUNTIME_FAILED', check.failureKind, 'checker 沙箱执行失败',
+          );
+        }
         return cases.map(() => 'infra-error');
       } finally {
         checkerBudgetRemainingMs = Math.max(
@@ -2822,11 +2923,12 @@ function appendCheckerExecutionNotes(
   checkerExecutor: CheckerExecutor,
 ): void {
   if (!customChecker) return;
-  if (response.verification && checkerExecutor.status !== 'unavailable') {
-    response.verification.checkerCheck = {
-      status: checkerExecutor.status === 'ready' ? 'executed' : 'compile-failed',
-      runtimeSkipped: checkerExecutor.runtimeSkipped,
-    };
+  if (response.verification) {
+    const check = checkerExecutor.check;
+    response.verification.checkerCheck = check;
+    const checkerVerified = check.compiled && check.executed && check.infraFailures === 0;
+    response.verification.verified = checkerVerified;
+    response.verification.wouldBlock = !checkerVerified;
   }
   const notes: Array<{ kind: 'warning' | 'system'; text: string }> = [];
   if (checkerExecutor.status === 'ready') {
@@ -2837,13 +2939,13 @@ function appendCheckerExecutionNotes(
   } else if (checkerExecutor.status === 'compile-failed') {
     notes.push({
       kind: 'warning',
-      text: `checker 编译失败，按无 checker 实跑处理：${excerptTail(checkerExecutor.compileError || '未知错误', 500)}`,
+      text: `checker 编译失败，已记录为不可验证，本计划不得视为已验证：${excerptTail(checkerExecutor.compileError || '未知错误', 500)}`,
     });
   }
   if (checkerExecutor.runtimeSkipped > 0) {
     notes.push({
       kind: 'warning',
-      text: `题目 checker 有 ${checkerExecutor.runtimeSkipped} 次判定因沙箱超时或基础设施错误跳过；这些结果未用于否定已通过的正确性。`,
+      text: `题目 checker 有 ${checkerExecutor.runtimeSkipped} 次判定因沙箱超时或基础设施错误未完成；这些结果计为基础设施失败且不计验证通过。`,
     });
   }
   for (const note of notes) {
@@ -2899,7 +3001,7 @@ export function evaluateDiscrimination(inputs: {
         kind: target.kind,
         description: target.description,
         killed: false,
-        skippedReason: 'custom-checker',
+        skippedReason: 'checker-infra-error',
       };
     }
 
@@ -3221,6 +3323,10 @@ export async function smokeTestKillTargets(input: {
       );
       if (details.length !== input.samples.length) continue;
       if (details.some(detail => !detail.accepted || detail.timedOut)) continue;
+      if (input.customChecker && input.checkerExecutor?.status !== 'ready') {
+        validTargets.push(target);
+        continue;
+      }
       let checkerVerdicts: CheckerExecutionVerdict[] | undefined;
       if (input.customChecker && input.checkerExecutor?.status === 'ready') {
         checkerVerdicts = await input.checkerExecutor.runBatch(
@@ -3233,10 +3339,9 @@ export async function smokeTestKillTargets(input: {
         );
       }
       const passed = details.every((detail, index) => {
-        if (checkerVerdicts) return checkerVerdicts[index] !== 'reject';
-        return input.customChecker
-          || comparableFileContent(detail.stdout)
-            === comparableFileContent(input.samples[index].output);
+        if (checkerVerdicts) return checkerVerdicts[index] === 'accept';
+        return comparableFileContent(detail.stdout)
+          === comparableFileContent(input.samples[index].output);
       });
       if (passed) validTargets.push(target);
     } catch (err) {
@@ -3520,8 +3625,8 @@ export async function verifySolutionBlueprintSamples(
   }
   return {
     total: samples.length,
-    passed: checkerVerdicts
-      ? checkerVerdicts.filter(verdict => verdict === 'accept').length
+    passed: customChecker
+      ? (checkerVerdicts?.filter(verdict => verdict === 'accept').length ?? 0)
       : samples.length,
   };
 }
@@ -3579,19 +3684,6 @@ export async function runDiscriminationPhase(input: {
         description: target.description,
         killed: false,
         skippedReason: target.skippedReason,
-      });
-      continue;
-    }
-    if (
-      input.customChecker
-      && target.kind !== 'brute-complexity'
-      && input.checkerExecutor?.status !== 'ready'
-    ) {
-      results.push({
-        kind: target.kind,
-        description: target.description,
-        killed: false,
-        skippedReason: 'custom-checker',
       });
       continue;
     }
@@ -4261,7 +4353,8 @@ export async function materializeSandboxBlueprint(
       }
       return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
     });
-    sampleCheckerVerdicts = customChecker && checkerExecutor?.status === 'ready'
+    sampleCheckerVerdicts = customChecker && samples.length > 0
+      && checkerExecutor?.status === 'ready'
       ? await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(
         samples.map((sample, index) => ({
           input: sample.input,
@@ -4270,7 +4363,7 @@ export async function materializeSandboxBlueprint(
         })),
         { signal },
       ))
-      : undefined;
+      : customChecker ? samples.map(() => 'infra-error' as const) : undefined;
     for (let i = 0; i < samples.length; i++) {
       const actual = oracleResults[inputs.length + i]?.stdout || '';
       const checkerRejected = sampleCheckerVerdicts?.[i] === 'reject';
@@ -4369,7 +4462,27 @@ export async function materializeSandboxBlueprint(
         const expectedOutput = i < inputs.length
           ? cases[i].output
           : oracleResults[i]?.stdout || '';
-        if (detail.accepted && comparableFileContent(detail.stdout) === comparableFileContent(expectedOutput)) {
+        if (!detail.accepted) {
+          const target = i < inputs.length
+            ? `第 ${caseNo} 个测试点`
+            : `函数题样例 ${samples[i - inputs.length].id}`;
+          throw toPipelineError(new Error(`template.py 在${target}执行失败`), {
+            code: 'TEMPLATE_RUNTIME_FAILED', stage: 'template', artifact: 'template-py',
+            safeDetails: { caseIndex: i + 1 },
+          });
+        }
+        let outputAccepted: boolean;
+        if (customChecker) {
+          if (checkerExecutor?.status !== 'ready') continue;
+          const verdict = await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runChecker(
+            templateInputs[i], detail.stdout, expectedOutput, { signal, deadlineAt: sandboxDeadlineAt },
+          ));
+          if (verdict === 'infra-error') continue;
+          outputAccepted = verdict === 'accept';
+        } else {
+          outputAccepted = comparableFileContent(detail.stdout) === comparableFileContent(expectedOutput);
+        }
+        if (outputAccepted) {
           passed++;
           continue;
         }
@@ -4481,7 +4594,6 @@ export async function materializeSandboxBlueprint(
         compared: 0,
         agreed: 0,
         ...(stressDroppedInvalid > 0 ? { droppedInvalid: stressDroppedInvalid } : {}),
-        skippedReason: 'custom-checker',
       };
     } else {
       checkBudget();
@@ -4586,6 +4698,7 @@ export async function materializeSandboxBlueprint(
         safeDetails: { actualCount: bruteResults.length, expectedCount: inputs.length },
       });
     }
+    let compared = 0;
     let agreed = 0;
     const skippedTimeout: number[] = [];
     const disagreed: number[] = [];
@@ -4605,7 +4718,19 @@ export async function materializeSandboxBlueprint(
           },
         );
       }
-      if (comparableFileContent(detail.stdout) === comparableFileContent(cases[i].output)) {
+      let outputsAgree: boolean;
+      if (customChecker) {
+        if (checkerExecutor?.status !== 'ready') continue;
+        const verdict = await checkerExecutor.runChecker(
+          inputs[i], detail.stdout, cases[i].output, { signal, deadlineAt: sandboxDeadlineAt },
+        );
+        if (verdict === 'infra-error') continue;
+        outputsAgree = verdict === 'accept';
+      } else {
+        outputsAgree = comparableFileContent(detail.stdout) === comparableFileContent(cases[i].output);
+      }
+      compared++;
+      if (outputsAgree) {
         agreed++;
         continue;
       }
@@ -4618,8 +4743,8 @@ export async function materializeSandboxBlueprint(
           },
         );
       }
-      // 教师手动 std 或自定义 checker 是权威：文本不一致只记录复核，不误判为生成失败。
-      if (oracleIsManualStd || customChecker) {
+      // 教师手动 std 是权威：文本不一致只记录复核，不误判为生成失败。
+      if (oracleIsManualStd) {
         disagreed.push(caseNo);
         continue;
       }
@@ -4636,7 +4761,7 @@ export async function materializeSandboxBlueprint(
         },
       );
     }
-    bruteCheck = { compared: inputs.length, agreed, skippedTimeout, disagreed };
+    bruteCheck = { compared, agreed, skippedTimeout, disagreed };
   }
 
   reportProgress('discrimination_testing', 90);
@@ -4669,14 +4794,11 @@ export async function materializeSandboxBlueprint(
       : oracleIsManualStd ? 'provided-std' : 'ai-solution',
     validator: { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
   };
-  if (
-    (!customChecker || checkerExecutor?.status === 'ready')
-    && (blueprint.problemType === 'traditional' || samples.length > 0)
-  ) {
+  if (blueprint.problemType === 'traditional' || samples.length > 0) {
     verification.sampleCheck = {
       total: samples.length,
-      passed: sampleCheckerVerdicts
-        ? sampleCheckerVerdicts.filter(verdict => verdict === 'accept').length
+      passed: customChecker
+        ? (sampleCheckerVerdicts?.filter(verdict => verdict === 'accept').length ?? 0)
         : samples.length,
     };
   }
@@ -4709,18 +4831,13 @@ export async function materializeSandboxBlueprint(
       ? `题目使用自定义 checker；暴力解与标程在测试点 ${bruteCheck.disagreed.join('、')} 的文本输出不同，已保留并请人工复核 checker 语义。`
       : `暴力解与教师标准答案在测试点 ${bruteCheck.disagreed.join('、')} 不一致，已按教师 std 输出为准，请人工复核。`);
   }
-  if (customChecker && samples.length > 0 && checkerExecutor?.status !== 'ready') {
-    appendNote('system', '题目使用自定义 checker，已验证标程可运行题面样例，但跳过样例输出的纯文本相等检查。');
-  }
   if (stressCheck?.droppedInvalid) {
     appendNote(
       'system',
       `已剔除 ${stressCheck.droppedInvalid} 组未通过输入校验的内部压力数据(仅用于内部对拍,不影响正式测试点)。`,
     );
   }
-  if (stressCheck?.skippedReason === 'custom-checker') {
-    appendNote('system', '题目使用自定义 checker，内部小数据已生成并通过输入校验，但在 checker 实跑支持完成前跳过纯文本压力对拍。');
-  } else if (stressCheck && stressCheck.compared > 0) {
+  if (stressCheck && stressCheck.compared > 0) {
     appendNote(
       'system',
       `${customChecker && checkerExecutor?.status === 'ready'
@@ -5655,6 +5772,16 @@ export interface TestdataGenerationProgress {
   attempt: number;
 }
 
+export type CheckerArtifactFailureKind = 'invalid-path' | 'missing' | 'read';
+
+export interface TestlibCheckerArtifacts {
+  configured: boolean;
+  read: boolean;
+  failureKind?: CheckerArtifactFailureKind;
+  checkerSource?: string;
+  checkerHeaders?: Record<string, string>;
+}
+
 export interface GenerateTestdataParams {
   problemTitle: string;
   statementMarkdown: string;
@@ -5662,10 +5789,8 @@ export interface GenerateTestdataParams {
   existingFiles?: string[];
   /** 当前题目的 pdoc.config，用于保留 checker/time/memory 等评测设置。 */
   existingConfig?: string;
-  /** testlib checker 源码；读取或能力不可用时缺省，保持原自定义 checker 降级行为。 */
-  checkerSource?: string;
-  /** 与 checker 同目录的头文件，编译时以内存 extraFiles 注入。 */
-  checkerHeaders?: Record<string, string>;
+  /** testlib checker 配置与读取制品的显式状态。 */
+  checkerArtifacts?: TestlibCheckerArtifacts;
   /** 服务端规则引擎的填空题初判信号 */
   fillInDetected?: boolean;
   signal?: AbortSignal;
@@ -5839,6 +5964,18 @@ export class TestdataGenService {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const risk = this.assessRisk(params);
+    const customChecker = hasCustomChecker(params.existingConfig);
+    if (
+      customChecker
+      && this.reliabilityMode === 'enforce'
+      && (!params.checkerArtifacts?.configured || !params.checkerArtifacts.read)
+    ) {
+      throw checkerPipelineError(
+        'CHECKER_REQUIRED_UNAVAILABLE',
+        params.checkerArtifacts?.failureKind || 'unavailable',
+        '已配置的 checker 制品未能读取，无法完成语义验证',
+      );
+    }
     if (isStatementTruncatedForGeneration(params.statementMarkdown)) {
       throw toPipelineError(new Error('题面超过安全生成长度，无法在截断语义下生成测试数据。'), {
         code: 'SPEC_STATEMENT_TRUNCATED',
@@ -5928,6 +6065,13 @@ export class TestdataGenService {
     if (!risk.allowsDirectFallback) {
       this.throwDirectFallbackBlocked(risk);
     }
+    if (customChecker && this.reliabilityMode === 'enforce') {
+      throw checkerPipelineError(
+        'CHECKER_REQUIRED_UNAVAILABLE',
+        'unavailable',
+        '直出模式不能编译或执行题目 checker',
+      );
+    }
 
     const plan = await this.generateDirect(params);
     if (this.mode === 'auto') {
@@ -5992,6 +6136,7 @@ export class TestdataGenService {
         mode: 'sandbox',
         cppOracleAvailable: this.cppOracleAvailable,
         semanticModelFallback: false,
+        reliabilityMode: this.reliabilityMode,
       });
       try {
         this.emitProgress(params, 'model_escalation', 60, 2);
@@ -6206,6 +6351,16 @@ export class TestdataGenService {
         ? params.options.providedStdSource === 'accepted-record' ? 'accepted-record' : 'provided-std'
         : 'ai-solution',
     };
+    if (hasCustomChecker(params.existingConfig)) {
+      const checkerArtifacts = params.checkerArtifacts
+        || { configured: true, read: false, failureKind: 'missing' as const };
+      plan.verification.checkerCheck = {
+        ...freshCheckerCheck(checkerArtifacts),
+        failureKind: 'unavailable',
+      };
+      plan.verification.verified = false;
+      plan.verification.wouldBlock = true;
+    }
     return this.applyResultMetadata(plan, results);
   }
 
@@ -6533,6 +6688,9 @@ export class TestdataGenService {
                 continue targetLoop;
               }
               if (verdict === 'reject') killedBy = 'wa';
+            } else if (hasCustomChecker(params.existingConfig)) {
+              targetResult.skippedReason = 'checker-infra-error';
+              continue targetLoop;
             } else if (comparableFileContent(detail.stdout) !== comparableFileContent(output)) {
               killedBy = 'wa';
             }
@@ -6636,10 +6794,12 @@ export class TestdataGenService {
     };
     const customChecker = hasCustomChecker(params.existingConfig);
     const checkerExecutor = await createCheckerExecutor({
-      source: params.checkerSource,
-      headers: params.checkerHeaders,
+      artifacts: params.checkerArtifacts || (customChecker
+        ? { configured: true, read: false, failureKind: 'missing' }
+        : { configured: false, read: false }),
       runner,
       signal: params.signal,
+      reliabilityMode: this.reliabilityMode,
     });
     try {
     // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
@@ -6696,6 +6856,7 @@ export class TestdataGenService {
           stage: 'solution_blueprint',
           artifact: 'spec',
         });
+      if (typedSolutionError.artifact === 'checker') throw typedSolutionError;
       if (
         params.options.providedStdSource === 'accepted-record'
         && typedSolutionError.artifact === 'oracle'
@@ -7181,6 +7342,21 @@ export class TestdataGenService {
       checkerExecutor,
     );
     appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
+    if (customChecker && this.reliabilityMode === 'enforce') {
+      const check = checkerExecutor.check;
+      if (!check.compiled) {
+        throw checkerPipelineError(
+          'CHECKER_COMPILE_FAILED', 'compile', 'checker 未成功编译',
+        );
+      }
+      if (!check.executed || check.infraFailures > 0) {
+        throw checkerPipelineError(
+          'CHECKER_RUNTIME_FAILED',
+          check.failureKind === 'budget' ? 'budget' : 'infra',
+          'checker 未完成可信语义执行',
+        );
+      }
+    }
     report('assembling', 96);
     return this.applyResultMetadata(assemblePlan(response, params.options, {
       mode: 'sandbox',

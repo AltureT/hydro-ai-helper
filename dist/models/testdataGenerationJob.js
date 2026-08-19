@@ -55,17 +55,21 @@ function normalizeTextForHash(value) {
 }
 /** 断点只在完整生成选项与题面均完全一致时可复用。 */
 function computeTestdataCheckpointHashes(options, statementMarkdown, context = {}) {
-    const checkerPresent = context.checkerSource !== undefined;
-    const checkerHeaders = Object.fromEntries(Object.entries(context.checkerHeaders || {})
+    const checkerArtifacts = context.checkerArtifacts;
+    const checkerPresent = checkerArtifacts?.checkerSource !== undefined;
+    const checkerHeaders = Object.fromEntries(Object.entries(checkerArtifacts?.checkerHeaders || {})
         .map(([name, content]) => [name, sha256(normalizeTextForHash(content))]));
     return {
         optionsHash: sha256(JSON.stringify(normalizeForStableJson({
             options: normalizeCheckpointOptions(options),
             existingConfig: normalizeExistingConfig(context.existingConfig),
             checker: {
+                configured: checkerArtifacts?.configured ?? false,
+                read: checkerArtifacts?.read ?? false,
+                failureKind: checkerArtifacts?.failureKind ?? null,
                 present: checkerPresent,
                 contentHash: checkerPresent
-                    ? sha256(normalizeTextForHash(context.checkerSource))
+                    ? sha256(normalizeTextForHash(checkerArtifacts?.checkerSource))
                     : null,
                 headers: checkerHeaders,
             },

@@ -82,7 +82,11 @@ describe('TestdataGenerationJobModel', () => {
       '题面正文',
       {
         existingConfig: 'time: 1s\nsubtasks:\n  - score: 100\n',
-        checkerSource: '#include "testlib.h"\nint main() {}\n',
+        checkerArtifacts: {
+          configured: true,
+          read: true,
+          checkerSource: '#include "testlib.h"\nint main() {}\n',
+        },
       },
     );
     const equivalent = computeTestdataCheckpointHashes(
@@ -90,7 +94,11 @@ describe('TestdataGenerationJobModel', () => {
       '题面正文',
       {
         existingConfig: 'subtasks:\n  - score: 100\ntime: 1s\n',
-        checkerSource: '#include "testlib.h"\r\nint main() {}\r\n',
+        checkerArtifacts: {
+          configured: true,
+          read: true,
+          checkerSource: '#include "testlib.h"\r\nint main() {}\r\n',
+        },
       },
     );
 
@@ -100,7 +108,11 @@ describe('TestdataGenerationJobModel', () => {
       '题面正文',
       {
         existingConfig: 'time: 2s\nsubtasks:\n  - score: 100\n',
-        checkerSource: '#include "testlib.h"\nint main() {}\n',
+        checkerArtifacts: {
+          configured: true,
+          read: true,
+          checkerSource: '#include "testlib.h"\nint main() {}\n',
+        },
       },
     ).optionsHash).not.toBe(first.optionsHash);
     expect(computeTestdataCheckpointHashes(
@@ -108,6 +120,7 @@ describe('TestdataGenerationJobModel', () => {
       '题面正文',
       {
         existingConfig: 'time: 1s\nsubtasks:\n  - score: 100\n',
+        checkerArtifacts: { configured: false, read: false },
       },
     ).optionsHash).not.toBe(first.optionsHash);
     expect(computeTestdataCheckpointHashes(
@@ -115,9 +128,39 @@ describe('TestdataGenerationJobModel', () => {
       '题面正文',
       {
         existingConfig: 'time: 1s\nsubtasks:\n  - score: 100\n',
-        checkerSource: '#include "testlib.h"\nint main() { return 1; }\n',
+        checkerArtifacts: {
+          configured: true,
+          read: true,
+          checkerSource: '#include "testlib.h"\nint main() { return 1; }\n',
+        },
       },
     ).optionsHash).not.toBe(first.optionsHash);
+  });
+
+  it('checkpoint hash 覆盖 checker 配置、读取与失败状态', () => {
+    const options = { problemKind: 'traditional', languages: [] };
+    const unreadable = computeTestdataCheckpointHashes(options, '题面正文', {
+      checkerArtifacts: {
+        configured: true,
+        read: false,
+        failureKind: 'missing',
+      },
+    } as never);
+
+    for (const checkerArtifacts of [
+      { configured: false, read: false },
+      { configured: true, read: false, failureKind: 'read' as const },
+      {
+        configured: true,
+        read: true,
+        checkerSource: 'int main() {}',
+        checkerHeaders: { 'testlib.h': '// header' },
+      },
+    ]) {
+      expect(computeTestdataCheckpointHashes(options, '题面正文', {
+        checkerArtifacts,
+      } as never).optionsHash).not.toBe(unreadable.optionsHash);
+    }
   });
 
   it('仅接受同作用域 interrupted 任务且双 hash 一致的 checkpoint', () => {

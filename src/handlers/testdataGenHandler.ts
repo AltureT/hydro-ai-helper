@@ -36,6 +36,7 @@ import {
   CPP_PROVIDED_STD_COMPILE_FAILED_KEY,
   CPP_ORACLE_INFRA_FAILURE_KEY,
   getTestlibCheckerFilename,
+  type TestlibCheckerArtifacts,
 } from '../services/testdataGenService';
 import {
   TESTDATA_FAILURE_CODES,
@@ -80,11 +81,6 @@ interface ProblemDocLite {
   data?: Array<{ _id?: string; name?: string; size?: number }>;
 }
 
-interface TestlibCheckerArtifacts {
-  checkerSource: string;
-  checkerHeaders: Record<string, string>;
-}
-
 function normalizeCheckerPath(filename: string): string | undefined {
   if (!filename || filename.includes('\\') || filename.includes('\0') || pathPosix.isAbsolute(filename)) {
     return undefined;
@@ -106,29 +102,31 @@ async function readStorageText(storagePath: string): Promise<string> {
 }
 
 /**
- * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
- * 让 service 完整回退到原有自定义 checker 跳过语义。
+ * 读取 testlib checker 与同目录头文件，并对每个路径返回显式制品状态。
  */
 export async function loadTestlibCheckerArtifacts(
   domainId: string,
   pdoc: ProblemDocLite,
-): Promise<TestlibCheckerArtifacts | undefined> {
+): Promise<TestlibCheckerArtifacts> {
   let configured: string | undefined;
   try {
     configured = getTestlibCheckerFilename(pdoc.config);
   } catch {
-    // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
-    return undefined;
+    // config 解析硬错误由 service 的统一 guard 报出；这里仍保持显式未配置状态。
+    return { configured: false, read: false };
   }
-  const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
-  if (!checkerFilename) return undefined;
+  if (!configured) return { configured: false, read: false };
+  const checkerFilename = normalizeCheckerPath(configured);
+  if (!checkerFilename) {
+    return { configured: true, read: false, failureKind: 'invalid-path' };
+  }
 
   const files = (pdoc.data || []).flatMap(item => {
     const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
     return storageName ? [{ storageName, logicalName: storageName }] : [];
   });
   const checkerFile = files.find(file => file.logicalName === checkerFilename);
-  if (!checkerFile) return undefined;
+  if (!checkerFile) return { configured: true, read: false, failureKind: 'missing' };
   const checkerDir = pathPosix.dirname(checkerFilename);
   const headerFiles = files.filter(file =>
     pathPosix.dirname(file.logicalName) === checkerDir
@@ -142,11 +140,13 @@ export async function loadTestlibCheckerArtifacts(
       await readStorageText(`${storageBase}/${file.storageName}`),
     ] as const));
     return {
+      configured: true,
+      read: true,
       checkerSource,
       checkerHeaders: Object.fromEntries(headerEntries),
     };
   } catch {
-    return undefined;
+    return { configured: true, read: false, failureKind: 'read' };
   }
 }
 
@@ -686,7 +686,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       options,
       existingFiles,
       existingConfig: pdoc.config,
-      ...checkerArtifacts,
+      checkerArtifacts,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
       checkpoint,
@@ -894,7 +894,7 @@ export class TestdataGenGenerateHandler extends Handler {
         options,
         existingFiles,
         existingConfig: pdoc.config,
-        ...checkerArtifacts,
+        checkerArtifacts,
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
         onProgress: progress => progressStream?.writeEvent('progress', progress),
@@ -1081,8 +1081,7 @@ export class TestdataGenJobStartHandler extends Handler {
       const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
       const checkpointHashes = computeTestdataCheckpointHashes(options, statement, {
         existingConfig: pdoc.config,
-        checkerSource: checkerArtifacts?.checkerSource,
-        checkerHeaders: checkerArtifacts?.checkerHeaders,
+        checkerArtifacts,
       });
       let checkpoint: TestdataGenerationCheckpoint | undefined;
       const resumeFromJobId = typeof body.resumeFromJobId === 'string'

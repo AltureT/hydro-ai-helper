@@ -12,6 +12,7 @@ import {
   materializeSandboxBlueprint,
   parseSandboxBlueprint,
   reduceCheckerExecution,
+  evaluateDiscrimination,
   type GenerateOptions,
 } from '../../services/testdataGenService';
 import {
@@ -134,7 +135,10 @@ describe('test-data generation current guarantees', () => {
   it('does not reuse a checkpoint after its options, config, or checker identity changes', () => {
     const options = { ...traditional, languages: ['py'] };
     const baseline = computeTestdataCheckpointHashes(options, 'statement', {
-      existingConfig: 'time_limit: 1000', checkerSource: 'int main() {}', checkerHeaders: { 'testlib.h': 'x' },
+      existingConfig: 'time_limit: 1000',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: { 'testlib.h': 'x' },
+      },
     });
     const job = {
       domainId: 'system', problemDocId: 1, problemId: 'P1', createdBy: 7, status: 'interrupted' as const,
@@ -153,7 +157,11 @@ describe('test-data generation current guarantees', () => {
     })).toBeUndefined();
     expect(selectTestdataResumeCheckpoint(job, {
       ...expected,
-      ...computeTestdataCheckpointHashes(options, 'statement', { checkerSource: 'int main(){return 1;}' }),
+      ...computeTestdataCheckpointHashes(options, 'statement', {
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main(){return 1;}', checkerHeaders: {},
+        },
+      }),
     })).toBeUndefined();
   });
 
@@ -164,6 +172,37 @@ describe('test-data generation current guarantees', () => {
     expect(reduceCheckerExecution({ status: 'Time Limit Exceeded', accepted: false, timedOut: true }))
       .toBe('infra-error');
     expect(reduceCheckerExecution(undefined, true)).toBe('infra-error');
+  });
+
+  it('treats checker rejection of a deliberate wrong target as successful semantic evidence', () => {
+    const result = evaluateDiscrimination({
+      targetRuns: [{
+        kind: 'wrong-algorithm',
+        description: 'deliberately wrong',
+        perCase: [{
+          accepted: true,
+          timedOut: false,
+          stdout: 'alternative',
+          status: 'Accepted',
+          exitStatus: 0,
+          checkerVerdict: 'reject',
+        }],
+      }],
+      oracleOutputs: ['official'],
+      customChecker: true,
+      checkerAvailable: true,
+    });
+
+    expect(result).toEqual({
+      targets: [{
+        kind: 'wrong-algorithm',
+        description: 'deliberately wrong',
+        killed: true,
+        killedBy: 'wa',
+        killedByCase: 1,
+      }],
+      allKilled: true,
+    });
   });
 
   it('preserves the complete existing top-level config in the final generated YAML', () => {

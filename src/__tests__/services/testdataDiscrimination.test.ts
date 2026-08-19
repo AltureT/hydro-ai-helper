@@ -111,7 +111,7 @@ describe('evaluateDiscrimination', () => {
     expect(result.allKilled).toBe(false);
   });
 
-  it('自定义 checker 跳过错误解 WA 判定且不计入 allKilled', () => {
+  it('自定义 checker 未裁决时记录基础设施失败且不计入 allKilled', () => {
     const result = evaluateDiscrimination({
       targetRuns: [{
         kind: 'wrong-algorithm',
@@ -127,7 +127,7 @@ describe('evaluateDiscrimination', () => {
         kind: 'wrong-algorithm',
         description: '输出另一种合法表示',
         killed: false,
-        skippedReason: 'custom-checker',
+        skippedReason: 'checker-infra-error',
       }],
       allKilled: false,
     });
@@ -436,6 +436,15 @@ describe('runDiscriminationPhase', () => {
     const checkerExecutor = {
       status: 'ready' as const,
       runtimeSkipped: 0,
+      check: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        total: 1,
+        passed: 1,
+        infraFailures: 0,
+      },
       runBatch: jest.fn().mockResolvedValue(['reject']),
       runChecker: jest.fn().mockResolvedValue('reject'),
       dispose: jest.fn(),
