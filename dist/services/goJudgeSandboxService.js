@@ -8,7 +8,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GoJudgeSandboxRunner = exports.CHECKER_BUDGET_MS = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = void 0;
+exports.GoJudgeSandboxRunner = exports.CHECKER_BUDGET_MS = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = exports.SandboxBudgetExceededError = void 0;
+exports.isSandboxBudgetExceededError = isSandboxBudgetExceededError;
 exports.scheduleSandboxChunks = scheduleSandboxChunks;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
@@ -24,6 +25,20 @@ const CPP_COMPILE_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024;
 const CPP_COMPILE_PROC_LIMIT = 64;
 const CPP_COMPILE_TIMEOUT_MS = 75000;
 const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测试点数量后重试';
+/** 低层沙箱截止时间耗尽；上层按 code 映射为不可重试的管线预算错误。 */
+class SandboxBudgetExceededError extends Error {
+    constructor() {
+        super(SANDBOX_BUDGET_ERROR);
+        this.code = 'SANDBOX_BUDGET_EXHAUSTED';
+        this.name = 'SandboxBudgetExceededError';
+    }
+}
+exports.SandboxBudgetExceededError = SandboxBudgetExceededError;
+function isSandboxBudgetExceededError(error) {
+    return error instanceof SandboxBudgetExceededError
+        || (error instanceof Error
+            && error.code === 'SANDBOX_BUDGET_EXHAUSTED');
+}
 /**
  * 单请求内所有 cmd 在沙箱内并发执行；实测 2 核机上并发度过高会抢占内存与 RAM 盘，
  * 故大批量每块最多 4 条，默认块间串行；仅无 TLE 判定的确定性 sweep 可显式提高并发。
@@ -265,7 +280,7 @@ class GoJudgeSandboxRunner {
             ? Number.POSITIVE_INFINITY
             : opts.deadlineAt - Date.now();
         if (remainingBudgetMs <= 0) {
-            return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
+            throw new SandboxBudgetExceededError();
         }
         let returnedFileIds = [];
         const cleanupReturnedFiles = async () => {
@@ -288,7 +303,8 @@ class GoJudgeSandboxRunner {
                 return { ok: false, kind, error };
             };
             if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-                return await fail('infra', SANDBOX_BUDGET_ERROR);
+                await cleanupReturnedFiles();
+                throw new SandboxBudgetExceededError();
             }
             if (results.length !== 1) {
                 return await fail('infra', `Hydro 沙箱返回 ${results.length} 个编译结果，期望 1 个`);
@@ -314,7 +330,7 @@ class GoJudgeSandboxRunner {
             if (opts.signal?.aborted)
                 throw err;
             if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-                return { ok: false, kind: 'infra', error: SANDBOX_BUDGET_ERROR };
+                throw new SandboxBudgetExceededError();
             }
             return { ok: false, kind: 'infra', error: summarizeSandboxError(err) };
         }
@@ -381,7 +397,7 @@ class GoJudgeSandboxRunner {
                 ? Number.POSITIVE_INFINITY
                 : opts.deadlineAt - Date.now();
             if (remainingBudgetMs <= 0)
-                throw new Error(SANDBOX_BUDGET_ERROR);
+                throw new SandboxBudgetExceededError();
             let response;
             try {
                 response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) }, {
@@ -393,12 +409,12 @@ class GoJudgeSandboxRunner {
             }
             catch (err) {
                 if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt && !opts.signal?.aborted) {
-                    throw new Error(SANDBOX_BUDGET_ERROR);
+                    throw new SandboxBudgetExceededError();
                 }
                 throw err;
             }
             if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-                throw new Error(SANDBOX_BUDGET_ERROR);
+                throw new SandboxBudgetExceededError();
             }
             const results = unwrapResults(response.data);
             if (results.length !== chunk.length) {

@@ -153,6 +153,46 @@ describe('ErrorReporter', () => {
       expect((reporter as any).buffer.size).toBe(2);
     });
 
+    it('keeps closed typed failure codes and AI categories in separate safe fingerprints', () => {
+      reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+        failureCode: 'ORACLE_RUNTIME_FAILED', stage: 'oracle', artifact: 'oracle', retryPolicy: 'repair-artifact',
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'Typed test-data pipeline failure', undefined, undefined, {
+        failureCode: 'PIPELINE_BUDGET_EXHAUSTED', stage: 'sandbox_budget', artifact: 'pipeline', retryPolicy: 'no-retry',
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, {
+        aiCategory: 'network', retryable: true, attemptCount: 2,
+      });
+      reporter.capture('api_failure', 'testdata_gen', 'Untyped test-data generation failure', undefined, undefined, {
+        aiCategory: 'timeout', retryable: true, attemptCount: 2,
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entries = [...(reporter as any).buffer.values()];
+      expect(entries).toHaveLength(4);
+      expect(new Set(entries.map(entry => entry.stackFingerprint)).size).toBe(4);
+    });
+
+    it('drops unsafe typed discriminator values from metadata and fingerprint inputs', () => {
+      const unsafe = {
+        failureCode: 'https://private.example/SECRET_INPUT',
+        aiCategory: 'sk-secret-key',
+        stage: '../../SECRET_OUTPUT',
+      };
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, unsafe);
+      reporter.capture('api_failure', 'testdata_gen', 'fixed safe message', undefined, undefined, {
+        failureCode: 'another-sensitive-value',
+        aiCategory: 'https://private.example/v1',
+        stage: 'SECRET_OUTPUT',
+      });
+
+      // Invalid discriminators must neither split the group nor survive in buffered metadata.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entries = [...(reporter as any).buffer.values()];
+      expect(entries).toHaveLength(1);
+      expect(JSON.stringify(entries[0])).not.toMatch(/SECRET|sk-secret|private\.example/);
+    });
+
     it('keeps different categories separate even when stack frames match', () => {
       const stack = [
         'Error: dynamic',

@@ -129,6 +129,7 @@ const SAFE_DETAIL_KEYS = new Set([
   'indexes',
   'maxBytes',
   'minimumUnique',
+  'oracleLanguage',
   'sample',
   'status',
   'uniqueCount',

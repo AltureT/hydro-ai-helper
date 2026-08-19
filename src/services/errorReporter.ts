@@ -6,6 +6,7 @@ import {
   getTelemetryToken,
   sendToEndpoint,
 } from './telemetryService';
+import { TESTDATA_FAILURE_CODES } from './testdata/failures';
 
 export type TelemetryErrorType = 'api_failure' | 'api_degraded' | 'startup_failure' | 'config' | 'db' | 'background_job';
 
@@ -63,6 +64,11 @@ const STALE_ENTRY_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT = 8000;
 const MAX_STACK_FRAMES = 10;
 const MAX_FRAME_LENGTH = 200;
+const SAFE_FAILURE_CODES = new Set<string>(TESTDATA_FAILURE_CODES);
+const SAFE_AI_CATEGORIES = new Set([
+  'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
+]);
+const SAFE_STAGE = /^[a-z][a-z0-9_:-]{0,63}$/;
 
 export class ErrorReporter {
   private buffer = new Map<string, BufferedError>();
@@ -123,9 +129,8 @@ export class ErrorReporter {
   ): void {
     // Check telemetry asynchronously — but capture is sync/fire-and-forget
     // We check lazily on flush instead of on every capture for performance
-    const discriminator = [metadata?.endpointId, metadata?.failureStage]
-      .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .join(':') || undefined;
+    const sanitizedMetadata = metadata ? this.sanitizeMetadata(metadata) : undefined;
+    const discriminator = this.buildSafeDiscriminator(sanitizedMetadata);
     const fingerprint = this.computeFingerprint(errorType, category, stack, discriminator);
     const key = `${errorType}:${category}:${fingerprint}`;
     const now = new Date();
@@ -171,7 +176,7 @@ export class ErrorReporter {
       stackFingerprint: fingerprint,
       // Store only the sanitized frames — never retain the raw stack in memory.
       stackFrames: this.sanitizeStack(stack),
-      metadata: metadata ? this.sanitizeMetadata(metadata) : undefined,
+      metadata: sanitizedMetadata,
       suppressedCount: 0,
     });
 
@@ -326,11 +331,31 @@ export class ErrorReporter {
       .substring(0, 16);
   }
 
+  private buildSafeDiscriminator(metadata?: Record<string, unknown>): string | undefined {
+    if (!metadata) return undefined;
+    const parts: string[] = [];
+    if (typeof metadata.failureCode === 'string' && SAFE_FAILURE_CODES.has(metadata.failureCode)) {
+      parts.push(`failureCode=${metadata.failureCode}`);
+    }
+    if (typeof metadata.aiCategory === 'string' && SAFE_AI_CATEGORIES.has(metadata.aiCategory)) {
+      parts.push(`aiCategory=${metadata.aiCategory}`);
+    }
+    for (const key of ['stage', 'failureStage'] as const) {
+      const value = metadata[key];
+      if (typeof value === 'string' && SAFE_STAGE.test(value)) parts.push(`${key}=${value}`);
+    }
+    return parts.join(':') || undefined;
+  }
+
   private sanitizeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
     const sanitized: Record<string, unknown> = {};
     const keys = Object.keys(metadata).slice(0, 10);
     for (const key of keys) {
       const val = metadata[key];
+      if (key === 'failureCode' && (typeof val !== 'string' || !SAFE_FAILURE_CODES.has(val))) continue;
+      if (key === 'aiCategory' && (typeof val !== 'string' || !SAFE_AI_CATEGORIES.has(val))) continue;
+      if ((key === 'stage' || key === 'failureStage')
+        && (typeof val !== 'string' || !SAFE_STAGE.test(val))) continue;
       if (typeof val === 'string') {
         sanitized[key] = val.substring(0, 200);
       } else if (typeof val === 'number' || typeof val === 'boolean') {

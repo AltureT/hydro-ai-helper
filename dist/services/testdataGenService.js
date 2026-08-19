@@ -2447,6 +2447,17 @@ function isCancellation(err) {
     return !!e && (e.name === 'AbortError' || e.name === 'CanceledError'
         || e.code === 'ERR_CANCELED' || e.category === 'aborted');
 }
+function toSandboxExecutionPipelineError(error, fallback) {
+    if ((0, goJudgeSandboxService_1.isSandboxBudgetExceededError)(error)) {
+        return (0, failures_1.toPipelineError)(error, {
+            code: 'PIPELINE_BUDGET_EXHAUSTED',
+            stage: 'sandbox_budget',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+        });
+    }
+    return (0, failures_1.toPipelineError)(error, fallback);
+}
 /**
  * 为一段可重试/可 fallback 的异步工作创建绝对截止时间 signal，同时把用户取消
  * 级联进去。调用方通过 deadlineTriggered 区分“预算耗尽，可静默降级”和“用户取消，
@@ -2557,14 +2568,17 @@ async function createOracleExecutor(input) {
         || !input.runner.runCompiledBatchDetailed) {
         const detail = '当前 Hydro 沙箱未通过 C++17 编译能力探测';
         if (hardProvidedStdFailure) {
-            throw new TestdataGenerationError(`当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_ORACLE_UNAVAILABLE_KEY, detail, { code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle', retryPolicy: 'manual-review' });
+            throw new TestdataGenerationError(`当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_ORACLE_UNAVAILABLE_KEY, detail, {
+                code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle', retryPolicy: 'manual-review',
+                safeDetails: { failureKind: 'infra', oracleLanguage: 'cpp' },
+            });
         }
         throw (0, failures_1.toPipelineError)(new Error(`ORACLE_LANG=cpp 的 C++17 ORACLE 编译能力不可用：${detail}`), {
             code: 'ORACLE_COMPILE_FAILED',
             stage: 'oracle',
             artifact: 'oracle',
             retryPolicy: 'repair-artifact',
-            safeDetails: { failureKind: 'infra' },
+            safeDetails: { failureKind: 'infra', oracleLanguage: 'cpp' },
         });
     }
     const compiled = await input.runner.compileCpp(source, {
@@ -2575,24 +2589,30 @@ async function createOracleExecutor(input) {
         const detail = (0, textTruncate_1.excerptTail)(compiled.error, 2000);
         if (compiled.kind === 'infra') {
             if (hardProvidedStdFailure) {
-                throw new TestdataGenerationError(`C++ 编译基础设施暂时不可用，无法执行教师提供的标准答案：${detail}`, 'provided_cpp_oracle_infra', [], false, exports.CPP_ORACLE_INFRA_FAILURE_KEY, detail, { code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle', retryPolicy: 'manual-review', safeDetails: { failureKind: 'infra' } });
+                throw new TestdataGenerationError(`C++ 编译基础设施暂时不可用，无法执行教师提供的标准答案：${detail}`, 'provided_cpp_oracle_infra', [], false, exports.CPP_ORACLE_INFRA_FAILURE_KEY, detail, {
+                    code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle', retryPolicy: 'manual-review',
+                    safeDetails: { failureKind: 'infra', oracleLanguage: 'cpp' },
+                });
             }
             throw (0, failures_1.toPipelineError)(new Error(`ORACLE_CPP_INFRA：C++ 编译基础设施不可用：${detail}；请改用 Python ORACLE`), {
                 code: 'ORACLE_COMPILE_FAILED',
                 stage: 'oracle',
                 artifact: 'oracle',
                 retryPolicy: 'repair-artifact',
-                safeDetails: { failureKind: 'infra' },
+                safeDetails: { failureKind: 'infra', oracleLanguage: 'cpp' },
             });
         }
         if (hardProvidedStdFailure) {
-            throw new TestdataGenerationError(`教师提供的 C++ 标准答案编译失败：${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY, detail, { code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle', retryPolicy: 'manual-review', safeDetails: { failureKind: 'compile' } });
+            throw new TestdataGenerationError(`教师提供的 C++ 标准答案编译失败：${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY, detail, {
+                code: 'ORACLE_COMPILE_FAILED', artifact: 'oracle', retryPolicy: 'manual-review',
+                safeDetails: { failureKind: 'compile', oracleLanguage: 'cpp' },
+            });
         }
         throw (0, failures_1.toPipelineError)(new Error(`ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：${detail}`), {
             code: 'ORACLE_COMPILE_FAILED',
             stage: 'oracle',
             artifact: 'oracle',
-            safeDetails: { failureKind: 'compile' },
+            safeDetails: { failureKind: 'compile', oracleLanguage: 'cpp' },
         });
     }
     return {
@@ -2649,7 +2669,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
             throw err;
         if (err instanceof TestdataGenerationError && err.userMessageKey)
             throw err;
-        throw (0, failures_1.toPipelineError)(err, {
+        throw toSandboxExecutionPipelineError(err, {
             code: 'ORACLE_RUNTIME_FAILED',
             stage: 'solution_verification',
             artifact: 'oracle',
@@ -2984,7 +3004,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             catch (err) {
                 if (isCancellation(err))
                     throw err;
-                throw (0, failures_1.toPipelineError)(err, {
+                throw toSandboxExecutionPipelineError(err, {
                     code: 'UNKNOWN',
                     stage: 'generator',
                     artifact: 'generator',
@@ -3035,7 +3055,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 catch (err) {
                     if (isCancellation(err))
                         throw err;
-                    throw (0, failures_1.toPipelineError)(err, {
+                    throw toSandboxExecutionPipelineError(err, {
                         code: 'UNKNOWN',
                         stage: 'stress_generator',
                         artifact: 'stress-generator',
@@ -3142,7 +3162,19 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             if (blueprint.validatorCode) {
                 reportProgress('validating_inputs', 66);
                 checkBudget();
-                const validatorResults = await runner.runPythonBatchDetailed(blueprint.validatorCode, validationInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 });
+                let validatorResults;
+                try {
+                    validatorResults = await runner.runPythonBatchDetailed(blueprint.validatorCode, validationInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 });
+                }
+                catch (err) {
+                    if (isCancellation(err))
+                        throw err;
+                    throw toSandboxExecutionPipelineError(err, {
+                        code: 'VALIDATOR_FALSE_REJECT',
+                        stage: 'validator',
+                        artifact: 'validator',
+                    });
+                }
                 if (validatorResults.length !== validationInputs.length) {
                     throw (0, failures_1.toPipelineError)(new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`), {
                         code: 'VALIDATOR_FALSE_REJECT',
@@ -3236,7 +3268,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     throw err;
                 if (err instanceof TestdataGenerationError && err.userMessageKey)
                     throw err;
-                throw (0, failures_1.toPipelineError)(err, {
+                throw toSandboxExecutionPipelineError(err, {
                     code: 'ORACLE_RUNTIME_FAILED',
                     stage: 'oracle',
                     artifact: 'oracle',
@@ -3352,7 +3384,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 catch (err) {
                     if (isCancellation(err))
                         throw err;
-                    throw (0, failures_1.toPipelineError)(err, {
+                    throw toSandboxExecutionPipelineError(err, {
                         code: 'TEMPLATE_RUNTIME_FAILED',
                         stage: 'template',
                         artifact: 'template-py',
@@ -3425,7 +3457,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             catch (err) {
                 if (isCancellation(err))
                     throw err;
-                throw (0, failures_1.toPipelineError)(err, {
+                throw toSandboxExecutionPipelineError(err, {
                     code: 'BRUTE_RUNTIME_FAILED',
                     stage: 'stress_testing',
                     artifact: 'brute',
@@ -4297,13 +4329,16 @@ ${detail}
 请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@、@@@SAMPLE_INPUTS@@@ 四个分节。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出 ORACLE、模板、代码围栏或解释。`;
     }
     if (scope === 'oracle') {
-        if (/ORACLE_CPP_INFRA/.test(detail)) {
+        const typedOracleFailure = error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle'
+            ? error.safeDetails
+            : {};
+        const oracleLanguage = typedOracleFailure.oracleLanguage === 'cpp' ? 'C++17' : 'Python 3';
+        if (typedOracleFailure.failureKind === 'infra' && typedOracleFailure.oracleLanguage === 'cpp') {
             return `你上一条蓝图选择的 C++ ORACLE 因沙箱编译基础设施暂时不可用而无法验证：
 ${detail}
 
 请只输出改用 Python 3 的 @@@ORACLE@@@，不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
         }
-        const oracleLanguage = /\bORACLE_LANG\s*=\s*cpp\b|C\+\+/.test(detail) ? 'C++17' : 'Python 3';
         return `你上一条蓝图的标程阶段未通过 Hydro 沙箱验证：
 ${detail}
 
@@ -4642,10 +4677,11 @@ class TestdataGenService {
                         ...firstError.chatResults,
                         ...fallbackError.chatResults,
                     ];
-                    throw new TestdataGenerationError(`首选模型自动修复失败，切换下一配置模型后仍未通过机器验证。技术细节：${fallbackError.message}`, `semantic_fallback:${String(fallbackError.telemetryMetadata.failureStage || 'unknown')}`, combinedResults, true, undefined, undefined, {
+                    const finalPolicy = (0, failures_1.repairPolicyForFailure)(fallbackError);
+                    throw new TestdataGenerationError(`首选模型自动修复失败，切换下一配置模型后仍未通过机器验证。技术细节：${fallbackError.message}`, `semantic_fallback:${String(fallbackError.telemetryMetadata.failureStage || 'unknown')}`, combinedResults, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
                         code: fallbackError.code,
                         artifact: fallbackError.artifact,
-                        retryPolicy: 'switch-model',
+                        retryPolicy: finalPolicy,
                         safeDetails: fallbackError.safeDetails,
                     });
                 }
@@ -5304,7 +5340,10 @@ class TestdataGenService {
                     blueprintSourceContent = `${blueprintSourceContent}\n${repairResult.content}`;
                     const stillMissing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
                     if (stillMissing.length > 0) {
-                        throw new TestdataGenerationError(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`, 'template_missing', results, true, undefined, undefined, { code: 'TEMPLATE_COMPILE_FAILED', artifact: 'template-py' });
+                        throw new TestdataGenerationError(`AI 补全后仍缺少 ${stillMissing.map(lang => LANG_DISPLAY[lang]).join('、')}。`, 'template_missing', results, true, undefined, undefined, {
+                            code: 'TEMPLATE_COMPILE_FAILED',
+                            artifact: artifactForTemplateLanguage(stillMissing[0]),
+                        });
                     }
                     void this.emitCheckpoint(params, {
                         artifacts: {
