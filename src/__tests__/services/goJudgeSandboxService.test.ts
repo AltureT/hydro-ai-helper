@@ -539,6 +539,31 @@ describe('GoJudgeSandboxRunner Java cached artifact infrastructure', () => {
     }));
   });
 
+  it('uses a Java-specific runtime proc limit while Python and C++ remain at 16', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runPythonBatchDetailed('print(1)', ['']);
+    await runner.runCompiledBatchDetailed('cached-prog-1', ['']);
+    await runner.runJavaBatchDetailed('cached-main-1', ['']);
+
+    expect(http.post.mock.calls[0][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/python3', 'main.py'],
+      procLimit: 16,
+    }));
+    expect(http.post.mock.calls[1][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['prog'],
+      procLimit: 16,
+    }));
+    expect(http.post.mock.calls[2][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/java', '-cp', 'Main.jar', 'Main'],
+      procLimit: 64,
+    }));
+  });
+
   it('compileJava classifies javac failures as compile and transport failures as infra', async () => {
     const compileHttp = {
       get: jest.fn(),

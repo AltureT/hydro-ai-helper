@@ -23,6 +23,7 @@ const CPP_COMPILE_CPU_LIMIT_NS = 30000000000;
 const CPP_COMPILE_CLOCK_LIMIT_NS = 60000000000;
 const CPP_COMPILE_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024;
 const CPP_COMPILE_PROC_LIMIT = 64;
+const JAVA_RUNTIME_PROC_LIMIT = 64;
 const CPP_COMPILE_TIMEOUT_MS = 75000;
 const SANDBOX_BUDGET_ERROR = '沙箱执行总时长超出预算，请减少测试点数量后重试';
 /** 低层沙箱截止时间耗尽；上层按 code 映射为不可重试的管线预算错误。 */
@@ -224,7 +225,7 @@ function buildJavaCommand(fileId, stdin, limits = {}) {
         clockLimit: limits.clockLimit ?? CLOCK_LIMIT_NS,
         memoryLimit: MEMORY_LIMIT_BYTES,
         stackLimit: 64 * 1024 * 1024,
-        procLimit: 16,
+        procLimit: JAVA_RUNTIME_PROC_LIMIT,
         copyIn: {
             'Main.jar': { fileId },
         },
