@@ -303,7 +303,7 @@ class TestdataGenerationJobModel {
                 'teacherOutcomeClaim.leaseExpiresAt': new Date(now.getTime() + exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS),
                 updatedAt: now,
             } });
-        return result.modifiedCount > 0;
+        return result.matchedCount > 0;
     }
     async getOrCreateApplyFailureEvent(id, preferredEventId) {
         const eventId = preferredEventId || (0, runTelemetry_1.createTestdataEventId)();

@@ -17,7 +17,7 @@ function createMockCollection() {
     createIndex: jest.fn().mockResolvedValue('ok'),
     insertOne: jest.fn().mockResolvedValue({ insertedId: 'job1' }),
     findOne: jest.fn().mockResolvedValue(null),
-    updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
+    updateOne: jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
     updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
   };
 }
@@ -533,6 +533,7 @@ describe('TestdataGenerationJobModel', () => {
     const { model, collection } = createModel();
     const before = Date.now();
 
+    collection.updateOne.mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 0 });
     await expect(model.renewTeacherOutcomeClaim('job1', 'claim-1')).resolves.toBe(true);
     expect(collection.updateOne).toHaveBeenNthCalledWith(
       1,
@@ -572,6 +573,9 @@ describe('TestdataGenerationJobModel', () => {
       eventId: preferredEventId,
       occurredAt: storedAt,
     });
+
+    collection.updateOne.mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 });
+    await expect(model.renewTeacherOutcomeClaim('job1', 'lost-claim')).resolves.toBe(false);
   });
 
   it('requires the matching apply claim to record and mark an applied result', async () => {

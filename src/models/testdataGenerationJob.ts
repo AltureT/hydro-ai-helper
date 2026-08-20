@@ -546,7 +546,7 @@ export class TestdataGenerationJobModel {
         updatedAt: now,
       } } as never,
     );
-    return result.modifiedCount > 0;
+    return result.matchedCount > 0;
   }
 
   async getOrCreateApplyFailureEvent(
