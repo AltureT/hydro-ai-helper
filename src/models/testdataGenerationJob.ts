@@ -64,6 +64,7 @@ export interface TestdataGenerationCheckpointPayload {
   roleDependencies?: Partial<Record<TestdataModelRole, string>>;
   solution?: SandboxSolutionBlueprint;
   artifacts?: SandboxGenerationArtifacts;
+  /** 仅保存验证器代码与安全的 Manifest/recipe 声明，不保存物化 probe、seed 或调用载荷。 */
   verifier?: IndependentVerifierBlueprint;
   killTargets?: KillTarget[];
 }

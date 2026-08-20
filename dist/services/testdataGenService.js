@@ -96,12 +96,14 @@ exports.buildSandboxRepairPrompt = buildSandboxRepairPrompt;
 exports.buildIndependentVerifierRepairPrompt = buildIndependentVerifierRepairPrompt;
 exports.mergeSandboxBlueprintRepair = mergeSandboxBlueprintRepair;
 exports.bindBlueprintToFrozenProblemSpec = bindBlueprintToFrozenProblemSpec;
+exports.checkpointVerifierFromBlueprint = checkpointVerifierFromBlueprint;
 const js_yaml_1 = __importDefault(require("js-yaml"));
 const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
 const statementSamples_1 = require("./testdata/statementSamples");
+const validatorManifest_1 = require("./testdata/validatorManifest");
 const specConsensus_1 = require("./testdata/specConsensus");
 const modelRoles_1 = require("./testdata/modelRoles");
 const statementSnapshot_1 = require("./testdata/statementSnapshot");
@@ -1335,19 +1337,27 @@ function buildIndependentVerifierSystemPrompt(stressCaseCount = exports.TESTDATA
     const sourceContract = frozenSpec
         ? '你只根据 FROZEN_PROBLEM_SPEC 与完整公开题面证据编写与正解实现隔离的验证制品。Spec 是唯一结构契约；题面仅用于实现它，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。'
         : '你只根据题面与已经确定的 stdin 编码，编写与正解实现隔离的验证制品。';
-    return `你是一位独立的 OJ 题目验证专家。${sourceContract}你看不到 ORACLE 源码，也不得猜测、复述或要求它。
-
-核心规则：
-1. BRUTE 必须是自包含 Python 3 完整程序，读取一份原始 stdin 并输出题目答案。使用最朴素、最容易审查的枚举/模拟算法，不追求大规模性能，不得省略任何输出格式细节。
-2. STRESS_GENERATOR 必须是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}。编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
-3. STRESS_GENERATOR 必须恰好生成 ${stressCaseCount} 组小数据，至少 ${Math.ceil(stressCaseCount * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；全部能让 BRUTE 在 5 秒内独立完成。混合穷举边界、固定种子随机、重复值、退化结构和容易触发错误算法的反例。不得复制正式测试点，也不得生成大规模性能数据。
-4. VALIDATOR 必须是自包含 Python 3 程序，读取一份 input，严格校验格式和题面约束；合法时静默 exit 0，非法时向 stderr 说明并 exit 1。合法输入必须接受，非法输入必须拒绝；题面中每一条“保证/约定”都必须成为一条显式校验，但不得添加题面没有的额外限制。不得无条件成功。
-5. 三个程序必须使用题目已经确定的同一份原始 stdin 编码。函数题每份 input 只对应一次调用；传统题若有 T，沿用题面和编码说明中的约定。
-6. 所有生成过程必须确定性并固定随机种子。每个 input 小于 256KB，STRESS_GENERATOR stdout 小于 1MB，不打印日志。
-7. 若用户消息列出函数题题面样例，额外输出 SAMPLE_INPUTS，将每个题面参数展示转换成上述 stdin 编码。只转换输入，不填写或改写期望输出；样例 id 必须逐一对应，不能遗漏或增加。
-8. 判断题目是否存在明显的复杂度差异：如果这道题不存在时间复杂度明显劣于标程、且学生现实中可能写出的朴素解法（例如 O(1) 公式题、纯输入输出模拟题），COMPLEXITY_GAP 输出 none；否则输出 exists，且 BRUTE 必须实现那个更慢的朴素解法。
-
-只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+    const frozenRules = frozenSpec ? `
+9. VALIDATOR 的 argv 契约必须精确：无命令行参数时校验全部全局约束；恰好 \`--subtask <known-positive-integer>\` 且其值是题面已知的正整数时，校验全局约束与该子任务作用域约束。未知参数、缺少值、非整数、重复参数或多余参数（unknown/missing/non-integer/duplicate/extra args）必须向 stderr 说明并 exit 非 0。
+10. 禁止从 stdin 读取子任务标签；stdin 始终只是待校验的题目原始输入。VALIDATOR 禁止接收任意原始 probe input，也不得增加任意调用、label、seed 或其他自定义参数入口。
+11. VALIDATOR_MANIFEST 必须恰好一个严格 JSON 对象，两个数组必须精确列出 frozen Spec 中全部 machine-checkable constraint/invariant id。VALIDATOR_PROBE_RECIPES 是有界声明式 recipe；没有 recipe 时输出空数组。两节均禁止代码围栏、JSON 前后缀、原始 probe input、seed 数组、物化值或调用 payload。` : '';
+    const sectionContract = frozenSpec
+        ? `只输出以下分节，顺序不得改变；函数题存在题面样例时再在末尾输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+=== COMPLEXITY_GAP ===
+exists 或 none
+@@@BRUTE@@@
+完整 Python 3 暴力解
+@@@STRESS_GENERATOR@@@
+完整 Python 3 小数据生成器
+@@@VALIDATOR_MANIFEST@@@
+{"constraintIds":["C1"],"invariantIds":["I1"]}
+@@@VALIDATOR_PROBE_RECIPES@@@
+{"recipes":[]}
+@@@VALIDATOR@@@
+完整 Python 3 输入校验器
+@@@SAMPLE_INPUTS@@@
+函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`
+        : `只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
 === COMPLEXITY_GAP ===
 exists 或 none
 @@@BRUTE@@@
@@ -1358,6 +1368,19 @@ exists 或 none
 完整 Python 3 输入校验器
 @@@SAMPLE_INPUTS@@@
 函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`;
+    return `你是一位独立的 OJ 题目验证专家。${sourceContract}你看不到 ORACLE 源码，也不得猜测、复述或要求它。
+
+核心规则：
+1. BRUTE 必须是自包含 Python 3 完整程序，读取一份原始 stdin 并输出题目答案。使用最朴素、最容易审查的枚举/模拟算法，不追求大规模性能，不得省略任何输出格式细节。
+2. STRESS_GENERATOR 必须是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}。编写 STRESS_GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
+3. STRESS_GENERATOR 必须恰好生成 ${stressCaseCount} 组小数据，至少 ${Math.ceil(stressCaseCount * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；全部能让 BRUTE 在 5 秒内独立完成。混合穷举边界、固定种子随机、重复值、退化结构和容易触发错误算法的反例。不得复制正式测试点，也不得生成大规模性能数据。
+4. VALIDATOR 必须是自包含 Python 3 程序，读取一份 input，严格校验格式和题面约束；合法时静默 exit 0，非法时向 stderr 说明并 exit 1。合法输入必须接受，非法输入必须拒绝；题面中每一条“保证/约定”都必须成为一条显式校验，但不得添加题面没有的额外限制。不得无条件成功。
+5. 三个程序必须使用题目已经确定的同一份原始 stdin 编码。函数题每份 input 只对应一次调用；传统题若有 T，沿用题面和编码说明中的约定。
+6. 所有生成过程必须确定性并固定随机种子。每个 input 小于 256KB，STRESS_GENERATOR stdout 小于 1MB，不打印日志。
+7. 若用户消息列出函数题题面样例，额外输出 SAMPLE_INPUTS，将每个题面参数展示转换成上述 stdin 编码。只转换输入，不填写或改写期望输出；样例 id 必须逐一对应，不能遗漏或增加。
+8. 判断题目是否存在明显的复杂度差异：如果这道题不存在时间复杂度明显劣于标程、且学生现实中可能写出的朴素解法（例如 O(1) 公式题、纯输入输出模拟题），COMPLEXITY_GAP 输出 none；否则输出 exists，且 BRUTE 必须实现那个更慢的朴素解法。${frozenRules}
+
+${sectionContract}`;
 }
 function buildIndependentVerifierUserPrompt(params, blueprint, context) {
     if (context) {
@@ -2146,7 +2169,7 @@ function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}
     };
 }
 /** 解析独立验证调用的三个强制分节，以及函数题样例的 stdin 转码。 */
-function parseIndependentVerifierBlueprint(raw, expectedFunctionSamples = []) {
+function parseIndependentVerifierBlueprint(raw, expectedFunctionSamples = [], options = {}) {
     const lines = raw.replace(/<think>[\s\S]*?<\/think>/g, '').split(/\r?\n/);
     const complexityGapMarker = lines.findIndex(line => /^[ \t]*===\s*COMPLEXITY_GAP\s*===\s*$/i.test(line));
     let complexityGap;
@@ -2173,12 +2196,40 @@ function parseIndependentVerifierBlueprint(raw, expectedFunctionSamples = []) {
         throw new Error(`AI 独立验证器缺少必需分节：${missing.join('、')}`);
     }
     const functionSampleInputs = parseFunctionSampleInputsSection(sections, expectedFunctionSamples, '独立验证器');
+    let strictManifestFields = {};
+    if (options.requireValidatorManifest) {
+        if (!options.frozenSpec) {
+            throw new Error('严格 VALIDATOR Manifest 解析缺少 frozen ProblemSpec');
+        }
+        const manifestSections = sections.filter(section => section.header.split(':')[0].trim().toUpperCase() === 'VALIDATOR_MANIFEST');
+        const recipeSections = sections.filter(section => section.header.split(':')[0].trim().toUpperCase() === 'VALIDATOR_PROBE_RECIPES');
+        if (manifestSections.length !== 1
+            || manifestSections[0].header.trim().toUpperCase() !== 'VALIDATOR_MANIFEST') {
+            throw new failures_1.TestdataPipelineError('Frozen 独立验证器必须恰好包含一个 VALIDATOR_MANIFEST 分节。', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'independent_verifier_parse', 'coverage', 'repair-artifact');
+        }
+        if (recipeSections.length > 1
+            || recipeSections.some(section => section.header.trim().toUpperCase() !== 'VALIDATOR_PROBE_RECIPES')) {
+            throw new failures_1.TestdataPipelineError('Frozen 独立验证器最多包含一个 VALIDATOR_PROBE_RECIPES 分节。', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'independent_verifier_parse', 'coverage', 'repair-artifact');
+        }
+        const validation = (0, validatorManifest_1.parseAndValidateValidatorManifest)(trimBlankEdges(manifestSections[0].content), options.frozenSpec);
+        strictManifestFields = {
+            validatorManifestStatus: 'valid',
+            validatorManifest: {
+                constraintIds: [...validation.manifest.constraintIds],
+                invariantIds: [...validation.manifest.invariantIds],
+            },
+            ...(recipeSections.length === 0 ? {} : {
+                validatorProbeRecipes: (0, validatorManifest_1.parseAndValidateValidatorProbeRecipes)(trimBlankEdges(recipeSections[0].content), options.frozenSpec),
+            }),
+        };
+    }
     return {
         bruteCode: bruteCode,
         stressGeneratorCode: stressGeneratorCode,
         validatorCode: validatorCode,
         complexityGap,
         functionSampleInputs,
+        ...strictManifestFields,
     };
 }
 /**
@@ -4879,6 +4930,9 @@ ${coverage ? `\n${coverage}\n` : ''}
 }
 function buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples = [], context) {
     if (context) {
+        const strictRepair = buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples)
+            .replace('请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@', '请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
+            + '@@@VALIDATOR_MANIFEST@@@、@@@VALIDATOR_PROBE_RECIPES@@@、@@@VALIDATOR@@@');
         return [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(context),
             '',
@@ -4886,7 +4940,7 @@ function buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples = [
             '',
             '只修复独立验证制品；不得从 ORACLE、analysis 或正确解推理中推断语义，不得修改 frozen Spec。',
             '',
-            buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples),
+            strictRepair,
         ].join('\n');
     }
     const detail = (error instanceof Error ? error.message : String(error)).slice(0, 1600);
@@ -5063,6 +5117,13 @@ function checkpointVerifierFromBlueprint(blueprint) {
         stressGeneratorCode: blueprint.stressGeneratorCode || '',
         complexityGap: blueprint.complexityGap,
         functionSampleInputs: blueprint.functionSampleInputs,
+        validatorManifestStatus: blueprint.validatorManifestStatus,
+        validatorManifest: blueprint.validatorManifest ? {
+            constraintIds: [...blueprint.validatorManifest.constraintIds],
+            invariantIds: [...blueprint.validatorManifest.invariantIds],
+        } : undefined,
+        validatorProbeRecipes: blueprint.validatorProbeRecipes
+            ?.map(recipe => ({ ...recipe })),
     };
 }
 class TestdataGenService {
@@ -5837,7 +5898,7 @@ class TestdataGenService {
         results.push(initialResult);
         try {
             return {
-                verifier: parseIndependentVerifierBlueprint(initialResult.content, expectedFunctionSamples),
+                verifier: parseIndependentVerifierBlueprint(initialResult.content, expectedFunctionSamples, context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined),
                 systemPrompt,
                 userPrompt,
                 sourceContent: initialResult.content,
@@ -5872,7 +5933,7 @@ class TestdataGenService {
             results.push(repairResult);
             try {
                 return {
-                    verifier: parseIndependentVerifierBlueprint(repairResult.content, expectedFunctionSamples),
+                    verifier: parseIndependentVerifierBlueprint(repairResult.content, expectedFunctionSamples, context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined),
                     systemPrompt,
                     userPrompt,
                     sourceContent: repairResult.content,
@@ -6534,7 +6595,7 @@ class TestdataGenService {
                         if (isIndependentVerifierScope(repairScope)) {
                             verifierState = {
                                 ...verifierState,
-                                verifier: parseIndependentVerifierBlueprint(repairResult.content, verifierState.expectedFunctionSamples),
+                                verifier: parseIndependentVerifierBlueprint(repairResult.content, verifierState.expectedFunctionSamples, context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined),
                                 sourceContent: repairResult.content,
                             };
                             blueprint = { ...blueprint, ...verifierState.verifier };

@@ -48,6 +48,7 @@ import {
   verifySolutionBlueprintSamples,
   classifySandboxRepairScope,
   buildSandboxRepairPrompt,
+  buildIndependentVerifierRepairPrompt,
   mergeSandboxBlueprintRepair,
   hasCustomChecker,
   getTestlibCheckerFilename,
@@ -234,6 +235,22 @@ function makeIndependentVerifierBlueprint(
       JSON.stringify({ samples: functionSampleInputs }),
     ] : []),
   ].join('\n');
+}
+
+function makeStrictIndependentVerifierBlueprint(
+  manifest = { constraintIds: ['C1'], invariantIds: ['I1'] },
+  recipes: unknown = { recipes: [] },
+): string {
+  return makeIndependentVerifierBlueprint().replace(
+    '@@@VALIDATOR@@@',
+    [
+      '@@@VALIDATOR_MANIFEST@@@',
+      JSON.stringify(manifest),
+      '@@@VALIDATOR_PROBE_RECIPES@@@',
+      JSON.stringify(recipes),
+      '@@@VALIDATOR@@@',
+    ].join('\n'),
+  );
 }
 
 function makeEmptyKillTargetsResponse(): string {
@@ -962,7 +979,7 @@ function makeFrozenSpecRoleClients(
   };
 }
 
-function makeFrozenV2Checkpoint<T extends Record<string, unknown>>(
+function makeFrozenV3Checkpoint<T extends Record<string, unknown>>(
   statementMarkdown: string,
   checkpoint: T,
   problemKind: 'traditional' | 'function' = 'traditional',
@@ -976,7 +993,7 @@ function makeFrozenV2Checkpoint<T extends Record<string, unknown>>(
 } {
   const snapshot = createStatementSnapshot(statementMarkdown);
   const context = createTestdataPipelineContext({
-    runId: 'test-v2-checkpoint',
+    runId: 'test-v3-checkpoint',
     promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
     statement: snapshot,
     spec: makeObservedProblemSpec(statementMarkdown, {
@@ -3320,7 +3337,7 @@ describe('TestdataGenService.generate', () => {
       risk,
       roleIdentities: {},
     });
-    const checkpoint = makeFrozenV2Checkpoint(statementMarkdown, {
+    const checkpoint = makeFrozenV3Checkpoint(statementMarkdown, {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -3367,7 +3384,7 @@ describe('TestdataGenService.generate', () => {
       requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
     };
     const context = createTestdataPipelineContext({
-      runId: 'checkpoint-v2-partial',
+      runId: 'checkpoint-v3-partial',
       promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       statement: createStatementSnapshot(statementMarkdown),
       spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
@@ -3376,7 +3393,7 @@ describe('TestdataGenService.generate', () => {
     });
     const restoredOracleHash = hashTestdataRoleIdentity('restored-oracle\0restored-model');
     const checkpoint = {
-      ...makeFrozenV2Checkpoint(statementMarkdown, {
+      ...makeFrozenV3Checkpoint(statementMarkdown, {
         solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       }),
       roleDependencies: { oracle: restoredOracleHash },
@@ -3388,7 +3405,9 @@ describe('TestdataGenService.generate', () => {
     const verifier = makeRoleClient(
       'verifier', 'fresh-verifier', 'verifier-model',
       makeEmptyKillTargetsResponse(),
-      makeIndependentVerifierBlueprint(),
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: [], invariantIds: [] },
+      ),
     );
     const updates: any[] = [];
     const service = new TestdataGenService({ chat: jest.fn() } as never, {
@@ -3479,7 +3498,7 @@ describe('TestdataGenService.generate', () => {
       requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
     };
     const context = createTestdataPipelineContext({
-      runId: 'checkpoint-v2-mixed-independence',
+      runId: 'checkpoint-v3-mixed-independence',
       promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       statement: createStatementSnapshot(statementMarkdown),
       spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
@@ -3501,7 +3520,9 @@ describe('TestdataGenService.generate', () => {
       'verifier', 'configured-verifier', 'configured-model',
       'shared-endpoint', 'shared-model',
       makeEmptyKillTargetsResponse(),
-      makeIndependentVerifierBlueprint(),
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: [], invariantIds: [] },
+      ),
     );
     const artifacts = makeRoleClient(
       'artifacts', 'artifacts-endpoint', 'artifacts-model',
@@ -3529,7 +3550,7 @@ describe('TestdataGenService.generate', () => {
     });
 
     await expect((service as any).generateWithSandbox({
-      problemTitle: 'mixed v2 identity', statementMarkdown, options, checkpoint,
+      problemTitle: 'mixed v3 identity', statementMarkdown, options, checkpoint,
     }, runner, 1, risk, context)).rejects.toMatchObject({
       code: 'SPEC_CONSENSUS_REQUIRED',
       artifact: 'spec',
@@ -4124,7 +4145,11 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
         .mockResolvedValueOnce({
-          content: ['=== COMPLEXITY_GAP ===', 'none', makeIndependentVerifierBlueprint()].join('\n'),
+          content: [
+            '=== COMPLEXITY_GAP ===',
+            'none',
+            makeStrictIndependentVerifierBlueprint({ constraintIds: [], invariantIds: [] }),
+          ].join('\n'),
           usedModel,
         })
         .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
@@ -4828,10 +4853,10 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
-  it('v2 checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
+  it('v3 checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
     const statementMarkdown = 'Input one integer and output it.';
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = makeFrozenV2Checkpoint(statementMarkdown, {
+    const checkpoint = makeFrozenV3Checkpoint(statementMarkdown, {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -6072,7 +6097,7 @@ describe('TestdataGenService.generate', () => {
           configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
         },
         options,
-        checkpoint: makeFrozenV2Checkpoint('题面', {
+        checkpoint: makeFrozenV3Checkpoint('题面', {
           solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
           artifacts: parseGenerationArtifacts(
             makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -6311,7 +6336,7 @@ describe('TestdataGenService.generate', () => {
           configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
         },
         options,
-        checkpoint: makeFrozenV2Checkpoint('题面', {
+        checkpoint: makeFrozenV3Checkpoint('题面', {
           solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
           artifacts: parseGenerationArtifacts(
             makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -6442,7 +6467,7 @@ describe('TestdataGenService.generate', () => {
 
   it('real checker executor keeps an earlier caller deadline than its remaining checker budget', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = makeFrozenV2Checkpoint('题面', {
+    const checkpoint = makeFrozenV3Checkpoint('题面', {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -6499,7 +6524,7 @@ describe('TestdataGenService.generate', () => {
 
   it('real checker executor preserves the exact caller cancellation reason identity', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = makeFrozenV2Checkpoint('题面', {
+    const checkpoint = makeFrozenV3Checkpoint('题面', {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -6581,7 +6606,7 @@ describe('TestdataGenService.generate', () => {
         configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
       },
       options,
-      checkpoint: makeFrozenV2Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
+      checkpoint: makeFrozenV3Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
         solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       }, 'traditional', true),
       signal: controller.signal,
@@ -6631,7 +6656,7 @@ describe('TestdataGenService.generate', () => {
           configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
         },
         options,
-        checkpoint: makeFrozenV2Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
+        checkpoint: makeFrozenV3Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
           solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
           artifacts: parseGenerationArtifacts(
             makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -6655,7 +6680,7 @@ describe('TestdataGenService.generate', () => {
 
   it('observe 保留 testlib _fail 基础设施证据并对未裁决样例记零分', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = makeFrozenV2Checkpoint(
+    const checkpoint = makeFrozenV3Checkpoint(
       '```input1\n1\n```\n```output1\n1\n```', {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
@@ -7658,6 +7683,163 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(verifier.validatorCode).toContain('sys.exit(0)');
     expect(() => parseIndependentVerifierBlueprint('@@@BRUTE@@@\nprint(1)'))
       .toThrow(/STRESS_GENERATOR、VALIDATOR/);
+  });
+
+  it('Frozen VALIDATOR_MANIFEST and VALIDATOR_PROBE_RECIPES protocol fixes section order', () => {
+    const system = buildIndependentVerifierSystemPrompt(TESTDATA_GEN_LIMITS.STRESS_CASES, true);
+    const strictSequence = [
+      '@@@VALIDATOR_MANIFEST@@@',
+      '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+      '@@@VALIDATOR_PROBE_RECIPES@@@',
+      '{"recipes":[]}',
+      '@@@VALIDATOR@@@',
+    ].join('\n');
+
+    expect(system).toContain(strictSequence);
+    expect(system.match(/@@@VALIDATOR_MANIFEST@@@/g)).toHaveLength(1);
+    expect(system.match(/@@@VALIDATOR_PROBE_RECIPES@@@/g)).toHaveLength(1);
+    expect(system).toContain('严格 JSON 对象');
+  });
+
+  it('Frozen VALIDATOR_MANIFEST prompt defines fail-closed subtask argv semantics', () => {
+    const system = buildIndependentVerifierSystemPrompt(TESTDATA_GEN_LIMITS.STRESS_CASES, true);
+
+    expect(system).toContain('无命令行参数时校验全部全局约束');
+    expect(system).toContain('--subtask <known-positive-integer>');
+    expect(system).toContain('全局约束与该子任务作用域约束');
+    for (const rejected of ['未知参数', '缺少值', '非整数', '重复参数', '多余参数']) {
+      expect(system).toContain(rejected);
+    }
+    expect(system).toContain('exit 非 0');
+    expect(system).toContain('禁止从 stdin 读取子任务标签');
+    expect(system).toContain('禁止接收任意原始 probe input');
+  });
+
+  it('Frozen VALIDATOR_MANIFEST parser returns strict manifest and bounded recipes', () => {
+    const spec: ProblemSpecV1 = {
+      schemaVersion: 1,
+      statementHash: 'a'.repeat(64),
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+      constraints: [{
+        id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+        evidence: { quote: 'n >= 1' },
+      }],
+      invariants: [{
+        id: 'I1', kind: 'custom', expression: 'n is valid', machineCheckable: true,
+        evidence: { quote: 'n is valid' },
+      }],
+      outputPolicy: { kind: 'exact' },
+      subtasks: [],
+      uncertainties: [],
+    };
+
+    expect(parseIndependentVerifierBlueprint(
+      makeStrictIndependentVerifierBlueprint(),
+      [],
+      { frozenSpec: spec, requireValidatorManifest: true },
+    )).toEqual(expect.objectContaining({
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [],
+    }));
+  });
+
+  it('Frozen VALIDATOR_MANIFEST repair prompt preserves the strict sections', () => {
+    const frozenStatement = createStatementSnapshot('Read one integer n.');
+    const context = createTestdataPipelineContext({
+      runId: 'strict-verifier-repair',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: frozenStatement,
+      spec: {
+        schemaVersion: 1,
+        statementHash: frozenStatement.statementHash,
+        problemKind: 'traditional',
+        testCaseMode: { kind: 'single' },
+        inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+        constraints: [],
+        invariants: [],
+        outputPolicy: { kind: 'exact' },
+        subtasks: [],
+        uncertainties: [],
+      },
+      risk: {
+        tier: 'low', score: 0, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+
+    const prompt = buildIndependentVerifierRepairPrompt(new Error('missing manifest'), [], context);
+    expect(prompt).toContain('@@@VALIDATOR_MANIFEST@@@');
+    expect(prompt).toContain('@@@VALIDATOR_PROBE_RECIPES@@@');
+    expect(prompt.indexOf('@@@VALIDATOR_MANIFEST@@@'))
+      .toBeLessThan(prompt.indexOf('@@@VALIDATOR@@@'));
+  });
+
+  it.each([
+    ['missing VALIDATOR_MANIFEST', makeIndependentVerifierBlueprint()],
+    [
+      'duplicate VALIDATOR_MANIFEST',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR_MANIFEST@@@\n{"constraintIds":["C1"],"invariantIds":["I1"]}\n@@@VALIDATOR@@@',
+      ),
+    ],
+    [
+      'qualified duplicate VALIDATOR_MANIFEST',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR_MANIFEST:extra@@@\n{}\n@@@VALIDATOR@@@',
+      ),
+    ],
+    [
+      'qualified duplicate VALIDATOR_PROBE_RECIPES',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR_PROBE_RECIPES:extra@@@\n{"recipes":[]}\n@@@VALIDATOR@@@',
+      ),
+    ],
+    [
+      'invalid VALIDATOR_PROBE_RECIPES',
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: ['C1'], invariantIds: ['I1'] },
+        { recipes: [{ targetId: 'C1', constructionKind: 'duplicate-element', input: 'raw' }] },
+      ),
+    ],
+  ])('Frozen parser rejects %s', (_name, raw) => {
+    const spec: ProblemSpecV1 = {
+      schemaVersion: 1,
+      statementHash: 'a'.repeat(64),
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+      constraints: [{
+        id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+        evidence: { quote: 'n >= 1' },
+      }],
+      invariants: [{
+        id: 'I1', kind: 'custom', expression: 'n is valid', machineCheckable: true,
+        evidence: { quote: 'n is valid' },
+      }],
+      outputPolicy: { kind: 'exact' },
+      subtasks: [],
+      uncertainties: [],
+    };
+
+    expect(() => parseIndependentVerifierBlueprint(
+      raw,
+      [],
+      { frozenSpec: spec, requireValidatorManifest: true },
+    )).toThrow();
+  });
+
+  it('legacy prompt and parser omit VALIDATOR_MANIFEST compatibility fields', () => {
+    expect(buildIndependentVerifierSystemPrompt()).not.toContain('@@@VALIDATOR_MANIFEST@@@');
+    expect(parseIndependentVerifierBlueprint(makeStrictIndependentVerifierBlueprint()))
+      .toEqual(parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()));
   });
 
   it('独立验证 User Prompt 不泄漏 ORACLE 源码', () => {
@@ -9095,7 +9277,7 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
     });
     expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
-    expect(plan.promptVersion).toBe('testdata-generation-v2');
+    expect(plan.promptVersion).toBe('testdata-generation-v3');
     expect(plan.originalFileHashes).toEqual(Object.fromEntries(
       plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
     ));
