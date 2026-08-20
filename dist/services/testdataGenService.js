@@ -1720,6 +1720,65 @@ function splitDelimitedSections(raw) {
     }
     return sections;
 }
+/** Frozen 严格协议保留原始 marker/content；不得删除 think 或规范化代码围栏。 */
+function splitRawDelimitedSections(raw) {
+    const sections = [];
+    let current = null;
+    for (const line of raw.split(/\r?\n/)) {
+        const marker = line.match(SECTION_MARKER_RE);
+        if (marker) {
+            current = { header: marker[1], content: [], markerLine: line };
+            sections.push(current);
+        }
+        else if (current) {
+            current.content.push(line);
+        }
+    }
+    return sections;
+}
+const STRICT_VERIFIER_SECTION_NAMES = [
+    'VALIDATOR_MANIFEST',
+    'VALIDATOR_PROBE_RECIPES',
+    'VALIDATOR',
+];
+function normalizedStrictVerifierSectionName(section) {
+    const name = section.header.split(':')[0].trim().toUpperCase();
+    return STRICT_VERIFIER_SECTION_NAMES.includes(name)
+        ? name
+        : undefined;
+}
+function strictVerifierSectionError(message) {
+    throw new failures_1.TestdataPipelineError(message, 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'independent_verifier_parse', 'coverage', 'repair-artifact');
+}
+function parseStrictVerifierSections(raw) {
+    const sections = splitRawDelimitedSections(raw);
+    const matching = (name) => sections.filter(section => normalizedStrictVerifierSectionName(section) === name);
+    const manifests = matching('VALIDATOR_MANIFEST');
+    const recipes = matching('VALIDATOR_PROBE_RECIPES');
+    const validators = matching('VALIDATOR');
+    if (manifests.length !== 1
+        || manifests[0].markerLine !== '@@@VALIDATOR_MANIFEST@@@') {
+        return strictVerifierSectionError('Frozen 独立验证器必须恰好包含一个精确的 VALIDATOR_MANIFEST 分节。');
+    }
+    if (recipes.length > 1
+        || recipes.some(section => section.markerLine !== '@@@VALIDATOR_PROBE_RECIPES@@@')) {
+        return strictVerifierSectionError('Frozen 独立验证器最多包含一个精确的 VALIDATOR_PROBE_RECIPES 分节。');
+    }
+    if (validators.length !== 1 || validators[0].markerLine !== '@@@VALIDATOR@@@') {
+        return strictVerifierSectionError('Frozen 独立验证器必须恰好包含一个精确的 VALIDATOR 分节。');
+    }
+    const manifestIndex = sections.indexOf(manifests[0]);
+    const expectedSequence = recipes.length === 1
+        ? [manifests[0], recipes[0], validators[0]]
+        : [manifests[0], validators[0]];
+    if (expectedSequence.some((section, offset) => sections[manifestIndex + offset] !== section)) {
+        return strictVerifierSectionError('Frozen 独立验证器严格分节必须按 Manifest、可选 Recipes、Validator 连续排列。');
+    }
+    return {
+        manifest: manifests[0],
+        recipes: recipes[0],
+    };
+}
 /** 解析学生提交形式的解；未限定语言的旧 SOLUTION 仅兼容为 Python。 */
 function parseTemplateSolutions(sections) {
     const solutions = {};
@@ -2201,25 +2260,16 @@ function parseIndependentVerifierBlueprint(raw, expectedFunctionSamples = [], op
         if (!options.frozenSpec) {
             throw new Error('严格 VALIDATOR Manifest 解析缺少 frozen ProblemSpec');
         }
-        const manifestSections = sections.filter(section => section.header.split(':')[0].trim().toUpperCase() === 'VALIDATOR_MANIFEST');
-        const recipeSections = sections.filter(section => section.header.split(':')[0].trim().toUpperCase() === 'VALIDATOR_PROBE_RECIPES');
-        if (manifestSections.length !== 1
-            || manifestSections[0].header.trim().toUpperCase() !== 'VALIDATOR_MANIFEST') {
-            throw new failures_1.TestdataPipelineError('Frozen 独立验证器必须恰好包含一个 VALIDATOR_MANIFEST 分节。', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'independent_verifier_parse', 'coverage', 'repair-artifact');
-        }
-        if (recipeSections.length > 1
-            || recipeSections.some(section => section.header.trim().toUpperCase() !== 'VALIDATOR_PROBE_RECIPES')) {
-            throw new failures_1.TestdataPipelineError('Frozen 独立验证器最多包含一个 VALIDATOR_PROBE_RECIPES 分节。', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'independent_verifier_parse', 'coverage', 'repair-artifact');
-        }
-        const validation = (0, validatorManifest_1.parseAndValidateValidatorManifest)(trimBlankEdges(manifestSections[0].content), options.frozenSpec);
+        const strictSections = parseStrictVerifierSections(raw);
+        const validation = (0, validatorManifest_1.parseAndValidateValidatorManifest)(trimBlankEdges(strictSections.manifest.content), options.frozenSpec);
         strictManifestFields = {
             validatorManifestStatus: 'valid',
             validatorManifest: {
                 constraintIds: [...validation.manifest.constraintIds],
                 invariantIds: [...validation.manifest.invariantIds],
             },
-            ...(recipeSections.length === 0 ? {} : {
-                validatorProbeRecipes: (0, validatorManifest_1.parseAndValidateValidatorProbeRecipes)(trimBlankEdges(recipeSections[0].content), options.frozenSpec),
+            ...(!strictSections.recipes ? {} : {
+                validatorProbeRecipes: (0, validatorManifest_1.parseAndValidateValidatorProbeRecipes)(trimBlankEdges(strictSections.recipes.content), options.frozenSpec),
             }),
         };
     }
@@ -5123,7 +5173,12 @@ function checkpointVerifierFromBlueprint(blueprint) {
             invariantIds: [...blueprint.validatorManifest.invariantIds],
         } : undefined,
         validatorProbeRecipes: blueprint.validatorProbeRecipes
-            ?.map(recipe => ({ ...recipe })),
+            ?.map(recipe => ({
+            targetId: recipe.targetId,
+            constructionKind: recipe.constructionKind,
+            ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId }),
+            ...(recipe.operationName === undefined ? {} : { operationName: recipe.operationName }),
+        })),
     };
 }
 class TestdataGenService {

@@ -87,6 +87,11 @@ describe('frozen test-data pipeline context', () => {
     const manifest = { constraintIds: ['C1'], invariantIds: ['I1'] };
     const recipes = [{
       targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+      operationName: 'append',
+      rawProbeInput: 'SECRET_RECIPE_RAW_PROBE',
+      seed: ['SECRET_RECIPE_SEED'],
+      materialized: { effectiveInput: 'SECRET_RECIPE_EFFECTIVE_INPUT' },
+      invocationPayload: { argv: ['--subtask', 'SECRET_RECIPE_SUBTASK'] },
     }];
     const blueprint = {
       problemType: 'traditional' as const,
@@ -112,11 +117,14 @@ describe('frozen test-data pipeline context', () => {
       validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
       validatorProbeRecipes: [{
         targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+        operationName: 'append',
       }],
     }));
     const serialized = JSON.stringify(checkpoint);
     for (const forbidden of [
       'SECRET_RAW_PROBE', 'SECRET_SEED', 'SECRET_EFFECTIVE_INPUT',
+      'SECRET_RECIPE_RAW_PROBE', 'SECRET_RECIPE_SEED', 'SECRET_RECIPE_EFFECTIVE_INPUT',
+      'SECRET_RECIPE_SUBTASK', 'rawProbeInput', 'seed', 'materialized', 'invocationPayload',
       'subtaskInvocationPayload', 'materializedProbeInputs', 'legalSeedArray',
     ]) {
       expect(serialized).not.toContain(forbidden);

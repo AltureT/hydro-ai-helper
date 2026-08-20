@@ -253,6 +253,27 @@ function makeStrictIndependentVerifierBlueprint(
   );
 }
 
+function makeStrictVerifierSpec(): ProblemSpecV1 {
+  return {
+    schemaVersion: 1,
+    statementHash: 'a'.repeat(64),
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+    constraints: [{
+      id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+      evidence: { quote: 'n >= 1' },
+    }],
+    invariants: [{
+      id: 'I1', kind: 'custom', expression: 'n is valid', machineCheckable: true,
+      evidence: { quote: 'n is valid' },
+    }],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+  };
+}
+
 function makeEmptyKillTargetsResponse(): string {
   return '未生成可用的错误解靶子';
 }
@@ -7716,34 +7737,142 @@ describe('parseSandboxBlueprint v2 分节', () => {
   });
 
   it('Frozen VALIDATOR_MANIFEST parser returns strict manifest and bounded recipes', () => {
-    const spec: ProblemSpecV1 = {
-      schemaVersion: 1,
-      statementHash: 'a'.repeat(64),
-      problemKind: 'traditional',
-      testCaseMode: { kind: 'single' },
-      inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
-      constraints: [{
-        id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
-        evidence: { quote: 'n >= 1' },
-      }],
-      invariants: [{
-        id: 'I1', kind: 'custom', expression: 'n is valid', machineCheckable: true,
-        evidence: { quote: 'n is valid' },
-      }],
-      outputPolicy: { kind: 'exact' },
-      subtasks: [],
-      uncertainties: [],
-    };
-
     expect(parseIndependentVerifierBlueprint(
       makeStrictIndependentVerifierBlueprint(),
       [],
-      { frozenSpec: spec, requireValidatorManifest: true },
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
     )).toEqual(expect.objectContaining({
       validatorManifestStatus: 'valid',
       validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
       validatorProbeRecipes: [],
     }));
+  });
+
+  it.each([
+    [
+      'think content inside Manifest',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+        '<think>polluted manifest</think>\n'
+          + '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+      ),
+    ],
+    [
+      'think content inside recipes',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '{"recipes":[]}',
+        '<think>polluted recipes</think>\n{"recipes":[]}',
+      ),
+    ],
+    [
+      'duplicate Manifest hidden inside think',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_MANIFEST@@@',
+        [
+          '<think>',
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '</think>',
+          '@@@VALIDATOR_MANIFEST@@@',
+        ].join('\n'),
+      ),
+    ],
+  ])('Frozen raw strict parser rejects %s', (_name, raw) => {
+    expect(() => parseIndependentVerifierBlueprint(
+      raw,
+      [],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    )).toThrow();
+  });
+
+  it.each([
+    [
+      'recipes before Manifest',
+      makeStrictIndependentVerifierBlueprint().replace(
+        [
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+        ].join('\n'),
+        [
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+        ].join('\n'),
+      ),
+    ],
+    [
+      'Manifest after Validator',
+      makeStrictIndependentVerifierBlueprint().replace(
+        [
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+          '@@@VALIDATOR@@@',
+          'import sys',
+          'sys.exit(0)',
+        ].join('\n'),
+        [
+          '@@@VALIDATOR@@@',
+          'import sys',
+          'sys.exit(0)',
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+        ].join('\n'),
+      ),
+    ],
+    [
+      'other section inside strict sequence',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_PROBE_RECIPES@@@',
+        '@@@UNEXPECTED@@@\nnot allowed here\n@@@VALIDATOR_PROBE_RECIPES@@@',
+      ),
+    ],
+    [
+      'lowercase Manifest heading',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_MANIFEST@@@',
+        '@@@validator_manifest@@@',
+      ),
+    ],
+    [
+      'whitespace-normalized recipes marker',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_PROBE_RECIPES@@@',
+        ' @@@VALIDATOR_PROBE_RECIPES@@@ ',
+      ),
+    ],
+    [
+      'qualified Validator heading inside strict sequence',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR:python@@@\nignored\n@@@VALIDATOR@@@',
+      ),
+    ],
+  ])('Frozen raw strict parser rejects invalid marker ordering: %s', (_name, raw) => {
+    expect(() => parseIndependentVerifierBlueprint(
+      raw,
+      [],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    )).toThrow();
+  });
+
+  it('Frozen raw strict parser allows BRUTE/STRESS before and SAMPLE_INPUTS after protocol', () => {
+    const raw = makeStrictIndependentVerifierBlueprint().replace(
+      'sys.exit(0)',
+      'sys.exit(0)\n@@@SAMPLE_INPUTS@@@\n{"samples":[{"id":"1","input":"1\\n"}]}',
+    );
+
+    expect(parseIndependentVerifierBlueprint(
+      raw,
+      [{ id: '1', input: '1', output: '1' }],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    ).functionSampleInputs).toEqual([{ id: '1', input: '1\n' }]);
   });
 
   it('Frozen VALIDATOR_MANIFEST repair prompt preserves the strict sections', () => {
@@ -7810,29 +7939,10 @@ describe('parseSandboxBlueprint v2 分节', () => {
       ),
     ],
   ])('Frozen parser rejects %s', (_name, raw) => {
-    const spec: ProblemSpecV1 = {
-      schemaVersion: 1,
-      statementHash: 'a'.repeat(64),
-      problemKind: 'traditional',
-      testCaseMode: { kind: 'single' },
-      inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
-      constraints: [{
-        id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
-        evidence: { quote: 'n >= 1' },
-      }],
-      invariants: [{
-        id: 'I1', kind: 'custom', expression: 'n is valid', machineCheckable: true,
-        evidence: { quote: 'n is valid' },
-      }],
-      outputPolicy: { kind: 'exact' },
-      subtasks: [],
-      uncertainties: [],
-    };
-
     expect(() => parseIndependentVerifierBlueprint(
       raw,
       [],
-      { frozenSpec: spec, requireValidatorManifest: true },
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
     )).toThrow();
   });
 
