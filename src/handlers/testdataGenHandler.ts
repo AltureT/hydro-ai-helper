@@ -573,6 +573,15 @@ function captureTestdataGenerationFailure(
   );
 }
 
+function emitTestdataTelemetryBestEffort(action: (() => unknown) | undefined): void {
+  if (!action) return;
+  try {
+    void Promise.resolve(action()).catch(() => undefined);
+  } catch {
+    // Quality telemetry must never change generation, apply, or teacher-outcome behavior.
+  }
+}
+
 function createTestdataTelemetrySession(input: {
   ctx: Handler['ctx'];
   runId: string;
@@ -703,7 +712,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     checkerArtifacts,
     configuredMode: generationMode,
   });
-  void telemetrySession?.start();
+  emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
   const ac = new AbortController();
   backgroundGenerationControllers.set(jobId, ac);
   let progressWrites = Promise.resolve();
@@ -773,7 +782,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       checkpoint,
       onCheckpoint: persistCheckpoint,
       onProgress: progress => {
-        void telemetrySession?.progress(progress);
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
         progressWrites = progressWrites
           .then(() => jobModel.updateProgress(job._id, progress))
           .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
@@ -786,7 +795,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     }
     const saved = await jobModel.complete(job._id, plan);
     if (!saved) return;
-    void telemetrySession?.complete(plan);
+    emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
 
     ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });
     const successfulModel = typeof plan.usedModel === 'string'
@@ -804,7 +813,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
   } catch (err) {
     await checkpointWrites;
     if (isCancellation(err)) {
-      void telemetrySession?.fail(err);
+      emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
       await jobModel.cancel(job._id, buildCancellationJobError(translate));
       return;
     }
@@ -824,7 +833,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       'testdata_generation', failedModel, false,
     ).catch(() => { /* best-effort */ });
     captureTestdataGenerationFailure(ctx, 'testdata_gen', err);
-    void telemetrySession?.fail(err);
+    emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
 
     const jobError: TestdataGenerationJobError = err instanceof AIServiceError
       ? {
@@ -924,7 +933,6 @@ export class TestdataGenGenerateHandler extends Handler {
 
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
 
-      const aiClient = await createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration');
       const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
       const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
       const generationMode = getTestdataGenerationMode();
@@ -965,10 +973,7 @@ export class TestdataGenGenerateHandler extends Handler {
         }, API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
       }
 
-      const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
-        probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
-        loadTestlibCheckerArtifacts(domainId, pdoc),
-      ]);
+      const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
       const runId = createTestdataRunId();
       telemetrySession = createTestdataTelemetrySession({
         ctx: this.ctx,
@@ -979,7 +984,11 @@ export class TestdataGenGenerateHandler extends Handler {
         checkerArtifacts,
         configuredMode: generationMode,
       });
-      void telemetrySession?.start();
+      emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
+      const [aiClient, cppOracleAvailable] = await Promise.all([
+        createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration'),
+        probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
+      ]);
       const service = new TestdataGenService(aiClient, {
         sandboxRunner,
         mode: generationMode,
@@ -996,11 +1005,11 @@ export class TestdataGenGenerateHandler extends Handler {
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
         onProgress: progress => {
-          void telemetrySession?.progress(progress);
+          emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
           progressStream?.writeEvent('progress', progress);
         },
       });
-      void telemetrySession?.complete(plan);
+      emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
 
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { /* best-effort */ });
       const successfulModel = typeof plan.usedModel === 'string'
@@ -1026,7 +1035,7 @@ export class TestdataGenGenerateHandler extends Handler {
     } catch (err) {
       // 客户端主动断开：非故障，不上报也不打 error 日志
       if (isCancellation(err)) {
-        void telemetrySession?.fail(err);
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
         if (progressStream) {
           progressStream.writeEvent('error', buildCancellationResponse(key => this.translate(key)));
           progressStream.end();
@@ -1055,7 +1064,7 @@ export class TestdataGenGenerateHandler extends Handler {
         'testdata_generation', failedModel, false,
       ).catch(() => { /* best-effort */ });
       captureTestdataGenerationFailure(this.ctx, 'testdata_gen', err);
-      void telemetrySession?.fail(err);
+      emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
       if (err instanceof AIServiceError) {
         const errorBody = {
           error: this.translate(USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -1234,12 +1243,12 @@ export class TestdataGenJobStartHandler extends Handler {
           });
           if (outcome.state !== 'conflict') {
             const telemetry = this.ctx.get('testdataRunTelemetry') as TestdataRunTelemetryService | undefined;
-            void telemetry?.emitTeacherOutcome({
+            emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
               runId: replacedJob.runId,
               eventId: outcome.record.eventId,
               occurredAt: outcome.record.recordedAt,
               outcome: outcome.record.outcome,
-            });
+            })));
           }
         } catch (err) {
           console.warn('[TestdataGenJob] regenerated outcome persistence failed:', err);
@@ -1385,13 +1394,13 @@ export class TestdataGenJobDismissHandler extends Handler {
         return;
       }
       const telemetry = this.ctx.get('testdataRunTelemetry') as TestdataRunTelemetryService | undefined;
-      void telemetry?.emitTeacherOutcome({
+      emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
         runId: authorized.job.runId,
         eventId: outcome.record.eventId,
         occurredAt: outcome.record.recordedAt,
         outcome: outcome.record.outcome,
         reason: outcome.record.reason,
-      });
+      })));
       await jobModel.dismiss(authorized.job._id);
       this.response.body = { dismissed: true, outcome: outcome.state };
       this.response.type = 'application/json';
@@ -1621,13 +1630,9 @@ export class TestdataGenApplyHandler extends Handler {
           if (plan?.runId && plan.originalFileHashes && outcomeClaimId) {
             try {
               const appliedHashes = computeOriginalFileHashes(validated);
-              const submittedNames = new Set(validated.map(file => file.name));
               const changedFileNames = new Set(validated
                 .filter(file => plan.originalFileHashes?.[file.name] !== appliedHashes[file.name])
                 .map(file => file.name));
-              for (const plannedFile of plan.files) {
-                if (!submittedNames.has(plannedFile.name)) changedFileNames.add(plannedFile.name);
-              }
               const plannedKinds = new Map(plan.files.map(file => [file.name, file.kind]));
               const changedFileKinds = [...new Set([...changedFileNames]
                 .map(name => plannedKinds.get(name))
@@ -1650,7 +1655,7 @@ export class TestdataGenApplyHandler extends Handler {
               );
               if (outcome.state === 'recorded') {
                 const telemetry = this.ctx.get('testdataRunTelemetry') as TestdataRunTelemetryService | undefined;
-                void telemetry?.emitTeacherOutcome({
+                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
                   runId: plan.runId,
                   eventId: outcome.record.eventId,
                   occurredAt: outcome.record.recordedAt,
@@ -1658,7 +1663,7 @@ export class TestdataGenApplyHandler extends Handler {
                   reason: outcome.record.reason,
                   editedFileCount: outcome.record.editedFileCount,
                   changedFileKinds: outcome.record.changedFileKinds,
-                });
+                })));
               } else {
                 teacherOutcomeConflict = true;
               }
@@ -1717,7 +1722,9 @@ export class TestdataGenApplyHandler extends Handler {
         }
       } else if (failed.length > 0 && generationJob?.runId) {
         const telemetry = this.ctx.get('testdataRunTelemetry') as TestdataRunTelemetryService | undefined;
-        void telemetry?.emitApplyFailure(generationJob.runId);
+        emitTestdataTelemetryBestEffort(
+          telemetry && (() => telemetry.emitApplyFailure(generationJob.runId)),
+        );
       }
 
       this.response.body = { written, failed };

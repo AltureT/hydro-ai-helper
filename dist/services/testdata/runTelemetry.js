@@ -118,10 +118,12 @@ function parseTestdataQualityEvent(value) {
     if (typeof candidate.eventType !== 'string' || !EVENT_TYPES.has(candidate.eventType)) {
         throw new TypeError('Invalid eventType');
     }
-    if (typeof candidate.occurredAt !== 'string'
-        || Number.isNaN(new Date(candidate.occurredAt).getTime())
-        || candidate.occurredAt.length > 40)
+    if (typeof candidate.occurredAt !== 'string')
         throw new TypeError('Invalid occurredAt');
+    const occurredAt = new Date(candidate.occurredAt);
+    if (Number.isNaN(occurredAt.getTime()) || occurredAt.toISOString() !== candidate.occurredAt) {
+        throw new TypeError('Invalid occurredAt');
+    }
     if (typeof candidate.pluginVersion !== 'string' || !VERSION.test(candidate.pluginVersion)) {
         throw new TypeError('Invalid pluginVersion');
     }

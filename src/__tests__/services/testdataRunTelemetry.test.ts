@@ -163,6 +163,16 @@ describe('test-data quality event schema', () => {
     }))).toThrow();
   });
 
+  it('rejects parseable but non-canonical timestamps', () => {
+    for (const occurredAt of [
+      'August 19, 2026 00:00:00 UTC',
+      '2026-08-19T00:00:00Z',
+      '2026-08-19T08:00:00.000+08:00',
+    ]) {
+      expect(() => parseTestdataQualityEvent(baseEvent({ occurredAt }))).toThrow(/occurredAt/);
+    }
+  });
+
   it('enforces event-specific fields and teacher outcome reasons', () => {
     expect(() => parseTestdataQualityEvent(baseEvent({
       eventType: 'stage_failed',

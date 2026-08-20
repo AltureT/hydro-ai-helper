@@ -261,8 +261,11 @@ export function validateTestdataQualityEventPayload(value) {
   if (typeof value.eventId !== 'string' || !TESTDATA_UUID_V4.test(value.eventId)) throw new HttpError(400, 'eventId is invalid');
   if (typeof value.runId !== 'string' || !TESTDATA_UUID_V4.test(value.runId)) throw new HttpError(400, 'runId is invalid');
   if (typeof value.eventType !== 'string' || !TESTDATA_EVENT_TYPES.has(value.eventType)) throw new HttpError(400, 'eventType is invalid');
-  if (typeof value.occurredAt !== 'string' || value.occurredAt.length > 40
-    || Number.isNaN(new Date(value.occurredAt).getTime())) throw new HttpError(400, 'occurredAt is invalid');
+  if (typeof value.occurredAt !== 'string') throw new HttpError(400, 'occurredAt is invalid');
+  const occurredAt = new Date(value.occurredAt);
+  if (Number.isNaN(occurredAt.getTime()) || occurredAt.toISOString() !== value.occurredAt) {
+    throw new HttpError(400, 'occurredAt is invalid');
+  }
   if (typeof value.pluginVersion !== 'string' || !TESTDATA_VERSION.test(value.pluginVersion)) throw new HttpError(400, 'pluginVersion is invalid');
   if (value.promptVersion !== 'testdata-generation-v1') throw new HttpError(400, 'promptVersion is invalid');
   for (const [field, [min, max]] of Object.entries(TESTDATA_NUMBER_LIMITS)) {

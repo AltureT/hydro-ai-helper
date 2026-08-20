@@ -409,6 +409,16 @@ function captureTestdataGenerationFailure(ctx, feature, err) {
     }
     reporter.capture('api_failure', feature, 'Untyped test-data generation failure', undefined, err instanceof Error ? err.stack : undefined, safeMetadata);
 }
+function emitTestdataTelemetryBestEffort(action) {
+    if (!action)
+        return;
+    try {
+        void Promise.resolve(action()).catch(() => undefined);
+    }
+    catch {
+        // Quality telemetry must never change generation, apply, or teacher-outcome behavior.
+    }
+}
 function createTestdataTelemetrySession(input) {
     const telemetry = input.ctx.get('testdataRunTelemetry');
     if (!telemetry)
@@ -511,7 +521,7 @@ async function runBackgroundGeneration(params) {
         checkerArtifacts,
         configuredMode: generationMode,
     });
-    void telemetrySession?.start();
+    emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
     const ac = new AbortController();
     backgroundGenerationControllers.set(jobId, ac);
     let progressWrites = Promise.resolve();
@@ -578,7 +588,7 @@ async function runBackgroundGeneration(params) {
             checkpoint,
             onCheckpoint: persistCheckpoint,
             onProgress: progress => {
-                void telemetrySession?.progress(progress);
+                emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
                 progressWrites = progressWrites
                     .then(() => jobModel.updateProgress(job._id, progress))
                     .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
@@ -592,7 +602,7 @@ async function runBackgroundGeneration(params) {
         const saved = await jobModel.complete(job._id, plan);
         if (!saved)
             return;
-        void telemetrySession?.complete(plan);
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
         ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
         const successfulModel = typeof plan.usedModel === 'string'
             ? plan.usedModel.split(' → ').pop()?.trim()
@@ -606,7 +616,7 @@ async function runBackgroundGeneration(params) {
     catch (err) {
         await checkpointWrites;
         if ((0, testdataGenService_1.isCancellation)(err)) {
-            void telemetrySession?.fail(err);
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
             await jobModel.cancel(job._id, buildCancellationJobError(translate));
             return;
         }
@@ -623,7 +633,7 @@ async function runBackgroundGeneration(params) {
             || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
         captureTestdataGenerationFailure(ctx, 'testdata_gen', err);
-        void telemetrySession?.fail(err);
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
         const jobError = err instanceof openaiClient_1.AIServiceError
             ? {
                 message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -718,7 +728,6 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 return;
             }
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
-            const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration');
             const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
             const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
             const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
@@ -758,10 +767,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     progressStream?.writeComment('keepalive');
                 }, limits_1.API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
             }
-            const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
-                probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
-                loadTestlibCheckerArtifacts(domainId, pdoc),
-            ]);
+            const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
             const runId = (0, runTelemetry_1.createTestdataRunId)();
             telemetrySession = createTestdataTelemetrySession({
                 ctx: this.ctx,
@@ -772,7 +778,11 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 checkerArtifacts,
                 configuredMode: generationMode,
             });
-            void telemetrySession?.start();
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
+            const [aiClient, cppOracleAvailable] = await Promise.all([
+                (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration'),
+                probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
+            ]);
             const service = new testdataGenService_1.TestdataGenService(aiClient, {
                 sandboxRunner,
                 mode: generationMode,
@@ -789,11 +799,11 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
                 onProgress: progress => {
-                    void telemetrySession?.progress(progress);
+                    emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
                     progressStream?.writeEvent('progress', progress);
                 },
             });
-            void telemetrySession?.complete(plan);
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
             const successfulModel = typeof plan.usedModel === 'string'
                 ? plan.usedModel.split(' → ').pop()?.trim()
@@ -815,7 +825,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         catch (err) {
             // 客户端主动断开：非故障，不上报也不打 error 日志
             if ((0, testdataGenService_1.isCancellation)(err)) {
-                void telemetrySession?.fail(err);
+                emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
                 if (progressStream) {
                     progressStream.writeEvent('error', buildCancellationResponse(key => this.translate(key)));
                     progressStream.end();
@@ -840,7 +850,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
             captureTestdataGenerationFailure(this.ctx, 'testdata_gen', err);
-            void telemetrySession?.fail(err);
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
             if (err instanceof openaiClient_1.AIServiceError) {
                 const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -1022,12 +1032,12 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     });
                     if (outcome.state !== 'conflict') {
                         const telemetry = this.ctx.get('testdataRunTelemetry');
-                        void telemetry?.emitTeacherOutcome({
+                        emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
                             runId: replacedJob.runId,
                             eventId: outcome.record.eventId,
                             occurredAt: outcome.record.recordedAt,
                             outcome: outcome.record.outcome,
-                        });
+                        })));
                     }
                 }
                 catch (err) {
@@ -1174,13 +1184,13 @@ class TestdataGenJobDismissHandler extends hydrooj_1.Handler {
                 return;
             }
             const telemetry = this.ctx.get('testdataRunTelemetry');
-            void telemetry?.emitTeacherOutcome({
+            emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
                 runId: authorized.job.runId,
                 eventId: outcome.record.eventId,
                 occurredAt: outcome.record.recordedAt,
                 outcome: outcome.record.outcome,
                 reason: outcome.record.reason,
-            });
+            })));
             await jobModel.dismiss(authorized.job._id);
             this.response.body = { dismissed: true, outcome: outcome.state };
             this.response.type = 'application/json';
@@ -1388,14 +1398,9 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                     if (plan?.runId && plan.originalFileHashes && outcomeClaimId) {
                         try {
                             const appliedHashes = (0, runTelemetry_1.computeOriginalFileHashes)(validated);
-                            const submittedNames = new Set(validated.map(file => file.name));
                             const changedFileNames = new Set(validated
                                 .filter(file => plan.originalFileHashes?.[file.name] !== appliedHashes[file.name])
                                 .map(file => file.name));
-                            for (const plannedFile of plan.files) {
-                                if (!submittedNames.has(plannedFile.name))
-                                    changedFileNames.add(plannedFile.name);
-                            }
                             const plannedKinds = new Map(plan.files.map(file => [file.name, file.kind]));
                             const changedFileKinds = [...new Set([...changedFileNames]
                                     .map(name => plannedKinds.get(name))
@@ -1414,7 +1419,7 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                             const outcome = await generationJobModel.recordTeacherOutcome(generationJob._id, input, outcomeClaimId);
                             if (outcome.state === 'recorded') {
                                 const telemetry = this.ctx.get('testdataRunTelemetry');
-                                void telemetry?.emitTeacherOutcome({
+                                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
                                     runId: plan.runId,
                                     eventId: outcome.record.eventId,
                                     occurredAt: outcome.record.recordedAt,
@@ -1422,7 +1427,7 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                                     reason: outcome.record.reason,
                                     editedFileCount: outcome.record.editedFileCount,
                                     changedFileKinds: outcome.record.changedFileKinds,
-                                });
+                                })));
                             }
                             else {
                                 teacherOutcomeConflict = true;
@@ -1485,7 +1490,7 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             }
             else if (failed.length > 0 && generationJob?.runId) {
                 const telemetry = this.ctx.get('testdataRunTelemetry');
-                void telemetry?.emitApplyFailure(generationJob.runId);
+                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitApplyFailure(generationJob.runId)));
             }
             this.response.body = { written, failed };
             this.response.type = 'application/json';

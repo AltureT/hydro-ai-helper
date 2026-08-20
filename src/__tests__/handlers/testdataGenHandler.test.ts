@@ -421,6 +421,36 @@ describe('TestdataGenGenerateHandler', () => {
     }
   });
 
+  it('同步入口在 AI 客户端初始化失败前已记录 run_started', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const clientError = new Error('client setup failed');
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockRejectedValue(clientError);
+    const start = jest.fn();
+    const fail = jest.fn();
+    const createSession = jest.fn().mockReturnValue({
+      start, progress: jest.fn(), complete: jest.fn(), fail,
+    });
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataRunTelemetry' ? { createSession } : undefined
+    ));
+
+    try {
+      await handler.post();
+      expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
+        runId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      }));
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(fail).toHaveBeenCalledWith(clientError);
+    } finally {
+      clientSpy.mockRestore();
+    }
+  });
+
   it('非法既有 config 在创建客户端、编译探针和读取 checker 前立即中止', async () => {
     mockFindOne({
       ...PROBLEM_DOC,
@@ -1136,7 +1166,9 @@ describe('Testdata generation background jobs', () => {
       .mockResolvedValue({} as never);
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
       .mockResolvedValue(plan as never);
-    const emitTeacherOutcome = jest.fn().mockResolvedValue(true);
+    const emitTeacherOutcome = jest.fn(() => {
+      throw new Error('quality telemetry unavailable');
+    });
     const createSession = jest.fn().mockReturnValue({
       start: jest.fn(), progress: jest.fn(), complete: jest.fn(), fail: jest.fn(),
     });
@@ -1592,7 +1624,9 @@ describe('Testdata generation background jobs', () => {
       recordTeacherOutcome: jest.fn().mockResolvedValue({ state: 'recorded', record }),
       dismiss: jest.fn().mockResolvedValue(undefined),
     };
-    const emitTeacherOutcome = jest.fn().mockResolvedValue(true);
+    const emitTeacherOutcome = jest.fn(() => {
+      throw new Error('quality telemetry unavailable');
+    });
     const handler = setupHandler(TestdataGenJobDismissHandler, {
       own: true,
       params: { jobId: String(job._id) },
@@ -1613,6 +1647,8 @@ describe('Testdata generation background jobs', () => {
     expect(emitTeacherOutcome).toHaveBeenCalledWith(expect.objectContaining({
       runId: job.runId, outcome: 'discarded', reason: 'weak_coverage',
     }));
+    expect(handler.response.status).toBeUndefined();
+    expect(handler.response.body).toEqual({ dismissed: true, outcome: 'recorded' });
   });
 
   it('discard rejects unknown reasons before changing the job', async () => {
@@ -1883,7 +1919,9 @@ describe('TestdataGenApplyHandler', () => {
       recordTeacherOutcome: jest.fn().mockResolvedValue({ state: 'recorded', record: outcome }),
       markApplied: jest.fn().mockResolvedValue(true),
     };
-    const emitTeacherOutcome = jest.fn().mockResolvedValue(true);
+    const emitTeacherOutcome = jest.fn(() => {
+      throw new Error('quality telemetry unavailable');
+    });
     const handler = setupHandler(TestdataGenApplyHandler, {
       own: true,
       body: {
@@ -1910,6 +1948,7 @@ describe('TestdataGenApplyHandler', () => {
       runId: job.runId,
       outcome: 'accepted_unchanged',
     }));
+    expect(handler.response.status).toBeUndefined();
   });
 
   it('后台任务内容经教师修改后只上报数量与封闭文件 kind', async () => {
@@ -1969,7 +2008,7 @@ describe('TestdataGenApplyHandler', () => {
     expect(JSON.stringify(emitTeacherOutcome.mock.calls)).not.toContain('content');
   });
 
-  it('取消勾选原计划文件会记录为 edited 且只上报其封闭 kind', async () => {
+  it('未选中的原计划文件不计入编辑，只比较成功写入的选中文件', async () => {
     mockFindOne(PROBLEM_DOC);
     (ProblemModel.addTestdata as jest.Mock).mockResolvedValue(undefined);
     const originalFiles = [
@@ -2011,8 +2050,13 @@ describe('TestdataGenApplyHandler', () => {
     expect(jobModel.recordTeacherOutcome).toHaveBeenCalledWith(
       job._id,
       expect.objectContaining({
-        outcome: 'accepted_edited', editedFileCount: 1, changedFileKinds: ['config'],
+        outcome: 'accepted_unchanged',
       }),
+      expect.any(String),
+    );
+    expect(jobModel.recordTeacherOutcome).not.toHaveBeenCalledWith(
+      job._id,
+      expect.objectContaining({ editedFileCount: expect.any(Number) }),
       expect.any(String),
     );
   });
@@ -2123,7 +2167,9 @@ describe('TestdataGenApplyHandler', () => {
     });
     const recordTeacherOutcome = jest.fn();
     const releaseTeacherOutcomeClaim = jest.fn().mockResolvedValue(undefined);
-    const emitApplyFailure = jest.fn().mockResolvedValue(true);
+    const emitApplyFailure = jest.fn(() => {
+      throw new Error('quality telemetry unavailable');
+    });
     const handler = setupHandler(TestdataGenApplyHandler, {
       own: true,
       body: {

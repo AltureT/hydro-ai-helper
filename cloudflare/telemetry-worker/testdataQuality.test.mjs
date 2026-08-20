@@ -169,6 +169,19 @@ test('worker validator rejects invalid UUIDs, bounds, arrays, and enums', () => 
   ]) assert.throws(() => validateTestdataQualityEventPayload(invalid));
 });
 
+test('worker validator accepts only canonical UTC ISO event timestamps', () => {
+  for (const occurredAt of [
+    'August 19, 2026 00:00:00 UTC',
+    '2026-08-19T00:00:00Z',
+    '2026-08-19T08:00:00.000+08:00',
+  ]) {
+    assert.throws(
+      () => validateTestdataQualityEventPayload(event({ occurredAt })),
+      /occurredAt/,
+    );
+  }
+});
+
 test('POST /api/testdata-events enforces auth and actual payload bytes', async () => {
   const db = new FakeDb();
   const unauthorized = await worker.fetch(
