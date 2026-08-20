@@ -6,6 +6,7 @@ import type {
 } from './validatorManifest';
 
 const MAX_PROBE_INPUT_BYTES = 256 * 1024;
+const MAX_PROBE_RECIPES = 64;
 
 export type ConstraintProbeTargetKind = 'constraint' | 'invariant';
 export type ConstraintProbeSeedSource = 'formal' | 'sample' | 'stress';
@@ -281,6 +282,9 @@ function resolveSequenceLayout(
   if (!countField || countField.type !== 'integer') return 'DEPENDENCY_NOT_RESOLVED';
   const countLocation = parseLocation(countField.encoding);
   if (!countLocation) return 'DEPENDENCY_NOT_RESOLVED';
+  if (!scalarLocationIsUnambiguous(spec, countField.id, countLocation)) {
+    return 'UNPARSEABLE_ENCODING';
+  }
   const countTokens = tokenValuesAtLine(input, countLocation.line);
   const countRaw = countTokens?.[countLocation.token - 1];
   if (!countRaw || !/^(0|[1-9]\d*)$/.test(countRaw)) return 'DEPENDENCY_NOT_RESOLVED';
@@ -399,8 +403,22 @@ export function buildConstraintProbes(
   );
   const probes: ConstraintProbe[] = [];
   const gaps: ConstraintProbeGap[] = [];
+  const recipes = input.recipes || [];
 
-  for (const recipe of input.recipes || []) {
+  if (recipes.length > MAX_PROBE_RECIPES) {
+    return {
+      probes,
+      gaps: [{
+        targetId: 'recipes',
+        targetKind: 'constraint',
+        reasonCode: 'INVALID_RECIPE',
+      }],
+      legalSeedHash,
+      effectiveSeed,
+    };
+  }
+
+  for (const recipe of recipes) {
     const target = findTarget(input.spec, recipe.targetId);
     if (!target) {
       gaps.push({

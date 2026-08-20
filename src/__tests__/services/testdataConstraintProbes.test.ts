@@ -89,6 +89,7 @@ describe('constraint probe determinism and hash binding', () => {
     expect(first.probes).toHaveLength(1);
     expect(first.probes[0].input).toBe('-1\n');
     expect(first.probes.every(probe => /^[a-f0-9]{32}$/.test(probe.id))).toBe(true);
+    expect(first.probes[0].id).toBe('6b1d3eea5b5f56d66bdf31a4b3f66b85');
   });
 
   it('binds probe ids to statement, spec, normalized seed, construction, and subtask', () => {
@@ -113,6 +114,31 @@ describe('constraint probe determinism and hash binding', () => {
       ...baseInput,
       recipes: [{ ...recipe, constructionKind: 'integer-above-max' }],
     }).probes[0].id;
+    const changedTargetSpec = integerSpec();
+    changedTargetSpec.constraints.push({
+      ...changedTargetSpec.constraints[0],
+      id: 'C2',
+    });
+    const changedTarget = buildConstraintProbes({
+      ...baseInput,
+      spec: changedTargetSpec,
+      recipes: [{ ...recipe, targetId: 'C2' }],
+    }).probes[0].id;
+    const invariantSpec: ProblemSpecV1 = {
+      ...integerSpec(),
+      constraints: [],
+      invariants: [{
+        id: 'C1',
+        kind: 'custom',
+        expression: '0 <= n <= 10',
+        machineCheckable: true,
+        evidence: { quote: '0 <= n <= 10' },
+      }],
+    };
+    const changedTargetKind = buildConstraintProbes({
+      ...baseInput,
+      spec: invariantSpec,
+    }).probes[0].id;
     const scopedSeeds: LegalConstraintProbeSeed[] = [
       { source: 'formal', index: 1, subtaskId: 1, input: '5\n' },
       { source: 'formal', index: 2, subtaskId: 2, input: '5\n' },
@@ -136,7 +162,34 @@ describe('constraint probe determinism and hash binding', () => {
     expect(changedSpec).not.toBe(baseId);
     expect(changedInput).not.toBe(baseId);
     expect(changedConstruction).not.toBe(baseId);
+    expect(changedTarget).not.toBe(baseId);
+    expect(changedTargetKind).not.toBe(baseId);
     expect(changedSubtask).not.toBe(firstSubtask);
+  });
+
+  it('binds the probe id to the exact mutation position', () => {
+    const firstPositionSpec = integerSpec();
+    firstPositionSpec.inputFields.push({
+      id: 'other', name: 'other', type: 'integer', encoding: 'line:1 token:2',
+    });
+    const secondPositionSpec: ProblemSpecV1 = {
+      ...firstPositionSpec,
+      inputFields: firstPositionSpec.inputFields.map(field => field.id === 'n'
+        ? { ...field, encoding: 'line:1 token:2' }
+        : { ...field, encoding: 'line:1 token:1' }),
+    };
+    const common = {
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal' as const, index: 1, input: '5 5\n' }],
+      recipes: [recipe],
+    };
+    const first = buildConstraintProbes({ ...common, spec: firstPositionSpec });
+    const second = buildConstraintProbes({ ...common, spec: secondPositionSpec });
+
+    expect(first.probes[0].input).toBe('-1 5\n');
+    expect(second.probes[0].input).toBe('5 -1\n');
+    expect(second.probes[0].id).not.toBe(first.probes[0].id);
   });
 });
 
@@ -346,6 +399,25 @@ describe('constraint probe scope gaps bounds and privacy', () => {
     }));
   });
 
+  it('returns a bounded gap when the sequence count location is ambiguous', () => {
+    const { spec, recipe } = sequenceSpec('array-length-mismatch');
+    spec.inputFields.push({
+      id: 'shadowCount', name: 'shadowCount', type: 'integer', encoding: 'line:1 token:1',
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '3\n1 2 3\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'C1', targetKind: 'constraint', reasonCode: 'UNPARSEABLE_ENCODING',
+    }]);
+  });
+
   it('does not use sample or stress seeds for a scoped target', () => {
     const result = buildConstraintProbes({
       spec: integerSpec({ subtaskId: 1 }),
@@ -407,5 +479,52 @@ describe('constraint probe scope gaps bounds and privacy', () => {
     expect(serialized).not.toContain('"index"');
     expect(serialized).not.toContain('"code"');
     expect(serialized).not.toContain('"error"');
+  });
+
+  it('fails closed without leaking recipe contents above the 64-recipe boundary', () => {
+    const spec = integerSpec();
+    spec.constraints = Array.from({ length: 65 }, (_, index) => ({
+      ...spec.constraints[0],
+      id: `PRIVATE_RECIPE_${index + 1}`,
+    }));
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: spec.constraints.map(constraint => ({
+        targetId: constraint.id,
+        constructionKind: 'integer-below-min',
+        fieldId: 'n',
+      })),
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'recipes', targetKind: 'constraint', reasonCode: 'INVALID_RECIPE',
+    }]);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_RECIPE');
+  });
+
+  it('accepts exactly 64 direct-builder recipes', () => {
+    const spec = integerSpec();
+    spec.constraints = Array.from({ length: 64 }, (_, index) => ({
+      ...spec.constraints[0],
+      id: `C${index + 1}`,
+    }));
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: spec.constraints.map(constraint => ({
+        targetId: constraint.id,
+        constructionKind: 'integer-below-min',
+        fieldId: 'n',
+      })),
+    });
+
+    expect(result.probes).toHaveLength(64);
+    expect(result.gaps).toEqual([]);
   });
 });

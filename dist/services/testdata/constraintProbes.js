@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildConstraintProbes = buildConstraintProbes;
 const crypto_1 = require("crypto");
 const MAX_PROBE_INPUT_BYTES = 256 * 1024;
+const MAX_PROBE_RECIPES = 64;
 function canonicalize(value) {
     if (Array.isArray(value))
         return value.map(item => canonicalize(item));
@@ -185,6 +186,9 @@ function resolveSequenceLayout(input, spec, fieldId) {
     const countLocation = parseLocation(countField.encoding);
     if (!countLocation)
         return 'DEPENDENCY_NOT_RESOLVED';
+    if (!scalarLocationIsUnambiguous(spec, countField.id, countLocation)) {
+        return 'UNPARSEABLE_ENCODING';
+    }
     const countTokens = tokenValuesAtLine(input, countLocation.line);
     const countRaw = countTokens?.[countLocation.token - 1];
     if (!countRaw || !/^(0|[1-9]\d*)$/.test(countRaw))
@@ -297,7 +301,20 @@ function buildConstraintProbes(input) {
     const effectiveSeed = sha256(`constraint-probes-v1\0${input.statementHash}\0${input.specHash}\0${legalSeedHash}`);
     const probes = [];
     const gaps = [];
-    for (const recipe of input.recipes || []) {
+    const recipes = input.recipes || [];
+    if (recipes.length > MAX_PROBE_RECIPES) {
+        return {
+            probes,
+            gaps: [{
+                    targetId: 'recipes',
+                    targetKind: 'constraint',
+                    reasonCode: 'INVALID_RECIPE',
+                }],
+            legalSeedHash,
+            effectiveSeed,
+        };
+    }
+    for (const recipe of recipes) {
         const target = findTarget(input.spec, recipe.targetId);
         if (!target) {
             gaps.push({
