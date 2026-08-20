@@ -26,7 +26,10 @@ import {
 import { GoJudgeSandboxRunner } from '../../services/goJudgeSandboxService';
 import { TestdataPipelineError } from '../../services/testdata/failures';
 import { ObjectId } from '../../utils/mongo';
-import { computeTestdataCheckpointHashes } from '../../models/testdataGenerationJob';
+import {
+  TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+  computeTestdataCheckpointHashes,
+} from '../../models/testdataGenerationJob';
 import { computeOriginalFileHashes } from '../../services/testdata/runTelemetry';
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
@@ -1916,6 +1919,7 @@ describe('TestdataGenApplyHandler', () => {
     const jobModel = {
       findById: jest.fn().mockResolvedValue(job),
       claimTeacherOutcome: jest.fn().mockResolvedValue(true),
+      renewTeacherOutcomeClaim: jest.fn().mockResolvedValue(true),
       releaseTeacherOutcomeClaim: jest.fn().mockResolvedValue(undefined),
       recordTeacherOutcome: jest.fn().mockResolvedValue({ state: 'recorded', record: outcome }),
       markApplied: jest.fn().mockResolvedValue(true),
@@ -1972,6 +1976,7 @@ describe('TestdataGenApplyHandler', () => {
     const jobModel = {
       findById: jest.fn().mockResolvedValue(job),
       claimTeacherOutcome: jest.fn().mockResolvedValue(true),
+      renewTeacherOutcomeClaim: jest.fn().mockResolvedValue(true),
       releaseTeacherOutcomeClaim: jest.fn().mockResolvedValue(undefined),
       recordTeacherOutcome: jest.fn().mockImplementation(async (_id, input) => ({
         state: 'recorded', record: { ...input, recordedAt: new Date() },
@@ -2029,6 +2034,7 @@ describe('TestdataGenApplyHandler', () => {
     const jobModel = {
       findById: jest.fn().mockResolvedValue(job),
       claimTeacherOutcome: jest.fn().mockResolvedValue(true),
+      renewTeacherOutcomeClaim: jest.fn().mockResolvedValue(true),
       releaseTeacherOutcomeClaim: jest.fn().mockResolvedValue(undefined),
       recordTeacherOutcome: jest.fn().mockImplementation(async (_id, input) => ({
         state: 'recorded', record: { ...input, recordedAt: new Date() },
@@ -2079,6 +2085,7 @@ describe('TestdataGenApplyHandler', () => {
     const jobModel = {
       findById: jest.fn().mockResolvedValue(job),
       claimTeacherOutcome: jest.fn().mockResolvedValue(true),
+      renewTeacherOutcomeClaim: jest.fn().mockResolvedValue(true),
       releaseTeacherOutcomeClaim: jest.fn().mockResolvedValue(undefined),
       recordTeacherOutcome: jest.fn().mockRejectedValue(new Error('local telemetry unavailable')),
       markApplied: jest.fn().mockResolvedValue(true),
@@ -2121,6 +2128,7 @@ describe('TestdataGenApplyHandler', () => {
     const jobModel = {
       findById: jest.fn().mockResolvedValue(job),
       claimTeacherOutcome: jest.fn().mockResolvedValue(true),
+      renewTeacherOutcomeClaim: jest.fn().mockResolvedValue(true),
       releaseTeacherOutcomeClaim: jest.fn(),
       recordTeacherOutcome: jest.fn().mockImplementation(async (_id, input) => ({
         state: 'recorded', record: { ...input, recordedAt: new Date() },
@@ -2168,6 +2176,11 @@ describe('TestdataGenApplyHandler', () => {
     });
     const recordTeacherOutcome = jest.fn();
     const releaseTeacherOutcomeClaim = jest.fn().mockResolvedValue(undefined);
+    const applyFailureOccurredAt = new Date('2026-08-19T00:00:00.000Z');
+    const getOrCreateApplyFailureEvent = jest.fn().mockResolvedValue({
+      eventId: job.applyFailureEventId,
+      occurredAt: applyFailureOccurredAt,
+    });
     const emitApplyFailure = jest.fn(() => {
       throw new Error('quality telemetry unavailable');
     });
@@ -2188,6 +2201,8 @@ describe('TestdataGenApplyHandler', () => {
         claimTeacherOutcome: jest.fn().mockResolvedValue(true),
         releaseTeacherOutcomeClaim,
         recordTeacherOutcome,
+        renewTeacherOutcomeClaim: jest.fn().mockResolvedValue(true),
+        getOrCreateApplyFailureEvent,
       };
       if (name === 'testdataRunTelemetry') return { emitApplyFailure };
       return undefined;
@@ -2197,7 +2212,73 @@ describe('TestdataGenApplyHandler', () => {
     expect(handler.response.body.failed).toEqual([{ name: '1.out', error: 'storage down' }]);
     expect(recordTeacherOutcome).not.toHaveBeenCalled();
     expect(releaseTeacherOutcomeClaim).toHaveBeenCalledWith(job._id, expect.any(String));
-    expect(emitApplyFailure).toHaveBeenCalledWith(job.runId, job.applyFailureEventId);
+    expect(emitApplyFailure).toHaveBeenCalledWith(
+      job.runId,
+      job.applyFailureEventId,
+      applyFailureOccurredAt,
+    );
+  });
+
+  it('长写入期间续租；失去 claim 后停止后续文件并返回真实冲突', async () => {
+    jest.useFakeTimers();
+    try {
+      mockFindOne(PROBLEM_DOC);
+      let finishFirstWrite: (() => void) | undefined;
+      (ProblemModel.addTestdata as jest.Mock)
+        .mockImplementationOnce(() => new Promise<void>(resolve => { finishFirstWrite = resolve; }))
+        .mockResolvedValueOnce(undefined);
+      const job = makeGenerationJob({ status: 'completed', active: false });
+      const renewTeacherOutcomeClaim = jest.fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      const recordTeacherOutcome = jest.fn();
+      const handler = setupHandler(TestdataGenApplyHandler, {
+        own: true,
+        body: {
+          problemId: 'D3102',
+          jobId: String(job._id),
+          files: [
+            { name: '1.in', content: '1\n' },
+            { name: '1.out', content: '2\n' },
+          ],
+        },
+      });
+      handler.ctx.get = jest.fn((name: string) => {
+        if (name === 'testdataGenerationJobModel') return {
+          findById: jest.fn().mockResolvedValue(job),
+          claimTeacherOutcome: jest.fn().mockResolvedValue(true),
+          renewTeacherOutcomeClaim,
+          releaseTeacherOutcomeClaim: jest.fn().mockResolvedValue(undefined),
+          recordTeacherOutcome,
+        };
+        return undefined;
+      });
+
+      const pending = handler.post();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(ProblemModel.addTestdata).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS);
+      expect(renewTeacherOutcomeClaim.mock.calls.length).toBeGreaterThanOrEqual(4);
+      expect(ProblemModel.addTestdata).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(
+        Math.floor(TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS / 3),
+      );
+      expect(renewTeacherOutcomeClaim.mock.calls.length).toBeGreaterThanOrEqual(5);
+      finishFirstWrite?.();
+      await pending;
+
+      expect(ProblemModel.addTestdata).toHaveBeenCalledTimes(1);
+      expect(recordTeacherOutcome).not.toHaveBeenCalled();
+      expect(handler.response.status).toBe(409);
+      expect(handler.response.body).toEqual(expect.objectContaining({
+        code: 'APPLY_STATE_CONFLICT', written: ['1.in'],
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('并发或重复 apply 未抢到 claim 时在写入任何文件前返回 409', async () => {

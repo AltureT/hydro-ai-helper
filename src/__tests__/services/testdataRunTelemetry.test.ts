@@ -266,19 +266,25 @@ describe('TestdataRunTelemetryService', () => {
 
   it('reuses a persisted apply-failure event id so retries remain idempotent', async () => {
     const send = jest.fn().mockResolvedValue(undefined);
+    let now = Date.parse('2026-08-19T00:00:00.000Z');
     const service = new TestdataRunTelemetryService(
       { getInstall: jest.fn().mockResolvedValue(install) },
-      { send, now: () => Date.parse('2026-08-19T00:00:00.000Z') },
+      { send, now: () => now },
     );
+    const occurredAt = new Date(now);
 
-    await service.emitApplyFailure(RUN_ID, EVENT_ID);
-    await service.emitApplyFailure(RUN_ID, EVENT_ID);
+    await service.emitApplyFailure(RUN_ID, EVENT_ID, occurredAt);
+    now += 60_000;
+    await service.emitApplyFailure(RUN_ID, EVENT_ID, occurredAt);
 
     expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls.map(call => call[0].events[0])).toEqual([
-      expect.objectContaining({ eventId: EVENT_ID, sequence: 999_999 }),
-      expect.objectContaining({ eventId: EVENT_ID, sequence: 999_999 }),
-    ]);
+    const events = send.mock.calls.map(call => call[0].events[0]);
+    expect(events[0]).toEqual(events[1]);
+    expect(events[0]).toEqual(expect.objectContaining({
+      eventId: EVENT_ID,
+      sequence: 999_999,
+      occurredAt: '2026-08-19T00:00:00.000Z',
+    }));
   });
 
   it('keeps reporting best-effort and never exposes the raw model identity', async () => {

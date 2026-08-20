@@ -296,6 +296,28 @@ class TestdataGenerationJobModel {
     async releaseTeacherOutcomeClaim(id, claimId) {
         await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), 'teacherOutcomeClaim.claimId': claimId }, { $unset: { teacherOutcomeClaim: '' }, $set: { updatedAt: new Date() } });
     }
+    async renewTeacherOutcomeClaim(id, claimId) {
+        const now = new Date();
+        const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), 'teacherOutcomeClaim.claimId': claimId }, { $set: {
+                'teacherOutcomeClaim.claimedAt': now,
+                'teacherOutcomeClaim.leaseExpiresAt': new Date(now.getTime() + exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS),
+                updatedAt: now,
+            } });
+        return result.modifiedCount > 0;
+    }
+    async getOrCreateApplyFailureEvent(id, preferredEventId) {
+        const eventId = preferredEventId || (0, runTelemetry_1.createTestdataEventId)();
+        const occurredAt = new Date();
+        const objectId = (0, ensureObjectId_1.ensureObjectId)(id);
+        const result = await this.collection.updateOne({ _id: objectId, applyFailureOccurredAt: { $exists: false } }, { $set: { applyFailureEventId: eventId, applyFailureOccurredAt: occurredAt } });
+        if (result.modifiedCount > 0)
+            return { eventId, occurredAt };
+        const existing = await this.collection.findOne({ _id: objectId }, { projection: { applyFailureEventId: 1, applyFailureOccurredAt: 1 } });
+        return typeof existing?.applyFailureEventId === 'string'
+            && existing.applyFailureOccurredAt instanceof Date
+            ? { eventId: existing.applyFailureEventId, occurredAt: existing.applyFailureOccurredAt }
+            : null;
+    }
     async markApplied(id, claimId) {
         const now = new Date();
         const result = await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), 'teacherOutcomeClaim.claimId': claimId }, {

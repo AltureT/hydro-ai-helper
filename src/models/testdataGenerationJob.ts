@@ -222,6 +222,7 @@ export interface TestdataGenerationJob {
   runId: string;
   /** Stable local id for the single idempotent apply-failure event slot. */
   applyFailureEventId?: string;
+  applyFailureOccurredAt?: Date;
   domainId: string;
   problemDocId: number;
   problemId: string;
@@ -531,6 +532,43 @@ export class TestdataGenerationJobModel {
       { _id: ensureObjectId(id), 'teacherOutcomeClaim.claimId': claimId } as never,
       { $unset: { teacherOutcomeClaim: '' }, $set: { updatedAt: new Date() } } as never,
     );
+  }
+
+  async renewTeacherOutcomeClaim(id: string | ObjectIdType, claimId: string): Promise<boolean> {
+    const now = new Date();
+    const result = await this.collection.updateOne(
+      { _id: ensureObjectId(id), 'teacherOutcomeClaim.claimId': claimId } as never,
+      { $set: {
+        'teacherOutcomeClaim.claimedAt': now,
+        'teacherOutcomeClaim.leaseExpiresAt': new Date(
+          now.getTime() + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+        ),
+        updatedAt: now,
+      } } as never,
+    );
+    return result.modifiedCount > 0;
+  }
+
+  async getOrCreateApplyFailureEvent(
+    id: string | ObjectIdType,
+    preferredEventId?: string,
+  ): Promise<{ eventId: string; occurredAt: Date } | null> {
+    const eventId = preferredEventId || createTestdataEventId();
+    const occurredAt = new Date();
+    const objectId = ensureObjectId(id);
+    const result = await this.collection.updateOne(
+      { _id: objectId, applyFailureOccurredAt: { $exists: false } } as never,
+      { $set: { applyFailureEventId: eventId, applyFailureOccurredAt: occurredAt } } as never,
+    );
+    if (result.modifiedCount > 0) return { eventId, occurredAt };
+    const existing = await this.collection.findOne(
+      { _id: objectId } as never,
+      { projection: { applyFailureEventId: 1, applyFailureOccurredAt: 1 } },
+    );
+    return typeof existing?.applyFailureEventId === 'string'
+      && existing.applyFailureOccurredAt instanceof Date
+      ? { eventId: existing.applyFailureEventId, occurredAt: existing.applyFailureOccurredAt }
+      : null;
   }
 
   async markApplied(id: string | ObjectIdType, claimId: string): Promise<boolean> {

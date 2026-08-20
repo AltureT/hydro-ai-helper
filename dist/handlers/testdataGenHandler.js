@@ -1282,6 +1282,9 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
         let claimedJobId;
         let outcomeClaimId;
         let releaseOutcomeClaim = false;
+        let outcomeClaimHeartbeatTimer;
+        let outcomeClaimLeaseLost = false;
+        let renewOutcomeClaim;
         try {
             if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
                 return;
@@ -1370,6 +1373,28 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                 claimedJobModel = generationJobModel;
                 claimedJobId = generationJob._id;
                 releaseOutcomeClaim = true;
+                let renewal = Promise.resolve(true);
+                renewOutcomeClaim = () => {
+                    renewal = renewal.then(async (active) => {
+                        if (!active)
+                            return false;
+                        try {
+                            const renewed = await generationJobModel.renewTeacherOutcomeClaim(generationJob._id, outcomeClaimId);
+                            if (!renewed)
+                                outcomeClaimLeaseLost = true;
+                            return renewed;
+                        }
+                        catch (err) {
+                            outcomeClaimLeaseLost = true;
+                            console.warn('[TestdataGenApplyHandler] outcome claim renewal failed:', err);
+                            return false;
+                        }
+                    });
+                    return renewal;
+                };
+                outcomeClaimHeartbeatTimer = setInterval(() => {
+                    void renewOutcomeClaim?.();
+                }, Math.max(1000, Math.floor(testdataGenerationJob_1.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS / 3)));
             }
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_apply').catch(() => { });
             // config.yaml 最后写入：确保测试点文件就位后再触发评测设置同步
@@ -1381,6 +1406,8 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             const written = [];
             const failed = [];
             for (const f of validated) {
+                if (renewOutcomeClaim && !(await renewOutcomeClaim()))
+                    break;
                 try {
                     await hydrooj_1.ProblemModel.addTestdata(domainId, pdoc.docId, f.name, Buffer.from(f.content, 'utf-8'), this.user?._id);
                     written.push(f.name);
@@ -1389,6 +1416,25 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                     console.error(`[TestdataGenApplyHandler] 写入 ${f.name} 失败:`, err);
                     failed.push({ name: f.name, error: err instanceof Error ? err.message : String(err) });
                 }
+            }
+            if (renewOutcomeClaim && !outcomeClaimLeaseLost && !(await renewOutcomeClaim())) {
+                outcomeClaimLeaseLost = true;
+            }
+            if (outcomeClaimHeartbeatTimer) {
+                clearInterval(outcomeClaimHeartbeatTimer);
+                outcomeClaimHeartbeatTimer = undefined;
+            }
+            if (outcomeClaimLeaseLost) {
+                releaseOutcomeClaim = false;
+                this.response.status = 409;
+                this.response.body = {
+                    written,
+                    failed,
+                    error: this.translate('ai_helper_testdata_outcome_already_recorded'),
+                    code: 'APPLY_STATE_CONFLICT',
+                };
+                this.response.type = 'application/json';
+                return;
             }
             if (written.length > 0 && failed.length === 0) {
                 this.ctx.get('featureStatsModel')?.recordSuccess('testdata_apply').catch(() => { });
@@ -1490,7 +1536,13 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             }
             else if (failed.length > 0 && generationJob?.runId) {
                 const telemetry = this.ctx.get('testdataRunTelemetry');
-                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitApplyFailure(generationJob.runId, generationJob.applyFailureEventId)));
+                try {
+                    const event = await generationJobModel?.getOrCreateApplyFailureEvent(generationJob._id, generationJob.applyFailureEventId);
+                    emitTestdataTelemetryBestEffort(telemetry && event && (() => telemetry.emitApplyFailure(generationJob.runId, event.eventId, event.occurredAt)));
+                }
+                catch (err) {
+                    console.warn('[TestdataGenApplyHandler] apply failure event persistence failed:', err);
+                }
             }
             this.response.body = { written, failed };
             this.response.type = 'application/json';
@@ -1501,6 +1553,8 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
         }
         finally {
+            if (outcomeClaimHeartbeatTimer)
+                clearInterval(outcomeClaimHeartbeatTimer);
             if (releaseOutcomeClaim && claimedJobModel && claimedJobId && outcomeClaimId) {
                 try {
                     await claimedJobModel.releaseTeacherOutcomeClaim(claimedJobId, outcomeClaimId);

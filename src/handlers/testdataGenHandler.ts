@@ -65,6 +65,7 @@ import { getDomainId } from '../utils/domainHelper';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import {
   TestdataGenerationJobModel,
+  TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
   computeTestdataCheckpointHashes,
   selectTestdataResumeCheckpoint,
   type TestdataGenerationJob,
@@ -1502,6 +1503,9 @@ export class TestdataGenApplyHandler extends Handler {
     let claimedJobId: TestdataGenerationJob['_id'] | undefined;
     let outcomeClaimId: string | undefined;
     let releaseOutcomeClaim = false;
+    let outcomeClaimHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    let outcomeClaimLeaseLost = false;
+    let renewOutcomeClaim: (() => Promise<boolean>) | undefined;
     try {
       if (rejectIfCsrfInvalid(this)) return;
       const domainId = getDomainId(this);
@@ -1595,6 +1599,28 @@ export class TestdataGenApplyHandler extends Handler {
         claimedJobModel = generationJobModel;
         claimedJobId = generationJob._id;
         releaseOutcomeClaim = true;
+        let renewal = Promise.resolve(true);
+        renewOutcomeClaim = () => {
+          renewal = renewal.then(async active => {
+            if (!active) return false;
+            try {
+              const renewed = await generationJobModel.renewTeacherOutcomeClaim(
+                generationJob._id,
+                outcomeClaimId as string,
+              );
+              if (!renewed) outcomeClaimLeaseLost = true;
+              return renewed;
+            } catch (err) {
+              outcomeClaimLeaseLost = true;
+              console.warn('[TestdataGenApplyHandler] outcome claim renewal failed:', err);
+              return false;
+            }
+          });
+          return renewal;
+        };
+        outcomeClaimHeartbeatTimer = setInterval(() => {
+          void renewOutcomeClaim?.();
+        }, Math.max(1_000, Math.floor(TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS / 3)));
       }
 
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_apply').catch(() => { /* best-effort */ });
@@ -1609,6 +1635,7 @@ export class TestdataGenApplyHandler extends Handler {
       const written: string[] = [];
       const failed: Array<{ name: string; error: string }> = [];
       for (const f of validated) {
+        if (renewOutcomeClaim && !(await renewOutcomeClaim())) break;
         try {
           await ProblemModel.addTestdata(
             domainId, pdoc.docId, f.name,
@@ -1620,6 +1647,26 @@ export class TestdataGenApplyHandler extends Handler {
           console.error(`[TestdataGenApplyHandler] 写入 ${f.name} 失败:`, err);
           failed.push({ name: f.name, error: err instanceof Error ? err.message : String(err) });
         }
+      }
+
+      if (renewOutcomeClaim && !outcomeClaimLeaseLost && !(await renewOutcomeClaim())) {
+        outcomeClaimLeaseLost = true;
+      }
+      if (outcomeClaimHeartbeatTimer) {
+        clearInterval(outcomeClaimHeartbeatTimer);
+        outcomeClaimHeartbeatTimer = undefined;
+      }
+      if (outcomeClaimLeaseLost) {
+        releaseOutcomeClaim = false;
+        this.response.status = 409;
+        this.response.body = {
+          written,
+          failed,
+          error: this.translate('ai_helper_testdata_outcome_already_recorded'),
+          code: 'APPLY_STATE_CONFLICT',
+        };
+        this.response.type = 'application/json';
+        return;
       }
 
       if (written.length > 0 && failed.length === 0) {
@@ -1722,12 +1769,19 @@ export class TestdataGenApplyHandler extends Handler {
         }
       } else if (failed.length > 0 && generationJob?.runId) {
         const telemetry = this.ctx.get('testdataRunTelemetry') as TestdataRunTelemetryService | undefined;
-        emitTestdataTelemetryBestEffort(
-          telemetry && (() => telemetry.emitApplyFailure(
-            generationJob.runId,
+        try {
+          const event = await generationJobModel?.getOrCreateApplyFailureEvent(
+            generationJob._id,
             generationJob.applyFailureEventId,
-          )),
-        );
+          );
+          emitTestdataTelemetryBestEffort(telemetry && event && (() => telemetry.emitApplyFailure(
+            generationJob.runId,
+            event.eventId,
+            event.occurredAt,
+          )));
+        } catch (err) {
+          console.warn('[TestdataGenApplyHandler] apply failure event persistence failed:', err);
+        }
       }
 
       this.response.body = { written, failed };
@@ -1737,6 +1791,7 @@ export class TestdataGenApplyHandler extends Handler {
       captureTestdataGenerationFailure(this.ctx, 'testdata_apply', err);
       sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
     } finally {
+      if (outcomeClaimHeartbeatTimer) clearInterval(outcomeClaimHeartbeatTimer);
       if (releaseOutcomeClaim && claimedJobModel && claimedJobId && outcomeClaimId) {
         try {
           await claimedJobModel.releaseTeacherOutcomeClaim(claimedJobId, outcomeClaimId);

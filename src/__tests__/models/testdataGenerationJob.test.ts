@@ -529,6 +529,51 @@ describe('TestdataGenerationJobModel', () => {
     await expect(model.claimTeacherOutcome('job1', 'claim-2')).resolves.toBe(false);
   });
 
+  it('renews only the owned apply claim and persists one stable apply-failure timestamp', async () => {
+    const { model, collection } = createModel();
+    const before = Date.now();
+
+    await expect(model.renewTeacherOutcomeClaim('job1', 'claim-1')).resolves.toBe(true);
+    expect(collection.updateOne).toHaveBeenNthCalledWith(
+      1,
+      { _id: 'job1', 'teacherOutcomeClaim.claimId': 'claim-1' },
+      { $set: {
+        'teacherOutcomeClaim.claimedAt': expect.any(Date),
+        'teacherOutcomeClaim.leaseExpiresAt': expect.any(Date),
+        updatedAt: expect.any(Date),
+      } },
+    );
+    const renewal = collection.updateOne.mock.calls[0][1].$set;
+    expect(renewal['teacherOutcomeClaim.leaseExpiresAt'].getTime()).toBeGreaterThanOrEqual(
+      before + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+    );
+
+    const preferredEventId = '66666666-6666-4666-8666-666666666666';
+    await expect(model.getOrCreateApplyFailureEvent('job1', preferredEventId)).resolves.toEqual({
+      eventId: preferredEventId,
+      occurredAt: expect.any(Date),
+    });
+    const firstEvent = collection.updateOne.mock.calls[1][1].$set;
+    expect(collection.updateOne.mock.calls[1][0]).toEqual({
+      _id: 'job1', applyFailureOccurredAt: { $exists: false },
+    });
+    expect(firstEvent).toEqual({
+      applyFailureEventId: preferredEventId,
+      applyFailureOccurredAt: expect.any(Date),
+    });
+
+    const storedAt = new Date('2026-08-19T01:02:03.000Z');
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({
+      applyFailureEventId: preferredEventId,
+      applyFailureOccurredAt: storedAt,
+    });
+    await expect(model.getOrCreateApplyFailureEvent('job1', preferredEventId)).resolves.toEqual({
+      eventId: preferredEventId,
+      occurredAt: storedAt,
+    });
+  });
+
   it('requires the matching apply claim to record and mark an applied result', async () => {
     const { model, collection } = createModel();
     const input = {

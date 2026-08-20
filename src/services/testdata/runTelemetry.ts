@@ -558,7 +558,11 @@ export class TestdataRunTelemetryService {
     }
   }
 
-  async emitApplyFailure(runId: string, eventId = this.eventId()): Promise<boolean> {
+  async emitApplyFailure(
+    runId: string,
+    eventId = this.eventId(),
+    occurredAt = new Date(this.now()),
+  ): Promise<boolean> {
     try {
       return await this.emit(parseTestdataQualityEvent({
         schemaVersion: TESTDATA_QUALITY_SCHEMA_VERSION,
@@ -566,7 +570,7 @@ export class TestdataRunTelemetryService {
         runId,
         sequence: TESTDATA_TEACHER_OUTCOME_SEQUENCE - 1,
         eventType: 'stage_failed',
-        occurredAt: new Date(this.now()).toISOString(),
+        occurredAt: occurredAt.toISOString(),
         pluginVersion: this.pluginVersion,
         promptVersion: TESTDATA_PROMPT_VERSION,
         stage: 'apply',
