@@ -416,10 +416,11 @@ function allOccurrences(markdown: string, quote: string): number[] {
   return offsets;
 }
 
-function locateEvidence(
+export function locateStatementEvidence(
   snapshot: StatementSnapshot,
   evidence: { quote: string; section?: string },
 ): { startOffset: number; endOffset: number } {
+  if (!evidence.quote.trim()) throw evidenceFailure();
   let offsets = allOccurrences(snapshot.normalizedMarkdown, evidence.quote);
   if (evidence.section !== undefined) {
     const sections = snapshot.sections.filter(section => section.heading === evidence.section);
@@ -441,13 +442,13 @@ export function validateProblemSpecEvidence(
     evidence: {
       quote: constraint.evidence.quote,
       ...(constraint.evidence.section !== undefined ? { section: constraint.evidence.section } : {}),
-      ...locateEvidence(snapshot, constraint.evidence),
+      ...locateStatementEvidence(snapshot, constraint.evidence),
     },
   }));
-  for (const invariant of spec.invariants) locateEvidence(snapshot, invariant.evidence);
+  for (const invariant of spec.invariants) locateStatementEvidence(snapshot, invariant.evidence);
   for (const uncertainty of spec.uncertainties) {
     if (uncertainty.evidence !== undefined) {
-      locateEvidence(snapshot, { quote: uncertainty.evidence });
+      locateStatementEvidence(snapshot, { quote: uncertainty.evidence });
     }
   }
   return { ...spec, constraints };

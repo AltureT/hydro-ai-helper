@@ -122,6 +122,63 @@ describe('deterministic ProblemSpec diff', () => {
       'outputPolicy', 'operations', 'subtasks', 'uncertainties',
     ]);
   });
+
+  it('treats field renames as equivalent when ordered structure and references match', () => {
+    const primary = validSpec(STATEMENT, {
+      testCaseMode: { kind: 'counted', countField: 'count_a' },
+      inputFields: [
+        { id: 'count_a', name: 'T', type: 'integer', encoding: 'first line' },
+        { id: 'value_a', name: 'value', type: 'integer', encoding: 'one per case', dependsOn: ['count_a'] },
+      ],
+    });
+    const critic = validSpec(STATEMENT, {
+      testCaseMode: { kind: 'counted', countField: 'renamed_count' },
+      inputFields: [
+        { id: 'renamed_count', name: 'case count', type: 'integer', encoding: 'first line' },
+        { id: 'renamed_value', name: 'item', type: 'integer', encoding: 'one per case', dependsOn: ['renamed_count'] },
+      ],
+    });
+
+    expect(diffProblemSpecs(primary, critic)).toEqual([]);
+  });
+
+  it('distinguishes references to different occurrences of duplicate field names', () => {
+    const primary = validSpec(STATEMENT, {
+      inputFields: [
+        { id: 'left_a', name: 'x', type: 'integer', encoding: 'first value' },
+        { id: 'right_a', name: 'x', type: 'integer', encoding: 'second value' },
+        { id: 'payload_a', name: 'payload', type: 'integer', encoding: 'payload', dependsOn: ['left_a'] },
+      ],
+    });
+    const critic = validSpec(STATEMENT, {
+      inputFields: [
+        { id: 'left_b', name: 'x', type: 'integer', encoding: 'first value' },
+        { id: 'right_b', name: 'x', type: 'integer', encoding: 'second value' },
+        { id: 'payload_b', name: 'payload', type: 'integer', encoding: 'payload', dependsOn: ['right_b'] },
+      ],
+    });
+
+    expect(diffProblemSpecs(primary, critic).map(conflict => conflict.path)).toEqual(['inputFields']);
+  });
+
+  it('distinguishes subtask references to duplicate constraint expressions with different structure', () => {
+    const primary = validSpec(STATEMENT, {
+      constraints: [
+        { id: 'a_checked', expression: '1 <= n <= 100', machineCheckable: true, scope: 'global', evidence: { quote: '1 <= n <= 100.' } },
+        { id: 'a_manual', expression: '1 <= n <= 100', machineCheckable: false, scope: 'global', evidence: { quote: '1 <= n <= 100.' } },
+      ],
+      subtasks: [{ id: 1, score: 100, constraintIds: ['a_checked'] }],
+    });
+    const critic = validSpec(STATEMENT, {
+      constraints: [
+        { id: 'b_checked', expression: '1 <= n <= 100', machineCheckable: true, scope: 'global', evidence: { quote: '1 <= n <= 100.' } },
+        { id: 'b_manual', expression: '1 <= n <= 100', machineCheckable: false, scope: 'global', evidence: { quote: '1 <= n <= 100.' } },
+      ],
+      subtasks: [{ id: 9, score: 100, constraintIds: ['b_manual'] }],
+    });
+
+    expect(diffProblemSpecs(primary, critic).map(conflict => conflict.path)).toEqual(['subtasks']);
+  });
 });
 
 describe('dual ProblemSpec consensus and adjudication', () => {
@@ -157,7 +214,10 @@ describe('dual ProblemSpec consensus and adjudication', () => {
     });
     const conflicts = diffProblemSpecs(primarySpec, criticSpec);
     expect(conflicts.map(item => item.path)).toEqual(['testCaseMode', 'outputPolicy', 'uncertainties']);
-    const resolvedSpec = validSpec(STATEMENT, { outputPolicy: { kind: 'token' } });
+    const resolvedSpec = validSpec(STATEMENT, {
+      outputPolicy: { kind: 'token' },
+      uncertainties: [{ code: 'u_resolved', description: 'resolved interpretation' }],
+    });
     const adjudication = JSON.stringify({
       resolvedSpec,
       resolutions: [
@@ -212,6 +272,56 @@ describe('dual ProblemSpec consensus and adjudication', () => {
     });
     expect(JSON.stringify(result.safeSummary || {})).not.toContain('PRIVATE MISSING QUOTE');
     expect(JSON.stringify(result.safeSummary || {})).not.toContain('private reason');
+  });
+
+  it.each([
+    ['blank evidence', STATEMENT, ' '],
+    ['non-unique evidence', `${STATEMENT}\nRepeated evidence.\nRepeated evidence.`, 'Repeated evidence.'],
+  ])('rejects %s using the same unique statement grounding rule', async (_label, statement, evidenceQuote) => {
+    const base = validSpec(statement, { constraints: [], invariants: [] });
+    const critic = validSpec(statement, {
+      constraints: [], invariants: [], outputPolicy: { kind: 'token' },
+    });
+    const adjudication = JSON.stringify({
+      resolvedSpec: base,
+      resolutions: [{ path: 'outputPolicy', selected: 'A', evidenceQuote, reason: 'grounding' }],
+    });
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(statement),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(base)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(critic)),
+      adjudicator: client('adjudicator', 'ep-c', 'judge', adjudication),
+    });
+
+    expect(result).toMatchObject({
+      status: 'unresolved', failureCode: 'SPEC_EVIDENCE_NOT_FOUND', unresolvedConflictCount: 1,
+    });
+  });
+
+  it('rejects selected new when the resolved value is actually A or B', async () => {
+    const criticSpec = validSpec(STATEMENT, { outputPolicy: { kind: 'token' } });
+    const adjudication = JSON.stringify({
+      resolvedSpec: validSpec(),
+      resolutions: [{
+        path: 'outputPolicy', selected: 'new', evidenceQuote: 'Print the exact sum.', reason: 'not new',
+      }],
+    });
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(STATEMENT),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(validSpec())),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+      adjudicator: client('adjudicator', 'ep-c', 'judge', adjudication),
+    });
+
+    expect(result).toMatchObject({
+      status: 'unresolved', failureCode: 'SPEC_CONSENSUS_REQUIRED', unresolvedConflictCount: 1,
+    });
   });
 
   it('rejects resolutions that do not cover every deterministic conflict', async () => {

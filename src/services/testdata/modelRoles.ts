@@ -36,6 +36,24 @@ export interface TestdataRoleIdentityConflict {
   identity: TestdataModelIdentity;
 }
 
+function isHttpUrl(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const parsed = new URL(value.trim());
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname;
+  } catch {
+    return false;
+  }
+}
+
+function usableEndpoint(endpoint: AIConfig['endpoints'][number] | undefined): boolean {
+  return !!endpoint
+    && endpoint.enabled !== false
+    && isHttpUrl(endpoint.apiBaseUrl)
+    && typeof endpoint.apiKeyEncrypted === 'string'
+    && !!endpoint.apiKeyEncrypted.trim();
+}
+
 function validChain(config: AIConfig, chain: SelectedModel[] | undefined): TestdataModelIdentity[] {
   if (!Array.isArray(chain) || chain.length === 0) return [];
   const identities: TestdataModelIdentity[] = [];
@@ -45,7 +63,7 @@ function validChain(config: AIConfig, chain: SelectedModel[] | undefined): Testd
     const endpoint = (config.endpoints || []).find(item => (
       item.id === selected.endpointId && item.enabled !== false
     ));
-    if (!endpoint) continue;
+    if (!usableEndpoint(endpoint)) continue;
     identities.push({
       endpointId: endpoint.id,
       endpointName: endpoint.name,
@@ -65,7 +83,9 @@ function candidates(config: AIConfig, role: TestdataModelRole): ResolvedTestdata
     },
     { role, source: 'global', chain: validChain(config, config.selectedModels) },
   ];
-  if (config.apiBaseUrl && config.modelName && config.apiKeyEncrypted) {
+  if (isHttpUrl(config.apiBaseUrl)
+    && config.modelName?.trim()
+    && config.apiKeyEncrypted?.trim()) {
     values.push({
       role,
       source: 'legacy',
@@ -95,10 +115,12 @@ function materializeModels(
   for (const identity of resolution.chain) {
     if (resolution.source === 'legacy') {
       try {
+        const apiKey = decrypt(config.apiKeyEncrypted || '');
+        if (!apiKey.trim()) continue;
         models.push({
           ...identity,
-          apiBaseUrl: config.apiBaseUrl || '',
-          apiKey: decrypt(config.apiKeyEncrypted || ''),
+          apiBaseUrl: config.apiBaseUrl?.trim() || '',
+          apiKey,
           timeoutSeconds: config.timeoutSeconds || 30,
         });
       } catch {
@@ -107,12 +129,14 @@ function materializeModels(
       continue;
     }
     const endpoint = (config.endpoints || []).find(item => item.id === identity.endpointId);
-    if (!endpoint || endpoint.enabled === false) continue;
+    if (!usableEndpoint(endpoint)) continue;
     try {
+      const apiKey = decrypt(endpoint.apiKeyEncrypted);
+      if (!apiKey.trim()) continue;
       models.push({
         ...identity,
-        apiBaseUrl: endpoint.apiBaseUrl,
-        apiKey: decrypt(endpoint.apiKeyEncrypted),
+        apiBaseUrl: endpoint.apiBaseUrl.trim(),
+        apiKey,
         timeoutSeconds: config.timeoutSeconds || 30,
       });
     } catch {

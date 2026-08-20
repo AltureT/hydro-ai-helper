@@ -8,6 +8,7 @@ import type { TestdataFailureCode } from './failures';
 import { TestdataPipelineError } from './failures';
 import {
   parseProblemSpecV1,
+  locateStatementEvidence,
   summarizeProblemSpec,
   validateProblemSpecEvidence,
   validateProblemSpecV1,
@@ -63,6 +64,7 @@ export interface SpecConsensusResult {
     'SPEC_PARSE_FAILED' | 'SPEC_EVIDENCE_NOT_FOUND' | 'SPEC_CONSENSUS_REQUIRED'>;
   results: MultiModelChatResult[];
   rolesUsed: TestdataModelRole[];
+  roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>>;
   safeSummary?: SpecConsensusSafeSummary;
 }
 
@@ -80,21 +82,46 @@ function text(value: string): string {
   return value.trim().replace(/\s+/g, ' ');
 }
 
-function fieldKeys(spec: ProblemSpecV1): Map<string, string> {
-  return new Map(spec.inputFields.map(field => [field.id, text(field.name).toLowerCase()]));
-}
-
-function constraintKeys(spec: ProblemSpecV1): Map<string, string> {
-  return new Map(spec.constraints.map(constraint => [constraint.id, text(constraint.expression)]));
-}
-
-function subtaskScore(spec: ProblemSpecV1, id: number): number | undefined {
-  return spec.subtasks.find(subtask => subtask.id === id)?.score;
+function canonicalReferences<T>(
+  items: T[],
+  key: (item: T) => string | number,
+  prefix: string,
+  structure: (item: T) => unknown,
+): Map<string | number, string> {
+  const occurrences = new Map<string, number>();
+  return new Map(items.map((item, index) => {
+    const signature = JSON.stringify(structure(item));
+    const occurrence = occurrences.get(signature) || 0;
+    occurrences.set(signature, occurrence + 1);
+    return [key(item), `${prefix}:${index}:${occurrence}:${signature}`];
+  }));
 }
 
 function normalizedSpec(spec: ProblemSpecV1): Record<string, unknown> {
-  const fields = fieldKeys(spec);
-  const constraints = constraintKeys(spec);
+  const subtasks = canonicalReferences(
+    spec.subtasks,
+    subtask => subtask.id,
+    'subtask',
+    subtask => ({ score: subtask.score }),
+  );
+  const fields = canonicalReferences(
+    spec.inputFields,
+    field => field.id,
+    'field',
+    field => ({ type: field.type, encoding: text(field.encoding) }),
+  );
+  const constraints = canonicalReferences(
+    spec.constraints,
+    constraint => constraint.id,
+    'constraint',
+    constraint => ({
+      expression: text(constraint.expression),
+      machineCheckable: constraint.machineCheckable,
+      scope: constraint.scope === 'global'
+        ? 'global'
+        : subtasks.get(constraint.scope.subtaskId) || 'missing',
+    }),
+  );
   const sortObjects = <T>(items: T[]): T[] => [...items].sort((left, right) => (
     JSON.stringify(left).localeCompare(JSON.stringify(right))
   ));
@@ -103,21 +130,20 @@ function normalizedSpec(spec: ProblemSpecV1): Record<string, unknown> {
     testCaseMode: spec.testCaseMode.kind === 'single'
       ? { kind: 'single' }
       : { kind: 'counted', countField: fields.get(spec.testCaseMode.countField) || 'missing' },
-    inputFields: sortObjects(spec.inputFields.map(field => ({
-      name: text(field.name).toLowerCase(),
+    inputFields: spec.inputFields.map(field => ({
       type: field.type,
       encoding: text(field.encoding),
       dependsOn: [...(field.dependsOn || [])]
         .map(id => fields.get(id) || 'missing')
         .sort(),
-    }))),
-    constraints: sortObjects(spec.constraints.map(constraint => ({
+    })),
+    constraints: spec.constraints.map(constraint => ({
       expression: text(constraint.expression),
       machineCheckable: constraint.machineCheckable,
       scope: constraint.scope === 'global'
         ? 'global'
-        : { subtaskScore: subtaskScore(spec, constraint.scope.subtaskId) },
-    }))),
+        : subtasks.get(constraint.scope.subtaskId) || 'missing',
+    })),
     invariants: sortObjects(spec.invariants.map(invariant => ({
       kind: invariant.kind,
       expression: text(invariant.expression),
@@ -130,10 +156,10 @@ function normalizedSpec(spec: ProblemSpecV1): Record<string, unknown> {
       preconditions: operation.preconditions.map(text).sort(),
       effects: operation.effects.map(text).sort(),
     }))),
-    subtasks: sortObjects(spec.subtasks.map(subtask => ({
+    subtasks: spec.subtasks.map(subtask => ({
       score: subtask.score,
       constraints: subtask.constraintIds.map(id => constraints.get(id) || 'missing').sort(),
-    }))),
+    })),
     uncertainties: sortObjects(spec.uncertainties.map(uncertainty => ({
       description: text(uncertainty.description),
       ...(uncertainty.evidence !== undefined ? { evidence: text(uncertainty.evidence) } : {}),
@@ -234,25 +260,21 @@ function parseAdjudication(
       );
     }
     for (const resolution of resolutions) {
-      if (!input.snapshot.normalizedMarkdown.includes(resolution.evidenceQuote)) {
-        throw new TestdataPipelineError(
-          '裁决证据无法在完整题面中定位。',
-          'SPEC_EVIDENCE_NOT_FOUND',
-          'spec_consensus',
-          'spec',
-          'manual-review',
-        );
-      }
+      locateStatementEvidence(input.snapshot, { quote: resolution.evidenceQuote });
     }
     const resolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
     const normalizedResolved = normalizedSpec(resolvedSpec);
     for (const resolution of resolutions) {
-      if (resolution.selected === 'new') continue;
       const conflict = conflicts.find(item => item.path === resolution.path);
-      const expected = resolution.selected === 'A'
-        ? conflict?.primaryValue
-        : conflict?.criticValue;
-      if (!conflict || !isDeepStrictEqual(normalizedResolved[resolution.path], expected)) {
+      const actual = normalizedResolved[resolution.path];
+      const matchesA = !!conflict && isDeepStrictEqual(actual, conflict.primaryValue);
+      const matchesB = !!conflict && isDeepStrictEqual(actual, conflict.criticValue);
+      const consistent = resolution.selected === 'A'
+        ? matchesA
+        : resolution.selected === 'B'
+          ? matchesB
+          : !matchesA && !matchesB;
+      if (!conflict || !consistent) {
         throw new TestdataPipelineError(
           '裁决选择与 resolvedSpec 不一致。',
           'SPEC_CONSENSUS_REQUIRED',
@@ -333,6 +355,9 @@ export async function runProblemSpecConsensus(
   const [primary, critic] = await Promise.all([extract(input.primary), extract(input.critic)]);
   const results = [primary.result, critic.result].filter(Boolean) as MultiModelChatResult[];
   const rolesUsed: TestdataModelRole[] = ['specPrimary', 'specCritic'];
+  const roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
+  if (primary.result) roleIdentities.specPrimary = { ...primary.result.usedModel };
+  if (critic.result) roleIdentities.specCritic = { ...critic.result.usedModel };
   if (!primary.spec || !critic.spec) {
     const error = primary.error || critic.error;
     return {
@@ -343,6 +368,7 @@ export async function runProblemSpecConsensus(
       failureCode: failureCode(error),
       results,
       rolesUsed,
+      roleIdentities,
     };
   }
 
@@ -356,6 +382,7 @@ export async function runProblemSpecConsensus(
       resolvedSpec: primary.spec,
       results,
       rolesUsed,
+      roleIdentities,
       safeSummary: safeSummary('consensus', conflicts, 0, rolesUsed, primary.spec),
     };
   }
@@ -368,6 +395,7 @@ export async function runProblemSpecConsensus(
       failureCode: 'SPEC_CONSENSUS_REQUIRED',
       results,
       rolesUsed,
+      roleIdentities,
     };
   }
 
@@ -383,6 +411,7 @@ export async function runProblemSpecConsensus(
       input.callOptions,
     );
     results.push(adjudicatorResult);
+    roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };
     const adjudication = parseAdjudication(adjudicatorResult.content, conflicts, input);
     return {
       status: 'adjudicated',
@@ -393,6 +422,7 @@ export async function runProblemSpecConsensus(
       resolutions: adjudication.resolutions,
       results,
       rolesUsed,
+      roleIdentities,
       safeSummary: safeSummary(
         'adjudicated', conflicts, 0, rolesUsed, adjudication.resolvedSpec,
       ),
@@ -407,6 +437,7 @@ export async function runProblemSpecConsensus(
       failureCode: failureCode(error),
       results,
       rolesUsed,
+      roleIdentities,
     };
   }
 }

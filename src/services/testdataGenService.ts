@@ -62,6 +62,7 @@ import {
 } from './testdata/specConsensus';
 import {
   findTestdataRoleIdentityConflicts,
+  type TestdataModelIdentity,
   type TestdataRoleClients,
 } from './testdata/modelRoles';
 import type { TestdataModelRole } from '../models/aiConfig';
@@ -5623,6 +5624,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
   readonly chatResults: readonly ChatResult[];
   readonly userMessageKey?: string;
   readonly userMessageDetail?: string;
+  readonly failedModelRole?: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'>;
 
   constructor(
     message: string,
@@ -5631,7 +5633,9 @@ export class TestdataGenerationError extends TestdataPipelineError {
     recommendDeeperReasoning = false,
     userMessageKey?: string,
     userMessageDetail?: string,
-    pipelineContext?: Omit<TestdataPipelineErrorContext, 'stage'>,
+    pipelineContext?: Omit<TestdataPipelineErrorContext, 'stage'> & {
+      failedModelRole?: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'>;
+    },
   ) {
     const legacyContract = legacyFailureContract(failureStage);
     const contract = pipelineContext || legacyContract;
@@ -5649,6 +5653,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
     this.chatResults = [...results];
     this.userMessageKey = userMessageKey;
     this.userMessageDetail = userMessageDetail;
+    this.failedModelRole = pipelineContext?.failedModelRole;
     const usedModels = [...new Set(results.map(result =>
       `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
     const lastModel = results[results.length - 1]?.usedModel;
@@ -6082,6 +6087,7 @@ interface ProblemSpecObservation {
   conflictCount: number;
   unresolvedConflictCount: number;
   rolesUsed: TestdataModelRole[];
+  roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>>;
   identityWarningCodes: string[];
   wouldBlock: boolean;
 }
@@ -6134,6 +6140,7 @@ export class TestdataGenService {
   private readonly reliabilityMode: TestdataReliabilityMode;
   private readonly roleClients?: TestdataRoleClients;
   private activeModelTelemetry?: LocalModelTelemetry;
+  private activeRoleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
@@ -6167,30 +6174,8 @@ export class TestdataGenService {
   private async observeProblemSpec(
     params: GenerateTestdataParams,
     snapshot: StatementSnapshot,
-    risk: TestdataRiskAssessment,
   ): Promise<ProblemSpecObservation | undefined> {
     if (this.reliabilityMode === 'legacy') return undefined;
-    const identities = Object.fromEntries(Object.entries(this.roleClients || {}).map(
-      ([role, value]) => [role, value?.identities || (value?.identity ? [value.identity] : [])],
-    ));
-    const identityConflicts = findTestdataRoleIdentityConflicts(identities);
-    const identityWarningCodes = identityConflicts.map(conflict => (
-      conflict.pair === 'spec'
-        ? 'SPEC_ROLE_IDENTITY_CONFLICT'
-        : 'ORACLE_VERIFIER_IDENTITY_CONFLICT'
-    ));
-    if (this.reliabilityMode === 'enforce'
-      && (risk.tier === 'high' || risk.tier === 'blocked')
-      && identityConflicts.length > 0) {
-      throw new TestdataPipelineError(
-        '高风险题目的独立模型角色配置不满足要求。',
-        'SPEC_CONSENSUS_REQUIRED',
-        'spec_consensus',
-        'spec',
-        'manual-review',
-        { identityConflictCount: identityConflicts.length },
-      );
-    }
     const role = (name: Extract<TestdataModelRole,
       'specPrimary' | 'specCritic' | 'adjudicator'>) => ({
       role: name,
@@ -6206,6 +6191,9 @@ export class TestdataGenService {
       adjudicator: role('adjudicator'),
       callOptions: this.getCallOptions(params),
     });
+    Object.assign(this.activeRoleIdentities, consensus.roleIdentities);
+    const identityConflicts = findTestdataRoleIdentityConflicts(consensus.roleIdentities)
+      .filter(conflict => conflict.pair === 'spec');
     return {
       schemaVersion: 1,
       summary: consensus.safeSummary ? {
@@ -6220,7 +6208,8 @@ export class TestdataGenService {
       conflictCount: consensus.conflictCount,
       unresolvedConflictCount: consensus.unresolvedConflictCount,
       rolesUsed: consensus.rolesUsed,
-      identityWarningCodes: [...new Set(identityWarningCodes)],
+      roleIdentities: consensus.roleIdentities,
+      identityWarningCodes: identityConflicts.map(() => 'SPEC_ROLE_IDENTITY_CONFLICT'),
       wouldBlock: identityConflicts.length > 0 || consensus.unresolvedConflictCount > 0,
     };
   }
@@ -6228,6 +6217,7 @@ export class TestdataGenService {
   private attachProblemSpecObservation(
     plan: GenerationPlan,
     observation: ProblemSpecObservation | undefined,
+    risk?: TestdataRiskAssessment,
   ): GenerationPlan {
     if (!observation) return plan;
     plan.specSchemaVersion = observation.schemaVersion;
@@ -6246,10 +6236,20 @@ export class TestdataGenService {
       plan.usedModel = [...new Set([...specModels, ...(plan.usedModel || '').split(' → ').filter(Boolean)])]
         .join(' → ');
     }
-    const warningCodes = [
+    const runtimeIdentityConflicts = findTestdataRoleIdentityConflicts(this.activeRoleIdentities);
+    const runtimeIdentityWarnings = runtimeIdentityConflicts.map(conflict => (
+      conflict.pair === 'spec'
+        ? 'SPEC_ROLE_IDENTITY_CONFLICT'
+        : 'ORACLE_VERIFIER_IDENTITY_CONFLICT'
+    ));
+    const exposeIdentityWarnings = this.reliabilityMode === 'observe'
+      || risk?.tier === 'high'
+      || risk?.tier === 'blocked';
+    const warningCodes = [...new Set([
       ...(observation.failureCode ? [observation.failureCode] : []),
-      ...observation.identityWarningCodes,
-    ];
+      ...(exposeIdentityWarnings ? observation.identityWarningCodes : []),
+      ...(exposeIdentityWarnings ? runtimeIdentityWarnings : []),
+    ])];
     for (const warningCode of warningCodes) {
       const warning = `题意规范观察未通过（${warningCode}）；旧生成流程已继续，请人工复核题意。`;
       if (!plan.notesStructured) {
@@ -6264,7 +6264,9 @@ export class TestdataGenService {
       }
       plan.notes = [plan.notes, warning].filter(Boolean).join('\n');
     }
-    if (observation.wouldBlock && plan.verification) {
+    const wouldBlock = observation.unresolvedConflictCount > 0
+      || (exposeIdentityWarnings && runtimeIdentityConflicts.length > 0);
+    if (wouldBlock && plan.verification) {
       plan.verification.verified = false;
       plan.verification.wouldBlock = true;
     }
@@ -6297,7 +6299,29 @@ export class TestdataGenService {
 
   private clientForRole(role: Extract<TestdataModelRole,
     'oracle' | 'artifacts' | 'verifier'>): MultiModelClient {
-    return this.roleClients?.[role]?.client || this.aiClient;
+    const client = this.roleClients?.[role]?.client || this.aiClient;
+    return {
+      chat: async (...args: Parameters<MultiModelClient['chat']>) => {
+        const result = await client.chat(...args);
+        this.activeRoleIdentities[role] = { ...result.usedModel };
+        return result;
+      },
+    } as MultiModelClient;
+  }
+
+  private assertIndependentRoleIdentities(risk: TestdataRiskAssessment): void {
+    if (this.reliabilityMode !== 'enforce'
+      || (risk.tier !== 'high' && risk.tier !== 'blocked')) return;
+    const conflicts = findTestdataRoleIdentityConflicts(this.activeRoleIdentities);
+    if (conflicts.length === 0) return;
+    throw new TestdataPipelineError(
+      '高风险题目的独立模型角色实际使用了相同模型。',
+      'SPEC_CONSENSUS_REQUIRED',
+      'spec_consensus',
+      'spec',
+      'manual-review',
+      { identityConflictCount: conflicts.length },
+    );
   }
 
   private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
@@ -6365,6 +6389,7 @@ export class TestdataGenService {
 
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
     this.activeModelTelemetry = undefined;
+    this.activeRoleIdentities = {};
     try {
       const snapshot = createStatementSnapshot(params.statementMarkdown);
       return await this.generateInternal({
@@ -6384,9 +6409,10 @@ export class TestdataGenService {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const initialRisk = this.assessRisk(params);
-    const problemSpecObservation = await this.observeProblemSpec(params, snapshot, initialRisk);
+    const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
     this.notifyProblemSpecObservation(params, problemSpecObservation);
     const risk = this.assessRisk(params, (problemSpecObservation?.conflictCount || 0) > 0);
+    this.assertIndependentRoleIdentities(risk);
     if (this.reliabilityMode === 'enforce'
       && (risk.tier === 'high' || risk.tier === 'blocked')
       && (problemSpecObservation?.unresolvedConflictCount || 0) > 0) {
@@ -6445,10 +6471,10 @@ export class TestdataGenService {
       this.emitProgress(params, 'sandbox_check', 5);
       const available = await this.sandboxRunner.isAvailable(params.signal);
       if (available) {
-        const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
+        const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner, risk);
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
         return this.attachRunMetadata(
-          this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation), risk),
+          this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation, risk), risk),
           params,
         );
       }
@@ -6519,7 +6545,7 @@ export class TestdataGenService {
     }
     this.emitProgress(params, 'complete', 100);
     return this.attachRunMetadata(
-      this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation), risk),
+      this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation, risk), risk),
       params,
     );
   }
@@ -6557,9 +6583,10 @@ export class TestdataGenService {
   private async generateSandboxWithSemanticFallback(
     params: GenerateTestdataParams,
     runner: TestdataSandboxRunner,
+    risk = this.assessRisk(params),
   ): Promise<GenerationPlan> {
     try {
-      return await this.generateWithSandbox(params, runner);
+      return await this.generateWithSandbox(params, runner, 1, risk);
     } catch (firstError) {
       if (isCancellation(firstError)
         || !this.semanticModelFallback
@@ -6569,18 +6596,50 @@ export class TestdataGenService {
       }
 
       const lastResult = firstError.chatResults[firstError.chatResults.length - 1];
-      const createFallback = this.aiClient.createClientStartingAfter;
+      const failedRole = this.reliabilityMode === 'legacy'
+        ? undefined
+        : firstError.failedModelRole;
+      const failedClient = failedRole
+        ? this.roleClients?.[failedRole]?.client || this.aiClient
+        : this.aiClient;
+      const createFallback = failedClient.createClientStartingAfter;
       if (!lastResult || typeof createFallback !== 'function') throw firstError;
-      const fallbackClient = createFallback.call(this.aiClient, lastResult.usedModel);
+      const fallbackClient = createFallback.call(failedClient, lastResult.usedModel);
       if (!fallbackClient) throw firstError;
 
+      let fallbackRoleClients = this.roleClients;
+      if (failedRole) {
+        const previousRole = this.roleClients?.[failedRole];
+        const previousIdentities = previousRole?.identities || [];
+        const usedIndex = previousIdentities.findIndex(identity => (
+          identity.endpointId === lastResult.usedModel.endpointId
+          && identity.modelName === lastResult.usedModel.modelName
+        ));
+        const fallbackIdentities = usedIndex >= 0
+          ? previousIdentities.slice(usedIndex + 1)
+          : [];
+        const fallbackIdentity = fallbackIdentities[0] || { ...lastResult.usedModel };
+        fallbackRoleClients = {
+          ...this.roleClients,
+          [failedRole]: {
+            role: failedRole,
+            source: previousRole?.source || 'global',
+            chain: fallbackIdentities,
+            identities: fallbackIdentities,
+            identity: fallbackIdentity,
+            client: fallbackClient,
+          },
+        };
+      }
+
       const fromModel = `${lastResult.usedModel.endpointName}/${lastResult.usedModel.modelName}`;
-      const fallbackService = new TestdataGenService(fallbackClient, {
+      const fallbackService = new TestdataGenService(failedRole ? this.aiClient : fallbackClient, {
         sandboxRunner: runner,
         mode: 'sandbox',
         cppOracleAvailable: this.cppOracleAvailable,
         semanticModelFallback: false,
         reliabilityMode: this.reliabilityMode,
+        roleClients: fallbackRoleClients,
       });
       try {
         this.emitProgress(params, 'model_escalation', 60, 2);
@@ -6590,6 +6649,7 @@ export class TestdataGenService {
           { ...params, checkpoint: undefined },
           runner,
           2,
+          risk,
         );
         const fallbackModels = plan.usedModel ? plan.usedModel.split(' → ').filter(Boolean) : [];
         const toModel = fallbackModels[0] || 'next configured model';
@@ -6637,6 +6697,7 @@ export class TestdataGenService {
               artifact: fallbackError.artifact,
               retryPolicy: finalPolicy,
               safeDetails: fallbackError.safeDetails,
+              failedModelRole: fallbackError.failedModelRole,
             },
           );
         }
@@ -6682,8 +6743,10 @@ export class TestdataGenService {
     const callOptions = this.getCallOptions(params);
 
     this.emitProgress(params, 'blueprint', 12);
-    const artifactsClient = this.clientForRole('artifacts');
-    const initialResult = await artifactsClient.chat(
+    // Task 6 只路由已拆分的 sandbox stages。直出协议仍是同时生成解法、ORACLE
+    // 与外围制品的兼容单体 prompt，Task 7 拆分前必须继续使用场景/base client。
+    const directClient = this.aiClient;
+    const initialResult = await directClient.chat(
       [{ role: 'user', content: userPrompt }],
       systemPrompt,
       callOptions,
@@ -6709,7 +6772,7 @@ export class TestdataGenService {
       this.emitProgress(params, 'pipeline_repair', 62);
       let repairResult;
       try {
-        repairResult = await artifactsClient.chat(
+        repairResult = await directClient.chat(
           [
             { role: 'user', content: userPrompt },
             { role: 'assistant', content: initialResult.content },
@@ -6750,7 +6813,7 @@ export class TestdataGenService {
         this.emitProgress(params, 'templates', 62);
         let repairResult;
         try {
-          repairResult = await artifactsClient.chat(
+          repairResult = await directClient.chat(
             [
               { role: 'user', content: userPrompt },
               { role: 'assistant', content: initialResult.content },
@@ -6882,6 +6945,14 @@ export class TestdataGenService {
           'artifacts_parse',
           results,
           true,
+          undefined,
+          undefined,
+          {
+            code: 'GENERATOR_INVALID_JSON',
+            artifact: 'generator',
+            retryPolicy: 'repair-artifact',
+            failedModelRole: 'artifacts',
+          },
         );
       }
     }
@@ -6946,6 +7017,7 @@ export class TestdataGenService {
             code: 'COVERAGE_REQUIREMENT_MISSING',
             artifact: 'coverage',
             retryPolicy: 'switch-model',
+            failedModelRole: 'verifier',
           },
         );
       }
@@ -6970,6 +7042,7 @@ export class TestdataGenService {
             code: 'COVERAGE_REQUIREMENT_MISSING',
             artifact: 'coverage',
             retryPolicy: 'switch-model',
+            failedModelRole: 'verifier',
           },
         );
       }
@@ -7253,6 +7326,7 @@ export class TestdataGenService {
     params: GenerateTestdataParams,
     runner: TestdataSandboxRunner,
     attempt = 1,
+    risk = this.assessRisk(params),
   ): Promise<GenerationPlan> {
     const report = (stage: TestdataGenerationProgressStage, percent: number) => {
       this.emitProgress(params, stage, this.progressForAttempt(percent, attempt), attempt);
@@ -7411,6 +7485,7 @@ export class TestdataGenService {
             artifact: typedRepairError.artifact,
             retryPolicy: typedRepairError.retryPolicy,
             safeDetails: typedRepairError.safeDetails,
+            failedModelRole: 'oracle',
           },
         );
       }
@@ -7492,6 +7567,15 @@ export class TestdataGenService {
           return state;
         }),
     ]);
+    // 可选 kill-target 与独立 verifier 并发完成，不能让完成顺序决定角色身份。
+    // 独立性门控固定采用最终 Oracle 蓝图调用和独立 verifier 调用的实际模型。
+    if (!checkpoint?.solution && results.length > 0) {
+      this.activeRoleIdentities.oracle = { ...results[results.length - 1].usedModel };
+    }
+    if (!checkpoint?.verifier && verifierResults.length > results.length) {
+      this.activeRoleIdentities.verifier = { ...verifierResults[verifierResults.length - 1].usedModel };
+    }
+    this.assertIndependentRoleIdentities(risk);
     if (checkpoint) {
       // 恢复任务会创建新 job；把命中的旧制品复制到新断点，保证再次中断仍可续跑。
       void this.emitCheckpoint(params, {
@@ -7544,6 +7628,7 @@ export class TestdataGenService {
             {
               code: 'TEMPLATE_COMPILE_FAILED',
               artifact: artifactForTemplateLanguage(stillMissing[0]),
+              failedModelRole: 'artifacts',
             },
           );
         }
@@ -7634,6 +7719,12 @@ export class TestdataGenService {
         );
       }
       const repairScope = repairScopeForPipelineFailure(typedFirstError);
+      let failedModelRole: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'> =
+        isIndependentVerifierScope(repairScope)
+          ? 'verifier'
+          : repairScope === 'oracle'
+            ? 'oracle'
+            : 'artifacts';
       let usedFullRepair = repairScope === 'full';
       report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
       let repairResult;
@@ -7687,6 +7778,7 @@ export class TestdataGenService {
             artifact: typedFirstError.artifact,
             retryPolicy: typedFirstError.retryPolicy,
             safeDetails: typedFirstError.safeDetails,
+            failedModelRole,
           },
         );
       }
@@ -7717,6 +7809,7 @@ export class TestdataGenService {
         } catch (targetedParseError) {
           if (repairScope === 'full' || isIndependentVerifierScope(repairScope)) throw targetedParseError;
           usedFullRepair = true;
+          failedModelRole = 'oracle';
           const fullRepairResult = await oracleClient.chat(
             [
               { role: 'user', content: userPrompt },
@@ -7796,6 +7889,7 @@ export class TestdataGenService {
             artifact: typedRepairError.artifact,
             retryPolicy: finalPolicy,
             safeDetails: typedRepairError.safeDetails,
+            failedModelRole,
           },
         );
       }

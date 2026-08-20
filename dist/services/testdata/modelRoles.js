@@ -6,6 +6,24 @@ exports.createTestdataRoleClientsFromConfig = createTestdataRoleClientsFromConfi
 exports.findTestdataRoleIdentityConflicts = findTestdataRoleIdentityConflicts;
 const crypto_1 = require("../../lib/crypto");
 const openaiClient_1 = require("../openaiClient");
+function isHttpUrl(value) {
+    if (typeof value !== 'string' || !value.trim())
+        return false;
+    try {
+        const parsed = new URL(value.trim());
+        return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname;
+    }
+    catch {
+        return false;
+    }
+}
+function usableEndpoint(endpoint) {
+    return !!endpoint
+        && endpoint.enabled !== false
+        && isHttpUrl(endpoint.apiBaseUrl)
+        && typeof endpoint.apiKeyEncrypted === 'string'
+        && !!endpoint.apiKeyEncrypted.trim();
+}
 function validChain(config, chain) {
     if (!Array.isArray(chain) || chain.length === 0)
         return [];
@@ -15,7 +33,7 @@ function validChain(config, chain) {
             || typeof selected.modelName !== 'string' || !selected.modelName.trim())
             continue;
         const endpoint = (config.endpoints || []).find(item => (item.id === selected.endpointId && item.enabled !== false));
-        if (!endpoint)
+        if (!usableEndpoint(endpoint))
             continue;
         identities.push({
             endpointId: endpoint.id,
@@ -35,7 +53,9 @@ function candidates(config, role) {
         },
         { role, source: 'global', chain: validChain(config, config.selectedModels) },
     ];
-    if (config.apiBaseUrl && config.modelName && config.apiKeyEncrypted) {
+    if (isHttpUrl(config.apiBaseUrl)
+        && config.modelName?.trim()
+        && config.apiKeyEncrypted?.trim()) {
         values.push({
             role,
             source: 'legacy',
@@ -57,10 +77,13 @@ function materializeModels(config, resolution) {
     for (const identity of resolution.chain) {
         if (resolution.source === 'legacy') {
             try {
+                const apiKey = (0, crypto_1.decrypt)(config.apiKeyEncrypted || '');
+                if (!apiKey.trim())
+                    continue;
                 models.push({
                     ...identity,
-                    apiBaseUrl: config.apiBaseUrl || '',
-                    apiKey: (0, crypto_1.decrypt)(config.apiKeyEncrypted || ''),
+                    apiBaseUrl: config.apiBaseUrl?.trim() || '',
+                    apiKey,
                     timeoutSeconds: config.timeoutSeconds || 30,
                 });
             }
@@ -70,13 +93,16 @@ function materializeModels(config, resolution) {
             continue;
         }
         const endpoint = (config.endpoints || []).find(item => item.id === identity.endpointId);
-        if (!endpoint || endpoint.enabled === false)
+        if (!usableEndpoint(endpoint))
             continue;
         try {
+            const apiKey = (0, crypto_1.decrypt)(endpoint.apiKeyEncrypted);
+            if (!apiKey.trim())
+                continue;
             models.push({
                 ...identity,
-                apiBaseUrl: endpoint.apiBaseUrl,
-                apiKey: (0, crypto_1.decrypt)(endpoint.apiKeyEncrypted),
+                apiBaseUrl: endpoint.apiBaseUrl.trim(),
+                apiKey,
                 timeoutSeconds: config.timeoutSeconds || 30,
             });
         }

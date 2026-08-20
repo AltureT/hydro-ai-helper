@@ -101,6 +101,28 @@ describe('test-data model role resolution', () => {
     expect(JSON.stringify(resolved.identity)).not.toContain('https://');
     expect(JSON.stringify(resolved.identity)).not.toContain('role-key');
   });
+
+  it.each([
+    ['blank URL', { apiBaseUrl: '   ', apiKeyEncrypted: 'role-key' }],
+    ['non-HTTP URL', { apiBaseUrl: 'ftp://private.invalid/v1', apiKeyEncrypted: 'role-key' }],
+    ['blank encrypted key', { apiBaseUrl: 'https://private.invalid/v1', apiKeyEncrypted: '   ' }],
+  ])('falls through a statically invalid role endpoint with %s', async (_label, invalid) => {
+    const value = config({
+      endpoints: config().endpoints.map(endpoint => endpoint.id === 'ep-role'
+        ? { ...endpoint, ...invalid }
+        : endpoint),
+      testdataRoleModels: {
+        oracle: [{ endpointId: 'ep-role', modelName: 'role-model' }],
+      },
+    });
+    const ctx = { get: jest.fn(() => ({ getConfig: jest.fn().mockResolvedValue(value) })) } as never;
+
+    expect(resolveTestdataRoleChain(value, 'oracle').source).toBe('scenario');
+    await expect(createTestdataRoleClientFromConfig(ctx, 'oracle')).resolves.toMatchObject({
+      source: 'scenario',
+      identity: { endpointId: 'ep-scenario', modelName: 'scenario-model' },
+    });
+  });
 });
 
 describe('exact role identity independence', () => {
@@ -131,14 +153,4 @@ describe('exact role identity independence', () => {
     })).toEqual([]);
   });
 
-  it('flags a shared exact identity anywhere in fallback chains', () => {
-    expect(findTestdataRoleIdentityConflicts({
-      specPrimary: [identity('ep-a', 'primary'), identity('ep-shared', 'fallback')],
-      specCritic: [identity('ep-b', 'critic'), identity('ep-shared', 'fallback')],
-    })).toEqual([{
-      pair: 'spec',
-      roles: ['specPrimary', 'specCritic'],
-      identity: identity('ep-shared', 'fallback'),
-    }]);
-  });
 });

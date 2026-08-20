@@ -180,9 +180,10 @@ export class AIConfigModel {
   private migrateFromLegacy(legacy: LegacyAIConfig): AIConfig {
     console.log('[AIConfigModel] Migrating AI config to v3...');
 
-    // 如果已有 endpoints，规范化并保留现有数据
-    if (legacy.endpoints && legacy.endpoints.length > 0) {
-      const normalizedEndpoints = legacy.endpoints.map((endpoint, index) => ({
+    // 任何带版本的配置都已经是结构化配置。迁移时必须保留未知/后续字段；
+    // 这里只规范化数组和旧端点缺省值，不能按无版本 legacy 字段重建对象。
+    if (legacy.configVersion) {
+      const normalizedEndpoints = (legacy.endpoints || []).map((endpoint, index) => ({
         id: endpoint.id || randomUUID(),
         name: endpoint.name || `Endpoint ${index + 1}`,
         apiBaseUrl: endpoint.apiBaseUrl || legacy.apiBaseUrl || '',

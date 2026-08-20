@@ -118,6 +118,30 @@ describe('AIConfigModel', () => {
       );
     });
 
+    it('migrates a v2 config with empty endpoints without rebuilding or dropping any fields', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        endpoints: [],
+        selectedModels: [],
+        scenarioModels: {
+          testdataGeneration: [{ endpointId: 'retained-endpoint', modelName: 'retained-model' }],
+        },
+        budgetConfig: { monthlyTokenLimitPerDomain: 456 },
+        systemPromptTemplate: 'keep-empty-endpoints-prompt',
+        extraJailbreakPatternsText: 'keep-empty-endpoints-pattern',
+        futureV2Field: { keep: true },
+      } as AIConfig & { futureV2Field: { keep: boolean } };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig() as AIConfig & { futureV2Field?: { keep: boolean } };
+
+      expect(result).toEqual({ ...v2Config, configVersion: 3 });
+      expect(result.scenarioModels).toEqual(v2Config.scenarioModels);
+      expect(result.budgetConfig).toEqual(v2Config.budgetConfig);
+      expect(result.futureV2Field).toEqual({ keep: true });
+    });
+
     it('should migrate legacy config without endpoints', async () => {
       const legacy = makeLegacyConfig();
       mockCollection.findOne.mockResolvedValue(legacy);
