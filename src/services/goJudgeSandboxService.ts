@@ -231,7 +231,7 @@ function normalizeHost(host: string): string {
 function normalizePythonBatchInput(input: PythonBatchInput): PythonRunInvocation {
   if (typeof input === 'string') return { stdin: input, argv: [] };
   if (!input || typeof input !== 'object') throw new TypeError('Invalid Python invocation');
-  const argv = input.argv || [];
+  const argv = input.argv === undefined ? [] : input.argv;
   if (typeof input.stdin !== 'string' || !Array.isArray(argv) || argv.length > 16) {
     throw new TypeError('Invalid Python invocation');
   }

@@ -129,7 +129,7 @@ function normalizePythonBatchInput(input) {
         return { stdin: input, argv: [] };
     if (!input || typeof input !== 'object')
         throw new TypeError('Invalid Python invocation');
-    const argv = input.argv || [];
+    const argv = input.argv === undefined ? [] : input.argv;
     if (typeof input.stdin !== 'string' || !Array.isArray(argv) || argv.length > 16) {
         throw new TypeError('Invalid Python invocation');
     }

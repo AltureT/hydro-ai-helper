@@ -174,6 +174,10 @@ describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
       { stdin: '', argv: [1] },
       {},
       null,
+      { stdin: '', argv: null },
+      { stdin: '', argv: false },
+      { stdin: '', argv: 0 },
+      { stdin: '', argv: '' },
       { stdin: '', argv: 'not-an-array' },
     ];
 
