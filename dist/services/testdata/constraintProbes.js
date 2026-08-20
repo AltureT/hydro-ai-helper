@@ -541,11 +541,129 @@ function constructStructuralMutation(input, spec, target, fieldId, kind) {
                             && hasDirectedCycle(mutated);
     return isolated ? mutation : 'MUTATION_NOT_ISOLATED';
 }
-function findArgumentBounds(spec, fieldId) {
+function expressionReferencesField(expression, fieldId) {
+    const escaped = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^A-Za-z0-9_.:-])${escaped}($|[^A-Za-z0-9_.:-])`)
+        .test(expression);
+}
+function intersectBounds(current, next) {
+    const min = next.min === undefined
+        ? current.min : current.min === undefined ? next.min : Math.max(current.min, next.min);
+    const max = next.max === undefined
+        ? current.max : current.max === undefined ? next.max : Math.min(current.max, next.max);
+    if ((min !== undefined && !Number.isSafeInteger(min))
+        || (max !== undefined && !Number.isSafeInteger(max))
+        || (min !== undefined && max !== undefined && min > max))
+        return undefined;
+    return {
+        ...(min === undefined ? {} : { min }),
+        ...(max === undefined ? {} : { max }),
+    };
+}
+function resolveArgumentBounds(spec, target, fieldId) {
+    let all = {};
+    let nonTarget = {};
+    let targetBounds;
+    let recognizedCount = 0;
     for (const constraint of spec.constraints) {
+        const applicable = constraint.scope === 'global'
+            || (target.subtaskId !== undefined
+                && constraint.scope.subtaskId === target.subtaskId);
+        if (!applicable)
+            continue;
         const bounds = integerBounds(constraint.expression, fieldId);
-        if (bounds.min !== undefined || bounds.max !== undefined)
-            return bounds;
+        const recognized = bounds.min !== undefined || bounds.max !== undefined;
+        if (!recognized) {
+            if (expressionReferencesField(constraint.expression, fieldId)) {
+                return 'MUTATION_NOT_ISOLATED';
+            }
+            continue;
+        }
+        recognizedCount += 1;
+        const nextAll = intersectBounds(all, bounds);
+        if (!nextAll)
+            return 'MUTATION_NOT_ISOLATED';
+        all = nextAll;
+        if (target.kind === 'constraint' && constraint.id === target.id) {
+            if (targetBounds)
+                return 'MUTATION_NOT_ISOLATED';
+            targetBounds = bounds;
+        }
+        else {
+            const nextNonTarget = intersectBounds(nonTarget, bounds);
+            if (!nextNonTarget)
+                return 'MUTATION_NOT_ISOLATED';
+            nonTarget = nextNonTarget;
+        }
+    }
+    if (recognizedCount === 0)
+        return 'UNSUPPORTED_TARGET';
+    if (target.kind === 'constraint' && !targetBounds)
+        return 'UNSUPPORTED_TARGET';
+    return {
+        all,
+        nonTarget,
+        ...(targetBounds ? { target: targetBounds } : {}),
+    };
+}
+function valueSatisfiesBounds(value, bounds) {
+    return Number.isSafeInteger(value)
+        && (bounds.min === undefined || value >= bounds.min)
+        && (bounds.max === undefined || value <= bounds.max);
+}
+function findMissingValue(present, original, bounds) {
+    const preferred = [original + 1, original - 1, bounds.min, bounds.max, 0]
+        .filter((value) => Number.isSafeInteger(value));
+    const direct = preferred.find(value => valueSatisfiesBounds(value, bounds)
+        && !present.has(value));
+    if (direct !== undefined)
+        return direct;
+    const orderedPresent = [...present]
+        .filter(value => valueSatisfiesBounds(value, bounds))
+        .sort((left, right) => left - right);
+    if (bounds.min !== undefined) {
+        let candidate = bounds.min;
+        for (const value of orderedPresent) {
+            if (value < candidate)
+                continue;
+            if (value > candidate)
+                break;
+            candidate += 1;
+            if (!Number.isSafeInteger(candidate))
+                return undefined;
+        }
+        if (valueSatisfiesBounds(candidate, bounds) && !present.has(candidate))
+            return candidate;
+    }
+    if (bounds.max !== undefined) {
+        let candidate = bounds.max;
+        for (let index = orderedPresent.length - 1; index >= 0; index--) {
+            const value = orderedPresent[index];
+            if (value > candidate)
+                continue;
+            if (value < candidate)
+                break;
+            candidate -= 1;
+            if (!Number.isSafeInteger(candidate))
+                return undefined;
+        }
+        if (valueSatisfiesBounds(candidate, bounds) && !present.has(candidate))
+            return candidate;
+    }
+    return undefined;
+}
+function findTargetViolation(target, nonTarget) {
+    if (target.max !== undefined && target.max < Number.MAX_SAFE_INTEGER) {
+        const candidate = Math.max(target.max + 1, nonTarget.min ?? Number.MIN_SAFE_INTEGER);
+        if (valueSatisfiesBounds(candidate, nonTarget)
+            && !valueSatisfiesBounds(candidate, target))
+            return candidate;
+    }
+    if (target.min !== undefined && target.min > Number.MIN_SAFE_INTEGER) {
+        const candidate = Math.min(target.min - 1, nonTarget.max ?? Number.MAX_SAFE_INTEGER);
+        if (valueSatisfiesBounds(candidate, nonTarget)
+            && !valueSatisfiesBounds(candidate, target))
+            return candidate;
     }
     return undefined;
 }
@@ -678,11 +796,11 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
     const argumentIndex = operationArgumentIndex(spec, selectedName, fieldId);
     if (argumentIndex === undefined)
         return 'INVALID_RECIPE';
-    const bounds = findArgumentBounds(spec, fieldId);
-    if (!bounds)
-        return 'UNSUPPORTED_TARGET';
-    const inBounds = (value) => ((bounds.min === undefined || value >= bounds.min)
-        && (bounds.max === undefined || value <= bounds.max));
+    const resolvedBounds = resolveArgumentBounds(spec, target, fieldId);
+    if (typeof resolvedBounds === 'string')
+        return resolvedBounds;
+    const bounds = resolvedBounds.all;
+    const inBounds = (value) => valueSatisfiesBounds(value, bounds);
     if (operations.some(operation => {
         const index = operationArgumentIndex(spec, operation.name, fieldId);
         return index === undefined || !inBounds(operation.arguments[index]);
@@ -726,9 +844,7 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
             if (!before)
                 continue;
             const original = operations[index].arguments[argumentIndex];
-            const candidates = [original + 1, bounds.min, bounds.max]
-                .filter((value) => Number.isSafeInteger(value));
-            const missing = candidates.find(value => inBounds(value) && !before.has(value));
+            const missing = findMissingValue(before, original, bounds);
             if (missing !== undefined) {
                 targetIndex = index;
                 replacement = missing;
@@ -737,16 +853,12 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
         }
     }
     else {
-        const targetBounds = integerBounds(target.expression, fieldId);
-        if (targetBounds.max === undefined && targetBounds.min === undefined) {
+        const targetBounds = resolvedBounds.target;
+        if (!targetBounds)
             return 'UNSUPPORTED_TARGET';
-        }
         targetIndex = operations.findIndex(operation => operation.name === selectedName);
         if (targetIndex >= 0) {
-            replacement = targetBounds.max !== undefined
-                ? targetBounds.max + 1 : targetBounds.min - 1;
-            if (!Number.isSafeInteger(replacement))
-                return 'UNSUPPORTED_TARGET';
+            replacement = findTargetViolation(targetBounds, resolvedBounds.nonTarget);
         }
     }
     if (targetIndex < 0 || replacement === undefined)
@@ -760,10 +872,11 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
         return 'MUTATION_NOT_ISOLATED';
     if (kind === 'operation-argument-out-of-range') {
         const mutatedValue = mutatedOperations[targetIndex]?.arguments[argumentIndex];
-        const targetBounds = integerBounds(target.expression, fieldId);
+        const targetBounds = resolvedBounds.target;
         const violatesTarget = (targetBounds.min !== undefined && mutatedValue < targetBounds.min)
             || (targetBounds.max !== undefined && mutatedValue > targetBounds.max);
-        return violatesTarget ? mutation : 'MUTATION_NOT_ISOLATED';
+        return violatesTarget && valueSatisfiesBounds(mutatedValue, resolvedBounds.nonTarget)
+            ? mutation : 'MUTATION_NOT_ISOLATED';
     }
     const violations = statefulViolations(spec, mutatedOperations, fieldId);
     return violations && violations.length === 1

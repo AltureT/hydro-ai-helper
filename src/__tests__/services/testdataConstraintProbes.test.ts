@@ -534,6 +534,159 @@ describe('stateful operation and scoped constructions', () => {
     })]);
     expect(result.gaps).toEqual([]);
   });
+
+  it('intersects every applicable argument range before choosing a missing object', () => {
+    const { spec, recipe } = operationSpec('delete-missing-object');
+    spec.constraints.push({
+      id: 'C_NARROW',
+      expression: '1 <= x <= 2',
+      machineCheckable: false,
+      scope: 'global',
+      evidence: { quote: '1 <= x <= 2' },
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '2\nADD 2\nDEL 2\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      constructionKind: 'delete-missing-object',
+      input: '2\nADD 2\nDEL 1\n',
+    })]);
+    expect(result.gaps).toEqual([]);
+  });
+
+  it('returns a bounded gap when every in-range object is already present', () => {
+    const { spec, recipe } = operationSpec('delete-missing-object');
+    spec.constraints.push({
+      id: 'C_NARROW',
+      expression: '1 <= x <= 2',
+      machineCheckable: false,
+      scope: 'global',
+      evidence: { quote: '1 <= x <= 2' },
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '3\nADD 1\nADD 2\nDEL 2\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'I1', targetKind: 'invariant', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]);
+  });
+
+  it('returns a bounded gap for conflicting applicable argument ranges', () => {
+    const { spec, recipe } = operationSpec('delete-missing-object');
+    spec.constraints.push({
+      id: 'C_CONFLICT',
+      expression: '20 <= x <= 30',
+      machineCheckable: false,
+      scope: 'global',
+      evidence: { quote: '20 <= x <= 30' },
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '2\nADD 2\nDEL 2\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'I1', targetKind: 'invariant', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]);
+  });
+
+  it('returns a bounded gap for an ambiguous applicable argument range', () => {
+    const { spec, recipe } = operationSpec('delete-missing-object');
+    spec.constraints.push({
+      id: 'C_AMBIGUOUS',
+      expression: '1 <= x <= limit',
+      machineCheckable: false,
+      scope: 'global',
+      evidence: { quote: '1 <= x <= limit' },
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '2\nADD 2\nDEL 2\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'I1', targetKind: 'invariant', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]);
+  });
+
+  it('does not violate a non-target range for an argument-range probe', () => {
+    const { spec, recipe } = operationSpec('operation-argument-out-of-range');
+    spec.constraints.push({
+      id: 'C2',
+      expression: '1 <= x <= 10',
+      machineCheckable: false,
+      scope: 'global',
+      evidence: { quote: '1 <= x <= 10' },
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '2\nADD 1\nDEL 1\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'C1', targetKind: 'constraint', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]);
+  });
+
+  it('intersects only global and matching-subtask argument ranges', () => {
+    const { spec, recipe } = operationSpec('operation-argument-out-of-range');
+    spec.constraints[0].scope = { subtaskId: 1 };
+    spec.constraints.push(
+      {
+        id: 'C_GLOBAL',
+        expression: '0 <= x <= 20',
+        machineCheckable: false,
+        scope: 'global',
+        evidence: { quote: '0 <= x <= 20' },
+      },
+      {
+        id: 'C_OTHER',
+        expression: 'x <= 10',
+        machineCheckable: false,
+        scope: { subtaskId: 2 },
+        evidence: { quote: 'x <= 10' },
+      },
+    );
+    spec.subtasks = [
+      { id: 1, score: 50, constraintIds: ['C1'] },
+      { id: 2, score: 50, constraintIds: ['C_OTHER'] },
+    ];
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, subtaskId: 1, input: '2\nADD 1\nDEL 1\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      targetId: 'C1', subtaskId: 1, input: '2\nADD 11\nDEL 1\n',
+    })]);
+    expect(result.gaps).toEqual([]);
+  });
 });
 
 describe('construction coverage deduplication and gaps', () => {
