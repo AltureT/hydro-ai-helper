@@ -32,6 +32,7 @@ const domainHelper_1 = require("../utils/domainHelper");
 const mongo_1 = require("../utils/mongo");
 const testdataGenerationJob_1 = require("../models/testdataGenerationJob");
 const runTelemetry_1 = require("../services/testdata/runTelemetry");
+const pipelineContext_1 = require("../services/testdata/pipelineContext");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
 function normalizeCheckerPath(filename) {
@@ -496,6 +497,12 @@ function serializeGenerationPlan(plan) {
     const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, problemSpec: _serverOnlyProblemSpec, primarySpec: _serverOnlyPrimarySpec, criticSpec: _serverOnlyCriticSpec, resolvedSpec: _serverOnlyResolvedSpec, specConflicts: _serverOnlySpecConflicts, adjudication: _serverOnlyAdjudication, ...clientPlan } = plan;
     return clientPlan;
 }
+function generationPlanForJobStorage(plan) {
+    // Runtime endpoint/model identity is needed only long enough to derive the
+    // keyed telemetry hash. It must not become durable Job state.
+    const { modelTelemetry: _runtimeOnlyModelTelemetry, ...storedPlan } = plan;
+    return storedPlan;
+}
 function serializeGenerationJob(job) {
     return {
         id: String(job._id),
@@ -562,6 +569,16 @@ async function runBackgroundGeneration(params) {
     let checkpointWrites = Promise.resolve();
     let checkpointRevision = 0;
     const checkpointPayload = {};
+    let checkpointMetadata = {};
+    if (checkpoint?.checkpointSchemaVersion === testdataGenerationJob_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+        checkpointMetadata = {
+            checkpointSchemaVersion: checkpoint.checkpointSchemaVersion,
+            promptVersion: checkpoint.promptVersion,
+            statementHash: checkpoint.statementHash,
+            specHash: checkpoint.specHash,
+            roleDependencies: checkpoint.roleDependencies,
+        };
+    }
     for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
         if (checkpoint?.[key] !== undefined)
             checkpointPayload[key] = checkpoint[key];
@@ -571,15 +588,26 @@ async function runBackgroundGeneration(params) {
             for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
                 delete checkpointPayload[key];
             }
+            checkpointMetadata = {};
         }
         else {
             for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
                 if (update[key] !== undefined)
                     checkpointPayload[key] = update[key];
             }
+            if (update.checkpointSchemaVersion === testdataGenerationJob_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+                checkpointMetadata = {
+                    checkpointSchemaVersion: update.checkpointSchemaVersion,
+                    promptVersion: update.promptVersion,
+                    statementHash: update.statementHash,
+                    specHash: update.specHash,
+                    roleDependencies: update.roleDependencies,
+                };
+            }
         }
         const envelope = {
             revision: ++checkpointRevision,
+            ...checkpointMetadata,
             ...checkpointPayload,
         };
         checkpointWrites = checkpointWrites
@@ -644,7 +672,7 @@ async function runBackgroundGeneration(params) {
         if (ac.signal.aborted) {
             throw Object.assign(new Error('canceled'), { name: 'AbortError' });
         }
-        const saved = await jobModel.complete(job._id, plan);
+        const saved = await jobModel.complete(job._id, generationPlanForJobStorage(plan));
         if (!saved)
             return;
         emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
@@ -1051,6 +1079,9 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                         problemId: pdoc.pid || String(pdoc.docId),
                         createdBy: this.user?._id,
                         ...checkpointHashes,
+                        checkpointSchemaVersion: testdataGenerationJob_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+                        promptVersion: pipelineContext_1.TESTDATA_PIPELINE_PROMPT_VERSION,
+                        allowV1: (0, risk_1.getTestdataReliabilityMode)() === 'legacy',
                     });
                 }
                 catch {

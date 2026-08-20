@@ -4,6 +4,7 @@ jest.mock('../../utils/ensureObjectId', () => ({
 
 import {
   TestdataGenerationJobModel,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
   TESTDATA_JOB_LEASE_MS,
   TESTDATA_JOB_RETENTION_MS,
   TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
@@ -184,6 +185,7 @@ describe('TestdataGenerationJobModel', () => {
       createdBy: createParams.createdBy,
       optionsHash: 'options',
       statementHash: 'statement',
+      allowV1: true,
     };
     expect(selectTestdataResumeCheckpoint(job, expected)).toBe(checkpoint);
     for (const mismatch of [
@@ -200,6 +202,69 @@ describe('TestdataGenerationJobModel', () => {
       expect(selectTestdataResumeCheckpoint({ ...job, ...mismatch } as never, expected))
         .toBeUndefined();
     }
+  });
+
+  it('识别 v1 但只有显式 legacy 回滚路径可以复用', () => {
+    const checkpoint = {
+      revision: 1,
+      optionsHash: 'options',
+      statementHash: 'statement',
+      solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' },
+    };
+    const job = {
+      ...createParams,
+      status: 'interrupted' as const,
+      checkpoint,
+    };
+    const expected = {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      optionsHash: 'options',
+      statementHash: 'statement',
+    };
+
+    expect(selectTestdataResumeCheckpoint(job, expected)).toBeUndefined();
+    expect(selectTestdataResumeCheckpoint(job, { ...expected, allowV1: true })).toBe(checkpoint);
+  });
+
+  it('v2 仅在 schema、prompt、statement、spec 与 options 全部一致时恢复', () => {
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v2',
+      revision: 7,
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { oracle: 'b'.repeat(64), verifier: 'c'.repeat(64) },
+      solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' },
+    };
+    const job = { ...createParams, status: 'interrupted' as const, checkpoint };
+    const expected = {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v2',
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+    };
+
+    expect(selectTestdataResumeCheckpoint(job, expected)).toBe(checkpoint);
+    for (const mismatch of [
+      { checkpointSchemaVersion: 1 },
+      { promptVersion: 'testdata-generation-v3' },
+      { optionsHash: 'other' },
+      { statementHash: 'other' },
+      { specHash: 'd'.repeat(64) },
+    ]) {
+      expect(selectTestdataResumeCheckpoint(job, { ...expected, ...mismatch } as never))
+        .toBeUndefined();
+    }
+    expect(JSON.stringify(checkpoint.roleDependencies)).not.toContain('endpointId');
   });
 
   it('checkpoint envelope 字段超限时丢弃该字段及所有下游字段', () => {
@@ -295,6 +360,7 @@ describe('TestdataGenerationJobModel', () => {
       createdBy: createParams.createdBy,
       optionsHash: 'options',
       statementHash: 'statement',
+      allowV1: true,
     });
     expect(restored?.solution?.solutions).toEqual(solutions);
   });
@@ -349,7 +415,7 @@ describe('TestdataGenerationJobModel', () => {
     const { model, collection } = createModel();
     const plan = {
       runId: '11111111-1111-4111-8111-111111111111',
-      promptVersion: 'testdata-generation-v1',
+      promptVersion: 'testdata-generation-v2',
       originalFileHashes: {},
       problemType: 'traditional' as const,
       files: [],

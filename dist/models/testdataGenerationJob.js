@@ -7,13 +7,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenerationJobModel = exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = void 0;
+exports.TestdataGenerationJobModel = exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = exports.TESTDATA_CHECKPOINT_SCHEMA_VERSION = void 0;
 exports.computeTestdataCheckpointHashes = computeTestdataCheckpointHashes;
 exports.filterTestdataCheckpointUpdate = filterTestdataCheckpointUpdate;
 exports.selectTestdataResumeCheckpoint = selectTestdataResumeCheckpoint;
 const node_crypto_1 = require("node:crypto");
 const js_yaml_1 = __importDefault(require("js-yaml"));
 const ensureObjectId_1 = require("../utils/ensureObjectId");
+const pipelineContext_1 = require("../services/testdata/pipelineContext");
+var pipelineContext_2 = require("../services/testdata/pipelineContext");
+Object.defineProperty(exports, "TESTDATA_CHECKPOINT_SCHEMA_VERSION", { enumerable: true, get: function () { return pipelineContext_2.TESTDATA_CHECKPOINT_SCHEMA_VERSION; } });
 const runTelemetry_1 = require("../services/testdata/runTelemetry");
 exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = 256 * 1024;
 function normalizeForStableJson(value) {
@@ -75,12 +78,21 @@ function computeTestdataCheckpointHashes(options, statementMarkdown, context = {
                 headers: checkerHeaders,
             },
         }))),
-        statementHash: sha256(statementMarkdown),
+        statementHash: sha256(normalizeTextForHash(statementMarkdown)),
     };
 }
 /** MongoDB 单文档安全边界：任一制品过大时同时丢弃它与所有下游制品，禁止混代复用。 */
 function filterTestdataCheckpointUpdate(update) {
-    const filtered = { revision: update.revision };
+    const filtered = {
+        revision: update.revision,
+        ...(update.checkpointSchemaVersion === pipelineContext_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION ? {
+            checkpointSchemaVersion: pipelineContext_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+            promptVersion: update.promptVersion,
+            statementHash: update.statementHash,
+            specHash: update.specHash,
+            roleDependencies: update.roleDependencies,
+        } : {}),
+    };
     const keys = [
         'solution',
         'artifacts',
@@ -110,16 +122,32 @@ function filterTestdataCheckpointUpdate(update) {
 function selectTestdataResumeCheckpoint(job, expected) {
     if (!job?.checkpoint || job.status !== 'interrupted')
         return undefined;
-    if (!Number.isSafeInteger(job.checkpoint.revision) || job.checkpoint.revision < 1
+    const checkpoint = job.checkpoint;
+    const isV2 = checkpoint.checkpointSchemaVersion === pipelineContext_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION;
+    if (!isV2 && !expected.allowV1)
+        return undefined;
+    if (!Number.isSafeInteger(checkpoint.revision) || checkpoint.revision < 1
         || job.domainId !== expected.domainId
         || job.problemDocId !== expected.problemDocId
         || job.problemId !== expected.problemId
         || job.createdBy !== expected.createdBy
-        || job.checkpoint.optionsHash !== expected.optionsHash
-        || job.checkpoint.statementHash !== expected.statementHash) {
+        || checkpoint.optionsHash !== expected.optionsHash
+        || checkpoint.statementHash !== expected.statementHash) {
         return undefined;
     }
-    return job.checkpoint;
+    if (!isV2)
+        return checkpoint;
+    if ((expected.checkpointSchemaVersion !== undefined
+        && expected.checkpointSchemaVersion !== checkpoint.checkpointSchemaVersion)
+        || (expected.promptVersion !== undefined && expected.promptVersion !== checkpoint.promptVersion)
+        || (expected.specHash !== undefined && expected.specHash !== checkpoint.specHash)
+        || typeof checkpoint.promptVersion !== 'string'
+        || !/^[a-f0-9]{64}$/.test(checkpoint.specHash || '')
+        || Object.values(checkpoint.roleDependencies || {})
+            .some(value => !/^[a-f0-9]{64}$/.test(value || ''))) {
+        return undefined;
+    }
+    return checkpoint;
 }
 exports.TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
 exports.TESTDATA_JOB_LEASE_MS = 90 * 1000;

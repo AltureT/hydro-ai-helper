@@ -28,9 +28,13 @@ import { TestdataPipelineError } from '../../services/testdata/failures';
 import { ObjectId } from '../../utils/mongo';
 import {
   TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
   computeTestdataCheckpointHashes,
 } from '../../models/testdataGenerationJob';
-import { computeOriginalFileHashes } from '../../services/testdata/runTelemetry';
+import {
+  computeOriginalFileHashes,
+} from '../../services/testdata/runTelemetry';
+import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../../services/testdata/pipelineContext';
 
 jest.mock('../../services/testdata/modelRoles', () => ({
   createTestdataRoleClientsFromConfig: jest.fn().mockResolvedValue({}),
@@ -1115,6 +1119,7 @@ describe('Testdata generation background jobs', () => {
       problemType: 'traditional',
       files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
       caseCount: 1,
+      modelTelemetry: { role: 'primary', identity: 'endpoint-secret-id/private-model' },
     };
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);
@@ -1137,7 +1142,13 @@ describe('Testdata generation background jobs', () => {
       }));
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
-      expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+      expect(jobModel.complete).toHaveBeenCalledWith(job._id, {
+        problemType: 'traditional',
+        files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
+        caseCount: 1,
+      });
+      expect(JSON.stringify(jobModel.complete.mock.calls[0][1]))
+        .not.toContain('endpoint-secret-id');
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -1174,7 +1185,7 @@ describe('Testdata generation background jobs', () => {
     };
     const plan = {
       runId: job.runId,
-      promptVersion: 'testdata-generation-v1',
+      promptVersion: 'testdata-generation-v2',
       originalFileHashes: {},
       problemType: 'traditional',
       files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
@@ -1333,7 +1344,7 @@ describe('Testdata generation background jobs', () => {
       .mockResolvedValue({} as never);
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
       runId: job.runId,
-      promptVersion: 'testdata-generation-v1',
+      promptVersion: 'testdata-generation-v2',
       originalFileHashes: {},
       problemType: 'traditional',
       files: [],
@@ -1522,6 +1533,10 @@ describe('Testdata generation background jobs', () => {
     const checkpoint = {
       revision: 2,
       ...computeTestdataCheckpointHashes(options, PROBLEM_DOC.content),
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      specHash: 'a'.repeat(64),
+      roleDependencies: { oracle: 'b'.repeat(64) },
       solution: {
         problemType: 'traditional' as const,
         oracleCode: 'print(input())',
@@ -1604,6 +1619,11 @@ describe('Testdata generation background jobs', () => {
         }),
         {
           revision: 1,
+          checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+          promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+          statementHash: checkpoint.statementHash,
+          specHash: checkpoint.specHash,
+          roleDependencies: checkpoint.roleDependencies,
           solution: checkpoint.solution,
           killTargets: [],
         },
@@ -1617,6 +1637,11 @@ describe('Testdata generation background jobs', () => {
         }),
         {
           revision: 2,
+          checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+          promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+          statementHash: checkpoint.statementHash,
+          specHash: checkpoint.specHash,
+          roleDependencies: checkpoint.roleDependencies,
           solution: checkpoint.solution,
           artifacts: { generatorCode: 'print(1)' },
           killTargets: [],
@@ -1733,7 +1758,7 @@ describe('Testdata generation background jobs', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         originalFileHashes: { '1.in': 'a'.repeat(64) },
         modelTelemetry: { role: 'fallback', identity: 'endpoint-id/private-model' },
         specSchemaVersion: 1,
@@ -2112,7 +2137,7 @@ describe('TestdataGenApplyHandler', () => {
       active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional',
         files: originalFiles,
         caseCount: 1,
@@ -2176,7 +2201,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2234,7 +2259,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2285,7 +2310,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2328,7 +2353,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2373,7 +2398,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional',
         files: [
           { name: '1.in', content: '1\n', kind: 'case-in' },
@@ -2496,7 +2521,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional',
         files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
         caseCount: 1,

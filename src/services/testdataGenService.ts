@@ -55,6 +55,7 @@ import {
 } from './testdata/statementSamples';
 import {
   type ProblemSpecSummary,
+  type ProblemSpecV1,
 } from './testdata/problemSpec';
 import {
   runProblemSpecConsensus,
@@ -72,16 +73,25 @@ import {
   type StatementSnapshot,
 } from './testdata/statementSnapshot';
 import {
+  assertProblemSpecUnchanged,
+  createTestdataPipelineContext,
+  hashTestdataRoleIdentity,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+  TESTDATA_PIPELINE_PROMPT_VERSION,
+  type TestdataPipelineContext,
+} from './testdata/pipelineContext';
+import {
+  buildFrozenInputEncodingBlock,
+  buildFrozenProblemSpecBlock,
+  buildFrozenStatementEvidenceBlock,
+} from './testdata/pipelinePrompts';
+import {
   TemplateVerificationError,
   verifySelectedTemplates,
   type TemplateChecks,
   type TemplateOutputAdjudicator,
 } from './testdata/templateVerifier';
-import {
-  TESTDATA_PROMPT_VERSION,
-  computeOriginalFileHashes,
-  createTestdataRunId,
-} from './testdata/runTelemetry';
+import { computeOriginalFileHashes, createTestdataRunId } from './testdata/runTelemetry';
 
 export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
 
@@ -148,6 +158,16 @@ export const SUPPORTED_TEMPLATE_LANGS: readonly TemplateLang[] = ['py', 'java', 
 
 /** 函数题各评测语言对应的学生提交形式参考解。 */
 export type TemplateSolutions = Partial<Record<TemplateLang, string>>;
+
+/** Task 7 的只读学生接口；保留已验证源码，避免不可靠的跨语言签名猜测。 */
+export interface FunctionInterfaceContract {
+  version: 1;
+  functionName?: string;
+  entries: Array<{
+    language: TemplateLang;
+    source: string;
+  }>;
+}
 
 /** 生成选项（来自前端表单） */
 export interface GenerateOptions {
@@ -1457,6 +1477,7 @@ function buildCoverageGuidanceBlock(
 export function buildTestdataUserPrompt(
   params: BuildUserPromptParams,
   coverageOverride?: Array<CoverageSlot | SubtaskCaseAllocation>,
+  context?: TestdataPipelineContext,
 ): string {
   const { problemTitle, statementMarkdown, options, existingFiles, fillInDetected } = params;
   const kindText = {
@@ -1475,6 +1496,47 @@ export function buildTestdataUserPrompt(
   const requiredTemplateSections = options.languages.map(l => `@@@TEMPLATE:${l}@@@`).join('、');
   const coveragePlan = coverageOverride
     ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
+
+  if (context) {
+    const lines = [
+      buildFrozenProblemSpecBlock(context),
+      '',
+      buildFrozenStatementEvidenceBlock(context),
+      '',
+      buildFrozenInputEncodingBlock(context),
+      '',
+      '【公开题面样例】',
+      ...(context.statement.samples.length > 0
+        ? context.statement.samples.flatMap(sample => [
+          `样例 ${sample.id} 输入：${JSON.stringify(comparableFileContent(sample.input))}`,
+          `样例 ${sample.id} 输出：${JSON.stringify(comparableFileContent(sample.output))}`,
+        ])
+        : ['题面未解析到公开样例。']),
+      '',
+      '【兼容直出要求】',
+      `- 题型：${context.spec.problemKind}`,
+      `- Hydro 测试点数量：${options.caseCount} 个独立文件对。`,
+      `- 数据规模策略：${DATA_SCALE_TEXT[options.dataScale || 'auto']}`,
+      `- 函数题模板语言：${options.languages.map(language => LANG_DISPLAY[language]).join('、') || '无'}`,
+      '- frozen ProblemSpec 是唯一机器题意契约；不得通过 ANALYSIS、STD、CASE 或 TEMPLATE 改写它。',
+      '- 公开题面只用于实现 frozen Spec；不得据此重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。',
+      '- ANALYSIS 只面向教师说明，不得成为其他机器阶段的输入。',
+      buildCoverageGuidanceBlock(coveragePlan),
+    ];
+    if (options.providedStd?.trim()) {
+      lines.push(
+        '',
+        options.providedStdSource === 'accepted-record'
+          ? '【历史 AC 候选解（不是权威，不得改变 Spec）】'
+          : '【教师提供的标准答案（不得改变 Spec）】',
+        '```',
+        options.providedStd.trim(),
+        '```',
+      );
+    }
+    lines.push('', '请严格按照 System 中约定的分节标记格式输出，不要输出 JSON 外壳。');
+    return lines.join('\n');
+  }
 
   const statement = completeStatementForGenerationPrompt(statementMarkdown);
 
@@ -1522,7 +1584,10 @@ export function buildTestdataUserPrompt(
 }
 
 /** 第一阶段：把模型注意力集中在题意、stdin 编码和正确算法上。 */
-export function buildSolutionBlueprintSystemPrompt(cppOracleAvailable = false): string {
+export function buildSolutionBlueprintSystemPrompt(
+  cppOracleAvailable = false,
+  frozenSpec = false,
+): string {
   const oracleRule = cppOracleAvailable
     ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
     : '2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。';
@@ -1532,10 +1597,13 @@ export function buildSolutionBlueprintSystemPrompt(cppOracleAvailable = false): 
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（与 ORACLE_LANG 一致）'
     : '完整 Python 3 标程';
+  const specRule = frozenSpec
+    ? '1. FROZEN_PROBLEM_SPEC 是唯一机器题意契约；只实现它，不得重新决定或修改 stdin 编码、题型、输出策略、子任务或引用关系。ANALYSIS 仅面向教师解释。'
+    : '1. 先确定唯一、语言无关的原始 stdin 编码，并在 ANALYSIS 中逐行说明输入、输出、约束、算法正确性理由与复杂度。';
   return `你是一位资深 OJ 算法审核专家。本阶段只解决题目并输出可执行标程，不生成测试数据、输入生成器、暴力解、校验器或多语言模板。
 
 核心规则：
-1. 先确定唯一、语言无关的原始 stdin 编码，并在 ANALYSIS 中逐行说明输入、输出、约束、算法正确性理由与复杂度。
+${specRule}
 ${oracleRule}
 3. 函数题仍要在 ORACLE 内包含完整实现与 stdin 驱动，并为用户选定的每种语言额外输出 SOLUTION:语言：与学生提交形式一致的函数或类定义，不含读输入和打印。未带语言的旧 SOLUTION 仅兼容 Python。
 4. 若函数题题面包含样例，必须输出 SAMPLE_INPUTS，把每个题面展示参数转换为 ANALYSIS 确定的原始 stdin；只转换输入，id 不得遗漏或增加。
@@ -1570,8 +1638,37 @@ ${oracleDescription}
 各节使用原文分节，不要代码围栏、JSON 外壳或额外解释。`;
 }
 
-export function buildSolutionBlueprintUserPrompt(params: BuildUserPromptParams): string {
+export function buildSolutionBlueprintUserPrompt(
+  params: BuildUserPromptParams,
+  context?: TestdataPipelineContext,
+): string {
   const { problemTitle, statementMarkdown, options, fillInDetected } = params;
+  if (context) {
+    const lines = [
+      buildFrozenProblemSpecBlock(context),
+      '',
+      buildFrozenStatementEvidenceBlock(context),
+      '',
+      '【本阶段解题要求】',
+      '- frozen ProblemSpec 是唯一机器题意契约；不得改变题型、testCaseMode、stdin encoding、outputPolicy、subtasks 或引用关系。',
+      '- ANALYSIS 仅面向教师解释，不得定义或覆盖任何机器语义。',
+      `- 填空题模式：${options.fillInMode || 'auto'}${fillInDetected ? '（规则初判为疑似填空）' : ''}`,
+      `- 函数题学生解语言：${options.languages.join(', ') || '无'}`,
+      '- 只编写 ORACLE 与函数题学生接口实现；测试点和验证制品由隔离角色生成。',
+    ];
+    if (options.providedStd?.trim()) {
+      lines.push(
+        '',
+        options.providedStdSource === 'accepted-record'
+          ? '【历史 AC 候选解（必须独立验证，不得据此修改 Spec）】'
+          : '【教师提供的标准答案（不得据此修改 Spec）】',
+        '```',
+        options.providedStd.trim(),
+        '```',
+      );
+    }
+    return lines.join('\n');
+  }
   const kindText = {
     auto: '自动判断（根据题面）',
     traditional: '传统题（标准输入输出）',
@@ -1622,8 +1719,11 @@ export function buildSolutionBlueprintUserPrompt(params: BuildUserPromptParams):
 }
 
 /** 第二阶段：在已验证解法固定后生成输入与函数题驱动模板。 */
-export function buildGenerationArtifactsSystemPrompt(): string {
-  return `你是一位 OJ 测试数据工程师。题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
+export function buildGenerationArtifactsSystemPrompt(frozenSpec = false): string {
+  const sourceContract = frozenSpec
+    ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；你看不到且不得请求 ORACLE 或自由文本 analysis。函数题会提供已经验证的 SOLUTION:<lang> 只读学生接口源码，仅用于生成调用它的模板。'
+    : '题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。';
+  return `你是一位 OJ 测试数据工程师。${sourceContract}本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
 
 核心规则：
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
@@ -1631,7 +1731,7 @@ export function buildGenerationArtifactsSystemPrompt(): string {
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
 4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
-6. 不得输出 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
+6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
@@ -1653,8 +1753,8 @@ export function buildGenerationArtifactsUserPrompt(
   params: BuildUserPromptParams,
   solution: SandboxSolutionBlueprint,
   coverageOverride?: Array<CoverageSlot | SubtaskCaseAllocation>,
+  context?: TestdataPipelineContext,
 ): string {
-  const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
   const coveragePlan = coverageOverride ?? (() => {
     const tiered = resolveTieredSubtaskGeneration({
       caseCount: params.options.caseCount,
@@ -1666,6 +1766,38 @@ export function buildGenerationArtifactsUserPrompt(
       ? tiered.allocations
       : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
   })();
+  if (context) {
+    const functionInterface = solution.problemType === 'function'
+      ? buildFunctionInterfaceContract(solution, params.options.languages)
+      : undefined;
+    return [
+      buildFrozenProblemSpecBlock(context),
+      '',
+      buildFrozenInputEncodingBlock(context),
+      '',
+      '【学生接口】',
+      `problemType: ${context.spec.problemKind}`,
+      solution.functionName ? `functionName: ${solution.functionName}` : '',
+      `languages: ${params.options.languages.join(', ') || '无'}`,
+      `parameters: ${context.spec.inputFields.map(field => `${field.id}:${field.type}`).join(', ') || '无'}`,
+      ...(functionInterface ? [
+        '',
+        '【FunctionInterfaceContract（只读；不得在响应中输出或改写）】',
+        `version: ${functionInterface.version}`,
+        ...functionInterface.entries.map(entry => (
+          `SOLUTION:${entry.language}（已验证的只读学生接口源码；仅用于确认精确签名与调用方式）：\n${entry.source}`
+        )),
+      ] : []),
+      '',
+      '【生成要求】',
+      `- 恰好生成 ${params.options.caseCount} 个独立测试点。`,
+      `- 数据规模策略：${DATA_SCALE_TEXT[params.options.dataScale || 'auto']}`,
+      '- 只输出 GENERATOR 与函数题 TEMPLATE；不得输出或推断 ORACLE、SOLUTION、BRUTE、VALIDATOR。',
+      '- 不得重新解释算法规范，不得改变 frozen Spec 的任何字段。',
+      buildCoverageGuidanceBlock(coveragePlan),
+    ].filter(Boolean).join('\n');
+  }
+  const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
   const base = buildTestdataUserPrompt(
     params,
     coveragePlan,
@@ -1693,7 +1825,10 @@ export function buildGenerationArtifactsUserPrompt(
  * 兼容性/定向修复协议：初始生成已拆为解题与外围制品两阶段；当沙箱定位到
  * 具体失败节时仍可用该完整协议只替换目标分节。
  */
-export function buildSandboxBlueprintSystemPrompt(cppOracleAvailable = false): string {
+export function buildSandboxBlueprintSystemPrompt(
+  cppOracleAvailable = false,
+  frozenSpec = false,
+): string {
   const oracleRule = cppOracleAvailable
     ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
     : '5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。';
@@ -1703,9 +1838,13 @@ export function buildSandboxBlueprintSystemPrompt(cppOracleAvailable = false): s
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（stdin → stdout，与 ORACLE_LANG 一致）'
     : '完整 Python 3 标程（stdin → stdout，正解算法）';
+  const frozenRule = frozenSpec
+    ? '0. FROZEN_PROBLEM_SPEC 是唯一机器题意契约。以下通用默认值只在不与 Spec 冲突时适用；不得修改 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或引用关系，ANALYSIS 仅面向教师。\n'
+    : '';
   return `你是一位资深 OJ 出题与测试数据专家。请根据题面输出一份可在 Hydro go-judge 中执行的测试数据生成蓝图。
 
 核心规则：
+${frozenRule}\
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，向 stdout 只打印一个 JSON 对象：{"cases":[{"label":"设计意图","input":"原始标准输入"}]}。cases 数量必须与用户要求完全一致；不得打印日志或 Markdown。
 2. GENERATOR 只生成 .in，不生成答案。input 必须是程序真实读取的原始 stdin，禁止 s = "101"、k = 2、arr = [1,2] 等源码赋值写法。
 3. ACM/传统题：每个 input 是一份独立完整的输入文件。若题面首行是 T，默认每个文件固定 T=1，并紧跟恰好一组完整数据；只有教师明确要求批处理时才使用 T>1。
@@ -1768,8 +1907,12 @@ export function buildSandboxBlueprintUserPrompt(
  */
 export function buildIndependentVerifierSystemPrompt(
   stressCaseCount = TESTDATA_GEN_LIMITS.STRESS_CASES,
+  frozenSpec = false,
 ): string {
-  return `你是一位独立的 OJ 题目验证专家。你只根据题面与已经确定的 stdin 编码，编写与正解实现隔离的验证制品。你看不到 ORACLE 源码，也不得猜测、复述或要求它。
+  const sourceContract = frozenSpec
+    ? '你只根据 FROZEN_PROBLEM_SPEC 与完整公开题面证据编写与正解实现隔离的验证制品。Spec 是唯一结构契约；题面仅用于实现它，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。'
+    : '你只根据题面与已经确定的 stdin 编码，编写与正解实现隔离的验证制品。';
+  return `你是一位独立的 OJ 题目验证专家。${sourceContract}你看不到 ORACLE 源码，也不得猜测、复述或要求它。
 
 核心规则：
 1. BRUTE 必须是自包含 Python 3 完整程序，读取一份原始 stdin 并输出题目答案。使用最朴素、最容易审查的枚举/模拟算法，不追求大规模性能，不得省略任何输出格式细节。
@@ -1797,7 +1940,31 @@ exists 或 none
 export function buildIndependentVerifierUserPrompt(
   params: BuildUserPromptParams,
   blueprint: Pick<SandboxGenerationBlueprint, 'problemType' | 'functionName' | 'analysis'>,
+  context?: TestdataPipelineContext,
 ): string {
+  if (context) {
+    const functionSamples = context.spec.problemKind === 'function'
+      ? context.statement.samples
+      : [];
+    return [
+      buildFrozenProblemSpecBlock(context),
+      '',
+      buildFrozenStatementEvidenceBlock(context),
+      '',
+      buildFrozenInputEncodingBlock(context),
+      blueprint.functionName ? `【学生函数名】${blueprint.functionName}` : '',
+      '',
+      functionSamples.length > 0 ? '【公开题面样例】' : '',
+      ...functionSamples.flatMap(sample => [
+        `样例 ${sample.id} 展示输入：${JSON.stringify(comparableFileContent(sample.input))}`,
+        `样例 ${sample.id} 公开输出：${JSON.stringify(comparableFileContent(sample.output))}`,
+      ]),
+      '',
+      '只依据 frozen ProblemSpec 与完整公开题面证据生成独立 BRUTE、STRESS_GENERATOR 与 VALIDATOR。',
+      '不得要求或推断 ORACLE 源码、ORACLE analysis、正确解推理过程或模型裁决私有理由。',
+      `请生成恰好 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据，并严格按要求输出验证分节。`,
+    ].filter(Boolean).join('\n');
+  }
   const statement = completeStatementForGenerationPrompt(params.statementMarkdown);
   const functionSamples = blueprint.problemType === 'function'
     ? extractStatementSamples(params.statementMarkdown)
@@ -1830,8 +1997,11 @@ export function buildIndependentVerifierUserPrompt(
 }
 
 /** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
-export function buildKillTargetsSystemPrompt(): string {
-  return `你是一位 OJ 错误解分析专家。请根据题面与既有解法分析，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
+export function buildKillTargetsSystemPrompt(frozenSpec = false): string {
+  const sourceContract = frozenSpec
+    ? '请只根据 FROZEN_PROBLEM_SPEC、完整公开题面证据与公开样例；题面仅用于实现 Spec，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用'
+    : '请根据题面与既有解法分析';
+  return `你是一位 OJ 错误解分析专家。${sourceContract}，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
 
 从以下菜单中挑选最多 2 种现实中学生确实可能犯的不同错误模式，每种输出一个完整错误解；如果题目过于简单、不存在有区分价值的现实错误模式，允许只输出 1 个甚至 0 个分节，不要硬凑：
 - boundary：边界或退化情形处理错误，例如 n=1、全相等、空结构。
@@ -1854,7 +2024,28 @@ export function buildKillTargetsUserPrompt(input: {
   statement: string;
   analysis: string;
   samples: SampleIO[];
+  context?: TestdataPipelineContext;
+  correctSolutionCode?: string;
 }): string {
+  if (input.context) {
+    const samples = input.samples.slice(0, 3);
+    return [
+      buildFrozenProblemSpecBlock(input.context),
+      '',
+      buildFrozenStatementEvidenceBlock(input.context),
+      '',
+      '【公开题面样例（最多 3 组，错误解必须全部通过）】',
+      ...(samples.length > 0
+        ? samples.flatMap((sample, index) => [
+          `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
+          `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+        ])
+        : ['题面未解析到公开样例。']),
+      '',
+      '只依据 frozen ProblemSpec、完整公开题面证据与公开样例选择最多 2 个典型错误模式。',
+      '不得请求或推断 ORACLE 源码、ORACLE analysis、正确解源码/推理过程或模型裁决私有理由。',
+    ].join('\n');
+  }
   const statement = completeStatementForGenerationPrompt(input.statement);
   const analysis = input.analysis.slice(0, 2000);
   const samples = input.samples.slice(0, 3);
@@ -1881,7 +2072,11 @@ export function buildKillTargetsUserPrompt(input: {
 export function buildKillTargetPromptSamples(
   solution: Pick<SandboxSolutionBlueprint, 'problemType' | 'functionSampleInputs'>,
   statementSamples: StatementSample[],
+  context?: TestdataPipelineContext,
 ): SampleIO[] {
+  if (context) {
+    return statementSamples.map(sample => ({ input: sample.input, output: sample.output }));
+  }
   if (solution.problemType !== 'function') {
     return statementSamples.map(sample => ({ input: sample.input, output: sample.output }));
   }
@@ -1904,7 +2099,9 @@ export function buildHackCasesSystemPrompt(): string {
 1. 每个输入必须符合既定 stdin 编码与题面约束，且不超过 2000 字符。
 2. 只构造容易人工复核的小规模输入，不生成大规模性能数据，不填写或猜测输出。
 3. 优先构造能直接触发所述错误模式的最小反例、边界组合与退化结构。
-4. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
+4. 若用户消息包含 FROZEN_PROBLEM_SPEC 与完整公开题面证据，题面仅用于实现 Spec；不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。
+5. 不得请求或推断 ORACLE 源码、ORACLE analysis、正确解源码/推理过程或模型裁决私有理由。
+6. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
 === HACK_CASE ===
 RATIONALE: 一句话说明该输入为何可能卡掉错误解
 \`\`\`text
@@ -1915,7 +2112,25 @@ RATIONALE: 一句话说明该输入为何可能卡掉错误解
 export function buildHackCasesUserPrompt(input: {
   analysis: string;
   target: KillTarget;
+  context?: TestdataPipelineContext;
 }): string {
+  if (input.context) {
+    return [
+      buildFrozenProblemSpecBlock(input.context),
+      '',
+      buildFrozenStatementEvidenceBlock(input.context),
+      '',
+      buildFrozenInputEncodingBlock(input.context),
+      '',
+      '【幸存错误模式】',
+      input.target.description,
+      '',
+      '【幸存错误解（最多 6000 字符）】',
+      input.target.code.slice(0, 6000),
+      '',
+      '该错误解通过了全部现有数据。只依据 frozen ProblemSpec 与完整公开题面证据构造 2 至 3 个小规模定向补刀输入。',
+    ].join('\n');
+  }
   return [
     '【既有解法与 stdin 编码分析】',
     input.analysis.slice(0, 3000) || '未提供额外分析，请依据错误模式构造合法小规模输入。',
@@ -2133,6 +2348,25 @@ function normalizeTemplateSolutions(
   };
 }
 
+export function buildFunctionInterfaceContract(
+  solution: Pick<SandboxSolutionBlueprint, 'functionName' | 'solutions' | 'solutionCode'>,
+  languages: readonly TemplateLang[],
+): FunctionInterfaceContract {
+  const solutions = normalizeTemplateSolutions(solution);
+  const missing = languages.filter(language => !solutions[language]?.trim());
+  if (missing.length > 0) {
+    throw new Error(`Artifacts 缺少已验证的只读学生接口：${missing.join('、')}`);
+  }
+  return {
+    version: 1,
+    functionName: solution.functionName,
+    entries: languages.map(language => ({
+      language,
+      source: solutions[language] as string,
+    })),
+  };
+}
+
 function normalizeSolutionBlueprintCompatibility(
   blueprint: SandboxSolutionBlueprint,
 ): SandboxSolutionBlueprint {
@@ -2153,6 +2387,36 @@ function normalizeReusableCheckpoint(
     && options.languages.some(language => !solution.solutions?.[language]?.trim())
   ) return undefined;
   return { ...checkpoint, solution };
+}
+
+function reusableCheckpointForContext(
+  checkpoint: TestdataGenerationCheckpointPayload | undefined,
+  options: GenerateOptions,
+  reliabilityMode: TestdataReliabilityMode,
+  context?: TestdataPipelineContext,
+): TestdataGenerationCheckpointPayload | undefined {
+  if (reliabilityMode === 'legacy') return normalizeReusableCheckpoint(checkpoint, options);
+  if (!checkpoint || !context
+    || checkpoint.checkpointSchemaVersion !== TESTDATA_CHECKPOINT_SCHEMA_VERSION
+    || checkpoint.promptVersion !== context.promptVersion
+    || checkpoint.statementHash !== context.statement.statementHash
+    || checkpoint.specHash !== context.specHash) {
+    return undefined;
+  }
+  const dependencies = checkpoint.roleDependencies || {};
+  if (Object.values(dependencies).some(value => !/^[a-f0-9]{64}$/.test(value || ''))
+    || (checkpoint.solution && !dependencies.oracle)
+    || (checkpoint.artifacts && !dependencies.artifacts)
+    || ((checkpoint.verifier || checkpoint.killTargets) && !dependencies.verifier)) {
+    return undefined;
+  }
+  if ((context.risk.tier === 'high' || context.risk.tier === 'blocked')
+    && (!dependencies.oracle
+      || !dependencies.verifier
+      || dependencies.oracle === dependencies.verifier)) {
+    return undefined;
+  }
+  return normalizeReusableCheckpoint(checkpoint, options);
 }
 
 function assertSelectedTemplateSolutions(
@@ -2505,7 +2769,7 @@ export function parseGenerationArtifacts(
   if (sections.length === 0) throw new Error('AI 未返回外围制品分节标记');
   const forbidden = sections.find(section => {
     const kind = section.header.split(':')[0].trim().toUpperCase();
-    return ['ORACLE', 'SOLUTION', 'BRUTE', 'STRESS_GENERATOR', 'VALIDATOR', 'CASE'].includes(kind);
+    return !['GENERATOR', 'TEMPLATE', 'NOTES'].includes(kind);
   });
   if (forbidden) {
     throw new Error(`第二阶段外围制品包含禁止的 ${forbidden.header} 分节`);
@@ -5221,7 +5485,7 @@ export function assemblePlan(
 
   return {
     runId: createTestdataRunId(),
-    promptVersion: TESTDATA_PROMPT_VERSION,
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
     originalFileHashes: computeOriginalFileHashes(files.map(file => ({
       name: file.name,
       content: normalizeFileContent(file.content),
@@ -5456,7 +5720,7 @@ export function buildSkeletonPlan(
 
   return {
     runId: createTestdataRunId(),
-    promptVersion: TESTDATA_PROMPT_VERSION,
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
     originalFileHashes: computeOriginalFileHashes(files.map(file => ({
       name: file.name,
       content: normalizeFileContent(file.content),
@@ -5625,6 +5889,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
   readonly userMessageKey?: string;
   readonly userMessageDetail?: string;
   readonly failedModelRole?: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'>;
+  readonly requiresIsolatedRegeneration: boolean;
 
   constructor(
     message: string,
@@ -5635,6 +5900,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
     userMessageDetail?: string,
     pipelineContext?: Omit<TestdataPipelineErrorContext, 'stage'> & {
       failedModelRole?: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'>;
+      requiresIsolatedRegeneration?: boolean;
     },
   ) {
     const legacyContract = legacyFailureContract(failureStage);
@@ -5654,6 +5920,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
     this.userMessageKey = userMessageKey;
     this.userMessageDetail = userMessageDetail;
     this.failedModelRole = pipelineContext?.failedModelRole;
+    this.requiresIsolatedRegeneration = pipelineContext?.requiresIsolatedRegeneration === true;
     const usedModels = [...new Set(results.map(result =>
       `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
     const lastModel = results[results.length - 1]?.usedModel;
@@ -5771,7 +6038,22 @@ export function buildSandboxRepairPrompt(
     ? repairScopeForPipelineFailure(error)
     : 'full',
   coveragePlan?: Array<CoverageSlot | SubtaskCaseAllocation>,
+  context?: TestdataPipelineContext,
 ): string {
+  if (context) {
+    return [
+      buildFrozenProblemSpecBlock(context),
+      '',
+      buildFrozenInputEncodingBlock(context),
+      '',
+      '【冻结修复门禁】',
+      '- 本次只修复失败制品；不得修改或重新解释 frozen ProblemSpec。',
+      '- problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 与约束/不变量引用关系必须保持不变。',
+      '- 如果失败只能通过修改 Spec 解决，停止输出制品并报告需要回到 Spec 共识阶段。',
+      '',
+      buildSandboxRepairPrompt(error, options, scope, coveragePlan),
+    ].join('\n');
+  }
   const templates = options.languages.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、') || '（传统题无需模板）';
   const detail = (error instanceof Error ? error.message : String(error)).slice(0, 1600);
   const coverage = buildCoverageGuidanceBlock(coveragePlan);
@@ -5789,9 +6071,8 @@ ${coverage ? `\n${coverage}\n` : ''}
   if (scope === 'validator') {
     return `你上一条蓝图的输入校验阶段未通过 Hydro 沙箱验证：
 ${detail}
-${coverage ? `\n${coverage}\n` : ''}
 
-请同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@。先严格依据题面判断是生成输入非法，还是校验器错误地拒绝了合法输入，再修正对应实现；不要通过放弃题面约束、删除校验器或让校验器无条件成功来绕过验证。每个 input 的 UTF-8 内容必须小于 256KB，全部 .in/.out 与辅助文件合计必须小于 1MB。不要输出其他分节、代码围栏或说明文字。`;
+请只输出修复后的 @@@VALIDATOR@@@。GENERATOR 与 frozen ProblemSpec 已验证并保持不变；不得通过放弃题面约束、删除校验器或让校验器无条件成功来迁就现有输入。不要输出其他分节、代码围栏或说明文字。`;
   }
   if (scope === 'stress-generator') {
     return `独立验证器的 STRESS_GENERATOR 未通过沙箱验证：
@@ -5833,10 +6114,10 @@ ${detail}
         : undefined;
   if (templateLanguage) {
     const display = LANG_DISPLAY[templateLanguage];
-    return `你上一条蓝图的 ${display} 学生解与模板组合未通过验证：
+    return `你上一条蓝图的 ${display} 模板组合未通过验证：
 ${detail}
 
-请只输出同步修复后的 @@@SOLUTION:${templateLanguage}@@@ 与 @@@TEMPLATE:${templateLanguage}@@@。两者必须沿用原有 GENERATOR 的 stdin 编码，组合运行后的输出与 ORACLE 完全一致。不要输出其他分节或代码围栏。`;
+请只输出修复后的 @@@TEMPLATE:${templateLanguage}@@@。已验证学生解与 frozen stdin encoding 必须保持不变；模板只负责解析输入、调用既有学生接口并打印结果。不要输出 SOLUTION、其他分节或代码围栏。`;
   }
   return `你上一条生成蓝图未通过 Hydro 沙箱验证：
 ${detail}
@@ -5855,7 +6136,19 @@ ${coverage ? `\n${coverage}\n` : ''}
 export function buildIndependentVerifierRepairPrompt(
   error: unknown,
   expectedFunctionSamples: StatementSample[] = [],
+  context?: TestdataPipelineContext,
 ): string {
+  if (context) {
+    return [
+      buildFrozenProblemSpecBlock(context),
+      '',
+      buildFrozenInputEncodingBlock(context),
+      '',
+      '只修复独立验证制品；不得从 ORACLE、analysis 或正确解推理中推断语义，不得修改 frozen Spec。',
+      '',
+      buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples),
+    ].join('\n');
+  }
   const detail = (error instanceof Error ? error.message : String(error)).slice(0, 1600);
   const sampleRequirement = expectedFunctionSamples.length > 0
     ? `\n5. 必须额外输出 @@@SAMPLE_INPUTS@@@，恰好包含题面样例 id：${expectedFunctionSamples.map(sample => sample.id).join('、')}；只转换 input，不填写 output。`
@@ -5895,19 +6188,18 @@ export function mergeSandboxBlueprintRepair(
     ...(Object.keys(solutions).length > 0 ? { solutions, solutionCode: solutions.py } : {}),
     templates: original.templates ? { ...original.templates } : undefined,
   };
-  if (scope === 'generator' || scope === 'validator') {
+  if (scope === 'generator') {
     const generatorCode = repairSectionContent(sections, 'GENERATOR');
     if (!generatorCode) throw new Error('AI 定向修复未返回 GENERATOR');
     merged.generatorCode = generatorCode;
+  } else if (scope === 'validator') {
     const validatorCode = repairSectionContent(sections, 'VALIDATOR');
-    if (scope === 'validator' && !validatorCode) throw new Error('AI 输入校验修复未返回 VALIDATOR');
-    if (validatorCode) merged.validatorCode = validatorCode;
+    if (!validatorCode) throw new Error('AI 输入校验修复未返回 VALIDATOR');
+    merged.validatorCode = validatorCode;
   } else if (scope === 'oracle') {
     const oracleCode = repairSectionContent(sections, 'ORACLE');
     if (!oracleCode) throw new Error('AI 定向修复未返回 ORACLE');
     merged.oracleCode = oracleCode;
-    const bruteCode = repairSectionContent(sections, 'BRUTE');
-    if (bruteCode) merged.bruteCode = bruteCode;
   } else if (scope === 'brute') {
     const bruteCode = repairSectionContent(sections, 'BRUTE');
     if (!bruteCode) throw new Error('AI 定向修复未返回 BRUTE');
@@ -5916,13 +6208,10 @@ export function mergeSandboxBlueprintRepair(
     const language: TemplateLang = scope === 'template-java' ? 'java'
       : scope === 'template-cc' ? 'cc'
         : 'py';
-    const solutionCode = repairSectionContent(sections, `SOLUTION:${language}`);
     const templateCode = repairSectionContent(sections, `TEMPLATE:${language}`);
-    if (!solutionCode || !templateCode) {
-      throw new Error(`AI 定向修复必须同时返回 SOLUTION:${language} 与 TEMPLATE:${language}`);
+    if (!templateCode) {
+      throw new Error(`AI 定向修复必须返回 TEMPLATE:${language}`);
     }
-    merged.solutions = { ...merged.solutions, [language]: solutionCode };
-    merged.solutionCode = merged.solutions.py;
     merged.templates = { ...merged.templates, [language]: templateCode };
   }
   return merged;
@@ -6045,6 +6334,11 @@ export interface GenerateTestdataParams {
 }
 
 export interface TestdataGenerationCheckpointPayload {
+  checkpointSchemaVersion?: typeof TESTDATA_CHECKPOINT_SCHEMA_VERSION;
+  promptVersion?: string;
+  statementHash?: string;
+  specHash?: string;
+  roleDependencies?: Partial<Record<TestdataModelRole, string>>;
   solution?: SandboxSolutionBlueprint;
   artifacts?: SandboxGenerationArtifacts;
   verifier?: IndependentVerifierBlueprint;
@@ -6079,6 +6373,8 @@ interface GenerationArtifactsCallState {
 
 interface ProblemSpecObservation {
   schemaVersion: 1;
+  /** Request-local final consensus only; never attached to plan, telemetry, or Job metadata. */
+  resolvedSpec?: ProblemSpecV1;
   summary?: ProblemSpecSummary;
   failureCode?: Extract<TestdataFailureCode,
     'SPEC_PARSE_FAILED' | 'SPEC_EVIDENCE_NOT_FOUND' | 'SPEC_CONSENSUS_REQUIRED'>;
@@ -6092,8 +6388,59 @@ interface ProblemSpecObservation {
   wouldBlock: boolean;
 }
 
+function frozenSubtasks(context: TestdataPipelineContext): SubtaskSpec[] {
+  const constraints = new Map(context.spec.constraints.map(constraint => [
+    constraint.id,
+    constraint.expression,
+  ]));
+  return context.spec.subtasks.map(subtask => ({
+    id: subtask.id,
+    score: subtask.score,
+    constraints: subtask.constraintIds
+      .map(constraintId => constraints.get(constraintId) || constraintId)
+      .join('; '),
+  }));
+}
+
+export function bindBlueprintToFrozenProblemSpec<
+  T extends Pick<SandboxSolutionBlueprint, 'problemType' | 'subtasks'>,
+>(blueprint: T, context?: TestdataPipelineContext): T {
+  if (!context) return blueprint;
+  assertProblemSpecUnchanged(context);
+  if (blueprint.problemType !== context.spec.problemKind) {
+    throw new TestdataPipelineError(
+      '生成制品试图改变 frozen ProblemSpec 的 problemKind。',
+      'SPEC_PARSE_FAILED',
+      'spec_consensus',
+      'spec',
+      'rerun-spec',
+    );
+  }
+  return {
+    ...blueprint,
+    subtasks: frozenSubtasks(context),
+  };
+}
+
+function assertDirectResponseMatchesFrozenProblemSpec(
+  response: Pick<GenerationResponse, 'problemType'>,
+  context?: TestdataPipelineContext,
+): void {
+  if (!context) return;
+  assertProblemSpecUnchanged(context);
+  if (response.problemType !== context.spec.problemKind) {
+    throw new TestdataPipelineError(
+      '直出响应试图改变 frozen ProblemSpec 的 problemKind。',
+      'SPEC_PARSE_FAILED',
+      'spec_consensus',
+      'spec',
+      'rerun-spec',
+    );
+  }
+}
+
 function checkpointSolutionFromBlueprint(
-  blueprint: SandboxGenerationBlueprint,
+  blueprint: SandboxSolutionBlueprint,
 ): SandboxSolutionBlueprint {
   return {
     problemType: blueprint.problemType,
@@ -6141,6 +6488,8 @@ export class TestdataGenService {
   private readonly roleClients?: TestdataRoleClients;
   private activeModelTelemetry?: LocalModelTelemetry;
   private activeRoleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
+  private restoredRoleDependencies: Partial<Record<TestdataModelRole, string>> = {};
+  private activePipelineContext?: TestdataPipelineContext;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
@@ -6196,6 +6545,7 @@ export class TestdataGenService {
       .filter(conflict => conflict.pair === 'spec');
     return {
       schemaVersion: 1,
+      resolvedSpec: consensus.resolvedSpec,
       summary: consensus.safeSummary ? {
         statementHash: consensus.safeSummary.statementHash,
         constraintCount: consensus.safeSummary.constraintCount,
@@ -6334,9 +6684,41 @@ export class TestdataGenService {
     );
   }
 
+  private assertCheckpointRoleIndependence(
+    risk: TestdataRiskAssessment,
+    checkpoint?: TestdataGenerationCheckpointPayload,
+  ): void {
+    if (this.reliabilityMode !== 'enforce'
+      || (risk.tier !== 'high' && risk.tier !== 'blocked')
+      || !checkpoint?.roleDependencies) return;
+    const dependencyHash = (role: 'oracle' | 'verifier') => {
+      const identity = this.activeRoleIdentities[role];
+      return identity
+        ? hashTestdataRoleIdentity(`${identity.endpointId}\0${identity.modelName}`)
+        : undefined;
+    };
+    const freshOracle = dependencyHash('oracle');
+    const freshVerifier = dependencyHash('verifier');
+    // A fresh call for a role replaces that role's restored provenance. Only retain
+    // checkpoint hashes for roles that remain restored in the current run.
+    const restoredOracle = freshOracle ? undefined : checkpoint.roleDependencies.oracle;
+    const restoredVerifier = freshVerifier ? undefined : checkpoint.roleDependencies.verifier;
+    if ((restoredOracle && freshVerifier && restoredOracle === freshVerifier)
+      || (restoredVerifier && freshOracle && restoredVerifier === freshOracle)) {
+      throw new TestdataPipelineError(
+        '高风险题目的恢复制品与新生成独立角色实际使用了相同模型。',
+        'SPEC_CONSENSUS_REQUIRED',
+        'spec_consensus',
+        'spec',
+        'manual-review',
+        { identityConflictCount: 1 },
+      );
+    }
+  }
+
   private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
     plan.runId = params.runId || plan.runId || createTestdataRunId();
-    plan.promptVersion = TESTDATA_PROMPT_VERSION;
+    plan.promptVersion = TESTDATA_PIPELINE_PROMPT_VERSION;
     plan.originalFileHashes = computeOriginalFileHashes(plan.files.map(file => ({
       name: file.name,
       content: normalizeFileContent(file.content),
@@ -6389,7 +6771,32 @@ export class TestdataGenService {
     update: TestdataGenerationCheckpointPayload | null,
   ): Promise<void> {
     try {
-      const pending = params.onCheckpoint?.(update);
+      if (update === null) this.restoredRoleDependencies = {};
+      const context = this.activePipelineContext;
+      const freshRoleDependencies = context ? Object.fromEntries([
+        ...Object.entries(context.roleIdentities),
+        ...Object.entries(this.activeRoleIdentities).map(([role, identity]) => [
+          role,
+          identity ? `${identity.endpointId}\0${identity.modelName}` : undefined,
+        ]),
+      ].flatMap(([role, identity]) => (
+        typeof identity === 'string' && identity
+          ? [[role, hashTestdataRoleIdentity(identity)]]
+          : []
+      ))) : undefined;
+      const roleDependencies = context ? {
+        ...this.restoredRoleDependencies,
+        ...freshRoleDependencies,
+      } : undefined;
+      const checkpointUpdate = update && context ? {
+        ...update,
+        checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+        promptVersion: context.promptVersion,
+        statementHash: context.statement.statementHash,
+        specHash: context.specHash,
+        roleDependencies,
+      } : update;
+      const pending = params.onCheckpoint?.(checkpointUpdate);
       return Promise.resolve(pending).catch(() => undefined);
     } catch {
       // 断点只用于降低中断重试成本，持久化失败不能改变生成结果。
@@ -6400,10 +6807,13 @@ export class TestdataGenService {
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
     this.activeModelTelemetry = undefined;
     this.activeRoleIdentities = {};
+    this.restoredRoleDependencies = {};
+    this.activePipelineContext = undefined;
     try {
       const snapshot = createStatementSnapshot(params.statementMarkdown);
       return await this.generateInternal({
         ...params,
+        runId: params.runId || createTestdataRunId(),
         statementMarkdown: snapshot.normalizedMarkdown,
       }, snapshot);
     } catch (error) {
@@ -6422,6 +6832,42 @@ export class TestdataGenService {
     const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
     this.notifyProblemSpecObservation(params, problemSpecObservation);
     const risk = this.assessRisk(params, (problemSpecObservation?.conflictCount || 0) > 0);
+    if (this.reliabilityMode === 'enforce' && !problemSpecObservation?.resolvedSpec) {
+      throw new TestdataPipelineError(
+        'enforce 模式缺少有效 frozen ProblemSpec，已安全停止生成。',
+        problemSpecObservation?.failureCode || 'SPEC_PARSE_FAILED',
+        'spec_consensus',
+        'spec',
+        problemSpecObservation?.failureCode === 'SPEC_CONSENSUS_REQUIRED'
+          ? 'manual-review'
+          : 'rerun-spec',
+        {
+          conflictCount: problemSpecObservation?.conflictCount || 0,
+          unresolvedConflictCount: problemSpecObservation?.unresolvedConflictCount || 0,
+        },
+      );
+    }
+    const pipelineContext = problemSpecObservation?.resolvedSpec
+      ? createTestdataPipelineContext({
+        runId: params.runId || createTestdataRunId(),
+        promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+        statement: snapshot,
+        spec: problemSpecObservation.resolvedSpec,
+        risk,
+        roleIdentities: Object.fromEntries(Object.entries(problemSpecObservation.roleIdentities)
+          .map(([role, identity]) => [
+            role,
+            identity ? `${identity.endpointId}\0${identity.modelName}` : undefined,
+          ])),
+        specValidation: {
+          hasCustomChecker: hasCustomChecker(params.existingConfig),
+          ...(params.options.problemKind === 'auto'
+            ? {}
+            : { expectedProblemKind: params.options.problemKind }),
+        },
+      })
+      : undefined;
+    this.activePipelineContext = pipelineContext;
     this.assertIndependentRoleIdentities(risk);
     if (this.reliabilityMode === 'enforce'
       && (risk.tier === 'high' || risk.tier === 'blocked')
@@ -6481,7 +6927,12 @@ export class TestdataGenService {
       this.emitProgress(params, 'sandbox_check', 5);
       const available = await this.sandboxRunner.isAvailable(params.signal);
       if (available) {
-        const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner, risk);
+        const plan = await this.generateSandboxWithSemanticFallback(
+          params,
+          this.sandboxRunner,
+          risk,
+          pipelineContext,
+        );
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
         return this.attachRunMetadata(
           this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation, risk), risk),
@@ -6544,7 +6995,7 @@ export class TestdataGenService {
       );
     }
 
-    const plan = await this.generateDirect(params);
+    const plan = await this.generateDirect(params, pipelineContext);
     if (this.mode === 'auto') {
       const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
       plan.notes = [
@@ -6594,9 +7045,11 @@ export class TestdataGenService {
     params: GenerateTestdataParams,
     runner: TestdataSandboxRunner,
     risk = this.assessRisk(params),
+    context?: TestdataPipelineContext,
   ): Promise<GenerationPlan> {
     try {
-      return await this.generateWithSandbox(params, runner, 1, risk);
+      if (context) assertProblemSpecUnchanged(context);
+      return await this.generateWithSandbox(params, runner, 1, risk, context);
     } catch (firstError) {
       if (isCancellation(firstError)
         || !this.semanticModelFallback
@@ -6605,20 +7058,32 @@ export class TestdataGenService {
         throw firstError;
       }
 
-      const lastResult = firstError.chatResults[firstError.chatResults.length - 1];
       const failedRole = this.reliabilityMode === 'legacy'
         ? undefined
         : firstError.failedModelRole;
+      const failedIdentity = failedRole ? this.activeRoleIdentities[failedRole] : undefined;
+      const configuredRoleIdentities = failedRole
+        ? this.roleClients?.[failedRole]?.identities || []
+        : [];
+      const matchesFailedRole = (result: ChatResult) => (
+        [failedIdentity, ...configuredRoleIdentities].some(identity => identity
+          && identity.endpointId === result.usedModel.endpointId
+          && identity.modelName === result.usedModel.modelName)
+      );
+      const lastResult = failedRole
+        ? [...firstError.chatResults].reverse().find(matchesFailedRole)
+        : firstError.chatResults[firstError.chatResults.length - 1];
       const failedClient = failedRole
         ? this.roleClients?.[failedRole]?.client || this.aiClient
         : this.aiClient;
       const createFallback = failedClient.createClientStartingAfter;
-      if (!lastResult || typeof createFallback !== 'function') throw firstError;
-      const fallbackClient = createFallback.call(failedClient, lastResult.usedModel);
-      if (!fallbackClient) throw firstError;
+      const fallbackClient = lastResult && typeof createFallback === 'function'
+        ? createFallback.call(failedClient, lastResult.usedModel)
+        : undefined;
+      if (!fallbackClient && !firstError.requiresIsolatedRegeneration) throw firstError;
 
       let fallbackRoleClients = this.roleClients;
-      if (failedRole) {
+      if (failedRole && fallbackClient && lastResult) {
         const previousRole = this.roleClients?.[failedRole];
         const previousIdentities = previousRole?.identities || [];
         const usedIndex = previousIdentities.findIndex(identity => (
@@ -6642,17 +7107,23 @@ export class TestdataGenService {
         };
       }
 
-      const fromModel = `${lastResult.usedModel.endpointName}/${lastResult.usedModel.modelName}`;
-      const fallbackService = new TestdataGenService(failedRole ? this.aiClient : fallbackClient, {
-        sandboxRunner: runner,
-        mode: 'sandbox',
-        cppOracleAvailable: this.cppOracleAvailable,
-        semanticModelFallback: false,
-        reliabilityMode: this.reliabilityMode,
-        roleClients: fallbackRoleClients,
-      });
+      const fromModel = lastResult
+        ? `${lastResult.usedModel.endpointName}/${lastResult.usedModel.modelName}`
+        : 'restored checkpoint';
+      const fallbackService = new TestdataGenService(
+        failedRole ? this.aiClient : fallbackClient || this.aiClient,
+        {
+          sandboxRunner: runner,
+          mode: 'sandbox',
+          cppOracleAvailable: this.cppOracleAvailable,
+          semanticModelFallback: false,
+          reliabilityMode: this.reliabilityMode,
+          roleClients: fallbackRoleClients,
+        },
+      );
       try {
         this.emitProgress(params, 'model_escalation', 60, 2);
+        if (context) assertProblemSpecUnchanged(context);
         // 先原子清空已持久化的首轮制品；升级轮仍保留回调以保存自己的全新制品。
         await this.emitCheckpoint(params, null);
         const plan = await fallbackService.generateWithSandbox(
@@ -6660,7 +7131,9 @@ export class TestdataGenService {
           runner,
           2,
           risk,
+          context,
         );
+        if (context) assertProblemSpecUnchanged(context);
         const fallbackModels = plan.usedModel ? plan.usedModel.split(' → ').filter(Boolean) : [];
         const toModel = fallbackModels[0] || 'next configured model';
         const firstModels = firstError.chatResults.map(result =>
@@ -6671,14 +7144,16 @@ export class TestdataGenService {
           plan.tokenUsage,
         ]);
         if (plan.modelTelemetry) plan.modelTelemetry.role = 'fallback';
-        if (plan.verification) {
+        if (plan.verification && fallbackClient) {
           plan.verification.modelEscalation = { fromModel, toModel };
         }
         this.activeRoleIdentities = {
           ...this.activeRoleIdentities,
           ...fallbackService.activeRoleIdentities,
         };
-        const escalationNote = `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`;
+        const escalationNote = fallbackClient
+          ? `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`
+          : '恢复制品在物化时未通过机器验证，已清空断点并在同一 frozen ProblemSpec 下重跑隔离角色。';
         plan.notes = [
           plan.notes,
           escalationNote,
@@ -6751,9 +7226,12 @@ export class TestdataGenService {
     return blueprint;
   }
 
-  private async generateDirect(params: GenerateTestdataParams): Promise<GenerationPlan> {
+  private async generateDirect(
+    params: GenerateTestdataParams,
+    context?: TestdataPipelineContext,
+  ): Promise<GenerationPlan> {
     const systemPrompt = buildTestdataSystemPrompt();
-    const userPrompt = buildTestdataUserPrompt(params);
+    const userPrompt = buildTestdataUserPrompt(params, undefined, context);
     const callOptions = this.getCallOptions(params);
 
     this.emitProgress(params, 'blueprint', 12);
@@ -6771,7 +7249,9 @@ export class TestdataGenService {
     let response: GenerationResponse;
     try {
       response = parseAiResponse(initialResult.content, params.options, { allowMissingTemplates: true });
+      assertDirectResponseMatchesFrozenProblemSpec(response, context);
     } catch (err) {
+      if (err instanceof TestdataPipelineError) throw err;
       throw toPipelineError(err, {
         code: 'GENERATOR_INVALID_JSON',
         stage: 'direct_parse',
@@ -6807,6 +7287,7 @@ export class TestdataGenService {
       results.push(repairResult);
       try {
         response = parseAiResponse(repairResult.content, params.options);
+        assertDirectResponseMatchesFrozenProblemSpec(response, context);
         const remainingIssue = response.problemType === 'function'
           ? findAssignmentStyleCaseInput(response.cases)
           : null;
@@ -6814,6 +7295,7 @@ export class TestdataGenService {
           throw new Error(`第 ${remainingIssue.caseNumber} 个 .in 仍含错误写法：${remainingIssue.line}`);
         }
       } catch (err) {
+        if (err instanceof TestdataPipelineError) throw err;
         throw toPipelineError(err, {
           code: 'GENERATOR_INVALID_INPUT',
           stage: 'direct_repair',
@@ -6907,10 +7389,16 @@ export class TestdataGenService {
     coveragePlan: Array<CoverageSlot | SubtaskCaseAllocation>,
     callOptions: ChatCallOptions,
     results: ChatResult[],
+    context?: TestdataPipelineContext,
   ): Promise<GenerationArtifactsCallState> {
     const artifactsClient = this.clientForRole('artifacts');
-    const systemPrompt = buildGenerationArtifactsSystemPrompt();
-    const userPrompt = buildGenerationArtifactsUserPrompt(params, solution, coveragePlan);
+    const systemPrompt = buildGenerationArtifactsSystemPrompt(!!context);
+    const userPrompt = buildGenerationArtifactsUserPrompt(
+      params,
+      solution,
+      coveragePlan,
+      context,
+    );
     const initialResult = await artifactsClient.chat(
       [{ role: 'user', content: userPrompt }],
       systemPrompt,
@@ -6978,12 +7466,16 @@ export class TestdataGenService {
     callOptions: ChatCallOptions,
     results: ChatResult[],
     attempt = 1,
+    context?: TestdataPipelineContext,
   ): Promise<IndependentVerifierCallState> {
     const verifierClient = this.clientForRole('verifier');
-    const systemPrompt = buildIndependentVerifierSystemPrompt();
-    const userPrompt = buildIndependentVerifierUserPrompt(params, blueprint);
-    const expectedFunctionSamples = blueprint.problemType === 'function'
-      ? extractStatementSamples(params.statementMarkdown)
+    const systemPrompt = buildIndependentVerifierSystemPrompt(
+      TESTDATA_GEN_LIMITS.STRESS_CASES,
+      !!context,
+    );
+    const userPrompt = buildIndependentVerifierUserPrompt(params, blueprint, context);
+    const expectedFunctionSamples = (context?.spec.problemKind || blueprint.problemType) === 'function'
+      ? context?.statement.samples || extractStatementSamples(params.statementMarkdown)
       : [];
     const initialResult = await verifierClient.chat(
       [{ role: 'user', content: userPrompt }],
@@ -7013,7 +7505,14 @@ export class TestdataGenService {
           [
             { role: 'user', content: userPrompt },
             { role: 'assistant', content: initialResult.content },
-            { role: 'user', content: buildIndependentVerifierRepairPrompt(parseError, expectedFunctionSamples) },
+            {
+              role: 'user',
+              content: buildIndependentVerifierRepairPrompt(
+                parseError,
+                expectedFunctionSamples,
+                context,
+              ),
+            },
           ],
           systemPrompt,
           callOptions,
@@ -7068,10 +7567,15 @@ export class TestdataGenService {
     analysis: string;
     samples: SampleIO[];
     signal?: AbortSignal;
+    context?: TestdataPipelineContext;
   }, results?: ChatResult[]): Promise<KillTarget[]> {
-    const result = await this.clientForRole('verifier').chat(
+    // Optional discrimination calls share the configured verifier client but are not
+    // the Independent Verifier artifact dependency. Do not let them relabel a restored
+    // verifier checkpoint with an unrelated fresh model hash.
+    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const result = await verifierClient.chat(
       [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
-      buildKillTargetsSystemPrompt(),
+      buildKillTargetsSystemPrompt(!!input.context),
       {
         ...this.getCallOptions({ signal: input.signal }),
         timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
@@ -7088,9 +7592,11 @@ export class TestdataGenService {
     timeoutMs: number,
     signal: AbortSignal,
     results: ChatResult[],
+    context?: TestdataPipelineContext,
   ): Promise<HackCandidate[]> {
-    const result = await this.clientForRole('verifier').chat(
-      [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target }) }],
+    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const result = await verifierClient.chat(
+      [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }],
       buildHackCasesSystemPrompt(),
       {
         ...this.getCallOptions({ signal, onProgress: params.onProgress }),
@@ -7113,6 +7619,7 @@ export class TestdataGenService {
     runner: TestdataSandboxRunner,
     results: ChatResult[],
     checkerExecutor?: CheckerExecutor,
+    context?: TestdataPipelineContext,
   ): Promise<GenerationResponse> {
     const discrimination = response.verification?.discrimination;
     const deadlineAt = response.discriminationDeadlineAt;
@@ -7170,11 +7677,12 @@ export class TestdataGenService {
           if (remainingBudgetMs <= 0) break targetLoop;
           candidates = await this.generateHackCandidates(
             params,
-            blueprint.analysis || '',
+            context ? '' : blueprint.analysis || '',
             target,
             remainingBudgetMs,
             deadlineScope.signal,
             results,
+            context,
           );
         } catch (err) {
           if (params.signal?.aborted) throw params.signal.reason ?? err;
@@ -7341,7 +7849,9 @@ export class TestdataGenService {
     runner: TestdataSandboxRunner,
     attempt = 1,
     risk = this.assessRisk(params),
+    context?: TestdataPipelineContext,
   ): Promise<GenerationPlan> {
+    if (context) this.activePipelineContext = context;
     const report = (stage: TestdataGenerationProgressStage, percent: number) => {
       this.emitProgress(params, stage, this.progressForAttempt(percent, attempt), attempt);
     };
@@ -7357,9 +7867,12 @@ export class TestdataGenService {
     try {
     // 完整协议只用于后续按失败节定向修复；正常成功路径严格分成两个阶段。
     let cppOracleAvailableForAttempt = this.cppOracleAvailable;
-    let systemPrompt = buildSandboxBlueprintSystemPrompt(cppOracleAvailableForAttempt);
-    let solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(cppOracleAvailableForAttempt);
-    const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params);
+    let systemPrompt = buildSandboxBlueprintSystemPrompt(cppOracleAvailableForAttempt, !!context);
+    let solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(
+      cppOracleAvailableForAttempt,
+      !!context,
+    );
+    const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params, context);
     const oracleClient = this.clientForRole('oracle');
     const artifactsClient = this.clientForRole('artifacts');
     const verifierClient = this.clientForRole('verifier');
@@ -7369,21 +7882,27 @@ export class TestdataGenService {
     let finalOracleIdentity: TestdataModelIdentity | undefined;
     let finalVerifierIdentity: TestdataModelIdentity | undefined;
     const expectedFunctionSamples = extractStatementSamples(params.statementMarkdown);
-    const normalizedCheckpoint = normalizeReusableCheckpoint(params.checkpoint, params.options);
-    const requiresFreshIndependentArtifacts = this.reliabilityMode === 'enforce'
-      && (risk.tier === 'high' || risk.tier === 'blocked');
-    // Checkpoint v1 carries no exact role identities or dependency provenance. Until
-    // Task 7 introduces a new checkpoint contract, high-risk enforce regenerates the
-    // complete dependent set instead of mixing fresh independent roles with stale files.
-    const checkpoint = requiresFreshIndependentArtifacts ? undefined : normalizedCheckpoint;
+    const checkpoint = reusableCheckpointForContext(
+      params.checkpoint,
+      params.options,
+      this.reliabilityMode,
+      context,
+    );
+    this.restoredRoleDependencies = checkpoint?.roleDependencies
+      ? { ...checkpoint.roleDependencies }
+      : {};
     let solutionSourceContent = checkpoint?.solution
       ? JSON.stringify(checkpoint.solution)
       : '';
     let solution: SandboxSolutionBlueprint;
     let originalParsedSubtasks: SubtaskSpec[] | undefined;
     try {
+      if (context) assertProblemSpecUnchanged(context);
       if (checkpoint?.solution) {
-        solution = this.useProvidedOracle(checkpoint.solution, params.options);
+        solution = bindBlueprintToFrozenProblemSpec(
+          this.useProvidedOracle(checkpoint.solution, params.options),
+          context,
+        );
       } else {
         const initialResult = await oracleClient.chat(
           [{ role: 'user', content: solutionUserPrompt }],
@@ -7392,9 +7911,12 @@ export class TestdataGenService {
         );
         results.push(initialResult);
         solutionSourceContent = initialResult.content;
-        solution = this.useProvidedOracle(
-          parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples),
-          params.options,
+        solution = bindBlueprintToFrozenProblemSpec(
+          this.useProvidedOracle(
+            parseSolutionBlueprint(initialResult.content, params.options, expectedFunctionSamples),
+            params.options,
+          ),
+          context,
         );
       }
       if (solution.subtasks?.length) originalParsedSubtasks = solution.subtasks;
@@ -7439,8 +7961,8 @@ export class TestdataGenService {
         && typedSolutionError.safeDetails.failureKind === 'infra';
       if (cppInfraFailure) {
         cppOracleAvailableForAttempt = false;
-        systemPrompt = buildSandboxBlueprintSystemPrompt(false);
-        solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(false);
+        systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
+        solutionSystemPrompt = buildSolutionBlueprintSystemPrompt(false, !!context);
       }
       report('blueprint_repair', 30);
       const repairResult = await oracleClient.chat(
@@ -7473,7 +7995,11 @@ export class TestdataGenService {
         ) {
           repairedSolution.subtasks = originalParsedSubtasks;
         }
-        solution = this.useProvidedOracle(repairedSolution, params.options);
+        solution = bindBlueprintToFrozenProblemSpec(
+          this.useProvidedOracle(repairedSolution, params.options),
+          context,
+        );
+        if (context) assertProblemSpecUnchanged(context);
         void this.emitCheckpoint(params, { solution });
         report('solution_verification', 32);
         await verifySolutionBlueprintSamples(
@@ -7524,12 +8050,27 @@ export class TestdataGenService {
     const generationCoverage: Array<CoverageSlot | SubtaskCaseAllocation> = tieredDecision.enabled
       ? tieredDecision.allocations
       : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
-    const userPrompt = buildSandboxBlueprintUserPrompt(params, generationCoverage);
+    const legacyCombinedUserPrompt = buildSandboxBlueprintUserPrompt(params, generationCoverage);
+    const artifactsUserPrompt = buildGenerationArtifactsUserPrompt(
+      params,
+      solution,
+      generationCoverage,
+      context,
+    );
+    const artifactsSystemPrompt = buildGenerationArtifactsSystemPrompt(!!context);
+    const userPrompt = context ? artifactsUserPrompt : legacyCombinedUserPrompt;
+    const solutionRepairSourceContent = context
+      ? JSON.stringify({ ...checkpointSolutionFromBlueprint(solution), analysis: undefined })
+      : solutionSourceContent;
 
     // 解题蓝图过硬闸门后，三个互不依赖的 AI 阶段并行生成；独立验证器
     // 看不到 ORACLE 源码，错误解靶子调用失败则独立降级为空，不影响正确性管线。
     report('artifacts', 36);
-    const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples);
+    const killTargetSamples = buildKillTargetPromptSamples(
+      solution,
+      expectedFunctionSamples,
+      context,
+    );
     const optionalDiscriminationResults: ChatResult[] = [];
     // 并发完成顺序不可作为因果顺序：两个必需阶段各自持有稳定的失败上下文，
     // 成功后再按“外围制品 → 独立验证器”的固定顺序合并；可选补刀模型单独归档。
@@ -7539,10 +8080,11 @@ export class TestdataGenService {
       Array.isArray(checkpoint?.killTargets)
         ? Promise.resolve(checkpoint.killTargets)
         : this.generateKillTargets({
-          statement: params.statementMarkdown,
-          analysis: solution.analysis || '',
+          statement: context ? '' : params.statementMarkdown,
+          analysis: context ? '' : solution.analysis || '',
           samples: killTargetSamples,
           signal: params.signal,
+          context,
         }, optionalDiscriminationResults)
           .then(targets => {
             void this.emitCheckpoint(params, { killTargets: targets });
@@ -7559,10 +8101,17 @@ export class TestdataGenService {
         })
         : this.generateGenerationArtifacts(
           params,
-          solution,
+          context ? {
+            ...solution,
+            analysis: undefined,
+            oracleCode: '',
+            solutionCode: solution.solutionCode,
+            solutions: solution.solutions,
+          } : solution,
           generationCoverage,
           callOptions,
           artifactsResults,
+          context,
         )
           .then(state => {
             void this.emitCheckpoint(params, { artifacts: state.artifacts });
@@ -7571,8 +8120,11 @@ export class TestdataGenService {
       checkpoint?.verifier
         ? Promise.resolve({
           verifier: checkpoint.verifier,
-          systemPrompt: buildIndependentVerifierSystemPrompt(),
-          userPrompt: buildIndependentVerifierUserPrompt(params, solution),
+          systemPrompt: buildIndependentVerifierSystemPrompt(
+            TESTDATA_GEN_LIMITS.STRESS_CASES,
+            !!context,
+          ),
+          userPrompt: buildIndependentVerifierUserPrompt(params, solution, context),
           sourceContent: JSON.stringify(checkpoint.verifier),
           expectedFunctionSamples: solution.problemType === 'function'
             ? expectedFunctionSamples
@@ -7580,10 +8132,14 @@ export class TestdataGenService {
         })
         : this.generateIndependentVerifier(
           params,
-          solution,
+          context ? {
+            problemType: solution.problemType,
+            functionName: solution.functionName,
+          } : solution,
           callOptions,
           verifierResults,
           attempt,
+          context,
         ).then(state => {
           void this.emitCheckpoint(params, { verifier: state.verifier });
           return state;
@@ -7599,6 +8155,7 @@ export class TestdataGenService {
       finalVerifierIdentity = { ...verifierResults[verifierResults.length - 1].usedModel };
       this.activeRoleIdentities.verifier = finalVerifierIdentity;
     }
+    this.assertCheckpointRoleIndependence(risk, checkpoint);
     this.assertIndependentRoleIdentities(risk);
     if (checkpoint) {
       // 恢复任务会创建新 job；把命中的旧制品复制到新断点，保证再次中断仍可续跑。
@@ -7615,13 +8172,14 @@ export class TestdataGenService {
     );
     report('independent_verifier', 54);
     let verifierState = initialVerifierState;
-    let blueprintSourceContent = `${solutionSourceContent}\n${artifactsState.sourceContent}`;
+    let blueprintSourceContent = `${solutionRepairSourceContent}\n${artifactsState.sourceContent}`;
     let blueprint: SandboxGenerationBlueprint = {
       ...solution,
       ...artifactsState.artifacts,
       ...verifierState.verifier,
       notes: [solution.notes, artifactsState.artifacts.notes].filter(Boolean).join('\n') || undefined,
     };
+    blueprint = bindBlueprintToFrozenProblemSpec(blueprint, context);
 
     if (blueprint.problemType === 'function') {
       const missing = params.options.languages.filter(lang => !blueprint.templates?.[lang]?.trim());
@@ -7630,10 +8188,13 @@ export class TestdataGenService {
         const repairResult = await artifactsClient.chat(
           [
             { role: 'user', content: userPrompt },
-            { role: 'assistant', content: blueprintSourceContent },
+            {
+              role: 'assistant',
+              content: context ? artifactsState.sourceContent : blueprintSourceContent,
+            },
             { role: 'user', content: buildTemplateRepairPrompt(missing) },
           ],
-          systemPrompt,
+          artifactsSystemPrompt,
           callOptions,
         );
         results.push(repairResult);
@@ -7697,7 +8258,7 @@ export class TestdataGenService {
         && typedFirstError.safeDetails.failureKind === 'infra';
       if (cppInfraFailure) {
         cppOracleAvailableForAttempt = false;
-        systemPrompt = buildSandboxBlueprintSystemPrompt(false);
+        systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
         blueprint = { ...blueprint, oracleLanguage: 'python' };
       }
       if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED') {
@@ -7753,6 +8314,29 @@ export class TestdataGenService {
               : 'artifacts';
       let usedFullRepair = repairScope === 'full';
       report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
+      const isolatedFullRegenerationError = (
+        detail: string,
+        role = failedModelRole || 'artifacts',
+      ) => new TestdataGenerationError(
+        `frozen ProblemSpec 流程不允许 combined full repair；必须在同一 Spec 下重跑隔离角色。${detail}`,
+        'pipeline_repair',
+        results,
+        true,
+        undefined,
+        undefined,
+        {
+          code: typedFirstError.code,
+          artifact: typedFirstError.artifact,
+          retryPolicy: 'switch-model',
+          safeDetails: typedFirstError.safeDetails,
+          failedModelRole: role,
+          requiresIsolatedRegeneration: true,
+        },
+      );
+      if (context && repairScope === 'full') {
+        assertProblemSpecUnchanged(context);
+        throw isolatedFullRegenerationError('');
+      }
       let repairResult;
       try {
         if (isIndependentVerifierScope(repairScope)) {
@@ -7765,6 +8349,7 @@ export class TestdataGenService {
                 content: buildIndependentVerifierRepairPrompt(
                   firstError,
                   verifierState.expectedFunctionSamples,
+                  context,
                 ),
               },
             ],
@@ -7773,6 +8358,7 @@ export class TestdataGenService {
           );
           finalVerifierIdentity = { ...repairResult.usedModel };
         } else if (repairScope === 'full') {
+          if (context) assertProblemSpecUnchanged(context);
           repairResult = await this.chatForCombinedRepair(
             [
               { role: 'user', content: userPrompt },
@@ -7784,6 +8370,7 @@ export class TestdataGenService {
                   params.options,
                   repairScope,
                   generationCoverage,
+                  context,
                 ),
               },
             ],
@@ -7792,10 +8379,16 @@ export class TestdataGenService {
           );
           finalOracleIdentity = { ...repairResult.usedModel };
         } else {
+          const repairUserPrompt = repairScope === 'oracle' ? solutionUserPrompt : userPrompt;
+          const repairSourceContent = repairScope === 'oracle'
+            ? solutionRepairSourceContent
+            : context
+              ? artifactsState.sourceContent
+              : blueprintSourceContent;
           repairResult = await (repairScope === 'oracle' ? oracleClient : artifactsClient).chat(
             [
-              { role: 'user', content: userPrompt },
-              { role: 'assistant', content: blueprintSourceContent },
+              { role: 'user', content: repairUserPrompt },
+              { role: 'assistant', content: repairSourceContent },
               {
                 role: 'user',
                 content: buildSandboxRepairPrompt(
@@ -7803,10 +8396,11 @@ export class TestdataGenService {
                   params.options,
                   repairScope,
                   generationCoverage,
+                  context,
                 ),
               },
             ],
-            systemPrompt,
+            repairScope === 'oracle' ? solutionSystemPrompt : artifactsSystemPrompt,
             callOptions,
           );
           if (repairScope === 'oracle') {
@@ -7832,6 +8426,7 @@ export class TestdataGenService {
         );
       }
       results.push(repairResult);
+      let pendingIsolatedFullRegeneration: TestdataGenerationError | undefined;
       try {
         try {
           if (isIndependentVerifierScope(repairScope)) {
@@ -7858,9 +8453,16 @@ export class TestdataGenService {
         } catch (targetedParseError) {
           if (repairScope === 'full' || isIndependentVerifierScope(repairScope)) throw targetedParseError;
           usedFullRepair = true;
-          failedModelRole = 'oracle';
-          const fullRepairResult = await oracleClient.chat(
-            [
+          failedModelRole = context ? undefined : 'oracle';
+          if (context) {
+            assertProblemSpecUnchanged(context);
+            pendingIsolatedFullRegeneration = isolatedFullRegenerationError(
+              `定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`,
+              repairScope === 'oracle' ? 'oracle' : 'artifacts',
+            );
+            throw pendingIsolatedFullRegeneration;
+          }
+          const fullRepairMessages = [
               { role: 'user', content: userPrompt },
               { role: 'assistant', content: blueprintSourceContent },
               {
@@ -7870,9 +8472,12 @@ export class TestdataGenService {
                   params.options,
                   'full',
                   generationCoverage,
+                  context,
                 ),
               },
-            ],
+            ] as Parameters<MultiModelClient['chat']>[0];
+          const fullRepairResult = await oracleClient.chat(
+            fullRepairMessages,
             systemPrompt,
             callOptions,
           );
@@ -7885,7 +8490,11 @@ export class TestdataGenService {
           blueprintSourceContent = fullRepairResult.content;
         }
         if (tieredDecision.enabled) blueprint.subtasks = tieredDecision.subtasks;
-        blueprint = this.useProvidedOracle(blueprint, params.options);
+        blueprint = bindBlueprintToFrozenProblemSpec(
+          this.useProvidedOracle(blueprint, params.options),
+          context,
+        );
+        if (context) assertProblemSpecUnchanged(context);
         const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
         const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
         if (usedFullRepair) {
@@ -7917,6 +8526,7 @@ export class TestdataGenService {
       } catch (err) {
         if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
+        if (err === pendingIsolatedFullRegeneration) throw err;
         if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
         const typedRepairError = err instanceof TestdataPipelineError
           ? err
@@ -7955,6 +8565,7 @@ export class TestdataGenService {
       runner,
       optionalDiscriminationResults,
       checkerExecutor,
+      context,
     );
     appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
     if (customChecker && this.reliabilityMode === 'enforce') {
@@ -7974,6 +8585,7 @@ export class TestdataGenService {
     }
     if (finalOracleIdentity) this.activeRoleIdentities.oracle = finalOracleIdentity;
     if (finalVerifierIdentity) this.activeRoleIdentities.verifier = finalVerifierIdentity;
+    this.assertCheckpointRoleIndependence(risk, checkpoint);
     this.assertIndependentRoleIdentities(risk);
     report('assembling', 96);
     const plan = assemblePlan(response, params.options, {
