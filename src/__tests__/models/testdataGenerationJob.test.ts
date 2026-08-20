@@ -483,6 +483,30 @@ describe('TestdataGenerationJobModel', () => {
     });
   });
 
+  it('reports a recoverable conflict when an active apply claim owns the outcome transition', async () => {
+    const { model, collection } = createModel();
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({
+      teacherOutcomeClaim: {
+        claimId: 'active-apply',
+        claimedAt: new Date(),
+        leaseExpiresAt: new Date(Date.now() + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS),
+      },
+    });
+
+    await expect(model.recordTeacherOutcome('job1', {
+      eventId: '22222222-2222-4222-8222-222222222222',
+      outcome: 'regenerated',
+    })).resolves.toEqual({
+      state: 'conflict',
+      record: expect.objectContaining({ outcome: 'regenerated' }),
+    });
+    expect(collection.updateOne.mock.calls[0][0]).toEqual(expect.objectContaining({
+      teacherOutcome: { $exists: false },
+      $or: expect.any(Array),
+    }));
+  });
+
   it('atomically leases an apply claim, recovers expired claims, and protects a live writer', async () => {
     const { model, collection } = createModel();
     const before = Date.now();

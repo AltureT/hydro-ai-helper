@@ -5,6 +5,7 @@ import type {
   TestdataQualityResponse,
 } from '../types';
 import {
+  buildTestdataModelRoleRows,
   buildTestdataQualityCards,
   formatTestdataQualityRate,
 } from '../testdataQualityView';
@@ -82,6 +83,19 @@ export function TestdataQualityPanel() {
             <Distribution title="失败 Artifact 分布" items={data.failure_artifacts} />
             <Distribution title="Risk tier 分布" items={data.risk_tiers} />
           </div>
+
+          <section style={sectionStyle}>
+            <h3 style={headingStyle}>模型角色成功率</h3>
+            <div style={tableWrapStyle}>
+              <table style={tableStyle}>
+                <thead><tr><th>角色</th><th>运行数</th><th>Pipeline 完成</th><th>机器验证</th><th>Pipeline 失败</th></tr></thead>
+                <tbody>{buildTestdataModelRoleRows(data).map(item => <tr key={item.role}>
+                  <td>{item.label}</td><td>{item.runs}</td><td>{item.completed}</td>
+                  <td>{item.verified}</td><td>{item.failed}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          </section>
 
           <section style={sectionStyle}>
             <h3 style={headingStyle}>模板语言验证</h3>

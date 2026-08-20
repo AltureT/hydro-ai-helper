@@ -122,11 +122,23 @@ test('migration creates quality tables plus an atomic event-slot ledger', async 
   assert.match(sql, /payload_hash\s+TEXT\s+NOT NULL/i);
   assert.match(sql, /event_id\s+TEXT\s+NOT NULL\s+UNIQUE/i);
   assert.match(sql, /UNIQUE\s*\(instance_id,\s*run_id\)/i);
-  for (const field of ['completed_at', 'received_at', 'plugin_version', 'failure_code', 'stage', 'risk_tier', 'verified', 'would_block', 'outcome']) {
+  for (const field of [
+    'completed_at', 'received_at', 'plugin_version', 'failure_code', 'stage', 'risk_tier',
+    'verified', 'would_block', 'outcome',
+  ]) {
     assert.match(sql, new RegExp(`idx_[^\\n]*${field}`));
   }
   assert.match(sql, /ON testdata_stage_events\(instance_id, received_at\)/);
   assert.match(sql, /ON testdata_teacher_outcomes\(instance_id, received_at\)/);
+});
+
+test('model role index is an idempotent incremental migration', async () => {
+  const sql = await readFile(
+    new URL('./migrations/0011_testdata_model_role_index.sql', import.meta.url),
+    'utf8',
+  );
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS idx_testdata_runs_model_role/i);
+  assert.match(sql, /ON testdata_runs\(model_role\)/i);
 });
 
 test('event fingerprints are canonical and change with safe payload content', async () => {
@@ -466,9 +478,18 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
       testdata_quality_outcomes: [{
         total_outcomes: 6, accepted_unchanged: 2, accepted_edited: 2, discarded: 1, regenerated: 1,
       }],
-      testdata_quality_failures: [{ key: 'CHECKER_RUNTIME_FAILED', count: 2 }],
-      testdata_quality_stages: [{ key: 'checker', count: 2 }],
-      testdata_quality_artifacts: [{ key: 'checker', count: 2 }],
+      testdata_quality_failures: [
+        { key: 'CHECKER_RUNTIME_FAILED', count: 2 },
+        { key: 'UNKNOWN', count: 1 },
+      ],
+      testdata_quality_stages: [
+        { key: 'checker', count: 2 },
+        { key: 'solution_verification', count: 1 },
+      ],
+      testdata_quality_artifacts: [
+        { key: 'checker', count: 2 },
+        { key: 'pipeline', count: 1 },
+      ],
       testdata_quality_risks: [{ key: 'high', count: 3 }],
       testdata_quality_templates: [
         { language: 'py', requested: 5, verified: 4 },
@@ -477,6 +498,10 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
       ],
       testdata_quality_fallback: [{ attempts: 2, rescued: 1 }],
       testdata_quality_verified_outcomes: [{ denominator: 4, changed: 2 }],
+      testdata_quality_model_roles: [
+        { model_role: 'primary', runs: 6, completed: 5, verified: 3, failed: 1 },
+        { model_role: 'fallback', runs: 4, completed: 3, verified: 2, failed: 1 },
+      ],
       testdata_quality_versions: [{ plugin_version: '3.1.0', runs: 10, pipeline_completed: 8, verified: 5, would_block: 2 }],
     },
   });
@@ -492,7 +517,29 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   assert.deepEqual(body.metrics.model_escalation_rescue, { count: 1, total: 2, rate: 0.5 });
   assert.deepEqual(body.metrics.verified_but_teacher_changed, { count: 2, total: 4, rate: 0.5 });
   assert.deepEqual(body.checker.infra_failure, { count: 1, total: 4, rate: 0.25 });
-  assert.deepEqual(body.failure_artifacts, [{ key: 'checker', count: 2 }]);
+  assert.deepEqual(body.failure_codes, [
+    { key: 'CHECKER_RUNTIME_FAILED', count: 2 }, { key: 'UNKNOWN', count: 1 },
+  ]);
+  assert.deepEqual(body.failure_stages, [
+    { key: 'checker', count: 2 }, { key: 'solution_verification', count: 1 },
+  ]);
+  assert.deepEqual(body.failure_artifacts, [
+    { key: 'checker', count: 2 }, { key: 'pipeline', count: 1 },
+  ]);
+  assert.deepEqual(body.model_roles, {
+    primary: {
+      runs: 6,
+      completed: { count: 5, total: 6, rate: 5 / 6 },
+      verified: { count: 3, total: 5, rate: 0.6 },
+      failed: { count: 1, total: 6, rate: 1 / 6 },
+    },
+    fallback: {
+      runs: 4,
+      completed: { count: 3, total: 4, rate: 0.75 },
+      verified: { count: 2, total: 3, rate: 2 / 3 },
+      failed: { count: 1, total: 4, rate: 0.25 },
+    },
+  });
   assert.equal(body.templates.java.verified, 2);
   const totalsCutoff = db.bound.find(statement => statement.sql.includes('testdata_quality_totals')).values[0];
   assert.match(totalsCutoff, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -525,6 +572,20 @@ test('GET dashboard returns null rates and empty distributions for zero data', a
   assert.deepEqual(body.metrics.verified, { count: 0, total: 0, rate: null });
   assert.deepEqual(body.failure_codes, []);
   assert.deepEqual(body.failure_artifacts, []);
+  assert.deepEqual(body.model_roles, {
+    primary: {
+      runs: 0,
+      completed: { count: 0, total: 0, rate: null },
+      verified: { count: 0, total: 0, rate: null },
+      failed: { count: 0, total: 0, rate: null },
+    },
+    fallback: {
+      runs: 0,
+      completed: { count: 0, total: 0, rate: null },
+      verified: { count: 0, total: 0, rate: null },
+      failed: { count: 0, total: 0, rate: null },
+    },
+  });
 });
 
 test('GET dashboard rejects invalid days before querying D1', async () => {

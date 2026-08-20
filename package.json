@@ -23,6 +23,7 @@
     "learning-assistant"
   ],
   "scripts": {
+    "build": "npm run build:plugin",
     "build:plugin": "tsc",
     "prebenchmark:testdata": "npm run build:plugin",
     "benchmark:testdata": "node dist/benchmarks/testdataBenchmarkCli.js",

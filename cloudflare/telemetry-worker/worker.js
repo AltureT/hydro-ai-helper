@@ -738,6 +738,16 @@ async function handleDashboardTestdataQuality(request, env) {
        WHERE r.received_at >= ? AND r.verified = 1`,
     ).bind(receivedAtCutoff),
     env.DB.prepare(
+      `SELECT /* testdata_quality_model_roles */ model_role,
+        COUNT(*) AS runs,
+        COALESCE(SUM(CASE WHEN pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS completed,
+        COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
+        COALESCE(SUM(CASE WHEN pipeline_completed = 0 THEN 1 ELSE 0 END), 0) AS failed
+       FROM testdata_runs
+       WHERE received_at >= ? AND model_role IS NOT NULL
+       GROUP BY model_role`,
+    ).bind(receivedAtCutoff),
+    env.DB.prepare(
       `SELECT /* testdata_quality_versions */ plugin_version, COUNT(*) AS runs,
         COALESCE(SUM(CASE WHEN pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS pipeline_completed,
         COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
@@ -766,6 +776,18 @@ async function handleDashboardTestdataQuality(request, env) {
   const distribution = (items, allowed) => items
     .filter(item => allowed.has(item.key))
     .map(item => ({ key: item.key, count: Number(item.count) || 0 }));
+  const modelRoles = {};
+  for (const role of TESTDATA_MODEL_ROLES) {
+    const item = rows[9].find(row => row.model_role === role) || {};
+    const runs = Number(item.runs) || 0;
+    const roleCompleted = Number(item.completed) || 0;
+    modelRoles[role] = {
+      runs,
+      completed: testdataRateMetric(roleCompleted, runs),
+      verified: testdataRateMetric(item.verified, roleCompleted),
+      failed: testdataRateMetric(item.failed, runs),
+    };
+  }
   return json({
     window_days: days,
     total_runs: totalRuns,
@@ -787,6 +809,7 @@ async function handleDashboardTestdataQuality(request, env) {
     failure_stages: distribution(rows[3], TESTDATA_STAGES),
     failure_artifacts: distribution(rows[4], TESTDATA_ARTIFACTS),
     risk_tiers: distribution(rows[5], TESTDATA_RISK_TIERS),
+    model_roles: modelRoles,
     templates,
     checker: {
       configured: testdataRateMetric(totals.checker_configured, totalRuns),
@@ -807,7 +830,7 @@ async function handleDashboardTestdataQuality(request, env) {
       compared: Number(totals.stress_compared) || 0,
       agreed: Number(totals.stress_agreed) || 0,
     },
-    version_trend: rows[9].map(item => ({
+    version_trend: rows[10].map(item => ({
       plugin_version: item.plugin_version,
       runs: Number(item.runs) || 0,
       pipeline_completed: Number(item.pipeline_completed) || 0,

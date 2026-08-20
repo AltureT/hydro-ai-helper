@@ -4378,6 +4378,34 @@ function buildTemplateRepairPrompt(missing) {
 3. Java 模板必须是 public class Main，并调用学生提交的 class Solution；C++ 模板通过 #include "foo.cc" 引入学生代码；Python 模板只含驱动代码。
 4. 只使用 @@@TEMPLATE:语言@@@ 标记和源码原文，不要输出 JSON、代码围栏或解释文字。`;
 }
+function modelIdentity(result) {
+    return `${result.usedModel.endpointId}/${result.usedModel.modelName}`;
+}
+const FAILURE_MODEL_TELEMETRY = new WeakMap();
+function rememberFailureModelTelemetry(error, telemetry) {
+    if ((!error || (typeof error !== 'object' && typeof error !== 'function')) || !telemetry)
+        return;
+    const key = error;
+    const existing = FAILURE_MODEL_TELEMETRY.get(key);
+    FAILURE_MODEL_TELEMETRY.set(key, existing ? {
+        role: existing.role === 'fallback' || telemetry.role === 'fallback' ? 'fallback' : 'primary',
+        identity: existing.identity || telemetry.identity,
+    } : telemetry);
+}
+function inferModelTelemetry(results) {
+    const finalResult = results[results.length - 1];
+    if (!finalResult)
+        return undefined;
+    const identities = results.map(modelIdentity);
+    const firstIdentity = identities[0];
+    const usedFallback = identities.some(identity => identity !== firstIdentity)
+        || results.some(result => result.fallbackErrors?.some(attempt => (attempt.endpoint !== result.usedModel.endpointId
+            || attempt.model !== result.usedModel.modelName)));
+    return {
+        role: usedFallback ? 'fallback' : 'primary',
+        identity: modelIdentity(finalResult),
+    };
+}
 exports.CPP_ORACLE_UNAVAILABLE_KEY = 'ai_helper_testdata_err_cpp_oracle_unavailable';
 exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY = 'ai_helper_testdata_err_cpp_std_compile_failed';
 exports.CPP_ORACLE_INFRA_FAILURE_KEY = 'ai_helper_testdata_err_cpp_oracle_infra';
@@ -4444,6 +4472,7 @@ class TestdataGenerationError extends failures_1.TestdataPipelineError {
         this.userMessageDetail = userMessageDetail;
         const usedModels = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
         const lastModel = results[results.length - 1]?.usedModel;
+        const modelTelemetry = inferModelTelemetry(results);
         this.telemetryMetadata = {
             failureStage: canonicalStage,
             ...(lastModel ? {
@@ -4451,6 +4480,10 @@ class TestdataGenerationError extends failures_1.TestdataPipelineError {
                 modelName: lastModel.modelName,
             } : {}),
             ...(usedModels.length > 0 ? { usedModels } : {}),
+            ...(modelTelemetry ? {
+                modelTelemetryRole: modelTelemetry.role,
+                modelTelemetryIdentity: modelTelemetry.identity,
+            } : {}),
             aiAttemptCount: results.length,
             recommendDeeperReasoning,
         };
@@ -4468,10 +4501,19 @@ function wrapHistoricalCandidateFailure(error, message, results) {
 }
 function extractTestdataErrorMetadata(err) {
     const failureMetadata = (0, failures_1.extractTestdataFailureMetadata)(err);
+    const localModel = err && (typeof err === 'object' || typeof err === 'function')
+        ? FAILURE_MODEL_TELEMETRY.get(err)
+        : undefined;
+    const localModelMetadata = localModel ? {
+        modelTelemetryRole: localModel.role,
+        modelTelemetryIdentity: localModel.identity,
+    } : {};
     if (err instanceof TestdataGenerationError) {
-        return { ...err.telemetryMetadata, ...failureMetadata };
+        return { ...err.telemetryMetadata, ...localModelMetadata, ...failureMetadata };
     }
-    return failureMetadata;
+    return failureMetadata || localModel
+        ? { ...localModelMetadata, ...failureMetadata }
+        : undefined;
 }
 function extractTestdataUserMessageKey(err) {
     if (err instanceof TestdataGenerationError && err.userMessageKey)
@@ -4843,6 +4885,16 @@ class TestdataGenService {
         }
     }
     async generate(params) {
+        this.activeModelTelemetry = undefined;
+        try {
+            return await this.generateInternal(params);
+        }
+        catch (error) {
+            rememberFailureModelTelemetry(error, this.activeModelTelemetry);
+            throw error;
+        }
+    }
+    async generateInternal(params) {
         assertExistingConfigParsable(params.existingConfig);
         this.emitProgress(params, 'preparing', 2);
         const risk = this.assessRisk(params);
@@ -4939,6 +4991,12 @@ class TestdataGenService {
             // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
             retryTimeouts: false,
             onAttempt: event => {
+                this.activeModelTelemetry = {
+                    role: this.activeModelTelemetry?.role === 'fallback' || event.type === 'fallback'
+                        ? 'fallback'
+                        : 'primary',
+                    identity: `${event.endpointId}/${event.modelName}`,
+                };
                 if (event.type === 'fallback') {
                     this.emitProgress(params, 'model_fallback', attempt > 1 ? 72 : 30, attempt);
                 }
@@ -4988,6 +5046,8 @@ class TestdataGenService {
                     mergeTokenUsage(firstError.chatResults.map(result => result.usage)),
                     plan.tokenUsage,
                 ]);
+                if (plan.modelTelemetry)
+                    plan.modelTelemetry.role = 'fallback';
                 if (plan.verification) {
                     plan.verification.modelEscalation = { fromModel, toModel };
                 }
@@ -5002,6 +5062,12 @@ class TestdataGenService {
             catch (fallbackError) {
                 if (isCancellation(fallbackError))
                     throw fallbackError;
+                if (fallbackService.activeModelTelemetry) {
+                    rememberFailureModelTelemetry(fallbackError, {
+                        ...fallbackService.activeModelTelemetry,
+                        role: 'fallback',
+                    });
+                }
                 if (fallbackError instanceof TestdataGenerationError) {
                     const combinedResults = [
                         ...firstError.chatResults,
@@ -5022,6 +5088,7 @@ class TestdataGenService {
     applyResultMetadata(plan, results) {
         plan.tokenUsage = mergeTokenUsage(results.map(result => result.usage));
         plan.usedModel = [...new Set(results.map(result => `${result.usedModel.endpointName}/${result.usedModel.modelName}`))].join(' → ');
+        plan.modelTelemetry = this.activeModelTelemetry || inferModelTelemetry(results);
         return plan;
     }
     useProvidedOracle(blueprint, options) {

@@ -268,8 +268,8 @@ class TestdataRunTelemetryService {
             const event = parseTestdataQualityEvent({
                 ...rawEvent,
                 pluginVersion: install.lastVersion,
+                ...(model ? { modelRole: model.modelRole } : {}),
                 ...(model?.modelIdentity && modelHmacKey ? {
-                    modelRole: model.modelRole,
                     modelIdentityHash: (0, crypto_1.createHmac)('sha256', modelHmacKey).update(`${model.modelRole}\0${model.modelIdentity}`, 'utf8').digest('hex'),
                 } : {}),
             });
@@ -400,18 +400,25 @@ class TestdataRunTelemetrySession {
             return false;
         }
     }
-    async fail(error) {
+    async fail(error, model) {
         if (this.terminal)
             return;
         this.terminal = true;
         try {
             const failure = (0, failures_1.extractTestdataFailureMetadata)(error);
-            if (failure && !isCancellation(error) && failure.failureCode !== 'CANCELLED') {
+            const canceled = isCancellation(error) || failure?.failureCode === 'CANCELLED';
+            const terminalModel = canceled ? undefined : {
+                modelRole: (this.currentStage?.attempt || 1) > 1 ? 'fallback' : model?.modelRole || 'primary',
+                ...(model?.modelIdentity ? { modelIdentity: model.modelIdentity } : {}),
+            };
+            if (!canceled) {
                 await this.service.emit(this.event('stage_failed', {
-                    stage: qualityStage(failure.stage),
-                    failureCode: failure.failureCode,
-                    artifact: failure.artifact,
-                    retryPolicy: failure.retryPolicy,
+                    stage: failure
+                        ? qualityStage(failure.stage)
+                        : this.currentStage?.stage || 'unknown',
+                    failureCode: failure?.failureCode || 'UNKNOWN',
+                    artifact: failure?.artifact || 'pipeline',
+                    retryPolicy: failure?.retryPolicy || 'switch-model',
                     attempt: this.currentStage?.attempt || 1,
                 }));
             }
@@ -419,8 +426,8 @@ class TestdataRunTelemetrySession {
                 pipelineCompleted: false,
                 verified: false,
                 wouldBlock: false,
-                modelEscalated: this.currentStage?.attempt === 2,
-            }));
+                modelEscalated: (this.currentStage?.attempt || 1) > 1,
+            }), terminalModel);
         }
         catch {
             // Event construction is also best-effort for legacy/invalid local state.
@@ -437,9 +444,10 @@ class TestdataRunTelemetrySession {
             const requested = verification?.templateLanguages || this.context.templateLanguagesRequested;
             const failureKinds = templateFailureKinds(plan);
             const modelEscalated = !!verification?.modelEscalation;
-            const identity = typeof plan.usedModel === 'string'
-                ? plan.usedModel.split(' → ').pop()?.trim()
-                : undefined;
+            const modelRole = modelEscalated || plan.modelTelemetry?.role === 'fallback'
+                ? 'fallback'
+                : 'primary';
+            const identity = plan.modelTelemetry?.identity;
             await this.service.emit(this.event('run_completed', {
                 generationMode: verification?.mode,
                 reliabilityMode: plan.reliabilityMode || this.context.reliabilityMode,
@@ -467,10 +475,10 @@ class TestdataRunTelemetrySession {
                 checkerExecuted: checker?.executed,
                 checkerInfraFailures: checker?.infraFailures,
                 checkerFailureKind: checkerFailureKind(checker?.failureKind),
-            }), identity ? {
-                modelRole: modelEscalated ? 'fallback' : 'primary',
-                modelIdentity: identity,
-            } : undefined);
+            }), {
+                modelRole,
+                ...(identity ? { modelIdentity: identity } : {}),
+            });
         }
         catch {
             // Event construction is also best-effort for legacy/invalid local state.

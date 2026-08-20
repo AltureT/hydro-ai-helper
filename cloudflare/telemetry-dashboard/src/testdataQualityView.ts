@@ -1,4 +1,8 @@
-import type { TestdataQualityRate, TestdataQualityResponse } from './types';
+import type {
+  TestdataModelRole,
+  TestdataQualityRate,
+  TestdataQualityResponse,
+} from './types';
 
 const EMPTY_RATE: TestdataQualityRate = { count: 0, total: 0, rate: null };
 
@@ -14,6 +18,31 @@ export interface TestdataQualityCard {
   key: string;
   label: string;
   value: string;
+}
+
+export interface TestdataModelRoleRow {
+  role: TestdataModelRole;
+  label: string;
+  runs: number;
+  completed: string;
+  verified: string;
+  failed: string;
+}
+
+export function buildTestdataModelRoleRows(
+  data: TestdataQualityResponse,
+): TestdataModelRoleRow[] {
+  return (['primary', 'fallback'] as const).map(role => {
+    const metrics = data.model_roles?.[role];
+    return {
+      role,
+      label: role === 'primary' ? '首选模型' : '后备模型',
+      runs: metrics?.runs ?? 0,
+      completed: formatTestdataQualityRate(metrics?.completed),
+      verified: formatTestdataQualityRate(metrics?.verified),
+      failed: formatTestdataQualityRate(metrics?.failed),
+    };
+  });
 }
 
 export function buildTestdataQualityCards(data: TestdataQualityResponse): TestdataQualityCard[] {

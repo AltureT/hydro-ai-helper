@@ -332,10 +332,12 @@ describe('TestdataRunTelemetryService', () => {
       modelRole: 'primary', modelIdentity: 'private-model',
     })).resolves.toBe(true);
     expect(send.mock.calls[0][0].events[0]).not.toHaveProperty('modelIdentityHash');
-    expect(send.mock.calls[0][0].events[0]).not.toHaveProperty('modelRole');
+    expect(send.mock.calls[0][0].events[0]).toEqual(expect.objectContaining({
+      modelRole: 'primary',
+    }));
   });
 
-  it('creates monotonic run events and emits typed failure without raw errors', async () => {
+  it('normalizes untyped failures to the current stage without raw errors', async () => {
     const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
     const service = new TestdataRunTelemetryService(
       { getInstall: jest.fn().mockResolvedValue(install) },
@@ -351,14 +353,62 @@ describe('TestdataRunTelemetryService', () => {
     await session.start();
     await session.progress({ stage: 'blueprint', percent: 10, attempt: 1 }, 1000);
     await session.progress({ stage: 'solution_verification', percent: 30, attempt: 1 }, 1250);
-    await session.fail(new Error('raw input/output secret'));
+    await session.fail(
+      new Error('statement code input output https://private.example/v1 sk-secret'),
+      { modelRole: 'primary', modelIdentity: 'private-endpoint/private-model' },
+    );
 
     const events = payloads.flatMap(payload => payload.events);
-    expect(events.map(event => event.sequence)).toEqual([1, 2, 3]);
+    expect(events.map(event => event.sequence)).toEqual([1, 2, 3, 4]);
     expect(events.map(event => event.eventType)).toEqual([
-      'run_started', 'stage_completed', 'run_completed',
+      'run_started', 'stage_completed', 'stage_failed', 'run_completed',
     ]);
-    expect(JSON.stringify(events)).not.toContain('raw input/output secret');
+    expect(events[2]).toEqual(expect.objectContaining({
+      stage: 'solution_verification',
+      failureCode: 'UNKNOWN',
+      artifact: 'pipeline',
+      retryPolicy: 'switch-model',
+      attempt: 1,
+    }));
+    expect(events[3]).toEqual(expect.objectContaining({
+      pipelineCompleted: false,
+      verified: false,
+      wouldBlock: false,
+      modelRole: 'primary',
+      modelIdentityHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+    const serialized = JSON.stringify(events);
+    for (const forbidden of [
+      'private.example', 'sk-secret', 'private-endpoint', 'private-model',
+      'statement code input output',
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it('records fallback role for an untyped failure during model escalation', async () => {
+    const events: TestdataQualityEvent[] = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { events.push(...payload.events); }) },
+    );
+    const session = service.createSession({ runId: RUN_ID });
+    await session.progress({ stage: 'model_escalation', percent: 60, attempt: 2 });
+    await session.fail(new Error('private fallback response'));
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual(expect.objectContaining({
+      eventType: 'stage_failed',
+      stage: 'model_escalation',
+      failureCode: 'UNKNOWN',
+      attempt: 2,
+    }));
+    expect(events[1]).toEqual(expect.objectContaining({
+      eventType: 'run_completed',
+      modelRole: 'fallback',
+      modelEscalated: true,
+    }));
+    expect(JSON.stringify(events)).not.toContain('private fallback response');
   });
 
   it('reports authoritative verified, template, checker, stress, and fallback completion', async () => {
@@ -377,6 +427,10 @@ describe('TestdataRunTelemetryService', () => {
     await session.complete({
       problemType: 'function',
       usedModel: 'primary-private → fallback-private',
+      modelTelemetry: {
+        role: 'fallback',
+        identity: 'fallback-endpoint-id/fallback-model-id',
+      },
       verification: {
         mode: 'sandbox',
         verified: true,
@@ -418,6 +472,35 @@ describe('TestdataRunTelemetryService', () => {
     expect(JSON.stringify(completed)).not.toContain('fallback-private');
     expect(completed?.modelIdentityHash).toMatch(/^[a-f0-9]{64}$/);
     expect(completed?.modelRole).toBe('fallback');
+  });
+
+  it('uses the same local HMAC identity for successful and failed runs', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    const success = service.createSession({ runId: RUN_ID });
+    const failed = service.createSession({
+      runId: '22222222-2222-4222-8222-222222222222',
+    });
+    const model = {
+      modelRole: 'fallback' as const,
+      modelIdentity: 'endpoint-secret-id/private-model',
+    };
+
+    await success.complete({
+      modelTelemetry: { role: model.modelRole, identity: model.modelIdentity },
+      verification: { mode: 'sandbox', verified: true, wouldBlock: false },
+    });
+    await failed.fail(new Error('private failure'), model);
+
+    const completed = payloads[0].events[0];
+    const failedCompleted = payloads[2].events[0];
+    expect(completed.modelIdentityHash).toBe(failedCompleted.modelIdentityHash);
+    expect(JSON.stringify(payloads)).not.toContain('endpoint-secret-id');
+    expect(JSON.stringify(payloads)).not.toContain('private-model');
+    expect(JSON.stringify(payloads)).not.toContain('private failure');
   });
 
   it('preserves verified=false and wouldBlock=true without deriving a new verdict', async () => {

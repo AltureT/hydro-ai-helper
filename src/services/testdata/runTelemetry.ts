@@ -164,6 +164,10 @@ interface TestdataPlanLike {
   problemType?: 'traditional' | 'function';
   tokenUsage?: { totalTokens?: number };
   usedModel?: string;
+  modelTelemetry?: {
+    role?: 'primary' | 'fallback';
+    identity?: string;
+  };
   reliabilityMode?: TestdataReliabilityMode;
   risk?: { tier?: TestdataRiskTier };
   verification?: {
@@ -209,6 +213,11 @@ interface TestdataTelemetryOptions {
   now?: () => number;
   eventId?: () => string;
   pluginVersion?: string;
+}
+
+export interface TestdataTelemetryModel {
+  modelRole: 'primary' | 'fallback';
+  modelIdentity?: string;
 }
 
 const EVENT_TYPES = new Set<TestdataRunEventType>([
@@ -484,7 +493,7 @@ export class TestdataRunTelemetryService {
 
   async emit(
     rawEvent: TestdataQualityEvent,
-    model?: { modelRole: 'primary' | 'fallback'; modelIdentity: string },
+    model?: TestdataTelemetryModel,
   ): Promise<boolean> {
     try {
       const install = await this.installProvider.getInstall();
@@ -494,8 +503,8 @@ export class TestdataRunTelemetryService {
       const event = parseTestdataQualityEvent({
         ...rawEvent,
         pluginVersion: install.lastVersion,
+        ...(model ? { modelRole: model.modelRole } : {}),
         ...(model?.modelIdentity && modelHmacKey ? {
-          modelRole: model.modelRole,
           modelIdentityHash: createHmac(
             'sha256',
             modelHmacKey,
@@ -644,17 +653,24 @@ export class TestdataRunTelemetrySession {
     }
   }
 
-  async fail(error: unknown): Promise<void> {
+  async fail(error: unknown, model?: TestdataTelemetryModel): Promise<void> {
     if (this.terminal) return;
     this.terminal = true;
     try {
       const failure = extractTestdataFailureMetadata(error);
-      if (failure && !isCancellation(error) && failure.failureCode !== 'CANCELLED') {
+      const canceled = isCancellation(error) || failure?.failureCode === 'CANCELLED';
+      const terminalModel: TestdataTelemetryModel | undefined = canceled ? undefined : {
+        modelRole: (this.currentStage?.attempt || 1) > 1 ? 'fallback' : model?.modelRole || 'primary',
+        ...(model?.modelIdentity ? { modelIdentity: model.modelIdentity } : {}),
+      };
+      if (!canceled) {
         await this.service.emit(this.event('stage_failed', {
-          stage: qualityStage(failure.stage),
-          failureCode: failure.failureCode,
-          artifact: failure.artifact,
-          retryPolicy: failure.retryPolicy,
+          stage: failure
+            ? qualityStage(failure.stage)
+            : this.currentStage?.stage || 'unknown',
+          failureCode: failure?.failureCode || 'UNKNOWN',
+          artifact: failure?.artifact || 'pipeline',
+          retryPolicy: failure?.retryPolicy || 'switch-model',
           attempt: this.currentStage?.attempt || 1,
         }));
       }
@@ -662,8 +678,8 @@ export class TestdataRunTelemetrySession {
         pipelineCompleted: false,
         verified: false,
         wouldBlock: false,
-        modelEscalated: this.currentStage?.attempt === 2,
-      }));
+        modelEscalated: (this.currentStage?.attempt || 1) > 1,
+      }), terminalModel);
     } catch {
       // Event construction is also best-effort for legacy/invalid local state.
     }
@@ -679,9 +695,10 @@ export class TestdataRunTelemetrySession {
       const requested = verification?.templateLanguages || this.context.templateLanguagesRequested;
       const failureKinds = templateFailureKinds(plan);
       const modelEscalated = !!verification?.modelEscalation;
-      const identity = typeof plan.usedModel === 'string'
-        ? plan.usedModel.split(' → ').pop()?.trim()
-        : undefined;
+      const modelRole = modelEscalated || plan.modelTelemetry?.role === 'fallback'
+        ? 'fallback'
+        : 'primary';
+      const identity = plan.modelTelemetry?.identity;
       await this.service.emit(this.event('run_completed', {
         generationMode: verification?.mode,
         reliabilityMode: plan.reliabilityMode || this.context.reliabilityMode,
@@ -709,10 +726,10 @@ export class TestdataRunTelemetrySession {
         checkerExecuted: checker?.executed,
         checkerInfraFailures: checker?.infraFailures,
         checkerFailureKind: checkerFailureKind(checker?.failureKind),
-      }), identity ? {
-        modelRole: modelEscalated ? 'fallback' : 'primary',
-        modelIdentity: identity,
-      } : undefined);
+      }), {
+        modelRole,
+        ...(identity ? { modelIdentity: identity } : {}),
+      });
     } catch {
       // Event construction is also best-effort for legacy/invalid local state.
     }

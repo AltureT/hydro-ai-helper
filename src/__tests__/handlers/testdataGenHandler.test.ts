@@ -449,7 +449,7 @@ describe('TestdataGenGenerateHandler', () => {
         runId: expect.stringMatching(/^[0-9a-f-]{36}$/),
       }));
       expect(start).toHaveBeenCalledTimes(1);
-      expect(fail).toHaveBeenCalledWith(clientError);
+      expect(fail).toHaveBeenCalledWith(clientError, { modelRole: 'primary' });
     } finally {
       clientSpy.mockRestore();
     }
@@ -985,12 +985,18 @@ describe('TestdataGenGenerateHandler', () => {
     error.stack = 'STACK_WITH_SECRET_INPUT_AND_OUTPUT';
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockRejectedValue(error);
     const capture = jest.fn();
+    const telemetryFail = jest.fn().mockResolvedValue(undefined);
+    const createSession = jest.fn().mockReturnValue({
+      start: jest.fn(), progress: jest.fn(), complete: jest.fn(), fail: telemetryFail,
+    });
     const handler = setupHandler(TestdataGenGenerateHandler, {
       own: true, body: { problemId: 'D3102', caseCount: 5 },
     });
-    handler.ctx.get = jest.fn((name: string) => (
-      name === 'errorReporter' ? { capture } : undefined
-    ));
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'errorReporter') return { capture };
+      if (name === 'testdataRunTelemetry') return { createSession };
+      return undefined;
+    });
 
     try {
       await handler.post();
@@ -1007,6 +1013,10 @@ describe('TestdataGenGenerateHandler', () => {
         error.stack,
         { aiCategory: 'network', retryable: true, attemptCount: 2 },
       );
+      expect(telemetryFail).toHaveBeenCalledWith(error, {
+        modelRole: 'primary',
+        modelIdentity: 'endpoint-secret-id/private-model',
+      });
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -1198,10 +1208,165 @@ describe('Testdata generation background jobs', () => {
         replaced._id,
         expect.objectContaining({ outcome: 'regenerated' }),
       );
+      expect(jobModel.recordTeacherOutcome.mock.invocationCallOrder[0])
+        .toBeLessThan(jobModel.createOrGetActive.mock.invocationCallOrder[0]);
       expect(emitTeacherOutcome).toHaveBeenCalledWith(expect.objectContaining({
         runId: replaced.runId,
         outcome: 'regenerated',
       }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('regenerated 本地终态持久化失败时不创建新任务并显式返回失败', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const replaced = makeGenerationJob({ status: 'completed', active: false });
+    const createOrGetActive = jest.fn();
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      findById: jest.fn().mockResolvedValue(replaced),
+      createOrGetActive,
+      recordTeacherOutcome: jest.fn().mockRejectedValue(new Error('database unavailable')),
+    };
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102', caseCount: 1, replacesJobId: String(replaced._id) },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(500);
+    expect(handler.response.body).toEqual(expect.objectContaining({
+      code: 'REGENERATION_OUTCOME_PERSIST_FAILED',
+    }));
+    expect(createOrGetActive).not.toHaveBeenCalled();
+  });
+
+  it('regenerated 与活跃 apply claim 冲突时不创建新任务', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const replaced = makeGenerationJob({ status: 'completed', active: false });
+    const createOrGetActive = jest.fn();
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      findById: jest.fn().mockResolvedValue(replaced),
+      createOrGetActive,
+      recordTeacherOutcome: jest.fn().mockResolvedValue({
+        state: 'conflict',
+        record: { eventId: '44444444-4444-4444-8444-444444444444', outcome: 'regenerated' },
+      }),
+    };
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      body: { problemId: 'D3102', caseCount: 1, replacesJobId: String(replaced._id) },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(409);
+    expect(handler.response.body).toEqual(expect.objectContaining({
+      code: 'OUTCOME_ALREADY_RECORDED',
+    }));
+    expect(createOrGetActive).not.toHaveBeenCalled();
+  });
+
+  it('重复 regenerated 请求复用同一终态且只启动一个后台任务', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const replaced = makeGenerationJob({ status: 'completed', active: false });
+    const job = makeGenerationJob({
+      _id: new ObjectId(),
+      runId: '33333333-3333-4333-8333-333333333333',
+      status: 'pending',
+      startedAt: null,
+    });
+    const outcomeRecord = {
+      eventId: '44444444-4444-4444-8444-444444444444',
+      outcome: 'regenerated' as const,
+      recordedAt: new Date(),
+    };
+    let persistedOutcome: typeof outcomeRecord | undefined;
+    let outcomeEntrants = 0;
+    let releaseOutcomes!: () => void;
+    const outcomeGate = new Promise<void>(resolve => { releaseOutcomes = resolve; });
+    let activeJob: typeof job | undefined;
+    let createEntrants = 0;
+    let releaseCreates!: () => void;
+    const createGate = new Promise<void>(resolve => { releaseCreates = resolve; });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      findById: jest.fn().mockResolvedValue(replaced),
+      createOrGetActive: jest.fn().mockImplementation(async () => {
+        createEntrants += 1;
+        if (createEntrants === 2) releaseCreates();
+        await createGate;
+        if (activeJob) return { job: activeJob, created: false };
+        activeJob = job;
+        return { job, created: true };
+      }),
+      recordTeacherOutcome: jest.fn().mockImplementation(async () => {
+        outcomeEntrants += 1;
+        if (outcomeEntrants === 2) releaseOutcomes();
+        await outcomeGate;
+        if (persistedOutcome) return { state: 'duplicate', record: persistedOutcome };
+        persistedOutcome = outcomeRecord;
+        return { state: 'recorded', record: outcomeRecord };
+      }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      runId: job.runId,
+      promptVersion: 'testdata-generation-v1',
+      originalFileHashes: {},
+      problemType: 'traditional',
+      files: [],
+      caseCount: 0,
+    } as never);
+    const emitTeacherOutcome = jest.fn().mockResolvedValue(true);
+    const createSession = jest.fn().mockReturnValue({
+      start: jest.fn(), progress: jest.fn(), complete: jest.fn(), fail: jest.fn(),
+    });
+    const makeHandler = () => {
+      const handler = setupHandler(TestdataGenJobStartHandler, {
+        own: true,
+        body: { problemId: 'D3102', caseCount: 1, replacesJobId: String(replaced._id) },
+      });
+      handler.ctx.get = jest.fn((name: string) => {
+        if (name === 'testdataGenerationJobModel') return jobModel;
+        if (name === 'testdataRunTelemetry') return { createSession, emitTeacherOutcome };
+        return undefined;
+      });
+      return handler;
+    };
+
+    try {
+      const first = makeHandler();
+      const second = makeHandler();
+      await Promise.all([first.post(), second.post()]);
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect([first.response.status, second.response.status].sort()).toEqual([200, 202]);
+      expect(jobModel.recordTeacherOutcome).toHaveBeenCalledTimes(2);
+      expect(persistedOutcome).toBe(outcomeRecord);
+      expect(jobModel.createOrGetActive).toHaveBeenCalledTimes(2);
+      expect(activeJob).toBe(job);
+      expect(jobModel.markRunning).toHaveBeenCalledTimes(1);
+      expect(emitTeacherOutcome).toHaveBeenCalledTimes(2);
+      expect(emitTeacherOutcome.mock.calls[0][0].eventId)
+        .toBe(emitTeacherOutcome.mock.calls[1][0].eventId);
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -1302,12 +1467,17 @@ describe('Testdata generation background jobs', () => {
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
       .mockRejectedValue(sensitiveError);
     const capture = jest.fn();
+    const telemetryFail = jest.fn().mockResolvedValue(undefined);
+    const createSession = jest.fn().mockReturnValue({
+      start: jest.fn(), progress: jest.fn(), complete: jest.fn(), fail: telemetryFail,
+    });
     const handler = setupHandler(TestdataGenJobStartHandler, {
       own: true, body: { problemId: 'D3102', caseCount: 1 },
     });
     handler.ctx.get = jest.fn((name: string) => {
       if (name === 'testdataGenerationJobModel') return jobModel;
       if (name === 'errorReporter') return { capture };
+      if (name === 'testdataRunTelemetry') return { createSession };
       return undefined;
     });
 
@@ -1323,6 +1493,9 @@ describe('Testdata generation background jobs', () => {
         sensitiveError.stack,
         {},
       );
+      expect(telemetryFail).toHaveBeenCalledWith(sensitiveError, {
+        modelRole: 'primary',
+      });
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
@@ -1558,6 +1731,7 @@ describe('Testdata generation background jobs', () => {
         runId: '11111111-1111-4111-8111-111111111111',
         promptVersion: 'testdata-generation-v1',
         originalFileHashes: { '1.in': 'a'.repeat(64) },
+        modelTelemetry: { role: 'fallback', identity: 'endpoint-id/private-model' },
         problemType: 'traditional',
         files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
         caseCount: 1,
@@ -1577,6 +1751,7 @@ describe('Testdata generation background jobs', () => {
 
     expect(handler.response.body.job.plan.runId).toBe('11111111-1111-4111-8111-111111111111');
     expect(handler.response.body.job.plan).not.toHaveProperty('originalFileHashes');
+    expect(handler.response.body.job.plan).not.toHaveProperty('modelTelemetry');
   });
 
   it('cancel endpoint persists cancellation and returns the canceled state', async () => {

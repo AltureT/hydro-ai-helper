@@ -133,6 +133,15 @@ export interface TestdataQualityDistributionItem {
   count: number;
 }
 
+export type TestdataModelRole = 'primary' | 'fallback';
+
+export interface TestdataModelRoleMetrics {
+  runs: number;
+  completed: TestdataQualityRate;
+  verified: TestdataQualityRate;
+  failed: TestdataQualityRate;
+}
+
 export interface TestdataQualityResponse {
   window_days: number;
   total_runs: number;
@@ -152,6 +161,7 @@ export interface TestdataQualityResponse {
   failure_stages?: TestdataQualityDistributionItem[];
   failure_artifacts?: TestdataQualityDistributionItem[];
   risk_tiers?: TestdataQualityDistributionItem[];
+  model_roles?: Record<TestdataModelRole, TestdataModelRoleMetrics>;
   templates?: Partial<Record<'py' | 'java' | 'cc', {
     requested: number;
     verified: number;

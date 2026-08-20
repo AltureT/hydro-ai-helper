@@ -409,6 +409,39 @@ function captureTestdataGenerationFailure(ctx, feature, err) {
     }
     reporter.capture('api_failure', feature, 'Untyped test-data generation failure', undefined, err instanceof Error ? err.stack : undefined, safeMetadata);
 }
+function testdataFailureModel(error, testdataMetadata, aiMetadata) {
+    const explicitRole = testdataMetadata?.modelTelemetryRole;
+    const explicitIdentity = testdataMetadata?.modelTelemetryIdentity;
+    if ((explicitRole === 'primary' || explicitRole === 'fallback')
+        && typeof explicitIdentity === 'string' && explicitIdentity) {
+        return { modelRole: explicitRole, modelIdentity: explicitIdentity };
+    }
+    const localAiContext = error instanceof openaiClient_1.AIServiceError ? error.context : undefined;
+    const attempts = localAiContext?.attempts || aiMetadata?.attempts;
+    const aiAttempts = Array.isArray(attempts)
+        ? attempts.flatMap(value => {
+            if (!value || typeof value !== 'object' || Array.isArray(value))
+                return [];
+            const attempt = value;
+            if (typeof attempt.model !== 'string' || !attempt.model)
+                return [];
+            return [typeof attempt.endpoint === 'string' && attempt.endpoint
+                    ? `${attempt.endpoint}/${attempt.model}`
+                    : attempt.model];
+        })
+        : [];
+    const directModelName = localAiContext?.modelName
+        || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : undefined);
+    const directEndpointId = localAiContext?.endpointId;
+    const directModel = directModelName
+        ? [directEndpointId ? `${directEndpointId}/${directModelName}` : directModelName]
+        : [];
+    const identities = [...new Set(aiAttempts.length > 0 ? aiAttempts : directModel)];
+    return {
+        modelRole: identities.length > 1 ? 'fallback' : 'primary',
+        ...(identities.length > 0 ? { modelIdentity: identities[identities.length - 1] } : {}),
+    };
+}
 function emitTestdataTelemetryBestEffort(action) {
     if (!action)
         return;
@@ -459,7 +492,7 @@ function serializeGenerationPlan(plan) {
         return undefined;
     // Hashes are server-authoritative apply state. They are persisted with the job
     // but never sent to the browser and are never accepted back from the client.
-    const { originalFileHashes: _serverOnlyHashes, ...clientPlan } = plan;
+    const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, ...clientPlan } = plan;
     return clientPlan;
 }
 function serializeGenerationJob(job) {
@@ -633,7 +666,7 @@ async function runBackgroundGeneration(params) {
             || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
         captureTestdataGenerationFailure(ctx, 'testdata_gen', err);
-        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err, testdataFailureModel(err, testdataMetadata, aiMetadata))));
         const jobError = err instanceof openaiClient_1.AIServiceError
             ? {
                 message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -850,7 +883,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
             captureTestdataGenerationFailure(this.ctx, 'testdata_gen', err);
-            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err, testdataFailureModel(err, testdataMetadata, aiMetadata))));
             if (err instanceof openaiClient_1.AIServiceError) {
                 const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -1017,6 +1050,24 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 }
                 replacedJob = authorized.job;
             }
+            let regeneratedOutcome;
+            if (replacedJob) {
+                try {
+                    regeneratedOutcome = await jobModel.recordTeacherOutcome(replacedJob._id, {
+                        eventId: (0, runTelemetry_1.createTestdataEventId)(),
+                        outcome: 'regenerated',
+                    });
+                }
+                catch (err) {
+                    console.error('[TestdataGenJob] regenerated outcome persistence failed:', err);
+                    sendError(this, 500, 'REGENERATION_OUTCOME_PERSIST_FAILED', 'ai_helper_err_internal');
+                    return;
+                }
+                if (regeneratedOutcome.state === 'conflict') {
+                    sendError(this, 409, 'OUTCOME_ALREADY_RECORDED', 'ai_helper_testdata_outcome_already_recorded');
+                    return;
+                }
+            }
             const { job, created } = await jobModel.createOrGetActive({
                 domainId,
                 problemDocId: pdoc.docId,
@@ -1024,25 +1075,14 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 problemTitle: pdoc.title || problemId,
                 createdBy: this.user?._id,
             });
-            if (created && replacedJob) {
-                try {
-                    const outcome = await jobModel.recordTeacherOutcome(replacedJob._id, {
-                        eventId: (0, runTelemetry_1.createTestdataEventId)(),
-                        outcome: 'regenerated',
-                    });
-                    if (outcome.state !== 'conflict') {
-                        const telemetry = this.ctx.get('testdataRunTelemetry');
-                        emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
-                            runId: replacedJob.runId,
-                            eventId: outcome.record.eventId,
-                            occurredAt: outcome.record.recordedAt,
-                            outcome: outcome.record.outcome,
-                        })));
-                    }
-                }
-                catch (err) {
-                    console.warn('[TestdataGenJob] regenerated outcome persistence failed:', err);
-                }
+            if (replacedJob && regeneratedOutcome) {
+                const telemetry = this.ctx.get('testdataRunTelemetry');
+                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
+                    runId: replacedJob.runId,
+                    eventId: regeneratedOutcome.record.eventId,
+                    occurredAt: regeneratedOutcome.record.recordedAt,
+                    outcome: regeneratedOutcome.record.outcome,
+                })));
             }
             if (created) {
                 // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
