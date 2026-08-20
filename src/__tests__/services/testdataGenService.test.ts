@@ -2675,6 +2675,22 @@ describe('TestdataGenService.generate', () => {
     })).toThrow(expect.objectContaining({ code: 'SPEC_CONSENSUS_REQUIRED' }));
   });
 
+  it('routes a combined full repair through base and attributes its replacement ORACLE identity', async () => {
+    const usedModel = { endpointId: 'base-repair', endpointName: 'base', modelName: 'repair-model' };
+    const baseClient = { chat: jest.fn().mockResolvedValue({ content: 'full repair', usedModel }) };
+    const artifacts = makeRoleClient('artifacts', 'artifacts', 'artifacts-model', 'unused');
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode: 'observe', roleClients: { artifacts },
+    });
+
+    const result = await (service as any).chatForCombinedRepair([], 'system', {});
+
+    expect(result.usedModel).toEqual(usedModel);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect((service as any).activeRoleIdentities.oracle).toEqual(usedModel);
+  });
+
   it('enforce + high blocks unresolved adjudication with safe counts only', async () => {
     const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
     const primarySpec = makeObservedProblemSpec(statement);
@@ -3066,6 +3082,132 @@ describe('TestdataGenService.generate', () => {
     expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+  });
+
+  it('high-risk enforce regenerates checkpoint v1 solution and verifier when identities are unavailable', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    };
+    const oracle = makeRoleClient(
+      'oracle', 'oracle-actual', 'oracle-model', makeSolutionBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-actual', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts', 'artifacts-model', makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, verifier, artifacts },
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'high-risk checkpoint v1',
+      statementMarkdown: 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.',
+      options,
+      checkpoint,
+    }, runner, 1, {
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    });
+
+    expect(plan.files.find((file: { name: string }) => file.name === '1.out')?.content).toBe('1\n');
+    expect(oracle.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(artifacts.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('high-risk enforce rechecks independence after an Oracle repair replaces the final blueprint', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const brokenSolution = makeSolutionBlueprint('traditional').replace(
+      'print(input())',
+      'raise RuntimeError("broken oracle")',
+    );
+    const firstOracleModel = {
+      endpointId: 'oracle-first', endpointName: 'oracle-first', modelName: 'oracle-model',
+    };
+    const sharedModel = {
+      endpointId: 'shared-final', endpointName: 'shared-final', modelName: 'same-model',
+    };
+    const oracle = makeRoleClient('oracle', 'configured-oracle', 'oracle-model');
+    oracle.chat
+      .mockResolvedValueOnce({ content: brokenSolution, usedModel: firstOracleModel })
+      .mockResolvedValueOnce({ content: '@@@ORACLE@@@\nprint(input())', usedModel: sharedModel });
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'verifier-model',
+      sharedModel.endpointId, sharedModel.modelName,
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts', 'artifacts-model', makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('RuntimeError')) {
+            return detail({
+              accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: 'broken oracle',
+            });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, verifier, artifacts },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'final repair identity',
+      statementMarkdown: 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.',
+      options,
+      checkpoint: { killTargets: [] },
+    }, runner, 1, {
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+    expect(oracle.chat).toHaveBeenCalledTimes(2);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
   });
 
   it('完整三语言 checkpoint 跳过 AI 调用并仍实跑全部模板沙箱门槛', async () => {
@@ -4183,6 +4325,74 @@ describe('TestdataGenService.generate', () => {
       expect(retriedRoleClients?.oracle?.client).toBe(oracleFallbackClient);
       expect(retriedRoleClients?.artifacts).toBe(artifacts);
       expect(retriedRoleClients?.verifier).toBe(verifier);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('propagates semantic fallback actual identities back to observe-mode warnings', async () => {
+    const primaryModel = { endpointId: 'oracle-a', endpointName: 'oracle-a', modelName: 'model-a' };
+    const sharedModel = { endpointId: 'shared-final', endpointName: 'shared', modelName: 'same-model' };
+    const firstError = new TestdataGenerationError(
+      'oracle repair failed',
+      'solution_blueprint',
+      [{ content: 'broken', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'SPEC_PARSE_FAILED', artifact: 'spec', retryPolicy: 'switch-model',
+        failedModelRole: 'oracle',
+      },
+    );
+    const oracle = makeRoleClient('oracle', 'oracle-a', 'model-a');
+    Object.assign(oracle.client as object, {
+      createClientStartingAfter: jest.fn().mockReturnValue({ chat: jest.fn() }),
+    });
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'shared/same-model', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockImplementationOnce(async function (this: TestdataGenService) {
+        (this as any).activeRoleIdentities = {
+          oracle: sharedModel,
+          verifier: sharedModel,
+        };
+        return fallbackPlan;
+      });
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe', roleClients: { oracle },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'identity propagation', statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() });
+      const observed = (service as any).attachProblemSpecObservation(plan, {
+        schemaVersion: 1, results: [], status: 'consensus', conflictCount: 0,
+        unresolvedConflictCount: 0, rolesUsed: ['specPrimary', 'specCritic'],
+        roleIdentities: {}, identityWarningCodes: [], wouldBlock: false,
+      }, {
+        tier: 'low', score: 1, reasons: [], requiresSandbox: false,
+        requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: true,
+      });
+
+      expect((service as any).activeRoleIdentities).toEqual({
+        oracle: sharedModel, verifier: sharedModel,
+      });
+      expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
+      expect(observed.notesStructured.warnings).toContainEqual(
+        expect.stringContaining('ORACLE_VERIFIER_IDENTITY_CONFLICT'),
+      );
     } finally {
       generateWithSandbox.mockRestore();
     }

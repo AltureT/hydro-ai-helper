@@ -4957,6 +4957,13 @@ class TestdataGenService {
             },
         };
     }
+    async chatForCombinedRepair(...args) {
+        const result = await this.aiClient.chat(...args);
+        // The combined repair protocol may replace the ORACLE-bearing solution as well as
+        // artifacts, so its successful model is the new Oracle identity for independence.
+        this.activeRoleIdentities.oracle = { ...result.usedModel };
+        return result;
+    }
     assertIndependentRoleIdentities(risk) {
         if (this.reliabilityMode !== 'enforce'
             || (risk.tier !== 'high' && risk.tier !== 'blocked'))
@@ -5225,6 +5232,10 @@ class TestdataGenService {
                 if (plan.verification) {
                     plan.verification.modelEscalation = { fromModel, toModel };
                 }
+                this.activeRoleIdentities = {
+                    ...this.activeRoleIdentities,
+                    ...fallbackService.activeRoleIdentities,
+                };
                 const escalationNote = `首选模型在自动修复后仍未通过机器验证，已从下一配置模型（${toModel}）完整重跑并通过。`;
                 plan.notes = [
                     plan.notes,
@@ -5762,8 +5773,16 @@ class TestdataGenService {
             const callOptions = this.getCallOptions(params, attempt);
             report('blueprint', 10);
             const results = [];
+            let finalOracleIdentity;
+            let finalVerifierIdentity;
             const expectedFunctionSamples = (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown);
-            const checkpoint = normalizeReusableCheckpoint(params.checkpoint, params.options);
+            const normalizedCheckpoint = normalizeReusableCheckpoint(params.checkpoint, params.options);
+            const requiresFreshIndependentArtifacts = this.reliabilityMode === 'enforce'
+                && (risk.tier === 'high' || risk.tier === 'blocked');
+            // Checkpoint v1 carries no exact role identities or dependency provenance. Until
+            // Task 7 introduces a new checkpoint contract, high-risk enforce regenerates the
+            // complete dependent set instead of mixing fresh independent roles with stale files.
+            const checkpoint = requiresFreshIndependentArtifacts ? undefined : normalizedCheckpoint;
             let solutionSourceContent = checkpoint?.solution
                 ? JSON.stringify(checkpoint.solution)
                 : '';
@@ -5926,10 +5945,12 @@ class TestdataGenService {
             // 可选 kill-target 与独立 verifier 并发完成，不能让完成顺序决定角色身份。
             // 独立性门控固定采用最终 Oracle 蓝图调用和独立 verifier 调用的实际模型。
             if (!checkpoint?.solution && results.length > 0) {
-                this.activeRoleIdentities.oracle = { ...results[results.length - 1].usedModel };
+                finalOracleIdentity = { ...results[results.length - 1].usedModel };
+                this.activeRoleIdentities.oracle = finalOracleIdentity;
             }
             if (!checkpoint?.verifier && verifierResults.length > results.length) {
-                this.activeRoleIdentities.verifier = { ...verifierResults[verifierResults.length - 1].usedModel };
+                finalVerifierIdentity = { ...verifierResults[verifierResults.length - 1].usedModel };
+                this.activeRoleIdentities.verifier = finalVerifierIdentity;
             }
             this.assertIndependentRoleIdentities(risk);
             if (checkpoint) {
@@ -6035,7 +6056,9 @@ class TestdataGenService {
                     ? 'verifier'
                     : repairScope === 'oracle'
                         ? 'oracle'
-                        : 'artifacts';
+                        : repairScope === 'full'
+                            ? undefined
+                            : 'artifacts';
                 let usedFullRepair = repairScope === 'full';
                 report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
                 let repairResult;
@@ -6049,6 +6072,18 @@ class TestdataGenService {
                                 content: buildIndependentVerifierRepairPrompt(firstError, verifierState.expectedFunctionSamples),
                             },
                         ], verifierState.systemPrompt, callOptions);
+                        finalVerifierIdentity = { ...repairResult.usedModel };
+                    }
+                    else if (repairScope === 'full') {
+                        repairResult = await this.chatForCombinedRepair([
+                            { role: 'user', content: userPrompt },
+                            { role: 'assistant', content: blueprintSourceContent },
+                            {
+                                role: 'user',
+                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage),
+                            },
+                        ], systemPrompt, callOptions);
+                        finalOracleIdentity = { ...repairResult.usedModel };
                     }
                     else {
                         repairResult = await (repairScope === 'oracle' ? oracleClient : artifactsClient).chat([
@@ -6059,6 +6094,9 @@ class TestdataGenService {
                                 content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage),
                             },
                         ], systemPrompt, callOptions);
+                        if (repairScope === 'oracle') {
+                            finalOracleIdentity = { ...repairResult.usedModel };
+                        }
                     }
                 }
                 catch (err) {
@@ -6105,6 +6143,7 @@ class TestdataGenService {
                                 content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full', generationCoverage),
                             },
                         ], systemPrompt, callOptions);
+                        finalOracleIdentity = { ...fullRepairResult.usedModel };
                         results.push(fullRepairResult);
                         blueprint = {
                             ...parseSandboxBlueprint(fullRepairResult.content, params.options),
@@ -6175,6 +6214,11 @@ class TestdataGenService {
                     throw checkerPipelineError('CHECKER_RUNTIME_FAILED', check.failureKind === 'budget' ? 'budget' : 'infra', 'checker 未完成可信语义执行');
                 }
             }
+            if (finalOracleIdentity)
+                this.activeRoleIdentities.oracle = finalOracleIdentity;
+            if (finalVerifierIdentity)
+                this.activeRoleIdentities.verifier = finalVerifierIdentity;
+            this.assertIndependentRoleIdentities(risk);
             report('assembling', 96);
             const plan = assemblePlan(response, params.options, {
                 mode: 'sandbox',

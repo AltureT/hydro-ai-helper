@@ -179,6 +179,43 @@ describe('deterministic ProblemSpec diff', () => {
 
     expect(diffProblemSpecs(primary, critic).map(conflict => conflict.path)).toEqual(['subtasks']);
   });
+
+  it('ignores constraint and subtask ordering when semantic references are unchanged', () => {
+    const primary = validSpec(STATEMENT, {
+      constraints: [
+        {
+          id: 'limit_a', expression: '1 <= n <= 100', machineCheckable: true,
+          scope: { subtaskId: 1 }, evidence: { quote: '1 <= n <= 100.' },
+        },
+        {
+          id: 'distinct_a', expression: 'Values are distinct', machineCheckable: false,
+          scope: { subtaskId: 2 }, evidence: { quote: 'Values are distinct.' },
+        },
+      ],
+      subtasks: [
+        { id: 1, score: 40, constraintIds: ['limit_a'] },
+        { id: 2, score: 60, constraintIds: ['distinct_a'] },
+      ],
+    });
+    const critic = validSpec(STATEMENT, {
+      constraints: [
+        {
+          id: 'distinct_b', expression: 'Values are distinct', machineCheckable: false,
+          scope: { subtaskId: 20 }, evidence: { quote: 'Values are distinct.' },
+        },
+        {
+          id: 'limit_b', expression: '1 <= n <= 100', machineCheckable: true,
+          scope: { subtaskId: 10 }, evidence: { quote: '1 <= n <= 100.' },
+        },
+      ],
+      subtasks: [
+        { id: 20, score: 60, constraintIds: ['distinct_b'] },
+        { id: 10, score: 40, constraintIds: ['limit_b'] },
+      ],
+    });
+
+    expect(diffProblemSpecs(primary, critic)).toEqual([]);
+  });
 });
 
 describe('dual ProblemSpec consensus and adjudication', () => {
@@ -315,6 +352,33 @@ describe('dual ProblemSpec consensus and adjudication', () => {
       requestedProblemKind: 'traditional',
       hasCustomChecker: false,
       primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(validSpec())),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+      adjudicator: client('adjudicator', 'ep-c', 'judge', adjudication),
+    });
+
+    expect(result).toMatchObject({
+      status: 'unresolved', failureCode: 'SPEC_CONSENSUS_REQUIRED', unresolvedConflictCount: 1,
+    });
+  });
+
+  it('rejects an adjudicator that changes a path Primary and Critic already agreed on', async () => {
+    const primarySpec = validSpec();
+    const criticSpec = validSpec(STATEMENT, { outputPolicy: { kind: 'token' } });
+    const adjudication = JSON.stringify({
+      resolvedSpec: validSpec(STATEMENT, {
+        constraints: [],
+        outputPolicy: { kind: 'token' },
+      }),
+      resolutions: [{
+        path: 'outputPolicy', selected: 'B', evidenceQuote: 'Print the exact sum.', reason: 'token output',
+      }],
+    });
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(STATEMENT),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
       critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
       adjudicator: client('adjudicator', 'ep-c', 'judge', adjudication),
     });

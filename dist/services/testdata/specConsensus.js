@@ -12,26 +12,47 @@ const RESOLUTION_EVIDENCE_MAX_LENGTH = 4096;
 function text(value) {
     return value.trim().replace(/\s+/g, ' ');
 }
-function canonicalReferences(items, key, prefix, structure) {
-    const occurrences = new Map();
-    return new Map(items.map((item, index) => {
-        const signature = JSON.stringify(structure(item));
-        const occurrence = occurrences.get(signature) || 0;
-        occurrences.set(signature, occurrence + 1);
-        return [key(item), `${prefix}:${index}:${occurrence}:${signature}`];
-    }));
+function signature(value) {
+    return JSON.stringify(value);
 }
 function normalizedSpec(spec) {
-    const subtasks = canonicalReferences(spec.subtasks, subtask => subtask.id, 'subtask', subtask => ({ score: subtask.score }));
-    const fields = canonicalReferences(spec.inputFields, field => field.id, 'field', field => ({ type: field.type, encoding: text(field.encoding) }));
-    const constraints = canonicalReferences(spec.constraints, constraint => constraint.id, 'constraint', constraint => ({
+    const sortObjects = (items) => [...items].sort((left, right) => (signature(left).localeCompare(signature(right))));
+    // Input order is part of the input encoding, so field references deliberately use
+    // their canonical position. Names and model-generated IDs remain non-semantic.
+    const fields = new Map(spec.inputFields.map((field, index) => [
+        field.id,
+        `field:${index}:${signature({ type: field.type, encoding: text(field.encoding) })}`,
+    ]));
+    // Constraints and subtasks are sets. First derive ID-free constraint bases, then
+    // ID-free subtask signatures, and finally scoped constraint signatures. Sorting the
+    // final arrays preserves duplicate multiplicity without depending on source order.
+    const constraintBases = new Map(spec.constraints.map(constraint => [
+        constraint.id,
+        signature({
+            expression: text(constraint.expression),
+            machineCheckable: constraint.machineCheckable,
+        }),
+    ]));
+    const subtaskSignatures = new Map(spec.subtasks.map(subtask => [
+        subtask.id,
+        signature({
+            score: subtask.score,
+            constraints: subtask.constraintIds
+                .map(id => constraintBases.get(id) || 'missing')
+                .sort(),
+        }),
+    ]));
+    const normalizedConstraints = spec.constraints.map(constraint => ({
         expression: text(constraint.expression),
         machineCheckable: constraint.machineCheckable,
         scope: constraint.scope === 'global'
             ? 'global'
-            : subtasks.get(constraint.scope.subtaskId) || 'missing',
+            : subtaskSignatures.get(constraint.scope.subtaskId) || 'missing',
     }));
-    const sortObjects = (items) => [...items].sort((left, right) => (JSON.stringify(left).localeCompare(JSON.stringify(right))));
+    const constraintSignatures = new Map(spec.constraints.map((constraint, index) => [
+        constraint.id,
+        signature(normalizedConstraints[index]),
+    ]));
     return {
         problemKind: spec.problemKind,
         testCaseMode: spec.testCaseMode.kind === 'single'
@@ -44,13 +65,7 @@ function normalizedSpec(spec) {
                 .map(id => fields.get(id) || 'missing')
                 .sort(),
         })),
-        constraints: spec.constraints.map(constraint => ({
-            expression: text(constraint.expression),
-            machineCheckable: constraint.machineCheckable,
-            scope: constraint.scope === 'global'
-                ? 'global'
-                : subtasks.get(constraint.scope.subtaskId) || 'missing',
-        })),
+        constraints: sortObjects(normalizedConstraints),
         invariants: sortObjects(spec.invariants.map(invariant => ({
             kind: invariant.kind,
             expression: text(invariant.expression),
@@ -63,10 +78,12 @@ function normalizedSpec(spec) {
             preconditions: operation.preconditions.map(text).sort(),
             effects: operation.effects.map(text).sort(),
         }))),
-        subtasks: spec.subtasks.map(subtask => ({
+        subtasks: sortObjects(spec.subtasks.map(subtask => ({
             score: subtask.score,
-            constraints: subtask.constraintIds.map(id => constraints.get(id) || 'missing').sort(),
-        })),
+            constraints: subtask.constraintIds
+                .map(id => constraintSignatures.get(id) || 'missing')
+                .sort(),
+        }))),
         uncertainties: sortObjects(spec.uncertainties.map(uncertainty => ({
             description: text(uncertainty.description),
             ...(uncertainty.evidence !== undefined ? { evidence: text(uncertainty.evidence) } : {}),
@@ -114,7 +131,7 @@ function exactKeys(value, allowed) {
         throw new TypeError('invalid adjudication keys');
     }
 }
-function parseAdjudication(raw, conflicts, input) {
+function parseAdjudication(raw, conflicts, primary, critic, input) {
     try {
         if (!raw || raw.length > ADJUDICATION_MAX_LENGTH)
             throw new TypeError('length');
@@ -155,6 +172,17 @@ function parseAdjudication(raw, conflicts, input) {
         }
         const resolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
         const normalizedResolved = normalizedSpec(resolvedSpec);
+        const normalizedPrimary = normalizedSpec(primary);
+        const normalizedCritic = normalizedSpec(critic);
+        const conflictPaths = new Set(conflicts.map(conflict => conflict.path));
+        for (const path of DIFF_PATHS) {
+            if (conflictPaths.has(path))
+                continue;
+            if (!(0, util_1.isDeepStrictEqual)(normalizedPrimary[path], normalizedCritic[path])
+                || !(0, util_1.isDeepStrictEqual)(normalizedResolved[path], normalizedPrimary[path])) {
+                throw new failures_1.TestdataPipelineError('裁决结果修改了无冲突字段。', 'SPEC_CONSENSUS_REQUIRED', 'spec_consensus', 'spec', 'manual-review');
+            }
+        }
         for (const resolution of resolutions) {
             const conflict = conflicts.find(item => item.path === resolution.path);
             const actual = normalizedResolved[resolution.path];
@@ -270,7 +298,7 @@ async function runProblemSpecConsensus(input) {
         adjudicatorResult = await input.adjudicator.client.chat([{ role: 'user', content: adjudicatorPrompt.userPrompt }], adjudicatorPrompt.systemPrompt, input.callOptions);
         results.push(adjudicatorResult);
         roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };
-        const adjudication = parseAdjudication(adjudicatorResult.content, conflicts, input);
+        const adjudication = parseAdjudication(adjudicatorResult.content, conflicts, primary.spec, critic.spec, input);
         return {
             status: 'adjudicated',
             conflictCount: conflicts.length,
