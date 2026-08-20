@@ -4456,6 +4456,7 @@ interface CachedValidationState {
   validatorVerification?: ValidatorVerification;
   validatorTargetEvidence?: ValidatorTargetEvidence[];
   validatorInvalidInvocationCount?: number;
+  validatorProofComplete?: boolean;
 }
 
 interface CachedOracleState {
@@ -4503,9 +4504,22 @@ export type ValidatorInvalidExecution =
 export function classifyValidatorInvalidResult(
   result: PythonRunDetail,
 ): ValidatorInvalidExecution {
-  if (result.timedOut) return 'timeout-gap';
-  if (result.error || !Number.isFinite(result.exitStatus)) return 'infra-gap';
-  return result.exitStatus === 0 ? 'false-accept' : 'rejected';
+  if (result.timedOut === true) return 'timeout-gap';
+  if (result.timedOut !== false
+    || typeof result.status !== 'string'
+    || typeof result.accepted !== 'boolean'
+    || typeof result.stdout !== 'string'
+    || typeof result.stderr !== 'string'
+    || (result.error !== undefined && result.error !== '')
+    || !Number.isFinite(result.exitStatus)) return 'infra-gap';
+  if (result.exitStatus === 0) {
+    return result.status === 'Accepted' && result.accepted
+      ? 'false-accept'
+      : 'infra-gap';
+  }
+  const explicitRejectionStatus = result.status === 'Nonzero Exit Status'
+    || result.status === 'Runtime Error';
+  return explicitRejectionStatus && !result.accepted ? 'rejected' : 'infra-gap';
 }
 
 interface ValidatorTargetEvidence {
@@ -4524,6 +4538,7 @@ interface InvalidValidatorInvocation {
 }
 
 const validatorInvalidInvocationCounts = new WeakMap<object, number>();
+const validatorProofCompleteness = new WeakMap<object, boolean>();
 
 function validatorEvidenceKey(
   targetKind: ValidatorTargetEvidence['targetKind'],
@@ -4714,13 +4729,23 @@ async function runValidatorInvalidProof(input: {
     } catch (err) {
       if (input.signal?.aborted) throw input.signal.reason ?? err;
       if (isCancellation(err)) throw err;
-      throw toSandboxExecutionPipelineError(err, {
-        code: 'SANDBOX_UNAVAILABLE',
-        stage: 'validator',
-        artifact: 'validator',
-        message: 'VALIDATOR 非法探针批次的沙箱基础设施不可用',
-        safeDetails: { failureKind: 'infra' },
-      });
+      if (isSandboxBudgetExceededError(err)) {
+        throw new TestdataPipelineError(
+          '沙箱执行总时长超出预算，请减少测试点数量后重试',
+          'PIPELINE_BUDGET_EXHAUSTED',
+          'sandbox_budget',
+          'pipeline',
+          'no-retry',
+        );
+      }
+      throw new TestdataPipelineError(
+        'VALIDATOR 非法探针批次的沙箱基础设施不可用',
+        'SANDBOX_UNAVAILABLE',
+        'validator',
+        'validator',
+        'manual-review',
+        { failureKind: 'infra' },
+      );
     }
     if (input.signal?.aborted) {
       throw input.signal.reason ?? new Error('VALIDATOR 非法探针执行已取消');
@@ -4782,6 +4807,7 @@ async function runValidatorInvalidProof(input: {
     protocolFalseAccept: falseAcceptedInvocations.some(item => item.protocolProbe === true),
   });
   validatorInvalidInvocationCounts.set(summary, invalidInvocations.length);
+  validatorProofCompleteness.set(summary, policy.complete);
   return {
     summary,
     targetEvidence,
@@ -5249,6 +5275,7 @@ export async function materializeSandboxBlueprint(
       ...(validatorInvalidInvocationCount !== undefined
         ? { validatorInvalidInvocationCount }
         : {}),
+      ...(validatorVerification ? { validatorProofComplete } : {}),
     };
     stressInputs = keptStressIndices.map(index => stressInputs[index]);
     stressGenerated = keptStressIndices.map(index => stressGenerated[index]);
@@ -5264,15 +5291,15 @@ export async function materializeSandboxBlueprint(
     validatorVerification = cachedValidation.validatorVerification;
     validatorTargetEvidence = cachedValidation.validatorTargetEvidence;
     validatorInvalidInvocationCount = cachedValidation.validatorInvalidInvocationCount;
-    if (validatorVerification && validatorInvalidInvocationCount !== undefined) {
-      validatorInvalidInvocationCounts.set(
-        validatorVerification,
-        validatorInvalidInvocationCount,
-      );
-      validatorProofComplete = validatorVerification.invalidAccepted === 0
-        && validatorVerification.missingConstraintIds.length === 0
-        && validatorVerification.invalidRejected + validatorVerification.invalidAccepted
-          === validatorInvalidInvocationCount;
+    validatorProofComplete = cachedValidation.validatorProofComplete === true;
+    if (validatorVerification) {
+      validatorProofCompleteness.set(validatorVerification, validatorProofComplete);
+      if (validatorInvalidInvocationCount !== undefined) {
+        validatorInvalidInvocationCounts.set(
+          validatorVerification,
+          validatorInvalidInvocationCount,
+        );
+      }
     }
   }
 
@@ -6232,6 +6259,9 @@ export function finalizePlanVerification(
   const validatorInvalidInvocationCount = validator
     ? validatorInvalidInvocationCounts.get(validator)
     : undefined;
+  const requestLocalValidatorProofComplete = validator
+    ? validatorProofCompleteness.get(validator)
+    : undefined;
   const invalidRejected = validator?.invalidRejected;
   const invalidAccepted = validator?.invalidAccepted;
   const coveredConstraintIds = validator?.coveredConstraintIds;
@@ -6245,6 +6275,7 @@ export function finalizePlanVerification(
     || !validatorExpanded
     || (
       validator.ran
+      && requestLocalValidatorProofComplete !== false
       && legalValidatorAccepted === validator.casesChecked
       && typeof invalidRejected === 'number'
       && typeof invalidAccepted === 'number'

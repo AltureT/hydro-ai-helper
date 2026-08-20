@@ -45,6 +45,7 @@ import {
   parseIndependentVerifierBlueprint,
   parseGeneratorOutput,
   materializeSandboxBlueprint,
+  finalizePlanVerification,
   verifySolutionBlueprintSamples,
   classifySandboxRepairScope,
   buildSandboxRepairPrompt,
@@ -7441,6 +7442,38 @@ describe('classifyValidatorInvalidResult invalid partition', () => {
   ])('classifies %s', (_label, result, expected) => {
     expect(classifyValidatorInvalidResult(result)).toBe(expected);
   });
+
+  it.each([
+    ['Internal Error with nonzero exit', detail({
+      status: 'Internal Error', accepted: false, exitStatus: 1,
+    })],
+    ['System Error with nonzero exit', detail({
+      status: 'System Error', accepted: false, exitStatus: 1,
+    })],
+    ['Accepted status with nonzero exit', detail({
+      status: 'Accepted', accepted: false, exitStatus: 1,
+    })],
+    ['accepted=true with nonzero exit', detail({
+      status: 'Runtime Error', accepted: true, exitStatus: 1,
+    })],
+    ['non-Accepted status with exit zero', detail({
+      status: 'Runtime Error', accepted: false, exitStatus: 0,
+    })],
+    ['unrecognized status with nonzero exit', detail({
+      status: 'Wrong Answer', accepted: false, exitStatus: 1,
+    })],
+    ['empty status with nonzero exit', detail({
+      status: '', accepted: false, exitStatus: 1,
+    })],
+    ['missing accepted flag', detail({
+      status: 'Runtime Error', accepted: undefined, exitStatus: 1,
+    })],
+    ['missing timeout flag', detail({
+      status: 'Runtime Error', accepted: false, timedOut: undefined, exitStatus: 1,
+    })],
+  ])('classifier rejects contradictory execution detail: %s', (_label, result) => {
+    expect(classifyValidatorInvalidResult(result)).toBe('infra-gap');
+  });
 });
 
 describe('Validator-owned scoped false accept repair policy', () => {
@@ -7515,6 +7548,7 @@ function materializeWithValidatorProof(
   validatorProof: ValidatorProofContext,
   signal?: AbortSignal,
   cache: MaterializationCacheState = {},
+  changedArtifacts: string[] = ['GENERATOR'],
 ) {
   return materializeSandboxBlueprint(
     blueprint,
@@ -7528,7 +7562,7 @@ function materializeWithValidatorProof(
     false,
     undefined,
     {
-      ...resolveMaterializationResume(['GENERATOR']),
+      ...resolveMaterializationResume(changedArtifacts),
       cache,
       validatorProof,
     } as never,
@@ -8573,6 +8607,38 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
   });
 
+  it('observe invalid Manifest with empty required targets stays incomplete after finalization and cache restore', async () => {
+    const statement = 'Read one integer n.';
+    const proof = makeValidatorCoverageProof(statement);
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'invalid' as const,
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+    const cache: MaterializationCacheState = {};
+    const finalize = (response: Awaited<ReturnType<typeof materializeSandboxBlueprint>>) => {
+      delete response.verification!.discrimination;
+      response.verification!.stressCheck = {
+        generated: 1, uniqueInputs: 1, duplicateInputs: 0, compared: 1, agreed: 1,
+      };
+      const plan = assemblePlan(response, tradOpts, { mode: 'sandbox' });
+      return finalizePlanVerification(plan, [], false, 'observe');
+    };
+
+    const first = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, undefined, cache,
+    );
+    expect(first.verification).toMatchObject({ verified: false, wouldBlock: true });
+    expect(finalize(first).verification).toMatchObject({ verified: false, wouldBlock: true });
+
+    const resumed = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, undefined, cache, ['ORACLE'],
+    );
+    expect(resumed.verification).toMatchObject({ verified: false, wouldBlock: true });
+    expect(finalize(resumed).verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
   it('validator coverage requires declaration, construction, and rejection for every target', async () => {
     const statement = 'Every input satisfies 0 <= n <= 10.';
     const proof = makeValidatorCoverageProof(statement, {
@@ -8742,7 +8808,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       .toEqual(['actualCount', 'expectedCount', 'failureKind']);
   });
 
-  it('invalid partition transport failure is sanitized as SANDBOX_UNAVAILABLE', async () => {
+  it('invalid partition transport privacy removes the original error and request-shaped cause', async () => {
     const statement = 'Every input satisfies 0 <= n <= 10.';
     const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
     const blueprint = {
@@ -8751,9 +8817,19 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
       validatorProbeRecipes: [belowMinRecipe],
     };
+    const sentinel = 'PRIVATE_INVALID_PROBE_SENTINEL';
+    const original = Object.assign(new Error(`transport ${sentinel}`), {
+      request: {
+        code: `validator ${sentinel}`,
+        inputs: [{ stdin: sentinel, argv: ['--subtask', sentinel] }],
+      },
+      cause: Object.assign(new Error(`nested ${sentinel}`), {
+        diagnostics: { stderr: sentinel, input: sentinel },
+      }),
+    });
     const runner = makeValidatorCoverageRunner(
       blueprint,
-      () => Promise.reject(new Error('PRIVATE_TRANSPORT_DIAGNOSTIC')),
+      () => Promise.reject(original),
     );
 
     const failure = await materializeWithValidatorProof(
@@ -8764,8 +8840,44 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
       safeDetails: { failureKind: 'infra' },
     });
-    expect(failure.message).not.toContain('PRIVATE_TRANSPORT_DIAGNOSTIC');
-    expect(JSON.stringify(failure.safeDetails)).not.toContain('PRIVATE_TRANSPORT_DIAGNOSTIC');
+    expect(failure).not.toBe(original);
+    expect(failure.message).not.toContain(sentinel);
+    expect(JSON.stringify(failure.safeDetails)).not.toContain(sentinel);
+    expect(failure.cause).toBeUndefined();
+    expect(String(failure.stack)).not.toContain(sentinel);
+    expect(JSON.stringify(failure)).not.toContain(sentinel);
+    expect(JSON.stringify(Object.fromEntries(Object.entries(failure)))).not.toContain(sentinel);
+    expect([failure.cause, (failure.cause as { cause?: unknown } | undefined)?.cause])
+      .toEqual([undefined, undefined]);
+  });
+
+  it('invalid partition budget remains a sanitized no-retry budget failure', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const budgetError = Object.assign(new SandboxBudgetExceededError(), {
+      request: { stdin: 'PRIVATE_BUDGET_PROBE', argv: ['--subtask', 'PRIVATE_BUDGET_PROBE'] },
+    });
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      () => Promise.reject(budgetError),
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED', stage: 'sandbox_budget',
+      artifact: 'pipeline', retryPolicy: 'no-retry', safeDetails: {},
+    });
+    expect(failure.cause).toBeUndefined();
+    expect(JSON.stringify(failure)).not.toContain('PRIVATE_BUDGET_PROBE');
   });
 
   it('invalid partition cancellation preserves the exact reason after the batch resolves', async () => {
