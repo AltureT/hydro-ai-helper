@@ -102,7 +102,7 @@ describe('constraint probe determinism and hash binding', () => {
       .toBe('8c77d442f0c0a5484713d19ac13148519933187aa0f22f68857cd8d963b4a722');
     expect(first.effectiveSeed)
       .toBe('7783db5d07dc20c76d4e941269b8fda11af71bb2f97728a4f0832c8a3ad2110b');
-    expect(first.probes).toHaveLength(1);
+    expect(first.probes).toHaveLength(2);
     expect(first.probes[0].input).toBe('-1\n');
     expect(first.probes.every(probe => /^[a-f0-9]{32}$/.test(probe.id))).toBe(true);
     expect(first.probes[0].id).toBe('6b1d3eea5b5f56d66bdf31a4b3f66b85');
@@ -126,20 +126,15 @@ describe('constraint probe determinism and hash binding', () => {
     const changedInput = buildConstraintProbes({
       ...baseInput, seeds: [{ ...formalSeed, input: '6\n' }],
     }).probes[0].id;
-    const changedConstruction = buildConstraintProbes({
-      ...baseInput,
-      recipes: [{ ...recipe, constructionKind: 'integer-above-max' }],
-    }).probes[0].id;
+    const changedConstruction = buildConstraintProbes(baseInput).probes
+      .find(probe => probe.constructionKind === 'integer-above-max')!.id;
     const changedTargetSpec = integerSpec();
-    changedTargetSpec.constraints.push({
-      ...changedTargetSpec.constraints[0],
-      id: 'C2',
-    });
+    changedTargetSpec.constraints = [{ ...changedTargetSpec.constraints[0], id: 'C2' }];
     const changedTarget = buildConstraintProbes({
       ...baseInput,
       spec: changedTargetSpec,
       recipes: [{ ...recipe, targetId: 'C2' }],
-    }).probes[0].id;
+    }).probes.find(probe => probe.constructionKind === 'integer-below-min')!.id;
     const invariantSpec: ProblemSpecV1 = {
       ...integerSpec(),
       constraints: [],
@@ -289,11 +284,11 @@ describe('scalar sequence and string constructions', () => {
     ['illegal-string-character', 'abc\n', 'ab#\n'],
   ])('%s creates one bounded invalid probe', (constructionKind, legal, illegal) => {
     const result = buildSingleTargetFixture(constructionKind, legal);
-    expect(result.probes).toEqual([expect.objectContaining({
+    expect(result.probes).toEqual(expect.arrayContaining([expect.objectContaining({
       targetId: 'C1',
       constructionKind,
       input: illegal,
-    })]);
+    })]));
     expect(result.gaps).toEqual([]);
   });
 });
@@ -368,10 +363,10 @@ describe('structural constructions', () => {
   ])('%s mutates a canonical edge list', (constructionKind, legal, illegal) => {
     const result = buildStructuralFixture(constructionKind, legal);
 
-    expect(result.probes[0]).toEqual(expect.objectContaining({
+    expect(result.probes).toEqual(expect.arrayContaining([expect.objectContaining({
       constructionKind,
       input: illegal,
-    }));
+    })]));
     expect(result.gaps).toEqual([]);
   });
 
@@ -500,11 +495,11 @@ describe('stateful operation and scoped constructions', () => {
   it('constructs the scoped upper-bound probe only from its assigned formal seed', () => {
     const result = buildScopedUpperBoundFixture();
 
-    expect(result.probes).toEqual([expect.objectContaining({
+    expect(result.probes).toEqual(expect.arrayContaining([expect.objectContaining({
       constructionKind: 'subtask-upper-bound',
       subtaskId: 1,
       input: '11\n',
-    })]);
+    })]));
     expect(result.gaps).toEqual([]);
   });
 
@@ -682,10 +677,259 @@ describe('stateful operation and scoped constructions', () => {
       recipes: [recipe],
     });
 
-    expect(result.probes).toEqual([expect.objectContaining({
+    expect(result.probes).toEqual(expect.arrayContaining([expect.objectContaining({
       targetId: 'C1', subtaskId: 1, input: '2\nADD 11\nDEL 1\n',
-    })]);
+    })]));
     expect(result.gaps).toEqual([]);
+  });
+
+  it('does not credit an argument-range target when the mutation also breaks state semantics', () => {
+    const { spec, recipe } = operationSpec('operation-argument-out-of-range');
+    spec.invariants.push({
+      id: 'I_STATE',
+      kind: 'stateful-precondition',
+      expression: 'DEL requires present(x)',
+      machineCheckable: true,
+      evidence: { quote: 'DEL requires present(x)' },
+    });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '2\nADD 1\nDEL 1\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetId: 'C1', constructionKind: 'integer-above-max',
+      }),
+    ]));
+    expect(result.gaps).toEqual(expect.arrayContaining([{
+      targetId: 'C1', targetKind: 'constraint', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]));
+  });
+});
+
+describe('target-isolated proof construction', () => {
+  const everyFamily: Array<[
+    string,
+    () => { spec: ProblemSpecV1; recipe: ValidatorProbeRecipe; legal: string },
+  ]> = [
+    ['integer-below-min', () => ({ ...sequenceSpec('integer-below-min'), legal: '5\n' })],
+    ['integer-above-max', () => ({ ...sequenceSpec('integer-above-max'), legal: '5\n' })],
+    ['array-length-mismatch', () => ({
+      ...sequenceSpec('array-length-mismatch'), legal: '3\n1 2 3\n',
+    })],
+    ['duplicate-element', () => ({
+      ...sequenceSpec('duplicate-element'), legal: '4\n1 2 3 4\n',
+    })],
+    ['permutation-duplicate-or-missing', () => ({
+      ...sequenceSpec('permutation-duplicate-or-missing'), legal: '4\n1 2 3 4\n',
+    })],
+    ['illegal-string-character', () => ({
+      ...sequenceSpec('illegal-string-character'), legal: 'abc\n',
+    })],
+    ['graph-self-loop', () => ({
+      ...structuralSpec('graph-self-loop'), legal: '3 2\n1 2\n2 3\n',
+    })],
+    ['graph-duplicate-edge', () => ({
+      ...structuralSpec('graph-duplicate-edge'), legal: '3 2\n1 2\n2 3\n',
+    })],
+    ['graph-disconnected', () => ({
+      ...structuralSpec('graph-disconnected'), legal: '4 3\n1 2\n2 3\n3 4\n',
+    })],
+    ['tree-missing-edge', () => ({
+      ...structuralSpec('tree-missing-edge'), legal: '4\n1 2\n2 3\n3 4\n',
+    })],
+    ['tree-cycle', () => ({
+      ...structuralSpec('tree-cycle'), legal: '4\n1 2\n2 3\n3 4\n',
+    })],
+    ['dag-cycle', () => ({
+      ...structuralSpec('dag-cycle'), legal: '3 2\n1 2\n2 3\n',
+    })],
+    ['add-existing-object', () => ({
+      ...operationSpec('add-existing-object'), legal: '3\nADD 1\nADD 2\nDEL 1\n',
+    })],
+    ['delete-missing-object', () => ({
+      ...operationSpec('delete-missing-object'), legal: '2\nADD 1\nDEL 1\n',
+    })],
+    ['operation-argument-out-of-range', () => ({
+      ...operationSpec('operation-argument-out-of-range'), legal: '2\nADD 1\nDEL 1\n',
+    })],
+    ['subtask-upper-bound', () => ({
+      spec: integerSpec({ subtaskId: 1 }),
+      recipe: {
+        targetId: 'C1', constructionKind: 'subtask-upper-bound', fieldId: 'n',
+      },
+      legal: '5\n',
+    })],
+  ];
+
+  it.each(everyFamily)(
+    '%s is derived from Frozen Spec when model recipes are omitted',
+    (_kind, makeFixture) => {
+      const { spec, recipe, legal } = makeFixture();
+      const target = spec.constraints.find(item => item.id === recipe.targetId)
+        || spec.invariants.find(item => item.id === recipe.targetId)!;
+      const targetSubtaskId = 'scope' in target && target.scope !== 'global'
+        ? target.scope.subtaskId : undefined;
+      const result = buildConstraintProbes({
+        spec,
+        statementHash: '1'.repeat(64),
+        specHash: '2'.repeat(64),
+        seeds: [{
+          source: 'formal', index: 1, input: legal,
+          ...(targetSubtaskId === undefined ? {} : { subtaskId: targetSubtaskId }),
+        }],
+        ...(_kind.length % 2 === 0 ? { recipes: [] } : {}),
+      });
+
+      expect(result.probes).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          targetId: recipe.targetId,
+          constructionKind: recipe.constructionKind,
+        }),
+      ]));
+    },
+  );
+
+  it('infers an omitted custom-recipe field only when the compatible field is unique', () => {
+    const spec = integerSpec();
+    spec.constraints[0].expression = 'n has a custom upper policy';
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: [{ targetId: 'C1', constructionKind: 'integer-above-max' }],
+    });
+
+    expect(result.gaps).toEqual([{
+      targetId: 'C1', targetKind: 'constraint', reasonCode: 'UNSUPPORTED_TARGET',
+    }]);
+  });
+
+  it('does not apply model recipes after a deterministic target was attempted', () => {
+    const spec = integerSpec();
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+      }],
+    });
+
+    expect(result.probes.map(probe => probe.constructionKind)).toEqual([
+      'integer-below-min', 'integer-above-max',
+    ]);
+  });
+
+  it.each(everyFamily)(
+    '%s refuses proof when an applicable recognizable target has the same predicate',
+    (_kind, makeFixture) => {
+      const { spec, recipe, legal } = makeFixture();
+      const constraint = spec.constraints.find(item => item.id === recipe.targetId);
+      if (constraint) {
+        spec.constraints.push({ ...constraint, id: 'C_DUPLICATE_SEMANTIC' });
+      } else {
+        const invariant = spec.invariants.find(item => item.id === recipe.targetId)!;
+        spec.invariants.push({ ...invariant, id: 'I_DUPLICATE_SEMANTIC' });
+      }
+      const target = spec.constraints.find(item => item.id === recipe.targetId)
+        || spec.invariants.find(item => item.id === recipe.targetId)!;
+      const targetSubtaskId = 'scope' in target && target.scope !== 'global'
+        ? target.scope.subtaskId : undefined;
+      const result = buildConstraintProbes({
+        spec,
+        statementHash: '1'.repeat(64),
+        specHash: '2'.repeat(64),
+        seeds: [{
+          source: 'formal', index: 1, input: legal,
+          ...(targetSubtaskId === undefined ? {} : { subtaskId: targetSubtaskId }),
+        }],
+        recipes: [recipe],
+      });
+
+      expect(result.probes).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ targetId: recipe.targetId }),
+      ]));
+      expect(result.gaps).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          targetId: recipe.targetId, reasonCode: 'MUTATION_NOT_ISOLATED',
+        }),
+      ]));
+    },
+  );
+
+  it('does not credit an overlapping scalar upper bound rejected by the other bound', () => {
+    const spec = integerSpec();
+    spec.constraints.push({
+      id: 'C_OTHER',
+      expression: 'n <= 5',
+      machineCheckable: true,
+      scope: 'global',
+      evidence: { quote: 'n <= 5' },
+    });
+
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: [{
+        targetId: 'C1', constructionKind: 'integer-above-max', fieldId: 'n',
+      }],
+    });
+
+    expect(result.probes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetId: 'C1', constructionKind: 'integer-above-max',
+      }),
+    ]));
+    expect(result.gaps).toEqual(expect.arrayContaining([{
+      targetId: 'C1', targetKind: 'constraint', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]));
+  });
+
+  it('applies global semantics to a scoped target but ignores other scoped semantics', () => {
+    const spec = integerSpec({ subtaskId: 1 });
+    spec.constraints.push(
+      {
+        id: 'C_GLOBAL', expression: 'n <= 5', machineCheckable: true,
+        scope: 'global', evidence: { quote: 'n <= 5' },
+      },
+      {
+        id: 'C_OTHER_SUBTASK', expression: 'n <= 4', machineCheckable: true,
+        scope: { subtaskId: 2 }, evidence: { quote: 'n <= 4' },
+      },
+    );
+    spec.subtasks = [
+      { id: 1, score: 50, constraintIds: ['C1'] },
+      { id: 2, score: 50, constraintIds: ['C_OTHER_SUBTASK'] },
+    ];
+
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, subtaskId: 1, input: '5\n' }],
+      recipes: [{
+        targetId: 'C1', constructionKind: 'subtask-upper-bound', fieldId: 'n',
+      }],
+    });
+
+    expect(result.probes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetId: 'C1', constructionKind: 'subtask-upper-bound',
+      }),
+    ]));
+    expect(result.gaps).toEqual(expect.arrayContaining([{
+      targetId: 'C1', targetKind: 'constraint', subtaskId: 1,
+      reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]));
   });
 });
 
@@ -719,13 +963,13 @@ describe('construction coverage deduplication and gaps', () => {
       buildScopedUpperBoundFixture(),
     ];
 
-    expect(results.map(result => result.probes[0]?.constructionKind))
-      .toEqual([...VALIDATOR_PROBE_CONSTRUCTION_KINDS]);
-    expect(results.every(result => result.probes.length === 1 && result.gaps.length === 0))
-      .toBe(true);
+    expect(results.every((result, index) => result.probes.some(probe => (
+      probe.constructionKind === VALIDATOR_PROBE_CONSTRUCTION_KINDS[index]
+    )))).toBe(true);
+    expect(results.every(result => result.gaps.length === 0)).toBe(true);
   });
 
-  it('preserves stable recipe order for multiple valid recipes on one target', () => {
+  it('preserves stable server-derived order and ignores recipes for an attempted target', () => {
     const spec = integerSpec();
     const input = {
       spec,
@@ -742,12 +986,12 @@ describe('construction coverage deduplication and gaps', () => {
     const second = buildConstraintProbes(input);
 
     expect(first.probes.map(probe => probe.constructionKind)).toEqual([
-      'integer-above-max', 'integer-below-min',
+      'integer-below-min', 'integer-above-max',
     ]);
     expect(second).toEqual(first);
   });
 
-  it('deduplicates duplicate final probe ids while retaining first recipe order', () => {
+  it('does not duplicate server-derived probe ids for redundant model recipes', () => {
     const recipe: ValidatorProbeRecipe = {
       targetId: 'C1', constructionKind: 'integer-above-max', fieldId: 'n',
     };
@@ -759,15 +1003,18 @@ describe('construction coverage deduplication and gaps', () => {
       recipes: [recipe, { ...recipe }],
     });
 
-    expect(result.probes).toEqual([expect.objectContaining({
-      constructionKind: 'integer-above-max', input: '11\n',
-    })]);
+    expect(result.probes.map(probe => probe.constructionKind)).toEqual([
+      'integer-below-min', 'integer-above-max',
+    ]);
+    expect(new Set(result.probes.map(probe => probe.id)).size).toBe(result.probes.length);
     expect(result.gaps).toEqual([]);
   });
 
   it('reports every uncovered machine-checkable target exactly once', () => {
     const spec = integerSpec();
-    spec.constraints.push({ ...spec.constraints[0], id: 'C2' });
+    spec.constraints.push({
+      ...spec.constraints[0], id: 'C2', expression: 'n follows a custom policy',
+    });
     const result = buildConstraintProbes({
       spec,
       statementHash: '1'.repeat(64),
@@ -778,7 +1025,7 @@ describe('construction coverage deduplication and gaps', () => {
       }],
     });
 
-    expect(result.probes).toHaveLength(1);
+    expect(result.probes).toHaveLength(2);
     expect(result.gaps).toEqual([{
       targetId: 'C2', targetKind: 'constraint', reasonCode: 'UNSUPPORTED_TARGET',
     }]);
@@ -788,8 +1035,10 @@ describe('construction coverage deduplication and gaps', () => {
     const invalidRecipe: ValidatorProbeRecipe = {
       targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'missing',
     };
+    const spec = integerSpec({ subtaskId: 1 });
+    spec.constraints[0].expression = 'n follows a custom policy';
     const result = buildConstraintProbes({
-      spec: integerSpec({ subtaskId: 1 }),
+      spec,
       statementHash: '1'.repeat(64),
       specHash: '2'.repeat(64),
       seeds: [{ source: 'formal', index: 1, subtaskId: 1, input: '5\n' }],
@@ -856,9 +1105,9 @@ describe('constraint probe scope gaps bounds and privacy', () => {
       }],
     });
 
-    expect(result.probes).toEqual([expect.objectContaining({
+    expect(result.probes).toEqual(expect.arrayContaining([expect.objectContaining({
       targetId: 'C1', subtaskId: 1, input: '-1\nMATCH\n',
-    })]);
+    })]));
     expect(result.gaps).toEqual([]);
   });
 
@@ -1057,12 +1306,24 @@ describe('constraint probe scope gaps bounds and privacy', () => {
     spec.constraints = Array.from({ length: 64 }, (_, index) => ({
       ...spec.constraints[0],
       id: `C${index + 1}`,
+      expression: 'n >= 0',
+      scope: { subtaskId: index + 1 } as const,
+    }));
+    spec.subtasks = spec.constraints.map((constraint, index) => ({
+      id: index + 1,
+      score: 1,
+      constraintIds: [constraint.id],
     }));
     const result = buildConstraintProbes({
       spec,
       statementHash: '1'.repeat(64),
       specHash: '2'.repeat(64),
-      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      seeds: spec.constraints.map((_constraint, index) => ({
+        source: 'formal' as const,
+        index: index + 1,
+        subtaskId: index + 1,
+        input: '5\n',
+      })),
       recipes: spec.constraints.map(constraint => ({
         targetId: constraint.id,
         constructionKind: 'integer-below-min',

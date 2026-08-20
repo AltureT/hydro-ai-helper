@@ -43,19 +43,32 @@ const CHECKER_FAILURE_KINDS = new Set([
   'unavailable', 'compile', 'infra', 'budget', 'reject',
 ]);
 const VALIDATOR_EVIDENCE_ID_MAX_LENGTH = 64;
+const VALIDATOR_EVIDENCE_TARGET_MAX_COUNT = 768;
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function isBoundedValidatorIdArray(value: unknown): value is string[] {
-  if (!Array.isArray(value)) return false;
+  if (!Array.isArray(value) || value.length > VALIDATOR_EVIDENCE_TARGET_MAX_COUNT) return false;
   for (let index = 0; index < value.length; index += 1) {
     if (!Object.prototype.hasOwnProperty.call(value, index)) return false;
     const item = value[index];
     if (typeof item !== 'string'
       || item.length === 0
       || item.length > VALIDATOR_EVIDENCE_ID_MAX_LENGTH) return false;
+  }
+  return true;
+}
+
+function areConsistentValidatorIdArrays(covered: unknown, missing: unknown): boolean {
+  if (!isBoundedValidatorIdArray(covered)
+    || !isBoundedValidatorIdArray(missing)
+    || covered.length + missing.length > VALIDATOR_EVIDENCE_TARGET_MAX_COUNT) return false;
+  const seen = new Set<string>();
+  for (const id of [...covered, ...missing]) {
+    if (seen.has(id)) return false;
+    seen.add(id);
   }
   return true;
 }
@@ -189,8 +202,10 @@ export function VerificationSummaryView(props: {
       && isNonNegativeSafeInteger(validator.validAccepted)
       && isNonNegativeSafeInteger(validator.invalidRejected)
       && isNonNegativeSafeInteger(validator.invalidAccepted)
-      && isBoundedValidatorIdArray(validator.coveredConstraintIds)
-      && isBoundedValidatorIdArray(validator.missingConstraintIds);
+      && areConsistentValidatorIdArrays(
+        validator.coveredConstraintIds,
+        validator.missingConstraintIds,
+      );
     let validatorEvidence: React.ReactElement[];
 
     if (hasExpandedEvidence) {

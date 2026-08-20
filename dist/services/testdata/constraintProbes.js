@@ -906,6 +906,359 @@ function constructStringMutation(input, spec, target, fieldId, encoding) {
     return replaceToken(input, location, `${value.slice(0, -1)}#`)
         || 'MUTATION_NOT_ISOLATED';
 }
+function compatibleFieldsForConstruction(spec, kind) {
+    if (kind === 'integer-below-min' || kind === 'integer-above-max'
+        || kind === 'subtask-upper-bound' || kind === 'operation-argument-out-of-range'
+        || kind === 'add-existing-object' || kind === 'delete-missing-object') {
+        return spec.inputFields.filter(field => field.type === 'integer'
+            && (kind === 'integer-below-min' || kind === 'integer-above-max'
+                || kind === 'subtask-upper-bound'
+                ? !!parseLocation(field.encoding)
+                : field.encoding === `operation-argument:${field.id}`));
+    }
+    if (kind === 'array-length-mismatch' || kind === 'duplicate-element') {
+        return spec.inputFields.filter(field => field.type === 'array');
+    }
+    if (kind === 'permutation-duplicate-or-missing') {
+        return spec.inputFields.filter(field => field.type === 'permutation');
+    }
+    if (kind === 'illegal-string-character') {
+        return spec.inputFields.filter(field => field.type === 'string');
+    }
+    if (kind === 'tree-missing-edge' || kind === 'tree-cycle') {
+        return spec.inputFields.filter(field => field.type === 'tree');
+    }
+    if (kind === 'graph-self-loop' || kind === 'graph-duplicate-edge'
+        || kind === 'graph-disconnected' || kind === 'dag-cycle') {
+        return spec.inputFields.filter(field => field.type === 'graph');
+    }
+    return [];
+}
+function deduplicateRequests(requests) {
+    const seen = new Set();
+    return requests.filter(request => {
+        const key = canonicalJson(request);
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
+}
+/** Closed server-owned recognizers. This maps Frozen expressions to fixed constructors only. */
+function deriveConstructionRequests(spec, target) {
+    const requests = [];
+    for (const field of spec.inputFields) {
+        if (field.type === 'integer') {
+            const bounds = integerBounds(target.expression, field.id);
+            if (bounds.min !== undefined || bounds.max !== undefined) {
+                if (field.encoding === `operation-argument:${field.id}`) {
+                    for (const operation of spec.operations || []) {
+                        if (operation.arguments.includes(field.id)) {
+                            requests.push({
+                                targetId: target.id,
+                                constructionKind: 'operation-argument-out-of-range',
+                                fieldId: field.id,
+                                operationName: operation.name,
+                            });
+                        }
+                    }
+                }
+                else if (parseLocation(field.encoding)) {
+                    if (bounds.min !== undefined) {
+                        requests.push({
+                            targetId: target.id,
+                            constructionKind: 'integer-below-min',
+                            fieldId: field.id,
+                        });
+                    }
+                    if (bounds.max !== undefined) {
+                        requests.push({
+                            targetId: target.id,
+                            constructionKind: target.subtaskId === undefined
+                                ? 'integer-above-max' : 'subtask-upper-bound',
+                            fieldId: field.id,
+                        });
+                    }
+                }
+            }
+        }
+        if (field.type === 'array') {
+            const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const range = parseTokenRange(field.encoding);
+            const escapedCount = range?.countFieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (range && new RegExp(`^length\\(${escapedField}\\) = ${escapedCount}$`)
+                .test(target.expression)) {
+                requests.push({
+                    targetId: target.id,
+                    constructionKind: 'array-length-mismatch',
+                    fieldId: field.id,
+                });
+            }
+            if (new RegExp(`^allDistinct\\(${escapedField}\\)$`).test(target.expression)) {
+                requests.push({
+                    targetId: target.id,
+                    constructionKind: 'duplicate-element',
+                    fieldId: field.id,
+                });
+            }
+        }
+        if (field.type === 'permutation') {
+            const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const range = parseTokenRange(field.encoding);
+            const escapedCount = range?.countFieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (range && new RegExp(`^permutation\\(${escapedField}, 1\\.\\.${escapedCount}\\)$`)
+                .test(target.expression)) {
+                requests.push({
+                    targetId: target.id,
+                    constructionKind: 'permutation-duplicate-or-missing',
+                    fieldId: field.id,
+                });
+            }
+        }
+        if (field.type === 'string') {
+            const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
+                .test(target.expression)) {
+                requests.push({
+                    targetId: target.id,
+                    constructionKind: 'illegal-string-character',
+                    fieldId: field.id,
+                });
+            }
+        }
+        if (field.type === 'graph' || field.type === 'tree') {
+            const graphCount = /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63})\+1 tokens:1,2$/
+                .exec(field.encoding)?.[1];
+            const vertexFieldId = field.type === 'tree'
+                ? /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63}) tokens:1,2$/
+                    .exec(field.encoding)?.[1]
+                : field.dependsOn?.find(dependency => dependency !== graphCount);
+            const predicate = vertexFieldId
+                ? structuralPredicate(target.expression, field.id, vertexFieldId)
+                : undefined;
+            const kinds = predicate?.predicate === 'simpleGraph'
+                ? ['graph-self-loop', 'graph-duplicate-edge']
+                : predicate?.predicate === 'connected' ? ['graph-disconnected']
+                    : predicate?.predicate === 'tree' ? ['tree-missing-edge', 'tree-cycle']
+                        : predicate?.predicate === 'dag' ? ['dag-cycle'] : [];
+            for (const constructionKind of kinds) {
+                requests.push({ targetId: target.id, constructionKind, fieldId: field.id });
+            }
+        }
+    }
+    const stateful = /^(ADD|DEL) requires (absent|present)\(([A-Za-z][A-Za-z0-9_.:-]{0,63})\)$/
+        .exec(target.expression);
+    if (stateful
+        && ((stateful[1] === 'ADD' && stateful[2] === 'absent')
+            || (stateful[1] === 'DEL' && stateful[2] === 'present'))
+        && operationSupportsSetPresence(spec, stateful[1], stateful[3])) {
+        requests.push({
+            targetId: target.id,
+            constructionKind: stateful[1] === 'ADD'
+                ? 'add-existing-object' : 'delete-missing-object',
+            fieldId: stateful[3],
+            operationName: stateful[1],
+        });
+    }
+    return deduplicateRequests(requests);
+}
+function resolveRecipeField(spec, target, recipe) {
+    if (recipe.fieldId)
+        return { ...recipe };
+    const compatible = compatibleFieldsForConstruction(spec, recipe.constructionKind);
+    const referenced = compatible.filter(field => expressionReferencesField(target.expression, field.id));
+    const candidates = referenced.length > 0 ? referenced : compatible;
+    if (candidates.length !== 1)
+        return undefined;
+    return { ...recipe, fieldId: candidates[0].id };
+}
+function sequenceSnapshot(input, spec, fieldId) {
+    const field = spec.inputFields.find(item => item.id === fieldId);
+    const range = field && parseTokenRange(field.encoding);
+    if (!field || !range || !field.dependsOn?.includes(range.countFieldId))
+        return undefined;
+    const countField = spec.inputFields.find(item => item.id === range.countFieldId);
+    const countLocation = countField && parseLocation(countField.encoding);
+    if (!countField || !countLocation || !scalarLocationIsUnambiguous(spec, countField.id, countLocation))
+        return undefined;
+    const count = parseNonNegativeInteger(tokenValuesAtLine(input, countLocation.line)?.[countLocation.token - 1]);
+    const tokens = tokenValuesAtLine(input, range.line);
+    if (count === undefined || !tokens || range.startToken > tokens.length + 1)
+        return undefined;
+    return { count, values: tokens.slice(range.startToken - 1) };
+}
+function evaluateRecognizedSemantic(input, spec, target, request) {
+    const fieldId = request.fieldId;
+    if (!fieldId)
+        return undefined;
+    const field = spec.inputFields.find(item => item.id === fieldId);
+    if (!field)
+        return undefined;
+    if (request.constructionKind === 'integer-below-min'
+        || request.constructionKind === 'integer-above-max'
+        || request.constructionKind === 'subtask-upper-bound'
+        || request.constructionKind === 'operation-argument-out-of-range') {
+        const bounds = integerBounds(target.expression, fieldId);
+        if (bounds.min === undefined && bounds.max === undefined)
+            return undefined;
+        if (field.encoding === `operation-argument:${fieldId}`) {
+            const operations = parseOperations(input, spec);
+            if (typeof operations === 'string')
+                return undefined;
+            const relevant = operations.flatMap(operation => {
+                const index = operationArgumentIndex(spec, operation.name, fieldId);
+                return index === undefined ? [] : [operation.arguments[index]];
+            });
+            return relevant.length > 0 && relevant.every(value => valueSatisfiesBounds(value, bounds));
+        }
+        const location = parseLocation(field.encoding);
+        const raw = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
+        const value = raw && /^-?(0|[1-9]\d*)$/.test(raw) ? Number(raw) : NaN;
+        return Number.isSafeInteger(value) ? valueSatisfiesBounds(value, bounds) : undefined;
+    }
+    if (request.constructionKind === 'array-length-mismatch'
+        || request.constructionKind === 'duplicate-element'
+        || request.constructionKind === 'permutation-duplicate-or-missing') {
+        const snapshot = sequenceSnapshot(input, spec, fieldId);
+        if (!snapshot)
+            return undefined;
+        if (request.constructionKind === 'array-length-mismatch') {
+            return snapshot.values.length === snapshot.count;
+        }
+        if (request.constructionKind === 'duplicate-element') {
+            return new Set(snapshot.values).size === snapshot.values.length;
+        }
+        const values = snapshot.values.map(value => /^(0|[1-9]\d*)$/.test(value)
+            ? Number(value) : NaN);
+        return values.every(Number.isSafeInteger)
+            && values.length === snapshot.count
+            && new Set(values).size === snapshot.count
+            && values.every(value => value >= 1 && value <= snapshot.count);
+    }
+    if (request.constructionKind === 'illegal-string-character') {
+        const location = parseLocation(field.encoding);
+        const value = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
+        return value === undefined ? undefined : /^[a-z]+$/.test(value);
+    }
+    if (request.constructionKind === 'graph-self-loop'
+        || request.constructionKind === 'graph-duplicate-edge'
+        || request.constructionKind === 'graph-disconnected'
+        || request.constructionKind === 'tree-missing-edge'
+        || request.constructionKind === 'tree-cycle'
+        || request.constructionKind === 'dag-cycle') {
+        const layout = parseEdgeList(input, spec, target, fieldId, false);
+        if (typeof layout === 'string')
+            return undefined;
+        if (request.constructionKind === 'graph-self-loop'
+            || request.constructionKind === 'graph-duplicate-edge')
+            return isSimpleUndirected(layout);
+        if (request.constructionKind === 'graph-disconnected') {
+            return isSimpleUndirected(layout) && isConnected(layout);
+        }
+        if (request.constructionKind === 'tree-missing-edge'
+            || request.constructionKind === 'tree-cycle')
+            return isTree(layout);
+        return !hasSelfLoop(layout.edges)
+            && !hasDuplicateEdge(layout.edges, true)
+            && !hasDirectedCycle(layout);
+    }
+    if (request.constructionKind === 'add-existing-object'
+        || request.constructionKind === 'delete-missing-object') {
+        const operations = parseOperations(input, spec);
+        if (typeof operations === 'string')
+            return undefined;
+        const violations = statefulViolations(spec, operations, fieldId);
+        if (!violations)
+            return undefined;
+        const operationName = request.constructionKind === 'add-existing-object' ? 'ADD' : 'DEL';
+        return !violations.some(violation => violation.name === operationName);
+    }
+    return undefined;
+}
+function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
+    const constraints = spec.constraints.flatMap(constraint => {
+        const applicable = constraint.scope === 'global'
+            || (namedTarget.subtaskId !== undefined
+                && constraint.scope.subtaskId === namedTarget.subtaskId);
+        return applicable ? [{
+                id: constraint.id,
+                kind: 'constraint',
+                expression: constraint.expression,
+                ...(constraint.scope === 'global' ? {} : { subtaskId: constraint.scope.subtaskId }),
+            }] : [];
+    });
+    const invariants = spec.invariants.map(invariant => ({
+        id: invariant.id,
+        kind: 'invariant',
+        expression: invariant.expression,
+    }));
+    return [...constraints, ...invariants].flatMap(target => {
+        if (target.id === namedTarget.id && target.kind === namedTarget.kind) {
+            return [{ target, request: namedRequest }];
+        }
+        const request = deriveConstructionRequests(spec, target)[0];
+        return request ? [{ target, request }] : [];
+    });
+}
+function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, request) {
+    const semantics = applicableRecognizableSemantics(spec, target, request);
+    if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
+        return false;
+    }
+    return semantics.every(item => {
+        const sourceValid = evaluateRecognizedSemantic(sourceInput, spec, item.target, item.request);
+        if (sourceValid !== true)
+            return false;
+        const mutatedValid = evaluateRecognizedSemantic(mutatedInput, spec, item.target, item.request);
+        const named = item.target.id === target.id && item.target.kind === target.kind;
+        return named ? mutatedValid === false : mutatedValid === true;
+    });
+}
+function constructMutationForRequest(input, spec, target, request) {
+    const field = request.fieldId
+        ? spec.inputFields.find(item => item.id === request.fieldId)
+        : undefined;
+    if (!field)
+        return 'INVALID_RECIPE';
+    if (request.constructionKind === 'integer-below-min'
+        || request.constructionKind === 'integer-above-max') {
+        return field.type === 'integer'
+            ? constructIntegerMutation(input, spec, target, field.id, field.encoding, request.constructionKind) : 'INVALID_RECIPE';
+    }
+    if (request.constructionKind === 'array-length-mismatch'
+        || request.constructionKind === 'duplicate-element'
+        || request.constructionKind === 'permutation-duplicate-or-missing') {
+        const expectedType = request.constructionKind === 'permutation-duplicate-or-missing'
+            ? 'permutation' : 'array';
+        return field.type === expectedType
+            ? constructSequenceMutation(input, spec, target, field.id, request.constructionKind)
+            : 'INVALID_RECIPE';
+    }
+    if (request.constructionKind === 'illegal-string-character') {
+        return field.type === 'string'
+            ? constructStringMutation(input, spec, target, field.id, field.encoding)
+            : 'INVALID_RECIPE';
+    }
+    if (request.constructionKind === 'graph-self-loop'
+        || request.constructionKind === 'graph-duplicate-edge'
+        || request.constructionKind === 'graph-disconnected'
+        || request.constructionKind === 'tree-missing-edge'
+        || request.constructionKind === 'tree-cycle'
+        || request.constructionKind === 'dag-cycle') {
+        return constructStructuralMutation(input, spec, target, field.id, request.constructionKind);
+    }
+    if (request.constructionKind === 'add-existing-object'
+        || request.constructionKind === 'delete-missing-object'
+        || request.constructionKind === 'operation-argument-out-of-range') {
+        return constructOperationMutation(input, spec, target, field.id, request.operationName, request.constructionKind);
+    }
+    if (request.constructionKind === 'subtask-upper-bound') {
+        return field.type === 'integer'
+            ? constructSubtaskUpperBoundMutation(input, spec, target, field.id, field.encoding)
+            : 'INVALID_RECIPE';
+    }
+    return 'UNSUPPORTED_TARGET';
+}
 function gap(target, reasonCode) {
     return {
         targetId: target.id,
@@ -926,6 +1279,24 @@ function buildConstraintProbes(input) {
     const probes = [];
     const gaps = [];
     const recipes = input.recipes || [];
+    const machineTargets = [
+        ...input.spec.constraints
+            .filter(constraint => constraint.machineCheckable)
+            .map(constraint => ({
+            id: constraint.id,
+            kind: 'constraint',
+            expression: constraint.expression,
+            ...(constraint.scope === 'global'
+                ? {} : { subtaskId: constraint.scope.subtaskId }),
+        })),
+        ...input.spec.invariants
+            .filter(invariant => invariant.machineCheckable)
+            .map(invariant => ({
+            id: invariant.id,
+            kind: 'invariant',
+            expression: invariant.expression,
+        })),
+    ];
     if (recipes.length > MAX_PROBE_RECIPES) {
         return {
             probes,
@@ -938,7 +1309,9 @@ function buildConstraintProbes(input) {
             effectiveSeed,
         };
     }
-    for (const recipe of recipes) {
+    const deterministicRequests = machineTargets.flatMap(target => (deriveConstructionRequests(input.spec, target).map(request => ({ target, request }))));
+    const deterministicallyAttemptedTargets = new Set(deterministicRequests.map(({ target }) => (canonicalJson({ targetId: target.id, targetKind: target.kind, subtaskId: target.subtaskId }))));
+    const customRequests = recipes.flatMap(recipe => {
         const target = findTarget(input.spec, recipe.targetId);
         if (!target) {
             gaps.push({
@@ -946,8 +1319,23 @@ function buildConstraintProbes(input) {
                 targetKind: 'constraint',
                 reasonCode: 'INVALID_RECIPE',
             });
-            continue;
+            return [];
         }
+        const targetKey = canonicalJson({
+            targetId: target.id,
+            targetKind: target.kind,
+            subtaskId: target.subtaskId,
+        });
+        if (deterministicallyAttemptedTargets.has(targetKey))
+            return [];
+        const resolved = resolveRecipeField(input.spec, target, recipe);
+        if (!resolved) {
+            gaps.push(gap(target, 'INVALID_RECIPE'));
+            return [];
+        }
+        return [{ target, request: resolved }];
+    });
+    for (const { target, request } of [...deterministicRequests, ...customRequests]) {
         const seed = selectSeed(seeds, target);
         if (!seed) {
             gaps.push(gap(target, 'NO_MATCHING_LEGAL_SEED'));
@@ -958,58 +1346,13 @@ function buildConstraintProbes(input) {
             gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
             continue;
         }
-        const field = recipe.fieldId
-            ? input.spec.inputFields.find(item => item.id === recipe.fieldId)
-            : undefined;
-        if (!field) {
-            gaps.push(gap(target, 'INVALID_RECIPE'));
-            continue;
-        }
-        let mutation;
-        if (recipe.constructionKind === 'integer-below-min'
-            || recipe.constructionKind === 'integer-above-max') {
-            mutation = field.type === 'integer'
-                ? constructIntegerMutation(normalizedInput, input.spec, target, field.id, field.encoding, recipe.constructionKind)
-                : 'INVALID_RECIPE';
-        }
-        else if (recipe.constructionKind === 'array-length-mismatch'
-            || recipe.constructionKind === 'duplicate-element'
-            || recipe.constructionKind === 'permutation-duplicate-or-missing') {
-            const expectedType = recipe.constructionKind === 'permutation-duplicate-or-missing'
-                ? 'permutation'
-                : 'array';
-            mutation = field.type === expectedType
-                ? constructSequenceMutation(normalizedInput, input.spec, target, field.id, recipe.constructionKind)
-                : 'INVALID_RECIPE';
-        }
-        else if (recipe.constructionKind === 'illegal-string-character') {
-            mutation = field.type === 'string'
-                ? constructStringMutation(normalizedInput, input.spec, target, field.id, field.encoding)
-                : 'INVALID_RECIPE';
-        }
-        else if (recipe.constructionKind === 'graph-self-loop'
-            || recipe.constructionKind === 'graph-duplicate-edge'
-            || recipe.constructionKind === 'graph-disconnected'
-            || recipe.constructionKind === 'tree-missing-edge'
-            || recipe.constructionKind === 'tree-cycle'
-            || recipe.constructionKind === 'dag-cycle') {
-            mutation = constructStructuralMutation(normalizedInput, input.spec, target, field.id, recipe.constructionKind);
-        }
-        else if (recipe.constructionKind === 'add-existing-object'
-            || recipe.constructionKind === 'delete-missing-object'
-            || recipe.constructionKind === 'operation-argument-out-of-range') {
-            mutation = constructOperationMutation(normalizedInput, input.spec, target, field.id, recipe.operationName, recipe.constructionKind);
-        }
-        else if (recipe.constructionKind === 'subtask-upper-bound') {
-            mutation = field.type === 'integer'
-                ? constructSubtaskUpperBoundMutation(normalizedInput, input.spec, target, field.id, field.encoding)
-                : 'INVALID_RECIPE';
-        }
-        else {
-            mutation = 'UNSUPPORTED_TARGET';
-        }
+        const mutation = constructMutationForRequest(normalizedInput, input.spec, target, request);
         if (typeof mutation === 'string') {
             gaps.push(gap(target, mutation));
+            continue;
+        }
+        if (!mutationIsTargetIsolated(normalizedInput, mutation.input, input.spec, target, request)) {
+            gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
             continue;
         }
         if (Buffer.byteLength(mutation.input, 'utf8') > MAX_PROBE_INPUT_BYTES) {
@@ -1022,7 +1365,7 @@ function buildConstraintProbes(input) {
             targetKind: target.kind,
             targetId: target.id,
             subtaskId: target.subtaskId,
-            constructionKind: recipe.constructionKind,
+            constructionKind: request.constructionKind,
             effectiveSeed,
             mutationPosition: mutation.position,
         })).slice(0, 32);
@@ -1032,7 +1375,7 @@ function buildConstraintProbes(input) {
             targetKind: target.kind,
             input: mutation.input,
             ...(target.subtaskId === undefined ? {} : { subtaskId: target.subtaskId }),
-            constructionKind: recipe.constructionKind,
+            constructionKind: request.constructionKind,
         });
     }
     const seenProbeIds = new Set();
@@ -1068,24 +1411,6 @@ function buildConstraintProbes(input) {
             subtaskId: item.subtaskId,
         })),
     ]);
-    const machineTargets = [
-        ...input.spec.constraints
-            .filter(constraint => constraint.machineCheckable)
-            .map(constraint => ({
-            id: constraint.id,
-            kind: 'constraint',
-            expression: constraint.expression,
-            ...(constraint.scope === 'global'
-                ? {} : { subtaskId: constraint.scope.subtaskId }),
-        })),
-        ...input.spec.invariants
-            .filter(invariant => invariant.machineCheckable)
-            .map(invariant => ({
-            id: invariant.id,
-            kind: 'invariant',
-            expression: invariant.expression,
-        })),
-    ];
     for (const target of machineTargets) {
         const targetKey = canonicalJson({
             targetId: target.id,

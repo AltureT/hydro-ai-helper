@@ -1378,7 +1378,9 @@ function buildIndependentVerifierSystemPrompt(stressCaseCount = exports.TESTDATA
     const frozenRules = frozenSpec ? `
 9. VALIDATOR 的 argv 契约必须精确：无命令行参数时校验全部全局约束；恰好 \`--subtask <known-positive-integer>\` 且其值是题面已知的正整数时，校验全局约束与该子任务作用域约束。未知参数、缺少值、非整数、重复参数或多余参数（unknown/missing/non-integer/duplicate/extra args）必须向 stderr 说明并 exit 非 0。
 10. 禁止从 stdin 读取子任务标签；stdin 始终只是待校验的题目原始输入。VALIDATOR 禁止接收任意原始 probe input，也不得增加任意调用、label、seed 或其他自定义参数入口。
-11. VALIDATOR_MANIFEST 必须恰好一个严格 JSON 对象，两个数组必须精确列出 frozen Spec 中全部 machine-checkable constraint/invariant id。VALIDATOR_PROBE_RECIPES 是有界声明式 recipe；没有 recipe 时输出空数组。两节均禁止代码围栏、JSON 前后缀、原始 probe input、seed 数组、物化值或调用 payload。` : '';
+11. VALIDATOR_MANIFEST 必须恰好一个严格 JSON 对象，两个数组必须精确列出 frozen Spec 中全部 machine-checkable constraint/invariant id。
+12. VALIDATOR_PROBE_RECIPES 是可选补充，严格形状为 {"recipes":[{"targetId":"I1","constructionKind":"duplicate-element","fieldId":"a","operationName":"ADD"}]}；recipes 最多 64 项。每项只允许必需字段 targetId、constructionKind 与可选字段 fieldId、operationName，constructionKind 只能是：${validatorManifest_1.VALIDATOR_PROBE_CONSTRUCTION_KINDS.join('、')}。没有 recipe 时输出空数组；recipe 只是可选补充，服务器优先从 frozen Spec 确定性构造，模型不得重复已支持目标。
+13. 禁止字段 input；禁止字段 subtaskId；禁止字段 subtask；禁止字段 seedIndex；禁止字段 seed；禁止字段 value；禁止字段 code；也禁止任何其他额外字段。服务器自行选择 seed、subtask、value、expression 与 input；recipe 不得提供原始输入、物化值、可执行表达式或调用 payload。Manifest 与 recipe 两节均禁止代码围栏或 JSON 前后缀。` : '';
     const sectionContract = frozenSpec
         ? `只输出以下分节，顺序不得改变；函数题存在题面样例时再在末尾输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
 === COMPLEXITY_GAP ===
@@ -3457,26 +3459,39 @@ function validatorInvocation(stdin, subtaskId) {
         argv: subtaskId === undefined ? [] : ['--subtask', String(subtaskId)],
     };
 }
-/** Invalid input is proof only when Validator returns an explicit, finite nonzero exit. */
-function classifyValidatorInvalidResult(result) {
-    if (result.timedOut === true)
-        return 'timeout-gap';
-    if (result.timedOut !== false
-        || typeof result.status !== 'string'
-        || typeof result.accepted !== 'boolean'
-        || typeof result.stdout !== 'string'
-        || typeof result.stderr !== 'string'
-        || (result.error !== undefined && result.error !== '')
-        || !Number.isFinite(result.exitStatus))
+/**
+ * Classify an untrusted sandbox result through one closed Validator protocol.
+ * Timeout is kept distinct, while every other proof-bearing result must be
+ * complete and internally consistent.
+ */
+function classifyValidatorExecution(result) {
+    if (!result || typeof result !== 'object')
         return 'infra-gap';
-    if (result.exitStatus === 0) {
-        return result.status === 'Accepted' && result.accepted
-            ? 'false-accept'
-            : 'infra-gap';
+    const detail = result;
+    if (typeof detail.status !== 'string'
+        || typeof detail.accepted !== 'boolean'
+        || typeof detail.timedOut !== 'boolean'
+        || typeof detail.stdout !== 'string'
+        || typeof detail.stderr !== 'string'
+        || (detail.error !== undefined && detail.error !== ''))
+        return 'infra-gap';
+    if (detail.timedOut)
+        return 'timeout-gap';
+    if (!Number.isSafeInteger(detail.exitStatus))
+        return 'infra-gap';
+    if (detail.status === 'Accepted' && detail.accepted && detail.exitStatus === 0) {
+        return 'accepted';
     }
-    const explicitRejectionStatus = result.status === 'Nonzero Exit Status'
-        || result.status === 'Runtime Error';
-    return explicitRejectionStatus && !result.accepted ? 'rejected' : 'infra-gap';
+    if ((detail.status === 'Nonzero Exit Status' || detail.status === 'Runtime Error')
+        && !detail.accepted
+        && detail.exitStatus !== 0)
+        return 'rejected';
+    return 'infra-gap';
+}
+/** Invalid input is proof only when Validator returns a strict explicit rejection. */
+function classifyValidatorInvalidResult(result) {
+    const execution = classifyValidatorExecution(result);
+    return execution === 'accepted' ? 'false-accept' : execution;
 }
 const validatorInvalidInvocationCounts = new WeakMap();
 const validatorProofCompleteness = new WeakMap();
@@ -3976,9 +3991,10 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         },
                     });
                 }
+                const validatorExecutions = validatorResults.map(classifyValidatorExecution);
                 for (let i = 0; i < validatorResults.length; i++) {
-                    const detail = validatorResults[i];
-                    if (detail.timedOut) {
+                    const execution = validatorExecutions[i];
+                    if (execution === 'timeout-gap') {
                         throw (0, failures_1.toPipelineError)(new Error(`VALIDATOR 第 ${i + 1} 个合法输入执行超时`), {
                             code: 'SANDBOX_UNAVAILABLE',
                             stage: 'validator',
@@ -3986,14 +4002,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                             safeDetails: { caseIndex: i + 1, failureKind: 'timeout' },
                         });
                     }
-                    const explicitAccepted = detail.accepted
-                        && detail.status === 'Accepted'
-                        && detail.exitStatus === 0;
-                    const explicitRejected = !detail.accepted
-                        && detail.status === 'Nonzero Exit Status'
-                        && typeof detail.exitStatus === 'number'
-                        && detail.exitStatus !== 0;
-                    if (!explicitAccepted && !explicitRejected) {
+                    if (execution === 'infra-gap') {
                         throw (0, failures_1.toPipelineError)(new Error(`VALIDATOR 第 ${i + 1} 个合法输入返回了不可判定结果`), {
                             code: 'SANDBOX_UNAVAILABLE',
                             stage: 'validator',
@@ -4002,11 +4011,11 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         });
                     }
                 }
-                validAccepted = validatorResults.filter(detail => detail.accepted).length;
+                validAccepted = validatorExecutions.filter(execution => execution === 'accepted').length;
                 const formalAndSampleCount = inputs.length + samples.length;
                 for (let i = 0; i < formalAndSampleCount; i++) {
                     const detail = validatorResults[i];
-                    if (!detail.accepted) {
+                    if (validatorExecutions[i] === 'rejected') {
                         const generatedInput = i < inputs.length;
                         const assignedSubtaskId = generatedInput && tieredValidatorEnabled
                             ? tieredValidatorDecision.allocations[i]?.subtaskId
@@ -5399,13 +5408,13 @@ ${detail}
         return `独立验证器的 STRESS_GENERATOR 未通过沙箱验证：
 ${detail}
 
-请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@ 三个分节。STRESS_GENERATOR 必须恰好生成 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，其中至少 ${Math.ceil(exports.TESTDATA_GEN_LIMITS.STRESS_CASES * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；stdout 只能是紧凑 JSON，且所有数据都必须让 BRUTE 在 5 秒内完成。不要输出 ORACLE、模板、代码围栏或解释。`;
+请只输出修复后的 @@@STRESS_GENERATOR@@@。BRUTE、VALIDATOR、Manifest、probe recipes、SAMPLE_INPUTS 与 frozen ProblemSpec 必须保持不变。STRESS_GENERATOR 必须恰好生成 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，其中至少 ${Math.ceil(exports.TESTDATA_GEN_LIMITS.STRESS_CASES * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；stdout 只能是紧凑 JSON，且所有数据都必须让既有暴力解在 5 秒内完成。不要输出其他分节、代码围栏或解释。`;
     }
     if (scope === 'function-samples') {
         return `独立验证器的函数题样例 stdin 转码未通过验证：
 ${detail}
 
-请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@、@@@SAMPLE_INPUTS@@@ 四个分节。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出 ORACLE、模板、代码围栏或解释。`;
+请只输出修复后的 @@@SAMPLE_INPUTS@@@。BRUTE、STRESS_GENERATOR、VALIDATOR、Manifest、probe recipes 与 frozen ProblemSpec 必须保持不变。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出其他分节、代码围栏或解释。`;
     }
     if (scope === 'oracle') {
         const typedOracleFailure = error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle'
@@ -5481,8 +5490,11 @@ ${detail}
 3. VALIDATOR 必须严格检查题面格式与约束，不得无条件成功。
 4. 所有验证制品必须沿用已经确定的同一原始 stdin 编码；不要输出 ORACLE、模板、代码围栏或解释。${sampleRequirement}`;
 }
-function isIndependentVerifierScope(scope) {
+function isVerifierRepairScope(scope) {
     return scope === 'stress-generator' || scope === 'function-samples' || scope === 'validator' || scope === 'brute';
+}
+function isVerifierSubartifactRepairScope(scope) {
+    return scope === 'stress-generator' || scope === 'function-samples' || scope === 'brute';
 }
 function repairSectionContent(sections, header) {
     const section = sections.find(item => item.header.trim().toUpperCase() === header.toUpperCase());
@@ -5491,9 +5503,25 @@ function repairSectionContent(sections, header) {
     const content = trimBlankEdges(section.content);
     return content.trim() ? normalizeExecutableContent(content) : undefined;
 }
-/** 将定向修复结果合并进已解析蓝图；缺少必需节时抛错并由调用方回退完整修复。 */
-function mergeSandboxBlueprintRepair(original, raw, scope) {
+function parseStrictSingleRepairSection(raw, header) {
+    const exactMarker = `@@@${header}@@@`;
     const sections = splitDelimitedSections(raw);
+    if (sections.length !== 1
+        || sections[0].header !== header
+        || !raw.trimStart().startsWith(exactMarker)) {
+        throw new Error(`AI 定向修复只允许单一 ${exactMarker} 分节`);
+    }
+    return sections;
+}
+/** 将定向修复结果合并进已解析蓝图；缺少必需节时抛错并由调用方回退完整修复。 */
+function mergeSandboxBlueprintRepair(original, raw, scope, expectedFunctionSamples = []) {
+    const singleHeader = scope === 'stress-generator' ? 'STRESS_GENERATOR'
+        : scope === 'function-samples' ? 'SAMPLE_INPUTS'
+            : scope === 'brute' ? 'BRUTE'
+                : undefined;
+    const sections = singleHeader
+        ? parseStrictSingleRepairSection(raw, singleHeader)
+        : splitDelimitedSections(raw);
     if (sections.length === 0)
         throw new Error('AI 定向修复未返回分节标记');
     const solutions = normalizeTemplateSolutions(original);
@@ -5525,6 +5553,18 @@ function mergeSandboxBlueprintRepair(original, raw, scope) {
         if (!bruteCode)
             throw new Error('AI 定向修复未返回 BRUTE');
         merged.bruteCode = bruteCode;
+    }
+    else if (scope === 'stress-generator') {
+        const stressGeneratorCode = repairSectionContent(sections, 'STRESS_GENERATOR');
+        if (!stressGeneratorCode)
+            throw new Error('AI 定向修复未返回 STRESS_GENERATOR');
+        merged.stressGeneratorCode = stressGeneratorCode;
+    }
+    else if (scope === 'function-samples') {
+        if (expectedFunctionSamples.length === 0) {
+            throw new Error('函数题样例修复缺少预期题面样例');
+        }
+        merged.functionSampleInputs = parseFunctionSampleInputsSection(sections, expectedFunctionSamples, '函数题样例定向修复');
     }
     else {
         const language = scope === 'template-java' ? 'java'
@@ -6449,7 +6489,7 @@ class TestdataGenService {
             }
         }
     }
-    async generateIndependentVerifier(params, blueprint, callOptions, results, attempt = 1, context) {
+    async generateIndependentVerifier(params, blueprint, callOptions, results, attempt = 1, context, checkpoint) {
         const verifierClient = this.clientForRole('verifier');
         const verifierRepairClient = this.clientForRole('verifier', false);
         const systemPrompt = buildIndependentVerifierSystemPrompt(exports.TESTDATA_GEN_LIMITS.STRESS_CASES, !!context);
@@ -6502,40 +6542,51 @@ class TestdataGenService {
                 });
             }
             results.push(repairResult);
+            let repairedVerifier;
             try {
-                return {
-                    verifier: parseIndependentVerifierBlueprint(repairResult.content, expectedFunctionSamples, context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined),
-                    systemPrompt,
-                    userPrompt,
-                    sourceContent: repairResult.content,
-                    expectedFunctionSamples,
-                };
+                repairedVerifier = parseIndependentVerifierBlueprint(repairResult.content, expectedFunctionSamples, context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined);
             }
             catch (repairParseError) {
                 if (context && this.reliabilityMode === 'observe') {
                     try {
-                        return {
-                            verifier: recoverIndependentVerifierBlueprintForObserve(repairResult.content, expectedFunctionSamples),
-                            systemPrompt,
-                            userPrompt,
-                            sourceContent: repairResult.content,
-                            expectedFunctionSamples,
-                        };
+                        repairedVerifier = recoverIndependentVerifierBlueprintForObserve(repairResult.content, expectedFunctionSamples);
                     }
                     catch {
-                        // The observe fallback is intentionally narrower than the strict parser.
-                        // If executable/sample sections are also unusable, normal typed failure applies.
+                        throw new TestdataGenerationError(`AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'independent_verifier_parse', results, true, undefined, undefined, {
+                            code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+                            artifact: 'coverage',
+                            retryPolicy: 'switch-model',
+                            failedModelRole: 'verifier',
+                        });
                     }
                 }
-                throw new TestdataGenerationError(`AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'independent_verifier_parse', results, true, undefined, undefined, {
-                    code: context
-                        ? 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING'
-                        : 'COVERAGE_REQUIREMENT_MISSING',
-                    artifact: 'coverage',
-                    retryPolicy: 'switch-model',
-                    failedModelRole: 'verifier',
-                });
+                else {
+                    throw new TestdataGenerationError(`AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'independent_verifier_parse', results, true, undefined, undefined, {
+                        code: context
+                            ? 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING'
+                            : 'COVERAGE_REQUIREMENT_MISSING',
+                        artifact: 'coverage',
+                        retryPolicy: 'switch-model',
+                        failedModelRole: 'verifier',
+                    });
+                }
             }
+            if (params.signal?.aborted) {
+                throw params.signal.reason
+                    ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            }
+            this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
+            if (context) {
+                this.assertCheckpointRoleIndependence(context.risk, checkpoint);
+                this.assertIndependentRoleIdentities(context.risk);
+            }
+            return {
+                verifier: repairedVerifier,
+                systemPrompt,
+                userPrompt,
+                sourceContent: repairResult.content,
+                expectedFunctionSamples,
+            };
         }
     }
     async generateKillTargets(input, results) {
@@ -6664,8 +6715,20 @@ class TestdataGenService {
                                         : candidate.input], { signal: params.signal, deadlineAt });
                                 if (validation.length !== 1)
                                     throw new Error('定向补刀 VALIDATOR 未返回单条结果');
-                                if (!validation[0].accepted)
+                                const validatorExecution = classifyValidatorExecution(validation[0]);
+                                if (validatorExecution === 'rejected')
                                     continue;
+                                if (validatorExecution === 'timeout-gap' || validatorExecution === 'infra-gap') {
+                                    throw (0, failures_1.toPipelineError)(new Error('定向补刀 VALIDATOR 返回了不可判定结果'), {
+                                        code: 'SANDBOX_UNAVAILABLE',
+                                        stage: 'validator',
+                                        artifact: 'validator',
+                                        safeDetails: {
+                                            caseIndex: 1,
+                                            failureKind: validatorExecution === 'timeout-gap' ? 'timeout' : 'protocol',
+                                        },
+                                    });
+                                }
                             }
                             const oracle = await oracleExecutor.runBatchDetailed([candidate.input], { signal: params.signal, deadlineAt });
                             if (oracle.length !== 1)
@@ -6726,6 +6789,10 @@ class TestdataGenService {
                             if (params.signal?.aborted)
                                 throw params.signal.reason ?? err;
                             if (isCancellation(err))
+                                throw err;
+                            if (err instanceof failures_1.TestdataPipelineError
+                                && err.code === 'SANDBOX_UNAVAILABLE'
+                                && err.artifact === 'validator')
                                 throw err;
                             break targetLoop;
                         }
@@ -7009,7 +7076,7 @@ class TestdataGenService {
                     : this.generateIndependentVerifier(params, context ? {
                         problemType: solution.problemType,
                         functionName: solution.functionName,
-                    } : solution, callOptions, verifierResults, attempt, context).then(state => {
+                    } : solution, callOptions, verifierResults, attempt, context, checkpoint).then(state => {
                         void this.emitCheckpoint(params, { verifier: state.verifier });
                         return state;
                     }),
@@ -7129,7 +7196,7 @@ class TestdataGenService {
                     });
                 }
                 const repairScope = repairScopeForPipelineFailure(typedFirstError);
-                let failedModelRole = isIndependentVerifierScope(repairScope)
+                let failedModelRole = isVerifierRepairScope(repairScope)
                     ? 'verifier'
                     : repairScope === 'oracle'
                         ? 'oracle'
@@ -7137,7 +7204,7 @@ class TestdataGenService {
                             ? undefined
                             : 'artifacts';
                 let usedFullRepair = repairScope === 'full';
-                report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
+                report(isVerifierRepairScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
                 const isolatedFullRegenerationError = (detail, role = failedModelRole || 'artifacts') => new TestdataGenerationError(`frozen ProblemSpec 流程不允许 combined full repair；必须在同一 Spec 下重跑隔离角色。${detail}`, 'pipeline_repair', results, true, undefined, undefined, {
                     code: typedFirstError.code,
                     artifact: typedFirstError.artifact,
@@ -7152,23 +7219,13 @@ class TestdataGenService {
                 }
                 let repairResult;
                 try {
-                    if (repairScope === 'validator') {
+                    if (repairScope === 'validator' || isVerifierSubartifactRepairScope(repairScope)) {
                         repairResult = await verifierRepairClient.chat([
                             { role: 'user', content: verifierState.userPrompt },
                             { role: 'assistant', content: verifierState.sourceContent },
                             {
                                 role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, 'validator', generationCoverage, context),
-                            },
-                        ], verifierState.systemPrompt, callOptions);
-                    }
-                    else if (isIndependentVerifierScope(repairScope)) {
-                        repairResult = await verifierRepairClient.chat([
-                            { role: 'user', content: verifierState.userPrompt },
-                            { role: 'assistant', content: verifierState.sourceContent },
-                            {
-                                role: 'user',
-                                content: buildIndependentVerifierRepairPrompt(firstError, verifierState.expectedFunctionSamples, context),
+                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
                             },
                         ], verifierState.systemPrompt, callOptions);
                     }
@@ -7204,14 +7261,6 @@ class TestdataGenService {
                             finalOracleIdentity = { ...repairResult.usedModel };
                         }
                     }
-                    if ((repairScope === 'validator' || isIndependentVerifierScope(repairScope))
-                        && params.signal?.aborted) {
-                        throw params.signal.reason
-                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
-                    }
-                    if (repairScope === 'validator' || isIndependentVerifierScope(repairScope)) {
-                        finalVerifierIdentity = { ...repairResult.usedModel };
-                    }
                 }
                 catch (err) {
                     if (params.signal?.aborted)
@@ -7238,13 +7287,12 @@ class TestdataGenService {
                                 sourceContent: repairResult.content,
                             };
                         }
-                        else if (isIndependentVerifierScope(repairScope)) {
+                        else if (isVerifierSubartifactRepairScope(repairScope)) {
+                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope, verifierState.expectedFunctionSamples);
                             verifierState = {
                                 ...verifierState,
-                                verifier: parseIndependentVerifierBlueprint(repairResult.content, verifierState.expectedFunctionSamples, context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined),
-                                sourceContent: repairResult.content,
+                                verifier: checkpointVerifierFromBlueprint(blueprint),
                             };
-                            blueprint = { ...blueprint, ...verifierState.verifier };
                         }
                         else if (repairScope === 'full') {
                             const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
@@ -7256,7 +7304,7 @@ class TestdataGenService {
                         }
                     }
                     catch (targetedParseError) {
-                        if (repairScope === 'full' || isIndependentVerifierScope(repairScope))
+                        if (repairScope === 'full' || isVerifierRepairScope(repairScope))
                             throw targetedParseError;
                         usedFullRepair = true;
                         failedModelRole = context ? undefined : 'oracle';
@@ -7287,6 +7335,16 @@ class TestdataGenService {
                     blueprint = bindBlueprintToFrozenProblemSpec(this.useProvidedOracle(blueprint, params.options), context);
                     if (context)
                         (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                    if (params.signal?.aborted) {
+                        throw params.signal.reason
+                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                    }
+                    if (isVerifierRepairScope(repairScope)) {
+                        finalVerifierIdentity = { ...repairResult.usedModel };
+                        this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
+                        this.assertCheckpointRoleIndependence(risk, checkpoint);
+                        this.assertIndependentRoleIdentities(risk);
+                    }
                     const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
                     const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
                     if (usedFullRepair) {
@@ -7298,11 +7356,15 @@ class TestdataGenService {
                         repairedSolutionCheckpoint.notes = solution.notes;
                         repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
                     }
-                    void this.emitCheckpoint(params, {
+                    await this.emitCheckpoint(params, {
                         solution: repairedSolutionCheckpoint,
                         artifacts: repairedArtifactsCheckpoint,
                         verifier: checkpointVerifierFromBlueprint(blueprint),
                     });
+                    if (params.signal?.aborted) {
+                        throw params.signal.reason
+                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                    }
                     const changedArtifacts = usedFullRepair
                         ? ['full']
                         : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);

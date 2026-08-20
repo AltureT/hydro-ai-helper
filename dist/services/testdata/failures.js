@@ -202,7 +202,9 @@ function repairPolicyForFailure(error) {
         case 'CHECKER_RUNTIME_FAILED':
             return 'manual-review';
         case 'SUBTASK_CONSTRAINT_VIOLATION':
-            return error.artifact === 'validator' ? 'repair-artifact' : 'manual-review';
+            return error.artifact === 'validator' || error.artifact === 'generator'
+                ? 'repair-artifact'
+                : 'manual-review';
         case 'UNKNOWN':
             if (error.artifact === 'spec')
                 return 'rerun-spec';

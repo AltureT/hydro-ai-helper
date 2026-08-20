@@ -234,7 +234,12 @@ describe('VerificationSummaryView', () => {
     expect(markup).not.toContain('I1');
   });
 
-  it('deduplicates validator target IDs only for the coverage total', () => {
+  it.each([
+    ['covered', ['C1', 'C1'], ['C2']],
+    ['missing', ['C1'], ['C2', 'C2']],
+  ])('falls back to legacy evidence for duplicate IDs within %s', (
+    _label, coveredConstraintIds, missingConstraintIds,
+  ) => {
     const markup = render({
       validator: {
         ran: true,
@@ -242,17 +247,18 @@ describe('VerificationSummaryView', () => {
         validAccepted: 2,
         invalidRejected: 1,
         invalidAccepted: 0,
-        coveredConstraintIds: ['C1', 'C1'],
-        missingConstraintIds: ['C2', 'C2'],
+        coveredConstraintIds,
+        missingConstraintIds,
       },
     });
 
-    expect(markup).toContain('1/2');
+    expect(markup).toContain('2');
+    expectNoExpandedValidatorEvidence(markup);
     expect(markup).not.toContain('C1');
     expect(markup).not.toContain('C2');
   });
 
-  it('deduplicates an ID that appears in both covered and missing totals', () => {
+  it('falls back to legacy evidence when covered and missing IDs overlap', () => {
     const markup = render({
       validator: {
         ran: true,
@@ -265,9 +271,51 @@ describe('VerificationSummaryView', () => {
       },
     });
 
-    expect(markup).toContain('1/2');
+    expect(markup).toContain('2');
+    expectNoExpandedValidatorEvidence(markup);
     expect(markup).not.toContain('C1');
     expect(markup).not.toContain('C2');
+  });
+
+  it.each([
+    ['covered', { coveredConstraintIds: Array.from({ length: 769 }, (_, index) => `C${index}`) }],
+    ['missing', { missingConstraintIds: Array.from({ length: 769 }, (_, index) => `I${index}`) }],
+  ])('falls back to legacy evidence for an over-limit %s ID array', (_label, oversized) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+        ...oversized,
+      },
+    });
+
+    expect(markup).toContain('2');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C768');
+    expect(markup).not.toContain('I768');
+  });
+
+  it('accepts the public 768-target protocol boundary', () => {
+    const coveredConstraintIds = Array.from({ length: 768 }, (_, index) => `T${index}`);
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds,
+        missingConstraintIds: [],
+      },
+    });
+
+    expect(markup).toContain('768/768');
+    expect(markup).not.toContain('T767');
   });
 
   it('does not claim expanded evidence when the validator did not run', () => {
