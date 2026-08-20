@@ -6,14 +6,18 @@
  * 约定：数据库中最多只有一条配置记录(固定 ID = 'default')
  *
  * v2 新增：支持多 API 端点配置、模型自动获取、Fallback 机制
+ * v3 新增：测试数据生成的独立角色模型链
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AIConfigModel = exports.AI_SCENARIOS = exports.CURRENT_CONFIG_VERSION = void 0;
+exports.AIConfigModel = exports.TESTDATA_MODEL_ROLES = exports.AI_SCENARIOS = exports.CURRENT_CONFIG_VERSION = void 0;
 const crypto_1 = require("crypto");
 const crypto_2 = require("../lib/crypto");
 /** 当前配置版本号 */
-exports.CURRENT_CONFIG_VERSION = 2;
+exports.CURRENT_CONFIG_VERSION = 3;
 exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'];
+exports.TESTDATA_MODEL_ROLES = [
+    'specPrimary', 'specCritic', 'oracle', 'artifacts', 'verifier', 'adjudicator',
+];
 /**
  * AI Config Model 操作类
  * 封装 AI 配置的 CRUD 操作
@@ -60,10 +64,22 @@ class AIConfigModel {
      * 从旧版配置迁移到新版
      */
     migrateFromLegacy(legacy) {
-        console.log('[AIConfigModel] Migrating from legacy config to v2...');
-        // 如果已有 endpoints，规范化并保留现有数据
-        if (legacy.endpoints && legacy.endpoints.length > 0) {
-            const normalizedEndpoints = legacy.endpoints.map((endpoint, index) => ({
+        console.log('[AIConfigModel] Migrating AI config to v3...');
+        // v2 is already a structured configuration. Upgrade only the schema version and
+        // supply required arrays when they are absent; explicit empty chains, stale model
+        // references, endpoint structure, and unknown fields must remain byte-for-byte data.
+        if (legacy.configVersion === 2) {
+            return {
+                ...legacy,
+                configVersion: exports.CURRENT_CONFIG_VERSION,
+                endpoints: legacy.endpoints ?? [],
+                selectedModels: legacy.selectedModels ?? [],
+            };
+        }
+        // v1 已有部分结构化字段，但仍需要原有的端点归一化、引用过滤与链推导。
+        // 继续展开对象以保留其未知字段；无版本 legacy 才在下方完整重建。
+        if (legacy.configVersion) {
+            const normalizedEndpoints = (legacy.endpoints || []).map((endpoint, index) => ({
                 id: endpoint.id || (0, crypto_1.randomUUID)(),
                 name: endpoint.name || `Endpoint ${index + 1}`,
                 apiBaseUrl: endpoint.apiBaseUrl || legacy.apiBaseUrl || '',
@@ -194,7 +210,23 @@ class AIConfigModel {
             }
             scenarioModels = cleaned;
         }
-        await this.updateConfig({ endpoints, selectedModels, ...(scenarioModels ? { scenarioModels } : {}) });
+        let testdataRoleModels = config.testdataRoleModels;
+        if (testdataRoleModels) {
+            const cleaned = {};
+            for (const role of exports.TESTDATA_MODEL_ROLES) {
+                const chain = testdataRoleModels[role];
+                if (Array.isArray(chain)) {
+                    cleaned[role] = chain.filter(sm => sm.endpointId !== endpointId);
+                }
+            }
+            testdataRoleModels = cleaned;
+        }
+        await this.updateConfig({
+            endpoints,
+            selectedModels,
+            ...(scenarioModels ? { scenarioModels } : {}),
+            ...(testdataRoleModels ? { testdataRoleModels } : {}),
+        });
     }
     /**
      * 更新选中的模型列表

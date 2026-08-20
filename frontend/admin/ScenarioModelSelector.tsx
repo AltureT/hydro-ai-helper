@@ -4,8 +4,12 @@ import {
   COLORS, SPACING, RADIUS,
   getInputStyle, getButtonStyle, getBadgeStyle, getAlertStyle,
 } from '../utils/styles';
-import type { Endpoint, SelectedModel, AIScenarioKey, ScenarioModelsState } from './configTypes';
+import type {
+  Endpoint, SelectedModel, AIScenarioKey, ScenarioModelsState,
+  TestdataModelRole, TestdataRoleModelsState,
+} from './configTypes';
 import { AI_SCENARIO_KEYS } from './configTypes';
+import { TestdataRoleModelSelector } from './TestdataRoleModelSelector';
 
 interface ScenarioModelSelectorProps {
   endpoints: Endpoint[];
@@ -13,6 +17,8 @@ interface ScenarioModelSelectorProps {
   globalModels: SelectedModel[];
   scenarioModels: ScenarioModelsState;
   onChange: (scenario: AIScenarioKey, chain: SelectedModel[]) => void;
+  testdataRoleModels: TestdataRoleModelsState;
+  onTestdataRoleChange: (role: TestdataModelRole, chain: SelectedModel[]) => void;
   disabled: boolean;
 }
 
@@ -50,7 +56,8 @@ const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; 
 const OPTION_SEPARATOR = '::';
 
 export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
-  endpoints, globalModels, scenarioModels, onChange, disabled,
+  endpoints, globalModels, scenarioModels, onChange,
+  testdataRoleModels, onTestdataRoleChange, disabled,
 }) => {
   // 可供选择的 端点×模型 组合（未保存端点的临时 ID 会在保存时由后端重映射为真实 ID）
   const modelOptions: Array<{ endpointId: string; endpointName: string; modelName: string }> = [];
@@ -240,6 +247,15 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                 <div style={{ fontSize: '12px', color: COLORS.textMuted }}>
                   {i18n('ai_helper_admin_scenario_no_models')}
                 </div>
+              )}
+              {scenario === 'testdataGeneration' && (
+                <TestdataRoleModelSelector
+                  endpoints={endpoints}
+                  fallbackModels={chain.length > 0 ? chain : globalModels}
+                  roleModels={testdataRoleModels}
+                  onChange={onTestdataRoleChange}
+                  disabled={disabled}
+                />
               )}
             </div>
           );

@@ -32,6 +32,10 @@ import {
 } from '../../models/testdataGenerationJob';
 import { computeOriginalFileHashes } from '../../services/testdata/runTelemetry';
 
+jest.mock('../../services/testdata/modelRoles', () => ({
+  createTestdataRoleClientsFromConfig: jest.fn().mockResolvedValue({}),
+}));
+
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
 const PROBLEM_DOC = {
@@ -1742,6 +1746,11 @@ describe('Testdata generation background jobs', () => {
         problemSpec: {
           constraints: [{ evidence: { quote: 'SECRET_EVIDENCE_QUOTE', startOffset: 7 } }],
         },
+        primarySpec: { expression: 'SECRET_PRIMARY_EXPRESSION' },
+        criticSpec: { expression: 'SECRET_CRITIC_EXPRESSION' },
+        resolvedSpec: { evidenceQuote: 'SECRET_RESOLVED_QUOTE' },
+        specConflicts: [{ path: 'constraints', primaryValue: 'SECRET_CONFLICT_VALUE' }],
+        adjudication: { reason: 'SECRET_ADJUDICATION_REASON' },
         problemType: 'traditional',
         files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
         caseCount: 1,
@@ -1763,6 +1772,11 @@ describe('Testdata generation background jobs', () => {
     expect(handler.response.body.job.plan).not.toHaveProperty('originalFileHashes');
     expect(handler.response.body.job.plan).not.toHaveProperty('modelTelemetry');
     expect(handler.response.body.job.plan).not.toHaveProperty('problemSpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('primarySpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('criticSpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('resolvedSpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('specConflicts');
+    expect(handler.response.body.job.plan).not.toHaveProperty('adjudication');
     expect(handler.response.body.job.plan.problemSpecSummary).toEqual({
       statementHash: 'b'.repeat(64),
       constraintCount: 2,
@@ -1770,6 +1784,7 @@ describe('Testdata generation background jobs', () => {
       unresolvedUncertainties: 0,
     });
     expect(JSON.stringify(handler.response.body.job.plan)).not.toContain('SECRET_EVIDENCE_QUOTE');
+    expect(JSON.stringify(handler.response.body.job.plan)).not.toContain('SECRET_ADJUDICATION_REASON');
   });
 
   it('cancel endpoint persists cancellation and returns the canceled state', async () => {

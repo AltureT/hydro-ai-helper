@@ -12,12 +12,20 @@ export interface ProblemSpecSummaryData {
 interface ProblemSpecSummaryViewProps {
   specSchemaVersion?: number;
   summary?: ProblemSpecSummaryData;
+  consensusStatus?: 'consensus' | 'adjudicated' | 'unresolved';
+  conflictCount?: number;
+  unresolvedConflictCount?: number;
+  rolesUsed?: string[];
   translate?: (key: string, ...args: Array<string | number>) => string;
 }
 
 export function ProblemSpecSummaryView({
   specSchemaVersion,
   summary,
+  consensusStatus,
+  conflictCount,
+  unresolvedConflictCount,
+  rolesUsed,
   translate = i18n,
 }: ProblemSpecSummaryViewProps): React.ReactElement | null {
   if (specSchemaVersion === undefined) return null;
@@ -38,6 +46,19 @@ export function ProblemSpecSummaryView({
       translate('ai_helper_testdata_spec_evidence_validated'),
       translate(summary ? 'ai_helper_testdata_spec_yes' : 'ai_helper_testdata_spec_no'),
     ],
+    ...(consensusStatus ? [[
+      translate('ai_helper_testdata_spec_consensus_status'),
+      translate(`ai_helper_testdata_spec_consensus_status_${consensusStatus}`),
+    ] as [string, string]] : []),
+    ...(conflictCount !== undefined ? [[
+      translate('ai_helper_testdata_spec_conflict_count'), conflictCount,
+    ] as [string, number]] : []),
+    ...(unresolvedConflictCount !== undefined ? [[
+      translate('ai_helper_testdata_spec_unresolved_conflict_count'), unresolvedConflictCount,
+    ] as [string, number]] : []),
+    ...(rolesUsed?.length ? [[
+      translate('ai_helper_testdata_spec_roles_used'), rolesUsed.join(', '),
+    ] as [string, string]] : []),
   ];
 
   const rowElements = rows.flatMap(([label, value]) => [

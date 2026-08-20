@@ -87,6 +87,103 @@ describe('AIConfigModel', () => {
       expect(mockCollection.updateOne).not.toHaveBeenCalled();
     });
 
+    it('migrates v2 to v3 without losing endpoints, scenarios, selected models, budgets, or optional fields', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        scenarioModels: {
+          testdataGeneration: [{ endpointId: 'ep-1', modelName: 'gpt-4o' }],
+        },
+        budgetConfig: { dailyTokenLimitPerUser: 123 },
+        systemPromptTemplate: 'preserve-system-prompt',
+        extraJailbreakPatternsText: 'preserve-pattern',
+      };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig();
+
+      expect(CURRENT_CONFIG_VERSION).toBe(3);
+      expect(result).toEqual(expect.objectContaining({
+        configVersion: 3,
+        endpoints: v2Config.endpoints,
+        selectedModels: v2Config.selectedModels,
+        scenarioModels: v2Config.scenarioModels,
+        budgetConfig: v2Config.budgetConfig,
+        systemPromptTemplate: 'preserve-system-prompt',
+        extraJailbreakPatternsText: 'preserve-pattern',
+      }));
+      expect(mockCollection.updateOne).toHaveBeenCalledWith(
+        { _id: 'default' },
+        { $set: expect.objectContaining({ configVersion: 3 }) },
+      );
+    });
+
+    it('migrates a v2 config with empty endpoints without rebuilding or dropping any fields', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        endpoints: [],
+        selectedModels: [],
+        scenarioModels: {
+          testdataGeneration: [{ endpointId: 'retained-endpoint', modelName: 'retained-model' }],
+        },
+        budgetConfig: { monthlyTokenLimitPerDomain: 456 },
+        systemPromptTemplate: 'keep-empty-endpoints-prompt',
+        extraJailbreakPatternsText: 'keep-empty-endpoints-pattern',
+        futureV2Field: { keep: true },
+      } as AIConfig & { futureV2Field: { keep: boolean } };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig() as AIConfig & { futureV2Field?: { keep: boolean } };
+
+      expect(result).toEqual({ ...v2Config, configVersion: 3 });
+      expect(result.scenarioModels).toEqual(v2Config.scenarioModels);
+      expect(result.budgetConfig).toEqual(v2Config.budgetConfig);
+      expect(result.futureV2Field).toEqual({ keep: true });
+    });
+
+    it('preserves an explicit empty v2 selectedModels chain when endpoints can provide defaults', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        endpoints: [{
+          id: 'ep-default',
+          name: 'Default-capable endpoint',
+          apiBaseUrl: 'https://default.example.com',
+          apiKeyEncrypted: 'enc_default',
+          models: ['endpoint-default-model'],
+          enabled: true,
+        }],
+        selectedModels: [],
+        modelName: 'legacy-default-model',
+        scenarioModels: { studentChat: [] },
+        budgetConfig: { dailyTokenLimitPerDomain: 789 },
+        futureV2Field: { nested: ['preserve', 'exactly'] },
+      } as AIConfig & { futureV2Field: { nested: string[] } };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig();
+
+      expect(result).toStrictEqual({ ...v2Config, configVersion: 3 });
+    });
+
+    it('preserves every v2 selectedModels reference instead of filtering missing endpoints', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        selectedModels: [
+          { endpointId: 'ep-missing', modelName: 'retained-missing-model' },
+          { endpointId: 'ep-1', modelName: 'gpt-4o' },
+        ],
+        futureV2Field: { keep: true },
+      } as AIConfig & { futureV2Field: { keep: boolean } };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig();
+
+      expect(result).toStrictEqual({ ...v2Config, configVersion: 3 });
+    });
+
     it('should migrate legacy config without endpoints', async () => {
       const legacy = makeLegacyConfig();
       mockCollection.findOne.mockResolvedValue(legacy);
@@ -394,6 +491,31 @@ describe('AIConfigModel', () => {
       const setData = mockCollection.updateOne.mock.calls[0][1].$set;
       expect(setData.scenarioModels.studentChat).toEqual([{ endpointId: 'ep-2', modelName: 'm2' }]);
       expect(setData.scenarioModels.teachingAnalysis).toEqual([]);
+    });
+
+    it('cleans test-data role model references to a deleted endpoint', async () => {
+      const config = makeV2Config({
+        endpoints: [
+          { id: 'ep-1', name: 'A', apiBaseUrl: 'a', apiKeyEncrypted: 'k', models: [], enabled: true },
+          { id: 'ep-2', name: 'B', apiBaseUrl: 'b', apiKeyEncrypted: 'k', models: [], enabled: true },
+        ],
+        selectedModels: [{ endpointId: 'ep-2', modelName: 'm2' }],
+        testdataRoleModels: {
+          specPrimary: [
+            { endpointId: 'ep-1', modelName: 'm1' },
+            { endpointId: 'ep-2', modelName: 'm2' },
+          ],
+          verifier: [{ endpointId: 'ep-1', modelName: 'm1' }],
+        },
+      });
+      mockCollection.findOne.mockResolvedValue(config);
+      mockCollection.updateOne.mockResolvedValue({});
+
+      await model.deleteEndpoint('ep-1');
+
+      const setData = mockCollection.updateOne.mock.calls[0][1].$set;
+      expect(setData.testdataRoleModels.specPrimary).toEqual([{ endpointId: 'ep-2', modelName: 'm2' }]);
+      expect(setData.testdataRoleModels.verifier).toEqual([]);
     });
   });
 

@@ -70,6 +70,10 @@ import {
   STATEMENT_SNAPSHOT_HARD_LIMIT,
   createStatementSnapshot,
 } from '../../services/testdata/statementSnapshot';
+import type {
+  TestdataRoleClient,
+  TestdataRoleClients,
+} from '../../services/testdata/modelRoles';
 import {
   CHECKER_BUDGET_MS,
   DISCRIMINATION_BUDGET_MS,
@@ -916,6 +920,68 @@ function makeObservedProblemSpec(
     subtasks: [],
     uncertainties: [],
     ...overrides,
+  };
+}
+
+function makeRoleClient(
+  role: TestdataRoleClient['role'],
+  endpointId: string,
+  modelName: string,
+  ...responses: Array<string | Error>
+): TestdataRoleClient & { chat: jest.Mock } {
+  const chat = jest.fn();
+  for (const response of responses) {
+    if (response instanceof Error) chat.mockRejectedValueOnce(response);
+    else chat.mockResolvedValueOnce({
+      content: response,
+      usedModel: { endpointId, endpointName: `${endpointId}-name`, modelName },
+    });
+  }
+  const identity = { endpointId, endpointName: `${endpointId}-name`, modelName };
+  return {
+    role,
+    source: 'role',
+    chain: [identity],
+    identities: [identity],
+    identity,
+    client: { chat } as never,
+    chat,
+  };
+}
+
+function makeRoleClientWithActual(
+  role: TestdataRoleClient['role'],
+  configuredEndpointId: string,
+  configuredModelName: string,
+  actualEndpointId: string,
+  actualModelName: string,
+  ...responses: Array<string | Error>
+): TestdataRoleClient & { chat: jest.Mock } {
+  const chat = jest.fn();
+  for (const response of responses) {
+    if (response instanceof Error) chat.mockRejectedValueOnce(response);
+    else chat.mockResolvedValueOnce({
+        content: response,
+        usedModel: {
+          endpointId: actualEndpointId,
+          endpointName: `${actualEndpointId}-name`,
+          modelName: actualModelName,
+        },
+      });
+  }
+  const identity = {
+    endpointId: configuredEndpointId,
+    endpointName: `${configuredEndpointId}-name`,
+    modelName: configuredModelName,
+  };
+  return {
+    role,
+    source: 'role',
+    chain: [identity],
+    identities: [identity],
+    identity,
+    client: { chat } as never,
+    chat,
   };
 }
 
@@ -2297,7 +2363,7 @@ describe('TestdataGenService.generate', () => {
     expect(prompt).not.toContain('题面（最多 6000 字符）');
   });
 
-  it('observes one grounded ProblemSpec before the legacy pipeline and saves only its summary', async () => {
+  it('observes independently grounded Primary/Critic specs before the legacy pipeline and saves only consensus summary', async () => {
     const statement = '## Constraints\nn >= 1';
     const spec = makeObservedProblemSpec(statement, {
       constraints: [{
@@ -2321,6 +2387,11 @@ describe('TestdataGenService.generate', () => {
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
         })
         .mockResolvedValueOnce({
+          content: JSON.stringify(spec),
+          usage: { promptTokens: 11, completionTokens: 21, totalTokens: 32 },
+          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
+        })
+        .mockResolvedValueOnce({
           content: makeAiJson(),
           usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 },
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
@@ -2336,12 +2407,13 @@ describe('TestdataGenService.generate', () => {
       onProblemSpecObservation,
     });
 
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
     expect(mockClient.chat.mock.calls[0][1]).toContain('严格 JSON');
-    expect(mockClient.chat.mock.calls[1][0][0].content).toContain(statement);
-    expect(JSON.stringify(mockClient.chat.mock.calls[1])).not.toContain('SECRET_SPEC_EXPRESSION');
-    expect(JSON.stringify(mockClient.chat.mock.calls[1])).not.toContain('SECRET_SPEC_INVARIANT');
-    expect(JSON.stringify(mockClient.chat.mock.calls[1])).not.toContain('SECRET_SPEC_UNCERTAINTY');
+    expect(mockClient.chat.mock.calls[1][0]).toEqual(mockClient.chat.mock.calls[0][0]);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain(statement);
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).not.toContain('SECRET_SPEC_EXPRESSION');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).not.toContain('SECRET_SPEC_INVARIANT');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).not.toContain('SECRET_SPEC_UNCERTAINTY');
     expect(plan.specSchemaVersion).toBe(1);
     expect(plan.problemSpecSummary).toEqual({
       statementHash: createStatementSnapshot(statement).statementHash,
@@ -2349,14 +2421,24 @@ describe('TestdataGenService.generate', () => {
       invariantCount: 1,
       unresolvedUncertainties: 1,
     });
+    expect(plan).toMatchObject({
+      specConsensusStatus: 'consensus',
+      specConflictCount: 0,
+      unresolvedConflictCount: 0,
+      modelRolesUsed: ['specPrimary', 'specCritic'],
+    });
     expect(plan).not.toHaveProperty('problemSpec');
-    expect(plan.tokenUsage?.totalTokens).toBe(330);
+    expect(plan.tokenUsage?.totalTokens).toBe(362);
     expect(onProblemSpecObservation).toHaveBeenCalledWith({
       schemaVersion: 1,
       succeeded: true,
       constraintCount: 1,
       invariantCount: 1,
       uncertaintyCount: 1,
+      conflictCount: 0,
+      consensusStatus: 'consensus',
+      unresolvedConflictCount: 0,
+      rolesUsed: ['specPrimary', 'specCritic'],
     });
   });
 
@@ -2375,6 +2457,10 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({
           content: specResponse,
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: specResponse,
+          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
         })
         .mockResolvedValueOnce({
           content: makeAiJson(),
@@ -2396,7 +2482,14 @@ describe('TestdataGenService.generate', () => {
     expect(plan.specSchemaVersion).toBe(1);
     expect(plan.problemSpecSummary).toBeUndefined();
     expect(plan.notesStructured?.warnings).toContainEqual(expect.stringContaining(failureCode));
-    expect(onProblemSpecObservation).toHaveBeenCalledWith({ schemaVersion: 1, succeeded: false });
+    expect(onProblemSpecObservation).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      succeeded: false,
+      conflictCount: 0,
+      consensusStatus: 'unresolved',
+      unresolvedConflictCount: 1,
+      rolesUsed: ['specPrimary', 'specCritic'],
+    });
   });
 
   it('keeps the complete statement in extractor and legacy prompts above the former 20k boundary', async () => {
@@ -2407,6 +2500,10 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({
           content: JSON.stringify(makeObservedProblemSpec(statement)),
           usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec(statement)),
+          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
         })
         .mockResolvedValueOnce({
           content: makeAiJson(),
@@ -2422,10 +2519,301 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
     });
 
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
     expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
     expect(mockClient.chat.mock.calls[1][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain(tail);
     expect(JSON.stringify(mockClient.chat.mock.calls)).not.toContain('题面过长已截断');
+  });
+
+  it('observe warns and marks wouldBlock when configured Spec identities are exactly equal', async () => {
+    const statement = 'Input one integer. Output it.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const baseClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }),
+    };
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'same', 'same-model', specJson),
+      specCritic: makeRoleClient('specCritic', 'same', 'same-model', specJson),
+    };
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'observe', roleClients: roles,
+    }).generate({
+      problemTitle: 'identity warning', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(plan.verification).toMatchObject({ verified: false, wouldBlock: true });
+    expect(plan.notesStructured?.warnings).toContainEqual(expect.stringContaining('SPEC_ROLE_IDENTITY_CONFLICT'));
+    expect(JSON.stringify(plan)).not.toContain('same/same-model');
+  });
+
+  it('enforce + high blocks an exact Spec identity collision after both actual calls', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'same', 'same-model', specJson),
+      specCritic: makeRoleClient('specCritic', 'same', 'same-model', specJson),
+    };
+    const baseClient = { chat: jest.fn() };
+
+    await expect(new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'enforce', roleClients: roles,
+    }).generate({
+      problemTitle: 'high risk', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED', artifact: 'spec' });
+    expect(baseClient.chat).not.toHaveBeenCalled();
+    expect(roles.specPrimary?.client.chat).toHaveBeenCalledTimes(1);
+    expect(roles.specCritic?.client.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks actual Spec identity after adjudication raises final risk from medium to high', async () => {
+    const statement = 'Floating point output. Input one integer. Output it exactly.';
+    const primarySpec = makeObservedProblemSpec(statement);
+    const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClientWithActual(
+        'specPrimary', 'configured-primary', 'model-a', 'actual-shared', 'same-model',
+        JSON.stringify(primarySpec),
+      ),
+      specCritic: makeRoleClientWithActual(
+        'specCritic', 'configured-critic', 'model-b', 'actual-shared', 'same-model',
+        JSON.stringify(criticSpec),
+      ),
+      adjudicator: makeRoleClient('adjudicator', 'judge', 'judge-model', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [{
+          path: 'outputPolicy', selected: 'A', evidenceQuote: 'Output it exactly.', reason: 'exact output',
+        }],
+      })),
+    };
+    const baseClient = { chat: jest.fn() };
+
+    await expect(new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'enforce', roleClients: roles,
+    }).generate({
+      problemTitle: 'final risk identity gate', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+    expect(roles.specPrimary?.client.chat).toHaveBeenCalledTimes(1);
+    expect(roles.specCritic?.client.chat).toHaveBeenCalledTimes(1);
+    expect(roles.adjudicator?.client.chat).toHaveBeenCalledTimes(1);
+    expect(baseClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an unused shared configured fallback as an actual identity collision', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const primary = makeRoleClientWithActual(
+      'specPrimary', 'configured-primary', 'model-a', 'actual-primary', 'model-a', specJson,
+    );
+    const critic = makeRoleClientWithActual(
+      'specCritic', 'configured-critic', 'model-b', 'actual-critic', 'model-b', specJson,
+    );
+    const sharedFallback = {
+      endpointId: 'unused-shared', endpointName: 'unused-shared-name', modelName: 'fallback',
+    };
+    primary.identities.push(sharedFallback);
+    critic.identities.push(sharedFallback);
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'direct', reliabilityMode: 'enforce',
+      roleClients: { specPrimary: primary, specCritic: critic },
+    }).generate({
+      problemTitle: 'unused configured overlap', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    expect(primary.chat).toHaveBeenCalledTimes(1);
+    expect(critic.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('detects that missing Spec role clients both actually used the base model', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const baseClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: specJson,
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'shared-model' },
+      }),
+    };
+
+    await expect(new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'base identity collision', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED', artifact: 'spec' });
+    expect(baseClient.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('tracks the actual Oracle and Verifier models instead of their configured first choices', async () => {
+    const actual = { endpointId: 'actual-shared', endpointName: 'actual', modelName: 'same-model' };
+    const oracle = makeRoleClientWithActual(
+      'oracle', 'configured-oracle', 'oracle-a', actual.endpointId, actual.modelName, 'oracle',
+    );
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'verifier-b', actual.endpointId, actual.modelName, 'verifier',
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { oracle, verifier },
+    });
+
+    await (service as any).clientForRole('oracle').chat([], '', {});
+    await (service as any).clientForRole('verifier').chat([], '', {});
+
+    expect(() => (service as any).assertIndependentRoleIdentities({
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    })).toThrow(expect.objectContaining({ code: 'SPEC_CONSENSUS_REQUIRED' }));
+  });
+
+  it('routes a combined full repair through base and attributes its replacement ORACLE identity', async () => {
+    const usedModel = { endpointId: 'base-repair', endpointName: 'base', modelName: 'repair-model' };
+    const baseClient = { chat: jest.fn().mockResolvedValue({ content: 'full repair', usedModel }) };
+    const artifacts = makeRoleClient('artifacts', 'artifacts', 'artifacts-model', 'unused');
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode: 'observe', roleClients: { artifacts },
+    });
+
+    const result = await (service as any).chatForCombinedRepair([], 'system', {});
+
+    expect(result.usedModel).toEqual(usedModel);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect((service as any).activeRoleIdentities.oracle).toEqual(usedModel);
+  });
+
+  it('enforce + high blocks unresolved adjudication with safe counts only', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const primarySpec = makeObservedProblemSpec(statement);
+    const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(primarySpec)),
+      specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', JSON.stringify(criticSpec)),
+      adjudicator: makeRoleClient('adjudicator', 'judge', 'judge-model', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [],
+      })),
+      oracle: makeRoleClient('oracle', 'oracle', 'oracle-model'),
+      verifier: makeRoleClient('verifier', 'verifier', 'verifier-model'),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'direct', reliabilityMode: 'enforce', roleClients: roles,
+    }).generate({
+      problemTitle: 'high conflict', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED',
+      safeDetails: expect.objectContaining({ conflictCount: 1, unresolvedConflictCount: 1 }),
+    });
+  });
+
+  it('observe continues the old generation after unresolved adjudication and exposes only safe conflict metadata', async () => {
+    const statement = 'Input one integer. Output it exactly.';
+    const primarySpec = makeObservedProblemSpec(statement);
+    const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
+    const secretReason = 'SECRET_ADJUDICATION_REASON';
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(primarySpec)),
+      specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', JSON.stringify(criticSpec)),
+      adjudicator: makeRoleClient('adjudicator', 'judge', 'judge-model', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [{ path: 'wrong-path', selected: 'new', evidenceQuote: 'Input one integer.', reason: secretReason }],
+      })),
+    };
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+    }) };
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'observe', roleClients: roles,
+    }).generate({
+      problemTitle: 'observe unresolved', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan).toMatchObject({
+      specConsensusStatus: 'unresolved', specConflictCount: 1, unresolvedConflictCount: 1,
+      modelRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+      verification: { verified: false, wouldBlock: true },
+    });
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(JSON.stringify(plan)).not.toContain(secretReason);
+    expect(JSON.stringify(plan)).not.toContain('Input one integer.');
+    expect(plan).not.toHaveProperty('resolvedSpec');
+    expect(plan).not.toHaveProperty('conflicts');
+  });
+
+  it('propagates Critic cancellation without converting it into a spec parse failure', async () => {
+    const statement = 'Input one integer. Output it.';
+    const canceled = Object.assign(new Error('canceled'), { name: 'AbortError' });
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(makeObservedProblemSpec(statement))),
+      specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', canceled),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'direct', reliabilityMode: 'observe', roleClients: roles,
+    }).generate({
+      problemTitle: 'cancel', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toBe(canceled);
+  });
+
+  it('keeps the combined direct-mode prompt on the scenario/base client before Task 7 splits it', async () => {
+    const statement = 'Input one integer. Output it.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+    }) };
+    const artifacts = makeRoleClient('artifacts', 'artifacts', 'artifacts-model', makeAiJson());
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+      roleClients: {
+        specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', specJson),
+        specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', specJson),
+        artifacts,
+      },
+    }).generate({
+      problemTitle: 'direct compatibility', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(artifacts.chat).not.toHaveBeenCalled();
+  });
+
+  it('legacy mode keeps the original single-client generation call and never invokes role clients', async () => {
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+    }) };
+    const roleClient = makeRoleClient('specPrimary', 'primary', 'spec-a', '{}');
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'legacy', roleClients: { specPrimary: roleClient },
+    }).generate({
+      problemTitle: 'legacy', statementMarkdown: 'Input one integer.',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(roleClient.chat).not.toHaveBeenCalled();
+    expect(plan.specSchemaVersion).toBeUndefined();
   });
 
   it('rejects a statement above the snapshot hard limit before any AI or sandbox call', async () => {
@@ -2694,6 +3082,132 @@ describe('TestdataGenService.generate', () => {
     expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+  });
+
+  it('high-risk enforce regenerates checkpoint v1 solution and verifier when identities are unavailable', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    };
+    const oracle = makeRoleClient(
+      'oracle', 'oracle-actual', 'oracle-model', makeSolutionBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-actual', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts', 'artifacts-model', makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, verifier, artifacts },
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'high-risk checkpoint v1',
+      statementMarkdown: 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.',
+      options,
+      checkpoint,
+    }, runner, 1, {
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    });
+
+    expect(plan.files.find((file: { name: string }) => file.name === '1.out')?.content).toBe('1\n');
+    expect(oracle.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(artifacts.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('high-risk enforce rechecks independence after an Oracle repair replaces the final blueprint', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const brokenSolution = makeSolutionBlueprint('traditional').replace(
+      'print(input())',
+      'raise RuntimeError("broken oracle")',
+    );
+    const firstOracleModel = {
+      endpointId: 'oracle-first', endpointName: 'oracle-first', modelName: 'oracle-model',
+    };
+    const sharedModel = {
+      endpointId: 'shared-final', endpointName: 'shared-final', modelName: 'same-model',
+    };
+    const oracle = makeRoleClient('oracle', 'configured-oracle', 'oracle-model');
+    oracle.chat
+      .mockResolvedValueOnce({ content: brokenSolution, usedModel: firstOracleModel })
+      .mockResolvedValueOnce({ content: '@@@ORACLE@@@\nprint(input())', usedModel: sharedModel });
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'verifier-model',
+      sharedModel.endpointId, sharedModel.modelName,
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts', 'artifacts-model', makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('RuntimeError')) {
+            return detail({
+              accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: 'broken oracle',
+            });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, verifier, artifacts },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'final repair identity',
+      statementMarkdown: 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.',
+      options,
+      checkpoint: { killTargets: [] },
+    }, runner, 1, {
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+    expect(oracle.chat).toHaveBeenCalledTimes(2);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
   });
 
   it('完整三语言 checkpoint 跳过 AI 调用并仍实跑全部模板沙箱门槛', async () => {
@@ -3119,6 +3633,12 @@ describe('TestdataGenService.generate', () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const mockClient = {
       chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec('题面', {
+            problemKind: 'traditional', outputPolicy: { kind: 'custom-checker' },
+          })),
+          usedModel,
+        })
         .mockResolvedValueOnce({
           content: JSON.stringify(makeObservedProblemSpec('题面', {
             problemKind: 'traditional', outputPolicy: { kind: 'custom-checker' },
@@ -3748,6 +4268,136 @@ describe('TestdataGenService.generate', () => {
       .toBeLessThan(fallbackClient.chat.mock.invocationCallOrder[0]);
   });
 
+  it('语义重跑推进失败角色的模型链并保留其余角色客户端', async () => {
+    const primaryModel = { endpointId: 'oracle-a', endpointName: 'oracle-a', modelName: 'model-a' };
+    const firstError = new TestdataGenerationError(
+      'oracle repair failed',
+      'solution_blueprint',
+      [{ content: 'broken', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'SPEC_PARSE_FAILED', artifact: 'spec', retryPolicy: 'switch-model',
+        failedModelRole: 'oracle',
+      } as any,
+    );
+    const oracleFallbackClient = { chat: jest.fn() };
+    const oracleAdvance = jest.fn().mockReturnValue(oracleFallbackClient);
+    const oracle = makeRoleClient('oracle', 'oracle-a', 'model-a');
+    Object.assign(oracle.client as object, { createClientStartingAfter: oracleAdvance });
+    const artifacts = makeRoleClient('artifacts', 'artifacts-a', 'model-a');
+    const verifier = makeRoleClient('verifier', 'verifier-a', 'model-a');
+    const baseAdvance = jest.fn();
+    const baseClient = { chat: jest.fn(), createClientStartingAfter: baseAdvance };
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'oracle-b/model-b', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    let retriedRoleClients: TestdataRoleClients | undefined;
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockImplementationOnce(async function (this: TestdataGenService) {
+        retriedRoleClients = (this as any).roleClients;
+        return fallbackPlan;
+      });
+
+    try {
+      const service = new TestdataGenService(baseClient as never, {
+        reliabilityMode: 'observe',
+        roleClients: { oracle, artifacts, verifier },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'role fallback', statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() });
+
+      expect(firstError).toMatchObject({ failedModelRole: 'oracle' });
+      expect(plan).toBe(fallbackPlan);
+      expect(oracleAdvance).toHaveBeenCalledWith(primaryModel);
+      expect(baseAdvance).not.toHaveBeenCalled();
+      expect(retriedRoleClients?.oracle?.client).toBe(oracleFallbackClient);
+      expect(retriedRoleClients?.artifacts).toBe(artifacts);
+      expect(retriedRoleClients?.verifier).toBe(verifier);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('propagates semantic fallback actual identities back to observe-mode warnings', async () => {
+    const primaryModel = { endpointId: 'oracle-a', endpointName: 'oracle-a', modelName: 'model-a' };
+    const sharedModel = { endpointId: 'shared-final', endpointName: 'shared', modelName: 'same-model' };
+    const firstError = new TestdataGenerationError(
+      'oracle repair failed',
+      'solution_blueprint',
+      [{ content: 'broken', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'SPEC_PARSE_FAILED', artifact: 'spec', retryPolicy: 'switch-model',
+        failedModelRole: 'oracle',
+      },
+    );
+    const oracle = makeRoleClient('oracle', 'oracle-a', 'model-a');
+    Object.assign(oracle.client as object, {
+      createClientStartingAfter: jest.fn().mockReturnValue({ chat: jest.fn() }),
+    });
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'shared/same-model', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockImplementationOnce(async function (this: TestdataGenService) {
+        (this as any).activeRoleIdentities = {
+          oracle: sharedModel,
+          verifier: sharedModel,
+        };
+        return fallbackPlan;
+      });
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe', roleClients: { oracle },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'identity propagation', statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() });
+      const observed = (service as any).attachProblemSpecObservation(plan, {
+        schemaVersion: 1, results: [], status: 'consensus', conflictCount: 0,
+        unresolvedConflictCount: 0, rolesUsed: ['specPrimary', 'specCritic'],
+        roleIdentities: {}, identityWarningCodes: [], wouldBlock: false,
+      }, {
+        tier: 'low', score: 1, reasons: [], requiresSandbox: false,
+        requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: true,
+      });
+
+      expect((service as any).activeRoleIdentities).toEqual({
+        oracle: sharedModel, verifier: sharedModel,
+      });
+      expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
+      expect(observed.notesStructured.warnings).toContainEqual(
+        expect.stringContaining('ORACLE_VERIFIER_IDENTITY_CONFLICT'),
+      );
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
   it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
     const mockClient = {
       chat: jest.fn()
@@ -4018,7 +4668,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -4570,7 +5220,9 @@ describe('TestdataGenService.generate', () => {
       options: {
         problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
       },
-    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    })).rejects.toMatchObject({
+      code: reliabilityMode === 'enforce' ? 'SPEC_CONSENSUS_REQUIRED' : 'SANDBOX_REQUIRED',
+    });
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 
@@ -4808,7 +5460,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
     expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
   });
@@ -4848,7 +5500,7 @@ describe('TestdataGenService.generate', () => {
       expect(failure).toBe(cancellation);
       expect(runner.deleteCachedFile).toHaveBeenCalledTimes(1);
       expect(runner.deleteCachedFile).toHaveBeenCalledWith('late-checker-cache');
-      expect(mockClient.chat).toHaveBeenCalledTimes(1);
+      expect(mockClient.chat).toHaveBeenCalledTimes(2);
       expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
       expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
     },
@@ -5243,7 +5895,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -5298,7 +5950,7 @@ describe('TestdataGenService.generate', () => {
 
       expect(failure).toBe(cancellation);
       expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
-      expect(mockClient.chat).toHaveBeenCalledTimes(1);
+      expect(mockClient.chat).toHaveBeenCalledTimes(2);
       expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();

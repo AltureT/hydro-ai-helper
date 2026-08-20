@@ -15,6 +15,7 @@ import { Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, d
 import type { ServerResponse } from 'http';
 import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
+import { createTestdataRoleClientsFromConfig } from '../services/testdata/modelRoles';
 import {
   TestdataGenService,
   GenerateOptions,
@@ -671,8 +672,20 @@ function serializeGenerationPlan(plan: GenerationPlan | undefined) {
     originalFileHashes: _serverOnlyHashes,
     modelTelemetry: _serverOnlyModelTelemetry,
     problemSpec: _serverOnlyProblemSpec,
+    primarySpec: _serverOnlyPrimarySpec,
+    criticSpec: _serverOnlyCriticSpec,
+    resolvedSpec: _serverOnlyResolvedSpec,
+    specConflicts: _serverOnlySpecConflicts,
+    adjudication: _serverOnlyAdjudication,
     ...clientPlan
-  } = plan as GenerationPlan & { problemSpec?: unknown };
+  } = plan as GenerationPlan & {
+    problemSpec?: unknown;
+    primarySpec?: unknown;
+    criticSpec?: unknown;
+    resolvedSpec?: unknown;
+    specConflicts?: unknown;
+    adjudication?: unknown;
+  };
   return clientPlan;
 }
 
@@ -799,18 +812,22 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
   try {
     await jobModel.markRunning(job._id);
     ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
-    const aiClient = await createMultiModelClientFromConfig(ctx, undefined, 'testdataGeneration');
+    const reliabilityMode = getTestdataReliabilityMode();
     const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
     const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
-    const cppOracleAvailable = await probeCppOracleAvailability(
-      sandboxRunner,
-      generationMode,
-      ac.signal,
-    );
+    const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
+      createMultiModelClientFromConfig(ctx, undefined, 'testdataGeneration'),
+      reliabilityMode === 'legacy'
+        ? Promise.resolve(undefined)
+        : createTestdataRoleClientsFromConfig(ctx),
+      probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
+    ]);
     const service = new TestdataGenService(aiClient, {
       sandboxRunner,
       mode: generationMode,
       cppOracleAvailable,
+      reliabilityMode,
+      roleClients,
     });
     const plan = await service.generate({
       runId: job.runId,
@@ -1034,14 +1051,20 @@ export class TestdataGenGenerateHandler extends Handler {
         configuredMode: generationMode,
       });
       emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
-      const [aiClient, cppOracleAvailable] = await Promise.all([
+      const reliabilityMode = getTestdataReliabilityMode();
+      const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
         createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration'),
+        reliabilityMode === 'legacy'
+          ? Promise.resolve(undefined)
+          : createTestdataRoleClientsFromConfig(this.ctx),
         probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
       ]);
       const service = new TestdataGenService(aiClient, {
         sandboxRunner,
         mode: generationMode,
         cppOracleAvailable,
+        reliabilityMode,
+        roleClients,
       });
       const plan = await service.generate({
         runId,

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseProblemSpecV1 = parseProblemSpecV1;
 exports.validateProblemSpecV1 = validateProblemSpecV1;
+exports.locateStatementEvidence = locateStatementEvidence;
 exports.validateProblemSpecEvidence = validateProblemSpecEvidence;
 exports.summarizeProblemSpec = summarizeProblemSpec;
 const failures_1 = require("./failures");
@@ -301,7 +302,9 @@ function allOccurrences(markdown, quote) {
     }
     return offsets;
 }
-function locateEvidence(snapshot, evidence) {
+function locateStatementEvidence(snapshot, evidence) {
+    if (!evidence.quote.trim())
+        throw evidenceFailure();
     let offsets = allOccurrences(snapshot.normalizedMarkdown, evidence.quote);
     if (evidence.section !== undefined) {
         const sections = snapshot.sections.filter(section => section.heading === evidence.section);
@@ -319,14 +322,14 @@ function validateProblemSpecEvidence(spec, snapshot) {
         evidence: {
             quote: constraint.evidence.quote,
             ...(constraint.evidence.section !== undefined ? { section: constraint.evidence.section } : {}),
-            ...locateEvidence(snapshot, constraint.evidence),
+            ...locateStatementEvidence(snapshot, constraint.evidence),
         },
     }));
     for (const invariant of spec.invariants)
-        locateEvidence(snapshot, invariant.evidence);
+        locateStatementEvidence(snapshot, invariant.evidence);
     for (const uncertainty of spec.uncertainties) {
         if (uncertainty.evidence !== undefined) {
-            locateEvidence(snapshot, { quote: uncertainty.evidence });
+            locateStatementEvidence(snapshot, { quote: uncertainty.evidence });
         }
     }
     return { ...spec, constraints };

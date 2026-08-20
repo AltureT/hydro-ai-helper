@@ -109,6 +109,10 @@ interface GenerationPlan {
   promptVersion: string;
   specSchemaVersion?: number;
   problemSpecSummary?: ProblemSpecSummaryData;
+  specConsensusStatus?: 'consensus' | 'adjudicated' | 'unresolved';
+  specConflictCount?: number;
+  unresolvedConflictCount?: number;
+  modelRolesUsed?: string[];
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
   analysis?: string;
@@ -1282,6 +1286,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         <ProblemSpecSummaryView
           specSchemaVersion={plan.specSchemaVersion}
           summary={plan.problemSpecSummary}
+          consensusStatus={plan.specConsensusStatus}
+          conflictCount={plan.specConflictCount}
+          unresolvedConflictCount={plan.unresolvedConflictCount}
+          rolesUsed={plan.modelRolesUsed}
         />
         {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
           <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>

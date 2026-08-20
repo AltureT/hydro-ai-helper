@@ -15,6 +15,8 @@ import {
   type TestdataRetryPolicy,
 } from './failures';
 import type { TestdataReliabilityMode, TestdataRiskTier } from './risk';
+import type { TestdataModelRole } from '../../models/aiConfig';
+import type { SpecConsensusStatus } from './specConsensus';
 
 export const TESTDATA_PROMPT_VERSION = 'testdata-generation-v1' as const;
 export const TESTDATA_QUALITY_SCHEMA_VERSION = 1 as const;
@@ -239,6 +241,10 @@ export interface TestdataProblemSpecObservation {
   constraintCount?: number;
   invariantCount?: number;
   uncertaintyCount?: number;
+  consensusStatus?: SpecConsensusStatus;
+  conflictCount?: number;
+  unresolvedConflictCount?: number;
+  rolesUsed?: TestdataModelRole[];
 }
 
 const EVENT_TYPES = new Set<TestdataRunEventType>([

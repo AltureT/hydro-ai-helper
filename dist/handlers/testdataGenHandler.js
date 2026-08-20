@@ -18,6 +18,7 @@ exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
 const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
+const modelRoles_1 = require("../services/testdata/modelRoles");
 const testdataGenService_1 = require("../services/testdataGenService");
 const failures_1 = require("../services/testdata/failures");
 const risk_1 = require("../services/testdata/risk");
@@ -492,7 +493,7 @@ function serializeGenerationPlan(plan) {
         return undefined;
     // Hashes/model identity and any future complete spec are server-only. The
     // browser receives only the bounded ProblemSpec summary declared on GenerationPlan.
-    const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, problemSpec: _serverOnlyProblemSpec, ...clientPlan } = plan;
+    const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, problemSpec: _serverOnlyProblemSpec, primarySpec: _serverOnlyPrimarySpec, criticSpec: _serverOnlyCriticSpec, resolvedSpec: _serverOnlyResolvedSpec, specConflicts: _serverOnlySpecConflicts, adjudication: _serverOnlyAdjudication, ...clientPlan } = plan;
     return clientPlan;
 }
 function serializeGenerationJob(job) {
@@ -599,14 +600,22 @@ async function runBackgroundGeneration(params) {
     try {
         await jobModel.markRunning(job._id);
         ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
-        const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration');
+        const reliabilityMode = (0, risk_1.getTestdataReliabilityMode)();
         const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
         const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
-        const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal);
+        const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
+            (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration'),
+            reliabilityMode === 'legacy'
+                ? Promise.resolve(undefined)
+                : (0, modelRoles_1.createTestdataRoleClientsFromConfig)(ctx),
+            probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
+        ]);
         const service = new testdataGenService_1.TestdataGenService(aiClient, {
             sandboxRunner,
             mode: generationMode,
             cppOracleAvailable,
+            reliabilityMode,
+            roleClients,
         });
         const plan = await service.generate({
             runId: job.runId,
@@ -815,14 +824,20 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 configuredMode: generationMode,
             });
             emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
-            const [aiClient, cppOracleAvailable] = await Promise.all([
+            const reliabilityMode = (0, risk_1.getTestdataReliabilityMode)();
+            const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
                 (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration'),
+                reliabilityMode === 'legacy'
+                    ? Promise.resolve(undefined)
+                    : (0, modelRoles_1.createTestdataRoleClientsFromConfig)(this.ctx),
                 probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
             ]);
             const service = new testdataGenService_1.TestdataGenService(aiClient, {
                 sandboxRunner,
                 mode: generationMode,
                 cppOracleAvailable,
+                reliabilityMode,
+                roleClients,
             });
             const plan = await service.generate({
                 runId,
