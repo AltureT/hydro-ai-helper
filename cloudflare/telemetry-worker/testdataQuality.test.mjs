@@ -141,6 +141,20 @@ test('model role index is an idempotent incremental migration', async () => {
   assert.match(sql, /ON testdata_runs\(model_role\)/i);
 });
 
+test('problem spec observation migration adds only bounded aggregate columns', async () => {
+  const sql = await readFile(
+    new URL('./migrations/0012_testdata_problem_spec_observation.sql', import.meta.url),
+    'utf8',
+  );
+  for (const column of [
+    'spec_schema_version', 'spec_extraction_succeeded', 'spec_constraint_count',
+    'spec_invariant_count', 'spec_uncertainty_count',
+  ]) assert.match(sql, new RegExp(`ADD COLUMN ${column}`));
+  for (const forbidden of [
+    'statement', 'title', 'problem_id', 'quote', 'expression', 'description', 'metadata',
+  ]) assert.doesNotMatch(sql, new RegExp(`ADD COLUMN ${forbidden}`, 'i'));
+});
+
 test('event fingerprints are canonical and change with safe payload content', async () => {
   const first = event();
   const reordered = Object.fromEntries(Object.entries(first).reverse());
@@ -152,7 +166,12 @@ test('event fingerprints are canonical and change with safe payload content', as
 });
 
 test('worker validator accepts the closed contract and rejects privacy injection', () => {
-  assert.equal(validateTestdataQualityEventPayload(event()).eventType, 'run_started');
+  const completed = event({
+    eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+    specSchemaVersion: 1, specExtractionSucceeded: true,
+    specConstraintCount: 12, specInvariantCount: 3, specUncertaintyCount: 1,
+  });
+  assert.equal(validateTestdataQualityEventPayload(completed).specConstraintCount, 12);
   for (const [key, value] of [
     ['problemId', 'D3102'], ['title', 'secret'], ['statement', '# secret'],
     ['code', 'print(secret)'], ['input', 'secret'], ['output', 'secret'],
@@ -177,6 +196,23 @@ test('worker validator rejects invalid UUIDs, bounds, arrays, and enums', () => 
     }),
     event({
       eventType: 'run_completed', pipelineCompleted: false, verified: false, wouldBlock: true,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 2, specExtractionSucceeded: false,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 1, specExtractionSucceeded: true, specConstraintCount: 513,
+      specInvariantCount: 0, specUncertaintyCount: 0,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 1, specExtractionSucceeded: true,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 1, specExtractionSucceeded: false, specConstraintCount: 0,
     }),
   ]) assert.throws(() => validateTestdataQualityEventPayload(invalid));
 });
@@ -375,6 +411,11 @@ test('completion-first delivery preserves statement buckets and late starts back
     hasSamples: true,
     hasStatefulOperations: false,
     statementLengthBucket: '4k-16k',
+    specSchemaVersion: 1,
+    specExtractionSucceeded: true,
+    specConstraintCount: 12,
+    specInvariantCount: 3,
+    specUncertaintyCount: 1,
   });
   const completedResponse = await worker.fetch(
     request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [completed] }),
@@ -389,7 +430,9 @@ test('completion-first delivery preserves statement buckets and late starts back
   assert.equal((completionSql.match(/\?/g) || []).length, completionStatement.values.length);
   for (const column of [
     'has_subtasks', 'has_custom_checker', 'has_samples',
-    'has_stateful_operations', 'statement_length_bucket',
+    'has_stateful_operations', 'statement_length_bucket', 'spec_schema_version',
+    'spec_extraction_succeeded', 'spec_constraint_count', 'spec_invariant_count',
+    'spec_uncertainty_count',
   ]) assert.match(completionSql, new RegExp(column));
   assert.equal(completionStatement.values.includes('4k-16k'), true);
 
@@ -470,6 +513,8 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
     rows: {
       testdata_quality_totals: [{
         total_runs: 10, pipeline_completed: 8, verified: 5, would_block: 2,
+        spec_attempted: 7, spec_succeeded: 5, spec_constraint_count: 48,
+        spec_invariant_count: 11, spec_uncertainty_count: 4,
         stress_generated: 600, stress_valid: 560, stress_dropped_invalid: 40,
         stress_unique: 540, stress_compared: 560, stress_agreed: 550,
         checker_configured: 4, checker_read: 4, checker_compiled: 3,
@@ -516,6 +561,12 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   assert.deepEqual(body.metrics.accepted_unchanged, { count: 2, total: 6, rate: 1 / 3 });
   assert.deepEqual(body.metrics.model_escalation_rescue, { count: 1, total: 2, rate: 0.5 });
   assert.deepEqual(body.metrics.verified_but_teacher_changed, { count: 2, total: 4, rate: 0.5 });
+  assert.deepEqual(body.problem_spec, {
+    extraction_succeeded: { count: 5, total: 7, rate: 5 / 7 },
+    constraint_count: 48,
+    invariant_count: 11,
+    uncertainty_count: 4,
+  });
   assert.deepEqual(body.checker.infra_failure, { count: 1, total: 4, rate: 0.25 });
   assert.deepEqual(body.failure_codes, [
     { key: 'CHECKER_RUNTIME_FAILED', count: 2 }, { key: 'UNKNOWN', count: 1 },

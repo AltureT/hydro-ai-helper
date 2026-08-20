@@ -162,6 +162,12 @@ export interface TestdataQualityResponse {
   failure_artifacts?: TestdataQualityDistributionItem[];
   risk_tiers?: TestdataQualityDistributionItem[];
   model_roles?: Record<TestdataModelRole, TestdataModelRoleMetrics>;
+  problem_spec?: {
+    extraction_succeeded: TestdataQualityRate;
+    constraint_count: number;
+    invariant_count: number;
+    uncertainty_count: number;
+  };
   templates?: Partial<Record<'py' | 'java' | 'cc', {
     requested: number;
     verified: number;
