@@ -337,6 +337,7 @@ function validateReferences(spec: ProblemSpecV1): void {
   assertUnique(constraintIds);
   assertUnique(invariantIds);
   assertUnique([...fieldIds, ...constraintIds, ...invariantIds]);
+  assertUnique(spec.uncertainties.map(uncertainty => uncertainty.code));
 
   const fieldIdSet = new Set(fieldIds);
   for (const field of spec.inputFields) {
@@ -444,6 +445,11 @@ export function validateProblemSpecEvidence(
     },
   }));
   for (const invariant of spec.invariants) locateEvidence(snapshot, invariant.evidence);
+  for (const uncertainty of spec.uncertainties) {
+    if (uncertainty.evidence !== undefined) {
+      locateEvidence(snapshot, { quote: uncertainty.evidence });
+    }
+  }
   return { ...spec, constraints };
 }
 

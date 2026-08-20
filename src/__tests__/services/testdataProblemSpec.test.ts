@@ -261,6 +261,17 @@ describe('ProblemSpec v1 strict schema', () => {
         .toThrow(expect.objectContaining({ code: 'SPEC_PARSE_FAILED' }));
     }
   });
+
+  it('rejects duplicate uncertainty codes', () => {
+    const spec = validTraditionalSpec();
+    spec.uncertainties = [
+      { code: 'u_format', description: 'first ambiguity' },
+      { code: 'u_format', description: 'second ambiguity' },
+    ];
+
+    expect(() => parseProblemSpecV1(JSON.stringify(spec)))
+      .toThrow(expect.objectContaining({ code: 'SPEC_PARSE_FAILED' }));
+  });
 });
 
 describe('ProblemSpec evidence grounding', () => {
@@ -273,6 +284,37 @@ describe('ProblemSpec evidence grounding', () => {
       code: 'SPEC_EVIDENCE_NOT_FOUND',
       artifact: 'spec',
     }));
+  });
+
+  it('grounds optional uncertainty evidence and rejects missing or ambiguous text', () => {
+    const uniqueSnapshot = traditionalStatement();
+    const unique = validTraditionalSpec(uniqueSnapshot.statementHash);
+    unique.uncertainties = [{
+      code: 'u_input',
+      description: 'input wording needs review',
+      evidence: 'The first line contains n.',
+    }];
+    expect(() => validateProblemSpecEvidence(
+      parseAndValidate(unique), uniqueSnapshot,
+    )).not.toThrow();
+
+    const missing = validTraditionalSpec(uniqueSnapshot.statementHash);
+    missing.uncertainties = [{
+      code: 'u_missing', description: 'missing quote', evidence: 'not in statement',
+    }];
+    expect(() => validateProblemSpecEvidence(
+      parseAndValidate(missing), uniqueSnapshot,
+    )).toThrow(expect.objectContaining({ code: 'SPEC_EVIDENCE_NOT_FOUND' }));
+
+    const repeatedSnapshot = createStatementSnapshot('## A\nambiguous\n## B\nambiguous');
+    const repeated = validTraditionalSpec(repeatedSnapshot.statementHash);
+    repeated.constraints = [];
+    repeated.uncertainties = [{
+      code: 'u_repeat', description: 'repeated quote', evidence: 'ambiguous',
+    }];
+    expect(() => validateProblemSpecEvidence(
+      parseAndValidate(repeated), repeatedSnapshot,
+    )).toThrow(expect.objectContaining({ code: 'SPEC_EVIDENCE_NOT_FOUND' }));
   });
 
   it('rejects an ambiguous repeated quote without a section', () => {

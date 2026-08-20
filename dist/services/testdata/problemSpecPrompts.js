@@ -24,7 +24,7 @@ JSON 必须满足 ProblemSpecV1：
 2. evidence.quote 必须逐字来自完整题面；不要改写。section 使用不含 # 的标题文本。
 3. startOffset/endOffset 不作为可信输入，服务端会重新计算；不得用 offset 代替 quote。
 4. 约束、状态操作前置条件、子任务继承、多组测试、函数题调用形式和输出比较策略不得遗漏。
-5. 不确定内容写入 uncertainties，不得猜测。
+5. 不确定内容写入 uncertainties，不得猜测；可选 evidence 必须是题面中的逐字引文。
 6. outputPolicy 只能使用封闭枚举；只有题目当前配置了自定义 checker 时才使用 custom-checker。
 7. 不要输出 metadata 或任何契约外字段。`;
     const chunks = input.snapshot.chunks.flatMap(chunk => [
