@@ -42,6 +42,19 @@ const TEMPLATE_FAILURE_KINDS = new Set([
 const CHECKER_FAILURE_KINDS = new Set([
   'unavailable', 'compile', 'infra', 'budget', 'reject',
 ]);
+const VALIDATOR_EVIDENCE_ID_MAX_LENGTH = 64;
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isBoundedValidatorIdArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => (
+    typeof item === 'string'
+    && item.length > 0
+    && item.length <= VALIDATOR_EVIDENCE_ID_MAX_LENGTH
+  ));
+}
 
 function booleanEvidence(label: string, value: boolean, translate: Translate): React.ReactElement {
   const state = translate(value
@@ -167,11 +180,13 @@ export function VerificationSummaryView(props: {
   const validator = verification.validator;
   if (validator) {
     const validatorLabel = translate('ai_helper_testdata_verify_validator');
-    const hasExpandedEvidence = typeof validator.validAccepted === 'number'
-      && typeof validator.invalidRejected === 'number'
-      && typeof validator.invalidAccepted === 'number'
-      && Array.isArray(validator.coveredConstraintIds)
-      && Array.isArray(validator.missingConstraintIds);
+    const hasExpandedEvidence = validator.ran === true
+      && isNonNegativeSafeInteger(validator.casesChecked)
+      && isNonNegativeSafeInteger(validator.validAccepted)
+      && isNonNegativeSafeInteger(validator.invalidRejected)
+      && isNonNegativeSafeInteger(validator.invalidAccepted)
+      && isBoundedValidatorIdArray(validator.coveredConstraintIds)
+      && isBoundedValidatorIdArray(validator.missingConstraintIds);
     let validatorEvidence: React.ReactElement[];
 
     if (hasExpandedEvidence) {
@@ -206,7 +221,7 @@ export function VerificationSummaryView(props: {
       validatorEvidence = [React.createElement(
         'span',
         { key: 'legacy' },
-        validator.ran
+        validator.ran === true && isNonNegativeSafeInteger(validator.casesChecked)
           ? String(validator.casesChecked)
           : translate('ai_helper_testdata_verify_validator_none'),
       )];

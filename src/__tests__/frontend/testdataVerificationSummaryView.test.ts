@@ -88,6 +88,19 @@ function render(verification: VerificationSummaryData): string {
   }));
 }
 
+const expandedValidatorLabels = [
+  'Legal inputs accepted',
+  'Invalid inputs rejected',
+  'Invalid inputs accepted',
+  'Constraint coverage',
+];
+
+function expectNoExpandedValidatorEvidence(markup: string): void {
+  for (const label of expandedValidatorLabels) {
+    expect(markup).not.toContain(label);
+  }
+}
+
 describe('VerificationSummaryView', () => {
   it('renders authoritative success with stable per-language and checker evidence', () => {
     const markup = render({
@@ -239,9 +252,129 @@ describe('VerificationSummaryView', () => {
     expect(markup).not.toContain('C2');
   });
 
+  it('deduplicates an ID that appears in both covered and missing totals', () => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: ['C1', 'C2'],
+      },
+    });
+
+    expect(markup).toContain('1/2');
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+  });
+
+  it('does not claim expanded evidence when the validator did not run', () => {
+    const markup = render({
+      validator: {
+        ran: false,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+      },
+    });
+
+    expect(markup).toContain('No validator provided');
+    expect(markup).not.toContain('12/12');
+    expectNoExpandedValidatorEvidence(markup);
+  });
+
+  describe.each([
+    'casesChecked',
+    'validAccepted',
+    'invalidRejected',
+    'invalidAccepted',
+  ] as const)('%s count validation', field => {
+    it.each([
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['fractional', 1.5],
+      ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+    ])('does not render %s evidence', (_label, invalidValue) => {
+      const markup = render({
+        validator: {
+          ran: true,
+          casesChecked: 12,
+          validAccepted: 12,
+          invalidRejected: 4,
+          invalidAccepted: 0,
+          coveredConstraintIds: ['C1'],
+          missingConstraintIds: [],
+          [field]: invalidValue,
+        },
+      });
+
+      expectNoExpandedValidatorEvidence(markup);
+      expect(markup).not.toContain(String(invalidValue));
+      if (field === 'casesChecked') {
+        expect(markup).toContain('No validator provided');
+      } else {
+        expect(markup).toContain('12');
+        expect(markup).not.toContain('No validator provided');
+      }
+    });
+  });
+
+  it.each([
+    ['covered is not an array', { coveredConstraintIds: null }],
+    ['missing is not an array', { missingConstraintIds: {} }],
+    ['covered contains a non-string', { coveredConstraintIds: [1] }],
+    ['missing contains a non-string', { missingConstraintIds: [false] }],
+    ['covered contains an empty ID', { coveredConstraintIds: [''] }],
+    ['missing contains an overlong ID', { missingConstraintIds: ['X'.repeat(65)] }],
+  ])('falls back without expanded labels when %s', (_label, malformed) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+        ...malformed,
+      } as unknown as NonNullable<VerificationSummaryData['validator']>,
+    });
+
+    expect(markup).toContain('12');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('X'.repeat(65));
+  });
+
+  it('renders zero as valid expanded evidence', () => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 0,
+        validAccepted: 0,
+        invalidRejected: 0,
+        invalidAccepted: 0,
+        coveredConstraintIds: [],
+        missingConstraintIds: [],
+      },
+    });
+
+    expect(markup).toContain('Legal inputs accepted');
+    expect(markup).toContain('0/0');
+    expect(markup).not.toContain('No validator provided');
+  });
+
   it('falls back to ran and casesChecked for legacy validator evidence', () => {
-    expect(render({
+    const markup = render({
       validator: { ran: true, casesChecked: 7 },
-    })).toContain('7');
+    });
+
+    expect(markup).toContain('7');
+    expectNoExpandedValidatorEvidence(markup);
   });
 });
