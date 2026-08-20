@@ -495,7 +495,11 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   assert.deepEqual(body.failure_artifacts, [{ key: 'checker', count: 2 }]);
   assert.equal(body.templates.java.verified, 2);
   const totalsCutoff = db.bound.find(statement => statement.sql.includes('testdata_quality_totals')).values[0];
-  assert.match(totalsCutoff, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(totalsCutoff, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  for (const statement of db.bound.filter(item => item.sql.includes('FROM testdata_runs WHERE'))) {
+    assert.match(statement.sql, /WHERE received_at >= \?/);
+    assert.doesNotMatch(statement.sql, /WHERE started_at >= \?/);
+  }
   for (const marker of [
     'testdata_quality_outcomes', 'testdata_quality_failures',
     'testdata_quality_stages', 'testdata_quality_artifacts',
@@ -531,4 +535,14 @@ test('GET dashboard rejects invalid days before querying D1', async () => {
   ), { DB: db, DASHBOARD_TOKEN: 'dashboard-secret' });
   assert.equal(response.status, 400);
   assert.equal(db.executed.length, 0);
+});
+
+test('GET dashboard rejects non-GET methods', async () => {
+  const db = new FakeDb();
+  const response = await worker.fetch(new Request(
+    'https://stats.example/api/dashboard/testdata-quality',
+    { method: 'POST', headers: { Authorization: 'Bearer dashboard-secret' } },
+  ), { DB: db, DASHBOARD_TOKEN: 'dashboard-secret' });
+  assert.equal(response.status, 405);
+  assert.equal(db.bound.length, 0);
 });

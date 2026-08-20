@@ -320,11 +320,11 @@ class TestdataRunTelemetryService {
             return false;
         }
     }
-    async emitApplyFailure(runId) {
+    async emitApplyFailure(runId, eventId = this.eventId()) {
         try {
             return await this.emit(parseTestdataQualityEvent({
                 schemaVersion: exports.TESTDATA_QUALITY_SCHEMA_VERSION,
-                eventId: this.eventId(),
+                eventId,
                 runId,
                 sequence: exports.TESTDATA_TEACHER_OUTCOME_SEQUENCE - 1,
                 eventType: 'stage_failed',

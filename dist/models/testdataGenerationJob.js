@@ -7,7 +7,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenerationJobModel = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = void 0;
+exports.TestdataGenerationJobModel = exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS = exports.TESTDATA_JOB_LEASE_MS = exports.TESTDATA_JOB_RETENTION_MS = exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = void 0;
 exports.computeTestdataCheckpointHashes = computeTestdataCheckpointHashes;
 exports.filterTestdataCheckpointUpdate = filterTestdataCheckpointUpdate;
 exports.selectTestdataResumeCheckpoint = selectTestdataResumeCheckpoint;
@@ -123,6 +123,17 @@ function selectTestdataResumeCheckpoint(job, expected) {
 }
 exports.TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
 exports.TESTDATA_JOB_LEASE_MS = 90 * 1000;
+exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS = 10 * 60 * 1000;
+function availableTeacherOutcomeClaim(now) {
+    return {
+        $or: [
+            { teacherOutcomeClaim: { $exists: false } },
+            { 'teacherOutcomeClaim.leaseExpiresAt': { $lte: now } },
+            // Recover pre-lease claims left by an interrupted older process.
+            { 'teacherOutcomeClaim.leaseExpiresAt': { $exists: false } },
+        ],
+    };
+}
 const interruptedError = {
     message: '生成服务在任务执行期间重启或失去连接，可从已保存的断点恢复。',
     code: 'WORKER_INTERRUPTED',
@@ -164,6 +175,7 @@ class TestdataGenerationJobModel {
         const doc = {
             ...params,
             runId: (0, runTelemetry_1.createTestdataRunId)(),
+            applyFailureEventId: (0, runTelemetry_1.createTestdataEventId)(),
             status: 'pending',
             active: true,
             restorable: true,
@@ -270,9 +282,13 @@ class TestdataGenerationJobModel {
             status: 'completed',
             teacherOutcome: { $exists: false },
             appliedAt: { $exists: false },
-            teacherOutcomeClaim: { $exists: false },
+            ...availableTeacherOutcomeClaim(now),
         }, { $set: {
-                teacherOutcomeClaim: { claimId },
+                teacherOutcomeClaim: {
+                    claimId,
+                    claimedAt: now,
+                    leaseExpiresAt: new Date(now.getTime() + exports.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS),
+                },
                 updatedAt: now,
             } });
         return result.modifiedCount > 0;
@@ -306,8 +322,11 @@ class TestdataGenerationJobModel {
             appliedAt: { $exists: false },
             ...(claimId
                 ? { 'teacherOutcomeClaim.claimId': claimId }
-                : { teacherOutcomeClaim: { $exists: false } }),
-        }, { $set: { teacherOutcome: record, restorable: false, updatedAt: now } });
+                : availableTeacherOutcomeClaim(now)),
+        }, {
+            $set: { teacherOutcome: record, restorable: false, updatedAt: now },
+            ...(!claimId ? { $unset: { teacherOutcomeClaim: '' } } : {}),
+        });
         if (result.modifiedCount > 0)
             return { state: 'recorded', record };
         const existing = await this.collection.findOne({ _id: objectId }, { projection: { teacherOutcome: 1 } });

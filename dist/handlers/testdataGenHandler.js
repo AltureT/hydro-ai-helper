@@ -1490,7 +1490,7 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             }
             else if (failed.length > 0 && generationJob?.runId) {
                 const telemetry = this.ctx.get('testdataRunTelemetry');
-                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitApplyFailure(generationJob.runId)));
+                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitApplyFailure(generationJob.runId, generationJob.applyFailureEventId)));
             }
             this.response.body = { written, failed };
             this.response.type = 'application/json';

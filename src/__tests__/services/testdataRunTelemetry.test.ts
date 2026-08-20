@@ -264,6 +264,23 @@ describe('TestdataRunTelemetryService', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('reuses a persisted apply-failure event id so retries remain idempotent', async () => {
+    const send = jest.fn().mockResolvedValue(undefined);
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send, now: () => Date.parse('2026-08-19T00:00:00.000Z') },
+    );
+
+    await service.emitApplyFailure(RUN_ID, EVENT_ID);
+    await service.emitApplyFailure(RUN_ID, EVENT_ID);
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.map(call => call[0].events[0])).toEqual([
+      expect.objectContaining({ eventId: EVENT_ID, sequence: 999_999 }),
+      expect.objectContaining({ eventId: EVENT_ID, sequence: 999_999 }),
+    ]);
+  });
+
   it('keeps reporting best-effort and never exposes the raw model identity', async () => {
     const send = jest.fn().mockRejectedValue(new Error('network down'));
     const service = new TestdataRunTelemetryService(

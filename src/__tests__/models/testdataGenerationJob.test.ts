@@ -6,6 +6,7 @@ import {
   TestdataGenerationJobModel,
   TESTDATA_JOB_LEASE_MS,
   TESTDATA_JOB_RETENTION_MS,
+  TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
   computeTestdataCheckpointHashes,
   filterTestdataCheckpointUpdate,
   selectTestdataResumeCheckpoint,
@@ -326,6 +327,7 @@ describe('TestdataGenerationJobModel', () => {
       status: 'pending', active: true, restorable: true,
       cancelRequested: false,
       runId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+      applyFailureEventId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
       progress: { stage: 'preparing', percent: 2, attempt: 1 },
     }));
     expect(inserted.leaseExpiresAt.getTime()).toBeGreaterThanOrEqual(before + TESTDATA_JOB_LEASE_MS);
@@ -435,13 +437,20 @@ describe('TestdataGenerationJobModel', () => {
         _id: 'job1',
         status: 'completed',
         teacherOutcome: { $exists: false },
-        teacherOutcomeClaim: { $exists: false },
         appliedAt: { $exists: false },
+        $or: [
+          { teacherOutcomeClaim: { $exists: false } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $lte: expect.any(Date) } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $exists: false } },
+        ],
       },
-      { $set: expect.objectContaining({
-        teacherOutcome: expect.objectContaining(record),
-        restorable: false,
-      }) },
+      {
+        $set: expect.objectContaining({
+          teacherOutcome: expect.objectContaining(record),
+          restorable: false,
+        }),
+        $unset: { teacherOutcomeClaim: '' },
+      },
     );
 
     collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
@@ -474,8 +483,9 @@ describe('TestdataGenerationJobModel', () => {
     });
   });
 
-  it('atomically claims one non-expiring apply writer and can release only the matching claim', async () => {
+  it('atomically leases an apply claim, recovers expired claims, and protects a live writer', async () => {
     const { model, collection } = createModel();
+    const before = Date.now();
 
     await expect(model.claimTeacherOutcome('job1', 'claim-1')).resolves.toBe(true);
     expect(collection.updateOne).toHaveBeenNthCalledWith(
@@ -485,12 +495,24 @@ describe('TestdataGenerationJobModel', () => {
         status: 'completed',
         teacherOutcome: { $exists: false },
         appliedAt: { $exists: false },
-        teacherOutcomeClaim: { $exists: false },
+        $or: [
+          { teacherOutcomeClaim: { $exists: false } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $lte: expect.any(Date) } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $exists: false } },
+        ],
       },
       { $set: {
-        teacherOutcomeClaim: { claimId: 'claim-1' },
+        teacherOutcomeClaim: {
+          claimId: 'claim-1',
+          claimedAt: expect.any(Date),
+          leaseExpiresAt: expect.any(Date),
+        },
         updatedAt: expect.any(Date),
       } },
+    );
+    const claim = collection.updateOne.mock.calls[0][1].$set.teacherOutcomeClaim;
+    expect(claim.leaseExpiresAt.getTime()).toBeGreaterThanOrEqual(
+      before + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
     );
 
     await model.releaseTeacherOutcomeClaim('job1', 'claim-1');

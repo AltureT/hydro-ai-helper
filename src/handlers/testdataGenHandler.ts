@@ -1723,7 +1723,10 @@ export class TestdataGenApplyHandler extends Handler {
       } else if (failed.length > 0 && generationJob?.runId) {
         const telemetry = this.ctx.get('testdataRunTelemetry') as TestdataRunTelemetryService | undefined;
         emitTestdataTelemetryBestEffort(
-          telemetry && (() => telemetry.emitApplyFailure(generationJob.runId)),
+          telemetry && (() => telemetry.emitApplyFailure(
+            generationJob.runId,
+            generationJob.applyFailureEventId,
+          )),
         );
       }
 

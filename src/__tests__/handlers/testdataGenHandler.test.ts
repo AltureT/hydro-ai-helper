@@ -45,6 +45,7 @@ function makeGenerationJob(overrides: Record<string, unknown> = {}) {
   return {
     _id: new ObjectId(),
     runId: '11111111-1111-4111-8111-111111111111',
+    applyFailureEventId: '66666666-6666-4666-8666-666666666666',
     domainId: 'system',
     problemDocId: 1530,
     problemId: 'D3102',
@@ -2196,7 +2197,7 @@ describe('TestdataGenApplyHandler', () => {
     expect(handler.response.body.failed).toEqual([{ name: '1.out', error: 'storage down' }]);
     expect(recordTeacherOutcome).not.toHaveBeenCalled();
     expect(releaseTeacherOutcomeClaim).toHaveBeenCalledWith(job._id, expect.any(String));
-    expect(emitApplyFailure).toHaveBeenCalledWith(job.runId);
+    expect(emitApplyFailure).toHaveBeenCalledWith(job.runId, job.applyFailureEventId);
   });
 
   it('并发或重复 apply 未抢到 claim 时在写入任何文件前返回 409', async () => {

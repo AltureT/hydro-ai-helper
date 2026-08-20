@@ -24,6 +24,7 @@ import type {
   TestdataRetryPolicy,
 } from '../services/testdata/failures';
 import {
+  createTestdataEventId,
   createTestdataRunId,
   type TestdataChangedFileKind,
   type TestdataTeacherOutcome,
@@ -219,6 +220,8 @@ export function selectTestdataResumeCheckpoint(
 export interface TestdataGenerationJob {
   _id: ObjectIdType;
   runId: string;
+  /** Stable local id for the single idempotent apply-failure event slot. */
+  applyFailureEventId?: string;
   domainId: string;
   problemDocId: number;
   problemId: string;
@@ -246,6 +249,8 @@ export interface TestdataGenerationJob {
 
 export interface TestdataTeacherOutcomeClaim {
   claimId: string;
+  claimedAt: Date;
+  leaseExpiresAt: Date;
 }
 
 export interface TestdataTeacherOutcomeRecord {
@@ -267,6 +272,18 @@ export interface TestdataTeacherOutcomeInput {
 
 export const TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const TESTDATA_JOB_LEASE_MS = 90 * 1000;
+export const TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS = 10 * 60 * 1000;
+
+function availableTeacherOutcomeClaim(now: Date) {
+  return {
+    $or: [
+      { teacherOutcomeClaim: { $exists: false } },
+      { 'teacherOutcomeClaim.leaseExpiresAt': { $lte: now } },
+      // Recover pre-lease claims left by an interrupted older process.
+      { 'teacherOutcomeClaim.leaseExpiresAt': { $exists: false } },
+    ],
+  };
+}
 
 interface CreateJobParams {
   domainId: string;
@@ -341,6 +358,7 @@ export class TestdataGenerationJobModel {
     const doc: Omit<TestdataGenerationJob, '_id'> = {
       ...params,
       runId: createTestdataRunId(),
+      applyFailureEventId: createTestdataEventId(),
       status: 'pending',
       active: true,
       restorable: true,
@@ -494,10 +512,14 @@ export class TestdataGenerationJobModel {
         status: 'completed',
         teacherOutcome: { $exists: false },
         appliedAt: { $exists: false },
-        teacherOutcomeClaim: { $exists: false },
+        ...availableTeacherOutcomeClaim(now),
       } as never,
       { $set: {
-        teacherOutcomeClaim: { claimId },
+        teacherOutcomeClaim: {
+          claimId,
+          claimedAt: now,
+          leaseExpiresAt: new Date(now.getTime() + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS),
+        },
         updatedAt: now,
       } },
     );
@@ -549,9 +571,12 @@ export class TestdataGenerationJobModel {
         appliedAt: { $exists: false },
         ...(claimId
           ? { 'teacherOutcomeClaim.claimId': claimId }
-          : { teacherOutcomeClaim: { $exists: false } }),
+          : availableTeacherOutcomeClaim(now)),
       } as never,
-      { $set: { teacherOutcome: record, restorable: false, updatedAt: now } },
+      {
+        $set: { teacherOutcome: record, restorable: false, updatedAt: now },
+        ...(!claimId ? { $unset: { teacherOutcomeClaim: '' } } : {}),
+      },
     );
     if (result.modifiedCount > 0) return { state: 'recorded', record };
     const existing = await this.collection.findOne(

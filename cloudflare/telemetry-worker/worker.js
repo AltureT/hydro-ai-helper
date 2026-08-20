@@ -656,13 +656,13 @@ function testdataRateMetric(count, total) {
 }
 
 async function handleDashboardTestdataQuality(request, env) {
+  if (request.method !== 'GET') return json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
   if (!isDashboardAuthorized(request, env)) return json({ success: false, error: 'Unauthorized' }, { status: 401 });
   let days;
   try { days = parseTestdataQualityDays(new URL(request.url)); } catch (error) {
     return json({ success: false, error: error.message }, { status: error.status || 400 });
   }
   const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const cutoff = cutoffDate.toISOString();
   const receivedAtCutoff = toSqliteUtcTimestamp(cutoffDate);
   const queries = [
     env.DB.prepare(
@@ -683,8 +683,8 @@ async function handleDashboardTestdataQuality(request, env) {
         COALESCE(SUM(CASE WHEN checker_executed = 1 THEN 1 ELSE 0 END), 0) AS checker_executed,
         COALESCE(SUM(checker_infra_failures), 0) AS checker_infra_failures,
         COALESCE(SUM(CASE WHEN checker_infra_failures > 0 THEN 1 ELSE 0 END), 0) AS checker_infra_failed_runs
-       FROM testdata_runs WHERE started_at >= ?`,
-    ).bind(cutoff),
+       FROM testdata_runs WHERE received_at >= ?`,
+    ).bind(receivedAtCutoff),
     env.DB.prepare(
       `SELECT /* testdata_quality_outcomes */ COUNT(*) AS total_outcomes,
         COALESCE(SUM(CASE WHEN outcome = 'accepted_unchanged' THEN 1 ELSE 0 END), 0) AS accepted_unchanged,
@@ -710,40 +710,40 @@ async function handleDashboardTestdataQuality(request, env) {
     ).bind(receivedAtCutoff),
     env.DB.prepare(
       `SELECT /* testdata_quality_risks */ risk_tier AS key, COUNT(*) AS count
-       FROM testdata_runs WHERE started_at >= ? AND risk_tier IS NOT NULL
+       FROM testdata_runs WHERE received_at >= ? AND risk_tier IS NOT NULL
        GROUP BY risk_tier ORDER BY count DESC`,
-    ).bind(cutoff),
+    ).bind(receivedAtCutoff),
     env.DB.prepare(
       `SELECT /* testdata_quality_templates */ 'py' AS language,
           COALESCE(SUM(template_py_requested), 0) AS requested,
           COALESCE(SUM(template_py_verified), 0) AS verified
-       FROM testdata_runs WHERE started_at >= ?
+       FROM testdata_runs WHERE received_at >= ?
        UNION ALL SELECT 'java', COALESCE(SUM(template_java_requested), 0), COALESCE(SUM(template_java_verified), 0)
-       FROM testdata_runs WHERE started_at >= ?
+       FROM testdata_runs WHERE received_at >= ?
        UNION ALL SELECT 'cc', COALESCE(SUM(template_cc_requested), 0), COALESCE(SUM(template_cc_verified), 0)
-       FROM testdata_runs WHERE started_at >= ?`,
-    ).bind(cutoff, cutoff, cutoff),
+       FROM testdata_runs WHERE received_at >= ?`,
+    ).bind(receivedAtCutoff, receivedAtCutoff, receivedAtCutoff),
     env.DB.prepare(
       `SELECT /* testdata_quality_fallback */
         COALESCE(SUM(CASE WHEN model_escalated = 1 THEN 1 ELSE 0 END), 0) AS attempts,
         COALESCE(SUM(CASE WHEN model_escalated = 1 AND pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS rescued
-       FROM testdata_runs WHERE started_at >= ?`,
-    ).bind(cutoff),
+       FROM testdata_runs WHERE received_at >= ?`,
+    ).bind(receivedAtCutoff),
     env.DB.prepare(
       `SELECT /* testdata_quality_verified_outcomes */
         COUNT(*) AS denominator,
         COALESCE(SUM(CASE WHEN o.outcome IN ('accepted_edited', 'discarded') THEN 1 ELSE 0 END), 0) AS changed
        FROM testdata_runs r JOIN testdata_teacher_outcomes o
          ON o.instance_id = r.instance_id AND o.run_id = r.run_id
-       WHERE r.started_at >= ? AND r.verified = 1`,
-    ).bind(cutoff),
+       WHERE r.received_at >= ? AND r.verified = 1`,
+    ).bind(receivedAtCutoff),
     env.DB.prepare(
       `SELECT /* testdata_quality_versions */ plugin_version, COUNT(*) AS runs,
         COALESCE(SUM(CASE WHEN pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS pipeline_completed,
         COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
         COALESCE(SUM(CASE WHEN would_block = 1 THEN 1 ELSE 0 END), 0) AS would_block
-       FROM testdata_runs WHERE started_at >= ? GROUP BY plugin_version ORDER BY runs DESC`,
-    ).bind(cutoff),
+       FROM testdata_runs WHERE received_at >= ? GROUP BY plugin_version ORDER BY runs DESC`,
+    ).bind(receivedAtCutoff),
   ];
   const results = await env.DB.batch(queries);
   const rows = results.map(result => result?.results || []);
