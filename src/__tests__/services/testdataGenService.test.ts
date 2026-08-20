@@ -4200,6 +4200,151 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
+  it('prospective hack allocation validates before Oracle, rejects without committing, and commits accepted allocation', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const tieredSolution = [
+      '=== SUBTASKS ===',
+      '1 | 50 | n<=10',
+      '2 | 50 | n<=100',
+      makeSolutionBlueprint('traditional'),
+    ].join('\n');
+    const firstHackCandidates = [
+      '=== HACK_CASE ===',
+      'RATIONALE: rejected non-killing candidate',
+      '```text',
+      '3',
+      '```',
+      '=== HACK_CASE ===',
+      'RATIONALE: accepted candidate for target one',
+      '```text',
+      '4',
+      '```',
+    ].join('\n');
+    const secondHackCandidate = [
+      '=== HACK_CASE ===',
+      'RATIONALE: accepted candidate for target two',
+      '```text',
+      '5',
+      '```',
+    ].join('\n');
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: tieredSolution, usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: firstHackCandidates, usedModel })
+        .mockResolvedValueOnce({ content: secondHackCandidate, usedModel }),
+    };
+    const hackValidatorInvocations: Array<{ stdin: string; argv: string[] }> = [];
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [
+            { label: 'first', input: '1' },
+            { label: 'second', input: '2' },
+          ] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, values: Array<string | { stdin: string; argv?: string[] }>) => {
+          const invocations = values.map(value => typeof value === 'string'
+            ? { stdin: value, argv: [] as string[] }
+            : { stdin: value.stdin, argv: value.argv || [] });
+          if (code.includes('sys.exit(0)')) {
+            if (invocations.length === 1 && ['3', '4', '5'].includes(invocations[0].stdin.trim())) {
+              hackValidatorInvocations.push(invocations[0]);
+            }
+            return Promise.resolve(invocations.map(() => detail()));
+          }
+          return Promise.resolve(invocations.map(invocation => {
+            const stdin = invocation.stdin.trim();
+            if (code.includes('shared hack target one')) {
+              return detail({ stdout: stdin === '4' ? 'wrong\n' : `${stdin}\n` });
+            }
+            if (code.includes('shared hack target two')) {
+              return detail({ stdout: stdin === '5' ? 'wrong\n' : `${stdin}\n` });
+            }
+            return detail({ stdout: `${stdin}\n` });
+          }));
+        },
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'prospective hack allocation',
+      statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [],
+      },
+    });
+
+    expect(hackValidatorInvocations).toEqual([
+      { stdin: '3\n', argv: ['--subtask', '1'] },
+      { stdin: '4\n', argv: ['--subtask', '1'] },
+      { stdin: '5\n', argv: ['--subtask', '2'] },
+    ]);
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2, 1, 2]);
+    expect(plan.verification?.discrimination?.targets.slice(0, 2)).toEqual([
+      expect.objectContaining({ killed: true, killedByCase: 3 }),
+      expect.objectContaining({ killed: true, killedByCase: 4 }),
+    ]);
+    expect(plan.files.find(file => file.name === '3.in')?.content).toBe('4\n');
+    expect(plan.files.find(file => file.name === '4.in')?.content).toBe('5\n');
+  });
+
+  it('final hack allocation drives coverage and config without a last/widest fallback warning', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [],
+    };
+    const subtasks = [
+      { id: 1, score: 50, constraints: 'n<=10' },
+      { id: 2, score: 50, constraints: 'n<=100' },
+    ];
+    const tieredDecision = resolveTieredSubtaskGeneration({
+      caseCount: 2, dataScale: 'auto', subtasks,
+    });
+    const response = parseGenerationResponse(makeAiJson({
+      problemType: 'traditional',
+      cases: [
+        { input: '1', output: '1' },
+        { input: '2', output: '2' },
+        { input: '3', output: '3' },
+        { input: '4', output: '4' },
+      ],
+    }), options);
+    response.subtasks = subtasks;
+    (response as unknown as { tieredAllocations: ReturnType<typeof extendTieredAllocations> })
+      .tieredAllocations = [
+        { caseNumber: 1, subtaskId: 1, guidance: 'n<=10' },
+        { caseNumber: 2, subtaskId: 2, guidance: 'n<=100' },
+        { caseNumber: 3, subtaskId: 2, guidance: 'n<=100' },
+        { caseNumber: 4, subtaskId: 1, guidance: 'n<=10' },
+      ];
+
+    const plan = assemblePlan(response, options, { mode: 'sandbox', tieredDecision });
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ id: number; cases: Array<{ input: string }> }> };
+
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2, 2, 1]);
+    expect(config.subtasks.map(subtask => ({
+      id: subtask.id,
+      cases: subtask.cases.map(item => item.input),
+    }))).toEqual([
+      { id: 1, cases: ['1.in', '4.in'] },
+      { id: 2, cases: ['2.in', '3.in'] },
+    ]);
+    expect(plan.notes).not.toContain('现阶段补刀输入仍仅经全局校验');
+    expect(plan.notesStructured?.warnings.join('\n')).not.toMatch(/last|widest|补刀输入仍仅经全局校验/);
+  });
+
   it('checker rejecting a deliberate wrong target leaves a verified plan without reject failure evidence', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const mockClient = {
@@ -8262,6 +8407,515 @@ describe('parseSandboxBlueprint v2 分节', () => {
       { id: '1', input: '2 3\n' },
       { id: '2', input: '-1 4\n' },
     ]);
+  });
+});
+
+describe('Task 8 full manifest repair', () => {
+  const statementMarkdown = 'Read one integer n.';
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 1, languages: [],
+  };
+  const params = { problemTitle: 'manifest repair', statementMarkdown, options };
+
+  function contextForManifestRepair() {
+    const statement = createStatementSnapshot(statementMarkdown);
+    return createTestdataPipelineContext({
+      runId: 'task-8-manifest-repair',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, {
+        problemKind: 'traditional',
+        constraints: [{
+          id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+          evidence: { quote: 'one integer n' },
+        }],
+      }),
+      risk: {
+        tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+  }
+
+  function strictRepairResponse(tag: string): string {
+    return [
+      '@@@BRUTE@@@', `print(input())  # ${tag}-brute`,
+      '@@@STRESS_GENERATOR@@@', `print('{"cases":[]}')  # ${tag}-stress`,
+      '@@@VALIDATOR_MANIFEST@@@', '{"constraintIds":["C1"],"invariantIds":[]}',
+      '@@@VALIDATOR_PROBE_RECIPES@@@', '{"recipes":[]}',
+      '@@@VALIDATOR@@@', `raise SystemExit(0)  # ${tag}-validator`,
+    ].join('\n');
+  }
+
+  it('manifest repair replaces every Independent Verifier section exactly once', async () => {
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-primary', 'verifier-model',
+      makeIndependentVerifierBlueprint(),
+      strictRepairResponse('repaired'),
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+    const results: any[] = [];
+
+    const state = await (service as any).generateIndependentVerifier(
+      params,
+      { problemType: 'traditional' },
+      {},
+      results,
+      1,
+      contextForManifestRepair(),
+    );
+
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    const repairPrompt = verifier.chat.mock.calls[1][0][2].content;
+    for (const section of [
+      '@@@BRUTE@@@', '@@@STRESS_GENERATOR@@@', '@@@VALIDATOR_MANIFEST@@@',
+      '@@@VALIDATOR_PROBE_RECIPES@@@', '@@@VALIDATOR@@@',
+    ]) expect(repairPrompt).toContain(section);
+    expect(state.sourceContent).toBe(strictRepairResponse('repaired'));
+    expect(state.verifier).toMatchObject({
+      bruteCode: expect.stringContaining('repaired-brute'),
+      stressGeneratorCode: expect.stringContaining('repaired-stress'),
+      validatorCode: expect.stringContaining('repaired-validator'),
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [],
+    });
+    expect(results).toHaveLength(2);
+  });
+
+  it('invalid-manifest observe recovers bounded executable sections without fabricating proof', async () => {
+    const secondInvalid = makeIndependentVerifierBlueprint()
+      .replace('independent brute', 'observe-repaired-brute')
+      .replace('stress generator', 'observe-repaired-stress')
+      .replace('sys.exit(0)', 'sys.exit(0)  # observe-repaired-validator');
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-primary', 'verifier-model',
+      makeIndependentVerifierBlueprint(),
+      secondInvalid,
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { verifier },
+    });
+
+    const state = await (service as any).generateIndependentVerifier(
+      params,
+      { problemType: 'traditional' },
+      {},
+      [],
+      1,
+      contextForManifestRepair(),
+    );
+
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(state.sourceContent).toBe(secondInvalid);
+    expect(state.verifier).toMatchObject({
+      bruteCode: expect.stringContaining('observe-repaired-brute'),
+      stressGeneratorCode: expect.stringContaining('observe-repaired-stress'),
+      validatorCode: expect.stringContaining('observe-repaired-validator'),
+      validatorManifestStatus: 'invalid',
+    });
+    expect(state.verifier.validatorManifest).toBeUndefined();
+    expect(state.verifier.validatorProbeRecipes).toBeUndefined();
+  });
+
+  it('manifest repair failure remains verifier-owned and typed in enforce mode', async () => {
+    const sentinel = 'PRIVATE_INVALID_MANIFEST';
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-primary', 'verifier-model',
+      `${makeIndependentVerifierBlueprint()}\n${sentinel}`,
+      `${makeIndependentVerifierBlueprint()}\n${sentinel}`,
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+
+    const failure = await (service as any).generateIndependentVerifier(
+      params,
+      { problemType: 'traditional' },
+      {},
+      [],
+      1,
+      contextForManifestRepair(),
+    ).catch((error: unknown) => error);
+
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+      failedModelRole: 'verifier',
+    });
+    expect(failure.message).not.toContain(sentinel);
+    expect(JSON.stringify(failure.safeDetails)).not.toContain(sentinel);
+  });
+
+  it('legacy verifier parsing never enters manifest repair', async () => {
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeIndependentVerifierBlueprint(),
+      usedModel: {
+        endpointId: 'legacy-verifier', endpointName: 'legacy-verifier', modelName: 'legacy-model',
+      },
+    }) };
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode: 'legacy',
+    });
+
+    const state = await (service as any).generateIndependentVerifier(
+      params, { problemType: 'traditional' }, {}, [], 1, undefined,
+    );
+
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(state.verifier.validatorManifestStatus).toBeUndefined();
+  });
+});
+
+describe('Task 8 validator-only repair', () => {
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 2, languages: [],
+  };
+
+  function frozenRepairContext() {
+    const statement = createStatementSnapshot('Every input satisfies n >= 1.');
+    return createTestdataPipelineContext({
+      runId: 'task-8-validator-only-repair',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statement.normalizedMarkdown, {
+        problemKind: 'traditional',
+        constraints: [{
+          id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+          evidence: { quote: 'n >= 1' },
+        }],
+      }),
+      risk: {
+        tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+  }
+
+  it.each([
+    ['VALIDATOR_FALSE_ACCEPT repair', 'VALIDATOR_FALSE_ACCEPT'],
+    ['validator-only repair for scoped false accept', 'SUBTASK_CONSTRAINT_VIOLATION'],
+  ])('%s requests only Validator and freezes all proof declarations', (_name, code) => {
+    const failure = new TestdataPipelineError(
+      'validator accepted an illegal probe',
+      code as 'VALIDATOR_FALSE_ACCEPT' | 'SUBTASK_CONSTRAINT_VIOLATION',
+      'validator',
+      'validator',
+      'repair-artifact',
+      { invalidAccepted: 1 },
+    );
+    const prompt = buildSandboxRepairPrompt(
+      failure, options, 'validator', undefined, frozenRepairContext(),
+    );
+
+    expect(prompt.match(/@@@VALIDATOR@@@/g)).toHaveLength(1);
+    for (const forbidden of [
+      '@@@BRUTE@@@', '@@@STRESS_GENERATOR@@@', '@@@VALIDATOR_MANIFEST@@@',
+      '@@@VALIDATOR_PROBE_RECIPES@@@', '@@@GENERATOR@@@', '@@@ORACLE@@@',
+    ]) expect(prompt).not.toContain(forbidden);
+    expect(prompt).toContain('Manifest');
+    expect(prompt).toContain('recipes');
+    expect(prompt).toContain('frozen ProblemSpec');
+    expect(prompt).toContain('不得修改');
+  });
+
+  it('validator-only repair replaces only Validator and preserves all frozen material byte-for-byte', () => {
+    const original = {
+      ...parseSandboxBlueprint([
+        '@@@META@@@', 'problemType: traditional',
+        '@@@GENERATOR@@@', 'print(gen())  # frozen-generator',
+        '@@@ORACLE@@@', 'print(input())  # frozen-oracle',
+        '@@@BRUTE@@@', 'print(input())  # frozen-brute',
+        '@@@VALIDATOR@@@', 'raise SystemExit(0)  # old-validator',
+      ].join('\n'), options),
+      stressGeneratorCode: 'print(stress())  # frozen-stress\n',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+      }],
+      functionSampleInputs: [{ id: 'sample-1', input: '1\n' }],
+      subtasks: [{ id: 1, score: 100, constraints: 'n >= 1' }],
+    };
+    const immutableBefore = JSON.stringify({
+      generatorCode: original.generatorCode,
+      oracleCode: original.oracleCode,
+      bruteCode: original.bruteCode,
+      stressGeneratorCode: original.stressGeneratorCode,
+      validatorManifestStatus: original.validatorManifestStatus,
+      validatorManifest: original.validatorManifest,
+      validatorProbeRecipes: original.validatorProbeRecipes,
+      functionSampleInputs: original.functionSampleInputs,
+      subtasks: original.subtasks,
+    });
+
+    const repaired = mergeSandboxBlueprintRepair(
+      original,
+      [
+        '@@@BRUTE@@@', 'print("malicious replacement")',
+        '@@@VALIDATOR_MANIFEST@@@', '{"constraintIds":[],"invariantIds":[]}',
+        '@@@VALIDATOR@@@', 'raise SystemExit(0)  # repaired-validator',
+      ].join('\n'),
+      'validator',
+    );
+
+    expect(repaired.validatorCode).toContain('repaired-validator');
+    expect(JSON.stringify({
+      generatorCode: repaired.generatorCode,
+      oracleCode: repaired.oracleCode,
+      bruteCode: repaired.bruteCode,
+      stressGeneratorCode: repaired.stressGeneratorCode,
+      validatorManifestStatus: repaired.validatorManifestStatus,
+      validatorManifest: repaired.validatorManifest,
+      validatorProbeRecipes: repaired.validatorProbeRecipes,
+      functionSampleInputs: repaired.functionSampleInputs,
+      subtasks: repaired.subtasks,
+    })).toBe(immutableBefore);
+    expect(resolveMaterializationResume(['VALIDATOR'])).toEqual({
+      phase: 'validator',
+      reuse: {
+        formalInputs: true, stressInputs: true,
+        validationResults: false, oracleOutputs: false,
+      },
+    });
+  });
+
+  it('full repair prohibition rejects a combined repair prompt on a Frozen path', () => {
+    expect(() => buildSandboxRepairPrompt(
+      new Error('unknown combined failure'),
+      options,
+      'full',
+      undefined,
+      frozenRepairContext(),
+    )).toThrow(expect.objectContaining({
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      retryPolicy: 'switch-model',
+    }));
+  });
+});
+
+describe('Task 8 resume checkpoint provenance privacy and cancellation identity', () => {
+  const statementMarkdown = 'Every input satisfies 0 <= n <= 10.';
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 2, languages: [],
+  };
+
+  function proofContext() {
+    return makeValidatorCoverageProof(statementMarkdown, {
+      constraints: [{
+        id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
+        scope: 'global', evidence: { quote: '0 <= n <= 10' },
+      }],
+    });
+  }
+
+  function proofBlueprint(validatorCode: string) {
+    return {
+      problemType: 'traditional' as const,
+      generatorCode: 'generator-code',
+      oracleCode: 'oracle-code',
+      bruteCode: 'brute-code',
+      stressGeneratorCode: 'stress-code',
+      validatorCode,
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+      }],
+    };
+  }
+
+  it('resume invalidates cached validator proof and reconstructs identical request-local probes', async () => {
+    const cache: MaterializationCacheState = {};
+    const illegalInvocations: unknown[][] = [];
+    let activeValidator = 'validator-v1';
+    let validatorCall = 0;
+    let cachedValidationAtRepair: unknown = 'not-observed';
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code === 'stress-code' ? stressGeneratorStdout() : twoCaseGen(),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === activeValidator) {
+            validatorCall += 1;
+            if (activeValidator === 'validator-v2' && validatorCall === 1) {
+              cachedValidationAtRepair = cache.validation;
+            }
+            if (validatorCall % 2 === 1) {
+              return Promise.resolve(invocations.map(() => detail()));
+            }
+            illegalInvocations.push(JSON.parse(JSON.stringify(invocations)));
+            return Promise.resolve(invocations.map(() => detail({
+              status: 'Runtime Error', accepted: false, exitStatus: 1,
+            })));
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+
+    await materializeWithValidatorProof(
+      proofBlueprint(activeValidator), options, statementMarkdown,
+      runner as never, proofContext(), undefined, cache,
+    );
+    const serializedFirstCache = JSON.stringify(cache);
+    expect(cache.validation).toBeDefined();
+    expect(serializedFirstCache).not.toContain('-1\\n');
+    expect(serializedFirstCache).not.toContain('argv');
+    expect(serializedFirstCache).not.toContain('stdin');
+
+    activeValidator = 'validator-v2';
+    validatorCall = 0;
+    await materializeWithValidatorProof(
+      proofBlueprint(activeValidator), options, statementMarkdown,
+      runner as never, proofContext(), undefined, cache, ['VALIDATOR'],
+    );
+
+    expect(cachedValidationAtRepair).toBeUndefined();
+    expect(illegalInvocations).toHaveLength(2);
+    expect(illegalInvocations[1]).toEqual(illegalInvocations[0]);
+    expect(JSON.stringify(cache)).not.toContain('-1\\n');
+  });
+
+  it('cancellation identity at the probe construction boundary prevents the illegal batch', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('probe construction cancellation identity');
+    const base = proofBlueprint('validator-code');
+    const blueprint = { ...base } as typeof base;
+    Object.defineProperty(blueprint, 'validatorProbeRecipes', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        controller.abort(cancellation);
+        return base.validatorProbeRecipes;
+      },
+    });
+    let validatorCalls = 0;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code === 'stress-code' ? stressGeneratorStdout() : twoCaseGen(),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === blueprint.validatorCode) {
+            validatorCalls += 1;
+            return Promise.resolve(invocations.map(() => validatorCalls === 1
+              ? detail()
+              : detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 })));
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, options, statementMarkdown, runner as never,
+      proofContext(), controller.signal,
+    ).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(validatorCalls).toBe(1);
+  });
+
+  it('cancellation identity during the Independent Verifier repair call is never wrapped', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('verifier repair cancellation identity');
+    const transport = new Error('repair transport failure');
+    const usedModel = {
+      endpointId: 'verifier', endpointName: 'verifier', modelName: 'model',
+    };
+    const verifier = makeRoleClient('verifier', 'verifier', 'model');
+    verifier.chat
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+      .mockImplementationOnce(() => {
+        controller.abort(cancellation);
+        return Promise.reject(transport);
+      });
+    const context = proofContext().pipelineContext;
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { verifier },
+    });
+
+    const failure = await (service as any).generateIndependentVerifier(
+      {
+        problemTitle: 'repair cancellation', statementMarkdown, options,
+        signal: controller.signal,
+      },
+      { problemType: 'traditional' },
+      { signal: controller.signal },
+      [],
+      1,
+      context,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBe(cancellation);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('checkpoint null clears restored dependencies before the next provenance emission', async () => {
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe',
+    });
+    const context = proofContext().pipelineContext;
+    const restoredVerifier = 'a'.repeat(64);
+    (service as any).activePipelineContext = context;
+    (service as any).restoredRoleDependencies = { verifier: restoredVerifier };
+    const updates: unknown[] = [];
+    const params = { onCheckpoint: (update: unknown) => { updates.push(update); } };
+
+    await (service as any).emitCheckpoint(params, null);
+    await (service as any).emitCheckpoint(params, {
+      verifier: {
+        bruteCode: 'brute', validatorCode: 'validator', stressGeneratorCode: 'stress',
+      },
+    });
+
+    expect(updates[0]).toBeNull();
+    expect(JSON.stringify(updates[1])).not.toContain(restoredVerifier);
+    expect((updates[1] as any).roleDependencies?.verifier).toBeUndefined();
+  });
+
+  it('optional kill provenance never overwrites the Independent Verifier checkpoint dependency', async () => {
+    const optional = makeRoleClient(
+      'verifier', 'optional-kill', 'optional-model', makeEmptyKillTargetsResponse(),
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { verifier: optional },
+    });
+    const independent = {
+      endpointId: 'independent-verifier', endpointName: 'independent', modelName: 'proof-model',
+    };
+    (service as any).activeRoleIdentities.verifier = independent;
+
+    await service.generateKillTargets({
+      statement: statementMarkdown, analysis: '', samples: [],
+      context: proofContext().pipelineContext,
+    });
+
+    expect((service as any).activeRoleIdentities.verifier).toBe(independent);
+    const serializedTelemetry = JSON.stringify((service as any).activeModelTelemetry || {});
+    for (const forbidden of ['probe', 'targetId', 'rawInput', '-1\\n']) {
+      expect(serializedTelemetry).not.toContain(forbidden);
+    }
   });
 });
 

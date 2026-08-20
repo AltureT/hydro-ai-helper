@@ -253,6 +253,8 @@ export interface GenerationResponse {
   discriminationKillTargets?: KillTarget[];
   /** 内部字段：补刀前正式测试点数量，用于识别并展示新增 hack 点。 */
   discriminationInitialCaseCount?: number;
+  /** 内部字段：每个已接纳补刀点在校验前冻结并提交的最终子任务分配。 */
+  tieredAllocations?: SubtaskCaseAllocation[];
 }
 
 /** AI 在沙箱模式下返回的生成蓝图；此阶段不让模型直接填写 .out。 */
@@ -3067,6 +3069,41 @@ export function parseIndependentVerifierBlueprint(
 }
 
 /**
+ * Observe-only recovery after the one strict Frozen verifier repair is exhausted.
+ * This deliberately parses only executable sections and the already bounded
+ * function-sample mapping; Manifest/recipe proof must never be synthesized.
+ */
+function recoverIndependentVerifierBlueprintForObserve(
+  raw: string,
+  expectedFunctionSamples: StatementSample[],
+): IndependentVerifierBlueprint {
+  const sections = splitDelimitedSections(raw);
+  if (sections.length === 0) throw new Error('AI 未返回独立验证器分节标记');
+  const bruteCode = repairSectionContent(sections, 'BRUTE');
+  const stressGeneratorCode = repairSectionContent(sections, 'STRESS_GENERATOR');
+  const validatorCode = repairSectionContent(sections, 'VALIDATOR');
+  const missing = [
+    !bruteCode ? 'BRUTE' : '',
+    !stressGeneratorCode ? 'STRESS_GENERATOR' : '',
+    !validatorCode ? 'VALIDATOR' : '',
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    throw new Error(`AI 独立验证器缺少必需分节：${missing.join('、')}`);
+  }
+  return {
+    bruteCode: bruteCode as string,
+    stressGeneratorCode: stressGeneratorCode as string,
+    validatorCode: validatorCode as string,
+    functionSampleInputs: parseFunctionSampleInputsSection(
+      sections,
+      expectedFunctionSamples,
+      '独立验证器',
+    ),
+    validatorManifestStatus: 'invalid',
+  };
+}
+
+/**
  * 解析分节标记文本。未发现任何标记时返回 null（调用方回退到 JSON 解析）。
  *
  * 采用分节文本而非 JSON 的原因：AI 需要输出多段含引号/反斜杠/换行的代码，
@@ -4687,6 +4724,9 @@ async function runValidatorInvalidProof(input: {
   signal?: AbortSignal;
   deadlineAt: number;
 }): Promise<ValidatorInvalidProofResult> {
+  if (input.signal?.aborted) {
+    throw input.signal.reason ?? new Error('VALIDATOR 非法探针构造已取消');
+  }
   const { spec } = input.proof.pipelineContext;
   const build = buildConstraintProbes({
     spec,
@@ -4695,6 +4735,9 @@ async function runValidatorInvalidProof(input: {
     seeds: input.seeds,
     recipes: input.blueprint.validatorProbeRecipes || [],
   });
+  if (input.signal?.aborted) {
+    throw input.signal.reason ?? new Error('VALIDATOR 非法探针构造已取消');
+  }
   const invalidInvocations: InvalidValidatorInvocation[] = build.probes.map(probe => ({
     invocation: validatorInvocation(probe.input, probe.subtaskId),
     probe,
@@ -4719,6 +4762,9 @@ async function runValidatorInvalidProof(input: {
 
   let executions: ValidatorInvalidExecution[] = [];
   if (invalidInvocations.length > 0 && input.blueprint.validatorCode) {
+    if (input.signal?.aborted) {
+      throw input.signal.reason ?? new Error('VALIDATOR 非法探针执行已取消');
+    }
     let results: PythonRunDetail[];
     try {
       results = await input.runner.runPythonBatchDetailed(
@@ -4855,6 +4901,14 @@ export async function materializeSandboxBlueprint(
   );
   if (!cacheSupportsResume) {
     requestedPhase = 'generator';
+  }
+  if (requestedPhase === 'validator') {
+    // Validator replacement invalidates every result that depended on validation.
+    // Formal/stress legal inputs remain reusable; request-local probes are rebuilt.
+    delete cache.validation;
+    delete cache.oracle;
+    delete cache.templateCompleted;
+    delete cache.templateChecks;
   }
   const startsAtOrBefore = (phase: MaterializationPhase) =>
     MATERIALIZATION_PHASE_ORDER[requestedPhase] <= MATERIALIZATION_PHASE_ORDER[phase];
@@ -5993,7 +6047,11 @@ export function assemblePlan(
   });
   const tieredSubtasks = tieredDecision.subtasks ?? response.subtasks ?? [];
   const subtaskAllocations = tieredDecision.enabled
-    ? extendTieredAllocations(tieredDecision.allocations, caseCount, tieredSubtasks)
+    ? extendTieredAllocations(
+      response.tieredAllocations ?? tieredDecision.allocations,
+      caseCount,
+      tieredSubtasks,
+    )
     : [];
   const tieredApplied = tieredDecision.enabled && subtaskAllocations.length === caseCount;
   const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
@@ -6020,13 +6078,6 @@ export function assemblePlan(
       message: `已按题面子任务表生成 ${tieredSubtasks.length} 档分层数据;`
         + 'VALIDATOR 已按服务器冻结分配校验全局约束与对应子任务约束,'
         + '建议抽查各档 .in 是否符合对应约束',
-    }] : []),
-    ...(tieredApplied && caseCount > tieredDecision.allocations.length ? [{
-      kind: 'warning' as const,
-      message: `补刀新增测试点 ${
-        newCaseNumbers.slice(tieredDecision.allocations.length).map(n => `#${n}`).join('、')
-      } 已按 Frozen 子任务分值稳定扩展归档;`
-        + '现阶段补刀输入仍仅经全局校验,请人工核对是否符合对应档约束',
     }] : []),
   ];
   const discriminationNotes = buildDiscriminationNotes(
@@ -6752,6 +6803,17 @@ export function buildSandboxRepairPrompt(
   context?: TestdataPipelineContext,
 ): string {
   if (context) {
+    if (scope === 'full') {
+      const typed = error instanceof TestdataPipelineError ? error : undefined;
+      throw new TestdataPipelineError(
+        'frozen ProblemSpec 流程禁止 combined full repair；必须在同一 Spec 下重跑隔离角色。',
+        typed?.code || 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+        'pipeline_repair',
+        typed?.artifact || 'coverage',
+        'switch-model',
+        typed?.safeDetails,
+      );
+    }
     return [
       buildFrozenProblemSpecBlock(context),
       '',
@@ -6783,7 +6845,7 @@ ${coverage ? `\n${coverage}\n` : ''}
     return `你上一条蓝图的输入校验阶段未通过 Hydro 沙箱验证：
 ${detail}
 
-请只输出修复后的 @@@VALIDATOR@@@。GENERATOR 与 frozen ProblemSpec 已验证并保持不变；不得通过放弃题面约束、删除校验器或让校验器无条件成功来迁就现有输入。不要输出其他分节、代码围栏或说明文字。`;
+请只输出修复后的 @@@VALIDATOR@@@。GENERATOR、VALIDATOR Manifest、probe recipes 与 frozen ProblemSpec 已验证并保持不变，不得修改或重新声明；不得通过放弃题面约束、删除校验器或让校验器无条件成功来迁就现有输入。不要输出其他分节、代码围栏或说明文字。`;
   }
   if (scope === 'stress-generator') {
     return `独立验证器的 STRESS_GENERATOR 未通过沙箱验证：
@@ -8286,6 +8348,7 @@ export class TestdataGenService {
           callOptions,
         );
       } catch (err) {
+        if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
         throw new TestdataGenerationError(
           `AI 独立验证器格式无法解析，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`,
@@ -8295,7 +8358,9 @@ export class TestdataGenService {
           undefined,
           undefined,
           {
-            code: 'COVERAGE_REQUIREMENT_MISSING',
+            code: context
+              ? 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING'
+              : 'COVERAGE_REQUIREMENT_MISSING',
             artifact: 'coverage',
             retryPolicy: 'switch-model',
             failedModelRole: 'verifier',
@@ -8316,6 +8381,23 @@ export class TestdataGenService {
           expectedFunctionSamples,
         };
       } catch (repairParseError) {
+        if (context && this.reliabilityMode === 'observe') {
+          try {
+            return {
+              verifier: recoverIndependentVerifierBlueprintForObserve(
+                repairResult.content,
+                expectedFunctionSamples,
+              ),
+              systemPrompt,
+              userPrompt,
+              sourceContent: repairResult.content,
+              expectedFunctionSamples,
+            };
+          } catch {
+            // The observe fallback is intentionally narrower than the strict parser.
+            // If executable/sample sections are also unusable, normal typed failure applies.
+          }
+        }
         throw new TestdataGenerationError(
           `AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`,
           'independent_verifier_parse',
@@ -8324,7 +8406,9 @@ export class TestdataGenService {
           undefined,
           undefined,
           {
-            code: 'COVERAGE_REQUIREMENT_MISSING',
+            code: context
+              ? 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING'
+              : 'COVERAGE_REQUIREMENT_MISSING',
             artifact: 'coverage',
             retryPolicy: 'switch-model',
             failedModelRole: 'verifier',
@@ -8392,15 +8476,28 @@ export class TestdataGenService {
     results: ChatResult[],
     checkerExecutor?: CheckerExecutor,
     context?: TestdataPipelineContext,
+    tieredDecision?: TieredSubtaskGenerationDecision,
   ): Promise<GenerationResponse> {
     const discrimination = response.verification?.discrimination;
     const deadlineAt = response.discriminationDeadlineAt;
     if (!discrimination || deadlineAt === undefined || killTargets.length === 0) return response;
     let cases: TestCase[] = response.cases;
     const initialCaseCount = cases.length;
+    const tieredSubtasks = tieredDecision?.subtasks || [];
+    let committedTieredAllocations = tieredDecision?.enabled
+      ? extendTieredAllocations(tieredDecision.allocations, cases.length, tieredSubtasks)
+      : [];
+    const tieredHackAllocationEnabled = tieredDecision?.enabled === true
+      && committedTieredAllocations.length === cases.length;
 
     const finish = () => {
       response.cases = cases;
+      if (tieredHackAllocationEnabled
+        && committedTieredAllocations.length === cases.length) {
+        response.tieredAllocations = committedTieredAllocations.map(allocation => ({
+          ...allocation,
+        }));
+      }
       discrimination.allKilled = areAllApplicableDiscriminationTargetsKilled(
         discrimination.targets,
       );
@@ -8472,11 +8569,25 @@ export class TestdataGenService {
             comparableFileContent(item.input) === comparableFileContent(candidate.input))) {
             continue;
           }
+          const prospectiveTieredAllocations = tieredHackAllocationEnabled
+            ? extendTieredAllocations(
+              committedTieredAllocations,
+              cases.length + 1,
+              tieredSubtasks,
+            )
+            : [];
+          const prospectiveAllocation = tieredHackAllocationEnabled
+            && prospectiveTieredAllocations.length === cases.length + 1
+            ? prospectiveTieredAllocations[prospectiveTieredAllocations.length - 1]
+            : undefined;
+          if (tieredHackAllocationEnabled && !prospectiveAllocation) break targetLoop;
           try {
             if (blueprint.validatorCode) {
               const validation = await runner.runPythonBatchDetailed(
                 blueprint.validatorCode,
-                [candidate.input],
+                [prospectiveAllocation
+                  ? validatorInvocation(candidate.input, prospectiveAllocation.subtaskId)
+                  : candidate.input],
                 { signal: params.signal, deadlineAt },
               );
               if (validation.length !== 1) throw new Error('定向补刀 VALIDATOR 未返回单条结果');
@@ -8533,6 +8644,9 @@ export class TestdataGenService {
             );
             if (merged.length === cases.length) break targetLoop;
             cases = merged;
+            if (prospectiveAllocation) {
+              committedTieredAllocations = prospectiveTieredAllocations;
+            }
             targetResult.killed = true;
             targetResult.killedBy = killedBy;
             targetResult.killedByCase = cases.length;
@@ -9116,7 +9230,27 @@ export class TestdataGenService {
       }
       let repairResult;
       try {
-        if (isIndependentVerifierScope(repairScope)) {
+        if (repairScope === 'validator') {
+          repairResult = await verifierClient.chat(
+            [
+              { role: 'user', content: verifierState.userPrompt },
+              { role: 'assistant', content: verifierState.sourceContent },
+              {
+                role: 'user',
+                content: buildSandboxRepairPrompt(
+                  firstError,
+                  params.options,
+                  'validator',
+                  generationCoverage,
+                  context,
+                ),
+              },
+            ],
+            verifierState.systemPrompt,
+            callOptions,
+          );
+          finalVerifierIdentity = { ...repairResult.usedModel };
+        } else if (isIndependentVerifierScope(repairScope)) {
           repairResult = await verifierClient.chat(
             [
               { role: 'user', content: verifierState.userPrompt },
@@ -9206,7 +9340,18 @@ export class TestdataGenService {
       let pendingIsolatedFullRegeneration: TestdataGenerationError | undefined;
       try {
         try {
-          if (isIndependentVerifierScope(repairScope)) {
+          if (repairScope === 'validator') {
+            blueprint = mergeSandboxBlueprintRepair(
+              blueprint,
+              repairResult.content,
+              'validator',
+            );
+            verifierState = {
+              ...verifierState,
+              verifier: checkpointVerifierFromBlueprint(blueprint),
+              sourceContent: repairResult.content,
+            };
+          } else if (isIndependentVerifierScope(repairScope)) {
             verifierState = {
               ...verifierState,
               verifier: parseIndependentVerifierBlueprint(
@@ -9344,6 +9489,7 @@ export class TestdataGenService {
       optionalDiscriminationResults,
       checkerExecutor,
       context,
+      tieredDecision,
     );
     appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
     if (customChecker && this.reliabilityMode === 'enforce') {

@@ -327,6 +327,49 @@ describe('TestdataGenerationJobModel', () => {
     }
   });
 
+  it('checkpoint privacy projects verifier proof declarations and drops raw probes, argv, and seeds', () => {
+    const privateProbe = 'PRIVATE_INVALID_PROBE_INPUT';
+    const filtered = filterTestdataCheckpointUpdate({
+      revision: 9,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { verifier: 'b'.repeat(64) },
+      verifier: {
+        bruteCode: 'print(input())',
+        validatorCode: 'raise SystemExit(0)',
+        stressGeneratorCode: 'print(1)',
+        validatorManifestStatus: 'valid',
+        validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+        validatorProbeRecipes: [{
+          targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+          input: privateProbe,
+          argv: ['--subtask', privateProbe],
+          seed: privateProbe,
+        } as never],
+        materializedProbeInputs: [privateProbe],
+        invalidInvocations: [{ stdin: privateProbe, argv: ['--subtask', '1'] }],
+        effectiveSeed: privateProbe,
+      } as never,
+    });
+
+    expect(filtered.verifier).toEqual({
+      bruteCode: 'print(input())',
+      validatorCode: 'raise SystemExit(0)',
+      stressGeneratorCode: 'print(1)',
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+      }],
+    });
+    expect(JSON.stringify(filtered)).not.toContain(privateProbe);
+    expect(JSON.stringify(filtered)).not.toContain('materializedProbeInputs');
+    expect(JSON.stringify(filtered)).not.toContain('invalidInvocations');
+    expect(JSON.stringify(filtered)).not.toContain('effectiveSeed');
+  });
+
   it('checkpoint envelope 字段超限时丢弃该字段及所有下游字段', () => {
     const smallSolution = {
       problemType: 'traditional' as const,
