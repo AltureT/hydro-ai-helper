@@ -39,7 +39,7 @@ function functionBlueprint() {
 function fullyGreenFunctionPlan(): GenerationPlan {
   return {
     runId: '11111111-1111-4111-8111-111111111111',
-    promptVersion: 'testdata-generation-v1',
+    promptVersion: 'testdata-generation-v2',
     problemType: 'function',
     files: [
       { name: '1.in', content: '1\n', kind: 'case-in', origin: 'executed' },
@@ -195,7 +195,11 @@ describe('test-data generation current guarantees', () => {
       domainId: 'system', problemDocId: 1, problemId: 'P1', createdBy: 7, status: 'interrupted' as const,
       checkpoint: { revision: 1, ...baseline, solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' } },
     };
-    const expected = { domainId: 'system', problemDocId: 1, problemId: 'P1', createdBy: 7, ...baseline };
+    const expected = {
+      domainId: 'system', problemDocId: 1, problemId: 'P1', createdBy: 7,
+      allowV1: true,
+      ...baseline,
+    };
 
     expect(selectTestdataResumeCheckpoint(job, expected)).toBe(job.checkpoint);
     expect(selectTestdataResumeCheckpoint(job, {

@@ -66,6 +66,7 @@ import { getDomainId } from '../utils/domainHelper';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import {
   TestdataGenerationJobModel,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
   TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
   computeTestdataCheckpointHashes,
   selectTestdataResumeCheckpoint,
@@ -87,6 +88,7 @@ import {
   type TestdataTelemetryModel,
   type TestdataTeacherOutcomeReason,
 } from '../services/testdata/runTelemetry';
+import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../services/testdata/pipelineContext';
 
 export const TestdataGenHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
@@ -689,6 +691,13 @@ function serializeGenerationPlan(plan: GenerationPlan | undefined) {
   return clientPlan;
 }
 
+function generationPlanForJobStorage(plan: GenerationPlan): GenerationPlan {
+  // Runtime endpoint/model identity is needed only long enough to derive the
+  // keyed telemetry hash. It must not become durable Job state.
+  const { modelTelemetry: _runtimeOnlyModelTelemetry, ...storedPlan } = plan;
+  return storedPlan;
+}
+
 function serializeGenerationJob(job: TestdataGenerationJob) {
   return {
     id: String(job._id),
@@ -775,6 +784,17 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
   let checkpointWrites = Promise.resolve();
   let checkpointRevision = 0;
   const checkpointPayload: TestdataGenerationCheckpointPayload = {};
+  let checkpointMetadata: Pick<TestdataGenerationCheckpointEnvelope,
+    'checkpointSchemaVersion' | 'promptVersion' | 'statementHash' | 'specHash' | 'roleDependencies'> = {};
+  if (checkpoint?.checkpointSchemaVersion === TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+    checkpointMetadata = {
+      checkpointSchemaVersion: checkpoint.checkpointSchemaVersion,
+      promptVersion: checkpoint.promptVersion,
+      statementHash: checkpoint.statementHash,
+      specHash: checkpoint.specHash,
+      roleDependencies: checkpoint.roleDependencies,
+    };
+  }
   for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
     if (checkpoint?.[key] !== undefined) checkpointPayload[key] = checkpoint[key] as never;
   }
@@ -785,13 +805,24 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
         delete checkpointPayload[key];
       }
+      checkpointMetadata = {};
     } else {
       for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
         if (update[key] !== undefined) checkpointPayload[key] = update[key] as never;
       }
+      if (update.checkpointSchemaVersion === TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+        checkpointMetadata = {
+          checkpointSchemaVersion: update.checkpointSchemaVersion,
+          promptVersion: update.promptVersion,
+          statementHash: update.statementHash,
+          specHash: update.specHash,
+          roleDependencies: update.roleDependencies,
+        };
+      }
     }
     const envelope: TestdataGenerationCheckpointEnvelope = {
       revision: ++checkpointRevision,
+      ...checkpointMetadata,
       ...checkpointPayload,
     };
     checkpointWrites = checkpointWrites
@@ -856,7 +887,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
     if (ac.signal.aborted) {
       throw Object.assign(new Error('canceled'), { name: 'AbortError' });
     }
-    const saved = await jobModel.complete(job._id, plan);
+    const saved = await jobModel.complete(job._id, generationPlanForJobStorage(plan));
     if (!saved) return;
     emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
 
@@ -1287,6 +1318,9 @@ export class TestdataGenJobStartHandler extends Handler {
             problemId: pdoc.pid || String(pdoc.docId),
             createdBy: this.user?._id,
             ...checkpointHashes,
+            checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+            promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+            allowV1: getTestdataReliabilityMode() === 'legacy',
           });
         } catch {
           // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。

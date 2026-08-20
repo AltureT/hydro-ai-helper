@@ -67,6 +67,12 @@ import {
 import { TestdataPipelineError } from '../../services/testdata/failures';
 import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
 import {
+  createTestdataPipelineContext,
+  hashTestdataRoleIdentity,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+  TESTDATA_PIPELINE_PROMPT_VERSION,
+} from '../../services/testdata/pipelineContext';
+import {
   STATEMENT_SNAPSHOT_HARD_LIMIT,
   createStatementSnapshot,
 } from '../../services/testdata/statementSnapshot';
@@ -920,6 +926,64 @@ function makeObservedProblemSpec(
     subtasks: [],
     uncertainties: [],
     ...overrides,
+  };
+}
+
+function makeFrozenSpecRoleClients(
+  statementMarkdown: string,
+  problemKind: 'traditional' | 'function' = 'traditional',
+  customChecker = false,
+): TestdataRoleClients {
+  const spec = makeObservedProblemSpec(statementMarkdown, {
+    problemKind,
+    outputPolicy: customChecker ? { kind: 'custom-checker' } : { kind: 'exact' },
+  });
+  const content = JSON.stringify(spec);
+  return {
+    specPrimary: makeRoleClient('specPrimary', 'spec-primary', 'spec-primary-model', content),
+    specCritic: makeRoleClient('specCritic', 'spec-critic', 'spec-critic-model', content),
+  };
+}
+
+function makeFrozenV2Checkpoint<T extends Record<string, unknown>>(
+  statementMarkdown: string,
+  checkpoint: T,
+  problemKind: 'traditional' | 'function' = 'traditional',
+  customChecker = false,
+): T & {
+  checkpointSchemaVersion: 2;
+  promptVersion: typeof TESTDATA_PIPELINE_PROMPT_VERSION;
+  statementHash: string;
+  specHash: string;
+  roleDependencies: Record<'oracle' | 'artifacts' | 'verifier', string>;
+} {
+  const snapshot = createStatementSnapshot(statementMarkdown);
+  const context = createTestdataPipelineContext({
+    runId: 'test-v2-checkpoint',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement: snapshot,
+    spec: makeObservedProblemSpec(statementMarkdown, {
+      problemKind,
+      outputPolicy: customChecker ? { kind: 'custom-checker' } : { kind: 'exact' },
+    }),
+    risk: {
+      tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  return {
+    ...checkpoint,
+    checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statementHash: snapshot.statementHash,
+    specHash: context.specHash,
+    roleDependencies: {
+      oracle: hashTestdataRoleIdentity('checkpoint-oracle\0model'),
+      artifacts: hashTestdataRoleIdentity('checkpoint-artifacts\0model'),
+      verifier: hashTestdataRoleIdentity('checkpoint-verifier\0model'),
+    },
   };
 }
 
@@ -2062,7 +2126,7 @@ describe('stage-specific sandbox repair', () => {
     expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
     expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options, 'generator')).toContain('只输出修复后的 @@@GENERATOR@@@');
     expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options, 'validator'))
-      .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+      .toContain('只输出修复后的 @@@VALIDATOR@@@');
     const cppCompileFailure = new TestdataPipelineError(
       'arbitrary compile wording A',
       'ORACLE_COMPILE_FAILED',
@@ -2159,7 +2223,7 @@ describe('stage-specific sandbox repair', () => {
     }
   });
 
-  it('template-java repair scope replaces only the Java solution and template', () => {
+  it('template-java repair scope replaces only the Java template', () => {
     const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
     const prompt = buildSandboxRepairPrompt(new Error('template.java 与标程不一致'), fnOptions, 'template-java');
     const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions);
@@ -2169,11 +2233,11 @@ describe('stage-specific sandbox repair', () => {
       'template-java',
     );
 
-    expect(prompt).toContain('@@@SOLUTION:java@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:java@@@');
     expect(prompt).toContain('@@@TEMPLATE:java@@@');
     expect(prompt).not.toContain('@@@SOLUTION:py@@@');
     expect(prompt).not.toContain('@@@SOLUTION:cc@@@');
-    expect(merged.solutions?.java).toContain('return v + "!"');
+    expect(merged.solutions?.java).toBe(original.solutions?.java);
     expect(merged.templates?.java).toContain('public class Main');
     expect(merged.solutions?.py).toBe(original.solutions?.py);
     expect(merged.solutions?.cc).toBe(original.solutions?.cc);
@@ -2181,7 +2245,7 @@ describe('stage-specific sandbox repair', () => {
     expect(merged.templates?.cc).toBe(original.templates?.cc);
   });
 
-  it('template-cc repair scope replaces only the C++ solution and template', () => {
+  it('template-cc repair scope replaces only the C++ template', () => {
     const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
     const prompt = buildSandboxRepairPrompt(new Error('template.cc 与标程不一致'), fnOptions, 'template-cc');
     const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions);
@@ -2191,11 +2255,11 @@ describe('stage-specific sandbox repair', () => {
       'template-cc',
     );
 
-    expect(prompt).toContain('@@@SOLUTION:cc@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:cc@@@');
     expect(prompt).toContain('@@@TEMPLATE:cc@@@');
     expect(prompt).not.toContain('@@@SOLUTION:py@@@');
     expect(prompt).not.toContain('@@@SOLUTION:java@@@');
-    expect(merged.solutions?.cc).toContain('return value + "!"');
+    expect(merged.solutions?.cc).toBe(original.solutions?.cc);
     expect(merged.templates?.cc).toContain('#include "foo.cc"');
     expect(merged.solutions?.py).toBe(original.solutions?.py);
     expect(merged.solutions?.java).toBe(original.solutions?.java);
@@ -2243,33 +2307,44 @@ describe('stage-specific sandbox repair', () => {
     expect(merged.oracleCode).toBe(original.oracleCode);
   });
 
-  it('Python 模板修复必须成对替换 SOLUTION 与 TEMPLATE:py', () => {
+  it('Python 模板修复不允许改写已验证学生解', () => {
     const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
     const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions, { allowMissingTemplates: true });
     const merged = mergeSandboxBlueprintRepair(
       original,
-      '@@@SOLUTION:py@@@\ndef solve(x):\n    return x\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
+      '@@@SOLUTION:py@@@\ndef solve(x):\n    return "MALICIOUS_REWRITE"\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
       'template-py',
     );
-    expect(merged.solutionCode).toContain('def solve');
+    expect(merged.solutionCode).toBe(original.solutionCode);
     expect(merged.templates?.py).toContain('print(solve');
   });
 
-  it('输入校验修复必须同时替换 GENERATOR 与 VALIDATOR', () => {
+  it('修复 VALIDATOR 不会改变已验证 GENERATOR', () => {
     const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
-    expect(() => mergeSandboxBlueprintRepair(
-      original,
-      '@@@GENERATOR@@@\nprint("{}")',
-      'validator',
-    )).toThrow(/未返回 VALIDATOR/);
-
     const merged = mergeSandboxBlueprintRepair(
       original,
-      '@@@GENERATOR@@@\nprint("{}")\n@@@VALIDATOR@@@\nimport sys\nsys.exit(0)',
+      '@@@GENERATOR@@@\nprint("MALICIOUS_GENERATOR_REWRITE")\n@@@VALIDATOR@@@\nimport sys\nsys.exit(0)',
       'validator',
     );
-    expect(merged.generatorCode).toContain('print');
+    expect(merged.generatorCode).toBe(original.generatorCode);
     expect(merged.validatorCode).toContain('sys.exit');
+    const prompt = buildSandboxRepairPrompt(new Error('validator rejected input'), options, 'validator');
+    expect(prompt).toContain('@@@VALIDATOR@@@');
+    expect(prompt).not.toContain('@@@GENERATOR@@@');
+  });
+
+  it('Oracle repair cannot replace the independent BRUTE section', () => {
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
+    original.bruteCode = 'print("INDEPENDENT_BRUTE")\n';
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@ORACLE@@@\nprint(input())\n@@@BRUTE@@@\nprint("MALICIOUS_ORACLE_BRUTE")',
+      'oracle',
+    );
+
+    expect(merged.oracleCode).toContain('print(input())');
+    expect(merged.bruteCode).toBe(original.bruteCode);
+    expect(merged.bruteCode).not.toContain('MALICIOUS_ORACLE_BRUTE');
   });
 
   it('最终失败携带模型与阶段遥测元数据', () => {
@@ -2363,7 +2438,7 @@ describe('TestdataGenService.generate', () => {
     expect(prompt).not.toContain('题面（最多 6000 字符）');
   });
 
-  it('observes independently grounded Primary/Critic specs before the legacy pipeline and saves only consensus summary', async () => {
+  it('freezes independently grounded Primary/Critic consensus for downstream use and exposes only its summary', async () => {
     const statement = '## Constraints\nn >= 1';
     const spec = makeObservedProblemSpec(statement, {
       constraints: [{
@@ -2410,10 +2485,10 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(3);
     expect(mockClient.chat.mock.calls[0][1]).toContain('严格 JSON');
     expect(mockClient.chat.mock.calls[1][0]).toEqual(mockClient.chat.mock.calls[0][0]);
-    expect(mockClient.chat.mock.calls[2][0][0].content).toContain(statement);
-    expect(JSON.stringify(mockClient.chat.mock.calls[2])).not.toContain('SECRET_SPEC_EXPRESSION');
-    expect(JSON.stringify(mockClient.chat.mock.calls[2])).not.toContain('SECRET_SPEC_INVARIANT');
-    expect(JSON.stringify(mockClient.chat.mock.calls[2])).not.toContain('SECRET_SPEC_UNCERTAINTY');
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).toContain('SECRET_SPEC_EXPRESSION');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).toContain('SECRET_SPEC_INVARIANT');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).toContain('SECRET_SPEC_UNCERTAINTY');
     expect(plan.specSchemaVersion).toBe(1);
     expect(plan.problemSpecSummary).toEqual({
       statementHash: createStatementSnapshot(statement).statementHash,
@@ -2492,7 +2567,7 @@ describe('TestdataGenService.generate', () => {
     });
   });
 
-  it('keeps the complete statement in extractor and legacy prompts above the former 20k boundary', async () => {
+  it('keeps the complete statement in Spec extraction but sends only frozen Spec and public samples downstream', async () => {
     const tail = 'FINAL_CONSTRAINT_AT_STATEMENT_TAIL';
     const statement = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_100)}${tail}`;
     const mockClient = {
@@ -2522,7 +2597,8 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(3);
     expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
     expect(mockClient.chat.mock.calls[1][0][0].content).toContain(tail);
-    expect(mockClient.chat.mock.calls[2][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[2][0][0].content).not.toContain(tail);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
     expect(JSON.stringify(mockClient.chat.mock.calls)).not.toContain('题面过长已截断');
   });
 
@@ -2770,7 +2846,7 @@ describe('TestdataGenService.generate', () => {
     })).rejects.toBe(canceled);
   });
 
-  it('keeps the combined direct-mode prompt on the scenario/base client before Task 7 splits it', async () => {
+  it('keeps direct compatibility on the base client but makes frozen Spec its machine contract', async () => {
     const statement = 'Input one integer. Output it.';
     const specJson = JSON.stringify(makeObservedProblemSpec(statement));
     const baseClient = { chat: jest.fn().mockResolvedValue({
@@ -2793,6 +2869,8 @@ describe('TestdataGenService.generate', () => {
 
     expect(plan.files.length).toBeGreaterThan(0);
     expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(baseClient.chat.mock.calls[0][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
+    expect(baseClient.chat.mock.calls[0][0][0].content).not.toContain(statement);
     expect(artifacts.chat).not.toHaveBeenCalled();
   });
 
@@ -3084,6 +3162,68 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
   });
 
+  it('checkpoint v2 在 frozen Spec 与依赖 hash 一致时正确恢复', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const snapshot = createStatementSnapshot(statementMarkdown);
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-run',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: snapshot.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('oracle-endpoint\0oracle-model'),
+        artifacts: hashTestdataRoleIdentity('artifacts-endpoint\0artifacts-model'),
+        verifier: hashTestdataRoleIdentity('verifier-endpoint\0verifier-model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    };
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'observe',
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'checkpoint v2', statementMarkdown, options, checkpoint,
+    }, runner, 1, risk, context);
+
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === '1.out')?.content).toBe('1\n');
+  });
+
   it('high-risk enforce regenerates checkpoint v1 solution and verifier when identities are unavailable', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
     const checkpoint = {
@@ -3140,6 +3280,71 @@ describe('TestdataGenService.generate', () => {
     expect(oracle.chat).toHaveBeenCalledTimes(1);
     expect(verifier.chat).toHaveBeenCalledTimes(2);
     expect(artifacts.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('high-risk enforce rejects a fresh verifier that matches the restored Oracle identity', async () => {
+    const statementMarkdown = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'high' as const, score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-mixed-independence',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('shared-endpoint\0shared-model'),
+        verifier: hashTestdataRoleIdentity('previous-verifier\0previous-model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+    };
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'configured-model',
+      'shared-endpoint', 'shared-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts-endpoint', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { verifier, artifacts },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'mixed v2 identity', statementMarkdown, options, checkpoint,
+    }, runner, 1, risk, context)).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED',
+      artifact: 'spec',
+    });
   });
 
   it('high-risk enforce rechecks independence after an Oracle repair replaces the final blueprint', async () => {
@@ -4268,7 +4473,7 @@ describe('TestdataGenService.generate', () => {
       .toBeLessThan(fallbackClient.chat.mock.invocationCallOrder[0]);
   });
 
-  it('语义重跑推进失败角色的模型链并保留其余角色客户端', async () => {
+  it('语义重跑推进失败角色的模型链并复用同一 frozen Spec', async () => {
     const primaryModel = { endpointId: 'oracle-a', endpointName: 'oracle-a', modelName: 'model-a' };
     const firstError = new TestdataGenerationError(
       'oracle repair failed',
@@ -4296,6 +4501,19 @@ describe('TestdataGenService.generate', () => {
       verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
     } as never;
     let retriedRoleClients: TestdataRoleClients | undefined;
+    const snapshot = createStatementSnapshot('Input one integer.');
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'semantic-fallback-context',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(snapshot.normalizedMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
     const generateWithSandbox = jest.spyOn(
       TestdataGenService.prototype as unknown as {
         generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
@@ -4316,7 +4534,7 @@ describe('TestdataGenService.generate', () => {
       const plan = await (service as any).generateSandboxWithSemanticFallback({
         problemTitle: 'role fallback', statementMarkdown: 'Input one integer.',
         options: { problemKind: 'traditional', caseCount: 1, languages: [] },
-      }, { isAvailable: jest.fn() });
+      }, { isAvailable: jest.fn() }, risk, context);
 
       expect(firstError).toMatchObject({ failedModelRole: 'oracle' });
       expect(plan).toBe(fallbackPlan);
@@ -4325,6 +4543,162 @@ describe('TestdataGenService.generate', () => {
       expect(retriedRoleClients?.oracle?.client).toBe(oracleFallbackClient);
       expect(retriedRoleClients?.artifacts).toBe(artifacts);
       expect(retriedRoleClients?.verifier).toBe(verifier);
+      expect(generateWithSandbox.mock.calls[0][4]).toBe(context);
+      expect(generateWithSandbox.mock.calls[1][4]).toBe(context);
+      expect(context.specHash).toBe(createTestdataPipelineContext({
+        runId: 'semantic-fallback-context-copy',
+        promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+        statement: snapshot,
+        spec: makeObservedProblemSpec(snapshot.normalizedMarkdown, { problemKind: 'traditional' }),
+        risk,
+        roleIdentities: {},
+      }).specHash);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('v2 checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV2Checkpoint(statementMarkdown, {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    });
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false,
+      allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'restored-full-materialization',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const fullMaterializationFailure = new TestdataGenerationError(
+      'frozen full materialization failure',
+      'pipeline_repair',
+      [],
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'UNKNOWN', artifact: 'pipeline', retryPolicy: 'switch-model',
+        failedModelRole: 'artifacts',
+        requiresIsolatedRegeneration: true,
+      },
+    );
+    const fallbackPlan = buildSkeletonPlan(options);
+    const onCheckpoint = jest.fn().mockResolvedValue(undefined);
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(fullMaterializationFailure)
+      .mockResolvedValueOnce(fallbackPlan);
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe',
+        roleClients: { artifacts: makeRoleClient('artifacts', 'artifact-a', 'model-a') },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'restored full materialization',
+        statementMarkdown,
+        options,
+        checkpoint,
+        onCheckpoint,
+      }, { isAvailable: jest.fn() }, risk, context);
+
+      expect(plan).toBe(fallbackPlan);
+      expect(generateWithSandbox).toHaveBeenCalledTimes(2);
+      expect(generateWithSandbox.mock.calls[0][0]).toEqual(expect.objectContaining({ checkpoint }));
+      expect(generateWithSandbox.mock.calls[1][0]).toEqual(expect.objectContaining({
+        checkpoint: undefined,
+      }));
+      expect(generateWithSandbox.mock.calls[1][4]).toBe(context);
+      expect(onCheckpoint).toHaveBeenCalledWith(null);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('语义 fallback 从失败角色的实际 usedModel 推进对应链而不使用其他角色的末项', async () => {
+    const artifactModel = {
+      endpointId: 'artifact-a', endpointName: 'artifact-a-name', modelName: 'artifact-model-a',
+    };
+    const nextArtifactModel = {
+      endpointId: 'artifact-b', endpointName: 'artifact-b-name', modelName: 'artifact-model-b',
+    };
+    const verifierModel = {
+      endpointId: 'verifier-a', endpointName: 'verifier-a-name', modelName: 'verifier-model-a',
+    };
+    const artifactFallbackClient = { chat: jest.fn() };
+    const artifactAdvance = jest.fn().mockReturnValue(artifactFallbackClient);
+    const artifacts: TestdataRoleClient = {
+      role: 'artifacts',
+      source: 'role',
+      chain: [artifactModel, nextArtifactModel],
+      identities: [artifactModel, nextArtifactModel],
+      identity: artifactModel,
+      client: { chat: jest.fn(), createClientStartingAfter: artifactAdvance } as never,
+    };
+    const firstError = new TestdataGenerationError(
+      'artifact repair failed after verifier had also completed',
+      'pipeline_repair',
+      [
+        { content: 'artifact result', usedModel: artifactModel },
+        { content: 'verifier result', usedModel: verifierModel },
+      ] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'GENERATOR_INVALID_JSON', artifact: 'generator', retryPolicy: 'switch-model',
+        failedModelRole: 'artifacts',
+      },
+    );
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'artifact-b-name/artifact-model-b', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockResolvedValueOnce(fallbackPlan);
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe', roleClients: { artifacts },
+      });
+      (service as any).activeRoleIdentities = {
+        artifacts: artifactModel,
+        verifier: verifierModel,
+      };
+
+      await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'disjoint role fallback',
+        statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() });
+
+      expect(artifactAdvance).toHaveBeenCalledTimes(1);
+      expect(artifactAdvance).toHaveBeenCalledWith(artifactModel);
+      expect(artifactAdvance).not.toHaveBeenCalledWith(verifierModel);
     } finally {
       generateWithSandbox.mockRestore();
     }
@@ -4658,7 +5032,7 @@ describe('TestdataGenService.generate', () => {
     };
 
     const failure = await new TestdataGenService(mockClient as never, {
-      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'legacy',
     }).generate({
       problemTitle: 'post-repair cancellation',
       statementMarkdown: '题面',
@@ -4668,7 +5042,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -5175,6 +5549,32 @@ describe('TestdataGenService.generate', () => {
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 
+  it('enforce direct fallback rejects a response that changes frozen problemKind', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const statementMarkdown = 'Read one integer and print it.';
+    const baseClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson({ problemType: 'function' }),
+        usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+      }),
+    };
+    const service = new TestdataGenService(baseClient as never, {
+      mode: 'direct',
+      reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+    });
+
+    await expect(service.generate({
+      problemTitle: 'frozen direct kind',
+      statementMarkdown,
+      options: { problemKind: 'auto', caseCount: 2, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_PARSE_FAILED',
+      artifact: 'spec',
+      retryPolicy: 'rerun-spec',
+    });
+  });
+
   it('medium risk requires an explicit direct-fallback confirmation', async () => {
     process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
     const service = new TestdataGenService({ chat: jest.fn() } as never, { mode: 'direct' });
@@ -5221,7 +5621,7 @@ describe('TestdataGenService.generate', () => {
         problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
       },
     })).rejects.toMatchObject({
-      code: reliabilityMode === 'enforce' ? 'SPEC_CONSENSUS_REQUIRED' : 'SANDBOX_REQUIRED',
+      code: reliabilityMode === 'enforce' ? 'SPEC_PARSE_FAILED' : 'SANDBOX_REQUIRED',
     });
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
@@ -5318,6 +5718,7 @@ describe('TestdataGenService.generate', () => {
       mode: 'sandbox',
       reliabilityMode: 'enforce',
       sandboxRunner: { isAvailable: jest.fn().mockResolvedValue(true) } as never,
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
     });
 
     await expect(service.generate({
@@ -5349,6 +5750,7 @@ describe('TestdataGenService.generate', () => {
 
       await expect(new TestdataGenService({ chat: jest.fn() } as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
       }).generate({
         problemTitle: 'checker capability',
         statementMarkdown: '题面',
@@ -5391,6 +5793,7 @@ describe('TestdataGenService.generate', () => {
 
       const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
       }).generate({
         problemTitle: 'checker capability',
         statementMarkdown: '题面',
@@ -5399,7 +5802,7 @@ describe('TestdataGenService.generate', () => {
           configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
         },
         options,
-        checkpoint: {
+        checkpoint: makeFrozenV2Checkpoint('题面', {
           solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
           artifacts: parseGenerationArtifacts(
             makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -5408,7 +5811,7 @@ describe('TestdataGenService.generate', () => {
             bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
           },
           killTargets: [],
-        },
+        }, 'traditional', true),
       });
 
       expect(plan.verification).toMatchObject({
@@ -5448,6 +5851,7 @@ describe('TestdataGenService.generate', () => {
 
     const failure = await new TestdataGenService(mockClient as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
     }).generate({
       problemTitle: 'checker cancellation boundary',
       statementMarkdown: '题面',
@@ -5460,7 +5864,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat).not.toHaveBeenCalled();
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
     expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
   });
@@ -5486,6 +5890,7 @@ describe('TestdataGenService.generate', () => {
 
       const failure = await new TestdataGenService(mockClient as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
       }).generate({
         problemTitle: 'checker cached cancellation boundary',
         statementMarkdown: '题面',
@@ -5500,7 +5905,7 @@ describe('TestdataGenService.generate', () => {
       expect(failure).toBe(cancellation);
       expect(runner.deleteCachedFile).toHaveBeenCalledTimes(1);
       expect(runner.deleteCachedFile).toHaveBeenCalledWith('late-checker-cache');
-      expect(mockClient.chat).toHaveBeenCalledTimes(2);
+      expect(mockClient.chat).not.toHaveBeenCalled();
       expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
       expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
     },
@@ -5518,6 +5923,7 @@ describe('TestdataGenService.generate', () => {
 
     const failure = await new TestdataGenService({ chat: jest.fn() } as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
     }).generate({
       problemTitle: 'checker',
       statementMarkdown: '题面',
@@ -5565,6 +5971,7 @@ describe('TestdataGenService.generate', () => {
 
       const failure = await new TestdataGenService({ chat: jest.fn() } as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
       }).generate({
         problemTitle: 'checker',
         statementMarkdown: '题面',
@@ -5625,6 +6032,7 @@ describe('TestdataGenService.generate', () => {
 
       const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
       }).generate({
         problemTitle: 'checker privacy',
         statementMarkdown: '题面',
@@ -5633,7 +6041,7 @@ describe('TestdataGenService.generate', () => {
           configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
         },
         options,
-        checkpoint: {
+        checkpoint: makeFrozenV2Checkpoint('题面', {
           solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
           artifacts: parseGenerationArtifacts(
             makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -5642,7 +6050,7 @@ describe('TestdataGenService.generate', () => {
             bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
           },
           killTargets: [],
-        },
+        }, 'traditional', true),
       });
 
       expect(plan.verification).toMatchObject({
@@ -5696,6 +6104,11 @@ describe('TestdataGenService.generate', () => {
       chat: jest.fn().mockResolvedValue({ content: makeSolutionBlueprint('traditional'), usedModel }),
     } as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients(
+        '```input1\n1\n```\n```output1\n1\n```',
+        'traditional',
+        true,
+      ),
     }).generate({
       problemTitle: 'checker',
       statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
@@ -5732,6 +6145,11 @@ describe('TestdataGenService.generate', () => {
         chat: jest.fn().mockResolvedValue({ content: makeSolutionBlueprint('traditional'), usedModel }),
       } as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(
+          '```input1\n1\n```\n```output1\n1\n```',
+          'traditional',
+          true,
+        ),
       }).generate({
         problemTitle: 'checker',
         statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
@@ -5754,7 +6172,7 @@ describe('TestdataGenService.generate', () => {
 
   it('real checker executor keeps an earlier caller deadline than its remaining checker budget', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = {
+    const checkpoint = makeFrozenV2Checkpoint('题面', {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -5764,7 +6182,7 @@ describe('TestdataGenService.generate', () => {
         validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
       },
       killTargets: [],
-    };
+    }, 'traditional', true);
     const startedAt = 10_000;
     let now = startedAt;
     const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
@@ -5788,6 +6206,7 @@ describe('TestdataGenService.generate', () => {
     try {
       await new TestdataGenService({ chat: jest.fn() } as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
       }).generate({
         problemTitle: 'checker deadline',
         statementMarkdown: '题面',
@@ -5810,7 +6229,7 @@ describe('TestdataGenService.generate', () => {
 
   it('real checker executor preserves the exact caller cancellation reason identity', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = {
+    const checkpoint = makeFrozenV2Checkpoint('题面', {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -5820,7 +6239,7 @@ describe('TestdataGenService.generate', () => {
         validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
       },
       killTargets: [],
-    };
+    }, 'traditional', true);
     const controller = new AbortController();
     const cancellation = new Error('caller cancellation identity');
     const transportCancellation = Object.assign(new Error('transport cancellation'), {
@@ -5843,6 +6262,7 @@ describe('TestdataGenService.generate', () => {
 
     await expect(new TestdataGenService({ chat: jest.fn() } as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
     }).generate({
       problemTitle: 'checker cancellation',
       statementMarkdown: '题面',
@@ -5880,6 +6300,9 @@ describe('TestdataGenService.generate', () => {
 
     const failure = await new TestdataGenService(mockClient as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(
+        '```input1\n1\n```\n```output1\n1\n```', 'traditional', true,
+      ),
     }).generate({
       problemTitle: 'solution sample cancellation',
       statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
@@ -5888,14 +6311,14 @@ describe('TestdataGenService.generate', () => {
         configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
       },
       options,
-      checkpoint: {
+      checkpoint: makeFrozenV2Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
         solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
-      },
+      }, 'traditional', true),
       signal: controller.signal,
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat).not.toHaveBeenCalled();
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -5927,6 +6350,9 @@ describe('TestdataGenService.generate', () => {
     try {
       const failure = await new TestdataGenService(mockClient as never, {
         mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients(
+          '```input1\n1\n```\n```output1\n1\n```', 'traditional', true,
+        ),
       }).generate({
         problemTitle: 'checker cancellation priority',
         statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
@@ -5935,7 +6361,7 @@ describe('TestdataGenService.generate', () => {
           configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
         },
         options,
-        checkpoint: {
+        checkpoint: makeFrozenV2Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
           solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
           artifacts: parseGenerationArtifacts(
             makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -5944,13 +6370,13 @@ describe('TestdataGenService.generate', () => {
             bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
           },
           killTargets: [],
-        },
+        }, 'traditional', true),
         signal: controller.signal,
       }).catch(error => error);
 
       expect(failure).toBe(cancellation);
       expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
-      expect(mockClient.chat).toHaveBeenCalledTimes(2);
+      expect(mockClient.chat).not.toHaveBeenCalled();
       expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();
@@ -5959,7 +6385,8 @@ describe('TestdataGenService.generate', () => {
 
   it('observe 保留 testlib _fail 基础设施证据并对未裁决样例记零分', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
-    const checkpoint = {
+    const checkpoint = makeFrozenV2Checkpoint(
+      '```input1\n1\n```\n```output1\n1\n```', {
       solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
@@ -5968,7 +6395,8 @@ describe('TestdataGenService.generate', () => {
         bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
       },
       killTargets: [],
-    };
+      }, 'traditional', true,
+    );
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
@@ -5992,6 +6420,9 @@ describe('TestdataGenService.generate', () => {
 
     const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
       mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(
+        '```input1\n1\n```\n```output1\n1\n```', 'traditional', true,
+      ),
     }).generate({
       problemTitle: 'checker',
       statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
@@ -6051,7 +6482,7 @@ describe('TestdataGenService.generate', () => {
         problemTitle: 'low risk',
         statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
         options: { problemKind: 'traditional', caseCount: 1, languages: [] },
-      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+      })).rejects.toMatchObject({ code: 'SPEC_PARSE_FAILED', artifact: 'spec' });
     },
   );
 
@@ -7191,7 +7622,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     });
     expect(failure.message).toMatch(/题面样例 1 未通过输入校验：样例非法/);
     expect(buildSandboxRepairPrompt(failure, tradOpts))
-      .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+      .toContain('只输出修复后的 @@@VALIDATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
@@ -8389,7 +8820,7 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
     });
     expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
-    expect(plan.promptVersion).toBe('testdata-generation-v1');
+    expect(plan.promptVersion).toBe('testdata-generation-v2');
     expect(plan.originalFileHashes).toEqual(Object.fromEntries(
       plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
     ));

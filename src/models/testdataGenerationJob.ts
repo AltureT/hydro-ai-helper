@@ -8,6 +8,9 @@ import yaml from 'js-yaml';
 import type { Collection, Db } from 'mongodb';
 import type { ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
+import type { TestdataModelRole } from './aiConfig';
+import { TESTDATA_CHECKPOINT_SCHEMA_VERSION } from '../services/testdata/pipelineContext';
+export { TESTDATA_CHECKPOINT_SCHEMA_VERSION } from '../services/testdata/pipelineContext';
 import type {
   GenerationPlan,
   IndependentVerifierBlueprint,
@@ -54,6 +57,11 @@ export interface TestdataGenerationJobError {
 export const TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = 256 * 1024;
 
 export interface TestdataGenerationCheckpointPayload {
+  checkpointSchemaVersion?: typeof TESTDATA_CHECKPOINT_SCHEMA_VERSION;
+  promptVersion?: string;
+  statementHash?: string;
+  specHash?: string;
+  roleDependencies?: Partial<Record<TestdataModelRole, string>>;
   solution?: SandboxSolutionBlueprint;
   artifacts?: SandboxGenerationArtifacts;
   verifier?: IndependentVerifierBlueprint;
@@ -88,6 +96,11 @@ interface TestdataResumeScope extends TestdataCheckpointHashes {
   problemDocId: number;
   problemId: string;
   createdBy: number;
+  checkpointSchemaVersion?: typeof TESTDATA_CHECKPOINT_SCHEMA_VERSION;
+  promptVersion?: string;
+  specHash?: string;
+  /** Emergency rollback only: v1 has no frozen Spec or role provenance. */
+  allowV1?: boolean;
 }
 
 interface ResumeCheckpointJob {
@@ -167,7 +180,7 @@ export function computeTestdataCheckpointHashes(
         headers: checkerHeaders,
       },
     }))),
-    statementHash: sha256(statementMarkdown),
+    statementHash: sha256(normalizeTextForHash(statementMarkdown)),
   };
 }
 
@@ -175,7 +188,16 @@ export function computeTestdataCheckpointHashes(
 export function filterTestdataCheckpointUpdate(
   update: TestdataGenerationCheckpointEnvelope,
 ): TestdataGenerationCheckpointEnvelope {
-  const filtered: TestdataGenerationCheckpointEnvelope = { revision: update.revision };
+  const filtered: TestdataGenerationCheckpointEnvelope = {
+    revision: update.revision,
+    ...(update.checkpointSchemaVersion === TESTDATA_CHECKPOINT_SCHEMA_VERSION ? {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: update.promptVersion,
+      statementHash: update.statementHash,
+      specHash: update.specHash,
+      roleDependencies: update.roleDependencies,
+    } : {}),
+  };
   const keys: Array<keyof TestdataGenerationCheckpointPayload> = [
     'solution',
     'artifacts',
@@ -205,16 +227,30 @@ export function selectTestdataResumeCheckpoint(
   expected: TestdataResumeScope,
 ): TestdataGenerationCheckpoint | undefined {
   if (!job?.checkpoint || job.status !== 'interrupted') return undefined;
-  if (!Number.isSafeInteger(job.checkpoint.revision) || job.checkpoint.revision < 1
+  const checkpoint = job.checkpoint;
+  const isV2 = checkpoint.checkpointSchemaVersion === TESTDATA_CHECKPOINT_SCHEMA_VERSION;
+  if (!isV2 && !expected.allowV1) return undefined;
+  if (!Number.isSafeInteger(checkpoint.revision) || checkpoint.revision < 1
     || job.domainId !== expected.domainId
     || job.problemDocId !== expected.problemDocId
     || job.problemId !== expected.problemId
     || job.createdBy !== expected.createdBy
-    || job.checkpoint.optionsHash !== expected.optionsHash
-    || job.checkpoint.statementHash !== expected.statementHash) {
+    || checkpoint.optionsHash !== expected.optionsHash
+    || checkpoint.statementHash !== expected.statementHash) {
     return undefined;
   }
-  return job.checkpoint;
+  if (!isV2) return checkpoint;
+  if ((expected.checkpointSchemaVersion !== undefined
+      && expected.checkpointSchemaVersion !== checkpoint.checkpointSchemaVersion)
+    || (expected.promptVersion !== undefined && expected.promptVersion !== checkpoint.promptVersion)
+    || (expected.specHash !== undefined && expected.specHash !== checkpoint.specHash)
+    || typeof checkpoint.promptVersion !== 'string'
+    || !/^[a-f0-9]{64}$/.test(checkpoint.specHash || '')
+    || Object.values(checkpoint.roleDependencies || {})
+      .some(value => !/^[a-f0-9]{64}$/.test(value || ''))) {
+    return undefined;
+  }
+  return checkpoint;
 }
 
 export interface TestdataGenerationJob {
