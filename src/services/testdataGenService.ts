@@ -2583,6 +2583,28 @@ function normalizeReusableCheckpoint(
   return { ...checkpoint, solution };
 }
 
+function isReusableFrozenVerifierCheckpoint(
+  verifier: IndependentVerifierBlueprint,
+  context: TestdataPipelineContext,
+): boolean {
+  if (verifier.validatorManifestStatus !== 'valid' || !verifier.validatorManifest) return false;
+  try {
+    parseAndValidateValidatorManifest(
+      JSON.stringify(verifier.validatorManifest),
+      context.spec,
+    );
+    if (verifier.validatorProbeRecipes !== undefined) {
+      parseAndValidateValidatorProbeRecipes(
+        JSON.stringify({ recipes: verifier.validatorProbeRecipes }),
+        context.spec,
+      );
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function reusableCheckpointForContext(
   checkpoint: TestdataGenerationCheckpointPayload | undefined,
   options: GenerateOptions,
@@ -2610,7 +2632,11 @@ function reusableCheckpointForContext(
       || dependencies.oracle === dependencies.verifier)) {
     return undefined;
   }
-  return normalizeReusableCheckpoint(checkpoint, options);
+  const normalized = normalizeReusableCheckpoint(checkpoint, options);
+  if (!normalized?.verifier
+    || isReusableFrozenVerifierCheckpoint(normalized.verifier, context)) return normalized;
+  const { verifier: _invalidVerifier, ...safeCheckpoint } = normalized;
+  return safeCheckpoint;
 }
 
 function assertSelectedTemplateSolutions(
@@ -6916,7 +6942,7 @@ export function buildIndependentVerifierRepairPrompt(
       .replace(
         '请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@',
         '请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
-          + '@@@VALIDATOR_MANIFEST@@@、@@@VALIDATOR_PROBE_RECIPES@@@、@@@VALIDATOR@@@',
+          + '@@@VALIDATOR_MANIFEST@@@、可选的 @@@VALIDATOR_PROBE_RECIPES@@@、@@@VALIDATOR@@@',
       );
     return [
       buildFrozenProblemSpecBlock(context),
@@ -7474,11 +7500,16 @@ export class TestdataGenService {
   }
 
   private clientForRole(role: Extract<TestdataModelRole,
-    'oracle' | 'artifacts' | 'verifier'>): MultiModelClient {
+    'oracle' | 'artifacts' | 'verifier'>, trackIdentity = true): MultiModelClient {
     const client = this.roleClients?.[role]?.client || this.aiClient;
+    if (!trackIdentity) return client;
     return {
       chat: async (...args: Parameters<MultiModelClient['chat']>) => {
         const result = await client.chat(...args);
+        const signal = args[2]?.signal;
+        if (signal?.aborted) {
+          throw signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
         this.activeRoleIdentities[role] = { ...result.usedModel };
         return result;
       },
@@ -8295,6 +8326,7 @@ export class TestdataGenService {
     context?: TestdataPipelineContext,
   ): Promise<IndependentVerifierCallState> {
     const verifierClient = this.clientForRole('verifier');
+    const verifierRepairClient = this.clientForRole('verifier', false);
     const systemPrompt = buildIndependentVerifierSystemPrompt(
       TESTDATA_GEN_LIMITS.STRESS_CASES,
       !!context,
@@ -8331,7 +8363,7 @@ export class TestdataGenService {
       );
       let repairResult: ChatResult;
       try {
-        repairResult = await verifierClient.chat(
+        repairResult = await verifierRepairClient.chat(
           [
             { role: 'user', content: userPrompt },
             { role: 'assistant', content: initialResult.content },
@@ -8347,6 +8379,10 @@ export class TestdataGenService {
           systemPrompt,
           callOptions,
         );
+        if (params.signal?.aborted) {
+          throw params.signal.reason
+            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
       } catch (err) {
         if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
@@ -8761,7 +8797,7 @@ export class TestdataGenService {
     const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params, context);
     const oracleClient = this.clientForRole('oracle');
     const artifactsClient = this.clientForRole('artifacts');
-    const verifierClient = this.clientForRole('verifier');
+    const verifierRepairClient = this.clientForRole('verifier', false);
     const callOptions = this.getCallOptions(params, attempt);
     report('blueprint', 10);
     const results: ChatResult[] = [];
@@ -9231,7 +9267,7 @@ export class TestdataGenService {
       let repairResult;
       try {
         if (repairScope === 'validator') {
-          repairResult = await verifierClient.chat(
+          repairResult = await verifierRepairClient.chat(
             [
               { role: 'user', content: verifierState.userPrompt },
               { role: 'assistant', content: verifierState.sourceContent },
@@ -9249,9 +9285,8 @@ export class TestdataGenService {
             verifierState.systemPrompt,
             callOptions,
           );
-          finalVerifierIdentity = { ...repairResult.usedModel };
         } else if (isIndependentVerifierScope(repairScope)) {
-          repairResult = await verifierClient.chat(
+          repairResult = await verifierRepairClient.chat(
             [
               { role: 'user', content: verifierState.userPrompt },
               { role: 'assistant', content: verifierState.sourceContent },
@@ -9267,7 +9302,6 @@ export class TestdataGenService {
             verifierState.systemPrompt,
             callOptions,
           );
-          finalVerifierIdentity = { ...repairResult.usedModel };
         } else if (repairScope === 'full') {
           if (context) assertProblemSpecUnchanged(context);
           repairResult = await this.chatForCombinedRepair(
@@ -9318,7 +9352,18 @@ export class TestdataGenService {
             finalOracleIdentity = { ...repairResult.usedModel };
           }
         }
+        if (
+          (repairScope === 'validator' || isIndependentVerifierScope(repairScope))
+          && params.signal?.aborted
+        ) {
+          throw params.signal.reason
+            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
+        if (repairScope === 'validator' || isIndependentVerifierScope(repairScope)) {
+          finalVerifierIdentity = { ...repairResult.usedModel };
+        }
       } catch (err) {
+        if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
         throw new TestdataGenerationError(
           `AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`,

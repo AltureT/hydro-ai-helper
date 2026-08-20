@@ -1082,8 +1082,22 @@ function makeFrozenV3Checkpoint<T extends Record<string, unknown>>(
     },
     roleIdentities: {},
   });
+  const restoredVerifier = checkpoint.verifier;
+  const strictCheckpoint = restoredVerifier && typeof restoredVerifier === 'object'
+    ? {
+      ...checkpoint,
+      verifier: {
+        ...restoredVerifier,
+        ...(!('validatorManifestStatus' in restoredVerifier) ? {
+          validatorManifestStatus: 'valid' as const,
+          validatorManifest: { constraintIds: [], invariantIds: [] },
+          validatorProbeRecipes: [],
+        } : {}),
+      },
+    }
+    : checkpoint;
   return {
-    ...checkpoint,
+    ...strictCheckpoint,
     checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
     promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
     statementHash: snapshot.statementHash,
@@ -3365,7 +3379,14 @@ describe('TestdataGenService.generate', () => {
       artifacts: parseGenerationArtifacts(
         makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
       ),
-      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      verifier: parseIndependentVerifierBlueprint(
+        makeStrictIndependentVerifierBlueprint(
+          { constraintIds: [], invariantIds: [] },
+          { recipes: [] },
+        ),
+        [],
+        { frozenSpec: context.spec, requireValidatorManifest: true },
+      ),
       killTargets: [],
     };
     const mockClient = { chat: jest.fn() };
@@ -3656,7 +3677,14 @@ describe('TestdataGenService.generate', () => {
         oracle: hashTestdataRoleIdentity('previous-oracle\0previous-model'),
         verifier: hashTestdataRoleIdentity('shared-endpoint\0shared-model'),
       },
-      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      verifier: parseIndependentVerifierBlueprint(
+        makeStrictIndependentVerifierBlueprint(
+          { constraintIds: [], invariantIds: [] },
+          { recipes: [] },
+        ),
+        [],
+        { frozenSpec: context.spec, requireValidatorManifest: true },
+      ),
     };
     const oracle = makeRoleClientWithActual(
       'oracle', 'configured-oracle', 'configured-model',
@@ -8318,6 +8346,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
     const prompt = buildIndependentVerifierRepairPrompt(new Error('missing manifest'), [], context);
     expect(prompt).toContain('@@@VALIDATOR_MANIFEST@@@');
     expect(prompt).toContain('@@@VALIDATOR_PROBE_RECIPES@@@');
+    expect(prompt).toContain('可选的 @@@VALIDATOR_PROBE_RECIPES@@@');
     expect(prompt.indexOf('@@@VALIDATOR_MANIFEST@@@'))
       .toBeLessThan(prompt.indexOf('@@@VALIDATOR@@@'));
   });
@@ -8571,6 +8600,48 @@ describe('Task 8 full manifest repair', () => {
     expect(baseClient.chat).toHaveBeenCalledTimes(1);
     expect(state.verifier.validatorManifestStatus).toBeUndefined();
   });
+
+  it.each([
+    ['rejected call with Error reason', 'reject', new Error('full repair rejected cancellation')],
+    ['resolved call with object reason', 'resolve', { kind: 'full-repair-cancel-object' }],
+  ] as const)('full verifier repair cancellation boundary preserves identity for %s', async (
+    _name, outcome, cancellation,
+  ) => {
+    const controller = new AbortController();
+    const initialModel = {
+      endpointId: 'initial-verifier', endpointName: 'initial-verifier', modelName: 'initial-model',
+    };
+    const repairModel = {
+      endpointId: 'repair-verifier', endpointName: 'repair-verifier', modelName: 'repair-model',
+    };
+    const transport = new Error('full repair transport rejection');
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel: initialModel })
+      .mockImplementationOnce(() => {
+        controller.abort(cancellation);
+        return outcome === 'resolve'
+          ? Promise.resolve({ content: strictRepairResponse('late'), usedModel: repairModel })
+          : Promise.reject(transport);
+      });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+    const results: unknown[] = [];
+
+    const failure = await (service as any).generateIndependentVerifier(
+      { ...params, signal: controller.signal },
+      { problemType: 'traditional' },
+      { signal: controller.signal },
+      results,
+      1,
+      contextForManifestRepair(),
+    ).then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toBe(cancellation);
+    expect(results).toHaveLength(1);
+    expect((service as any).activeRoleIdentities.verifier).toEqual(initialModel);
+  });
 });
 
 describe('Task 8 validator-only repair', () => {
@@ -8579,7 +8650,7 @@ describe('Task 8 validator-only repair', () => {
   };
 
   function frozenRepairContext() {
-    const statement = createStatementSnapshot('Every input satisfies n >= 1.');
+    const statement = createStatementSnapshot('Every input satisfies 0 <= n <= 10.');
     return createTestdataPipelineContext({
       runId: 'task-8-validator-only-repair',
       promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
@@ -8587,9 +8658,10 @@ describe('Task 8 validator-only repair', () => {
       spec: makeObservedProblemSpec(statement.normalizedMarkdown, {
         problemKind: 'traditional',
         constraints: [{
-          id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
-          evidence: { quote: 'n >= 1' },
+          id: 'C1', expression: '0 <= n <= 10', machineCheckable: true, scope: 'global',
+          evidence: { quote: '0 <= n <= 10' },
         }],
+        subtasks: [{ id: 1, score: 100, constraintIds: ['C1'] }],
       }),
       risk: {
         tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
@@ -8699,6 +8771,305 @@ describe('Task 8 validator-only repair', () => {
       code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
       retryPolicy: 'switch-model',
     }));
+  });
+
+  it.each([
+    ['rejected call with object reason', 'reject', { kind: 'validator-reject-cancel-object' }],
+    ['resolved call with Error reason', 'resolve', new Error('validator repair resolved cancellation')],
+  ] as const)('validator-only repair cancellation boundary preserves identity for %s', async (
+    _name, outcome, cancellation,
+  ) => {
+    const context = frozenRepairContext();
+    const checkpointVerifier = parseIndependentVerifierBlueprint(
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: ['C1'], invariantIds: [] },
+        { recipes: [{
+          targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+        }] },
+      ),
+      [],
+      { frozenSpec: context.spec, requireValidatorManifest: true },
+    );
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('restored-oracle\0model'),
+        artifacts: hashTestdataRoleIdentity('restored-artifacts\0model'),
+        verifier: hashTestdataRoleIdentity('restored-verifier\0model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: checkpointVerifier,
+      killTargets: [],
+    };
+    const controller = new AbortController();
+    const transport = new Error('validator repair transport rejection');
+    const repairModel = {
+      endpointId: 'late-validator-repair', endpointName: 'late-validator-repair',
+      modelName: 'late-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    const updates: unknown[] = [];
+    let updatesAtRepair = -1;
+    verifier.chat.mockImplementationOnce(() => {
+      updatesAtRepair = updates.length;
+      controller.abort(cancellation);
+      return outcome === 'resolve'
+        ? Promise.resolve({
+          content: '@@@VALIDATOR@@@\nraise SystemExit(1)  # late-validator-repair',
+          usedModel: repairModel,
+        })
+        : Promise.reject(transport);
+    });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [
+            { label: 'formal-1', input: '1' },
+            { label: 'formal-2', input: '2' },
+          ] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: Array<string | { stdin: string }>, callOptions: any) => {
+          if (callOptions?.signal?.aborted) return Promise.reject(callOptions.signal.reason);
+          if (code === checkpointVerifier.validatorCode) {
+            return Promise.resolve(inputs.map(() => detail()));
+          }
+          return Promise.resolve(inputs.map(input => detail({
+            stdout: typeof input === 'string' ? input : input.stdin,
+          })));
+        },
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+
+    const failure = await (service as any).generateWithSandbox({
+      problemTitle: 'validator-only repair cancellation',
+      statementMarkdown: context.statement.normalizedMarkdown,
+      options,
+      checkpoint,
+      signal: controller.signal,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, runner, 1, context.risk, context).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBe(cancellation);
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(updatesAtRepair).toBeGreaterThanOrEqual(0);
+    expect(updates).toHaveLength(updatesAtRepair);
+    expect((service as any).activeRoleIdentities.verifier).toBeUndefined();
+  });
+});
+
+describe('Task 8 restored verifier checkpoint strictness', () => {
+  const statementMarkdown = 'Input one integer n with n >= 1.';
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 1, languages: [],
+  };
+  const risk = {
+    tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+    requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+  };
+
+  function frozenContext() {
+    const statement = createStatementSnapshot(statementMarkdown);
+    return createTestdataPipelineContext({
+      runId: 'task-8-restored-verifier-strictness',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, {
+        problemKind: 'traditional',
+        constraints: [{
+          id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+          evidence: { quote: 'n >= 1' },
+        }],
+      }),
+      risk,
+      roleIdentities: {},
+    });
+  }
+
+  function validCheckpointVerifier(context: ReturnType<typeof frozenContext>) {
+    return parseIndependentVerifierBlueprint(
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: ['C1'], invariantIds: [] },
+        { recipes: [{
+          targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+        }] },
+      ),
+      [],
+      { frozenSpec: context.spec, requireValidatorManifest: true },
+    );
+  }
+
+  async function generateFromVerifierCheckpoint(
+    mutate: (verifier: ReturnType<typeof validCheckpointVerifier>) => unknown,
+    reliabilityMode: 'observe' | 'enforce' = 'observe',
+  ) {
+    const context = frozenContext();
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('restored-oracle\0model'),
+        artifacts: hashTestdataRoleIdentity('restored-artifacts\0model'),
+        verifier: hashTestdataRoleIdentity('restored-verifier\0model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: mutate(validCheckpointVerifier(context)),
+      killTargets: [],
+    };
+    const freshVerifierResponse = makeStrictIndependentVerifierBlueprint(
+      { constraintIds: ['C1'], invariantIds: [] },
+      { recipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+      }] },
+    ).replace('sys.exit(0)', 'sys.exit(0)  # fresh-restored-proof');
+    const verifier = makeRoleClient(
+      'verifier', 'fresh-verifier', 'fresh-model', freshVerifierResponse,
+    );
+    const oracle = makeRoleClient('oracle', 'unused-oracle', 'unused-model');
+    const artifacts = makeRoleClient('artifacts', 'unused-artifacts', 'unused-model');
+    const baseClient = { chat: jest.fn() };
+    let validatorBatch = 0;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: Array<string | { stdin: string }>) => {
+          if (code.includes('sys.exit(0)')) {
+            validatorBatch += 1;
+            return Promise.resolve(inputs.map(() => validatorBatch === 1
+              ? detail()
+              : detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 })));
+          }
+          return Promise.resolve(inputs.map(input => detail({
+            stdout: typeof input === 'string' ? input : input.stdin,
+          })));
+        },
+      ),
+    };
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode,
+      roleClients: { oracle, artifacts, verifier },
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'restored verifier strictness',
+      statementMarkdown,
+      options,
+      checkpoint,
+    }, runner, 1, risk, context);
+
+    return { plan, verifier, oracle, artifacts, baseClient };
+  }
+
+  it.each([
+    ['invalid observe status', (verifier: any) => ({
+      ...verifier, validatorManifestStatus: 'invalid', validatorManifest: undefined,
+    })],
+    ['missing manifest status', (verifier: any) => {
+      const { validatorManifestStatus: _removed, ...rest } = verifier;
+      return rest;
+    }],
+    ['unknown manifest id', (verifier: any) => ({
+      ...verifier,
+      validatorManifest: { constraintIds: ['UNKNOWN'], invariantIds: [] },
+    })],
+    ['duplicate manifest id', (verifier: any) => ({
+      ...verifier,
+      validatorManifest: { constraintIds: ['C1', 'C1'], invariantIds: [] },
+    })],
+    ['incomplete manifest', (verifier: any) => ({
+      ...verifier,
+      validatorManifest: { constraintIds: [], invariantIds: [] },
+    })],
+  ])('%s forces fresh full Independent Verifier generation while reusing safe roles', async (
+    _name, mutate,
+  ) => {
+    const { plan, verifier, oracle, artifacts, baseClient } =
+      await generateFromVerifierCheckpoint(mutate);
+
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat.mock.calls[0][0]).toHaveLength(1);
+    expect(oracle.chat).not.toHaveBeenCalled();
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect(baseClient.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === 'validator.py')?.content)
+      .toContain('fresh-restored-proof');
+  });
+
+  it.each([
+    ['unknown field', (verifier: any) => ({
+      ...verifier,
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'unknown-field',
+      }],
+    })],
+    ['unknown operation', (verifier: any) => ({
+      ...verifier,
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'add-existing-object', operationName: 'unknown-op',
+      }],
+    })],
+    ['unknown construction', (verifier: any) => ({
+      ...verifier,
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'model-chosen-executable-expression', fieldId: 'n',
+      }],
+    })],
+  ])('invalid restored recipe with %s forces fresh full Independent Verifier generation', async (
+    _name, mutate,
+  ) => {
+    const { verifier, oracle, artifacts } = await generateFromVerifierCheckpoint(mutate);
+
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat.mock.calls[0][0]).toHaveLength(1);
+    expect(oracle.chat).not.toHaveBeenCalled();
+    expect(artifacts.chat).not.toHaveBeenCalled();
+  });
+
+  it('observe-to-enforce reuse rejects an invalid observe verifier before materialization', async () => {
+    const { plan, verifier, oracle, artifacts } = await generateFromVerifierCheckpoint(
+      cached => ({
+        ...cached,
+        validatorManifestStatus: 'invalid',
+        validatorManifest: undefined,
+        validatorProbeRecipes: undefined,
+      }),
+      'enforce',
+    );
+
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat.mock.calls[0][0]).toHaveLength(1);
+    expect(oracle.chat).not.toHaveBeenCalled();
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === 'validator.py')?.content)
+      .toContain('fresh-restored-proof');
   });
 });
 
