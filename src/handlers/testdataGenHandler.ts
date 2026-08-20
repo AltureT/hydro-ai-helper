@@ -637,7 +637,7 @@ function createTestdataTelemetrySession(input: {
     statement: input.statement,
     hasCustomChecker: customChecker,
     unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(input.existingConfig),
-    statementTruncated: input.statement.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH,
+    statementTruncated: false,
     directFallbackEnabled: getTestdataDirectFallbackEnabled(),
     confirmDirectFallback: input.options.confirmDirectFallback,
     reliabilityMode,
@@ -665,13 +665,14 @@ function createTestdataTelemetrySession(input: {
 
 function serializeGenerationPlan(plan: GenerationPlan | undefined) {
   if (!plan) return undefined;
-  // Hashes are server-authoritative apply state. They are persisted with the job
-  // but never sent to the browser and are never accepted back from the client.
+  // Hashes/model identity and any future complete spec are server-only. The
+  // browser receives only the bounded ProblemSpec summary declared on GenerationPlan.
   const {
     originalFileHashes: _serverOnlyHashes,
     modelTelemetry: _serverOnlyModelTelemetry,
+    problemSpec: _serverOnlyProblemSpec,
     ...clientPlan
-  } = plan;
+  } = plan as GenerationPlan & { problemSpec?: unknown };
   return clientPlan;
 }
 
@@ -828,6 +829,9 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
         progressWrites = progressWrites
           .then(() => jobModel.updateProgress(job._id, progress))
           .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
+      },
+      onProblemSpecObservation: observation => {
+        telemetrySession?.observeProblemSpec?.(observation);
       },
     });
     await checkpointWrites;
@@ -1052,6 +1056,9 @@ export class TestdataGenGenerateHandler extends Handler {
         onProgress: progress => {
           emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
           progressStream?.writeEvent('progress', progress);
+        },
+        onProblemSpecObservation: observation => {
+          telemetrySession?.observeProblemSpec?.(observation);
         },
       });
       emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));

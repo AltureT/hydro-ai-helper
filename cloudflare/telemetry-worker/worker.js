@@ -200,7 +200,9 @@ const TESTDATA_EVENT_FIELDS = new Set([
   'schemaVersion', 'eventId', 'runId', 'sequence', 'eventType', 'occurredAt', 'pluginVersion',
   'promptVersion', 'generationMode', 'reliabilityMode', 'riskTier', 'problemKind',
   'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
-  'statementLengthBucket', 'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
+  'statementLengthBucket', 'specSchemaVersion', 'specExtractionSucceeded',
+  'specConstraintCount', 'specInvariantCount', 'specUncertaintyCount',
+  'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
   'durationMs', 'tokenCount', 'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated',
   'stressGenerated', 'stressValid', 'stressDroppedInvalid', 'stressUnique', 'stressCompared',
   'stressAgreed', 'templateLanguagesRequested', 'templateLanguagesVerified',
@@ -212,7 +214,7 @@ const TESTDATA_EVENT_FIELDS = new Set([
 const TESTDATA_BOOLEAN_FIELDS = [
   'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
   'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated', 'checkerConfigured',
-  'checkerRead', 'checkerCompiled', 'checkerExecuted',
+  'checkerRead', 'checkerCompiled', 'checkerExecuted', 'specExtractionSucceeded',
 ];
 const TESTDATA_NUMBER_LIMITS = {
   sequence: [1, 1_000_000], attempt: [1, 10], durationMs: [0, 86_400_000],
@@ -221,6 +223,8 @@ const TESTDATA_NUMBER_LIMITS = {
   stressUnique: [0, 1_000_000], stressCompared: [0, 1_000_000],
   stressAgreed: [0, 1_000_000], checkerInfraFailures: [0, 1_000_000],
   editedFileCount: [0, 80],
+  specSchemaVersion: [1, 1], specConstraintCount: [0, 512],
+  specInvariantCount: [0, 256], specUncertaintyCount: [0, 100],
 };
 
 function canonicalTestdataValue(value) {
@@ -312,6 +316,22 @@ export function validateTestdataQualityEventPayload(value) {
   if (value.eventType === 'run_completed' && value.pipelineCompleted === false
     && (value.verified === true || value.wouldBlock === true)) {
     throw new HttpError(400, 'verified/wouldBlock require pipelineCompleted');
+  }
+  const specFields = [
+    value.specSchemaVersion, value.specExtractionSucceeded, value.specConstraintCount,
+    value.specInvariantCount, value.specUncertaintyCount,
+  ];
+  if (specFields.some(item => item !== undefined)) {
+    if (value.eventType !== 'run_completed' || value.specSchemaVersion !== 1
+      || typeof value.specExtractionSucceeded !== 'boolean') {
+      throw new HttpError(400, 'problem spec observation is invalid');
+    }
+    const counts = [value.specConstraintCount, value.specInvariantCount, value.specUncertaintyCount];
+    if (value.specExtractionSucceeded
+      ? counts.some(item => item === undefined)
+      : counts.some(item => item !== undefined)) {
+      throw new HttpError(400, 'problem spec observation counts are invalid');
+    }
   }
   if (value.eventType === 'teacher_outcome' && value.teacherOutcome === undefined) {
     throw new HttpError(400, 'teacherOutcome is required');
@@ -406,6 +426,8 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          instance_id, run_id, completed_event_id, plugin_version, prompt_version, started_at,
          completed_at, generation_mode, reliability_mode, risk_tier, problem_kind,
          has_subtasks, has_custom_checker, has_samples, has_stateful_operations, statement_length_bucket,
+         spec_schema_version, spec_extraction_succeeded, spec_constraint_count,
+         spec_invariant_count, spec_uncertainty_count,
          pipeline_completed, verified, would_block, model_escalated,
          stress_generated, stress_valid, stress_dropped_invalid, stress_unique,
          stress_compared, stress_agreed, template_py_requested, template_py_verified,
@@ -413,7 +435,7 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          template_cc_verified, template_failure_kinds, checker_configured, checker_read,
          checker_compiled, checker_executed, checker_infra_failures, checker_failure_kind,
          model_role, model_identity_hash
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM testdata_event_slots
          WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
@@ -433,6 +455,11 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          has_samples = COALESCE(excluded.has_samples, testdata_runs.has_samples),
          has_stateful_operations = COALESCE(excluded.has_stateful_operations, testdata_runs.has_stateful_operations),
          statement_length_bucket = COALESCE(excluded.statement_length_bucket, testdata_runs.statement_length_bucket),
+         spec_schema_version = excluded.spec_schema_version,
+         spec_extraction_succeeded = excluded.spec_extraction_succeeded,
+         spec_constraint_count = excluded.spec_constraint_count,
+         spec_invariant_count = excluded.spec_invariant_count,
+         spec_uncertainty_count = excluded.spec_uncertainty_count,
          pipeline_completed = excluded.pipeline_completed,
          verified = excluded.verified,
          would_block = excluded.would_block,
@@ -467,6 +494,9 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
       nullableBoolean(event.hasSubtasks), nullableBoolean(event.hasCustomChecker),
       nullableBoolean(event.hasSamples), nullableBoolean(event.hasStatefulOperations),
       event.statementLengthBucket ?? null,
+      nullableNumber(event.specSchemaVersion), nullableBoolean(event.specExtractionSucceeded),
+      nullableNumber(event.specConstraintCount), nullableNumber(event.specInvariantCount),
+      nullableNumber(event.specUncertaintyCount),
       nullableBoolean(event.pipelineCompleted), nullableBoolean(event.verified),
       nullableBoolean(event.wouldBlock), nullableBoolean(event.modelEscalated),
       nullableNumber(event.stressGenerated), nullableNumber(event.stressValid),
@@ -671,6 +701,11 @@ async function handleDashboardTestdataQuality(request, env) {
         COALESCE(SUM(CASE WHEN pipeline_completed = 1 THEN 1 ELSE 0 END), 0) AS pipeline_completed,
         COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
         COALESCE(SUM(CASE WHEN would_block = 1 THEN 1 ELSE 0 END), 0) AS would_block,
+        COALESCE(SUM(CASE WHEN spec_schema_version = 1 THEN 1 ELSE 0 END), 0) AS spec_attempted,
+        COALESCE(SUM(CASE WHEN spec_extraction_succeeded = 1 THEN 1 ELSE 0 END), 0) AS spec_succeeded,
+        COALESCE(SUM(spec_constraint_count), 0) AS spec_constraint_count,
+        COALESCE(SUM(spec_invariant_count), 0) AS spec_invariant_count,
+        COALESCE(SUM(spec_uncertainty_count), 0) AS spec_uncertainty_count,
         COALESCE(SUM(stress_generated), 0) AS stress_generated,
         COALESCE(SUM(stress_valid), 0) AS stress_valid,
         COALESCE(SUM(stress_dropped_invalid), 0) AS stress_dropped_invalid,
@@ -810,6 +845,12 @@ async function handleDashboardTestdataQuality(request, env) {
     failure_artifacts: distribution(rows[4], TESTDATA_ARTIFACTS),
     risk_tiers: distribution(rows[5], TESTDATA_RISK_TIERS),
     model_roles: modelRoles,
+    problem_spec: {
+      extraction_succeeded: testdataRateMetric(totals.spec_succeeded, totals.spec_attempted),
+      constraint_count: Number(totals.spec_constraint_count) || 0,
+      invariant_count: Number(totals.spec_invariant_count) || 0,
+      uncertainty_count: Number(totals.spec_uncertainty_count) || 0,
+    },
     templates,
     checker: {
       configured: testdataRateMetric(totals.checker_configured, totalRuns),

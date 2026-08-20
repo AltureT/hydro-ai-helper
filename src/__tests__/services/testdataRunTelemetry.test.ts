@@ -88,6 +88,11 @@ describe('test-data quality event schema', () => {
       checkerExecuted: false,
       checkerInfraFailures: 1,
       checkerFailureKind: 'infra',
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 12,
+      specInvariantCount: 3,
+      specUncertaintyCount: 1,
     }))).toEqual(expect.objectContaining({ verified: false, wouldBlock: true }));
 
     expect(parseTestdataQualityEvent(baseEvent({
@@ -133,6 +138,10 @@ describe('test-data quality event schema', () => {
     ['riskTier', 'critical'],
     ['stage', 'arbitrary-private-stage'],
     ['failureCode', 'RAW_ERROR_MESSAGE'],
+    ['specSchemaVersion', 2],
+    ['specConstraintCount', 513],
+    ['specInvariantCount', 257],
+    ['specUncertaintyCount', 101],
   ])('rejects invalid bounded field %s', (key, value) => {
     const event = baseEvent({
       eventType: key === 'stage' || key === 'failureCode' ? 'stage_failed' : 'run_completed',
@@ -203,6 +212,23 @@ describe('test-data quality event schema', () => {
       teacherOutcome: 'discarded',
       teacherOutcomeReason: 'weak_coverage',
     })).teacherOutcomeReason).toBe('weak_coverage');
+    expect(() => parseTestdataQualityEvent(baseEvent({
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+    }))).toThrow(/spec/i);
+    expect(() => parseTestdataQualityEvent(baseEvent({
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: false,
+      specConstraintCount: 0,
+    }))).toThrow(/spec/i);
   });
 });
 
@@ -426,6 +452,13 @@ describe('TestdataRunTelemetryService', () => {
     await session.start();
     await session.complete({
       problemType: 'function',
+      specSchemaVersion: 1,
+      problemSpecSummary: {
+        statementHash: 'c'.repeat(64),
+        constraintCount: 12,
+        invariantCount: 3,
+        unresolvedUncertainties: 1,
+      },
       usedModel: 'primary-private → fallback-private',
       modelTelemetry: {
         role: 'fallback',
@@ -468,10 +501,65 @@ describe('TestdataRunTelemetryService', () => {
       templateFailureKinds: ['compile'],
       checkerCompiled: true,
       checkerExecuted: true,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 12,
+      specInvariantCount: 3,
+      specUncertaintyCount: 1,
     }));
+    expect(JSON.stringify(completed)).not.toContain('cccccccccccc');
     expect(JSON.stringify(completed)).not.toContain('fallback-private');
     expect(completed?.modelIdentityHash).toMatch(/^[a-f0-9]{64}$/);
     expect(completed?.modelRole).toBe('fallback');
+  });
+
+  it('reports a failed observe extraction without free text or evidence', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    const session = service.createSession({ runId: RUN_ID });
+    await session.complete({
+      specSchemaVersion: 1,
+      verification: { mode: 'sandbox', verified: true, wouldBlock: false },
+    });
+    expect(payloads[0].events[0]).toEqual(expect.objectContaining({
+      specSchemaVersion: 1,
+      specExtractionSucceeded: false,
+    }));
+    expect(payloads[0].events[0]).not.toHaveProperty('specConstraintCount');
+    expect(JSON.stringify(payloads)).not.toMatch(/quote|expression|uncertainty description/i);
+  });
+
+  it('retains only bounded spec observation fields when the old pipeline later fails', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    const session = service.createSession({ runId: RUN_ID });
+    session.observeProblemSpec({
+      schemaVersion: 1,
+      succeeded: true,
+      constraintCount: 9,
+      invariantCount: 2,
+      uncertaintyCount: 1,
+      quote: 'SECRET_EVIDENCE_QUOTE',
+    } as never);
+    await session.fail(new Error('SECRET_PIPELINE_ERROR'));
+
+    const completed = payloads.flatMap(payload => payload.events).at(-1);
+    expect(completed).toEqual(expect.objectContaining({
+      pipelineCompleted: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 9,
+      specInvariantCount: 2,
+      specUncertaintyCount: 1,
+    }));
+    expect(JSON.stringify(payloads)).not.toContain('SECRET_EVIDENCE_QUOTE');
+    expect(JSON.stringify(payloads)).not.toContain('SECRET_PIPELINE_ERROR');
   });
 
   it('uses the same local HMAC identity for successful and failed runs', async () => {

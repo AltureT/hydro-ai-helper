@@ -52,11 +52,46 @@ const MODEL_ROLES = new Set(['primary', 'fallback']);
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+function boundedProblemSpecObservation(value) {
+    if (value.schemaVersion !== 1 || typeof value.succeeded !== 'boolean')
+        return undefined;
+    const counts = [value.constraintCount, value.invariantCount, value.uncertaintyCount];
+    if (!value.succeeded) {
+        return counts.every(item => item === undefined)
+            ? { schemaVersion: 1, succeeded: false }
+            : undefined;
+    }
+    const limits = [512, 256, 100];
+    if (counts.some((item, index) => (!Number.isSafeInteger(item) || item < 0 || item > limits[index])))
+        return undefined;
+    return {
+        schemaVersion: 1,
+        succeeded: true,
+        constraintCount: value.constraintCount,
+        invariantCount: value.invariantCount,
+        uncertaintyCount: value.uncertaintyCount,
+    };
+}
+function problemSpecEventFields(observation) {
+    if (!observation)
+        return {};
+    return {
+        specSchemaVersion: 1,
+        specExtractionSucceeded: observation.succeeded,
+        ...(observation.succeeded ? {
+            specConstraintCount: observation.constraintCount,
+            specInvariantCount: observation.invariantCount,
+            specUncertaintyCount: observation.uncertaintyCount,
+        } : {}),
+    };
+}
 const EVENT_FIELDS = new Set([
     'schemaVersion', 'eventId', 'runId', 'sequence', 'eventType', 'occurredAt',
     'pluginVersion', 'promptVersion', 'generationMode', 'reliabilityMode', 'riskTier',
     'problemKind', 'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
-    'statementLengthBucket', 'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
+    'statementLengthBucket', 'specSchemaVersion', 'specExtractionSucceeded',
+    'specConstraintCount', 'specInvariantCount', 'specUncertaintyCount',
+    'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
     'durationMs', 'tokenCount', 'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated',
     'stressGenerated', 'stressValid', 'stressDroppedInvalid', 'stressUnique', 'stressCompared',
     'stressAgreed', 'templateLanguagesRequested', 'templateLanguagesVerified',
@@ -68,7 +103,7 @@ const EVENT_FIELDS = new Set([
 const BOOLEAN_FIELDS = [
     'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations', 'pipelineCompleted',
     'verified', 'wouldBlock', 'modelEscalated', 'checkerConfigured', 'checkerRead',
-    'checkerCompiled', 'checkerExecuted',
+    'checkerCompiled', 'checkerExecuted', 'specExtractionSucceeded',
 ];
 const NUMBER_LIMITS = {
     sequence: { min: 1, max: exports.TESTDATA_TEACHER_OUTCOME_SEQUENCE },
@@ -83,6 +118,10 @@ const NUMBER_LIMITS = {
     stressAgreed: { min: 0, max: 1000000 },
     checkerInfraFailures: { min: 0, max: 1000000 },
     editedFileCount: { min: 0, max: 80 },
+    specSchemaVersion: { min: 1, max: 1 },
+    specConstraintCount: { min: 0, max: 512 },
+    specInvariantCount: { min: 0, max: 256 },
+    specUncertaintyCount: { min: 0, max: 100 },
 };
 function assertEnum(value, values, field) {
     if (value !== undefined && (typeof value !== 'string' || !values.has(value))) {
@@ -180,6 +219,24 @@ function parseTestdataQualityEvent(value) {
     if (candidate.eventType === 'run_completed' && candidate.pipelineCompleted === false
         && (candidate.verified === true || candidate.wouldBlock === true)) {
         throw new TypeError('verified/wouldBlock require pipelineCompleted');
+    }
+    const specFields = [
+        candidate.specSchemaVersion, candidate.specExtractionSucceeded, candidate.specConstraintCount,
+        candidate.specInvariantCount, candidate.specUncertaintyCount,
+    ];
+    if (specFields.some(item => item !== undefined)) {
+        if (candidate.eventType !== 'run_completed' || candidate.specSchemaVersion !== 1
+            || typeof candidate.specExtractionSucceeded !== 'boolean') {
+            throw new TypeError('Invalid problem spec observation');
+        }
+        const counts = [
+            candidate.specConstraintCount, candidate.specInvariantCount, candidate.specUncertaintyCount,
+        ];
+        if (candidate.specExtractionSucceeded
+            ? counts.some(item => item === undefined)
+            : counts.some(item => item !== undefined)) {
+            throw new TypeError('Invalid problem spec observation counts');
+        }
     }
     if (candidate.eventType === 'teacher_outcome' && candidate.teacherOutcome === undefined) {
         throw new TypeError('teacher_outcome requires teacherOutcome');
@@ -354,6 +411,13 @@ class TestdataRunTelemetrySession {
         this.sequence = 0;
         this.terminal = false;
     }
+    observeProblemSpec(observation) {
+        if (this.terminal)
+            return;
+        const bounded = boundedProblemSpecObservation(observation);
+        if (bounded)
+            this.problemSpecObservation = bounded;
+    }
     event(eventType, fields = {}) {
         return parseTestdataQualityEvent({
             schemaVersion: exports.TESTDATA_QUALITY_SCHEMA_VERSION,
@@ -427,6 +491,7 @@ class TestdataRunTelemetrySession {
                 verified: false,
                 wouldBlock: false,
                 modelEscalated: (this.currentStage?.attempt || 1) > 1,
+                ...problemSpecEventFields(this.problemSpecObservation),
             }), terminalModel);
         }
         catch {
@@ -448,6 +513,17 @@ class TestdataRunTelemetrySession {
                 ? 'fallback'
                 : 'primary';
             const identity = plan.modelTelemetry?.identity;
+            const planSpecObservation = plan.specSchemaVersion === 1
+                ? boundedProblemSpecObservation({
+                    schemaVersion: 1,
+                    succeeded: !!plan.problemSpecSummary,
+                    ...(plan.problemSpecSummary ? {
+                        constraintCount: plan.problemSpecSummary.constraintCount,
+                        invariantCount: plan.problemSpecSummary.invariantCount,
+                        uncertaintyCount: plan.problemSpecSummary.unresolvedUncertainties,
+                    } : {}),
+                })
+                : undefined;
             await this.service.emit(this.event('run_completed', {
                 generationMode: verification?.mode,
                 reliabilityMode: plan.reliabilityMode || this.context.reliabilityMode,
@@ -458,6 +534,7 @@ class TestdataRunTelemetrySession {
                 verified: verification?.verified === true,
                 wouldBlock: verification?.wouldBlock === true,
                 modelEscalated,
+                ...problemSpecEventFields(planSpecObservation || this.problemSpecObservation),
                 stressGenerated: stress?.generated,
                 stressValid: stress?.generated === undefined
                     ? undefined
