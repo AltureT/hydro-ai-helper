@@ -68,6 +68,33 @@ interface Mutation {
   position: { line: number; token: number };
 }
 
+type StructuralConstructionKind =
+  | 'graph-self-loop'
+  | 'graph-duplicate-edge'
+  | 'graph-disconnected'
+  | 'tree-missing-edge'
+  | 'tree-cycle'
+  | 'dag-cycle';
+
+type OperationConstructionKind =
+  | 'add-existing-object'
+  | 'delete-missing-object'
+  | 'operation-argument-out-of-range';
+
+interface EdgeListLayout {
+  vertexCount: number;
+  edgeCount?: number;
+  domainMin: 0 | 1;
+  edges: Array<[number, number]>;
+  lines: string[];
+}
+
+interface ParsedOperation {
+  name: 'ADD' | 'DEL';
+  arguments: number[];
+  line: number;
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(item => canonicalize(item));
   if (value && typeof value === 'object') {
@@ -359,6 +386,571 @@ function constructSequenceMutation(
   }, replacement) || 'MUTATION_NOT_ISOLATED';
 }
 
+function parseNonNegativeInteger(value: string | undefined): number | undefined {
+  if (!value || !/^(0|[1-9]\d*)$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function structuralPredicate(
+  expression: string,
+  fieldId: string,
+  vertexFieldId: string,
+): { predicate: 'simpleGraph' | 'connected' | 'tree' | 'dag'; domainMin: 0 | 1 }
+  | undefined {
+  const escapedField = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedVertexField = vertexFieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(
+    `^(simpleGraph|connected|tree|dag)\\(${escapedField}, vertices=(0\\.\\.${escapedVertexField}-1|1\\.\\.${escapedVertexField})\\)$`,
+  ).exec(expression);
+  if (!match) return undefined;
+  return {
+    predicate: match[1] as 'simpleGraph' | 'connected' | 'tree' | 'dag',
+    domainMin: match[2].startsWith('0') ? 0 : 1,
+  };
+}
+
+function parseEdgeList(
+  input: string,
+  spec: ProblemSpecV1,
+  target: Target,
+  fieldId: string,
+  requireLegalTreeCount: boolean,
+): EdgeListLayout | ConstraintProbeGap['reasonCode'] {
+  const field = spec.inputFields.find(item => item.id === fieldId);
+  if (!field || (field.type !== 'graph' && field.type !== 'tree')) return 'INVALID_RECIPE';
+  const graphEncoding = /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63})\+1 tokens:1,2$/
+    .exec(field.encoding);
+  const treeEncoding = /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63}) tokens:1,2$/
+    .exec(field.encoding);
+  if ((field.type === 'graph' && !graphEncoding) || (field.type === 'tree' && !treeEncoding)) {
+    return 'UNPARSEABLE_ENCODING';
+  }
+  const edgeCountFieldId = graphEncoding?.[1];
+  const vertexFieldId = treeEncoding?.[1]
+    || field.dependsOn?.find(dependency => dependency !== edgeCountFieldId);
+  if (!vertexFieldId || !field.dependsOn?.includes(vertexFieldId)
+    || (edgeCountFieldId && !field.dependsOn.includes(edgeCountFieldId))) {
+    return 'DEPENDENCY_NOT_RESOLVED';
+  }
+  const vertexField = spec.inputFields.find(item => item.id === vertexFieldId);
+  const vertexLocation = vertexField && parseLocation(vertexField.encoding);
+  if (!vertexField || vertexField.type !== 'integer' || !vertexLocation
+    || vertexLocation.line !== 1 || vertexLocation.token !== 1) {
+    return 'DEPENDENCY_NOT_RESOLVED';
+  }
+  if (!scalarLocationIsUnambiguous(spec, vertexField.id, vertexLocation)) {
+    return 'UNPARSEABLE_ENCODING';
+  }
+  let edgeCountLocation: { line: number; token: number } | undefined;
+  if (edgeCountFieldId) {
+    const edgeCountField = spec.inputFields.find(item => item.id === edgeCountFieldId);
+    edgeCountLocation = edgeCountField && parseLocation(edgeCountField.encoding);
+    if (!edgeCountField || edgeCountField.type !== 'integer' || !edgeCountLocation
+      || edgeCountLocation.line !== 1 || edgeCountLocation.token !== 2) {
+      return 'DEPENDENCY_NOT_RESOLVED';
+    }
+    if (!scalarLocationIsUnambiguous(spec, edgeCountField.id, edgeCountLocation)) {
+      return 'UNPARSEABLE_ENCODING';
+    }
+  }
+  const declaredPredicate = structuralPredicate(target.expression, fieldId, vertexFieldId);
+  if (!declaredPredicate) return 'UNSUPPORTED_TARGET';
+  const lines = input.endsWith('\n') ? input.slice(0, -1).split('\n') : input.split('\n');
+  const header = lines[0] === undefined ? [] : [...lines[0].matchAll(/\S+/g)].map(item => item[0]);
+  if (header.length !== (edgeCountFieldId ? 2 : 1)) return 'MUTATION_NOT_ISOLATED';
+  const vertexCount = parseNonNegativeInteger(header[0]);
+  const edgeCount = edgeCountFieldId ? parseNonNegativeInteger(header[1]) : undefined;
+  if (vertexCount === undefined || vertexCount === 0
+    || (edgeCountFieldId && edgeCount === undefined)) return 'MUTATION_NOT_ISOLATED';
+  const edgeLines = lines.slice(1);
+  if (edgeCount !== undefined && edgeLines.length !== edgeCount) {
+    return 'MUTATION_NOT_ISOLATED';
+  }
+  if (field.type === 'tree' && requireLegalTreeCount && edgeLines.length !== vertexCount - 1) {
+    return 'MUTATION_NOT_ISOLATED';
+  }
+  const maxVertex = declaredPredicate.domainMin === 0 ? vertexCount - 1 : vertexCount;
+  const edges: Array<[number, number]> = [];
+  for (const line of edgeLines) {
+    const tokens = [...line.matchAll(/\S+/g)].map(item => item[0]);
+    if (tokens.length !== 2) return 'MUTATION_NOT_ISOLATED';
+    const left = /^-?(0|[1-9]\d*)$/.test(tokens[0]) ? Number(tokens[0]) : NaN;
+    const right = /^-?(0|[1-9]\d*)$/.test(tokens[1]) ? Number(tokens[1]) : NaN;
+    if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)
+      || left < declaredPredicate.domainMin || right < declaredPredicate.domainMin
+      || left > maxVertex || right > maxVertex) return 'MUTATION_NOT_ISOLATED';
+    edges.push([left, right]);
+  }
+  return {
+    vertexCount,
+    ...(edgeCount === undefined ? {} : { edgeCount }),
+    domainMin: declaredPredicate.domainMin,
+    edges,
+    lines,
+  };
+}
+
+function undirectedEdgeKey(edge: [number, number]): string {
+  return edge[0] < edge[1] ? `${edge[0]}:${edge[1]}` : `${edge[1]}:${edge[0]}`;
+}
+
+function hasSelfLoop(edges: readonly [number, number][]): boolean {
+  return edges.some(([left, right]) => left === right);
+}
+
+function hasDuplicateEdge(edges: readonly [number, number][], directed: boolean): boolean {
+  const keys = edges.map(edge => directed ? `${edge[0]}:${edge[1]}` : undirectedEdgeKey(edge));
+  return new Set(keys).size !== keys.length;
+}
+
+function isConnected(layout: EdgeListLayout): boolean {
+  const start = layout.domainMin;
+  const seen = new Set<number>([start]);
+  const pending: number[] = [start];
+  while (pending.length > 0) {
+    const vertex = pending.pop() as number;
+    for (const [left, right] of layout.edges) {
+      const next = left === vertex ? right : right === vertex ? left : undefined;
+      if (next !== undefined && !seen.has(next)) {
+        seen.add(next);
+        pending.push(next);
+      }
+    }
+  }
+  return seen.size === layout.vertexCount;
+}
+
+function hasUndirectedCycle(layout: EdgeListLayout): boolean {
+  const parent = new Map<number, number>();
+  const find = (vertex: number): number => {
+    const current = parent.get(vertex);
+    if (current === undefined) {
+      parent.set(vertex, vertex);
+      return vertex;
+    }
+    if (current === vertex) return vertex;
+    const root = find(current);
+    parent.set(vertex, root);
+    return root;
+  };
+  for (const [left, right] of layout.edges) {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot === rightRoot) return true;
+    parent.set(leftRoot, rightRoot);
+  }
+  return false;
+}
+
+function hasDirectedCycle(layout: EdgeListLayout): boolean {
+  const adjacency = new Map<number, number[]>();
+  for (const [left, right] of layout.edges) {
+    const neighbours = adjacency.get(left) || [];
+    neighbours.push(right);
+    adjacency.set(left, neighbours);
+  }
+  const visiting = new Set<number>();
+  const visited = new Set<number>();
+  const visit = (vertex: number): boolean => {
+    if (visiting.has(vertex)) return true;
+    if (visited.has(vertex)) return false;
+    visiting.add(vertex);
+    for (const neighbour of adjacency.get(vertex) || []) {
+      if (visit(neighbour)) return true;
+    }
+    visiting.delete(vertex);
+    visited.add(vertex);
+    return false;
+  };
+  for (let offset = 0; offset < layout.vertexCount; offset++) {
+    if (visit(layout.domainMin + offset)) return true;
+  }
+  return false;
+}
+
+function isSimpleUndirected(layout: EdgeListLayout): boolean {
+  return !hasSelfLoop(layout.edges) && !hasDuplicateEdge(layout.edges, false);
+}
+
+function isTree(layout: EdgeListLayout): boolean {
+  return layout.edges.length === layout.vertexCount - 1
+    && isSimpleUndirected(layout)
+    && isConnected(layout)
+    && !hasUndirectedCycle(layout);
+}
+
+function replaceEdgeLine(
+  input: string,
+  line: number,
+  replacement: [number, number],
+): Mutation | undefined {
+  const first = replaceToken(input, { line, token: 1 }, String(replacement[0]));
+  const second = first && replaceToken(first.input, { line, token: 2 }, String(replacement[1]));
+  return second && { input: second.input, position: { line, token: 1 } };
+}
+
+function removeLine(input: string, line: number): Mutation | undefined {
+  const lines = input.split('\n');
+  if (line < 1 || line >= lines.length) return undefined;
+  lines.splice(line - 1, 1);
+  return { input: lines.join('\n'), position: { line, token: 1 } };
+}
+
+function appendEdgeLine(input: string, edge: [number, number], line: number): Mutation {
+  const lines = input.split('\n');
+  lines.splice(lines.length - 1, 0, `${edge[0]} ${edge[1]}`);
+  return { input: lines.join('\n'), position: { line, token: 1 } };
+}
+
+function constructStructuralMutation(
+  input: string,
+  spec: ProblemSpecV1,
+  target: Target,
+  fieldId: string,
+  kind: StructuralConstructionKind,
+): Mutation | ConstraintProbeGap['reasonCode'] {
+  const source = parseEdgeList(input, spec, target, fieldId, true);
+  if (typeof source === 'string') return source;
+  const expectedPredicate = kind === 'graph-self-loop' || kind === 'graph-duplicate-edge'
+    ? 'simpleGraph'
+    : kind === 'graph-disconnected' ? 'connected'
+      : kind === 'tree-missing-edge' || kind === 'tree-cycle' ? 'tree' : 'dag';
+  const field = spec.inputFields.find(item => item.id === fieldId) as ProblemSpecV1['inputFields'][number];
+  const vertexFieldId = field.type === 'tree'
+    ? /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63}) tokens:1,2$/.exec(field.encoding)?.[1]
+    : field.dependsOn?.find(dependency => dependency
+      !== /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63})\+1 tokens:1,2$/
+        .exec(field.encoding)?.[1]);
+  const declared = vertexFieldId
+    && structuralPredicate(target.expression, fieldId, vertexFieldId);
+  if (!declared || declared.predicate !== expectedPredicate) return 'UNSUPPORTED_TARGET';
+  const sourceValid = expectedPredicate === 'simpleGraph' ? isSimpleUndirected(source)
+    : expectedPredicate === 'connected' ? isSimpleUndirected(source) && isConnected(source)
+      : expectedPredicate === 'tree' ? isTree(source)
+        : !hasSelfLoop(source.edges) && !hasDuplicateEdge(source.edges, true)
+          && !hasDirectedCycle(source);
+  if (!sourceValid) return 'MUTATION_NOT_ISOLATED';
+
+  let mutation: Mutation | undefined;
+  if (kind === 'graph-self-loop') {
+    const first = source.edges[0];
+    mutation = first && replaceToken(input, { line: 2, token: 2 }, String(first[0]));
+  } else if (kind === 'graph-duplicate-edge') {
+    mutation = source.edges.length >= 2 ? replaceEdgeLine(input, 3, source.edges[0]) : undefined;
+  } else if (kind === 'graph-disconnected') {
+    const removed = removeLine(input, source.lines.length);
+    const decremented = source.edgeCount !== undefined
+      && replaceToken(input, { line: 1, token: 2 }, String(source.edgeCount - 1));
+    mutation = removed && decremented && removeLine(decremented.input, source.lines.length);
+  } else if (kind === 'tree-missing-edge') {
+    mutation = removeLine(input, source.lines.length);
+  } else if (kind === 'tree-cycle') {
+    const lastEdge = source.edges[source.edges.length - 1];
+    mutation = lastEdge && replaceEdgeLine(
+      input,
+      source.lines.length,
+      [lastEdge[0], source.domainMin],
+    );
+  } else {
+    const lastVertex = source.domainMin + source.vertexCount - 1;
+    const incremented = source.edgeCount !== undefined
+      && replaceToken(input, { line: 1, token: 2 }, String(source.edgeCount + 1));
+    mutation = incremented
+      ? appendEdgeLine(incremented.input, [lastVertex, source.domainMin], source.lines.length + 1)
+      : undefined;
+  }
+  if (!mutation) return 'MUTATION_NOT_ISOLATED';
+  const mutated = parseEdgeList(
+    mutation.input,
+    spec,
+    target,
+    fieldId,
+    kind !== 'tree-missing-edge',
+  );
+  if (typeof mutated === 'string') return 'MUTATION_NOT_ISOLATED';
+  const isolated = kind === 'graph-self-loop'
+    ? hasSelfLoop(mutated.edges) && !hasDuplicateEdge(mutated.edges, false)
+    : kind === 'graph-duplicate-edge'
+      ? !hasSelfLoop(mutated.edges) && hasDuplicateEdge(mutated.edges, false)
+      : kind === 'graph-disconnected'
+        ? isSimpleUndirected(mutated) && !isConnected(mutated)
+        : kind === 'tree-missing-edge'
+          ? mutated.edges.length === mutated.vertexCount - 2
+            && isSimpleUndirected(mutated) && !hasUndirectedCycle(mutated)
+          : kind === 'tree-cycle'
+            ? mutated.edges.length === mutated.vertexCount - 1
+              && isSimpleUndirected(mutated) && hasUndirectedCycle(mutated)
+            : !hasSelfLoop(mutated.edges) && !hasDuplicateEdge(mutated.edges, true)
+              && hasDirectedCycle(mutated);
+  return isolated ? mutation : 'MUTATION_NOT_ISOLATED';
+}
+
+function findArgumentBounds(
+  spec: ProblemSpecV1,
+  fieldId: string,
+): { min?: number; max?: number } | undefined {
+  for (const constraint of spec.constraints) {
+    const bounds = integerBounds(constraint.expression, fieldId);
+    if (bounds.min !== undefined || bounds.max !== undefined) return bounds;
+  }
+  return undefined;
+}
+
+function parseOperations(
+  input: string,
+  spec: ProblemSpecV1,
+): ParsedOperation[] | ConstraintProbeGap['reasonCode'] {
+  const operationFields = spec.inputFields.filter(field => field.type === 'operations');
+  if (operationFields.length !== 1) return 'UNPARSEABLE_ENCODING';
+  const operationField = operationFields[0];
+  const encoding = /^lines:2\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63})\+1 operations$/
+    .exec(operationField.encoding);
+  if (!encoding) return 'UNPARSEABLE_ENCODING';
+  const countFieldId = encoding[1];
+  if (!operationField.dependsOn?.includes(countFieldId)) return 'DEPENDENCY_NOT_RESOLVED';
+  const countField = spec.inputFields.find(field => field.id === countFieldId);
+  const countLocation = countField && parseLocation(countField.encoding);
+  if (!countField || countField.type !== 'integer' || !countLocation
+    || countLocation.line !== 1 || countLocation.token !== 1) {
+    return 'DEPENDENCY_NOT_RESOLVED';
+  }
+  if (!scalarLocationIsUnambiguous(spec, countField.id, countLocation)) {
+    return 'UNPARSEABLE_ENCODING';
+  }
+  const definitions = spec.operations || [];
+  if (new Set(definitions.map(operation => operation.name)).size !== definitions.length) {
+    return 'UNPARSEABLE_ENCODING';
+  }
+  const byName = new Map(definitions.map(operation => [operation.name, operation]));
+  const lines = input.endsWith('\n') ? input.slice(0, -1).split('\n') : input.split('\n');
+  const header = lines[0] === undefined ? [] : [...lines[0].matchAll(/\S+/g)].map(item => item[0]);
+  const count = header.length === 1 ? parseNonNegativeInteger(header[0]) : undefined;
+  if (count === undefined || lines.length !== count + 1) return 'MUTATION_NOT_ISOLATED';
+  const parsed: ParsedOperation[] = [];
+  for (let index = 1; index < lines.length; index++) {
+    const tokens = [...lines[index].matchAll(/\S+/g)].map(item => item[0]);
+    const definition = byName.get(tokens[0]);
+    if (!definition || (definition.name !== 'ADD' && definition.name !== 'DEL')
+      || tokens.length !== definition.arguments.length + 1) return 'MUTATION_NOT_ISOLATED';
+    const argumentsList = tokens.slice(1).map(token => /^-?(0|[1-9]\d*)$/.test(token)
+      ? Number(token) : NaN);
+    if (argumentsList.some(value => !Number.isSafeInteger(value))) {
+      return 'MUTATION_NOT_ISOLATED';
+    }
+    parsed.push({
+      name: definition.name,
+      arguments: argumentsList,
+      line: index + 1,
+    });
+  }
+  return parsed;
+}
+
+function operationArgumentIndex(
+  spec: ProblemSpecV1,
+  operationName: string,
+  fieldId: string,
+): number | undefined {
+  const field = spec.inputFields.find(item => item.id === fieldId);
+  if (!field || field.type !== 'integer' || field.encoding !== `operation-argument:${fieldId}`) {
+    return undefined;
+  }
+  const operation = (spec.operations || []).find(item => item.name === operationName);
+  const index = operation?.arguments.indexOf(fieldId) ?? -1;
+  return index >= 0 ? index : undefined;
+}
+
+function operationSupportsSetPresence(
+  spec: ProblemSpecV1,
+  operationName: 'ADD' | 'DEL',
+  fieldId: string,
+): boolean {
+  const operation = (spec.operations || []).find(item => item.name === operationName);
+  if (!operation || !operation.arguments.includes(fieldId)) return false;
+  const expectedPrecondition = operationName === 'ADD'
+    ? `absent(${fieldId})` : `present(${fieldId})`;
+  const expectedEffect = operationName === 'ADD' ? `add(${fieldId})` : `delete(${fieldId})`;
+  return operation.preconditions.length === 1
+    && operation.preconditions[0] === expectedPrecondition
+    && operation.effects.length === 1
+    && operation.effects[0] === expectedEffect;
+}
+
+function statefulViolations(
+  spec: ProblemSpecV1,
+  operations: readonly ParsedOperation[],
+  fieldId: string,
+): Array<{
+  line: number;
+  name: 'ADD' | 'DEL';
+}> | undefined {
+  const present = new Set<number>();
+  const violations: Array<{ line: number; name: 'ADD' | 'DEL' }> = [];
+  for (const operation of operations) {
+    const argumentIndex = operationArgumentIndex(spec, operation.name, fieldId);
+    if (argumentIndex === undefined || !operationSupportsSetPresence(spec, operation.name, fieldId)) {
+      return undefined;
+    }
+    const value = operation.arguments[argumentIndex];
+    if (operation.name === 'ADD') {
+      if (present.has(value)) violations.push({ line: operation.line, name: operation.name });
+      else present.add(value);
+    } else if (!present.has(value)) {
+      violations.push({ line: operation.line, name: operation.name });
+    } else {
+      present.delete(value);
+    }
+  }
+  return violations;
+}
+
+function presentBefore(
+  spec: ProblemSpecV1,
+  operations: readonly ParsedOperation[],
+  beforeIndex: number,
+  fieldId: string,
+): Set<number> | undefined {
+  const present = new Set<number>();
+  for (let index = 0; index < beforeIndex; index++) {
+    const operation = operations[index];
+    const argumentIndex = operationArgumentIndex(spec, operation.name, fieldId);
+    if (argumentIndex === undefined || !operationSupportsSetPresence(spec, operation.name, fieldId)) {
+      return undefined;
+    }
+    const value = operation.arguments[argumentIndex];
+    if (operation.name === 'ADD') {
+      if (present.has(value)) return undefined;
+      present.add(value);
+    } else {
+      if (!present.has(value)) return undefined;
+      present.delete(value);
+    }
+  }
+  return present;
+}
+
+function constructOperationMutation(
+  input: string,
+  spec: ProblemSpecV1,
+  target: Target,
+  fieldId: string,
+  operationName: string | undefined,
+  kind: OperationConstructionKind,
+): Mutation | ConstraintProbeGap['reasonCode'] {
+  const operations = parseOperations(input, spec);
+  if (typeof operations === 'string') return operations;
+  const selectedName = operationName
+    || (kind === 'delete-missing-object' ? 'DEL' : 'ADD');
+  if (selectedName !== 'ADD' && selectedName !== 'DEL') return 'INVALID_RECIPE';
+  const argumentIndex = operationArgumentIndex(spec, selectedName, fieldId);
+  if (argumentIndex === undefined) return 'INVALID_RECIPE';
+  const bounds = findArgumentBounds(spec, fieldId);
+  if (!bounds) return 'UNSUPPORTED_TARGET';
+  const inBounds = (value: number): boolean => (
+    (bounds.min === undefined || value >= bounds.min)
+    && (bounds.max === undefined || value <= bounds.max)
+  );
+  if (operations.some(operation => {
+    const index = operationArgumentIndex(spec, operation.name, fieldId);
+    return index === undefined || !inBounds(operation.arguments[index]);
+  })) {
+    return 'MUTATION_NOT_ISOLATED';
+  }
+  let targetIndex = -1;
+  let replacement: number | undefined;
+  if (kind === 'add-existing-object') {
+    if (selectedName !== 'ADD'
+      || target.expression !== `${selectedName} requires absent(${fieldId})`) {
+      return 'UNSUPPORTED_TARGET';
+    }
+    const sourceViolations = statefulViolations(spec, operations, fieldId);
+    if (!sourceViolations || sourceViolations.length !== 0) return 'MUTATION_NOT_ISOLATED';
+    for (let index = 0; index < operations.length; index++) {
+      if (operations[index].name !== selectedName) continue;
+      const before = presentBefore(spec, operations, index, fieldId);
+      const existing = before && [...before].sort((left, right) => left - right)[0];
+      if (existing !== undefined && inBounds(existing)) {
+        targetIndex = index;
+        replacement = existing;
+        break;
+      }
+    }
+  } else if (kind === 'delete-missing-object') {
+    if (selectedName !== 'DEL'
+      || target.expression !== `${selectedName} requires present(${fieldId})`) {
+      return 'UNSUPPORTED_TARGET';
+    }
+    const sourceViolations = statefulViolations(spec, operations, fieldId);
+    if (!sourceViolations || sourceViolations.length !== 0) return 'MUTATION_NOT_ISOLATED';
+    for (let index = 0; index < operations.length; index++) {
+      if (operations[index].name !== selectedName) continue;
+      const before = presentBefore(spec, operations, index, fieldId);
+      if (!before) continue;
+      const original = operations[index].arguments[argumentIndex];
+      const candidates = [original + 1, bounds.min, bounds.max]
+        .filter((value): value is number => Number.isSafeInteger(value));
+      const missing = candidates.find(value => inBounds(value) && !before.has(value));
+      if (missing !== undefined) {
+        targetIndex = index;
+        replacement = missing;
+        break;
+      }
+    }
+  } else {
+    const targetBounds = integerBounds(target.expression, fieldId);
+    if (targetBounds.max === undefined && targetBounds.min === undefined) {
+      return 'UNSUPPORTED_TARGET';
+    }
+    targetIndex = operations.findIndex(operation => operation.name === selectedName);
+    if (targetIndex >= 0) {
+      replacement = targetBounds.max !== undefined
+        ? targetBounds.max + 1 : (targetBounds.min as number) - 1;
+      if (!Number.isSafeInteger(replacement)) return 'UNSUPPORTED_TARGET';
+    }
+  }
+  if (targetIndex < 0 || replacement === undefined) return 'MUTATION_NOT_ISOLATED';
+  const selected = operations[targetIndex];
+  const mutation = replaceToken(
+    input,
+    { line: selected.line, token: argumentIndex + 2 },
+    String(replacement),
+  );
+  if (!mutation) return 'MUTATION_NOT_ISOLATED';
+  const mutatedOperations = parseOperations(mutation.input, spec);
+  if (typeof mutatedOperations === 'string') return 'MUTATION_NOT_ISOLATED';
+  if (kind === 'operation-argument-out-of-range') {
+    const mutatedValue = mutatedOperations[targetIndex]?.arguments[argumentIndex];
+    const targetBounds = integerBounds(target.expression, fieldId);
+    const violatesTarget = (targetBounds.min !== undefined && mutatedValue < targetBounds.min)
+      || (targetBounds.max !== undefined && mutatedValue > targetBounds.max);
+    return violatesTarget ? mutation : 'MUTATION_NOT_ISOLATED';
+  }
+  const violations = statefulViolations(spec, mutatedOperations, fieldId);
+  return violations && violations.length === 1
+    && violations[0].line === selected.line
+    && violations[0].name === selectedName
+    ? mutation : 'MUTATION_NOT_ISOLATED';
+}
+
+function constructSubtaskUpperBoundMutation(
+  input: string,
+  spec: ProblemSpecV1,
+  target: Target,
+  fieldId: string,
+  encoding: string,
+): Mutation | ConstraintProbeGap['reasonCode'] {
+  if (target.subtaskId === undefined) return 'UNSUPPORTED_TARGET';
+  return constructIntegerMutation(
+    input,
+    spec,
+    target,
+    fieldId,
+    encoding,
+    'integer-above-max',
+  );
+}
+
 function constructStringMutation(
   input: string,
   spec: ProblemSpecV1,
@@ -484,6 +1076,40 @@ export function buildConstraintProbes(
           field.encoding,
         )
         : 'INVALID_RECIPE';
+    } else if (recipe.constructionKind === 'graph-self-loop'
+      || recipe.constructionKind === 'graph-duplicate-edge'
+      || recipe.constructionKind === 'graph-disconnected'
+      || recipe.constructionKind === 'tree-missing-edge'
+      || recipe.constructionKind === 'tree-cycle'
+      || recipe.constructionKind === 'dag-cycle') {
+      mutation = constructStructuralMutation(
+        normalizedInput,
+        input.spec,
+        target,
+        field.id,
+        recipe.constructionKind,
+      );
+    } else if (recipe.constructionKind === 'add-existing-object'
+      || recipe.constructionKind === 'delete-missing-object'
+      || recipe.constructionKind === 'operation-argument-out-of-range') {
+      mutation = constructOperationMutation(
+        normalizedInput,
+        input.spec,
+        target,
+        field.id,
+        recipe.operationName,
+        recipe.constructionKind,
+      );
+    } else if (recipe.constructionKind === 'subtask-upper-bound') {
+      mutation = field.type === 'integer'
+        ? constructSubtaskUpperBoundMutation(
+          normalizedInput,
+          input.spec,
+          target,
+          field.id,
+          field.encoding,
+        )
+        : 'INVALID_RECIPE';
     } else {
       mutation = 'UNSUPPORTED_TARGET';
     }
@@ -515,5 +1141,76 @@ export function buildConstraintProbes(
     });
   }
 
-  return { probes, gaps, legalSeedHash, effectiveSeed };
+  const seenProbeIds = new Set<string>();
+  const deduplicatedProbes = probes.filter(probe => {
+    if (seenProbeIds.has(probe.id)) return false;
+    seenProbeIds.add(probe.id);
+    return true;
+  });
+  const publicGapKey = (item: ConstraintProbeGap): string => canonicalJson({
+    targetId: item.targetId,
+    targetKind: item.targetKind,
+    subtaskId: item.subtaskId,
+    reasonCode: item.reasonCode,
+  });
+  const seenGapKeys = new Set<string>();
+  const deduplicatedGaps = gaps.filter(item => {
+    const key = publicGapKey(item);
+    if (seenGapKeys.has(key)) return false;
+    seenGapKeys.add(key);
+    return true;
+  });
+  const coveredTargets = new Set([
+    ...deduplicatedProbes.map(probe => canonicalJson({
+      targetId: probe.targetId,
+      targetKind: probe.targetKind,
+      subtaskId: probe.subtaskId,
+    })),
+    ...deduplicatedGaps.map(item => canonicalJson({
+      targetId: item.targetId,
+      targetKind: item.targetKind,
+      subtaskId: item.subtaskId,
+    })),
+  ]);
+  const machineTargets: Target[] = [
+    ...input.spec.constraints
+      .filter(constraint => constraint.machineCheckable)
+      .map(constraint => ({
+        id: constraint.id,
+        kind: 'constraint' as const,
+        expression: constraint.expression,
+        ...(constraint.scope === 'global'
+          ? {} : { subtaskId: constraint.scope.subtaskId }),
+      })),
+    ...input.spec.invariants
+      .filter(invariant => invariant.machineCheckable)
+      .map(invariant => ({
+        id: invariant.id,
+        kind: 'invariant' as const,
+        expression: invariant.expression,
+      })),
+  ];
+  for (const target of machineTargets) {
+    const targetKey = canonicalJson({
+      targetId: target.id,
+      targetKind: target.kind,
+      subtaskId: target.subtaskId,
+    });
+    if (!coveredTargets.has(targetKey)) {
+      const uncovered = gap(target, 'UNSUPPORTED_TARGET');
+      const key = publicGapKey(uncovered);
+      if (!seenGapKeys.has(key)) {
+        seenGapKeys.add(key);
+        deduplicatedGaps.push(uncovered);
+      }
+      coveredTargets.add(targetKey);
+    }
+  }
+
+  return {
+    probes: deduplicatedProbes,
+    gaps: deduplicatedGaps,
+    legalSeedHash,
+    effectiveSeed,
+  };
 }

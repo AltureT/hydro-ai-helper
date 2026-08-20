@@ -3,7 +3,10 @@ import {
   type LegalConstraintProbeSeed,
 } from '../../services/testdata/constraintProbes';
 import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
-import type { ValidatorProbeRecipe } from '../../services/testdata/validatorManifest';
+import {
+  VALIDATOR_PROBE_CONSTRUCTION_KINDS,
+  type ValidatorProbeRecipe,
+} from '../../services/testdata/validatorManifest';
 
 type ScalarSequenceConstructionKind =
   | 'integer-below-min'
@@ -12,6 +15,19 @@ type ScalarSequenceConstructionKind =
   | 'duplicate-element'
   | 'permutation-duplicate-or-missing'
   | 'illegal-string-character';
+
+type StructuralConstructionKind =
+  | 'graph-self-loop'
+  | 'graph-duplicate-edge'
+  | 'graph-disconnected'
+  | 'tree-missing-edge'
+  | 'tree-cycle'
+  | 'dag-cycle';
+
+type OperationConstructionKind =
+  | 'add-existing-object'
+  | 'delete-missing-object'
+  | 'operation-argument-out-of-range';
 
 function integerSpec(scope: 'global' | { subtaskId: number } = 'global'): ProblemSpecV1 {
   return {
@@ -279,6 +295,383 @@ describe('scalar sequence and string constructions', () => {
       input: illegal,
     })]);
     expect(result.gaps).toEqual([]);
+  });
+});
+
+function structuralSpec(constructionKind: StructuralConstructionKind): {
+  spec: ProblemSpecV1;
+  recipe: ValidatorProbeRecipe;
+} {
+  const isTree = constructionKind === 'tree-missing-edge'
+    || constructionKind === 'tree-cycle';
+  const invariantKind = constructionKind.startsWith('graph-')
+    ? constructionKind === 'graph-disconnected' ? 'connected' : 'simple-graph'
+    : isTree ? 'tree' : 'dag';
+  const expression = `${invariantKind === 'simple-graph' ? 'simpleGraph' : invariantKind}`
+    + '(edges, vertices=1..n)';
+  return {
+    spec: {
+      schemaVersion: 1,
+      statementHash: '1'.repeat(64),
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [
+        { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+        ...(isTree ? [] : [{
+          id: 'm', name: 'm', type: 'integer' as const, encoding: 'line:1 token:2',
+        }]),
+        {
+          id: 'edges',
+          name: 'edges',
+          type: isTree ? 'tree' : 'graph',
+          encoding: isTree
+            ? 'lines:2..n tokens:1,2'
+            : 'lines:2..m+1 tokens:1,2',
+          dependsOn: isTree ? ['n'] : ['n', 'm'],
+        },
+      ],
+      constraints: [],
+      invariants: [{
+        id: 'I1',
+        kind: invariantKind,
+        expression,
+        machineCheckable: true,
+        evidence: { quote: expression },
+      }],
+      outputPolicy: { kind: 'exact' },
+      subtasks: [],
+      uncertainties: [],
+    },
+    recipe: { targetId: 'I1', constructionKind, fieldId: 'edges' },
+  };
+}
+
+function buildStructuralFixture(constructionKind: StructuralConstructionKind, legal: string) {
+  const { spec, recipe } = structuralSpec(constructionKind);
+  return buildConstraintProbes({
+    spec,
+    statementHash: '1'.repeat(64),
+    specHash: '2'.repeat(64),
+    seeds: [{ source: 'formal', index: 1, input: legal }],
+    recipes: [recipe],
+  });
+}
+
+describe('structural constructions', () => {
+  it.each<[StructuralConstructionKind, string, string]>([
+    ['graph-self-loop', '3 2\n1 2\n2 3\n', '3 2\n1 1\n2 3\n'],
+    ['graph-duplicate-edge', '3 2\n1 2\n2 3\n', '3 2\n1 2\n1 2\n'],
+    ['graph-disconnected', '4 3\n1 2\n2 3\n3 4\n', '4 2\n1 2\n2 3\n'],
+    ['tree-missing-edge', '4\n1 2\n2 3\n3 4\n', '4\n1 2\n2 3\n'],
+    ['tree-cycle', '4\n1 2\n2 3\n3 4\n', '4\n1 2\n2 3\n3 1\n'],
+    ['dag-cycle', '3 2\n1 2\n2 3\n', '3 3\n1 2\n2 3\n3 1\n'],
+  ])('%s mutates a canonical edge list', (constructionKind, legal, illegal) => {
+    const result = buildStructuralFixture(constructionKind, legal);
+
+    expect(result.probes[0]).toEqual(expect.objectContaining({
+      constructionKind,
+      input: illegal,
+    }));
+    expect(result.gaps).toEqual([]);
+  });
+
+  it('preserves a declared zero-based vertex domain', () => {
+    const { spec, recipe } = structuralSpec('dag-cycle');
+    spec.invariants[0].expression = 'dag(edges, vertices=0..n-1)';
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '3 2\n0 1\n1 2\n' }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      constructionKind: 'dag-cycle',
+      input: '3 3\n0 1\n1 2\n2 0\n',
+    })]);
+    expect(result.gaps).toEqual([]);
+  });
+});
+
+function operationSpec(constructionKind: OperationConstructionKind): {
+  spec: ProblemSpecV1;
+  recipe: ValidatorProbeRecipe;
+} {
+  const operationName = constructionKind === 'delete-missing-object' ? 'DEL' : 'ADD';
+  const isRange = constructionKind === 'operation-argument-out-of-range';
+  const expression = isRange
+    ? '1 <= x <= 10'
+    : `${operationName} requires ${operationName === 'ADD' ? 'absent' : 'present'}(x)`;
+  return {
+    spec: {
+      schemaVersion: 1,
+      statementHash: '1'.repeat(64),
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [
+        { id: 'q', name: 'q', type: 'integer', encoding: 'line:1 token:1' },
+        { id: 'x', name: 'x', type: 'integer', encoding: 'operation-argument:x' },
+        {
+          id: 'ops',
+          name: 'operations',
+          type: 'operations',
+          encoding: 'lines:2..q+1 operations',
+          dependsOn: ['q'],
+        },
+      ],
+      constraints: [{
+        id: isRange ? 'C1' : 'C_RANGE',
+        expression: '1 <= x <= 10',
+        machineCheckable: isRange,
+        scope: 'global',
+        evidence: { quote: '1 <= x <= 10' },
+      }],
+      invariants: isRange ? [] : [{
+        id: 'I1',
+        kind: 'stateful-precondition',
+        expression,
+        machineCheckable: true,
+        evidence: { quote: expression },
+      }],
+      outputPolicy: { kind: 'exact' },
+      operations: [
+        {
+          name: 'ADD', arguments: ['x'], preconditions: ['absent(x)'], effects: ['add(x)'],
+        },
+        {
+          name: 'DEL', arguments: ['x'], preconditions: ['present(x)'], effects: ['delete(x)'],
+        },
+      ],
+      subtasks: [],
+      uncertainties: [],
+    },
+    recipe: {
+      targetId: isRange ? 'C1' : 'I1',
+      constructionKind,
+      fieldId: 'x',
+      operationName,
+    },
+  };
+}
+
+function buildOperationFixture(constructionKind: OperationConstructionKind, legal: string) {
+  const { spec, recipe } = operationSpec(constructionKind);
+  return buildConstraintProbes({
+    spec,
+    statementHash: '1'.repeat(64),
+    specHash: '2'.repeat(64),
+    seeds: [{ source: 'formal', index: 1, input: legal }],
+    recipes: [recipe],
+  });
+}
+
+function buildScopedUpperBoundFixture() {
+  return buildConstraintProbes({
+    spec: integerSpec({ subtaskId: 1 }),
+    statementHash: '1'.repeat(64),
+    specHash: '2'.repeat(64),
+    seeds: [
+      { source: 'formal', index: 1, subtaskId: 2, input: '2\n' },
+      { source: 'sample', index: 'sample-a', subtaskId: 1, input: '3\n' },
+      { source: 'formal', index: 9, subtaskId: 1, input: '5\n' },
+    ],
+    recipes: [{
+      targetId: 'C1', constructionKind: 'subtask-upper-bound', fieldId: 'n',
+    }],
+  });
+}
+
+describe('stateful operation and scoped constructions', () => {
+  it.each<[OperationConstructionKind, string, string]>([
+    ['add-existing-object', '3\nADD 1\nADD 2\nDEL 1\n', '3\nADD 1\nADD 1\nDEL 1\n'],
+    ['delete-missing-object', '2\nADD 1\nDEL 1\n', '2\nADD 1\nDEL 2\n'],
+    ['operation-argument-out-of-range', '2\nADD 1\nDEL 1\n', '2\nADD 11\nDEL 1\n'],
+  ])('%s mutates a declared operation sequence', (constructionKind, legal, illegal) => {
+    const result = buildOperationFixture(constructionKind, legal);
+
+    expect(result.probes[0]).toEqual(expect.objectContaining({
+      constructionKind,
+      input: illegal,
+    }));
+    expect(result.gaps).toEqual([]);
+  });
+
+  it('constructs the scoped upper-bound probe only from its assigned formal seed', () => {
+    const result = buildScopedUpperBoundFixture();
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      constructionKind: 'subtask-upper-bound',
+      subtaskId: 1,
+      input: '11\n',
+    })]);
+    expect(result.gaps).toEqual([]);
+  });
+
+  it('maps the stateful object through the declared operation argument position', () => {
+    const { spec, recipe } = operationSpec('add-existing-object');
+    spec.inputFields.splice(1, 0, {
+      id: 'tag', name: 'tag', type: 'integer', encoding: 'operation-argument:tag',
+    });
+    spec.operations = spec.operations?.map(operation => ({
+      ...operation,
+      arguments: ['tag', 'x'],
+    }));
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{
+        source: 'formal', index: 1,
+        input: '3\nADD 99 1\nADD 88 2\nDEL 77 1\n',
+      }],
+      recipes: [recipe],
+    });
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      constructionKind: 'add-existing-object',
+      input: '3\nADD 99 1\nADD 88 1\nDEL 77 1\n',
+    })]);
+    expect(result.gaps).toEqual([]);
+  });
+});
+
+describe('construction coverage deduplication and gaps', () => {
+  it('covers all declared construction kinds with canonical supported fixtures', () => {
+    const scalarInputs: Array<[ScalarSequenceConstructionKind, string]> = [
+      ['integer-below-min', '5\n'],
+      ['integer-above-max', '5\n'],
+      ['array-length-mismatch', '3\n1 2 3\n'],
+      ['duplicate-element', '4\n1 2 3 4\n'],
+      ['permutation-duplicate-or-missing', '4\n1 2 3 4\n'],
+      ['illegal-string-character', 'abc\n'],
+    ];
+    const structuralInputs: Array<[StructuralConstructionKind, string]> = [
+      ['graph-self-loop', '3 2\n1 2\n2 3\n'],
+      ['graph-duplicate-edge', '3 2\n1 2\n2 3\n'],
+      ['graph-disconnected', '4 3\n1 2\n2 3\n3 4\n'],
+      ['tree-missing-edge', '4\n1 2\n2 3\n3 4\n'],
+      ['tree-cycle', '4\n1 2\n2 3\n3 4\n'],
+      ['dag-cycle', '3 2\n1 2\n2 3\n'],
+    ];
+    const operationInputs: Array<[OperationConstructionKind, string]> = [
+      ['add-existing-object', '3\nADD 1\nADD 2\nDEL 1\n'],
+      ['delete-missing-object', '2\nADD 1\nDEL 1\n'],
+      ['operation-argument-out-of-range', '2\nADD 1\nDEL 1\n'],
+    ];
+    const results = [
+      ...scalarInputs.map(([kind, legal]) => buildSingleTargetFixture(kind, legal)),
+      ...structuralInputs.map(([kind, legal]) => buildStructuralFixture(kind, legal)),
+      ...operationInputs.map(([kind, legal]) => buildOperationFixture(kind, legal)),
+      buildScopedUpperBoundFixture(),
+    ];
+
+    expect(results.map(result => result.probes[0]?.constructionKind))
+      .toEqual([...VALIDATOR_PROBE_CONSTRUCTION_KINDS]);
+    expect(results.every(result => result.probes.length === 1 && result.gaps.length === 0))
+      .toBe(true);
+  });
+
+  it('preserves stable recipe order for multiple valid recipes on one target', () => {
+    const spec = integerSpec();
+    const input = {
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal' as const, index: 1, input: '5\n' }],
+      recipes: [
+        { targetId: 'C1', constructionKind: 'integer-above-max' as const, fieldId: 'n' },
+        { targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n' },
+      ],
+    };
+
+    const first = buildConstraintProbes(input);
+    const second = buildConstraintProbes(input);
+
+    expect(first.probes.map(probe => probe.constructionKind)).toEqual([
+      'integer-above-max', 'integer-below-min',
+    ]);
+    expect(second).toEqual(first);
+  });
+
+  it('deduplicates duplicate final probe ids while retaining first recipe order', () => {
+    const recipe: ValidatorProbeRecipe = {
+      targetId: 'C1', constructionKind: 'integer-above-max', fieldId: 'n',
+    };
+    const result = buildConstraintProbes({
+      spec: integerSpec(),
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: [recipe, { ...recipe }],
+    });
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      constructionKind: 'integer-above-max', input: '11\n',
+    })]);
+    expect(result.gaps).toEqual([]);
+  });
+
+  it('reports every uncovered machine-checkable target exactly once', () => {
+    const spec = integerSpec();
+    spec.constraints.push({ ...spec.constraints[0], id: 'C2' });
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+      recipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+      }],
+    });
+
+    expect(result.probes).toHaveLength(1);
+    expect(result.gaps).toEqual([{
+      targetId: 'C2', targetKind: 'constraint', reasonCode: 'UNSUPPORTED_TARGET',
+    }]);
+  });
+
+  it('deduplicates public gaps by target subtask and reason tuple', () => {
+    const invalidRecipe: ValidatorProbeRecipe = {
+      targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'missing',
+    };
+    const result = buildConstraintProbes({
+      spec: integerSpec({ subtaskId: 1 }),
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, subtaskId: 1, input: '5\n' }],
+      recipes: [invalidRecipe, { ...invalidRecipe }],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'C1',
+      targetKind: 'constraint',
+      subtaskId: 1,
+      reasonCode: 'INVALID_RECIPE',
+    }]);
+  });
+
+  it('returns stable bounded gaps when a structural or operation mutation is not isolated', () => {
+    const structural = structuralSpec('graph-self-loop');
+    structural.spec.inputFields.find(field => field.id === 'edges')!.encoding = 'free text';
+    const structuralResult = buildConstraintProbes({
+      spec: structural.spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '3 2\n1 2\n2 3\n' }],
+      recipes: [structural.recipe],
+    });
+    const operationResult = buildOperationFixture('add-existing-object', '1\nADD 1\n');
+
+    expect(structuralResult.probes).toEqual([]);
+    expect(structuralResult.gaps).toEqual([{
+      targetId: 'I1', targetKind: 'invariant', reasonCode: 'UNPARSEABLE_ENCODING',
+    }]);
+    expect(operationResult.probes).toEqual([]);
+    expect(operationResult.gaps).toEqual([{
+      targetId: 'I1', targetKind: 'invariant', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]);
   });
 });
 
