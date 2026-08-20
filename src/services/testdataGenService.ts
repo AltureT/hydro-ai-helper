@@ -25,6 +25,7 @@ import {
 import { excerpt, excerptTail } from '../lib/textTruncate';
 import type {
   CheckerRunCase,
+  PythonRunInvocation,
   PythonRunDetail,
   PythonRunResult,
   TestdataGenerationMode,
@@ -688,24 +689,63 @@ export function allocateCasesToSubtasks(
 /**
  * 补刀等后续阶段追加测试点时，前 N 个 case 的「构造档位 ↔ 配置归档」对应关系必须保持不变，
  * 否则按某档约束构造的输入会被归入另一档、破坏子任务约束契约。
- * 追加项一律归入最后一个子任务：这里采用 OI 题“最后一档约束最宽”的通行约定，
- * 组装阶段会同时写入人工复核警告，提示教师核对追加输入是否确实符合该档约束；
- * 原分配为空或总数反而变少时返回空数组（调用方降级为扁平配置）。
+ * 每个追加项按 Frozen Spec 分值目标重新计算最大缺口；同缺口时保持 Frozen 子任务顺序。
+ * prefix、权重或目标总数非法时返回空数组（调用方降级为扁平配置）。
  */
 export function extendTieredAllocations(
   base: SubtaskCaseAllocation[],
   totalCaseCount: number,
   subtasks: SubtaskSpec[],
 ): SubtaskCaseAllocation[] {
-  if (totalCaseCount === base.length) return base;
-  if (base.length === 0 || totalCaseCount < base.length || subtasks.length === 0) return [];
-  const last = subtasks[subtasks.length - 1];
-  const appended = Array.from({ length: totalCaseCount - base.length }, (_, index) => ({
-    caseNumber: base.length + index + 1,
-    subtaskId: last.id,
-    guidance: last.constraints,
-  }));
-  return [...base, ...appended];
+  if (!Number.isSafeInteger(totalCaseCount)
+    || base.length === 0
+    || totalCaseCount < base.length
+    || subtasks.length === 0) return [];
+
+  const subtaskIndexById = new Map<number, number>();
+  let totalScore = 0;
+  for (let index = 0; index < subtasks.length; index++) {
+    const subtask = subtasks[index];
+    if (!Number.isSafeInteger(subtask.id)
+      || subtask.id <= 0
+      || subtaskIndexById.has(subtask.id)
+      || !Number.isSafeInteger(subtask.score)
+      || subtask.score <= 0
+      || typeof subtask.constraints !== 'string'
+      || !subtask.constraints.trim()) return [];
+    subtaskIndexById.set(subtask.id, index);
+    totalScore += subtask.score;
+  }
+  if (!Number.isSafeInteger(totalScore) || totalScore <= 0) return [];
+
+  const counts = subtasks.map(() => 0);
+  for (let index = 0; index < base.length; index++) {
+    const allocation = base[index];
+    const subtaskIndex = allocation && subtaskIndexById.get(allocation.subtaskId);
+    if (!allocation
+      || allocation.caseNumber !== index + 1
+      || typeof allocation.guidance !== 'string'
+      || subtaskIndex === undefined) return [];
+    counts[subtaskIndex]++;
+  }
+
+  const extended = [...base];
+  for (let nextTotal = base.length + 1; nextTotal <= totalCaseCount; nextTotal++) {
+    const nextIndex = subtasks.reduce((best, subtask, index) => (
+      nextTotal * subtask.score / totalScore - counts[index]
+        > nextTotal * subtasks[best].score / totalScore - counts[best]
+        ? index
+        : best
+    ), 0);
+    const selected = subtasks[nextIndex];
+    counts[nextIndex]++;
+    extended.push({
+      caseNumber: nextTotal,
+      subtaskId: selected.id,
+      guidance: selected.constraints,
+    });
+  }
+  return extended;
 }
 
 interface ExistingNumericCases {
@@ -4414,8 +4454,22 @@ export interface MaterializationCacheState {
   templateChecks?: TemplateChecks;
 }
 
+export interface ValidatorProofContext {
+  reliabilityMode: TestdataReliabilityMode;
+  pipelineContext: TestdataPipelineContext;
+  tieredDecision: TieredSubtaskGenerationDecision;
+}
+
 export interface MaterializationRunOptions extends MaterializationResume {
   cache: MaterializationCacheState;
+  validatorProof?: ValidatorProofContext;
+}
+
+function validatorInvocation(stdin: string, subtaskId?: number): PythonRunInvocation {
+  return {
+    stdin,
+    argv: subtaskId === undefined ? [] : ['--subtask', String(subtaskId)],
+  };
 }
 
 const MATERIALIZATION_PHASE_ORDER: Record<MaterializationPhase, number> = {
@@ -4692,7 +4746,18 @@ export async function materializeSandboxBlueprint(
 
   // d. VALIDATOR：正式输入与题面样例仍逐项硬失败；压力输入允许在保底比例内剔除。
   let validatorRan = false;
-  const validationInputs = [...inputs, ...sampleInputs, ...stressInputs];
+  const tieredValidatorDecision = materialization?.validatorProof?.tieredDecision;
+  const tieredValidatorEnabled = tieredValidatorDecision?.enabled === true;
+  const validationInputs = tieredValidatorEnabled
+    ? [
+      ...inputs.map((stdin, index) => validatorInvocation(
+        stdin,
+        tieredValidatorDecision.allocations[index]?.subtaskId,
+      )),
+      ...sampleInputs.map(stdin => validatorInvocation(stdin)),
+      ...stressInputs.map(stdin => validatorInvocation(stdin)),
+    ]
+    : [...inputs, ...sampleInputs, ...stressInputs];
   if (startsAtOrBefore('validator')) {
     let keptStressIndices = stressInputs.map((_, index) => index);
     if (blueprint.validatorCode) {
@@ -4706,42 +4771,83 @@ export async function materializeSandboxBlueprint(
           { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 },
         );
       } catch (err) {
+        if (signal?.aborted) throw signal.reason ?? err;
         if (isCancellation(err)) throw err;
         throw toSandboxExecutionPipelineError(err, {
-          code: 'VALIDATOR_FALSE_REJECT',
+          code: 'SANDBOX_UNAVAILABLE',
           stage: 'validator',
           artifact: 'validator',
+          message: 'VALIDATOR 沙箱执行基础设施不可用',
+          safeDetails: { failureKind: 'infra' },
         });
       }
+      if (signal?.aborted) throw signal.reason ?? new Error('VALIDATOR 执行已取消');
       if (validatorResults.length !== validationInputs.length) {
         throw toPipelineError(
           new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`),
           {
-            code: 'VALIDATOR_FALSE_REJECT',
+            code: 'SANDBOX_UNAVAILABLE',
             stage: 'validator',
             artifact: 'validator',
             safeDetails: {
               actualCount: validatorResults.length,
               expectedCount: validationInputs.length,
+              failureKind: 'protocol',
             },
           },
         );
+      }
+      for (let i = 0; i < validatorResults.length; i++) {
+        const detail = validatorResults[i];
+        if (detail.timedOut) {
+          throw toPipelineError(new Error(`VALIDATOR 第 ${i + 1} 个合法输入执行超时`), {
+            code: 'SANDBOX_UNAVAILABLE',
+            stage: 'validator',
+            artifact: 'validator',
+            safeDetails: { caseIndex: i + 1, failureKind: 'timeout' },
+          });
+        }
+        const explicitAccepted = detail.accepted
+          && detail.status === 'Accepted'
+          && detail.exitStatus === 0;
+        const explicitRejected = !detail.accepted
+          && detail.status === 'Nonzero Exit Status'
+          && typeof detail.exitStatus === 'number'
+          && detail.exitStatus !== 0;
+        if (!explicitAccepted && !explicitRejected) {
+          throw toPipelineError(new Error(`VALIDATOR 第 ${i + 1} 个合法输入返回了不可判定结果`), {
+            code: 'SANDBOX_UNAVAILABLE',
+            stage: 'validator',
+            artifact: 'validator',
+            safeDetails: { caseIndex: i + 1, failureKind: 'protocol' },
+          });
+        }
       }
       const formalAndSampleCount = inputs.length + samples.length;
       for (let i = 0; i < formalAndSampleCount; i++) {
         const detail = validatorResults[i];
         if (!detail.accepted) {
           const generatedInput = i < inputs.length;
-          const target = generatedInput
-            ? `第 ${i + 1} 个 .in `
-            : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `;
+          const assignedSubtaskId = generatedInput && tieredValidatorEnabled
+            ? tieredValidatorDecision.allocations[i]?.subtaskId
+            : undefined;
+          const scopedFormalRejection = assignedSubtaskId !== undefined;
+          const target = scopedFormalRejection
+            ? `第 ${i + 1} 个 .in 未通过服务器分配的子任务约束`
+            : generatedInput
+              ? `第 ${i + 1} 个 .in 未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`
+              : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} 未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`;
           throw toPipelineError(
-            new Error(`${target}未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`),
+            new Error(target),
             {
-              code: generatedInput ? 'GENERATOR_INVALID_INPUT' : 'VALIDATOR_FALSE_REJECT',
+              code: scopedFormalRejection
+                ? 'SUBTASK_CONSTRAINT_VIOLATION'
+                : generatedInput ? 'GENERATOR_INVALID_INPUT' : 'VALIDATOR_FALSE_REJECT',
               stage: 'validator',
               artifact: generatedInput ? 'generator' : 'validator',
-              safeDetails: { caseIndex: i + 1, sample: !generatedInput },
+              safeDetails: scopedFormalRejection
+                ? { caseIndex: i + 1, subtaskId: assignedSubtaskId }
+                : { caseIndex: i + 1, sample: !generatedInput },
             },
           );
         }
@@ -5503,15 +5609,15 @@ export function assemblePlan(
     ...(tieredApplied ? [{
       kind: 'system' as const,
       message: `已按题面子任务表生成 ${tieredSubtasks.length} 档分层数据;`
-        + 'VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,'
+        + 'VALIDATOR 已按服务器冻结分配校验全局约束与对应子任务约束,'
         + '建议抽查各档 .in 是否符合对应约束',
     }] : []),
     ...(tieredApplied && caseCount > tieredDecision.allocations.length ? [{
       kind: 'warning' as const,
       message: `补刀新增测试点 ${
         newCaseNumbers.slice(tieredDecision.allocations.length).map(n => `#${n}`).join('、')
-      } 已归入子任务 ${tieredSubtasks[tieredSubtasks.length - 1]?.id ?? ''}(约束最宽档);`
-        + '其输入仅经全局校验,请人工核对是否符合该档约束',
+      } 已按 Frozen 子任务分值稳定扩展归档;`
+        + '现阶段补刀输入仍仅经全局校验,请人工核对是否符合对应档约束',
     }] : []),
   ];
   const discriminationNotes = buildDiscriminationNotes(
@@ -8271,6 +8377,11 @@ export class TestdataGenService {
       subtasks: solution.subtasks,
       existingConfig: params.existingConfig,
     });
+    const validatorProof: ValidatorProofContext | undefined = context ? {
+      reliabilityMode: this.reliabilityMode,
+      pipelineContext: context,
+      tieredDecision,
+    } : undefined;
     const generationCoverage: Array<CoverageSlot | SubtaskCaseAllocation> = tieredDecision.enabled
       ? tieredDecision.allocations
       : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
@@ -8461,7 +8572,7 @@ export class TestdataGenService {
         killTargets,
         cppOracleAvailableForAttempt,
         checkerExecutor,
-        { ...initialMaterialization, cache: materializationCache },
+        { ...initialMaterialization, cache: materializationCache, validatorProof },
       );
     } catch (firstError) {
       if (params.signal?.aborted) throw params.signal.reason ?? firstError;
@@ -8746,7 +8857,7 @@ export class TestdataGenService {
           killTargets,
           cppOracleAvailableForAttempt,
           checkerExecutor,
-          { ...materializationResume, cache: materializationCache },
+          { ...materializationResume, cache: materializationCache, validatorProof },
         );
       } catch (err) {
         if (params.signal?.aborted) throw params.signal.reason ?? err;

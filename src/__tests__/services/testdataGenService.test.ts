@@ -489,24 +489,71 @@ describe('parseSubtasksSection / allocateCasesToSubtasks', () => {
     expect(allocations.filter(item => item.subtaskId === 3)).toHaveLength(2);
   });
 
-  it('extendTieredAllocations 总数不变时原样返回同一分配', () => {
-    const base = allocateCasesToSubtasks(6, subtasks);
-    expect(extendTieredAllocations(base, 6, subtasks)).toBe(base);
+  it('weighted-deficit extension preserves the supplied prefix and follows Frozen order on ties', () => {
+    const prefix = [
+      { caseNumber: 1, subtaskId: 1, guidance: 'n <= 10' },
+      { caseNumber: 2, subtaskId: 2, guidance: 'n <= 100' },
+    ];
+    const frozenPrefix = prefix.map(item => ({ ...item }));
+    const frozenSubtasks = [
+      { id: 1, score: 30, constraints: 'n <= 10' },
+      { id: 2, score: 70, constraints: 'n <= 100' },
+    ];
+
+    expect(extendTieredAllocations(prefix, 5, frozenSubtasks)).toEqual([
+      { caseNumber: 1, subtaskId: 1, guidance: 'n <= 10' },
+      { caseNumber: 2, subtaskId: 2, guidance: 'n <= 100' },
+      { caseNumber: 3, subtaskId: 2, guidance: 'n <= 100' },
+      { caseNumber: 4, subtaskId: 2, guidance: 'n <= 100' },
+      { caseNumber: 5, subtaskId: 1, guidance: 'n <= 10' },
+    ]);
+    expect(prefix).toEqual(frozenPrefix);
+
+    const frozenOrderDiffersFromNumericOrder = [
+      { id: 9, score: 50, constraints: 'first in Frozen order' },
+      { id: 1, score: 50, constraints: 'second in Frozen order' },
+    ];
+    expect(extendTieredAllocations([
+      { caseNumber: 1, subtaskId: 9, guidance: 'first' },
+      { caseNumber: 2, subtaskId: 1, guidance: 'second' },
+    ], 3, frozenOrderDiffersFromNumericOrder)[2]).toEqual({
+      caseNumber: 3,
+      subtaskId: 9,
+      guidance: 'first in Frozen order',
+    });
   });
 
-  it('extendTieredAllocations 追加项保持原分配不变并归入最后一个子任务', () => {
-    const base = allocateCasesToSubtasks(6, subtasks);
-    const extended = extendTieredAllocations(base, 8, subtasks);
-    expect(extended.slice(0, 6)).toEqual(base);
-    expect(extended.slice(6).map(item => item.subtaskId)).toEqual([3, 3]);
-    expect(extended.slice(6).map(item => item.caseNumber)).toEqual([7, 8]);
-    expect(extended[6].guidance).toBe(subtasks[2].constraints);
-  });
+  it('prefix-preserving extension validates the full prefix and returns a clone at equal total', () => {
+    const frozenSubtasks = [
+      { id: 1, score: 30, constraints: 'n <= 10' },
+      { id: 2, score: 70, constraints: 'n <= 100' },
+    ];
+    const prefix = [
+      { caseNumber: 1, subtaskId: 1, guidance: 'n <= 10' },
+      { caseNumber: 2, subtaskId: 2, guidance: 'n <= 100' },
+    ];
+    const cloned = extendTieredAllocations(prefix, prefix.length, frozenSubtasks);
+    expect(cloned).toEqual(prefix);
+    expect(cloned).not.toBe(prefix);
 
-  it('extendTieredAllocations 原分配为空或总数变少时返回空数组', () => {
-    const base = allocateCasesToSubtasks(6, subtasks);
-    expect(extendTieredAllocations([], 3, subtasks)).toEqual([]);
-    expect(extendTieredAllocations(base, 5, subtasks)).toEqual([]);
+    expect(extendTieredAllocations([], 3, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations(prefix, 1, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations([
+      { caseNumber: 1, subtaskId: 3, guidance: 'unknown subtask' },
+    ], 2, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations([
+      { caseNumber: 2, subtaskId: 1, guidance: 'invalid case number' },
+    ], 2, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations([
+      { caseNumber: 1, subtaskId: 0, guidance: 'invalid subtask id' },
+    ], 2, frozenSubtasks)).toEqual([]);
+
+    for (const invalidScore of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(extendTieredAllocations(prefix, 3, [
+        { ...frozenSubtasks[0], score: invalidScore },
+        frozenSubtasks[1],
+      ])).toEqual([]);
+    }
   });
 
   it('测试点数恰好等于子任务数时每个子任务分配一个', () => {
@@ -1682,7 +1729,7 @@ describe('assemblePlan', () => {
       '既有完整测试点 #1 已并入子任务 1,请人工复核其子任务归属。',
     );
     expect(plan.notesStructured?.system).toContain(
-      '已按题面子任务表生成 2 档分层数据;VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,建议抽查各档 .in 是否符合对应约束',
+      '已按题面子任务表生成 2 档分层数据;VALIDATOR 已按服务器冻结分配校验全局约束与对应子任务约束,建议抽查各档 .in 是否符合对应约束',
     );
     expect(plan.notes).not.toContain('子任务分值合计为');
   });
@@ -7323,7 +7370,12 @@ describe('TestdataGenService.generate', () => {
 
 /** 构造一条宽容明细，默认 Accepted。 */
 function detail(over: Record<string, unknown> = {}) {
-  return { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: '', stderr: '', ...over };
+  const exitStatus = over.accepted === false
+    && over.status === 'Nonzero Exit Status'
+    && !Object.prototype.hasOwnProperty.call(over, 'exitStatus')
+    ? 1
+    : 0;
+  return { status: 'Accepted', accepted: true, timedOut: false, exitStatus, stdout: '', stderr: '', ...over };
 }
 
 const tradOpts: GenerateOptions = { problemKind: 'traditional', caseCount: 2, languages: [] };
@@ -7331,6 +7383,79 @@ const tradOpts: GenerateOptions = { problemKind: 'traditional', caseCount: 2, la
 /** 两个测试点的生成器 stdout（label c1/c2，输入 1 / 2）。 */
 function twoCaseGen(): string {
   return JSON.stringify({ cases: [{ label: 'c1', input: '1' }, { label: 'c2', input: '2' }] });
+}
+
+function makeTieredValidatorProof(statementMarkdown: string) {
+  const statement = createStatementSnapshot(statementMarkdown);
+  const subtasks = [
+    { id: 1, score: 30, constraints: 'n <= 10' },
+    { id: 2, score: 70, constraints: 'n <= 100' },
+  ];
+  const pipelineContext = createTestdataPipelineContext({
+    runId: 'task-6-legal-validator-partition',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement,
+    spec: makeObservedProblemSpec(statementMarkdown, {
+      problemKind: 'traditional',
+      subtasks: [
+        { id: 1, score: 30, constraintIds: ['C_subtask_1'] },
+        { id: 2, score: 70, constraintIds: ['C_subtask_2'] },
+      ],
+      constraints: [
+        {
+          id: 'C_subtask_1', expression: 'n <= 10', machineCheckable: true,
+          scope: { subtaskId: 1 }, evidence: { quote: 'Subtask 1 requires n <= 10.' },
+        },
+        {
+          id: 'C_subtask_2', expression: 'n <= 100', machineCheckable: true,
+          scope: { subtaskId: 2 }, evidence: { quote: 'Subtask 2 requires n <= 100.' },
+        },
+      ],
+    }),
+    risk: {
+      tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const tieredDecision = resolveTieredSubtaskGeneration({
+    caseCount: 2,
+    dataScale: 'auto',
+    subtasks,
+  });
+  return {
+    reliabilityMode: 'enforce' as const,
+    pipelineContext,
+    tieredDecision,
+  };
+}
+
+function materializeWithValidatorProof(
+  blueprint: Parameters<typeof materializeSandboxBlueprint>[0],
+  options: GenerateOptions,
+  statementMarkdown: string,
+  runner: Parameters<typeof materializeSandboxBlueprint>[3],
+  validatorProof: ReturnType<typeof makeTieredValidatorProof>,
+  signal?: AbortSignal,
+) {
+  return materializeSandboxBlueprint(
+    blueprint,
+    options,
+    statementMarkdown,
+    runner,
+    signal,
+    false,
+    undefined,
+    [],
+    false,
+    undefined,
+    {
+      ...resolveMaterializationResume(['GENERATOR']),
+      cache: {},
+      validatorProof,
+    } as never,
+  );
 }
 
 describe('两阶段沙箱蓝图', () => {
@@ -8005,6 +8130,231 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ...extra,
     ].join('\n'), tradOpts);
   }
+
+  it('assigned subtask argv forms the legal validator partition without changing stdin', async () => {
+    const statement = [
+      'Subtask 1 requires n <= 10.',
+      'Subtask 2 requires n <= 100.',
+      '```input1',
+      '1',
+      '```',
+      '```output1',
+      '1',
+      '```',
+    ].join('\n');
+    const proof = makeTieredValidatorProof(statement);
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, index) => `${index + 1}\n`,
+    );
+    const blueprint = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [
+            { label: 'subtask-1', input: '5' },
+            { label: 'subtask-2', input: '50' },
+          ] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockImplementationOnce((_code: string, invocations: unknown[]) => Promise.resolve(
+          invocations.map(() => detail()),
+        ))
+        .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ))
+        .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        )),
+    };
+
+    const result = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      runner,
+      proof,
+    );
+    const validatorInputs = runner.runPythonBatchDetailed.mock.calls[0][1];
+
+    expect(validatorInputs).toEqual([
+      { stdin: '5\n', argv: ['--subtask', '1'] },
+      { stdin: '50\n', argv: ['--subtask', '2'] },
+      { stdin: '1\n', argv: [] },
+      ...stressInputs.map(stdin => ({ stdin, argv: [] })),
+    ]);
+    expect(validatorInputs.map((invocation: { stdin: string }) => invocation.stdin)).toEqual([
+      '5\n',
+      '50\n',
+      '1\n',
+      ...stressInputs,
+    ]);
+    expect(result.verification?.validator?.casesChecked)
+      .toBe(3 + TESTDATA_GEN_LIMITS.STRESS_CASES);
+  });
+
+  it('legal validator partition preserves string calls for legacy and non-tiered materialization', async () => {
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const makeRunner = () => ({
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    });
+    const legacyRunner = makeRunner();
+    await materializeSandboxBlueprint(blueprint, tradOpts, '', legacyRunner);
+    expect(legacyRunner.runPythonBatchDetailed.mock.calls[0][1]).toEqual(['1\n', '2\n']);
+
+    const statement = 'Subtask 1 requires n <= 10.\nSubtask 2 requires n <= 100.';
+    const nonTieredProof = {
+      ...makeTieredValidatorProof(statement),
+      tieredDecision: { enabled: false, allocations: [] },
+    } as ReturnType<typeof makeTieredValidatorProof>;
+    const nonTieredRunner = makeRunner();
+    await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      nonTieredRunner,
+      nonTieredProof,
+    );
+    expect(nonTieredRunner.runPythonBatchDetailed.mock.calls[0][1]).toEqual(['1\n', '2\n']);
+  });
+
+  it('tiered formal rejection is a sanitized Generator-owned SUBTASK_CONSTRAINT_VIOLATION', async () => {
+    const statement = 'Subtask 1 requires n <= 10.\nSubtask 2 requires n <= 100.';
+    const proof = makeTieredValidatorProof(statement);
+    const privateInput = 'PRIVATE_FORMAL_INPUT';
+    const privateDiagnostic = `${privateInput} --subtask 1`;
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: 'private', input: privateInput },
+          { label: 'second', input: '50' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({
+          accepted: false,
+          status: 'Nonzero Exit Status',
+          exitStatus: 1,
+          stderr: privateDiagnostic,
+        }),
+        detail(),
+      ]),
+    };
+
+    const failure = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      runner,
+      proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator',
+      artifact: 'generator',
+      retryPolicy: 'manual-review',
+      safeDetails: { caseIndex: 1, subtaskId: 1 },
+    });
+    expect(Object.keys(failure.safeDetails).sort()).toEqual(['caseIndex', 'subtaskId']);
+    expect(failure.message).not.toContain(privateInput);
+    expect(failure.message).not.toContain('--subtask');
+    expect(JSON.stringify(failure.safeDetails)).not.toContain(privateInput);
+    expect(JSON.stringify(failure.safeDetails)).not.toContain('--subtask');
+  });
+
+  it.each([
+    [
+      'timeout result',
+      jest.fn().mockResolvedValue([
+        detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+        detail(),
+      ]),
+      { caseIndex: 1, failureKind: 'timeout' },
+    ],
+    [
+      'transport failure',
+      jest.fn().mockRejectedValue(new Error('validator transport unavailable')),
+      { failureKind: 'infra' },
+    ],
+    [
+      'result-count mismatch',
+      jest.fn().mockResolvedValue([detail()]),
+      { actualCount: 1, expectedCount: 2, failureKind: 'protocol' },
+    ],
+  ])('legal validator partition classifies %s as SANDBOX_UNAVAILABLE', async (
+    _label,
+    runValidator,
+    safeDetails,
+  ) => {
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: runValidator,
+    };
+
+    const failure = await materializeSandboxBlueprint(blueprint, tradOpts, '', runner as never)
+      .catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'manual-review',
+      safeDetails,
+    });
+    expect(failure.code).not.toBe('GENERATOR_INVALID_INPUT');
+    expect(failure.code).not.toBe('VALIDATOR_FALSE_REJECT');
+  });
+
+  it('legal validator partition cancellation rethrows the exact ordinary signal reason', async () => {
+    const statement = 'Subtask 1 requires n <= 10.\nSubtask 2 requires n <= 100.';
+    const proof = makeTieredValidatorProof(statement);
+    const controller = new AbortController();
+    const cancellation = new Error('validator caller cancellation');
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementationOnce(async () => {
+        controller.abort(cancellation);
+        return [detail(), detail()];
+      }),
+    };
+
+    const failure = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      runner,
+      proof,
+      controller.signal,
+    ).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
 
   it('修复轮复用阶段缓存并仅延续已消耗后的沙箱预算，AI 等待时间不计入', async () => {
     const broken = tradBlueprint([
