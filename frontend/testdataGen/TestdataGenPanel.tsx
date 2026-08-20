@@ -25,6 +25,10 @@ import {
   type VerificationSummaryData,
 } from './VerificationSummaryView';
 import {
+  ProblemSpecSummaryView,
+  type ProblemSpecSummaryData,
+} from './ProblemSpecSummaryView';
+import {
   getTestdataApplyPresentation,
   parseTestdataApplyResult,
   type TestdataApplyPresentation,
@@ -103,6 +107,8 @@ interface TestdataRiskAssessment {
 interface GenerationPlan {
   runId: string;
   promptVersion: string;
+  specSchemaVersion?: number;
+  problemSpecSummary?: ProblemSpecSummaryData;
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
   analysis?: string;
@@ -1273,6 +1279,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             </ul>
           </div>
         )}
+        <ProblemSpecSummaryView
+          specSchemaVersion={plan.specSchemaVersion}
+          summary={plan.problemSpecSummary}
+        />
         {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
           <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>

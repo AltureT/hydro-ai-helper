@@ -1723,7 +1723,7 @@ describe('Testdata generation background jobs', () => {
     expect(handler.response.body.code).toBe('JOB_NOT_FOUND');
   });
 
-  it('job status keeps original file hashes server-local', async () => {
+  it('job status exposes only the ProblemSpec summary and keeps internal fields server-local', async () => {
     mockFindOne(PROBLEM_DOC);
     const job = makeGenerationJob({
       status: 'completed', active: false,
@@ -1732,6 +1732,16 @@ describe('Testdata generation background jobs', () => {
         promptVersion: 'testdata-generation-v1',
         originalFileHashes: { '1.in': 'a'.repeat(64) },
         modelTelemetry: { role: 'fallback', identity: 'endpoint-id/private-model' },
+        specSchemaVersion: 1,
+        problemSpecSummary: {
+          statementHash: 'b'.repeat(64),
+          constraintCount: 2,
+          invariantCount: 1,
+          unresolvedUncertainties: 0,
+        },
+        problemSpec: {
+          constraints: [{ evidence: { quote: 'SECRET_EVIDENCE_QUOTE', startOffset: 7 } }],
+        },
         problemType: 'traditional',
         files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
         caseCount: 1,
@@ -1752,6 +1762,14 @@ describe('Testdata generation background jobs', () => {
     expect(handler.response.body.job.plan.runId).toBe('11111111-1111-4111-8111-111111111111');
     expect(handler.response.body.job.plan).not.toHaveProperty('originalFileHashes');
     expect(handler.response.body.job.plan).not.toHaveProperty('modelTelemetry');
+    expect(handler.response.body.job.plan).not.toHaveProperty('problemSpec');
+    expect(handler.response.body.job.plan.problemSpecSummary).toEqual({
+      statementHash: 'b'.repeat(64),
+      constraintCount: 2,
+      invariantCount: 1,
+      unresolvedUncertainties: 0,
+    });
+    expect(JSON.stringify(handler.response.body.job.plan)).not.toContain('SECRET_EVIDENCE_QUOTE');
   });
 
   it('cancel endpoint persists cancellation and returns the canceled state', async () => {

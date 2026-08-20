@@ -54,6 +54,19 @@ import {
   type StatementSample,
 } from './testdata/statementSamples';
 import {
+  parseProblemSpecV1,
+  summarizeProblemSpec,
+  validateProblemSpecEvidence,
+  validateProblemSpecV1,
+  type ProblemSpecSummary,
+} from './testdata/problemSpec';
+import { buildProblemSpecPrompt } from './testdata/problemSpecPrompts';
+import {
+  STATEMENT_SNAPSHOT_HARD_LIMIT,
+  createStatementSnapshot,
+  type StatementSnapshot,
+} from './testdata/statementSnapshot';
+import {
   TemplateVerificationError,
   verifySelectedTemplates,
   type TemplateChecks,
@@ -366,6 +379,10 @@ export interface GenerationPlan {
   runId: string;
   /** 生成提示契约的静态版本，不包含题面或模型响应。 */
   promptVersion: string;
+  /** Observe-only ProblemSpec contract version. */
+  specSchemaVersion?: number;
+  /** Browser-safe summary; the complete spec and evidence locations are never persisted here. */
+  problemSpecSummary?: ProblemSpecSummary;
   /** 仅保存在 Hydro 本地，apply 时用于判断教师是否修改。 */
   originalFileHashes?: Record<string, string>;
   problemType: 'function' | 'traditional';
@@ -416,7 +433,7 @@ export const TESTDATA_GEN_LIMITS = {
   MAX_CASES: 30,
   MAX_EXTRA_REQUIREMENTS: 1000,
   MAX_PROVIDED_STD: 10000,
-  MAX_STATEMENT_LENGTH: 20000,
+  MAX_STATEMENT_LENGTH: STATEMENT_SNAPSHOT_HARD_LIMIT,
   /** apply 时单文件内容上限（字节） */
   MAX_FILE_SIZE: 256 * 1024,
   /** apply 时文件数量上限 */
@@ -1104,14 +1121,8 @@ export function getTestlibCheckerFilename(raw?: string): string | undefined {
   return checkerType === 'testlib' && checker ? checker : undefined;
 }
 
-function isStatementTruncatedForGeneration(statementMarkdown: string): boolean {
-  return statementMarkdown.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH;
-}
-
-function truncateStatementForGenerationPrompt(statementMarkdown: string): string {
-  return isStatementTruncatedForGeneration(statementMarkdown)
-    ? `${statementMarkdown.slice(0, TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-    : statementMarkdown;
+function completeStatementForGenerationPrompt(statementMarkdown: string): string {
+  return createStatementSnapshot(statementMarkdown).normalizedMarkdown;
 }
 
 /**
@@ -1455,7 +1466,7 @@ export function buildTestdataUserPrompt(
   const coveragePlan = coverageOverride
     ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
 
-  const statement = truncateStatementForGenerationPrompt(statementMarkdown);
+  const statement = completeStatementForGenerationPrompt(statementMarkdown);
 
   const lines = [
     `【题目标题】${problemTitle}`,
@@ -1563,7 +1574,7 @@ export function buildSolutionBlueprintUserPrompt(params: BuildUserPromptParams):
     yes: '是（标程必须是补全后的题面代码）',
     no: '否',
   }[options.fillInMode || 'auto'];
-  const statement = truncateStatementForGenerationPrompt(statementMarkdown);
+  const statement = completeStatementForGenerationPrompt(statementMarkdown);
   const lines = [
     `【题目标题】${problemTitle}`,
     '',
@@ -1777,7 +1788,7 @@ export function buildIndependentVerifierUserPrompt(
   params: BuildUserPromptParams,
   blueprint: Pick<SandboxGenerationBlueprint, 'problemType' | 'functionName' | 'analysis'>,
 ): string {
-  const statement = truncateStatementForGenerationPrompt(params.statementMarkdown);
+  const statement = completeStatementForGenerationPrompt(params.statementMarkdown);
   const functionSamples = blueprint.problemType === 'function'
     ? extractStatementSamples(params.statementMarkdown)
     : [];
@@ -1834,14 +1845,14 @@ export function buildKillTargetsUserPrompt(input: {
   analysis: string;
   samples: SampleIO[];
 }): string {
-  const statement = input.statement.slice(0, 6000);
+  const statement = completeStatementForGenerationPrompt(input.statement);
   const analysis = input.analysis.slice(0, 2000);
   const samples = input.samples.slice(0, 3);
   return [
     '【既有解法分析】',
     analysis || '未提供额外分析，请从题面推导常见错误模式。',
     '',
-    '【题面（最多 6000 字符）】',
+    '【完整规范化题面】',
     statement,
     '',
     '【题面样例（最多 3 组，错误解必须全部通过）】',
@@ -6001,6 +6012,14 @@ export interface GenerateTestdataParams {
   signal?: AbortSignal;
   /** 页面进度事件；回调异常不得影响生成主流程。 */
   onProgress?: (progress: TestdataGenerationProgress) => void;
+  /** 仅传递封闭计数，供同次运行的专用质量遥测记录 observe 结果。 */
+  onProblemSpecObservation?: (observation: {
+    schemaVersion: 1;
+    succeeded: boolean;
+    constraintCount?: number;
+    invariantCount?: number;
+    uncertaintyCount?: number;
+  }) => void;
   /** 已通过 handler 作用域与 hash 校验的解析后断点制品。 */
   checkpoint?: TestdataGenerationCheckpointPayload;
   /** 每个 AI 阶段成功后的异步落盘钩子；失败不得影响生成。 */
@@ -6036,6 +6055,13 @@ interface IndependentVerifierCallState {
 interface GenerationArtifactsCallState {
   artifacts: SandboxGenerationArtifacts;
   sourceContent: string;
+}
+
+interface ProblemSpecObservation {
+  schemaVersion: 1;
+  summary?: ProblemSpecSummary;
+  failureCode?: Extract<TestdataFailureCode, 'SPEC_PARSE_FAILED' | 'SPEC_EVIDENCE_NOT_FOUND'>;
+  result?: ChatResult;
 }
 
 function checkpointSolutionFromBlueprint(
@@ -6100,7 +6126,7 @@ export class TestdataGenService {
       statement: params.statementMarkdown,
       hasCustomChecker: customChecker,
       unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
-      statementTruncated: isStatementTruncatedForGeneration(params.statementMarkdown),
+      statementTruncated: false,
       directFallbackEnabled: getTestdataDirectFallbackEnabled(),
       confirmDirectFallback: params.options.confirmDirectFallback,
       reliabilityMode: this.reliabilityMode,
@@ -6111,6 +6137,100 @@ export class TestdataGenService {
     plan.risk = risk;
     plan.reliabilityMode = this.reliabilityMode;
     return plan;
+  }
+
+  private async observeProblemSpec(
+    params: GenerateTestdataParams,
+    snapshot: StatementSnapshot,
+  ): Promise<ProblemSpecObservation | undefined> {
+    if (this.reliabilityMode === 'legacy') return undefined;
+    const prompt = buildProblemSpecPrompt({
+      snapshot,
+      requestedProblemKind: params.options.problemKind,
+      hasCustomChecker: hasCustomChecker(params.existingConfig),
+    });
+    let result: ChatResult;
+    try {
+      result = await this.aiClient.chat(
+        [{ role: 'user', content: prompt.userPrompt }],
+        prompt.systemPrompt,
+        this.getCallOptions(params),
+      );
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      return { schemaVersion: 1, failureCode: 'SPEC_PARSE_FAILED' };
+    }
+    try {
+      const parsed = parseProblemSpecV1(result.content);
+      const validated = validateProblemSpecV1(parsed, {
+        hasCustomChecker: hasCustomChecker(params.existingConfig),
+        ...(params.options.problemKind === 'auto'
+          ? {}
+          : { expectedProblemKind: params.options.problemKind }),
+      });
+      const grounded = validateProblemSpecEvidence(validated, snapshot);
+      return { schemaVersion: 1, summary: summarizeProblemSpec(grounded), result };
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      return {
+        schemaVersion: 1,
+        failureCode: error instanceof TestdataPipelineError
+          && error.code === 'SPEC_EVIDENCE_NOT_FOUND'
+          ? 'SPEC_EVIDENCE_NOT_FOUND'
+          : 'SPEC_PARSE_FAILED',
+        result,
+      };
+    }
+  }
+
+  private attachProblemSpecObservation(
+    plan: GenerationPlan,
+    observation: ProblemSpecObservation | undefined,
+  ): GenerationPlan {
+    if (!observation) return plan;
+    plan.specSchemaVersion = observation.schemaVersion;
+    if (observation.summary) plan.problemSpecSummary = observation.summary;
+    if (observation.result) {
+      plan.tokenUsage = mergeTokenUsage([observation.result.usage, plan.tokenUsage]);
+      const specModel = `${observation.result.usedModel.endpointName}/${observation.result.usedModel.modelName}`;
+      plan.usedModel = [...new Set([specModel, ...(plan.usedModel || '').split(' → ').filter(Boolean)])]
+        .join(' → ');
+    }
+    if (observation.failureCode) {
+      const warning = `题意规范观察未通过（${observation.failureCode}）；旧生成流程已继续，请人工复核题意。`;
+      if (!plan.notesStructured) {
+        plan.notesStructured = {
+          warnings: [],
+          system: [],
+          ...(plan.notes ? { ai: plan.notes } : {}),
+        };
+      }
+      if (!plan.notesStructured.warnings.includes(warning)) {
+        plan.notesStructured.warnings.push(warning);
+      }
+      plan.notes = [plan.notes, warning].filter(Boolean).join('\n');
+    }
+    return plan;
+  }
+
+  private notifyProblemSpecObservation(
+    params: GenerateTestdataParams,
+    observation: ProblemSpecObservation | undefined,
+  ): void {
+    if (!observation || !params.onProblemSpecObservation) return;
+    try {
+      params.onProblemSpecObservation({
+        schemaVersion: observation.schemaVersion,
+        succeeded: !!observation.summary,
+        ...(observation.summary ? {
+          constraintCount: observation.summary.constraintCount,
+          invariantCount: observation.summary.invariantCount,
+          uncertaintyCount: observation.summary.unresolvedUncertainties,
+        } : {}),
+      });
+    } catch {
+      // Quality telemetry is best-effort and cannot change generation behavior.
+    }
   }
 
   private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
@@ -6179,16 +6299,25 @@ export class TestdataGenService {
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
     this.activeModelTelemetry = undefined;
     try {
-      return await this.generateInternal(params);
+      const snapshot = createStatementSnapshot(params.statementMarkdown);
+      return await this.generateInternal({
+        ...params,
+        statementMarkdown: snapshot.normalizedMarkdown,
+      }, snapshot);
     } catch (error) {
       rememberFailureModelTelemetry(error, this.activeModelTelemetry);
       throw error;
     }
   }
 
-  private async generateInternal(params: GenerateTestdataParams): Promise<GenerationPlan> {
+  private async generateInternal(
+    params: GenerateTestdataParams,
+    snapshot: StatementSnapshot,
+  ): Promise<GenerationPlan> {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
+    const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
+    this.notifyProblemSpecObservation(params, problemSpecObservation);
     const risk = this.assessRisk(params);
     const customChecker = hasCustomChecker(params.existingConfig);
     if (
@@ -6201,13 +6330,6 @@ export class TestdataGenService {
         params.checkerArtifacts?.failureKind || 'unavailable',
         '已配置的 checker 制品未能读取，无法完成语义验证',
       );
-    }
-    if (isStatementTruncatedForGeneration(params.statementMarkdown)) {
-      throw toPipelineError(new Error('题面超过安全生成长度，无法在截断语义下生成测试数据。'), {
-        code: 'SPEC_STATEMENT_TRUNCATED',
-        stage: 'pipeline',
-        artifact: 'statement',
-      });
     }
     const requiresProvidedCppOracle = params.options.problemKind !== 'function'
       && !!params.options.providedStd?.trim()
@@ -6242,7 +6364,10 @@ export class TestdataGenService {
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-        return this.attachRunMetadata(this.attachRisk(plan, risk), params);
+        return this.attachRunMetadata(
+          this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation), risk),
+          params,
+        );
       }
       if (requiresProvidedCppOracle) {
         const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -6309,7 +6434,10 @@ export class TestdataGenService {
       plan.notesStructured?.warnings.push(fallbackWarning);
     }
     this.emitProgress(params, 'complete', 100);
-    return this.attachRunMetadata(this.attachRisk(plan, risk), params);
+    return this.attachRunMetadata(
+      this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation), risk),
+      params,
+    );
   }
 
   private getCallOptions(

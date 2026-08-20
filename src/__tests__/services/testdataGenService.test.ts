@@ -36,6 +36,7 @@ import {
   buildSandboxBlueprintUserPrompt,
   buildIndependentVerifierSystemPrompt,
   buildIndependentVerifierUserPrompt,
+  buildKillTargetsUserPrompt,
   parseOracleLanguage,
   parseSubtasksSection,
   parseSandboxBlueprint,
@@ -64,6 +65,11 @@ import {
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
 import { TestdataPipelineError } from '../../services/testdata/failures';
+import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
+import {
+  STATEMENT_SNAPSHOT_HARD_LIMIT,
+  createStatementSnapshot,
+} from '../../services/testdata/statementSnapshot';
 import {
   CHECKER_BUDGET_MS,
   DISCRIMINATION_BUDGET_MS,
@@ -82,6 +88,9 @@ const baseOptions: GenerateOptions = {
 // fixture path explicit while individual risk-gate tests override it as needed.
 beforeEach(() => {
   process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+  // Existing characterization fixtures predate the observe-only extractor.
+  // Tests that exercise Task 5 opt into observe explicitly with a grounded response.
+  process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'legacy';
 });
 
 afterEach(() => {
@@ -888,6 +897,26 @@ function makeAiJson(overrides: Record<string, unknown> = {}): string {
     notes: '注意事项',
     ...overrides,
   });
+}
+
+function makeObservedProblemSpec(
+  statementMarkdown: string,
+  overrides: Partial<ProblemSpecV1> = {},
+): ProblemSpecV1 {
+  const snapshot = createStatementSnapshot(statementMarkdown);
+  return {
+    schemaVersion: 1,
+    statementHash: snapshot.statementHash,
+    problemKind: 'function',
+    testCaseMode: { kind: 'single' },
+    inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+    constraints: [],
+    invariants: [],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+    ...overrides,
+  };
 }
 
 describe('parseGenerationResponse', () => {
@@ -1823,13 +1852,15 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(up).toContain('CASE 5: large');
   });
 
-  it('超长题面被截断', () => {
+  it('超过旧提示长度的题面仍完整保留末尾约束', () => {
+    const tail = 'FINAL_CONSTRAINT_MUST_SURVIVE';
     const up = buildTestdataUserPrompt({
       problemTitle: 't',
-      statementMarkdown: 'x'.repeat(TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH + 100),
+      statementMarkdown: `${'x'.repeat(20_100)}${tail}`,
       options: baseOptions,
     });
-    expect(up).toContain('题面过长已截断');
+    expect(up).toContain(tail);
+    expect(up).not.toContain('题面过长已截断');
   });
 
   it('User Prompt 包含填空指定、数据规模与标准答案', () => {
@@ -2256,6 +2287,162 @@ describe('buildSkeletonPlan', () => {
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
+  it('keeps the complete normalized statement in the isolated kill-target prompt', () => {
+    const tail = 'FINAL_KILL_TARGET_CONSTRAINT';
+    const statement = `${'x'.repeat(12_100)}\r\n${tail}`;
+    const prompt = buildKillTargetsUserPrompt({ statement, analysis: '', samples: [] });
+
+    expect(prompt).toContain(tail);
+    expect(prompt).toContain(statement.replace(/\r\n/g, '\n'));
+    expect(prompt).not.toContain('题面（最多 6000 字符）');
+  });
+
+  it('observes one grounded ProblemSpec before the legacy pipeline and saves only its summary', async () => {
+    const statement = '## Constraints\nn >= 1';
+    const spec = makeObservedProblemSpec(statement, {
+      constraints: [{
+        id: 'c_n',
+        expression: 'SECRET_SPEC_EXPRESSION',
+        machineCheckable: true,
+        scope: 'global',
+        evidence: { quote: 'n >= 1', section: 'Constraints', startOffset: 0, endOffset: 1 },
+      }],
+      invariants: [{
+        id: 'i_n', kind: 'custom', expression: 'SECRET_SPEC_INVARIANT', machineCheckable: false,
+        evidence: { quote: 'n >= 1', section: 'Constraints' },
+      }],
+      uncertainties: [{ code: 'u_semantics', description: 'SECRET_SPEC_UNCERTAINTY' }],
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(spec),
+          usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: makeAiJson(),
+          usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+        }),
+    };
+    const onProblemSpecObservation = jest.fn();
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'observed',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      onProblemSpecObservation,
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat.mock.calls[0][1]).toContain('严格 JSON');
+    expect(mockClient.chat.mock.calls[1][0][0].content).toContain(statement);
+    expect(JSON.stringify(mockClient.chat.mock.calls[1])).not.toContain('SECRET_SPEC_EXPRESSION');
+    expect(JSON.stringify(mockClient.chat.mock.calls[1])).not.toContain('SECRET_SPEC_INVARIANT');
+    expect(JSON.stringify(mockClient.chat.mock.calls[1])).not.toContain('SECRET_SPEC_UNCERTAINTY');
+    expect(plan.specSchemaVersion).toBe(1);
+    expect(plan.problemSpecSummary).toEqual({
+      statementHash: createStatementSnapshot(statement).statementHash,
+      constraintCount: 1,
+      invariantCount: 1,
+      unresolvedUncertainties: 1,
+    });
+    expect(plan).not.toHaveProperty('problemSpec');
+    expect(plan.tokenUsage?.totalTokens).toBe(330);
+    expect(onProblemSpecObservation).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      succeeded: true,
+      constraintCount: 1,
+      invariantCount: 1,
+      uncertaintyCount: 1,
+    });
+  });
+
+  it.each([
+    ['SPEC_PARSE_FAILED', 'not strict json'],
+    ['SPEC_EVIDENCE_NOT_FOUND', JSON.stringify(makeObservedProblemSpec('## Constraints\nn >= 1', {
+      constraints: [{
+        id: 'c_n', expression: 'n is prime', machineCheckable: true, scope: 'global',
+        evidence: { quote: 'n is prime', section: 'Constraints' },
+      }],
+    }))],
+  ])('continues the old success path when observe extraction records %s', async (failureCode, specResponse) => {
+    const statement = '## Constraints\nn >= 1';
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: specResponse,
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: makeAiJson(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+        }),
+    };
+    const onProblemSpecObservation = jest.fn();
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'observe failure',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      onProblemSpecObservation,
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(plan.specSchemaVersion).toBe(1);
+    expect(plan.problemSpecSummary).toBeUndefined();
+    expect(plan.notesStructured?.warnings).toContainEqual(expect.stringContaining(failureCode));
+    expect(onProblemSpecObservation).toHaveBeenCalledWith({ schemaVersion: 1, succeeded: false });
+  });
+
+  it('keeps the complete statement in extractor and legacy prompts above the former 20k boundary', async () => {
+    const tail = 'FINAL_CONSTRAINT_AT_STATEMENT_TAIL';
+    const statement = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_100)}${tail}`;
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec(statement)),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: makeAiJson(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+        }),
+    };
+
+    await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'long',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+    expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[1][0][0].content).toContain(tail);
+    expect(JSON.stringify(mockClient.chat.mock.calls)).not.toContain('题面过长已截断');
+  });
+
+  it('rejects a statement above the snapshot hard limit before any AI or sandbox call', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = { isAvailable: jest.fn() };
+
+    await expect(new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'too long',
+      statementMarkdown: 'x'.repeat(STATEMENT_SNAPSHOT_HARD_LIMIT + 1),
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({ code: 'SPEC_STATEMENT_TOO_LONG', retryPolicy: 'no-retry' });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
   it('best-effort checker 耗时扩展正确性截止时间，不消耗主预算', () => {
     expect(extendDeadlineByBestEffortElapsed(10_000, 2_000, 7_500)).toBe(15_500);
     expect(extendDeadlineByBestEffortElapsed(10_000, 7_500, 2_000)).toBe(10_000);
@@ -2932,6 +3119,12 @@ describe('TestdataGenService.generate', () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const mockClient = {
       chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec('题面', {
+            problemKind: 'traditional', outputPolicy: { kind: 'custom-checker' },
+          })),
+          usedModel,
+        })
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
         .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
@@ -3825,7 +4018,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -4312,7 +4505,9 @@ describe('TestdataGenService.generate', () => {
         usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
       }),
     };
-    const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
       problemTitle: 'low risk',
       statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
       options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
@@ -4379,19 +4574,28 @@ describe('TestdataGenService.generate', () => {
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 
-  it('long statements truncated from the prompt never use direct fallback', async () => {
-    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
-    const mockClient = { chat: jest.fn() };
-    await expect(new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+  it('legacy mode also sends a complete statement above the former prompt boundary', async () => {
+    const tail = 'LEGACY_TAIL_CONSTRAINT';
+    const statementMarkdown = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_001)}${tail}`;
+    const mockClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+    }) };
+
+    await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'legacy',
+    }).generate({
       problemTitle: 'long statement',
-      statementMarkdown: `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20001)}`,
-      options: { problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true },
-    })).rejects.toMatchObject({ code: 'SPEC_STATEMENT_TRUNCATED', retryPolicy: 'rerun-spec' });
-    expect(mockClient.chat).not.toHaveBeenCalled();
-    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+      statementMarkdown,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[0][0][0].content).not.toContain('题面过长已截断');
   });
 
-  it('rejects a prompt-truncated statement before an available sandbox or AI call', async () => {
+  it('legacy mode rejects only the explicit snapshot hard limit before sandbox or AI calls', async () => {
     const mockClient = { chat: jest.fn() };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -4401,11 +4605,11 @@ describe('TestdataGenService.generate', () => {
       mode: 'sandbox', sandboxRunner: runner,
     }).generate({
       problemTitle: 'long statement',
-      statementMarkdown: `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH + 1)}`,
+      statementMarkdown: 'x'.repeat(STATEMENT_SNAPSHOT_HARD_LIMIT + 1),
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     })).rejects.toMatchObject({
-      code: 'SPEC_STATEMENT_TRUNCATED',
-      retryPolicy: 'rerun-spec',
+      code: 'SPEC_STATEMENT_TOO_LONG',
+      retryPolicy: 'no-retry',
     });
     expect(runner.isAvailable).not.toHaveBeenCalled();
     expect(mockClient.chat).not.toHaveBeenCalled();
@@ -4604,7 +4808,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
     expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
   });
@@ -4644,7 +4848,7 @@ describe('TestdataGenService.generate', () => {
       expect(failure).toBe(cancellation);
       expect(runner.deleteCachedFile).toHaveBeenCalledTimes(1);
       expect(runner.deleteCachedFile).toHaveBeenCalledWith('late-checker-cache');
-      expect(mockClient.chat).not.toHaveBeenCalled();
+      expect(mockClient.chat).toHaveBeenCalledTimes(1);
       expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
       expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
     },
@@ -5039,7 +5243,7 @@ describe('TestdataGenService.generate', () => {
     }).catch(error => error);
 
     expect(failure).toBe(cancellation);
-    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -5094,7 +5298,7 @@ describe('TestdataGenService.generate', () => {
 
       expect(failure).toBe(cancellation);
       expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
-      expect(mockClient.chat).not.toHaveBeenCalled();
+      expect(mockClient.chat).toHaveBeenCalledTimes(1);
       expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();
@@ -7522,7 +7726,9 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
         usedModel: { endpointId: 'e', endpointName: 'n', modelName: 'm' },
       }),
     };
-    const plan = await new TestdataGenService(mockClient as never).generate({
+    const plan = await new TestdataGenService(mockClient as never, {
+      reliabilityMode: 'observe',
+    }).generate({
       runId: '11111111-1111-4111-8111-111111111111',
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },

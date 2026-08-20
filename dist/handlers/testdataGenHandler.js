@@ -462,7 +462,7 @@ function createTestdataTelemetrySession(input) {
         statement: input.statement,
         hasCustomChecker: customChecker,
         unsupportedCustomChecker: customChecker && !(0, testdataGenService_1.getTestlibCheckerFilename)(input.existingConfig),
-        statementTruncated: input.statement.length > testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH,
+        statementTruncated: false,
         directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
         confirmDirectFallback: input.options.confirmDirectFallback,
         reliabilityMode,
@@ -490,9 +490,9 @@ function createTestdataTelemetrySession(input) {
 function serializeGenerationPlan(plan) {
     if (!plan)
         return undefined;
-    // Hashes are server-authoritative apply state. They are persisted with the job
-    // but never sent to the browser and are never accepted back from the client.
-    const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, ...clientPlan } = plan;
+    // Hashes/model identity and any future complete spec are server-only. The
+    // browser receives only the bounded ProblemSpec summary declared on GenerationPlan.
+    const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, problemSpec: _serverOnlyProblemSpec, ...clientPlan } = plan;
     return clientPlan;
 }
 function serializeGenerationJob(job) {
@@ -625,6 +625,9 @@ async function runBackgroundGeneration(params) {
                 progressWrites = progressWrites
                     .then(() => jobModel.updateProgress(job._id, progress))
                     .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
+            },
+            onProblemSpecObservation: observation => {
+                telemetrySession?.observeProblemSpec?.(observation);
             },
         });
         await checkpointWrites;
@@ -834,6 +837,9 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 onProgress: progress => {
                     emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
                     progressStream?.writeEvent('progress', progress);
+                },
+                onProblemSpecObservation: observation => {
+                    telemetrySession?.observeProblemSpec?.(observation);
                 },
             });
             emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));

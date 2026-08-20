@@ -100,6 +100,9 @@ const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
 const statementSamples_1 = require("./testdata/statementSamples");
+const problemSpec_1 = require("./testdata/problemSpec");
+const problemSpecPrompts_1 = require("./testdata/problemSpecPrompts");
+const statementSnapshot_1 = require("./testdata/statementSnapshot");
 const templateVerifier_1 = require("./testdata/templateVerifier");
 const runTelemetry_1 = require("./testdata/runTelemetry");
 var statementSamples_2 = require("./testdata/statementSamples");
@@ -120,7 +123,7 @@ exports.TESTDATA_GEN_LIMITS = {
     MAX_CASES: 30,
     MAX_EXTRA_REQUIREMENTS: 1000,
     MAX_PROVIDED_STD: 10000,
-    MAX_STATEMENT_LENGTH: 20000,
+    MAX_STATEMENT_LENGTH: statementSnapshot_1.STATEMENT_SNAPSHOT_HARD_LIMIT,
     /** apply 时单文件内容上限（字节） */
     MAX_FILE_SIZE: 256 * 1024,
     /** apply 时文件数量上限 */
@@ -688,13 +691,8 @@ function getTestlibCheckerFilename(raw) {
     const checker = typeof config.checker === 'string' ? config.checker.trim() : '';
     return checkerType === 'testlib' && checker ? checker : undefined;
 }
-function isStatementTruncatedForGeneration(statementMarkdown) {
-    return statementMarkdown.length > exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH;
-}
-function truncateStatementForGenerationPrompt(statementMarkdown) {
-    return isStatementTruncatedForGeneration(statementMarkdown)
-        ? `${statementMarkdown.slice(0, exports.TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH)}\n...（题面过长已截断）`
-        : statementMarkdown;
+function completeStatementForGenerationPrompt(statementMarkdown) {
+    return (0, statementSnapshot_1.createStatementSnapshot)(statementMarkdown).normalizedMarkdown;
 }
 /**
  * 生成 config.yaml（评测设置）
@@ -991,7 +989,7 @@ function buildTestdataUserPrompt(params, coverageOverride) {
     const requiredTemplateSections = options.languages.map(l => `@@@TEMPLATE:${l}@@@`).join('、');
     const coveragePlan = coverageOverride
         ?? buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
-    const statement = truncateStatementForGenerationPrompt(statementMarkdown);
+    const statement = completeStatementForGenerationPrompt(statementMarkdown);
     const lines = [
         `【题目标题】${problemTitle}`,
         '',
@@ -1086,7 +1084,7 @@ function buildSolutionBlueprintUserPrompt(params) {
         yes: '是（标程必须是补全后的题面代码）',
         no: '否',
     }[options.fillInMode || 'auto'];
-    const statement = truncateStatementForGenerationPrompt(statementMarkdown);
+    const statement = completeStatementForGenerationPrompt(statementMarkdown);
     const lines = [
         `【题目标题】${problemTitle}`,
         '',
@@ -1262,7 +1260,7 @@ exists 或 none
 函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`;
 }
 function buildIndependentVerifierUserPrompt(params, blueprint) {
-    const statement = truncateStatementForGenerationPrompt(params.statementMarkdown);
+    const statement = completeStatementForGenerationPrompt(params.statementMarkdown);
     const functionSamples = blueprint.problemType === 'function'
         ? (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown)
         : [];
@@ -1313,14 +1311,14 @@ DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\``;
 }
 function buildKillTargetsUserPrompt(input) {
-    const statement = input.statement.slice(0, 6000);
+    const statement = completeStatementForGenerationPrompt(input.statement);
     const analysis = input.analysis.slice(0, 2000);
     const samples = input.samples.slice(0, 3);
     return [
         '【既有解法分析】',
         analysis || '未提供额外分析，请从题面推导常见错误模式。',
         '',
-        '【题面（最多 6000 字符）】',
+        '【完整规范化题面】',
         statement,
         '',
         '【题面样例（最多 3 组，错误解必须全部通过）】',
@@ -4821,7 +4819,7 @@ class TestdataGenService {
             statement: params.statementMarkdown,
             hasCustomChecker: customChecker,
             unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
-            statementTruncated: isStatementTruncatedForGeneration(params.statementMarkdown),
+            statementTruncated: false,
             directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
             confirmDirectFallback: params.options.confirmDirectFallback,
             reliabilityMode: this.reliabilityMode,
@@ -4831,6 +4829,93 @@ class TestdataGenService {
         plan.risk = risk;
         plan.reliabilityMode = this.reliabilityMode;
         return plan;
+    }
+    async observeProblemSpec(params, snapshot) {
+        if (this.reliabilityMode === 'legacy')
+            return undefined;
+        const prompt = (0, problemSpecPrompts_1.buildProblemSpecPrompt)({
+            snapshot,
+            requestedProblemKind: params.options.problemKind,
+            hasCustomChecker: hasCustomChecker(params.existingConfig),
+        });
+        let result;
+        try {
+            result = await this.aiClient.chat([{ role: 'user', content: prompt.userPrompt }], prompt.systemPrompt, this.getCallOptions(params));
+        }
+        catch (error) {
+            if (isCancellation(error))
+                throw error;
+            return { schemaVersion: 1, failureCode: 'SPEC_PARSE_FAILED' };
+        }
+        try {
+            const parsed = (0, problemSpec_1.parseProblemSpecV1)(result.content);
+            const validated = (0, problemSpec_1.validateProblemSpecV1)(parsed, {
+                hasCustomChecker: hasCustomChecker(params.existingConfig),
+                ...(params.options.problemKind === 'auto'
+                    ? {}
+                    : { expectedProblemKind: params.options.problemKind }),
+            });
+            const grounded = (0, problemSpec_1.validateProblemSpecEvidence)(validated, snapshot);
+            return { schemaVersion: 1, summary: (0, problemSpec_1.summarizeProblemSpec)(grounded), result };
+        }
+        catch (error) {
+            if (isCancellation(error))
+                throw error;
+            return {
+                schemaVersion: 1,
+                failureCode: error instanceof failures_1.TestdataPipelineError
+                    && error.code === 'SPEC_EVIDENCE_NOT_FOUND'
+                    ? 'SPEC_EVIDENCE_NOT_FOUND'
+                    : 'SPEC_PARSE_FAILED',
+                result,
+            };
+        }
+    }
+    attachProblemSpecObservation(plan, observation) {
+        if (!observation)
+            return plan;
+        plan.specSchemaVersion = observation.schemaVersion;
+        if (observation.summary)
+            plan.problemSpecSummary = observation.summary;
+        if (observation.result) {
+            plan.tokenUsage = mergeTokenUsage([observation.result.usage, plan.tokenUsage]);
+            const specModel = `${observation.result.usedModel.endpointName}/${observation.result.usedModel.modelName}`;
+            plan.usedModel = [...new Set([specModel, ...(plan.usedModel || '').split(' → ').filter(Boolean)])]
+                .join(' → ');
+        }
+        if (observation.failureCode) {
+            const warning = `题意规范观察未通过（${observation.failureCode}）；旧生成流程已继续，请人工复核题意。`;
+            if (!plan.notesStructured) {
+                plan.notesStructured = {
+                    warnings: [],
+                    system: [],
+                    ...(plan.notes ? { ai: plan.notes } : {}),
+                };
+            }
+            if (!plan.notesStructured.warnings.includes(warning)) {
+                plan.notesStructured.warnings.push(warning);
+            }
+            plan.notes = [plan.notes, warning].filter(Boolean).join('\n');
+        }
+        return plan;
+    }
+    notifyProblemSpecObservation(params, observation) {
+        if (!observation || !params.onProblemSpecObservation)
+            return;
+        try {
+            params.onProblemSpecObservation({
+                schemaVersion: observation.schemaVersion,
+                succeeded: !!observation.summary,
+                ...(observation.summary ? {
+                    constraintCount: observation.summary.constraintCount,
+                    invariantCount: observation.summary.invariantCount,
+                    uncertaintyCount: observation.summary.unresolvedUncertainties,
+                } : {}),
+            });
+        }
+        catch {
+            // Quality telemetry is best-effort and cannot change generation behavior.
+        }
     }
     attachRunMetadata(plan, params) {
         plan.runId = params.runId || plan.runId || (0, runTelemetry_1.createTestdataRunId)();
@@ -4887,29 +4972,28 @@ class TestdataGenService {
     async generate(params) {
         this.activeModelTelemetry = undefined;
         try {
-            return await this.generateInternal(params);
+            const snapshot = (0, statementSnapshot_1.createStatementSnapshot)(params.statementMarkdown);
+            return await this.generateInternal({
+                ...params,
+                statementMarkdown: snapshot.normalizedMarkdown,
+            }, snapshot);
         }
         catch (error) {
             rememberFailureModelTelemetry(error, this.activeModelTelemetry);
             throw error;
         }
     }
-    async generateInternal(params) {
+    async generateInternal(params, snapshot) {
         assertExistingConfigParsable(params.existingConfig);
         this.emitProgress(params, 'preparing', 2);
+        const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
+        this.notifyProblemSpecObservation(params, problemSpecObservation);
         const risk = this.assessRisk(params);
         const customChecker = hasCustomChecker(params.existingConfig);
         if (customChecker
             && this.reliabilityMode === 'enforce'
             && (!params.checkerArtifacts?.configured || !params.checkerArtifacts.read)) {
             throw checkerPipelineError('CHECKER_REQUIRED_UNAVAILABLE', params.checkerArtifacts?.failureKind || 'unavailable', '已配置的 checker 制品未能读取，无法完成语义验证');
-        }
-        if (isStatementTruncatedForGeneration(params.statementMarkdown)) {
-            throw (0, failures_1.toPipelineError)(new Error('题面超过安全生成长度，无法在截断语义下生成测试数据。'), {
-                code: 'SPEC_STATEMENT_TRUNCATED',
-                stage: 'pipeline',
-                artifact: 'statement',
-            });
         }
         const requiresProvidedCppOracle = params.options.problemKind !== 'function'
             && !!params.options.providedStd?.trim()
@@ -4934,7 +5018,7 @@ class TestdataGenService {
             if (available) {
                 const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
                 this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-                return this.attachRunMetadata(this.attachRisk(plan, risk), params);
+                return this.attachRunMetadata(this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation), risk), params);
             }
             if (requiresProvidedCppOracle) {
                 const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -4979,7 +5063,7 @@ class TestdataGenService {
             plan.notesStructured?.warnings.push(fallbackWarning);
         }
         this.emitProgress(params, 'complete', 100);
-        return this.attachRunMetadata(this.attachRisk(plan, risk), params);
+        return this.attachRunMetadata(this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation), risk), params);
     }
     getCallOptions(params, attempt = 1) {
         return {
