@@ -286,8 +286,9 @@ export function repairPolicyForFailure(
     case 'CHECKER_REQUIRED_UNAVAILABLE':
     case 'CHECKER_COMPILE_FAILED':
     case 'CHECKER_RUNTIME_FAILED':
-    case 'SUBTASK_CONSTRAINT_VIOLATION':
       return 'manual-review';
+    case 'SUBTASK_CONSTRAINT_VIOLATION':
+      return error.artifact === 'validator' ? 'repair-artifact' : 'manual-review';
     case 'UNKNOWN':
       if (error.artifact === 'spec') return 'rerun-spec';
       return error.artifact === 'pipeline' ? 'switch-model' : 'repair-artifact';

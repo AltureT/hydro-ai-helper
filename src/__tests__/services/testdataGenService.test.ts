@@ -50,6 +50,7 @@ import {
   buildSandboxRepairPrompt,
   buildIndependentVerifierRepairPrompt,
   mergeSandboxBlueprintRepair,
+  classifyValidatorInvalidResult,
   hasCustomChecker,
   getTestlibCheckerFilename,
   extendDeadlineByBestEffortElapsed,
@@ -63,9 +64,14 @@ import {
   extractTestdataErrorMetadata,
   shouldRecommendDeeperReasoning,
   GenerateOptions,
+  MaterializationCacheState,
+  ValidatorProofContext,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
-import { TestdataPipelineError } from '../../services/testdata/failures';
+import {
+  TestdataPipelineError,
+  repairPolicyForFailure,
+} from '../../services/testdata/failures';
 import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
 import {
   createTestdataPipelineContext,
@@ -7378,6 +7384,76 @@ function detail(over: Record<string, unknown> = {}) {
   return { status: 'Accepted', accepted: true, timedOut: false, exitStatus, stdout: '', stderr: '', ...over };
 }
 
+describe('classifyValidatorInvalidResult invalid partition', () => {
+  it.each([
+    [
+      'explicit exit zero',
+      detail(),
+      'false-accept',
+    ],
+    [
+      'explicit nonzero exit',
+      detail({
+        status: 'Runtime Error', accepted: false, exitStatus: 1, stderr: 'invalid',
+      }),
+      'rejected',
+    ],
+    [
+      'timeout',
+      detail({
+        status: 'Time Limit Exceeded', accepted: false, timedOut: true,
+        exitStatus: undefined,
+      }),
+      'timeout-gap',
+    ],
+    [
+      'transport error',
+      detail({
+        status: 'Internal Error', accepted: false, exitStatus: undefined,
+        error: 'transport',
+      }),
+      'infra-gap',
+    ],
+    [
+      'missing exit status',
+      detail({ accepted: false, exitStatus: undefined }),
+      'infra-gap',
+    ],
+    [
+      'NaN exit status',
+      detail({ accepted: false, exitStatus: Number.NaN }),
+      'infra-gap',
+    ],
+    [
+      'nonzero exit with timeout',
+      detail({
+        status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1,
+      }),
+      'timeout-gap',
+    ],
+    [
+      'nonzero exit with malformed transport detail',
+      detail({
+        status: 'Runtime Error', accepted: false, exitStatus: 1, error: 'transport',
+      }),
+      'infra-gap',
+    ],
+  ])('classifies %s', (_label, result, expected) => {
+    expect(classifyValidatorInvalidResult(result)).toBe(expected);
+  });
+});
+
+describe('Validator-owned scoped false accept repair policy', () => {
+  it('repairs Validator-owned subtask violations without changing Generator ownership', () => {
+    expect(repairPolicyForFailure({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION', artifact: 'validator',
+    })).toBe('repair-artifact');
+    expect(repairPolicyForFailure({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION', artifact: 'generator',
+    })).toBe('manual-review');
+  });
+});
+
 const tradOpts: GenerateOptions = { problemKind: 'traditional', caseCount: 2, languages: [] };
 
 /** 两个测试点的生成器 stdout（label c1/c2，输入 1 / 2）。 */
@@ -7436,8 +7512,9 @@ function materializeWithValidatorProof(
   options: GenerateOptions,
   statementMarkdown: string,
   runner: Parameters<typeof materializeSandboxBlueprint>[3],
-  validatorProof: ReturnType<typeof makeTieredValidatorProof>,
+  validatorProof: ValidatorProofContext,
   signal?: AbortSignal,
+  cache: MaterializationCacheState = {},
 ) {
   return materializeSandboxBlueprint(
     blueprint,
@@ -7452,10 +7529,43 @@ function materializeWithValidatorProof(
     undefined,
     {
       ...resolveMaterializationResume(['GENERATOR']),
-      cache: {},
+      cache,
       validatorProof,
     } as never,
   );
+}
+
+function makeValidatorCoverageProof(
+  statementMarkdown: string,
+  specOverrides: Partial<ProblemSpecV1> = {},
+  reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
+  riskTier: 'low' | 'medium' | 'high' | 'blocked' = 'medium',
+  tieredDecision: ValidatorProofContext['tieredDecision'] = { enabled: false, allocations: [] },
+): ValidatorProofContext {
+  const statement = createStatementSnapshot(statementMarkdown);
+  return {
+    reliabilityMode,
+    pipelineContext: createTestdataPipelineContext({
+      runId: 'task-7-validator-coverage',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, {
+        problemKind: 'traditional',
+        inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' }],
+        ...specOverrides,
+      }),
+      risk: {
+        tier: riskTier,
+        score: riskTier === 'low' ? 0 : riskTier === 'medium' ? 3 : 6,
+        reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: riskTier === 'high' || riskTier === 'blocked',
+        requiresIndependentModels: riskTier === 'high' || riskTier === 'blocked',
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    }),
+    tieredDecision,
+  };
 }
 
 describe('两阶段沙箱蓝图', () => {
@@ -8131,6 +8241,53 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     ].join('\n'), tradOpts);
   }
 
+  function makeValidatorCoverageRunner(
+    blueprint: ReturnType<typeof tradBlueprint>,
+    invalidResults: ReturnType<typeof detail>[] | ((invocations: unknown[]) => unknown),
+    legalResults?: ReturnType<typeof detail>[],
+  ) {
+    let validatorCalls = 0;
+    return {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: 'formal-1', input: '5' },
+          { label: 'formal-2', input: '6' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === blueprint.validatorCode) {
+            validatorCalls += 1;
+            if (validatorCalls === 1) {
+              return Promise.resolve(legalResults || invocations.map(() => detail()));
+            }
+            return typeof invalidResults === 'function'
+              ? invalidResults(invocations)
+              : Promise.resolve(invalidResults);
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+  }
+
+  const globalConstraint = {
+    id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
+    scope: 'global' as const, evidence: { quote: '0 <= n <= 10' },
+  };
+  const boundedInvariant = {
+    id: 'I1', kind: 'custom' as const, expression: '0 <= n <= 10',
+    machineCheckable: true, evidence: { quote: '0 <= n <= 10' },
+  };
+  const belowMinRecipe = {
+    targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+  };
+
   it('assigned subtask argv forms the legal validator partition without changing stdin', async () => {
     const statement = [
       'Subtask 1 requires n <= 10.',
@@ -8150,6 +8307,12 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const blueprint = {
       ...tradBlueprint(),
       ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: {
+        constraintIds: ['C_subtask_1', 'C_subtask_2'],
+        invariantIds: [],
+      },
+      validatorProbeRecipes: [],
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -8166,6 +8329,11 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       runPythonBatchDetailed: jest.fn()
         .mockImplementationOnce((_code: string, invocations: unknown[]) => Promise.resolve(
           invocations.map(() => detail()),
+        ))
+        .mockImplementationOnce((_code: string, invocations: unknown[]) => Promise.resolve(
+          invocations.map(() => detail({
+            status: 'Runtime Error', accepted: false, exitStatus: 1,
+          })),
         ))
         .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
           inputs.map(input => detail({ stdout: input })),
@@ -8222,8 +8390,30 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       tieredDecision: { enabled: false, allocations: [] },
     } as ReturnType<typeof makeTieredValidatorProof>;
     const nonTieredRunner = makeRunner();
+    nonTieredRunner.runPythonBatchDetailed
+      .mockReset()
+      .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+        inputs.map(input => detail({ stdout: input })),
+      ))
+      .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+        inputs.map(() => detail({
+          status: 'Runtime Error', accepted: false, exitStatus: 1,
+        })),
+      ))
+      .mockImplementation((_code: string, inputs: string[]) => Promise.resolve(
+        inputs.map(input => detail({ stdout: input })),
+      ));
+    const nonTieredBlueprint = {
+      ...blueprint,
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: {
+        constraintIds: ['C_subtask_1', 'C_subtask_2'],
+        invariantIds: [],
+      },
+      validatorProbeRecipes: [],
+    };
     await materializeWithValidatorProof(
-      blueprint,
+      nonTieredBlueprint,
       tradOpts,
       statement,
       nonTieredRunner,
@@ -8354,6 +8544,469 @@ describe('materializeSandboxBlueprint 双重验证', () => {
 
     expect(failure).toBe(cancellation);
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('validator coverage accepts a valid-only legal corpus with no required targets', async () => {
+    const statement = 'Read one integer n.';
+    const proof = makeValidatorCoverageProof(statement);
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: [] },
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual({
+      ran: true,
+      casesChecked: 2,
+      validAccepted: 2,
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: [],
+    });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+  });
+
+  it('validator coverage requires declaration, construction, and rejection for every target', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, {
+      constraints: [globalConstraint],
+      invariants: [boundedInvariant],
+    });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [
+        belowMinRecipe,
+        { ...belowMinRecipe, targetId: 'I1' },
+      ],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 2 }),
+    ]);
+    const cache: MaterializationCacheState = {};
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, undefined, cache,
+    );
+
+    expect(result.verification?.validator).toEqual({
+      ran: true,
+      casesChecked: 2,
+      validAccepted: 2,
+      invalidRejected: 2,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['C1', 'I1'],
+      missingConstraintIds: [],
+    });
+    const evidence = (cache as unknown as {
+      validation?: { validatorTargetEvidence?: Array<Record<string, unknown>> };
+    }).validation?.validatorTargetEvidence;
+    expect(evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetId: 'I1', targetKind: 'invariant', execution: 'rejected' }),
+    ]));
+  });
+
+  it('validator coverage counts every probe while one rejection covers a multiply-probed target', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [
+        belowMinRecipe,
+        { ...belowMinRecipe, constructionKind: 'integer-above-max' as const },
+      ],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      detail({ status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1 }),
+    ]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 1,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['C1'],
+      missingConstraintIds: [],
+    }));
+  });
+
+  it('validator coverage unions several independently rejected target IDs', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, {
+      constraints: [globalConstraint], invariants: [boundedInvariant],
+    });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [belowMinRecipe, { ...belowMinRecipe, targetId: 'I1' }],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+    ]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 2,
+      coveredConstraintIds: ['C1', 'I1'],
+      missingConstraintIds: [],
+    }));
+  });
+
+  it('validator coverage keeps a declared target missing when no probe is constructed', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C1'],
+    }));
+    expect(result.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('validator coverage treats a constructed probe timeout as a missing execution proof', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1 }),
+    ]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C1'],
+    }));
+  });
+
+  it('validator coverage rejects an illegal result-count mismatch with safe counts only', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
+      safeDetails: { actualCount: 0, expectedCount: 1, failureKind: 'protocol' },
+    });
+    expect(Object.keys(failure.safeDetails).sort())
+      .toEqual(['actualCount', 'expectedCount', 'failureKind']);
+  });
+
+  it('invalid partition transport failure is sanitized as SANDBOX_UNAVAILABLE', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      () => Promise.reject(new Error('PRIVATE_TRANSPORT_DIAGNOSTIC')),
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
+      safeDetails: { failureKind: 'infra' },
+    });
+    expect(failure.message).not.toContain('PRIVATE_TRANSPORT_DIAGNOSTIC');
+    expect(JSON.stringify(failure.safeDetails)).not.toContain('PRIVATE_TRANSPORT_DIAGNOSTIC');
+  });
+
+  it('invalid partition cancellation preserves the exact reason after the batch resolves', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const controller = new AbortController();
+    const cancellation = new Error('caller cancellation identity');
+    const runner = makeValidatorCoverageRunner(blueprint, () => {
+      controller.abort(cancellation);
+      return Promise.resolve([
+        detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      ]);
+    });
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, controller.signal,
+    ).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+  });
+
+  it('custom recipe false accept is counted without exposing the probe input in observe mode', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [detail()]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 1,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C1'],
+    }));
+    expect(JSON.stringify(result)).not.toContain('-1\\n');
+    expect(result.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('protocol probe false accept blocks enforce after deterministic probes reject', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10. Subtask 1 is worth all points.';
+    const proof = makeValidatorCoverageProof(
+      statement,
+      {
+        constraints: [globalConstraint],
+        subtasks: [{ id: 1, score: 100, constraintIds: [] }],
+      },
+      'enforce',
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+    const runner = makeValidatorCoverageRunner(blueprint, [rejected, detail(), rejected]);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: expect.objectContaining({ protocolProbe: true, invalidAccepted: 1 }),
+    });
+    const illegalInvocations = runner.runPythonBatchDetailed.mock.calls[1][1];
+    expect(illegalInvocations).toEqual([
+      { stdin: '-1\n', argv: [] },
+      { stdin: '5\n', argv: ['--subtask', '2'] },
+      { stdin: '5\n', argv: ['--subtask', 'malformed'] },
+    ]);
+    const oracleInputs = runner.runPythonBatchDetailed.mock.calls[2]?.[1] || [];
+    expect(oracleInputs).not.toContain('-1\n');
+  });
+
+  it.each([
+    ['legacy', 'low', 'legacy'],
+    ['legacy', 'medium', 'legacy'],
+    ['legacy', 'high', 'legacy'],
+    ['legacy', 'blocked', 'legacy'],
+    ['observe', 'low', 'continue'],
+    ['observe', 'medium', 'continue'],
+    ['observe', 'high', 'continue'],
+    ['observe', 'blocked', 'continue'],
+    ['enforce', 'low', 'continue'],
+    ['enforce', 'medium', 'continue'],
+    ['enforce', 'high', 'coverage-error'],
+    ['enforce', 'blocked', 'coverage-error'],
+  ] as const)('%s %s applies validator coverage missing policy as %s', async (
+    reliabilityMode,
+    riskTier,
+    expected,
+  ) => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(
+      statement, { constraints: [globalConstraint] }, reliabilityMode, riskTier,
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+    const promise = materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    if (expected === 'coverage-error') {
+      await expect(promise).rejects.toMatchObject({
+        code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+        stage: 'validator',
+        artifact: 'coverage',
+      });
+      return;
+    }
+    const result = await promise;
+    if (expected === 'legacy') {
+      expect(result.verification?.validator).toEqual({ ran: true, casesChecked: 2 });
+      expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+    } else {
+      expect(result.verification?.validator).toEqual(expect.objectContaining({
+        missingConstraintIds: ['C1'],
+      }));
+      expect(result.verification).toMatchObject({
+        verified: false,
+        wouldBlock: reliabilityMode === 'observe',
+      });
+    }
+  });
+
+  it.each(['low', 'medium', 'high', 'blocked'] as const)(
+    'enforce %s rejects invalid Manifest as coverage missing before risk proportionality',
+    async riskTier => {
+      const statement = 'Every input satisfies 0 <= n <= 10.';
+      const proof = makeValidatorCoverageProof(
+        statement, { constraints: [globalConstraint] }, 'enforce', riskTier,
+      );
+      const blueprint = {
+        ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+        validatorManifestStatus: 'invalid' as const,
+        validatorProbeRecipes: [belowMinRecipe],
+      };
+      const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+      const runner = makeValidatorCoverageRunner(blueprint, [rejected]);
+
+      await expect(materializeWithValidatorProof(
+        blueprint, tradOpts, statement, runner as never, proof,
+      )).rejects.toMatchObject({
+        code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+        stage: 'validator',
+        artifact: 'coverage',
+      });
+    },
+  );
+
+  it('enforce ordinary false accept is Validator-owned and sanitized', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(
+      statement, { constraints: [globalConstraint] }, 'enforce', 'medium',
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [detail({ stderr: 'PRIVATE_PROBE' })]);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_FALSE_ACCEPT', stage: 'validator', artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { invalidAccepted: 1, invalidRejected: 0 },
+    });
+    expect(failure.message).not.toContain('PRIVATE_PROBE');
+    expect(JSON.stringify(failure.safeDetails)).not.toContain('PRIVATE_PROBE');
+  });
+
+  it('enforce scoped false accept uses SUBTASK_CONSTRAINT_VIOLATION with Validator ownership', async () => {
+    const statement = 'Subtask 1 requires 0 <= n <= 10.';
+    const scopedConstraint = {
+      ...globalConstraint,
+      scope: { subtaskId: 1 },
+      evidence: { quote: '0 <= n <= 10' },
+    };
+    const tieredDecision = {
+      enabled: true,
+      allocations: [
+        { caseNumber: 1, subtaskId: 1, guidance: 'bounded' },
+        { caseNumber: 2, subtaskId: 1, guidance: 'bounded' },
+      ],
+      subtasks: [{ id: 1, score: 100, constraints: '0 <= n <= 10' }],
+    };
+    const proof = makeValidatorCoverageProof(
+      statement,
+      {
+        constraints: [scopedConstraint],
+        subtasks: [{ id: 1, score: 100, constraintIds: ['C1'] }],
+      },
+      'enforce',
+      'medium',
+      tieredDecision,
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+    const runner = makeValidatorCoverageRunner(blueprint, [detail(), rejected, rejected]);
+
+    await expect(materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    )).rejects.toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator', artifact: 'validator', retryPolicy: 'repair-artifact',
+      safeDetails: expect.objectContaining({ invalidAccepted: 1 }),
+    });
   });
 
   it('修复轮复用阶段缓存并仅延续已消耗后的沙箱预算，AI 等待时间不计入', async () => {

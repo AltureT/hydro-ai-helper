@@ -66,6 +66,11 @@ import {
   type ValidatorProbeRecipe,
 } from './testdata/validatorManifest';
 import {
+  buildConstraintProbes,
+  type ConstraintProbe,
+  type LegalConstraintProbeSeed,
+} from './testdata/constraintProbes';
+import {
   runProblemSpecConsensus,
   type SpecConsensusStatus,
 } from './testdata/specConsensus';
@@ -368,6 +373,19 @@ export interface DiscriminationCheck {
   allKilled: boolean;
 }
 
+export interface ValidatorVerification {
+  ran: boolean;
+  casesChecked: number;
+  validAccepted: number;
+  invalidRejected: number;
+  invalidAccepted: number;
+  coveredConstraintIds: string[];
+  missingConstraintIds: string[];
+}
+
+type PlanValidatorVerification = Pick<ValidatorVerification, 'ran' | 'casesChecked'>
+  & Partial<Omit<ValidatorVerification, 'ran' | 'casesChecked'>>;
+
 /** 各道机器关卡的验证结果（前端据此渲染验证横幅与徽章）。 */
 export interface PlanVerification {
   mode: 'sandbox' | 'direct';
@@ -392,7 +410,7 @@ export interface PlanVerification {
     droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
-  validator?: { ran: boolean; casesChecked: number };
+  validator?: PlanValidatorVerification;
   templateChecks?: TemplateChecks;
   checkerCheck?: CheckerVerificationCheck;
   discrimination?: DiscriminationCheck;
@@ -4435,6 +4453,9 @@ interface CachedValidationState {
   keptStressIndices: number[];
   droppedInvalid: number;
   validatorRan: boolean;
+  validatorVerification?: ValidatorVerification;
+  validatorTargetEvidence?: ValidatorTargetEvidence[];
+  validatorInvalidInvocationCount?: number;
 }
 
 interface CachedOracleState {
@@ -4469,6 +4490,303 @@ function validatorInvocation(stdin: string, subtaskId?: number): PythonRunInvoca
   return {
     stdin,
     argv: subtaskId === undefined ? [] : ['--subtask', String(subtaskId)],
+  };
+}
+
+export type ValidatorInvalidExecution =
+  | 'rejected'
+  | 'false-accept'
+  | 'timeout-gap'
+  | 'infra-gap';
+
+/** Invalid input is proof only when Validator returns an explicit, finite nonzero exit. */
+export function classifyValidatorInvalidResult(
+  result: PythonRunDetail,
+): ValidatorInvalidExecution {
+  if (result.timedOut) return 'timeout-gap';
+  if (result.error || !Number.isFinite(result.exitStatus)) return 'infra-gap';
+  return result.exitStatus === 0 ? 'false-accept' : 'rejected';
+}
+
+interface ValidatorTargetEvidence {
+  targetId: string;
+  targetKind: 'constraint' | 'invariant';
+  subtaskId?: number;
+  declared: boolean;
+  constructed: boolean;
+  execution: ValidatorInvalidExecution | 'not-run';
+}
+
+interface InvalidValidatorInvocation {
+  invocation: PythonRunInvocation;
+  probe?: ConstraintProbe;
+  protocolProbe?: boolean;
+}
+
+const validatorInvalidInvocationCounts = new WeakMap<object, number>();
+
+function validatorEvidenceKey(
+  targetKind: ValidatorTargetEvidence['targetKind'],
+  targetId: string,
+): string {
+  return `${targetKind}\0${targetId}`;
+}
+
+function firstUnknownSubtaskId(knownIds: readonly number[]): number {
+  const known = new Set(knownIds);
+  const maximum = Math.max(0, ...knownIds);
+  if (Number.isSafeInteger(maximum + 1) && !known.has(maximum + 1)) return maximum + 1;
+  for (let candidate = 1; candidate <= known.size + 1; candidate++) {
+    if (!known.has(candidate)) return candidate;
+  }
+  throw new Error('无法构造未知子任务 ID');
+}
+
+interface ValidatorProofPolicyInput {
+  reliabilityMode: TestdataReliabilityMode;
+  riskTier: TestdataRiskAssessment['tier'];
+  manifestStatus: SandboxGenerationBlueprint['validatorManifestStatus'];
+  manifestComplete: boolean;
+  summary: ValidatorVerification;
+  gaps: readonly ValidatorTargetEvidence[];
+  invalidInvocationCount: number;
+  scopedFalseAccept: boolean;
+  protocolFalseAccept: boolean;
+}
+
+/** Single authority for mode/risk decisions over the request-local Validator proof. */
+function applyValidatorProofPolicy(input: ValidatorProofPolicyInput): { complete: boolean } {
+  const classifiedInvalidCount = input.summary.invalidRejected + input.summary.invalidAccepted;
+  const complete = input.summary.ran
+    && input.manifestComplete
+    && input.summary.invalidAccepted === 0
+    && input.summary.missingConstraintIds.length === 0
+    && classifiedInvalidCount === input.invalidInvocationCount
+    && (input.invalidInvocationCount === 0 || input.summary.invalidRejected > 0);
+
+  if (input.reliabilityMode === 'enforce'
+    && (input.manifestStatus !== 'valid' || !input.manifestComplete)) {
+    throw toPipelineError(new Error('VALIDATOR Manifest 未声明全部必需约束目标。'), {
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      stage: 'validator',
+      artifact: 'coverage',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { missingCount: input.summary.missingConstraintIds.length },
+    });
+  }
+  if (input.reliabilityMode === 'enforce' && input.summary.invalidAccepted > 0) {
+    const scoped = input.scopedFalseAccept || input.protocolFalseAccept;
+    throw toPipelineError(new Error(
+      scoped
+        ? 'VALIDATOR 接受了非法子任务或协议探针。'
+        : 'VALIDATOR 接受了服务器构造的非法探针。',
+    ), {
+      code: scoped ? 'SUBTASK_CONSTRAINT_VIOLATION' : 'VALIDATOR_FALSE_ACCEPT',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: {
+        invalidAccepted: input.summary.invalidAccepted,
+        invalidRejected: input.summary.invalidRejected,
+        ...(input.protocolFalseAccept ? { protocolProbe: true } : {}),
+      },
+    });
+  }
+  if (input.reliabilityMode === 'enforce'
+    && (input.riskTier === 'high' || input.riskTier === 'blocked')
+    && input.gaps.length > 0) {
+    throw toPipelineError(new Error('高风险题目的 VALIDATOR 缺少完整拒绝覆盖。'), {
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      stage: 'validator',
+      artifact: 'coverage',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { missingCount: input.summary.missingConstraintIds.length },
+    });
+  }
+  return { complete };
+}
+
+function createValidatorTargetEvidence(
+  spec: ProblemSpecV1,
+  manifestStatus: SandboxGenerationBlueprint['validatorManifestStatus'],
+  manifest: ValidatorManifest | undefined,
+  probes: readonly ConstraintProbe[],
+  executions: readonly ValidatorInvalidExecution[],
+): ValidatorTargetEvidence[] {
+  const declaredConstraints = manifestStatus === 'valid'
+    ? new Set(manifest?.constraintIds || []) : new Set<string>();
+  const declaredInvariants = manifestStatus === 'valid'
+    ? new Set(manifest?.invariantIds || []) : new Set<string>();
+  const targets: ValidatorTargetEvidence[] = [
+    ...spec.constraints.filter(item => item.machineCheckable).map(item => ({
+      targetId: item.id,
+      targetKind: 'constraint' as const,
+      ...(item.scope === 'global' ? {} : { subtaskId: item.scope.subtaskId }),
+      declared: declaredConstraints.has(item.id),
+      constructed: false,
+      execution: 'not-run' as const,
+    })),
+    ...spec.invariants.filter(item => item.machineCheckable).map(item => ({
+      targetId: item.id,
+      targetKind: 'invariant' as const,
+      declared: declaredInvariants.has(item.id),
+      constructed: false,
+      execution: 'not-run' as const,
+    })),
+  ];
+  const evidenceByTarget = new Map(targets.map(item => [
+    validatorEvidenceKey(item.targetKind, item.targetId), item,
+  ]));
+  const priority: Record<ValidatorTargetEvidence['execution'], number> = {
+    'not-run': 0,
+    'infra-gap': 1,
+    'timeout-gap': 2,
+    'false-accept': 3,
+    rejected: 4,
+  };
+  probes.forEach((probe, index) => {
+    const evidence = evidenceByTarget.get(validatorEvidenceKey(probe.targetKind, probe.targetId));
+    if (!evidence) return;
+    evidence.constructed = true;
+    const execution = executions[index] || 'not-run';
+    if (priority[execution] > priority[evidence.execution]) evidence.execution = execution;
+  });
+  return targets;
+}
+
+interface ValidatorInvalidProofResult {
+  summary: ValidatorVerification;
+  targetEvidence: ValidatorTargetEvidence[];
+  invalidInvocationCount: number;
+  complete: boolean;
+}
+
+async function runValidatorInvalidProof(input: {
+  blueprint: SandboxGenerationBlueprint;
+  proof: ValidatorProofContext;
+  runner: TestdataSandboxRunner;
+  seeds: LegalConstraintProbeSeed[];
+  validatorRan: boolean;
+  legalCasesChecked: number;
+  validAccepted: number;
+  signal?: AbortSignal;
+  deadlineAt: number;
+}): Promise<ValidatorInvalidProofResult> {
+  const { spec } = input.proof.pipelineContext;
+  const build = buildConstraintProbes({
+    spec,
+    statementHash: input.proof.pipelineContext.statement.statementHash,
+    specHash: input.proof.pipelineContext.specHash,
+    seeds: input.seeds,
+    recipes: input.blueprint.validatorProbeRecipes || [],
+  });
+  const invalidInvocations: InvalidValidatorInvocation[] = build.probes.map(probe => ({
+    invocation: validatorInvocation(probe.input, probe.subtaskId),
+    probe,
+  }));
+  const firstLegalSeed = input.seeds[0];
+  if (spec.subtasks.length > 0 && firstLegalSeed) {
+    const unknownSubtaskId = firstUnknownSubtaskId(spec.subtasks.map(subtask => subtask.id));
+    invalidInvocations.push(
+      {
+        invocation: validatorInvocation(firstLegalSeed.input, unknownSubtaskId),
+        protocolProbe: true,
+      },
+      {
+        invocation: {
+          stdin: firstLegalSeed.input,
+          argv: ['--subtask', 'malformed'],
+        },
+        protocolProbe: true,
+      },
+    );
+  }
+
+  let executions: ValidatorInvalidExecution[] = [];
+  if (invalidInvocations.length > 0 && input.blueprint.validatorCode) {
+    let results: PythonRunDetail[];
+    try {
+      results = await input.runner.runPythonBatchDetailed(
+        input.blueprint.validatorCode,
+        invalidInvocations.map(item => item.invocation),
+        { signal: input.signal, deadlineAt: input.deadlineAt, chunkConcurrency: 3 },
+      );
+    } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      if (isCancellation(err)) throw err;
+      throw toSandboxExecutionPipelineError(err, {
+        code: 'SANDBOX_UNAVAILABLE',
+        stage: 'validator',
+        artifact: 'validator',
+        message: 'VALIDATOR 非法探针批次的沙箱基础设施不可用',
+        safeDetails: { failureKind: 'infra' },
+      });
+    }
+    if (input.signal?.aborted) {
+      throw input.signal.reason ?? new Error('VALIDATOR 非法探针执行已取消');
+    }
+    if (results.length !== invalidInvocations.length) {
+      throw toPipelineError(new Error('VALIDATOR 非法探针批次返回结果数量不匹配'), {
+        code: 'SANDBOX_UNAVAILABLE',
+        stage: 'validator',
+        artifact: 'validator',
+        safeDetails: {
+          actualCount: results.length,
+          expectedCount: invalidInvocations.length,
+          failureKind: 'protocol',
+        },
+      });
+    }
+    executions = results.map(classifyValidatorInvalidResult);
+  }
+
+  const probeExecutions = executions.slice(0, build.probes.length);
+  const targetEvidence = createValidatorTargetEvidence(
+    spec,
+    input.blueprint.validatorManifestStatus,
+    input.blueprint.validatorManifest,
+    build.probes,
+    probeExecutions,
+  );
+  const coveredIds = targetEvidence.filter(item => (
+    item.declared && item.constructed && item.execution === 'rejected'
+  )).map(item => item.targetId);
+  const missingIds = targetEvidence.filter(item => !(
+    item.declared && item.constructed && item.execution === 'rejected'
+  )).map(item => item.targetId);
+  const summary: ValidatorVerification = {
+    ran: input.validatorRan,
+    casesChecked: input.legalCasesChecked,
+    validAccepted: input.validAccepted,
+    invalidRejected: executions.filter(item => item === 'rejected').length,
+    invalidAccepted: executions.filter(item => item === 'false-accept').length,
+    coveredConstraintIds: [...new Set(coveredIds)].sort(),
+    missingConstraintIds: [...new Set(missingIds)].sort(),
+  };
+  const manifestComplete = input.blueprint.validatorManifestStatus === 'valid'
+    && targetEvidence.every(item => item.declared);
+  const falseAcceptedInvocations = invalidInvocations.filter(
+    (_item, index) => executions[index] === 'false-accept',
+  );
+  const policy = applyValidatorProofPolicy({
+    reliabilityMode: input.proof.reliabilityMode,
+    riskTier: input.proof.pipelineContext.risk.tier,
+    manifestStatus: input.blueprint.validatorManifestStatus,
+    manifestComplete,
+    summary,
+    gaps: targetEvidence.filter(item => (
+      !item.declared || !item.constructed || item.execution !== 'rejected'
+    )),
+    invalidInvocationCount: invalidInvocations.length,
+    scopedFalseAccept: falseAcceptedInvocations.some(item => item.probe?.subtaskId !== undefined),
+    protocolFalseAccept: falseAcceptedInvocations.some(item => item.protocolProbe === true),
+  });
+  validatorInvalidInvocationCounts.set(summary, invalidInvocations.length);
+  return {
+    summary,
+    targetEvidence,
+    invalidInvocationCount: invalidInvocations.length,
+    complete: policy.complete,
   };
 }
 
@@ -4746,6 +5064,11 @@ export async function materializeSandboxBlueprint(
 
   // d. VALIDATOR：正式输入与题面样例仍逐项硬失败；压力输入允许在保底比例内剔除。
   let validatorRan = false;
+  let validAccepted = 0;
+  let validatorVerification: ValidatorVerification | undefined;
+  let validatorTargetEvidence: ValidatorTargetEvidence[] | undefined;
+  let validatorInvalidInvocationCount: number | undefined;
+  let validatorProofComplete = true;
   const tieredValidatorDecision = materialization?.validatorProof?.tieredDecision;
   const tieredValidatorEnabled = tieredValidatorDecision?.enabled === true;
   const validationInputs = tieredValidatorEnabled
@@ -4823,6 +5146,7 @@ export async function materializeSandboxBlueprint(
           });
         }
       }
+      validAccepted = validatorResults.filter(detail => detail.accepted).length;
       const formalAndSampleCount = inputs.length + samples.length;
       for (let i = 0; i < formalAndSampleCount; i++) {
         const detail = validatorResults[i];
@@ -4878,10 +5202,53 @@ export async function materializeSandboxBlueprint(
       stressDroppedInvalid = stressPartition.dropped.length;
       validatorRan = true;
     }
+    if (materialization?.validatorProof
+      && materialization.validatorProof.reliabilityMode !== 'legacy') {
+      const legalSeeds: LegalConstraintProbeSeed[] = [
+        ...inputs.map((input, index) => ({
+          source: 'formal' as const,
+          index: index + 1,
+          input,
+          ...(tieredValidatorEnabled
+            ? { subtaskId: tieredValidatorDecision.allocations[index]?.subtaskId }
+            : {}),
+        })),
+        ...samples.map(sample => ({
+          source: 'sample' as const,
+          index: sample.id,
+          input: sample.input,
+        })),
+        ...keptStressIndices.map(originalIndex => ({
+          source: 'stress' as const,
+          index: originalIndex + 1,
+          input: stressInputs[originalIndex],
+        })),
+      ];
+      const invalidProof = await runValidatorInvalidProof({
+        blueprint,
+        proof: materialization.validatorProof,
+        runner,
+        seeds: legalSeeds,
+        validatorRan,
+        legalCasesChecked: validationInputs.length,
+        validAccepted,
+        signal,
+        deadlineAt: sandboxDeadlineAt,
+      });
+      validatorVerification = invalidProof.summary;
+      validatorTargetEvidence = invalidProof.targetEvidence;
+      validatorInvalidInvocationCount = invalidProof.invalidInvocationCount;
+      validatorProofComplete = invalidProof.complete;
+    }
     cache.validation = {
       keptStressIndices,
       droppedInvalid: stressDroppedInvalid,
       validatorRan,
+      ...(validatorVerification ? { validatorVerification } : {}),
+      ...(validatorTargetEvidence ? { validatorTargetEvidence } : {}),
+      ...(validatorInvalidInvocationCount !== undefined
+        ? { validatorInvalidInvocationCount }
+        : {}),
     };
     stressInputs = keptStressIndices.map(index => stressInputs[index]);
     stressGenerated = keptStressIndices.map(index => stressGenerated[index]);
@@ -4894,6 +5261,19 @@ export async function materializeSandboxBlueprint(
     stressGenerated = cachedValidation.keptStressIndices.map(index => stressGenerated[index]);
     stressDroppedInvalid = cachedValidation.droppedInvalid;
     validatorRan = cachedValidation.validatorRan;
+    validatorVerification = cachedValidation.validatorVerification;
+    validatorTargetEvidence = cachedValidation.validatorTargetEvidence;
+    validatorInvalidInvocationCount = cachedValidation.validatorInvalidInvocationCount;
+    if (validatorVerification && validatorInvalidInvocationCount !== undefined) {
+      validatorInvalidInvocationCounts.set(
+        validatorVerification,
+        validatorInvalidInvocationCount,
+      );
+      validatorProofComplete = validatorVerification.invalidAccepted === 0
+        && validatorVerification.missingConstraintIds.length === 0
+        && validatorVerification.invalidRejected + validatorVerification.invalidAccepted
+          === validatorInvalidInvocationCount;
+    }
   }
 
   // e. ORACLE：一次批量跑正式输入、题面样例和内部压力输入。
@@ -5397,8 +5777,10 @@ export async function materializeSandboxBlueprint(
       ? 'accepted-record'
       : oracleIsManualStd ? 'provided-std' : 'ai-solution',
     verified: false,
-    wouldBlock: false,
-    validator: { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
+    wouldBlock: materialization?.validatorProof?.reliabilityMode === 'observe'
+      && !validatorProofComplete,
+    validator: validatorVerification
+      || { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
   };
   if (blueprint.problemType === 'traditional' || samples.length > 0) {
     verification.sampleCheck = {
@@ -5845,6 +6227,34 @@ export function finalizePlanVerification(
     && checker.passed === checker.total
     && checker.infraFailures === 0
   );
+  const validator = verification.validator;
+  const validatorExpanded = validator?.validAccepted !== undefined;
+  const validatorInvalidInvocationCount = validator
+    ? validatorInvalidInvocationCounts.get(validator)
+    : undefined;
+  const invalidRejected = validator?.invalidRejected;
+  const invalidAccepted = validator?.invalidAccepted;
+  const coveredConstraintIds = validator?.coveredConstraintIds;
+  const missingConstraintIds = validator?.missingConstraintIds;
+  const inferredInvalidInvocationCount = validatorInvalidInvocationCount
+    ?? ((invalidRejected ?? 0) + (invalidAccepted ?? 0));
+  const legalValidatorAccepted = validator?.validAccepted === undefined
+    ? undefined
+    : validator.validAccepted + (stress?.droppedInvalid ?? 0);
+  const validatorGreen = !validator
+    || !validatorExpanded
+    || (
+      validator.ran
+      && legalValidatorAccepted === validator.casesChecked
+      && typeof invalidRejected === 'number'
+      && typeof invalidAccepted === 'number'
+      && Array.isArray(coveredConstraintIds)
+      && Array.isArray(missingConstraintIds)
+      && invalidAccepted === 0
+      && missingConstraintIds.length === 0
+      && invalidRejected + invalidAccepted === inferredInvalidInvocationCount
+      && (inferredInvalidInvocationCount === 0 || invalidRejected > 0)
+    );
   const selectedTemplateNames = new Set(selectedLanguages.map(language => TEMPLATE_FILENAMES[language]));
   const hasAiOnlyCriticalFile = plan.files.some(file => file.origin === 'ai-only' && (
     file.kind === 'case-in'
@@ -5863,6 +6273,7 @@ export function finalizePlanVerification(
     && discriminationGreen
     && templatesGreen
     && checkerGreen
+    && validatorGreen
     && !hasAiOnlyCriticalFile;
   verification.verified = verified;
   verification.wouldBlock = reliabilityMode === 'observe' && !verified;

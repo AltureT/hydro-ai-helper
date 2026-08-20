@@ -321,6 +321,94 @@ describe('test-data generation current guarantees', () => {
     expect(plan.verification).toMatchObject({ verified: true, wouldBlock: false });
   });
 
+  it('enforce hard gate accepts complete expanded validator rejection coverage', () => {
+    const plan = fullyGreenFunctionPlan();
+    plan.verification!.validator = {
+      ran: true,
+      casesChecked: 5,
+      validAccepted: 5,
+      invalidRejected: 2,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['C1', 'I1'],
+      missingConstraintIds: [],
+    };
+
+    finalizePlanVerification(plan, ['py', 'java', 'cc'], false, 'enforce');
+
+    expect(plan.verification).toMatchObject({ verified: true, wouldBlock: false });
+  });
+
+  it('observe hard gate applies dropped-stress ruling to expanded validator legal counts', () => {
+    const plan = fullyGreenFunctionPlan();
+    plan.verification!.stressCheck = {
+      generated: 7,
+      uniqueInputs: 7,
+      duplicateInputs: 0,
+      compared: 5,
+      agreed: 5,
+      droppedInvalid: 2,
+    };
+    plan.verification!.validator = {
+      ran: true,
+      casesChecked: 7,
+      validAccepted: 5,
+      invalidRejected: 1,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['C1'],
+      missingConstraintIds: [],
+    };
+
+    finalizePlanVerification(plan, ['py', 'java', 'cc'], false, 'observe');
+
+    expect(plan.verification).toMatchObject({ verified: true, wouldBlock: false });
+  });
+
+  it.each([
+    ['legal acceptance mismatch', {
+      ran: true, casesChecked: 5, validAccepted: 4,
+      invalidRejected: 1, invalidAccepted: 0,
+      coveredConstraintIds: ['C1'], missingConstraintIds: [],
+    }],
+    ['false accept', {
+      ran: true, casesChecked: 5, validAccepted: 5,
+      invalidRejected: 1, invalidAccepted: 1,
+      coveredConstraintIds: ['C1'], missingConstraintIds: [],
+    }],
+    ['missing target', {
+      ran: true, casesChecked: 5, validAccepted: 5,
+      invalidRejected: 1, invalidAccepted: 0,
+      coveredConstraintIds: [], missingConstraintIds: ['C1'],
+    }],
+  ] as const)('observe hard gate rejects expanded validator %s', (_label, validator) => {
+    const plan = fullyGreenFunctionPlan();
+    plan.verification!.validator = {
+      ...validator,
+      coveredConstraintIds: [...validator.coveredConstraintIds],
+      missingConstraintIds: [...validator.missingConstraintIds],
+    };
+
+    finalizePlanVerification(plan, ['py', 'java', 'cc'], false, 'observe');
+
+    expect(plan.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('enforce hard gate allows zero invalid rejections only for an empty proof batch', () => {
+    const plan = fullyGreenFunctionPlan();
+    plan.verification!.validator = {
+      ran: true,
+      casesChecked: 5,
+      validAccepted: 5,
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: [],
+    };
+
+    finalizePlanVerification(plan, ['py', 'java', 'cc'], false, 'enforce');
+
+    expect(plan.verification).toMatchObject({ verified: true, wouldBlock: false });
+  });
+
   it('hard gate accepts legacy brute evidence only when no stress evidence is present', () => {
     const plan = fullyGreenFunctionPlan();
     delete plan.verification?.stressCheck;
