@@ -49,11 +49,15 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 function isBoundedValidatorIdArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(item => (
-    typeof item === 'string'
-    && item.length > 0
-    && item.length <= VALIDATOR_EVIDENCE_ID_MAX_LENGTH
-  ));
+  if (!Array.isArray(value)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) return false;
+    const item = value[index];
+    if (typeof item !== 'string'
+      || item.length === 0
+      || item.length > VALIDATOR_EVIDENCE_ID_MAX_LENGTH) return false;
+  }
+  return true;
 }
 
 function booleanEvidence(label: string, value: boolean, translate: Translate): React.ReactElement {

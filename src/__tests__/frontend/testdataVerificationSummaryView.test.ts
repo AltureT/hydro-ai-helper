@@ -351,6 +351,38 @@ describe('VerificationSummaryView', () => {
     expect(markup).not.toContain('X'.repeat(65));
   });
 
+  it.each([
+    ['covered', (() => {
+      const ids = new Array<string>(2);
+      ids[1] = 'C1';
+      return { coveredConstraintIds: ids };
+    })()],
+    ['missing', (() => {
+      const ids = new Array<string>(2);
+      ids[1] = 'C2';
+      return { missingConstraintIds: ids };
+    })()],
+  ])('falls back to valid legacy evidence for a sparse %s array', (_label, sparse) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+        ...sparse,
+      },
+    });
+
+    expect(markup).toContain('12');
+    expect(markup).not.toContain('No validator provided');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+  });
+
   it('renders zero as valid expanded evidence', () => {
     const markup = render({
       validator: {
