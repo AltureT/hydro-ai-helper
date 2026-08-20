@@ -159,6 +159,16 @@ export const SUPPORTED_TEMPLATE_LANGS: readonly TemplateLang[] = ['py', 'java', 
 /** 函数题各评测语言对应的学生提交形式参考解。 */
 export type TemplateSolutions = Partial<Record<TemplateLang, string>>;
 
+/** Task 7 的只读学生接口；保留已验证源码，避免不可靠的跨语言签名猜测。 */
+export interface FunctionInterfaceContract {
+  version: 1;
+  functionName?: string;
+  entries: Array<{
+    language: TemplateLang;
+    source: string;
+  }>;
+}
+
 /** 生成选项（来自前端表单） */
 export interface GenerateOptions {
   /** 题型：auto 由 AI 根据题面判断 */
@@ -1491,6 +1501,8 @@ export function buildTestdataUserPrompt(
     const lines = [
       buildFrozenProblemSpecBlock(context),
       '',
+      buildFrozenStatementEvidenceBlock(context),
+      '',
       buildFrozenInputEncodingBlock(context),
       '',
       '【公开题面样例】',
@@ -1507,6 +1519,7 @@ export function buildTestdataUserPrompt(
       `- 数据规模策略：${DATA_SCALE_TEXT[options.dataScale || 'auto']}`,
       `- 函数题模板语言：${options.languages.map(language => LANG_DISPLAY[language]).join('、') || '无'}`,
       '- frozen ProblemSpec 是唯一机器题意契约；不得通过 ANALYSIS、STD、CASE 或 TEMPLATE 改写它。',
+      '- 公开题面只用于实现 frozen Spec；不得据此重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。',
       '- ANALYSIS 只面向教师说明，不得成为其他机器阶段的输入。',
       buildCoverageGuidanceBlock(coveragePlan),
     ];
@@ -1708,7 +1721,7 @@ export function buildSolutionBlueprintUserPrompt(
 /** 第二阶段：在已验证解法固定后生成输入与函数题驱动模板。 */
 export function buildGenerationArtifactsSystemPrompt(frozenSpec = false): string {
   const sourceContract = frozenSpec
-    ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；你看不到且不得请求 ORACLE、SOLUTION 或自由文本 analysis。'
+    ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；你看不到且不得请求 ORACLE 或自由文本 analysis。函数题会提供已经验证的 SOLUTION:<lang> 只读学生接口源码，仅用于生成调用它的模板。'
     : '题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。';
   return `你是一位 OJ 测试数据工程师。${sourceContract}本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
 
@@ -1718,7 +1731,7 @@ export function buildGenerationArtifactsSystemPrompt(frozenSpec = false): string
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
 4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
-6. 不得输出 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
+6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
@@ -1754,16 +1767,27 @@ export function buildGenerationArtifactsUserPrompt(
       : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
   })();
   if (context) {
+    const functionInterface = solution.problemType === 'function'
+      ? buildFunctionInterfaceContract(solution, params.options.languages)
+      : undefined;
     return [
       buildFrozenProblemSpecBlock(context),
       '',
       buildFrozenInputEncodingBlock(context),
       '',
-      '【学生接口（只供模板调用，不包含正确解实现）】',
+      '【学生接口】',
       `problemType: ${context.spec.problemKind}`,
       solution.functionName ? `functionName: ${solution.functionName}` : '',
       `languages: ${params.options.languages.join(', ') || '无'}`,
       `parameters: ${context.spec.inputFields.map(field => `${field.id}:${field.type}`).join(', ') || '无'}`,
+      ...(functionInterface ? [
+        '',
+        '【FunctionInterfaceContract（只读；不得在响应中输出或改写）】',
+        `version: ${functionInterface.version}`,
+        ...functionInterface.entries.map(entry => (
+          `SOLUTION:${entry.language}（已验证的只读学生接口源码；仅用于确认精确签名与调用方式）：\n${entry.source}`
+        )),
+      ] : []),
       '',
       '【生成要求】',
       `- 恰好生成 ${params.options.caseCount} 个独立测试点。`,
@@ -1886,7 +1910,7 @@ export function buildIndependentVerifierSystemPrompt(
   frozenSpec = false,
 ): string {
   const sourceContract = frozenSpec
-    ? '你只根据 FROZEN_PROBLEM_SPEC 编写与正解实现隔离的验证制品。Spec 是唯一机器题意契约，不得从自由文本 analysis 推断或改写语义。'
+    ? '你只根据 FROZEN_PROBLEM_SPEC 与完整公开题面证据编写与正解实现隔离的验证制品。Spec 是唯一结构契约；题面仅用于实现它，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。'
     : '你只根据题面与已经确定的 stdin 编码，编写与正解实现隔离的验证制品。';
   return `你是一位独立的 OJ 题目验证专家。${sourceContract}你看不到 ORACLE 源码，也不得猜测、复述或要求它。
 
@@ -1925,6 +1949,8 @@ export function buildIndependentVerifierUserPrompt(
     return [
       buildFrozenProblemSpecBlock(context),
       '',
+      buildFrozenStatementEvidenceBlock(context),
+      '',
       buildFrozenInputEncodingBlock(context),
       blueprint.functionName ? `【学生函数名】${blueprint.functionName}` : '',
       '',
@@ -1934,8 +1960,8 @@ export function buildIndependentVerifierUserPrompt(
         `样例 ${sample.id} 公开输出：${JSON.stringify(comparableFileContent(sample.output))}`,
       ]),
       '',
-      '只依据 frozen ProblemSpec 生成独立 BRUTE、STRESS_GENERATOR 与 VALIDATOR。',
-      '不得要求或推断 ORACLE 源码、ORACLE analysis 或正确解推理过程。',
+      '只依据 frozen ProblemSpec 与完整公开题面证据生成独立 BRUTE、STRESS_GENERATOR 与 VALIDATOR。',
+      '不得要求或推断 ORACLE 源码、ORACLE analysis、正确解推理过程或模型裁决私有理由。',
       `请生成恰好 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据，并严格按要求输出验证分节。`,
     ].filter(Boolean).join('\n');
   }
@@ -1973,7 +1999,7 @@ export function buildIndependentVerifierUserPrompt(
 /** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
 export function buildKillTargetsSystemPrompt(frozenSpec = false): string {
   const sourceContract = frozenSpec
-    ? '请只根据 FROZEN_PROBLEM_SPEC 与公开样例'
+    ? '请只根据 FROZEN_PROBLEM_SPEC、完整公开题面证据与公开样例；题面仅用于实现 Spec，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用'
     : '请根据题面与既有解法分析';
   return `你是一位 OJ 错误解分析专家。${sourceContract}，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
 
@@ -2006,6 +2032,8 @@ export function buildKillTargetsUserPrompt(input: {
     return [
       buildFrozenProblemSpecBlock(input.context),
       '',
+      buildFrozenStatementEvidenceBlock(input.context),
+      '',
       '【公开题面样例（最多 3 组，错误解必须全部通过）】',
       ...(samples.length > 0
         ? samples.flatMap((sample, index) => [
@@ -2014,7 +2042,8 @@ export function buildKillTargetsUserPrompt(input: {
         ])
         : ['题面未解析到公开样例。']),
       '',
-      '只依据 frozen ProblemSpec 与公开样例选择最多 2 个典型错误模式；不得请求或推断正确解源码。',
+      '只依据 frozen ProblemSpec、完整公开题面证据与公开样例选择最多 2 个典型错误模式。',
+      '不得请求或推断 ORACLE 源码、ORACLE analysis、正确解源码/推理过程或模型裁决私有理由。',
     ].join('\n');
   }
   const statement = completeStatementForGenerationPrompt(input.statement);
@@ -2070,7 +2099,9 @@ export function buildHackCasesSystemPrompt(): string {
 1. 每个输入必须符合既定 stdin 编码与题面约束，且不超过 2000 字符。
 2. 只构造容易人工复核的小规模输入，不生成大规模性能数据，不填写或猜测输出。
 3. 优先构造能直接触发所述错误模式的最小反例、边界组合与退化结构。
-4. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
+4. 若用户消息包含 FROZEN_PROBLEM_SPEC 与完整公开题面证据，题面仅用于实现 Spec；不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。
+5. 不得请求或推断 ORACLE 源码、ORACLE analysis、正确解源码/推理过程或模型裁决私有理由。
+6. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
 === HACK_CASE ===
 RATIONALE: 一句话说明该输入为何可能卡掉错误解
 \`\`\`text
@@ -2087,6 +2118,8 @@ export function buildHackCasesUserPrompt(input: {
     return [
       buildFrozenProblemSpecBlock(input.context),
       '',
+      buildFrozenStatementEvidenceBlock(input.context),
+      '',
       buildFrozenInputEncodingBlock(input.context),
       '',
       '【幸存错误模式】',
@@ -2095,7 +2128,7 @@ export function buildHackCasesUserPrompt(input: {
       '【幸存错误解（最多 6000 字符）】',
       input.target.code.slice(0, 6000),
       '',
-      '该错误解通过了全部现有数据。只依据 frozen ProblemSpec 构造 2 至 3 个小规模定向补刀输入。',
+      '该错误解通过了全部现有数据。只依据 frozen ProblemSpec 与完整公开题面证据构造 2 至 3 个小规模定向补刀输入。',
     ].join('\n');
   }
   return [
@@ -2312,6 +2345,25 @@ function normalizeTemplateSolutions(
   return {
     ...(blueprint.solutionCode?.trim() ? { py: blueprint.solutionCode } : {}),
     ...blueprint.solutions,
+  };
+}
+
+export function buildFunctionInterfaceContract(
+  solution: Pick<SandboxSolutionBlueprint, 'functionName' | 'solutions' | 'solutionCode'>,
+  languages: readonly TemplateLang[],
+): FunctionInterfaceContract {
+  const solutions = normalizeTemplateSolutions(solution);
+  const missing = languages.filter(language => !solutions[language]?.trim());
+  if (missing.length > 0) {
+    throw new Error(`Artifacts 缺少已验证的只读学生接口：${missing.join('、')}`);
+  }
+  return {
+    version: 1,
+    functionName: solution.functionName,
+    entries: languages.map(language => ({
+      language,
+      source: solutions[language] as string,
+    })),
   };
 }
 
@@ -2717,7 +2769,7 @@ export function parseGenerationArtifacts(
   if (sections.length === 0) throw new Error('AI 未返回外围制品分节标记');
   const forbidden = sections.find(section => {
     const kind = section.header.split(':')[0].trim().toUpperCase();
-    return ['ORACLE', 'SOLUTION', 'BRUTE', 'STRESS_GENERATOR', 'VALIDATOR', 'CASE'].includes(kind);
+    return !['GENERATOR', 'TEMPLATE', 'NOTES'].includes(kind);
   });
   if (forbidden) {
     throw new Error(`第二阶段外围制品包含禁止的 ${forbidden.header} 分节`);
@@ -6436,6 +6488,7 @@ export class TestdataGenService {
   private readonly roleClients?: TestdataRoleClients;
   private activeModelTelemetry?: LocalModelTelemetry;
   private activeRoleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
+  private restoredRoleDependencies: Partial<Record<TestdataModelRole, string>> = {};
   private activePipelineContext?: TestdataPipelineContext;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
@@ -6644,10 +6697,12 @@ export class TestdataGenService {
         ? hashTestdataRoleIdentity(`${identity.endpointId}\0${identity.modelName}`)
         : undefined;
     };
-    const restoredOracle = checkpoint.roleDependencies.oracle;
-    const restoredVerifier = checkpoint.roleDependencies.verifier;
     const freshOracle = dependencyHash('oracle');
     const freshVerifier = dependencyHash('verifier');
+    // A fresh call for a role replaces that role's restored provenance. Only retain
+    // checkpoint hashes for roles that remain restored in the current run.
+    const restoredOracle = freshOracle ? undefined : checkpoint.roleDependencies.oracle;
+    const restoredVerifier = freshVerifier ? undefined : checkpoint.roleDependencies.verifier;
     if ((restoredOracle && freshVerifier && restoredOracle === freshVerifier)
       || (restoredVerifier && freshOracle && restoredVerifier === freshOracle)) {
       throw new TestdataPipelineError(
@@ -6716,8 +6771,9 @@ export class TestdataGenService {
     update: TestdataGenerationCheckpointPayload | null,
   ): Promise<void> {
     try {
+      if (update === null) this.restoredRoleDependencies = {};
       const context = this.activePipelineContext;
-      const roleDependencies = context ? Object.fromEntries([
+      const freshRoleDependencies = context ? Object.fromEntries([
         ...Object.entries(context.roleIdentities),
         ...Object.entries(this.activeRoleIdentities).map(([role, identity]) => [
           role,
@@ -6728,13 +6784,17 @@ export class TestdataGenService {
           ? [[role, hashTestdataRoleIdentity(identity)]]
           : []
       ))) : undefined;
+      const roleDependencies = context ? {
+        ...this.restoredRoleDependencies,
+        ...freshRoleDependencies,
+      } : undefined;
       const checkpointUpdate = update && context ? {
+        ...update,
         checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
         promptVersion: context.promptVersion,
         statementHash: context.statement.statementHash,
         specHash: context.specHash,
         roleDependencies,
-        ...update,
       } : update;
       const pending = params.onCheckpoint?.(checkpointUpdate);
       return Promise.resolve(pending).catch(() => undefined);
@@ -6747,6 +6807,7 @@ export class TestdataGenService {
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
     this.activeModelTelemetry = undefined;
     this.activeRoleIdentities = {};
+    this.restoredRoleDependencies = {};
     this.activePipelineContext = undefined;
     try {
       const snapshot = createStatementSnapshot(params.statementMarkdown);
@@ -7508,7 +7569,11 @@ export class TestdataGenService {
     signal?: AbortSignal;
     context?: TestdataPipelineContext;
   }, results?: ChatResult[]): Promise<KillTarget[]> {
-    const result = await this.clientForRole('verifier').chat(
+    // Optional discrimination calls share the configured verifier client but are not
+    // the Independent Verifier artifact dependency. Do not let them relabel a restored
+    // verifier checkpoint with an unrelated fresh model hash.
+    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const result = await verifierClient.chat(
       [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
       buildKillTargetsSystemPrompt(!!input.context),
       {
@@ -7529,7 +7594,8 @@ export class TestdataGenService {
     results: ChatResult[],
     context?: TestdataPipelineContext,
   ): Promise<HackCandidate[]> {
-    const result = await this.clientForRole('verifier').chat(
+    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const result = await verifierClient.chat(
       [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }],
       buildHackCasesSystemPrompt(),
       {
@@ -7822,6 +7888,9 @@ export class TestdataGenService {
       this.reliabilityMode,
       context,
     );
+    this.restoredRoleDependencies = checkpoint?.roleDependencies
+      ? { ...checkpoint.roleDependencies }
+      : {};
     let solutionSourceContent = checkpoint?.solution
       ? JSON.stringify(checkpoint.solution)
       : '';
@@ -8036,8 +8105,8 @@ export class TestdataGenService {
             ...solution,
             analysis: undefined,
             oracleCode: '',
-            solutionCode: undefined,
-            solutions: undefined,
+            solutionCode: solution.solutionCode,
+            solutions: solution.solutions,
           } : solution,
           generationCoverage,
           callOptions,

@@ -290,6 +290,23 @@ function stressGeneratorStdout(): string {
   });
 }
 
+function makeCheckpointRunner() {
+  return {
+    isAvailable: jest.fn().mockResolvedValue(true),
+    runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+      stdout: code.includes('stress generator')
+        ? stressGeneratorStdout()
+        : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+      stderr: '',
+    })),
+    runPythonBatch: jest.fn(),
+    runPythonBatchDetailed: jest.fn().mockImplementation(
+      (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+        code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+    ),
+  };
+}
+
 // ─── validateGenerateOptions ──────────────────────────────────────────────────
 
 describe('validateGenerateOptions', () => {
@@ -2567,7 +2584,7 @@ describe('TestdataGenService.generate', () => {
     });
   });
 
-  it('keeps the complete statement in Spec extraction but sends only frozen Spec and public samples downstream', async () => {
+  it('keeps the complete statement in Spec extraction and trusted downstream evidence without truncation', async () => {
     const tail = 'FINAL_CONSTRAINT_AT_STATEMENT_TAIL';
     const statement = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_100)}${tail}`;
     const mockClient = {
@@ -2597,9 +2614,72 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(3);
     expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
     expect(mockClient.chat.mock.calls[1][0][0].content).toContain(tail);
-    expect(mockClient.chat.mock.calls[2][0][0].content).not.toContain(tail);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain(tail);
     expect(mockClient.chat.mock.calls[2][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
     expect(JSON.stringify(mockClient.chat.mock.calls)).not.toContain('题面过长已截断');
+  });
+
+  it('passes every verified callable interface into the real Artifacts role call', async () => {
+    const statement = 'Call transform with values and label.';
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    };
+    const interfaces = {
+      py: 'def transform(values: list[int], label: str) -> tuple[list[int], str]:\n    return values, label',
+      java: 'class Solution { public int[] transform(int[] values, String label) { return values; } }',
+      cc: 'class Solution { public: vector<string> transform(vector<int> values, string label); };',
+    };
+    const solutionResponse = [
+      '@@@META@@@',
+      'problemType: function',
+      'functionName: transform',
+      '@@@ANALYSIS@@@',
+      'TEACHER_ONLY_ANALYSIS',
+      '@@@ORACLE@@@',
+      'print(input()) # CORRECT_ORACLE_SOURCE',
+      '@@@SOLUTION:py@@@', interfaces.py,
+      '@@@SOLUTION:java@@@', interfaces.java,
+      '@@@SOLUTION:cc@@@', interfaces.cc,
+    ].join('\n');
+    const oracle = makeRoleClient('oracle', 'oracle-endpoint', 'oracle-model', solutionResponse);
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts-endpoint', 'artifacts-model',
+      new Error('ARTIFACT_PROMPT_CAPTURED'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-endpoint', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const snapshot = createStatementSnapshot(statement);
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'artifacts-interface-call',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(statement, { problemKind: 'function' }),
+      risk,
+      roleIdentities: {},
+    });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe',
+      roleClients: { oracle, artifacts, verifier },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'callable interfaces', statementMarkdown: statement, options,
+    }, {}, 1, risk, context)).rejects.toThrow('ARTIFACT_PROMPT_CAPTURED');
+
+    const prompt = artifacts.chat.mock.calls[0][0][0].content;
+    for (const [language, source] of Object.entries(interfaces)) {
+      expect(prompt).toContain(`SOLUTION:${language}`);
+      expect(prompt).toContain(source);
+    }
+    expect(prompt).not.toContain('CORRECT_ORACLE_SOURCE');
+    expect(prompt).not.toContain('TEACHER_ONLY_ANALYSIS');
   });
 
   it('observe warns and marks wouldBlock when configured Spec identities are exactly equal', async () => {
@@ -2870,7 +2950,8 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.length).toBeGreaterThan(0);
     expect(baseClient.chat).toHaveBeenCalledTimes(1);
     expect(baseClient.chat.mock.calls[0][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
-    expect(baseClient.chat.mock.calls[0][0][0].content).not.toContain(statement);
+    expect(baseClient.chat.mock.calls[0][0][0].content).toContain(statement);
+    expect(baseClient.chat.mock.calls[0][0][0].content).toContain('不得用题面重新定义 problemKind');
     expect(artifacts.chat).not.toHaveBeenCalled();
   });
 
@@ -3224,6 +3305,114 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.find((file: { name: string }) => file.name === '1.out')?.content).toBe('1\n');
   });
 
+  it('preserves full v2 dependency hashes across restore, emit, interruption, and restore again', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-roundtrip',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = makeFrozenV2Checkpoint(statementMarkdown, {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    });
+    const firstUpdates: any[] = [];
+    const firstClient = { chat: jest.fn() };
+    const firstService = new TestdataGenService(firstClient as never, {
+      reliabilityMode: 'observe',
+    });
+
+    await (firstService as any).generateWithSandbox({
+      problemTitle: 'checkpoint roundtrip', statementMarkdown, options, checkpoint,
+      onCheckpoint: (update: unknown) => { firstUpdates.push(update); },
+    }, makeCheckpointRunner(), 1, risk, context);
+
+    const reemitted = [...firstUpdates].reverse().find(update => (
+      update?.solution && update?.artifacts && update?.verifier && Array.isArray(update?.killTargets)
+    ));
+    expect(reemitted?.roleDependencies).toEqual(checkpoint.roleDependencies);
+    expect(JSON.stringify(reemitted)).not.toContain('checkpoint-oracle');
+    expect(JSON.stringify(reemitted)).not.toContain('checkpoint-artifacts');
+    expect(JSON.stringify(reemitted)).not.toContain('checkpoint-verifier');
+
+    const secondClient = { chat: jest.fn() };
+    const secondService = new TestdataGenService(secondClient as never, {
+      reliabilityMode: 'observe',
+    });
+    await (secondService as any).generateWithSandbox({
+      problemTitle: 'checkpoint roundtrip', statementMarkdown, options, checkpoint: reemitted,
+    }, makeCheckpointRunner(), 1, risk, context);
+
+    expect(firstClient.chat).not.toHaveBeenCalled();
+    expect(secondClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('merges restored Oracle provenance with fresh Artifacts and Verifier hashes', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-partial',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const restoredOracleHash = hashTestdataRoleIdentity('restored-oracle\0restored-model');
+    const checkpoint = {
+      ...makeFrozenV2Checkpoint(statementMarkdown, {
+        solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      }),
+      roleDependencies: { oracle: restoredOracleHash },
+    };
+    const artifacts = makeRoleClient(
+      'artifacts', 'fresh-artifacts', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'fresh-verifier', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const updates: any[] = [];
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { artifacts, verifier },
+    });
+
+    await (service as any).generateWithSandbox({
+      problemTitle: 'partial checkpoint', statementMarkdown, options, checkpoint,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, makeCheckpointRunner(), 1, risk, context);
+
+    const emitted = [...updates].reverse().find(update => update?.artifacts && update?.verifier);
+    expect(emitted.roleDependencies).toMatchObject({
+      oracle: restoredOracleHash,
+      artifacts: hashTestdataRoleIdentity('fresh-artifacts\0artifacts-model'),
+      verifier: hashTestdataRoleIdentity('fresh-verifier\0verifier-model'),
+    });
+    const serialized = JSON.stringify(emitted);
+    for (const secret of [
+      'restored-oracle', 'restored-model', 'fresh-artifacts', 'artifacts-model',
+      'fresh-verifier', 'verifier-model', 'endpointId', 'endpointName', 'modelName',
+    ]) expect(serialized).not.toContain(secret);
+  });
+
   it('high-risk enforce regenerates checkpoint v1 solution and verifier when identities are unavailable', async () => {
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
     const checkpoint = {
@@ -3345,6 +3534,87 @@ describe('TestdataGenService.generate', () => {
       code: 'SPEC_CONSENSUS_REQUIRED',
       artifact: 'spec',
     });
+  });
+
+  it('high-risk enforce rejects a fresh Oracle that matches the restored Verifier identity', async () => {
+    const statementMarkdown = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'high' as const, score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-reverse-mixed-independence',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('previous-oracle\0previous-model'),
+        verifier: hashTestdataRoleIdentity('shared-endpoint\0shared-model'),
+      },
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+    };
+    const oracle = makeRoleClientWithActual(
+      'oracle', 'configured-oracle', 'configured-model',
+      'shared-endpoint', 'shared-model', makeSolutionBlueprint('traditional'),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts-endpoint', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'fresh-kill-target-endpoint', 'fresh-kill-target-model',
+      makeEmptyKillTargetsResponse(),
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { oracle, artifacts, verifier },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'reverse mixed v2 identity', statementMarkdown, options, checkpoint,
+    }, makeCheckpointRunner(), 1, risk, context)).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+  });
+
+  it('high-risk independence ignores a restored role hash after a fresh identity replaces it', () => {
+    const risk = {
+      tier: 'high' as const, score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce',
+    });
+    (service as any).activeRoleIdentities = {
+      oracle: {
+        endpointId: 'fresh-oracle-endpoint',
+        endpointName: 'fresh-oracle',
+        modelName: 'fresh-oracle-model',
+      },
+      verifier: {
+        endpointId: 'fresh-verifier-endpoint',
+        endpointName: 'fresh-verifier',
+        modelName: 'fresh-verifier-model',
+      },
+    };
+    const checkpoint = {
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('fresh-verifier-endpoint\0fresh-verifier-model'),
+        verifier: hashTestdataRoleIdentity('restored-verifier-endpoint\0restored-verifier-model'),
+      },
+    };
+
+    expect(() => (service as any).assertCheckpointRoleIndependence(risk, checkpoint))
+      .not.toThrow();
+    expect(() => (service as any).assertIndependentRoleIdentities(risk)).not.toThrow();
   });
 
   it('high-risk enforce rechecks independence after an Oracle repair replaces the final blueprint', async () => {
@@ -7148,6 +7418,11 @@ describe('两阶段沙箱蓝图', () => {
       'traditional',
       [],
     )).toThrow(/第二阶段.*禁止的 ORACLE/);
+    expect(() => parseGenerationArtifacts(
+      `${makeGenerationArtifactsBlueprint('function')}\n@@@SOLUTION:java@@@\nclass Solution { int solve() { return 2; } }`,
+      'function',
+      ['java'],
+    )).toThrow(/第二阶段.*禁止的 SOLUTION:java/);
   });
 
   it('函数题第一阶段逐一解析题面样例 stdin 转码', () => {

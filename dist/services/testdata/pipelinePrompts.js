@@ -13,7 +13,10 @@ function buildFrozenProblemSpecBlock(context) {
 }
 function buildFrozenStatementEvidenceBlock(context) {
     return [
-        '【题面证据（仅用于实现 frozen spec；若文字与 Spec 冲突，必须报告而不得改写 Spec）】',
+        '【完整公开题面证据（仅用于实现 frozen Spec 的题意与计算语义）】',
+        '- Frozen ProblemSpec 仍是唯一结构契约。',
+        '- 不得用题面重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或任何约束/不变量引用。',
+        '- 若题面文字与 Frozen ProblemSpec 冲突，必须报告冲突，不得改写或重新解释 Spec。',
         context.statement.normalizedMarkdown,
     ].join('\n');
 }

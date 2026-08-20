@@ -9,11 +9,13 @@ import type { TestdataRiskAssessment } from '../../services/testdata/risk';
 import { createStatementSnapshot } from '../../services/testdata/statementSnapshot';
 import {
   buildGenerationArtifactsUserPrompt,
+  buildHackCasesUserPrompt,
   buildIndependentVerifierUserPrompt,
   buildKillTargetPromptSamples,
   buildKillTargetsUserPrompt,
   buildSandboxRepairPrompt,
   buildSolutionBlueprintUserPrompt,
+  buildTestdataUserPrompt,
   type BuildUserPromptParams,
   type SandboxSolutionBlueprint,
   TestdataGenService,
@@ -211,6 +213,56 @@ describe('frozen test-data pipeline context', () => {
     expect(serialized).not.toContain('private-runtime-model');
     expect(serialized).not.toContain('endpointId');
   });
+
+  it('lets a fresh role identity override the restored hash for the same role', async () => {
+    const context = createContext();
+    const onCheckpoint = jest.fn();
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe',
+    });
+    (service as any).activePipelineContext = context;
+    (service as any).restoredRoleDependencies = {
+      oracle: hashTestdataRoleIdentity('restored-endpoint\0restored-model'),
+    };
+    (service as any).activeRoleIdentities = {
+      oracle: {
+        endpointId: 'fresh-endpoint',
+        endpointName: 'Fresh endpoint display name',
+        modelName: 'fresh-model',
+      },
+    };
+
+    await (service as any).emitCheckpoint({ onCheckpoint }, {
+      solution: { problemType: 'traditional', oracleCode: 'print(input())' },
+    });
+
+    const update = onCheckpoint.mock.calls[0][0];
+    expect(update.roleDependencies.oracle).toBe(
+      hashTestdataRoleIdentity('fresh-endpoint\0fresh-model'),
+    );
+    expect(JSON.stringify(update)).not.toContain('fresh-endpoint');
+    expect(JSON.stringify(update)).not.toContain('fresh-model');
+  });
+
+  it('atomically clears restored provenance when the checkpoint is cleared', async () => {
+    const context = createContext();
+    const onCheckpoint = jest.fn();
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe',
+    });
+    (service as any).activePipelineContext = context;
+    (service as any).restoredRoleDependencies = {
+      artifacts: hashTestdataRoleIdentity('old-artifacts\0old-model'),
+    };
+
+    await (service as any).emitCheckpoint({ onCheckpoint }, null);
+    await (service as any).emitCheckpoint({ onCheckpoint }, {
+      artifacts: { generatorCode: 'print(1)' },
+    });
+
+    expect(onCheckpoint.mock.calls[0][0]).toBeNull();
+    expect(onCheckpoint.mock.calls[1][0].roleDependencies).not.toHaveProperty('artifacts');
+  });
 });
 
 describe('role prompt isolation around the frozen spec', () => {
@@ -230,6 +282,34 @@ describe('role prompt isolation around the frozen spec', () => {
     oracleCode: 'CORRECT_ORACLE_SOURCE',
   };
 
+  function semanticContext(outputRule: string) {
+    const semanticStatement = createStatementSnapshot([
+      '# Same structure',
+      'Read one integer n.',
+      outputRule,
+    ].join('\n'));
+    const spec: ProblemSpecV1 = {
+      schemaVersion: 1,
+      statementHash: semanticStatement.statementHash,
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+      constraints: [],
+      invariants: [],
+      outputPolicy: { kind: 'exact', caseSensitive: true },
+      subtasks: [],
+      uncertainties: [],
+    };
+    return createTestdataPipelineContext({
+      runId: 'semantic-role-isolation',
+      promptVersion: 'testdata-generation-v2',
+      statement: semanticStatement,
+      spec,
+      risk: lowRisk(),
+      roleIdentities: {},
+    });
+  }
+
   it('gives Oracle the frozen spec and evidence without role identities or adjudication reasoning', () => {
     const prompt = buildSolutionBlueprintUserPrompt(params, createContext());
 
@@ -237,6 +317,30 @@ describe('role prompt isolation around the frozen spec', () => {
     expect(prompt).toContain('1 <= n <= 100');
     expect(prompt).not.toContain('private-endpoint-id');
     expect(prompt).not.toContain('Critic reasoning secret');
+  });
+
+  it('distinguishes isomorphic frozen specs with different public output semantics for direct and Verifier', () => {
+    const outputN = semanticContext('PUBLIC_SEMANTIC_OUTPUT_N: print n.');
+    const outputSquared = semanticContext('PUBLIC_SEMANTIC_OUTPUT_N_SQUARED: print n squared.');
+    const { statementHash: _hashA, ...specA } = outputN.spec;
+    const { statementHash: _hashB, ...specB } = outputSquared.spec;
+
+    expect(specA).toEqual(specB);
+    for (const build of [
+      (context: ReturnType<typeof semanticContext>) => buildTestdataUserPrompt(params, undefined, context),
+      (context: ReturnType<typeof semanticContext>) => buildIndependentVerifierUserPrompt(
+        params,
+        solution,
+        context,
+      ),
+    ]) {
+      const promptA = build(outputN);
+      const promptB = build(outputSquared);
+      expect(promptA).toContain('PUBLIC_SEMANTIC_OUTPUT_N: print n.');
+      expect(promptA).not.toContain('PUBLIC_SEMANTIC_OUTPUT_N_SQUARED');
+      expect(promptB).toContain('PUBLIC_SEMANTIC_OUTPUT_N_SQUARED: print n squared.');
+      expect(promptB).not.toContain('PUBLIC_SEMANTIC_OUTPUT_N: print n.');
+    }
   });
 
   it('gives Artifacts only the frozen spec, stdin encoding, and student interface', () => {
@@ -249,35 +353,101 @@ describe('role prompt isolation around the frozen spec', () => {
     expect(prompt).not.toContain('PRIVATE_STATEMENT_ONLY');
   });
 
+  it('gives Artifacts exact read-only Python, Java, and C++ callable interfaces', () => {
+    const functionStatement = createStatementSnapshot('Call transform with values and label.');
+    const functionContext = createTestdataPipelineContext({
+      runId: 'function-interface-contract',
+      promptVersion: 'testdata-generation-v2',
+      statement: functionStatement,
+      spec: {
+        schemaVersion: 1,
+        statementHash: functionStatement.statementHash,
+        problemKind: 'function',
+        testCaseMode: { kind: 'single' },
+        inputFields: [
+          { id: 'values', name: 'values', type: 'array', encoding: 'one JSON array' },
+          { id: 'label', name: 'label', type: 'string', encoding: 'one string' },
+        ],
+        constraints: [],
+        invariants: [],
+        outputPolicy: { kind: 'exact' },
+        subtasks: [],
+        uncertainties: [],
+      },
+      risk: lowRisk(),
+      roleIdentities: {},
+    });
+    const interfaces = {
+      py: 'def transform(values: list[int], label: str) -> tuple[list[int], str]:\n    return values, label',
+      java: 'class Solution { public int[] transform(int[] values, String label) { return values; } }',
+      cc: 'class Solution { public: vector<string> transform(vector<int> values, string label); };',
+    };
+    const prompt = buildGenerationArtifactsUserPrompt({
+      ...params,
+      options: { ...params.options, problemKind: 'function', languages: ['py', 'java', 'cc'] },
+    }, {
+      problemType: 'function',
+      functionName: 'transform',
+      analysis: 'TEACHER_ONLY_ANALYSIS',
+      oracleCode: 'CORRECT_ORACLE_SOURCE',
+      solutions: interfaces,
+      solutionCode: interfaces.py,
+    }, undefined, functionContext);
+
+    for (const [language, source] of Object.entries(interfaces)) {
+      expect(prompt).toContain(`SOLUTION:${language}`);
+      expect(prompt).toContain(source);
+    }
+    expect(prompt).not.toContain('CORRECT_ORACLE_SOURCE');
+    expect(prompt).not.toContain('TEACHER_ONLY_ANALYSIS');
+  });
+
   it('does not expose Oracle source or analysis to the independent Verifier', () => {
+    const publicContext = semanticContext('PUBLIC_VERIFIER_SEMANTICS: print n squared.');
     const verifierInput: Pick<SandboxSolutionBlueprint, 'problemType' | 'functionName' | 'analysis'>
       & { oracleCode: string } = { ...solution, oracleCode: 'CORRECT_ORACLE_SOURCE' };
     const prompt = buildIndependentVerifierUserPrompt(
       params,
       verifierInput,
-      createContext(),
+      publicContext,
     );
 
     expect(prompt).toContain('FROZEN_PROBLEM_SPEC');
+    expect(prompt).toContain('PUBLIC_VERIFIER_SEMANTICS: print n squared.');
     expect(prompt).not.toContain('CORRECT_ORACLE_SOURCE');
     expect(prompt).not.toContain('TEACHER_ONLY_ANALYSIS');
     expect(prompt).not.toContain('PRIVATE_STATEMENT_ONLY');
   });
 
-  it('gives Kill Target only the frozen spec and public samples', () => {
+  it('gives Kill Target and Hack public semantics without the correct solution', () => {
+    const publicContext = semanticContext('PUBLIC_DISCRIMINATION_SEMANTICS: print n squared.');
     const prompt = buildKillTargetsUserPrompt({
       statement: `${statement.normalizedMarkdown}\nPRIVATE_STATEMENT_ONLY`,
       analysis: 'TEACHER_ONLY_ANALYSIS',
       samples: [{ input: 'PUBLIC_SAMPLE_IN\n', output: 'PUBLIC_SAMPLE_OUT\n' }],
-      context: createContext(),
+      context: publicContext,
       correctSolutionCode: 'CORRECT_ORACLE_SOURCE',
+    });
+    const hackPrompt = buildHackCasesUserPrompt({
+      analysis: 'TEACHER_ONLY_ANALYSIS',
+      target: {
+        kind: 'wrong-algorithm',
+        description: 'PUBLIC_WRONG_PATTERN',
+        code: 'print("PUBLIC_WRONG_SOLUTION")',
+      },
+      context: publicContext,
     });
 
     expect(prompt).toContain('FROZEN_PROBLEM_SPEC');
+    expect(prompt).toContain('PUBLIC_DISCRIMINATION_SEMANTICS: print n squared.');
     expect(prompt).toContain('PUBLIC_SAMPLE_IN');
     expect(prompt).not.toContain('CORRECT_ORACLE_SOURCE');
     expect(prompt).not.toContain('TEACHER_ONLY_ANALYSIS');
     expect(prompt).not.toContain('PRIVATE_STATEMENT_ONLY');
+    expect(hackPrompt).toContain('PUBLIC_DISCRIMINATION_SEMANTICS: print n squared.');
+    expect(hackPrompt).toContain('PUBLIC_WRONG_SOLUTION');
+    expect(hackPrompt).not.toContain('CORRECT_ORACLE_SOURCE');
+    expect(hackPrompt).not.toContain('TEACHER_ONLY_ANALYSIS');
   });
 
   it('does not reuse Oracle-produced function sample conversions as Kill Target input', () => {

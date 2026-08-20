@@ -56,6 +56,7 @@ exports.normalizeFileContent = normalizeFileContent;
 exports.normalizeExecutableContent = normalizeExecutableContent;
 exports.normalizeGenerationObject = normalizeGenerationObject;
 exports.parseGenerationResponse = parseGenerationResponse;
+exports.buildFunctionInterfaceContract = buildFunctionInterfaceContract;
 exports.parseKillTargetsResponse = parseKillTargetsResponse;
 exports.parseHackCasesResponse = parseHackCasesResponse;
 exports.mergeHackCases = mergeHackCases;
@@ -996,6 +997,8 @@ function buildTestdataUserPrompt(params, coverageOverride, context) {
         const lines = [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(context),
             '',
+            (0, pipelinePrompts_1.buildFrozenStatementEvidenceBlock)(context),
+            '',
             (0, pipelinePrompts_1.buildFrozenInputEncodingBlock)(context),
             '',
             '【公开题面样例】',
@@ -1012,6 +1015,7 @@ function buildTestdataUserPrompt(params, coverageOverride, context) {
             `- 数据规模策略：${DATA_SCALE_TEXT[options.dataScale || 'auto']}`,
             `- 函数题模板语言：${options.languages.map(language => LANG_DISPLAY[language]).join('、') || '无'}`,
             '- frozen ProblemSpec 是唯一机器题意契约；不得通过 ANALYSIS、STD、CASE 或 TEMPLATE 改写它。',
+            '- 公开题面只用于实现 frozen Spec；不得据此重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。',
             '- ANALYSIS 只面向教师说明，不得成为其他机器阶段的输入。',
             buildCoverageGuidanceBlock(coveragePlan),
         ];
@@ -1171,7 +1175,7 @@ function buildSolutionBlueprintUserPrompt(params, context) {
 /** 第二阶段：在已验证解法固定后生成输入与函数题驱动模板。 */
 function buildGenerationArtifactsSystemPrompt(frozenSpec = false) {
     const sourceContract = frozenSpec
-        ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；你看不到且不得请求 ORACLE、SOLUTION 或自由文本 analysis。'
+        ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；你看不到且不得请求 ORACLE 或自由文本 analysis。函数题会提供已经验证的 SOLUTION:<lang> 只读学生接口源码，仅用于生成调用它的模板。'
         : '题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。';
     return `你是一位 OJ 测试数据工程师。${sourceContract}本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
 
@@ -1181,7 +1185,7 @@ function buildGenerationArtifactsSystemPrompt(frozenSpec = false) {
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
 4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
-6. 不得输出 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
+6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
 
 输出格式：
@@ -1211,16 +1215,25 @@ function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, 
             : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
     })();
     if (context) {
+        const functionInterface = solution.problemType === 'function'
+            ? buildFunctionInterfaceContract(solution, params.options.languages)
+            : undefined;
         return [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(context),
             '',
             (0, pipelinePrompts_1.buildFrozenInputEncodingBlock)(context),
             '',
-            '【学生接口（只供模板调用，不包含正确解实现）】',
+            '【学生接口】',
             `problemType: ${context.spec.problemKind}`,
             solution.functionName ? `functionName: ${solution.functionName}` : '',
             `languages: ${params.options.languages.join(', ') || '无'}`,
             `parameters: ${context.spec.inputFields.map(field => `${field.id}:${field.type}`).join(', ') || '无'}`,
+            ...(functionInterface ? [
+                '',
+                '【FunctionInterfaceContract（只读；不得在响应中输出或改写）】',
+                `version: ${functionInterface.version}`,
+                ...functionInterface.entries.map(entry => (`SOLUTION:${entry.language}（已验证的只读学生接口源码；仅用于确认精确签名与调用方式）：\n${entry.source}`)),
+            ] : []),
             '',
             '【生成要求】',
             `- 恰好生成 ${params.options.caseCount} 个独立测试点。`,
@@ -1320,7 +1333,7 @@ function buildSandboxBlueprintUserPrompt(params, coverageOverride) {
  */
 function buildIndependentVerifierSystemPrompt(stressCaseCount = exports.TESTDATA_GEN_LIMITS.STRESS_CASES, frozenSpec = false) {
     const sourceContract = frozenSpec
-        ? '你只根据 FROZEN_PROBLEM_SPEC 编写与正解实现隔离的验证制品。Spec 是唯一机器题意契约，不得从自由文本 analysis 推断或改写语义。'
+        ? '你只根据 FROZEN_PROBLEM_SPEC 与完整公开题面证据编写与正解实现隔离的验证制品。Spec 是唯一结构契约；题面仅用于实现它，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。'
         : '你只根据题面与已经确定的 stdin 编码，编写与正解实现隔离的验证制品。';
     return `你是一位独立的 OJ 题目验证专家。${sourceContract}你看不到 ORACLE 源码，也不得猜测、复述或要求它。
 
@@ -1354,6 +1367,8 @@ function buildIndependentVerifierUserPrompt(params, blueprint, context) {
         return [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(context),
             '',
+            (0, pipelinePrompts_1.buildFrozenStatementEvidenceBlock)(context),
+            '',
             (0, pipelinePrompts_1.buildFrozenInputEncodingBlock)(context),
             blueprint.functionName ? `【学生函数名】${blueprint.functionName}` : '',
             '',
@@ -1363,8 +1378,8 @@ function buildIndependentVerifierUserPrompt(params, blueprint, context) {
                 `样例 ${sample.id} 公开输出：${JSON.stringify(comparableFileContent(sample.output))}`,
             ]),
             '',
-            '只依据 frozen ProblemSpec 生成独立 BRUTE、STRESS_GENERATOR 与 VALIDATOR。',
-            '不得要求或推断 ORACLE 源码、ORACLE analysis 或正确解推理过程。',
+            '只依据 frozen ProblemSpec 与完整公开题面证据生成独立 BRUTE、STRESS_GENERATOR 与 VALIDATOR。',
+            '不得要求或推断 ORACLE 源码、ORACLE analysis、正确解推理过程或模型裁决私有理由。',
             `请生成恰好 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据，并严格按要求输出验证分节。`,
         ].filter(Boolean).join('\n');
     }
@@ -1401,7 +1416,7 @@ function buildIndependentVerifierUserPrompt(params, blueprint, context) {
 /** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
 function buildKillTargetsSystemPrompt(frozenSpec = false) {
     const sourceContract = frozenSpec
-        ? '请只根据 FROZEN_PROBLEM_SPEC 与公开样例'
+        ? '请只根据 FROZEN_PROBLEM_SPEC、完整公开题面证据与公开样例；题面仅用于实现 Spec，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用'
         : '请根据题面与既有解法分析';
     return `你是一位 OJ 错误解分析专家。${sourceContract}，构造最可能出现在学生提交中的典型错误解，用于检验测试数据能否区分正确与错误程序。
 
@@ -1427,6 +1442,8 @@ function buildKillTargetsUserPrompt(input) {
         return [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(input.context),
             '',
+            (0, pipelinePrompts_1.buildFrozenStatementEvidenceBlock)(input.context),
+            '',
             '【公开题面样例（最多 3 组，错误解必须全部通过）】',
             ...(samples.length > 0
                 ? samples.flatMap((sample, index) => [
@@ -1435,7 +1452,8 @@ function buildKillTargetsUserPrompt(input) {
                 ])
                 : ['题面未解析到公开样例。']),
             '',
-            '只依据 frozen ProblemSpec 与公开样例选择最多 2 个典型错误模式；不得请求或推断正确解源码。',
+            '只依据 frozen ProblemSpec、完整公开题面证据与公开样例选择最多 2 个典型错误模式。',
+            '不得请求或推断 ORACLE 源码、ORACLE analysis、正确解源码/推理过程或模型裁决私有理由。',
         ].join('\n');
     }
     const statement = completeStatementForGenerationPrompt(input.statement);
@@ -1483,7 +1501,9 @@ function buildHackCasesSystemPrompt() {
 1. 每个输入必须符合既定 stdin 编码与题面约束，且不超过 2000 字符。
 2. 只构造容易人工复核的小规模输入，不生成大规模性能数据，不填写或猜测输出。
 3. 优先构造能直接触发所述错误模式的最小反例、边界组合与退化结构。
-4. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
+4. 若用户消息包含 FROZEN_PROBLEM_SPEC 与完整公开题面证据，题面仅用于实现 Spec；不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。
+5. 不得请求或推断 ORACLE 源码、ORACLE analysis、正确解源码/推理过程或模型裁决私有理由。
+6. 只输出以下分节，可重复 2 至 3 次，不要代码、答案、对话历史或额外说明：
 === HACK_CASE ===
 RATIONALE: 一句话说明该输入为何可能卡掉错误解
 \`\`\`text
@@ -1495,6 +1515,8 @@ function buildHackCasesUserPrompt(input) {
         return [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(input.context),
             '',
+            (0, pipelinePrompts_1.buildFrozenStatementEvidenceBlock)(input.context),
+            '',
             (0, pipelinePrompts_1.buildFrozenInputEncodingBlock)(input.context),
             '',
             '【幸存错误模式】',
@@ -1503,7 +1525,7 @@ function buildHackCasesUserPrompt(input) {
             '【幸存错误解（最多 6000 字符）】',
             input.target.code.slice(0, 6000),
             '',
-            '该错误解通过了全部现有数据。只依据 frozen ProblemSpec 构造 2 至 3 个小规模定向补刀输入。',
+            '该错误解通过了全部现有数据。只依据 frozen ProblemSpec 与完整公开题面证据构造 2 至 3 个小规模定向补刀输入。',
         ].join('\n');
     }
     return [
@@ -1696,6 +1718,21 @@ function normalizeTemplateSolutions(blueprint) {
     return {
         ...(blueprint.solutionCode?.trim() ? { py: blueprint.solutionCode } : {}),
         ...blueprint.solutions,
+    };
+}
+function buildFunctionInterfaceContract(solution, languages) {
+    const solutions = normalizeTemplateSolutions(solution);
+    const missing = languages.filter(language => !solutions[language]?.trim());
+    if (missing.length > 0) {
+        throw new Error(`Artifacts 缺少已验证的只读学生接口：${missing.join('、')}`);
+    }
+    return {
+        version: 1,
+        functionName: solution.functionName,
+        entries: languages.map(language => ({
+            language,
+            source: solutions[language],
+        })),
     };
 }
 function normalizeSolutionBlueprintCompatibility(blueprint) {
@@ -2072,7 +2109,7 @@ function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}
         throw new Error('AI 未返回外围制品分节标记');
     const forbidden = sections.find(section => {
         const kind = section.header.split(':')[0].trim().toUpperCase();
-        return ['ORACLE', 'SOLUTION', 'BRUTE', 'STRESS_GENERATOR', 'VALIDATOR', 'CASE'].includes(kind);
+        return !['GENERATOR', 'TEMPLATE', 'NOTES'].includes(kind);
     });
     if (forbidden) {
         throw new Error(`第二阶段外围制品包含禁止的 ${forbidden.header} 分节`);
@@ -5032,6 +5069,7 @@ class TestdataGenService {
     constructor(aiClient, serviceOptions = {}) {
         this.aiClient = aiClient;
         this.activeRoleIdentities = {};
+        this.restoredRoleDependencies = {};
         this.sandboxRunner = serviceOptions.sandboxRunner;
         this.mode = serviceOptions.mode || (serviceOptions.sandboxRunner ? 'auto' : 'direct');
         this.cppOracleAvailable = serviceOptions.cppOracleAvailable === true;
@@ -5208,10 +5246,12 @@ class TestdataGenService {
                 ? (0, pipelineContext_1.hashTestdataRoleIdentity)(`${identity.endpointId}\0${identity.modelName}`)
                 : undefined;
         };
-        const restoredOracle = checkpoint.roleDependencies.oracle;
-        const restoredVerifier = checkpoint.roleDependencies.verifier;
         const freshOracle = dependencyHash('oracle');
         const freshVerifier = dependencyHash('verifier');
+        // A fresh call for a role replaces that role's restored provenance. Only retain
+        // checkpoint hashes for roles that remain restored in the current run.
+        const restoredOracle = freshOracle ? undefined : checkpoint.roleDependencies.oracle;
+        const restoredVerifier = freshVerifier ? undefined : checkpoint.roleDependencies.verifier;
         if ((restoredOracle && freshVerifier && restoredOracle === freshVerifier)
             || (restoredVerifier && freshOracle && restoredVerifier === freshOracle)) {
             throw new failures_1.TestdataPipelineError('高风险题目的恢复制品与新生成独立角色实际使用了相同模型。', 'SPEC_CONSENSUS_REQUIRED', 'spec_consensus', 'spec', 'manual-review', { identityConflictCount: 1 });
@@ -5261,8 +5301,10 @@ class TestdataGenService {
     }
     emitCheckpoint(params, update) {
         try {
+            if (update === null)
+                this.restoredRoleDependencies = {};
             const context = this.activePipelineContext;
-            const roleDependencies = context ? Object.fromEntries([
+            const freshRoleDependencies = context ? Object.fromEntries([
                 ...Object.entries(context.roleIdentities),
                 ...Object.entries(this.activeRoleIdentities).map(([role, identity]) => [
                     role,
@@ -5271,13 +5313,17 @@ class TestdataGenService {
             ].flatMap(([role, identity]) => (typeof identity === 'string' && identity
                 ? [[role, (0, pipelineContext_1.hashTestdataRoleIdentity)(identity)]]
                 : []))) : undefined;
+            const roleDependencies = context ? {
+                ...this.restoredRoleDependencies,
+                ...freshRoleDependencies,
+            } : undefined;
             const checkpointUpdate = update && context ? {
+                ...update,
                 checkpointSchemaVersion: pipelineContext_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION,
                 promptVersion: context.promptVersion,
                 statementHash: context.statement.statementHash,
                 specHash: context.specHash,
                 roleDependencies,
-                ...update,
             } : update;
             const pending = params.onCheckpoint?.(checkpointUpdate);
             return Promise.resolve(pending).catch(() => undefined);
@@ -5290,6 +5336,7 @@ class TestdataGenService {
     async generate(params) {
         this.activeModelTelemetry = undefined;
         this.activeRoleIdentities = {};
+        this.restoredRoleDependencies = {};
         this.activePipelineContext = undefined;
         try {
             const snapshot = (0, statementSnapshot_1.createStatementSnapshot)(params.statementMarkdown);
@@ -5843,7 +5890,11 @@ class TestdataGenService {
         }
     }
     async generateKillTargets(input, results) {
-        const result = await this.clientForRole('verifier').chat([{ role: 'user', content: buildKillTargetsUserPrompt(input) }], buildKillTargetsSystemPrompt(!!input.context), {
+        // Optional discrimination calls share the configured verifier client but are not
+        // the Independent Verifier artifact dependency. Do not let them relabel a restored
+        // verifier checkpoint with an unrelated fresh model hash.
+        const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+        const result = await verifierClient.chat([{ role: 'user', content: buildKillTargetsUserPrompt(input) }], buildKillTargetsSystemPrompt(!!input.context), {
             ...this.getCallOptions({ signal: input.signal }),
             timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
         });
@@ -5851,7 +5902,8 @@ class TestdataGenService {
         return parseKillTargetsResponse(result.content);
     }
     async generateHackCandidates(params, analysis, target, timeoutMs, signal, results, context) {
-        const result = await this.clientForRole('verifier').chat([{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }], buildHackCasesSystemPrompt(), {
+        const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+        const result = await verifierClient.chat([{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }], buildHackCasesSystemPrompt(), {
             ...this.getCallOptions({ signal, onProgress: params.onProgress }),
             timeoutMs,
         });
@@ -6100,6 +6152,9 @@ class TestdataGenService {
             let finalVerifierIdentity;
             const expectedFunctionSamples = (0, statementSamples_1.extractStatementSamples)(params.statementMarkdown);
             const checkpoint = reusableCheckpointForContext(params.checkpoint, params.options, this.reliabilityMode, context);
+            this.restoredRoleDependencies = checkpoint?.roleDependencies
+                ? { ...checkpoint.roleDependencies }
+                : {};
             let solutionSourceContent = checkpoint?.solution
                 ? JSON.stringify(checkpoint.solution)
                 : '';
@@ -6254,8 +6309,8 @@ class TestdataGenService {
                         ...solution,
                         analysis: undefined,
                         oracleCode: '',
-                        solutionCode: undefined,
-                        solutions: undefined,
+                        solutionCode: solution.solutionCode,
+                        solutions: solution.solutions,
                     } : solution, generationCoverage, callOptions, artifactsResults, context)
                         .then(state => {
                         void this.emitCheckpoint(params, { artifacts: state.artifacts });
