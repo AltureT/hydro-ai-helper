@@ -142,6 +142,48 @@ describe('AIConfigModel', () => {
       expect(result.futureV2Field).toEqual({ keep: true });
     });
 
+    it('preserves an explicit empty v2 selectedModels chain when endpoints can provide defaults', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        endpoints: [{
+          id: 'ep-default',
+          name: 'Default-capable endpoint',
+          apiBaseUrl: 'https://default.example.com',
+          apiKeyEncrypted: 'enc_default',
+          models: ['endpoint-default-model'],
+          enabled: true,
+        }],
+        selectedModels: [],
+        modelName: 'legacy-default-model',
+        scenarioModels: { studentChat: [] },
+        budgetConfig: { dailyTokenLimitPerDomain: 789 },
+        futureV2Field: { nested: ['preserve', 'exactly'] },
+      } as AIConfig & { futureV2Field: { nested: string[] } };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig();
+
+      expect(result).toStrictEqual({ ...v2Config, configVersion: 3 });
+    });
+
+    it('preserves every v2 selectedModels reference instead of filtering missing endpoints', async () => {
+      const v2Config = {
+        ...makeV2Config(),
+        configVersion: 2,
+        selectedModels: [
+          { endpointId: 'ep-missing', modelName: 'retained-missing-model' },
+          { endpointId: 'ep-1', modelName: 'gpt-4o' },
+        ],
+        futureV2Field: { keep: true },
+      } as AIConfig & { futureV2Field: { keep: boolean } };
+      mockCollection.findOne.mockResolvedValue(v2Config);
+
+      const result = await model.getConfig();
+
+      expect(result).toStrictEqual({ ...v2Config, configVersion: 3 });
+    });
+
     it('should migrate legacy config without endpoints', async () => {
       const legacy = makeLegacyConfig();
       mockCollection.findOne.mockResolvedValue(legacy);

@@ -65,8 +65,19 @@ class AIConfigModel {
      */
     migrateFromLegacy(legacy) {
         console.log('[AIConfigModel] Migrating AI config to v3...');
-        // 任何带版本的配置都已经是结构化配置。迁移时必须保留未知/后续字段；
-        // 这里只规范化数组和旧端点缺省值，不能按无版本 legacy 字段重建对象。
+        // v2 is already a structured configuration. Upgrade only the schema version and
+        // supply required arrays when they are absent; explicit empty chains, stale model
+        // references, endpoint structure, and unknown fields must remain byte-for-byte data.
+        if (legacy.configVersion === 2) {
+            return {
+                ...legacy,
+                configVersion: exports.CURRENT_CONFIG_VERSION,
+                endpoints: legacy.endpoints ?? [],
+                selectedModels: legacy.selectedModels ?? [],
+            };
+        }
+        // v1 已有部分结构化字段，但仍需要原有的端点归一化、引用过滤与链推导。
+        // 继续展开对象以保留其未知字段；无版本 legacy 才在下方完整重建。
         if (legacy.configVersion) {
             const normalizedEndpoints = (legacy.endpoints || []).map((endpoint, index) => ({
                 id: endpoint.id || (0, crypto_1.randomUUID)(),
