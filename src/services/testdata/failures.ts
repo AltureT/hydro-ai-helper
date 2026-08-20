@@ -124,6 +124,7 @@ export const TESTDATA_FAILURE_STAGES = [
   'sandbox_check',
   'solution_blueprint',
   'solution_verification',
+  'spec_consensus',
   'stress-generator',
   'stress_testing',
   'template',
@@ -188,6 +189,8 @@ const SAFE_DETAIL_KEYS = new Set([
   'expectedCount',
   'failureKind',
   'generatedCount',
+  'conflictCount',
+  'identityConflictCount',
   'indexes',
   'maxBytes',
   'minimumUnique',
@@ -195,6 +198,7 @@ const SAFE_DETAIL_KEYS = new Set([
   'sample',
   'status',
   'uniqueCount',
+  'unresolvedConflictCount',
   'validCount',
 ]);
 

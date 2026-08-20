@@ -16,6 +16,10 @@ const { ProblemSpecSummaryView } = require(
       invariantCount: number;
       unresolvedUncertainties: number;
     };
+    consensusStatus?: 'consensus' | 'adjudicated' | 'unresolved';
+    conflictCount?: number;
+    unresolvedConflictCount?: number;
+    rolesUsed?: string[];
     translate?: (key: string, ...args: Array<string | number>) => string;
   }) => React.ReactElement | null;
 };
@@ -48,6 +52,10 @@ describe('ProblemSpecSummaryView', () => {
         invariantCount: 3,
         unresolvedUncertainties: 2,
       },
+      consensusStatus: 'adjudicated',
+      conflictCount: 2,
+      unresolvedConflictCount: 0,
+      rolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
       translate,
     }));
 
@@ -65,6 +73,12 @@ describe('ProblemSpecSummaryView', () => {
     expect(markup).toContain('2');
     expect(markup).toContain('Evidence validated');
     expect(markup).toContain('Yes');
+    expect(markup).toContain('ai_helper_testdata_spec_consensus_status_adjudicated');
+    expect(markup).toContain('ai_helper_testdata_spec_conflict_count');
+    expect(markup).toContain('2');
+    expect(markup).toContain('specPrimary');
+    expect(markup).toContain('specCritic');
+    expect(markup).toContain('adjudicator');
   });
 
   it('fails closed when extraction ran but no evidence-validated summary exists', () => {

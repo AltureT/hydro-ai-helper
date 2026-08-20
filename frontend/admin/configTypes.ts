@@ -23,6 +23,21 @@ export const AI_SCENARIO_KEYS: readonly AIScenarioKey[] = ['studentChat', 'learn
 /** 每个场景的专属模型链；空数组 = 跟随全局 selectedModels */
 export type ScenarioModelsState = Record<AIScenarioKey, SelectedModel[]>;
 
+export type TestdataModelRole =
+  | 'specPrimary'
+  | 'specCritic'
+  | 'oracle'
+  | 'artifacts'
+  | 'verifier'
+  | 'adjudicator';
+
+export const TESTDATA_MODEL_ROLES: readonly TestdataModelRole[] = [
+  'specPrimary', 'specCritic', 'oracle', 'artifacts', 'verifier', 'adjudicator',
+] as const;
+
+/** Empty role chains inherit from the test-data scenario, then the global chain. */
+export type TestdataRoleModelsState = Record<TestdataModelRole, SelectedModel[]>;
+
 export interface BudgetConfigState {
   dailyTokenLimitPerUser: number | '';
   dailyTokenLimitPerDomain: number | '';
@@ -34,6 +49,7 @@ export interface ConfigState {
   endpoints: Endpoint[];
   selectedModels: SelectedModel[];
   scenarioModels: ScenarioModelsState;
+  testdataRoleModels: TestdataRoleModelsState;
   apiBaseUrl: string;
   modelName: string;
   rateLimitPerMinute: number | '';
@@ -162,6 +178,7 @@ export interface APIConfigResponse {
     endpoints?: Array<Omit<Endpoint, 'newApiKey' | 'isNew'> & { apiKeyMasked?: string; hasApiKey?: boolean }>;
     selectedModels?: SelectedModel[];
     scenarioModels?: Partial<Record<AIScenarioKey, SelectedModel[]>>;
+    testdataRoleModels?: Partial<Record<TestdataModelRole, SelectedModel[]>>;
     apiBaseUrl?: string;
     modelName?: string;
     rateLimitPerMinute?: number;

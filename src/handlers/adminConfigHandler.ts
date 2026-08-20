@@ -4,7 +4,11 @@
  */
 
 import { Handler, PRIV } from 'hydrooj';
-import { AIConfig, AIConfigModel, APIEndpoint, SelectedModel, BudgetConfig, ScenarioModelConfig, AI_SCENARIOS } from '../models/aiConfig';
+import {
+  AIConfig, AIConfigModel, APIEndpoint, SelectedModel, BudgetConfig,
+  ScenarioModelConfig, AI_SCENARIOS, TESTDATA_MODEL_ROLES,
+  type TestdataRoleModelConfig,
+} from '../models/aiConfig';
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
@@ -43,6 +47,7 @@ interface UpdateConfigRequest {
   }>;
   selectedModels?: SelectedModel[];
   scenarioModels?: ScenarioModelConfig;
+  testdataRoleModels?: TestdataRoleModelConfig;
   // 通用字段
   rateLimitPerMinute?: number;
   timeoutSeconds?: number;
@@ -142,6 +147,7 @@ export class AdminConfigHandler extends Handler {
           endpoints: endpointsWithMaskedKeys,
           selectedModels: config.selectedModels || [],
           scenarioModels: config.scenarioModels || {},
+          testdataRoleModels: config.testdataRoleModels || {},
           apiBaseUrl: config.apiBaseUrl,
           modelName: config.modelName,
           rateLimitPerMinute: config.rateLimitPerMinute,
@@ -246,6 +252,20 @@ export class AdminConfigHandler extends Handler {
           }
           body.scenarioModels = remapped;
         }
+
+        if (body.testdataRoleModels !== undefined && Object.keys(idMapping).length > 0) {
+          const remapped: TestdataRoleModelConfig = {};
+          for (const role of TESTDATA_MODEL_ROLES) {
+            const chain = body.testdataRoleModels[role];
+            if (Array.isArray(chain)) {
+              remapped[role] = chain.map(sm => ({
+                ...sm,
+                endpointId: idMapping[sm.endpointId] || sm.endpointId,
+              }));
+            }
+          }
+          body.testdataRoleModels = remapped;
+        }
       }
 
       // 处理选中的模型
@@ -265,6 +285,20 @@ export class AdminConfigHandler extends Handler {
           }
         }
         partial.scenarioModels = sanitized;
+      }
+
+
+      if (body.testdataRoleModels !== undefined) {
+        const sanitized: TestdataRoleModelConfig = {};
+        for (const role of TESTDATA_MODEL_ROLES) {
+          const chain = body.testdataRoleModels?.[role];
+          if (Array.isArray(chain)) {
+            sanitized[role] = chain
+              .filter(sm => sm && typeof sm.endpointId === 'string' && typeof sm.modelName === 'string')
+              .map(sm => ({ endpointId: sm.endpointId, modelName: sm.modelName }));
+          }
+        }
+        partial.testdataRoleModels = sanitized;
       }
 
       // 旧版单端点字段（向后兼容）
@@ -392,6 +426,7 @@ export class AdminConfigHandler extends Handler {
           endpoints: endpointsWithMaskedKeys,
           selectedModels: updatedConfig.selectedModels || [],
           scenarioModels: updatedConfig.scenarioModels || {},
+          testdataRoleModels: updatedConfig.testdataRoleModels || {},
           apiBaseUrl: updatedConfig.apiBaseUrl,
           modelName: updatedConfig.modelName,
           rateLimitPerMinute: updatedConfig.rateLimitPerMinute,
