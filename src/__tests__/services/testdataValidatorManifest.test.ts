@@ -11,7 +11,12 @@ function frozenSpec(): ProblemSpecV1 {
     statementHash: 'a'.repeat(64),
     problemKind: 'traditional',
     testCaseMode: { kind: 'single' },
-    inputFields: [{ id: 'a', name: 'a', type: 'integer', encoding: 'one integer' }],
+    inputFields: Array.from({ length: 65 }, (_, index) => ({
+      id: index === 0 ? 'a' : `a-${index}`,
+      name: `a-${index}`,
+      type: 'integer' as const,
+      encoding: 'one integer',
+    })),
     constraints: [
       {
         id: 'C1', expression: 'a >= 1', machineCheckable: true, scope: 'global',
@@ -111,6 +116,14 @@ describe('validator manifest', () => {
 describe('validator probe recipe', () => {
   const spec = frozenSpec();
 
+  function distinctLegalRecipes(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      targetId: 'I1',
+      constructionKind: 'duplicate-element',
+      fieldId: index === 0 ? 'a' : `a-${index}`,
+    }));
+  }
+
   function expectRecipeFailure(raw: string): void {
     expect(() => parseAndValidateValidatorProbeRecipes(raw, spec))
       .toThrow(expect.objectContaining({
@@ -131,13 +144,22 @@ describe('validator probe recipe', () => {
   });
 
   it('rejects more than 64 recipes', () => {
-    expectRecipeFailure(JSON.stringify({
-      recipes: Array.from({ length: 65 }, (_, index) => ({
-        targetId: 'I1',
-        constructionKind: index % 2 === 0 ? 'duplicate-element' : 'tree-cycle',
-        fieldId: `a-${index}`,
-      })),
-    }));
+    expectRecipeFailure(JSON.stringify({ recipes: distinctLegalRecipes(65) }));
+  });
+
+  it('accepts exactly 64 otherwise-valid recipes', () => {
+    const recipes = parseAndValidateValidatorProbeRecipes(
+      JSON.stringify({ recipes: distinctLegalRecipes(64) }),
+      spec,
+    );
+
+    expect(recipes).toHaveLength(64);
+    expect(recipes[0]).toEqual({
+      targetId: 'I1', constructionKind: 'duplicate-element', fieldId: 'a',
+    });
+    expect(recipes[63]).toEqual({
+      targetId: 'I1', constructionKind: 'duplicate-element', fieldId: 'a-63',
+    });
   });
 
   it('rejects duplicate canonical recipes', () => {
