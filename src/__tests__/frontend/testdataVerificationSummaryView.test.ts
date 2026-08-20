@@ -26,6 +26,15 @@ type VerificationSummaryData = {
     infraFailures: number;
     failureKind?: string;
   };
+  validator?: {
+    ran: boolean;
+    casesChecked: number;
+    validAccepted?: number;
+    invalidRejected?: number;
+    invalidAccepted?: number;
+    coveredConstraintIds?: string[];
+    missingConstraintIds?: string[];
+  };
 };
 
 const { VerificationSummaryView } = require(
@@ -54,6 +63,12 @@ const translations: Record<string, string> = {
   ai_helper_testdata_verify_infra_failures: 'Infrastructure failures',
   ai_helper_testdata_verify_failure: 'Failure',
   ai_helper_testdata_verify_failure_infra: 'infra',
+  ai_helper_testdata_verify_validator: 'Input validation',
+  ai_helper_testdata_verify_validator_none: 'No validator provided',
+  ai_helper_testdata_verify_validator_legal: 'Legal inputs accepted',
+  ai_helper_testdata_verify_validator_invalid_rejected: 'Invalid inputs rejected',
+  ai_helper_testdata_verify_validator_invalid_accepted: 'Invalid inputs accepted',
+  ai_helper_testdata_verify_validator_coverage: 'Constraint coverage',
   ai_helper_testdata_verify_yes: 'Yes',
   ai_helper_testdata_verify_no: 'No',
 };
@@ -180,5 +195,53 @@ describe('VerificationSummaryView', () => {
 
     expect(markup).toContain('Python');
     expect(markup).not.toContain('/private/checker/source.cc');
+  });
+
+  it('renders server-owned validator acceptance, rejection, and coverage', () => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      validator: {
+        ran: true,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 1,
+        coveredConstraintIds: ['C1', 'I1'],
+        missingConstraintIds: ['C2'],
+      },
+    });
+
+    expect(markup).toContain('12/12');
+    expect(markup).toContain('4');
+    expect(markup).toContain('1');
+    expect(markup).toContain('2/3');
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+    expect(markup).not.toContain('I1');
+  });
+
+  it('deduplicates validator target IDs only for the coverage total', () => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1', 'C1'],
+        missingConstraintIds: ['C2', 'C2'],
+      },
+    });
+
+    expect(markup).toContain('1/2');
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+  });
+
+  it('falls back to ran and casesChecked for legacy validator evidence', () => {
+    expect(render({
+      validator: { ran: true, casesChecked: 7 },
+    })).toContain('7');
   });
 });

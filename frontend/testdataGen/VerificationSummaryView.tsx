@@ -22,6 +22,15 @@ export interface VerificationSummaryData {
     infraFailures: number;
     failureKind?: string;
   };
+  validator?: {
+    ran: boolean;
+    casesChecked: number;
+    validAccepted?: number;
+    invalidRejected?: number;
+    invalidAccepted?: number;
+    coveredConstraintIds?: string[];
+    missingConstraintIds?: string[];
+  };
 }
 
 type Translate = (key: string, ...args: Array<string | number>) => string;
@@ -152,6 +161,62 @@ export function VerificationSummaryView(props: {
         ),
         boundedFailure(checker.failureKind, CHECKER_FAILURE_KINDS, translate),
       ].filter((item): item is React.ReactElement => item !== null)),
+    ));
+  }
+
+  const validator = verification.validator;
+  if (validator) {
+    const validatorLabel = translate('ai_helper_testdata_verify_validator');
+    const hasExpandedEvidence = typeof validator.validAccepted === 'number'
+      && typeof validator.invalidRejected === 'number'
+      && typeof validator.invalidAccepted === 'number'
+      && Array.isArray(validator.coveredConstraintIds)
+      && Array.isArray(validator.missingConstraintIds);
+    let validatorEvidence: React.ReactElement[];
+
+    if (hasExpandedEvidence) {
+      const coveredIds = new Set(validator.coveredConstraintIds);
+      const allIds = new Set([
+        ...validator.coveredConstraintIds,
+        ...validator.missingConstraintIds,
+      ]);
+      validatorEvidence = [
+        React.createElement(
+          'span',
+          { key: 'legal' },
+          `${translate('ai_helper_testdata_verify_validator_legal')}: ${validator.validAccepted}/${validator.casesChecked}`,
+        ),
+        React.createElement(
+          'span',
+          { key: 'invalid-rejected' },
+          `${translate('ai_helper_testdata_verify_validator_invalid_rejected')}: ${validator.invalidRejected}`,
+        ),
+        React.createElement(
+          'span',
+          { key: 'invalid-accepted' },
+          `${translate('ai_helper_testdata_verify_validator_invalid_accepted')}: ${validator.invalidAccepted}`,
+        ),
+        React.createElement(
+          'span',
+          { key: 'coverage' },
+          `${translate('ai_helper_testdata_verify_validator_coverage')}: ${coveredIds.size}/${allIds.size}`,
+        ),
+      ];
+    } else {
+      validatorEvidence = [React.createElement(
+        'span',
+        { key: 'legacy' },
+        validator.ran
+          ? String(validator.casesChecked)
+          : translate('ai_helper_testdata_verify_validator_none'),
+      )];
+    }
+
+    rows.push(React.createElement(
+      'div',
+      { key: 'validator', 'aria-label': validatorLabel },
+      React.createElement('div', { style: { fontWeight: 600, marginTop: '6px' } }, validatorLabel),
+      evidenceRow(validatorEvidence),
     ));
   }
 

@@ -79,7 +79,6 @@ interface PlanVerification extends VerificationSummaryData {
     droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
-  validator?: { ran: boolean; casesChecked: number };
   discrimination?: {
     targets: Array<{
       kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
@@ -1405,11 +1404,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {` · ${i18n('ai_helper_testdata_verify_stress_generated')}: ${stressCheck.generated}`}
                 {stressCheck.uniqueInputs !== undefined
                   && ` · ${i18n('ai_helper_testdata_verify_stress_unique')}: ${stressCheck.uniqueInputs}/${stressCheck.generated}`}
-              </div>
-            )}
-            {verification.validator && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_validator')}: {verification.validator.ran ? verification.validator.casesChecked : i18n('ai_helper_testdata_verify_validator_none')}
               </div>
             )}
             {discrimination && (
