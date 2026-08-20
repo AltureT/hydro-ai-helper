@@ -122,6 +122,72 @@ export interface FeatureHealthResponse {
   snapshot_max_age_hours?: number;
 }
 
+export interface TestdataQualityRate {
+  count: number;
+  total: number;
+  rate: number | null;
+}
+
+export interface TestdataQualityDistributionItem {
+  key: string;
+  count: number;
+}
+
+export type TestdataModelRole = 'primary' | 'fallback';
+
+export interface TestdataModelRoleMetrics {
+  runs: number;
+  completed: TestdataQualityRate;
+  verified: TestdataQualityRate;
+  failed: TestdataQualityRate;
+}
+
+export interface TestdataQualityResponse {
+  window_days: number;
+  total_runs: number;
+  metrics?: Partial<Record<
+    | 'pipeline_completion'
+    | 'verified'
+    | 'would_block'
+    | 'accepted_unchanged'
+    | 'accepted_edited'
+    | 'discarded'
+    | 'regenerated'
+    | 'model_escalation_rescue'
+    | 'verified_but_teacher_changed',
+    TestdataQualityRate
+  >>;
+  failure_codes?: TestdataQualityDistributionItem[];
+  failure_stages?: TestdataQualityDistributionItem[];
+  failure_artifacts?: TestdataQualityDistributionItem[];
+  risk_tiers?: TestdataQualityDistributionItem[];
+  model_roles?: Record<TestdataModelRole, TestdataModelRoleMetrics>;
+  templates?: Partial<Record<'py' | 'java' | 'cc', {
+    requested: number;
+    verified: number;
+    rate: number | null;
+  }>>;
+  checker?: {
+    configured?: TestdataQualityRate;
+    read?: TestdataQualityRate;
+    compiled?: TestdataQualityRate;
+    executed?: TestdataQualityRate;
+    infra_failure?: TestdataQualityRate;
+    infra_failures?: number;
+  };
+  stress?: Partial<Record<
+    'generated' | 'valid' | 'dropped_invalid' | 'unique' | 'compared' | 'agreed',
+    number
+  >>;
+  version_trend?: Array<{
+    plugin_version: string;
+    runs: number;
+    pipeline_completed: number;
+    verified: number;
+    would_block: number;
+  }>;
+}
+
 export interface Alert {
   id: number;
   alert_key: string;
@@ -145,4 +211,4 @@ export interface TelegramConfigInput {
   token?: string; // omitted ⇒ keep existing token
 }
 
-export type Tab = 'overview' | 'instances' | 'errors' | 'feature-health' | 'alerts' | 'feedback';
+export type Tab = 'overview' | 'instances' | 'errors' | 'feature-health' | 'testdata-quality' | 'alerts' | 'feedback';

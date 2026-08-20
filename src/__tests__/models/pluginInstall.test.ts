@@ -71,6 +71,7 @@ describe('PluginInstallModel', () => {
       expect(inserted.installedVersion).toBe('1.0.0');
       expect(inserted.lastVersion).toBe('1.0.0');
       expect(inserted.telemetryEnabled).toBe(true);
+      expect(inserted.testdataTelemetryHmacKey).toMatch(/^[a-f0-9]{64}$/);
       // instanceId must be a real random UUID, not a deterministic hash
       expect(inserted.instanceId).toMatch(UUID_RE);
     });
@@ -93,7 +94,10 @@ describe('PluginInstallModel', () => {
 
     it('should preserve a valid existing UUID instanceId on version update', async () => {
       const existingUuid = '11111111-2222-4333-8444-555555555555';
-      mockColl.findOne.mockResolvedValue({ _id: 'install', instanceId: existingUuid });
+      const existingHmacKey = 'a'.repeat(64);
+      mockColl.findOne.mockResolvedValue({
+        _id: 'install', instanceId: existingUuid, testdataTelemetryHmacKey: existingHmacKey,
+      });
 
       await model.createIfMissing('2.0.0');
 
@@ -104,6 +108,7 @@ describe('PluginInstallModel', () => {
       expect(updateArgs[1].$set.lastVersion).toBe('2.0.0');
       // A valid UUID must NOT be regenerated
       expect(updateArgs[1].$set).not.toHaveProperty('instanceId');
+      expect(updateArgs[1].$set).not.toHaveProperty('testdataTelemetryHmacKey');
     });
 
     it('should migrate a legacy deterministic (sha256) instanceId to a unique UUID', async () => {
@@ -117,6 +122,17 @@ describe('PluginInstallModel', () => {
       expect(updateArgs[1].$set.lastVersion).toBe('2.0.0');
       expect(updateArgs[1].$set.instanceId).toMatch(UUID_RE);
       expect(updateArgs[1].$set.instanceId).not.toBe(collidedHash);
+    });
+
+    it('backfills a private model-identity HMAC key without rotating instanceId', async () => {
+      const existingUuid = '11111111-2222-4333-8444-555555555555';
+      mockColl.findOne.mockResolvedValue({ _id: 'install', instanceId: existingUuid });
+
+      await model.createIfMissing('2.0.0');
+
+      const updates = mockColl.updateOne.mock.calls[0][1].$set;
+      expect(updates.instanceId).toBeUndefined();
+      expect(updates.testdataTelemetryHmacKey).toMatch(/^[a-f0-9]{64}$/);
     });
   });
 

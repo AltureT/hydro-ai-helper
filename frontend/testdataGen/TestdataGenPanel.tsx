@@ -24,6 +24,12 @@ import {
   VerificationSummaryView,
   type VerificationSummaryData,
 } from './VerificationSummaryView';
+import {
+  getTestdataApplyPresentation,
+  parseTestdataApplyResult,
+  type TestdataApplyPresentation,
+  type TestdataApplyResult,
+} from './applyResult';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -95,6 +101,8 @@ interface TestdataRiskAssessment {
 }
 
 interface GenerationPlan {
+  runId: string;
+  promptVersion: string;
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
   analysis?: string;
@@ -353,7 +361,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [selectedFiles, setSelectedFiles] = useState<Record<string, boolean>>({});
   const [activeFile, setActiveFile] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<{ written: string[]; failed: Array<{ name: string; error: string }> } | null>(null);
+  const [applyResult, setApplyResult] = useState<TestdataApplyResult | null>(null);
+  const [applyPresentation, setApplyPresentation] = useState<TestdataApplyPresentation | null>(null);
+  const [discardReason, setDiscardReason] = useState<'' | 'wrong_answer' | 'invalid_input' | 'weak_coverage' | 'template_problem' | 'checker_problem' | 'other'>('');
+  const [outcomeSubmitting, setOutcomeSubmitting] = useState(false);
 
   const rememberJob = useCallback((jobId: string | null) => {
     setGenerationJobId(jobId);
@@ -378,6 +389,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setSelectedFiles(selected);
     setActiveFile(newPlan.files[0].name);
     setApplyResult(null);
+    setApplyPresentation(null);
     setPhase('preview');
   }, []);
 
@@ -573,6 +585,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const handleGenerate = useCallback(async (
     resumeFromJobId?: string,
     directFallbackConfirmed = confirmDirectFallback,
+    replacesJobId?: string,
   ) => {
     setError(null);
     setRetryGuidance('none');
@@ -581,6 +594,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
+    if (replacesJobId) rememberJob(null);
     const startedAt = Date.now();
     generationStartedAtRef.current = startedAt;
     generationLastEventAtRef.current = startedAt;
@@ -611,6 +625,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           extraRequirements: extraRequirements.trim() || undefined,
           confirmDirectFallback: directFallbackConfirmed,
           resumeFromJobId,
+          replacesJobId,
         }),
       });
       if (!response.ok) {
@@ -632,6 +647,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         setGenerationProgress(data.job.progress);
       }
     } catch (err) {
+      if (replacesJobId) rememberJob(replacesJobId);
       setError(err instanceof Error ? err.message : String(err));
       const failureUi = adaptSynchronousTestdataGenerationFailure({
         failureCode: err instanceof TestdataRequestError ? err.failureCode : undefined,
@@ -639,7 +655,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       });
       setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
       setRetryGuidance(failureUi.retryGuidance);
-      setPhase('form');
+      setPhase(replacesJobId ? 'preview' : 'form');
     }
   }, [
     problemId, problemKind, fillInMode, caseCount,
@@ -743,12 +759,24 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         credentials: 'include',
         body: JSON.stringify({ problemId, jobId: generationJobId || undefined, files }),
       });
+      const payload = await response.clone().json().catch(() => undefined);
       if (!response.ok) {
+        const actualResult = parseTestdataApplyResult(payload);
+        if (actualResult) {
+          setApplyResult(actualResult);
+          setApplyPresentation(getTestdataApplyPresentation(false, actualResult));
+          setError((await parseErrorDetails(response)).message);
+          setPhase('applied');
+          return;
+        }
         throw new Error((await parseErrorDetails(response)).message);
       }
-      const data = await response.json() as { written: string[]; failed: Array<{ name: string; error: string }> };
+      const data = parseTestdataApplyResult(payload);
+      if (!data) throw new Error(i18n('ai_helper_err_internal'));
       setApplyResult(data);
-      if (data.failed.length === 0) rememberJob(null);
+      const presentation = getTestdataApplyPresentation(true, data);
+      setApplyPresentation(presentation);
+      if (presentation === 'success') rememberJob(null);
       setPhase('applied');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -759,20 +787,29 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     generationJobId, rememberJob,
   ]);
 
-  const handleBackToForm = useCallback(async () => {
+  const handleDiscard = useCallback(async () => {
+    if (!window.confirm(i18n('ai_helper_testdata_discard_confirm'))) return;
     const jobId = generationJobId;
+    setOutcomeSubmitting(true);
     if (jobId) {
       try {
-        await fetch(
+        const response = await fetch(
           buildApiUrl(`/ai-helper/testdata-gen/jobs/${encodeURIComponent(jobId)}/dismiss`),
           {
             method: 'POST',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
             credentials: 'include',
+            body: JSON.stringify({ reason: discardReason || undefined }),
           },
         );
+        if (!response.ok) throw new Error((await parseErrorDetails(response)).message);
       } catch (err) {
-        console.warn('[AI-Helper] dismiss testdata generation job failed:', err);
+        setError(err instanceof Error ? err.message : String(err));
+        setOutcomeSubmitting(false);
+        return;
       }
     }
     rememberJob(null);
@@ -780,9 +817,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setFileContents({});
     setSelectedFiles({});
     setActiveFile(null);
+    setDiscardReason('');
     setError(null);
     setPhase('form');
-  }, [generationJobId, rememberJob]);
+    setOutcomeSubmitting(false);
+  }, [discardReason, generationJobId, rememberJob]);
+
+  const handleRegenerate = useCallback(() => {
+    void handleGenerate(undefined, confirmDirectFallback, generationJobId || undefined);
+  }, [confirmDirectFallback, generationJobId, handleGenerate]);
 
   // ─── 渲染 ───────────────────────────────────────────────────────────────────
 
@@ -1447,15 +1490,37 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         {error && (
           <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>{error}</div>
         )}
-        <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.base }}>
+        <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.base, flexWrap: 'wrap', alignItems: 'center' }}>
           <button style={getButtonStyle('primary')} onClick={handleApply}>
             {i18n('ai_helper_testdata_apply_btn', selectedCount)}
           </button>
           <button
             style={getButtonStyle('secondary')}
-            onClick={handleBackToForm}
+            onClick={handleRegenerate}
+            disabled={outcomeSubmitting}
           >
-            {i18n('ai_helper_testdata_back_btn')}
+            {i18n('ai_helper_testdata_regenerate_btn')}
+          </button>
+          <label style={{ ...TYPOGRAPHY.xs, color: COLORS.textSecondary, marginLeft: 'auto' }}>
+            {i18n('ai_helper_testdata_discard_reason_label')}{' '}
+            <select
+              value={discardReason}
+              onChange={event => setDiscardReason(event.target.value as typeof discardReason)}
+              disabled={outcomeSubmitting}
+              style={{ ...getInputStyle(), width: 'auto', display: 'inline-block', padding: '6px 8px' }}
+            >
+              <option value="">{i18n('ai_helper_testdata_discard_reason_none')}</option>
+              {(['wrong_answer', 'invalid_input', 'weak_coverage', 'template_problem', 'checker_problem', 'other'] as const).map(reason => (
+                <option key={reason} value={reason}>{i18n(`ai_helper_testdata_discard_reason_${reason}`)}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            style={getButtonStyle('secondary')}
+            onClick={() => void handleDiscard()}
+            disabled={outcomeSubmitting}
+          >
+            {i18n('ai_helper_testdata_discard_btn')}
           </button>
         </div>
       </div>
@@ -1470,9 +1535,21 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const renderApplied = () => (
     <div>
-      {applyResult && applyResult.failed.length === 0 ? (
+      {applyPresentation === 'conflict' ? (
+        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
+          <div>{error}</div>
+          <div style={{ marginTop: SPACING.xs }}>
+            {i18n('ai_helper_testdata_apply_partial', applyResult?.written.length ?? 0, applyResult?.failed.length ?? 0)}
+          </div>
+          {applyResult?.failed.map(f => (
+            <div key={f.name} style={{ fontFamily: MONO_FONT, fontSize: '12px', marginTop: SPACING.xs }}>
+              {f.name}: {f.error}
+            </div>
+          ))}
+        </div>
+      ) : applyPresentation === 'success' ? (
         <div style={{ ...getAlertStyle('success'), marginBottom: SPACING.base }}>
-          {i18n('ai_helper_testdata_apply_success', applyResult.written.length)}
+          {i18n('ai_helper_testdata_apply_success', applyResult?.written.length ?? 0)}
         </div>
       ) : (
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
@@ -1491,9 +1568,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         <button style={getButtonStyle('primary')} onClick={() => window.location.reload()}>
           {i18n('ai_helper_testdata_refresh_btn')}
         </button>
-        <button style={getButtonStyle('secondary')} onClick={() => { setPhase('preview'); setError(null); }}>
-          {i18n('ai_helper_testdata_back_to_preview_btn')}
-        </button>
+        {(applyPresentation === 'conflict' || (applyResult?.failed.length ?? 0) > 0) && (
+          <button style={getButtonStyle('secondary')} onClick={() => { setPhase('preview'); setError(null); }}>
+            {i18n('ai_helper_testdata_back_to_preview_btn')}
+          </button>
+        )}
       </div>
     </div>
   );

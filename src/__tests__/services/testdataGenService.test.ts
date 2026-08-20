@@ -2185,6 +2185,8 @@ describe('stage-specific sandbox repair', () => {
       endpointName: 'main',
       modelName: 'gpt-test',
       usedModels: ['main/gpt-test'],
+      modelTelemetryRole: 'primary',
+      modelTelemetryIdentity: 'ep1/gpt-test',
       aiAttemptCount: 1,
       recommendDeeperReasoning: true,
     }));
@@ -2618,10 +2620,81 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
     expect(plan.usedModel).toBe('main/gpt-test');
+    expect(plan.modelTelemetry).toEqual({
+      role: 'primary',
+      identity: 'ep1/gpt-test',
+    });
     expect(progress.map(event => event.stage)).toEqual(expect.arrayContaining([
       'preparing', 'blueprint', 'assembling', 'complete',
     ]));
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
+  });
+
+  it('普通网络 fallback 成功时保留后备角色与稳定本地身份', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep2', endpointName: 'private-fallback', modelName: 'model-b' },
+        fallbackErrors: [{
+          endpoint: 'ep1',
+          model: 'model-a',
+          category: 'network',
+          message: 'private upstream error',
+        }],
+      }),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never).generate({
+      problemTitle: 'fallback',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(plan.usedModel).toBe('private-fallback/model-b');
+    expect(plan.modelTelemetry).toEqual({
+      role: 'fallback',
+      identity: 'ep2/model-b',
+    });
+  });
+
+  it('普通 fallback 返回后发生类型化解析失败仍保留后备角色', async () => {
+    const mockClient = {
+      chat: jest.fn().mockImplementation(async (_messages, _systemPrompt, callOptions) => {
+        callOptions.onAttempt?.({
+          type: 'fallback',
+          endpointId: 'ep2',
+          endpointName: 'private-fallback',
+          modelName: 'model-b',
+          attempt: 1,
+        });
+        return {
+          content: 'not a generation response',
+          usedModel: { endpointId: 'ep2', endpointName: 'private-fallback', modelName: 'model-b' },
+          fallbackErrors: [{
+            endpoint: 'ep1', model: 'model-a', category: 'network', message: 'private error',
+          }],
+        };
+      }),
+    };
+    const service = new TestdataGenService(mockClient as never);
+
+    let caught: unknown;
+    try {
+      await service.generate({
+        problemTitle: 'fallback parse failure',
+        statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TestdataPipelineError);
+    expect(extractTestdataErrorMetadata(caught)).toEqual(expect.objectContaining({
+      failureCode: 'GENERATOR_INVALID_JSON',
+      modelTelemetryRole: 'fallback',
+      modelTelemetryIdentity: 'ep2/model-b',
+    }));
   });
 
   it('沙箱模式并发生成三个独立阶段，错误解靶子失败仍继续组装文件', async () => {
@@ -3467,6 +3540,10 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('下一配置模型');
     expect(plan.notesStructured?.system.some(note => note.includes('下一配置模型'))).toBe(true);
     expect(plan.usedModel).toBe('primary/model-a → deeper/model-b');
+    expect(plan.modelTelemetry).toEqual({
+      role: 'fallback',
+      identity: 'ep2/model-b',
+    });
     expect(plan.tokenUsage?.totalTokens).toBe(14);
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
     expect(progress.some(event => event.attempt === 2 && event.stage === 'blueprint')).toBe(true);
@@ -7446,11 +7523,17 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       }),
     };
     const plan = await new TestdataGenService(mockClient as never).generate({
+      runId: '11111111-1111-4111-8111-111111111111',
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     });
     expect(plan.verification).toEqual({
       mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
     });
+    expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
+    expect(plan.promptVersion).toBe('testdata-generation-v1');
+    expect(plan.originalFileHashes).toEqual(Object.fromEntries(
+      plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
+    ));
   });
 });

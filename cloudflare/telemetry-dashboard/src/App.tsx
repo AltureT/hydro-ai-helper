@@ -4,6 +4,7 @@ import { OverviewPanel } from './panels/OverviewPanel';
 import { InstancesPanel } from './panels/InstancesPanel';
 import { ErrorsPanel } from './panels/ErrorsPanel';
 import { FeatureHealthPanel } from './panels/FeatureHealthPanel';
+import { TestdataQualityPanel } from './panels/TestdataQualityPanel';
 import { AlertsPanel } from './panels/AlertsPanel';
 import { FeedbackPanel } from './panels/FeedbackPanel';
 import type { Tab } from './types';
@@ -13,6 +14,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'instances', label: '实例' },
   { key: 'errors', label: '错误' },
   { key: 'feature-health', label: '功能健康' },
+  { key: 'testdata-quality', label: '测试数据质量' },
   { key: 'alerts', label: '告警' },
   { key: 'feedback', label: '反馈' },
 ];
@@ -113,6 +115,7 @@ export function App() {
         {tab === 'instances' && <InstancesPanel />}
         {tab === 'errors' && <ErrorsPanel />}
         {tab === 'feature-health' && <FeatureHealthPanel />}
+        {tab === 'testdata-quality' && <TestdataQualityPanel />}
         {tab === 'alerts' && <AlertsPanel />}
         {tab === 'feedback' && <FeedbackPanel />}
       </main>

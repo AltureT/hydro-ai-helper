@@ -54,12 +54,33 @@ interface FeatureStatPayload {
   last_success_at?: string;
 }
 
-interface ModelStatPayload {
+export interface ModelStatPayload {
   scenario: string;
   model_name: string;
   date: string;
   attempts: number;
   successes: number;
+}
+
+const REMOTE_MODEL_STATS_EXCLUDED_SCENARIOS = new Set(['testdata_generation']);
+
+/**
+ * Task 4 test-data quality uses its closed role enum plus a local HMAC identity.
+ * Keep legacy per-model counters local for this scenario so historical rows can
+ * never leak a raw configured model name through the generic heartbeat.
+ */
+export function serializeRemoteModelStats(
+  stats: readonly ModelUsageStatsDaily[],
+): ModelStatPayload[] {
+  return stats
+    .filter(item => !REMOTE_MODEL_STATS_EXCLUDED_SCENARIOS.has(item.scenario))
+    .map(item => ({
+      scenario: item.scenario,
+      model_name: item.modelName,
+      date: item.date,
+      attempts: item.attempts,
+      successes: item.successes,
+    }));
 }
 
 /**
@@ -333,13 +354,7 @@ export class TelemetryService {
           successes: f.successes,
           last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
         })),
-        model_stats: stats.modelStats.map((item) => ({
-          scenario: item.scenario,
-          model_name: item.modelName,
-          date: item.date,
-          attempts: item.attempts,
-          successes: item.successes,
-        })),
+        model_stats: serializeRemoteModelStats(stats.modelStats),
         domain_hash: domainHash,
         timestamp: new Date().toISOString()
       };

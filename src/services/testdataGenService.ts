@@ -59,6 +59,11 @@ import {
   type TemplateChecks,
   type TemplateOutputAdjudicator,
 } from './testdata/templateVerifier';
+import {
+  TESTDATA_PROMPT_VERSION,
+  computeOriginalFileHashes,
+  createTestdataRunId,
+} from './testdata/runTelemetry';
 
 export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
 
@@ -357,6 +362,12 @@ export interface PlannedFile {
 
 /** 完整生成计划（返回给前端预览） */
 export interface GenerationPlan {
+  /** 独立于 job/problem/user 的本次质量遥测随机 UUID。 */
+  runId: string;
+  /** 生成提示契约的静态版本，不包含题面或模型响应。 */
+  promptVersion: string;
+  /** 仅保存在 Hydro 本地，apply 时用于判断教师是否修改。 */
+  originalFileHashes?: Record<string, string>;
   problemType: 'function' | 'traditional';
   /** 是否为填空题（完善代码） */
   isFillIn?: boolean;
@@ -378,6 +389,14 @@ export interface GenerationPlan {
   }>;
   tokenUsage?: TokenUsage;
   usedModel?: string;
+  /**
+   * 仅保存在 Hydro 本地，用于将模型角色与稳定本地身份转换为质量遥测。
+   * 返回浏览器前必须移除；identity 只能经本地 HMAC 后离开实例。
+   */
+  modelTelemetry?: {
+    role: 'primary' | 'fallback';
+    identity: string;
+  };
   /** 验证元数据；沙箱/直出模式提供，骨架模式与旧后端缺省。 */
   verification?: PlanVerification;
   /** Deterministic privacy-safe risk metadata for this generation request. */
@@ -5180,6 +5199,12 @@ export function assemblePlan(
   });
 
   return {
+    runId: createTestdataRunId(),
+    promptVersion: TESTDATA_PROMPT_VERSION,
+    originalFileHashes: computeOriginalFileHashes(files.map(file => ({
+      name: file.name,
+      content: normalizeFileContent(file.content),
+    }))),
     problemType: response.problemType,
     isFillIn: response.isFillIn,
     analysis: response.analysis,
@@ -5409,6 +5434,12 @@ export function buildSkeletonPlan(
   const subtaskNotes = configBuild.subtaskNotes;
 
   return {
+    runId: createTestdataRunId(),
+    promptVersion: TESTDATA_PROMPT_VERSION,
+    originalFileHashes: computeOriginalFileHashes(files.map(file => ({
+      name: file.name,
+      content: normalizeFileContent(file.content),
+    }))),
     problemType,
     analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
     notes: subtaskNotes.length > 0
@@ -5469,6 +5500,43 @@ export type SandboxRepairScope =
   | 'template-py' | 'template-java' | 'template-cc' | 'full';
 
 type ChatResult = Awaited<ReturnType<MultiModelClient['chat']>>;
+
+function modelIdentity(result: ChatResult): string {
+  return `${result.usedModel.endpointId}/${result.usedModel.modelName}`;
+}
+
+type LocalModelTelemetry = NonNullable<GenerationPlan['modelTelemetry']>;
+
+const FAILURE_MODEL_TELEMETRY = new WeakMap<object, LocalModelTelemetry>();
+
+function rememberFailureModelTelemetry(
+  error: unknown,
+  telemetry: LocalModelTelemetry | undefined,
+): void {
+  if ((!error || (typeof error !== 'object' && typeof error !== 'function')) || !telemetry) return;
+  const key = error as object;
+  const existing = FAILURE_MODEL_TELEMETRY.get(key);
+  FAILURE_MODEL_TELEMETRY.set(key, existing ? {
+    role: existing.role === 'fallback' || telemetry.role === 'fallback' ? 'fallback' : 'primary',
+    identity: existing.identity || telemetry.identity,
+  } : telemetry);
+}
+
+function inferModelTelemetry(results: readonly ChatResult[]): GenerationPlan['modelTelemetry'] {
+  const finalResult = results[results.length - 1];
+  if (!finalResult) return undefined;
+  const identities = results.map(modelIdentity);
+  const firstIdentity = identities[0];
+  const usedFallback = identities.some(identity => identity !== firstIdentity)
+    || results.some(result => result.fallbackErrors?.some(attempt => (
+      attempt.endpoint !== result.usedModel.endpointId
+      || attempt.model !== result.usedModel.modelName
+    )));
+  return {
+    role: usedFallback ? 'fallback' : 'primary',
+    identity: modelIdentity(finalResult),
+  };
+}
 
 export const CPP_ORACLE_UNAVAILABLE_KEY = 'ai_helper_testdata_err_cpp_oracle_unavailable';
 export const CPP_PROVIDED_STD_COMPILE_FAILED_KEY = 'ai_helper_testdata_err_cpp_std_compile_failed';
@@ -5564,6 +5632,7 @@ export class TestdataGenerationError extends TestdataPipelineError {
     const usedModels = [...new Set(results.map(result =>
       `${result.usedModel.endpointName}/${result.usedModel.modelName}`))];
     const lastModel = results[results.length - 1]?.usedModel;
+    const modelTelemetry = inferModelTelemetry(results);
     this.telemetryMetadata = {
       failureStage: canonicalStage,
       ...(lastModel ? {
@@ -5571,6 +5640,10 @@ export class TestdataGenerationError extends TestdataPipelineError {
         modelName: lastModel.modelName,
       } : {}),
       ...(usedModels.length > 0 ? { usedModels } : {}),
+      ...(modelTelemetry ? {
+        modelTelemetryRole: modelTelemetry.role,
+        modelTelemetryIdentity: modelTelemetry.identity,
+      } : {}),
       aiAttemptCount: results.length,
       recommendDeeperReasoning,
     };
@@ -5601,10 +5674,19 @@ function wrapHistoricalCandidateFailure(
 
 export function extractTestdataErrorMetadata(err: unknown): Record<string, unknown> | undefined {
   const failureMetadata = extractTestdataFailureMetadata(err);
+  const localModel = err && (typeof err === 'object' || typeof err === 'function')
+    ? FAILURE_MODEL_TELEMETRY.get(err as object)
+    : undefined;
+  const localModelMetadata = localModel ? {
+    modelTelemetryRole: localModel.role,
+    modelTelemetryIdentity: localModel.identity,
+  } : {};
   if (err instanceof TestdataGenerationError) {
-    return { ...err.telemetryMetadata, ...failureMetadata };
+    return { ...err.telemetryMetadata, ...localModelMetadata, ...failureMetadata };
   }
-  return failureMetadata;
+  return failureMetadata || localModel
+    ? { ...localModelMetadata, ...failureMetadata }
+    : undefined;
 }
 
 export function extractTestdataUserMessageKey(err: unknown): string | undefined {
@@ -5904,6 +5986,8 @@ export interface TestlibCheckerArtifacts {
 }
 
 export interface GenerateTestdataParams {
+  /** Handler/job 创建的独立质量遥测 UUID；旧调用缺省时由 service 安全生成。 */
+  runId?: string;
   problemTitle: string;
   statementMarkdown: string;
   options: GenerateOptions;
@@ -6000,6 +6084,7 @@ export class TestdataGenService {
   private readonly cppOracleAvailable: boolean;
   private readonly semanticModelFallback: boolean;
   private readonly reliabilityMode: TestdataReliabilityMode;
+  private activeModelTelemetry?: LocalModelTelemetry;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
@@ -6025,6 +6110,16 @@ export class TestdataGenService {
   private attachRisk(plan: GenerationPlan, risk: TestdataRiskAssessment): GenerationPlan {
     plan.risk = risk;
     plan.reliabilityMode = this.reliabilityMode;
+    return plan;
+  }
+
+  private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
+    plan.runId = params.runId || plan.runId || createTestdataRunId();
+    plan.promptVersion = TESTDATA_PROMPT_VERSION;
+    plan.originalFileHashes = computeOriginalFileHashes(plan.files.map(file => ({
+      name: file.name,
+      content: normalizeFileContent(file.content),
+    })));
     return plan;
   }
 
@@ -6082,6 +6177,16 @@ export class TestdataGenService {
   }
 
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
+    this.activeModelTelemetry = undefined;
+    try {
+      return await this.generateInternal(params);
+    } catch (error) {
+      rememberFailureModelTelemetry(error, this.activeModelTelemetry);
+      throw error;
+    }
+  }
+
+  private async generateInternal(params: GenerateTestdataParams): Promise<GenerationPlan> {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const risk = this.assessRisk(params);
@@ -6137,7 +6242,7 @@ export class TestdataGenService {
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner);
         this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
-        return this.attachRisk(plan, risk);
+        return this.attachRunMetadata(this.attachRisk(plan, risk), params);
       }
       if (requiresProvidedCppOracle) {
         const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
@@ -6204,7 +6309,7 @@ export class TestdataGenService {
       plan.notesStructured?.warnings.push(fallbackWarning);
     }
     this.emitProgress(params, 'complete', 100);
-    return this.attachRisk(plan, risk);
+    return this.attachRunMetadata(this.attachRisk(plan, risk), params);
   }
 
   private getCallOptions(
@@ -6220,6 +6325,12 @@ export class TestdataGenService {
       // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
       retryTimeouts: false,
       onAttempt: event => {
+        this.activeModelTelemetry = {
+          role: this.activeModelTelemetry?.role === 'fallback' || event.type === 'fallback'
+            ? 'fallback'
+            : 'primary',
+          identity: `${event.endpointId}/${event.modelName}`,
+        };
         if (event.type === 'fallback') {
           this.emitProgress(params, 'model_fallback', attempt > 1 ? 72 : 30, attempt);
         }
@@ -6277,6 +6388,7 @@ export class TestdataGenService {
           mergeTokenUsage(firstError.chatResults.map(result => result.usage)),
           plan.tokenUsage,
         ]);
+        if (plan.modelTelemetry) plan.modelTelemetry.role = 'fallback';
         if (plan.verification) {
           plan.verification.modelEscalation = { fromModel, toModel };
         }
@@ -6289,6 +6401,12 @@ export class TestdataGenService {
         return plan;
       } catch (fallbackError) {
         if (isCancellation(fallbackError)) throw fallbackError;
+        if (fallbackService.activeModelTelemetry) {
+          rememberFailureModelTelemetry(fallbackError, {
+            ...fallbackService.activeModelTelemetry,
+            role: 'fallback',
+          });
+        }
         if (fallbackError instanceof TestdataGenerationError) {
           const combinedResults = [
             ...firstError.chatResults,
@@ -6322,6 +6440,7 @@ export class TestdataGenService {
     plan.tokenUsage = mergeTokenUsage(results.map(result => result.usage));
     plan.usedModel = [...new Set(results.map(result =>
       `${result.usedModel.endpointName}/${result.usedModel.modelName}`))].join(' → ');
+    plan.modelTelemetry = this.activeModelTelemetry || inferModelTelemetry(results);
     return plan;
   }
 

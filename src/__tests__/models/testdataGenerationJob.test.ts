@@ -6,6 +6,7 @@ import {
   TestdataGenerationJobModel,
   TESTDATA_JOB_LEASE_MS,
   TESTDATA_JOB_RETENTION_MS,
+  TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
   computeTestdataCheckpointHashes,
   filterTestdataCheckpointUpdate,
   selectTestdataResumeCheckpoint,
@@ -16,7 +17,7 @@ function createMockCollection() {
     createIndex: jest.fn().mockResolvedValue('ok'),
     insertOne: jest.fn().mockResolvedValue({ insertedId: 'job1' }),
     findOne: jest.fn().mockResolvedValue(null),
-    updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
+    updateOne: jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
     updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
   };
 }
@@ -325,6 +326,8 @@ describe('TestdataGenerationJobModel', () => {
     expect(inserted).toEqual(expect.objectContaining({
       status: 'pending', active: true, restorable: true,
       cancelRequested: false,
+      runId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+      applyFailureEventId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
       progress: { stage: 'preparing', percent: 2, attempt: 1 },
     }));
     expect(inserted.leaseExpiresAt.getTime()).toBeGreaterThanOrEqual(before + TESTDATA_JOB_LEASE_MS);
@@ -345,6 +348,9 @@ describe('TestdataGenerationJobModel', () => {
   it('only saves a completed plan while the job is still active and not canceled', async () => {
     const { model, collection } = createModel();
     const plan = {
+      runId: '11111111-1111-4111-8111-111111111111',
+      promptVersion: 'testdata-generation-v1',
+      originalFileHashes: {},
       problemType: 'traditional' as const,
       files: [],
       caseCount: 1,
@@ -411,5 +417,226 @@ describe('TestdataGenerationJobModel', () => {
     const update = collection.updateOne.mock.calls[0][1].$set;
     expect(update.leaseExpiresAt.getTime()).toBeGreaterThanOrEqual(before + TESTDATA_JOB_LEASE_MS);
     expect(update.expiresAt.getTime()).toBeGreaterThanOrEqual(before + TESTDATA_JOB_RETENTION_MS);
+  });
+
+  it('records exactly one terminal teacher outcome and treats same retries as idempotent', async () => {
+    const { model, collection } = createModel();
+    const record = {
+      eventId: '22222222-2222-4222-8222-222222222222',
+      outcome: 'accepted_edited' as const,
+      editedFileCount: 1,
+      changedFileKinds: ['case-in'] as const,
+    };
+
+    await expect(model.recordTeacherOutcome('job1', record)).resolves.toEqual({
+      state: 'recorded',
+      record: expect.objectContaining(record),
+    });
+    expect(collection.updateOne).toHaveBeenCalledWith(
+      {
+        _id: 'job1',
+        status: 'completed',
+        teacherOutcome: { $exists: false },
+        appliedAt: { $exists: false },
+        $or: [
+          { teacherOutcomeClaim: { $exists: false } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $lte: expect.any(Date) } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $exists: false } },
+        ],
+      },
+      {
+        $set: expect.objectContaining({
+          teacherOutcome: expect.objectContaining(record),
+          restorable: false,
+        }),
+        $unset: { teacherOutcomeClaim: '' },
+      },
+    );
+
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({ teacherOutcome: { ...record, recordedAt: new Date() } });
+    await expect(model.recordTeacherOutcome('job1', record)).resolves.toEqual({
+      state: 'duplicate',
+      record: expect.objectContaining(record),
+    });
+
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({ teacherOutcome: { ...record, recordedAt: new Date() } });
+    await expect(model.recordTeacherOutcome('job1', {
+      eventId: '33333333-3333-4333-8333-333333333333',
+      outcome: 'discarded',
+      reason: 'other',
+    })).resolves.toEqual({
+      state: 'conflict',
+      record: expect.objectContaining(record),
+    });
+
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({ teacherOutcome: { ...record, recordedAt: new Date() } });
+    await expect(model.recordTeacherOutcome('job1', {
+      eventId: record.eventId,
+      outcome: 'discarded',
+      reason: 'other',
+    })).resolves.toEqual({
+      state: 'conflict',
+      record: expect.objectContaining(record),
+    });
+  });
+
+  it('reports a recoverable conflict when an active apply claim owns the outcome transition', async () => {
+    const { model, collection } = createModel();
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({
+      teacherOutcomeClaim: {
+        claimId: 'active-apply',
+        claimedAt: new Date(),
+        leaseExpiresAt: new Date(Date.now() + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS),
+      },
+    });
+
+    await expect(model.recordTeacherOutcome('job1', {
+      eventId: '22222222-2222-4222-8222-222222222222',
+      outcome: 'regenerated',
+    })).resolves.toEqual({
+      state: 'conflict',
+      record: expect.objectContaining({ outcome: 'regenerated' }),
+    });
+    expect(collection.updateOne.mock.calls[0][0]).toEqual(expect.objectContaining({
+      teacherOutcome: { $exists: false },
+      $or: expect.any(Array),
+    }));
+  });
+
+  it('atomically leases an apply claim, recovers expired claims, and protects a live writer', async () => {
+    const { model, collection } = createModel();
+    const before = Date.now();
+
+    await expect(model.claimTeacherOutcome('job1', 'claim-1')).resolves.toBe(true);
+    expect(collection.updateOne).toHaveBeenNthCalledWith(
+      1,
+      {
+        _id: 'job1',
+        status: 'completed',
+        teacherOutcome: { $exists: false },
+        appliedAt: { $exists: false },
+        $or: [
+          { teacherOutcomeClaim: { $exists: false } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $lte: expect.any(Date) } },
+          { 'teacherOutcomeClaim.leaseExpiresAt': { $exists: false } },
+        ],
+      },
+      { $set: {
+        teacherOutcomeClaim: {
+          claimId: 'claim-1',
+          claimedAt: expect.any(Date),
+          leaseExpiresAt: expect.any(Date),
+        },
+        updatedAt: expect.any(Date),
+      } },
+    );
+    const claim = collection.updateOne.mock.calls[0][1].$set.teacherOutcomeClaim;
+    expect(claim.leaseExpiresAt.getTime()).toBeGreaterThanOrEqual(
+      before + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+    );
+
+    await model.releaseTeacherOutcomeClaim('job1', 'claim-1');
+    expect(collection.updateOne).toHaveBeenNthCalledWith(
+      2,
+      { _id: 'job1', 'teacherOutcomeClaim.claimId': 'claim-1' },
+      {
+        $unset: { teacherOutcomeClaim: '' },
+        $set: { updatedAt: expect.any(Date) },
+      },
+    );
+
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    await expect(model.claimTeacherOutcome('job1', 'claim-2')).resolves.toBe(false);
+  });
+
+  it('renews only the owned apply claim and persists one stable apply-failure timestamp', async () => {
+    const { model, collection } = createModel();
+    const before = Date.now();
+
+    collection.updateOne.mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 0 });
+    await expect(model.renewTeacherOutcomeClaim('job1', 'claim-1')).resolves.toBe(true);
+    expect(collection.updateOne).toHaveBeenNthCalledWith(
+      1,
+      { _id: 'job1', 'teacherOutcomeClaim.claimId': 'claim-1' },
+      { $set: {
+        'teacherOutcomeClaim.claimedAt': expect.any(Date),
+        'teacherOutcomeClaim.leaseExpiresAt': expect.any(Date),
+        updatedAt: expect.any(Date),
+      } },
+    );
+    const renewal = collection.updateOne.mock.calls[0][1].$set;
+    expect(renewal['teacherOutcomeClaim.leaseExpiresAt'].getTime()).toBeGreaterThanOrEqual(
+      before + TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+    );
+
+    const preferredEventId = '66666666-6666-4666-8666-666666666666';
+    await expect(model.getOrCreateApplyFailureEvent('job1', preferredEventId)).resolves.toEqual({
+      eventId: preferredEventId,
+      occurredAt: expect.any(Date),
+    });
+    const firstEvent = collection.updateOne.mock.calls[1][1].$set;
+    expect(collection.updateOne.mock.calls[1][0]).toEqual({
+      _id: 'job1', applyFailureOccurredAt: { $exists: false },
+    });
+    expect(firstEvent).toEqual({
+      applyFailureEventId: preferredEventId,
+      applyFailureOccurredAt: expect.any(Date),
+    });
+
+    const storedAt = new Date('2026-08-19T01:02:03.000Z');
+    collection.updateOne.mockResolvedValueOnce({ modifiedCount: 0 });
+    collection.findOne.mockResolvedValueOnce({
+      applyFailureEventId: preferredEventId,
+      applyFailureOccurredAt: storedAt,
+    });
+    await expect(model.getOrCreateApplyFailureEvent('job1', preferredEventId)).resolves.toEqual({
+      eventId: preferredEventId,
+      occurredAt: storedAt,
+    });
+
+    collection.updateOne.mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 });
+    await expect(model.renewTeacherOutcomeClaim('job1', 'lost-claim')).resolves.toBe(false);
+  });
+
+  it('requires the matching apply claim to record and mark an applied result', async () => {
+    const { model, collection } = createModel();
+    const input = {
+      eventId: '22222222-2222-4222-8222-222222222222',
+      outcome: 'accepted_unchanged' as const,
+    };
+
+    await expect(model.recordTeacherOutcome('job1', input, 'claim-1')).resolves.toEqual({
+      state: 'recorded',
+      record: expect.objectContaining(input),
+    });
+    expect(collection.updateOne).toHaveBeenNthCalledWith(
+      1,
+      {
+        _id: 'job1',
+        status: 'completed',
+        teacherOutcome: { $exists: false },
+        appliedAt: { $exists: false },
+        'teacherOutcomeClaim.claimId': 'claim-1',
+      },
+      { $set: expect.objectContaining({ teacherOutcome: expect.objectContaining(input) }) },
+    );
+
+    await expect(model.markApplied('job1', 'claim-1')).resolves.toBe(true);
+    expect(collection.updateOne).toHaveBeenNthCalledWith(
+      2,
+      { _id: 'job1', 'teacherOutcomeClaim.claimId': 'claim-1' },
+      {
+        $set: {
+          appliedAt: expect.any(Date),
+          restorable: false,
+          updatedAt: expect.any(Date),
+        },
+        $unset: { teacherOutcomeClaim: '' },
+      },
+    );
   });
 });
