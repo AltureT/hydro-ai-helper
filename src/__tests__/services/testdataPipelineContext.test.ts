@@ -131,6 +131,63 @@ describe('frozen test-data pipeline context', () => {
     }
   });
 
+  it('drops malformed checkpoint recipes without serializing allowed-slot runtime payloads', () => {
+    const validRecipe = {
+      targetId: 'C1',
+      constructionKind: 'integer-below-min' as const,
+      fieldId: 'n',
+      operationName: 'append',
+    };
+    const boundaryRecipe = {
+      targetId: 'T'.repeat(64),
+      constructionKind: 'subtask-upper-bound' as const,
+      fieldId: 'F'.repeat(64),
+      operationName: 'O'.repeat(256),
+    };
+    const malformedValues: Array<[string, unknown]> = [
+      ['nested', { outer: { sensitive: 'SECRET_ALLOWED_SLOT_NESTED' } }],
+      ['object', { sensitive: 'SECRET_ALLOWED_SLOT_OBJECT' }],
+      ['array', ['SECRET_ALLOWED_SLOT_ARRAY']],
+      ['number', 8675309],
+      ['null', null],
+      ['empty', ''],
+      ['overlong', `SECRET_ALLOWED_SLOT_OVERLONG_${'x'.repeat(300)}`],
+    ];
+    const malformedRecipes = (
+      ['targetId', 'constructionKind', 'fieldId', 'operationName'] as const
+    ).flatMap(slot => malformedValues.map(([, value]) => ({
+      ...validRecipe,
+      [slot]: value,
+    })));
+    const checkpoint = checkpointVerifierFromBlueprint({
+      problemType: 'traditional',
+      generatorCode: 'print(1)',
+      oracleCode: 'print(input())',
+      bruteCode: 'print(input())',
+      validatorCode: 'import sys\nsys.exit(0)',
+      stressGeneratorCode: 'print(1)',
+      validatorProbeRecipes: [
+        validRecipe,
+        boundaryRecipe,
+        ...malformedRecipes,
+        { ...validRecipe, constructionKind: 'SECRET_UNKNOWN_CONSTRUCTION_KIND' },
+      ] as any,
+    });
+
+    expect(checkpoint.validatorProbeRecipes).toEqual([validRecipe, boundaryRecipe]);
+    const serialized = JSON.stringify(checkpoint);
+    for (const forbidden of [
+      'SECRET_ALLOWED_SLOT_NESTED',
+      'SECRET_ALLOWED_SLOT_OBJECT',
+      'SECRET_ALLOWED_SLOT_ARRAY',
+      '8675309',
+      'SECRET_ALLOWED_SLOT_OVERLONG',
+      'SECRET_UNKNOWN_CONSTRUCTION_KIND',
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
   it('keeps specHash stable when semantically identical object keys arrive in a different order', () => {
     const reordered = JSON.parse(JSON.stringify(validSpec(), [
       'uncertainties', 'subtasks', 'outputPolicy', 'caseSensitive', 'kind',

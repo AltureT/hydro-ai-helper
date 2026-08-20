@@ -60,6 +60,7 @@ import {
 import {
   parseAndValidateValidatorManifest,
   parseAndValidateValidatorProbeRecipes,
+  VALIDATOR_PROBE_CONSTRUCTION_KINDS,
   type ValidatorManifest,
   type ValidatorProbeRecipe,
 } from './testdata/validatorManifest';
@@ -6635,6 +6636,42 @@ function checkpointArtifactsFromBlueprint(
   };
 }
 
+const CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH = 64;
+const CHECKPOINT_VALIDATOR_RECIPE_OPERATION_MAX_LENGTH = 256;
+
+function isBoundedCheckpointRecipeString(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+}
+
+function checkpointValidatorProbeRecipe(value: unknown): ValidatorProbeRecipe | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const recipe = value as Record<string, unknown>;
+  if (!isBoundedCheckpointRecipeString(
+    recipe.targetId,
+    CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH,
+  )) return undefined;
+  if (typeof recipe.constructionKind !== 'string'
+    || !VALIDATOR_PROBE_CONSTRUCTION_KINDS.includes(
+      recipe.constructionKind as ValidatorProbeRecipe['constructionKind'],
+    )) return undefined;
+  if (recipe.fieldId !== undefined && !isBoundedCheckpointRecipeString(
+    recipe.fieldId,
+    CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH,
+  )) return undefined;
+  if (recipe.operationName !== undefined && !isBoundedCheckpointRecipeString(
+    recipe.operationName,
+    CHECKPOINT_VALIDATOR_RECIPE_OPERATION_MAX_LENGTH,
+  )) return undefined;
+  return {
+    targetId: recipe.targetId,
+    constructionKind: recipe.constructionKind as ValidatorProbeRecipe['constructionKind'],
+    ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId as string }),
+    ...(recipe.operationName === undefined
+      ? {}
+      : { operationName: recipe.operationName as string }),
+  };
+}
+
 export function checkpointVerifierFromBlueprint(
   blueprint: SandboxGenerationBlueprint,
 ): IndependentVerifierBlueprint {
@@ -6649,13 +6686,12 @@ export function checkpointVerifierFromBlueprint(
       constraintIds: [...blueprint.validatorManifest.constraintIds],
       invariantIds: [...blueprint.validatorManifest.invariantIds],
     } : undefined,
-    validatorProbeRecipes: blueprint.validatorProbeRecipes
-      ?.map(recipe => ({
-        targetId: recipe.targetId,
-        constructionKind: recipe.constructionKind,
-        ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId }),
-        ...(recipe.operationName === undefined ? {} : { operationName: recipe.operationName }),
-      })),
+    validatorProbeRecipes: Array.isArray(blueprint.validatorProbeRecipes)
+      ? blueprint.validatorProbeRecipes.flatMap(recipe => {
+        const checkpointRecipe = checkpointValidatorProbeRecipe(recipe);
+        return checkpointRecipe ? [checkpointRecipe] : [];
+      })
+      : undefined,
   };
 }
 

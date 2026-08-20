@@ -5160,6 +5160,33 @@ function checkpointArtifactsFromBlueprint(blueprint) {
         notes: blueprint.notes,
     };
 }
+const CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH = 64;
+const CHECKPOINT_VALIDATOR_RECIPE_OPERATION_MAX_LENGTH = 256;
+function isBoundedCheckpointRecipeString(value, maxLength) {
+    return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+}
+function checkpointValidatorProbeRecipe(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return undefined;
+    const recipe = value;
+    if (!isBoundedCheckpointRecipeString(recipe.targetId, CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH))
+        return undefined;
+    if (typeof recipe.constructionKind !== 'string'
+        || !validatorManifest_1.VALIDATOR_PROBE_CONSTRUCTION_KINDS.includes(recipe.constructionKind))
+        return undefined;
+    if (recipe.fieldId !== undefined && !isBoundedCheckpointRecipeString(recipe.fieldId, CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH))
+        return undefined;
+    if (recipe.operationName !== undefined && !isBoundedCheckpointRecipeString(recipe.operationName, CHECKPOINT_VALIDATOR_RECIPE_OPERATION_MAX_LENGTH))
+        return undefined;
+    return {
+        targetId: recipe.targetId,
+        constructionKind: recipe.constructionKind,
+        ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId }),
+        ...(recipe.operationName === undefined
+            ? {}
+            : { operationName: recipe.operationName }),
+    };
+}
 function checkpointVerifierFromBlueprint(blueprint) {
     return {
         bruteCode: blueprint.bruteCode || '',
@@ -5172,13 +5199,12 @@ function checkpointVerifierFromBlueprint(blueprint) {
             constraintIds: [...blueprint.validatorManifest.constraintIds],
             invariantIds: [...blueprint.validatorManifest.invariantIds],
         } : undefined,
-        validatorProbeRecipes: blueprint.validatorProbeRecipes
-            ?.map(recipe => ({
-            targetId: recipe.targetId,
-            constructionKind: recipe.constructionKind,
-            ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId }),
-            ...(recipe.operationName === undefined ? {} : { operationName: recipe.operationName }),
-        })),
+        validatorProbeRecipes: Array.isArray(blueprint.validatorProbeRecipes)
+            ? blueprint.validatorProbeRecipes.flatMap(recipe => {
+                const checkpointRecipe = checkpointValidatorProbeRecipe(recipe);
+                return checkpointRecipe ? [checkpointRecipe] : [];
+            })
+            : undefined,
     };
 }
 class TestdataGenService {
