@@ -12,6 +12,7 @@ import {
   summarizeProblemSpec,
   validateProblemSpecEvidence,
   validateProblemSpecV1,
+  UNCERTAINTY_MAX_COUNT,
   type ProblemSpecSummary,
   type ProblemSpecV1,
 } from './problemSpec';
@@ -140,13 +141,34 @@ function mergeUncertainties(
   primary: ProblemSpecV1,
   critic: ProblemSpecV1,
 ): ProblemSpecV1['uncertainties'] {
-  const seen = new Set<string>();
+  const seenDescriptions = new Set<string>();
+  const seenCodes = new Set<string>();
   return [...primary.uncertainties, ...critic.uncertainties].filter(uncertainty => {
     const key = signature(normalizedUncertainty(uncertainty));
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seenCodes.has(uncertainty.code) || seenDescriptions.has(key)) return false;
+    seenCodes.add(uncertainty.code);
+    seenDescriptions.add(key);
     return true;
-  });
+  }).slice(0, UNCERTAINTY_MAX_COUNT);
+}
+
+function mergeValidatedSpec(
+  base: ProblemSpecV1,
+  primary: ProblemSpecV1,
+  critic: ProblemSpecV1,
+  input: Pick<RunSpecConsensusInput, 'requestedProblemKind' | 'hasCustomChecker'>,
+): ProblemSpecV1 {
+  const merged = { ...base, uncertainties: mergeUncertainties(primary, critic) };
+  try {
+    return validateProblemSpecV1(merged, {
+      hasCustomChecker: input.hasCustomChecker,
+      ...(input.requestedProblemKind === 'auto'
+        ? {}
+        : { expectedProblemKind: input.requestedProblemKind }),
+    });
+  } catch {
+    return primary;
+  }
 }
 
 function normalizedSpec(spec: ProblemSpecV1): Record<string, unknown> {
@@ -231,6 +253,19 @@ const WHOLE_DIFF_PATHS = [
 
 type ItemDiffPath = 'constraints' | 'invariants';
 
+function overlappingItemSignature(item: unknown): string {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return signature(item);
+  const object = item as Record<string, unknown>;
+  if (typeof object.expression !== 'string') return signature(item);
+  return signature({
+    ...object,
+    expression: object.expression.replace(
+      /(?<![\p{L}\p{N}_.])\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\p{L}\p{N}_.])/gu,
+      '#',
+    ).replace(/\s*(<=|>=|!=|==|<|>)\s*/g, '$1'),
+  });
+}
+
 function wholeConflict(
   path: typeof WHOLE_DIFF_PATHS[number],
   left: Record<string, unknown>,
@@ -260,12 +295,37 @@ function itemConflicts(
   primaryItems.forEach(item => add(primaryBySignature, item));
   criticItems.forEach(item => add(criticBySignature, item));
 
-  const unpaired: Array<{ primaryValue: unknown | null; criticValue: unknown | null }> = [];
+  const unmatchedPrimary: unknown[] = [];
+  const unmatchedCritic: unknown[] = [];
   const keys = [...new Set([...primaryBySignature.keys(), ...criticBySignature.keys()])].sort();
   for (const key of keys) {
     const primary = primaryBySignature.get(key) || [];
     const critic = criticBySignature.get(key) || [];
     const paired = Math.min(primary.length, critic.length);
+    unmatchedPrimary.push(...primary.slice(paired));
+    unmatchedCritic.push(...critic.slice(paired));
+  }
+
+  const primaryByOverlap = new Map<string, unknown[]>();
+  const criticByOverlap = new Map<string, unknown[]>();
+  const addOverlap = (target: Map<string, unknown[]>, item: unknown) => {
+    const key = overlappingItemSignature(item);
+    target.set(key, [...(target.get(key) || []), item]);
+  };
+  unmatchedPrimary.forEach(item => addOverlap(primaryByOverlap, item));
+  unmatchedCritic.forEach(item => addOverlap(criticByOverlap, item));
+
+  const unpaired: Array<{ primaryValue: unknown | null; criticValue: unknown | null }> = [];
+  const overlapKeys = [
+    ...new Set([...primaryByOverlap.keys(), ...criticByOverlap.keys()]),
+  ].sort();
+  for (const key of overlapKeys) {
+    const primary = primaryByOverlap.get(key) || [];
+    const critic = criticByOverlap.get(key) || [];
+    const paired = Math.min(primary.length, critic.length);
+    for (let index = 0; index < paired; index += 1) {
+      unpaired.push({ primaryValue: primary[index], criticValue: critic[index] });
+    }
     primary.slice(paired).forEach(item => unpaired.push({ primaryValue: item, criticValue: null }));
     critic.slice(paired).forEach(item => unpaired.push({ primaryValue: null, criticValue: item }));
   }
@@ -448,10 +508,7 @@ function parseAdjudication(
       locateStatementEvidence(input.snapshot, { quote: resolution.evidenceQuote });
     }
     const modelResolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
-    const resolvedSpec: ProblemSpecV1 = {
-      ...modelResolvedSpec,
-      uncertainties: mergeUncertainties(primary, critic),
-    };
+    const resolvedSpec = mergeValidatedSpec(modelResolvedSpec, primary, critic, input);
     const normalizedResolved = normalizedSpec(resolvedSpec);
     const normalizedPrimary = normalizedSpec(primary);
     const normalizedCritic = normalizedSpec(critic);
@@ -625,10 +682,7 @@ export async function runProblemSpecConsensus(
   }
 
   const conflicts = diffProblemSpecs(primary.spec, critic.spec);
-  const mergedSpec: ProblemSpecV1 = {
-    ...primary.spec,
-    uncertainties: mergeUncertainties(primary.spec, critic.spec),
-  };
+  const mergedSpec = mergeValidatedSpec(primary.spec, primary.spec, critic.spec, input);
   if (conflicts.length === 0) {
     return {
       status: 'consensus',

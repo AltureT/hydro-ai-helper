@@ -7216,7 +7216,8 @@ class TestdataGenService {
                     systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
                     blueprint = { ...blueprint, oracleLanguage: 'python' };
                 }
-                if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED') {
+                const isModelCallBudget = Object.prototype.hasOwnProperty.call(typedFirstError.safeDetails, 'callCount');
+                if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED' && !isModelCallBudget) {
                     throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false, undefined, undefined, {
                         code: 'PIPELINE_BUDGET_EXHAUSTED',
                         artifact: 'pipeline',

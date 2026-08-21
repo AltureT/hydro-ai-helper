@@ -137,9 +137,31 @@ describe('deterministic ProblemSpec diff', () => {
 
     expect(diffProblemSpecs(primary, critic).map(conflict => conflict.path)).toEqual([
       'problemKind', 'testCaseMode', 'inputFields',
-      'constraints[0]', 'constraints[1]', 'invariants[0]', 'invariants[1]',
+      'constraints[0]', 'invariants[0]', 'invariants[1]',
       'outputPolicy', 'operations', 'subtasks',
     ]);
+  });
+
+  it('pairs changed numeric bounds as one overlapping constraint conflict', () => {
+    const statement = `${STATEMENT}\n1 <= n <= 1000.`;
+    const primary = validSpec(statement, {
+      constraints: [{
+        ...validSpec(statement).constraints[0], expression: '1<=n<=100',
+      }],
+    });
+    const critic = validSpec(statement, {
+      constraints: [{
+        id: 'c_n_critic', expression: '1 <= n <= 1000', machineCheckable: true,
+        scope: 'global', evidence: { quote: '1 <= n <= 1000.' },
+      }],
+    });
+
+    expect(diffProblemSpecs(primary, critic)).toEqual([{
+      path: 'constraints[0]',
+      kind: 'value-mismatch',
+      primaryValue: expect.objectContaining({ expression: '1<=n<=100' }),
+      criticValue: expect.objectContaining({ expression: '1 <= n <= 1000' }),
+    }]);
   });
 
   it('treats field renames as equivalent when ordered structure and references match', () => {
@@ -303,6 +325,47 @@ describe('dual ProblemSpec consensus and adjudication', () => {
     expect(adjudicator.chat).not.toHaveBeenCalled();
   });
 
+  it('keeps the Primary uncertainty when Critic reuses its code with a different description', async () => {
+    const primarySpec = validSpec(STATEMENT, {
+      uncertainties: [{ code: 'u1', description: 'Primary interpretation' }],
+    });
+    const criticSpec = validSpec(STATEMENT, {
+      uncertainties: [{ code: 'u1', description: 'Critic interpretation' }],
+    });
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(STATEMENT),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+    });
+
+    expect(result).toMatchObject({ status: 'consensus', conflictCount: 0 });
+    expect(result.resolvedSpec?.uncertainties).toEqual(primarySpec.uncertainties);
+  });
+
+  it('caps combined Primary and Critic uncertainties at the ProblemSpec limit', async () => {
+    const uncertainties = (prefix: string, count: number) => Array.from(
+      { length: count },
+      (_, index) => ({ code: `${prefix}_${index}`, description: `${prefix} uncertainty ${index}` }),
+    );
+    const primarySpec = validSpec(STATEMENT, { uncertainties: uncertainties('primary', 60) });
+    const criticSpec = validSpec(STATEMENT, { uncertainties: uncertainties('critic', 60) });
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(STATEMENT),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+    });
+
+    expect(result).toMatchObject({ status: 'consensus', conflictCount: 0 });
+    expect(result.resolvedSpec?.uncertainties).toHaveLength(100);
+    expect(result.resolvedSpec?.uncertainties.slice(0, 60)).toEqual(primarySpec.uncertainties);
+  });
+
   it('adjudicates exactly one genuinely missing constraint item', async () => {
     const statement = `${STATEMENT}\nn is even.`;
     const shared = validSpec(statement).constraints[0];
@@ -342,6 +405,48 @@ describe('dual ProblemSpec consensus and adjudication', () => {
     });
     expect(adjudicator.chat).toHaveBeenCalledTimes(1);
     expect(adjudicator.chat.mock.calls[0][0][0].content).toContain('"path":"constraints[0]"');
+  });
+
+  it('rejects an adjudication that retains both sides of an overlapping bound conflict', async () => {
+    const statement = `${STATEMENT}\n1 <= n <= 1000.`;
+    const primaryConstraint = {
+      id: 'c_primary', expression: '1<=n<=100', machineCheckable: true as const,
+      scope: 'global' as const, evidence: { quote: '1 <= n <= 100.' },
+    };
+    const criticConstraint = {
+      id: 'c_critic', expression: '1 <= n <= 1000', machineCheckable: true as const,
+      scope: 'global' as const, evidence: { quote: '1 <= n <= 1000.' },
+    };
+    const primarySpec = validSpec(statement, { constraints: [primaryConstraint] });
+    const criticSpec = validSpec(statement, { constraints: [criticConstraint] });
+    const resolvedSpec = validSpec(statement, {
+      constraints: [primaryConstraint, criticConstraint],
+    });
+    const adjudicator = client('adjudicator', 'ep-c', 'judge', JSON.stringify({
+      resolvedSpec,
+      resolutions: [{
+        path: 'constraints[0]', selected: 'A', evidenceQuote: '1 <= n <= 100.',
+        reason: 'retain the primary bound',
+      }],
+    }));
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(statement),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+      adjudicator,
+    });
+
+    expect(result.conflicts).toEqual([expect.objectContaining({
+      path: 'constraints[0]',
+      primaryValue: expect.objectContaining({ expression: '1<=n<=100' }),
+      criticValue: expect.objectContaining({ expression: '1 <= n <= 1000' }),
+    })]);
+    expect(result).toMatchObject({
+      status: 'unresolved', failureCode: 'SPEC_CONSENSUS_REQUIRED', unresolvedConflictCount: 1,
+    });
   });
 
   it('gives Primary and Critic only the same StatementSnapshot and skips adjudicator without conflicts', async () => {

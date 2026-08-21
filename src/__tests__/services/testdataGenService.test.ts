@@ -111,9 +111,6 @@ beforeEach(() => {
   // Existing characterization fixtures predate the observe-only extractor.
   // Tests that exercise Task 5 opt into observe explicitly with a grounded response.
   process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'legacy';
-  // Preserve pre-R1 dual-Spec characterization fixtures. Risk-gate tests below
-  // explicitly remove or override this switch to exercise the production default.
-  process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
 });
 
 afterEach(() => {
@@ -2735,6 +2732,38 @@ describe('TestdataGenService.generate', () => {
       expect(plan.modelCallCount).toBeLessThan(40);
     });
 
+    it('production auto default keeps a low-risk observe sandbox run on Primary only', async () => {
+      const statement = 'Input one integer. Output it.';
+      const options: GenerateOptions = {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+      };
+      const roleClients = makeFrozenSpecRoleClients(statement, 'traditional');
+      const checkpoint = makeFrozenV3Checkpoint(statement, {
+        solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+        artifacts: parseGenerationArtifacts(
+          makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+        ),
+        verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+        killTargets: [],
+      });
+      const runner = makeCheckpointRunner();
+      const baseClient = { chat: jest.fn() };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'sandbox', sandboxRunner: runner, reliabilityMode: 'observe', roleClients,
+      }).generate({
+        problemTitle: 'default auto sandbox', statementMarkdown: statement, options, checkpoint,
+      });
+
+      expect(roleClients.specPrimary?.client.chat).toHaveBeenCalledTimes(1);
+      expect(roleClients.specCritic?.client.chat).not.toHaveBeenCalled();
+      expect(plan.modelRolesUsed).toEqual(['specPrimary']);
+      expect(plan.verification).toMatchObject({ mode: 'sandbox' });
+      expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+      expect(runner.runPython).toHaveBeenCalled();
+      expect(baseClient.chat).not.toHaveBeenCalled();
+    });
+
     it('auto keeps dual extraction and adjudication for a high-risk run', async () => {
       delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
       const primarySpec = makeObservedProblemSpec(highStatement);
@@ -2880,6 +2909,7 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('freezes independently grounded Primary/Critic consensus for downstream use and exposes only its summary', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = '## Constraints\nn >= 1';
     const spec = makeObservedProblemSpec(statement, {
       constraints: [{
@@ -2967,6 +2997,7 @@ describe('TestdataGenService.generate', () => {
       }],
     }))],
   ])('continues the old success path when observe extraction records %s', async (failureCode, specResponse) => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = '## Constraints\nn >= 1';
     const mockClient = {
       chat: jest.fn()
@@ -3009,6 +3040,7 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('keeps the complete statement in Spec extraction and trusted downstream evidence without truncation', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const tail = 'FINAL_CONSTRAINT_AT_STATEMENT_TAIL';
     const statement = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_100)}${tail}`;
     const mockClient = {
@@ -3107,6 +3139,7 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('observe warns and marks wouldBlock when configured Spec identities are exactly equal', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = 'Input one integer. Output it.';
     const specJson = JSON.stringify(makeObservedProblemSpec(statement));
     const baseClient = {
@@ -3298,6 +3331,7 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('observe continues the old generation after unresolved adjudication and exposes only safe conflict metadata', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = 'Input one integer. Output it exactly.';
     const primarySpec = makeObservedProblemSpec(statement);
     const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
@@ -3335,6 +3369,7 @@ describe('TestdataGenService.generate', () => {
   });
 
   it('propagates Critic cancellation without converting it into a spec parse failure', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = 'Input one integer. Output it.';
     const canceled = Object.assign(new Error('canceled'), { name: 'AbortError' });
     const roles: TestdataRoleClients = {
@@ -5766,6 +5801,54 @@ describe('TestdataGenService.generate', () => {
       telemetryMetadata: expect.objectContaining({ failureStage: 'sandbox_budget' }),
     });
     await expect(promise).rejects.toThrow(/停止后续修复与模型升级/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('沙箱阶段保留模型调用次数预算错误的文案与安全详情', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const modelCallBudgetError = new TestdataPipelineError(
+      '本次测试数据生成已达到 AI 调用次数上限。',
+      'PIPELINE_BUDGET_EXHAUSTED',
+      'pipeline',
+      'pipeline',
+      'no-retry',
+      { callCount: 5, limit: 4 },
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(modelCallBudgetError),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '模型调用预算传播',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED',
+      stage: 'pipeline',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+      safeDetails: { callCount: 5, limit: 4 },
+      recommendDeeperReasoning: false,
+    });
+    expect(failure.message).toContain('AI 调用次数上限');
+    expect(failure.message).not.toContain('沙箱验证已达到总时长上限');
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
