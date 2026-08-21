@@ -234,9 +234,25 @@ function resolveSequenceLayout(input, spec, fieldId) {
     return {
         line: range.line,
         startToken: range.startToken,
+        count,
         values,
         countFieldId: range.countFieldId,
     };
+}
+function isOneBasedPermutation(values, count) {
+    if (!Number.isSafeInteger(count) || count < 0 || values.length !== count)
+        return false;
+    const seen = new Set();
+    for (const raw of values) {
+        if (!/^-?(0|[1-9]\d*)$/.test(raw))
+            return false;
+        const value = Number(raw);
+        if (!Number.isSafeInteger(value) || value < 1 || value > count || seen.has(value)) {
+            return false;
+        }
+        seen.add(value);
+    }
+    return seen.size === count;
 }
 function constructSequenceMutation(input, spec, target, fieldId, kind, source) {
     const layout = resolveSequenceLayout(input, spec, fieldId);
@@ -272,6 +288,8 @@ function constructSequenceMutation(input, spec, target, fieldId, kind, source) {
         && !new RegExp(`^permutation\\(${escapedField}, 1\\.\\.${escapedCount}\\)$`)
             .test(target.expression))
         return 'UNSUPPORTED_TARGET';
+    if (!isOneBasedPermutation(layout.values, layout.count))
+        return 'MUTATION_NOT_ISOLATED';
     const replacement = layout.values[layout.values.length - 2];
     if (replacement === layout.values[layout.values.length - 1])
         return 'MUTATION_NOT_ISOLATED';
@@ -1176,12 +1194,7 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
         if (request.constructionKind === 'duplicate-element') {
             return new Set(snapshot.values).size === snapshot.values.length;
         }
-        const values = snapshot.values.map(value => /^(0|[1-9]\d*)$/.test(value)
-            ? Number(value) : NaN);
-        return values.every(Number.isSafeInteger)
-            && values.length === snapshot.count
-            && new Set(values).size === snapshot.count
-            && values.every(value => value >= 1 && value <= snapshot.count);
+        return isOneBasedPermutation(snapshot.values, snapshot.count);
     }
     if (request.constructionKind === 'illegal-string-character') {
         const location = parseLocation(field.encoding);

@@ -320,6 +320,48 @@ function buildNoncanonicalPairwiseProbe(
   });
 }
 
+function noncanonicalPermutationSpec(): ProblemSpecV1 {
+  return {
+    schemaVersion: 1,
+    statementHash: '1'.repeat(64),
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [
+      { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+      {
+        id: 'p', name: 'p', type: 'permutation',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      },
+    ],
+    constraints: [],
+    invariants: [{
+      id: 'I_PERM', kind: 'custom',
+      expression: 'each label must occur exactly once',
+      machineCheckable: true,
+      evidence: { quote: 'each label must occur exactly once' },
+    }],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+  };
+}
+
+const noncanonicalPermutationRecipe: ValidatorProbeRecipe = {
+  targetId: 'I_PERM',
+  constructionKind: 'permutation-duplicate-or-missing',
+  fieldId: 'p',
+};
+
+function buildNoncanonicalPermutationProbe(input: string) {
+  return buildConstraintProbes({
+    spec: noncanonicalPermutationSpec(),
+    statementHash: '1'.repeat(64),
+    specHash: '2'.repeat(64),
+    seeds: [{ source: 'formal', index: 1, input }],
+    recipes: [noncanonicalPermutationRecipe],
+  });
+}
+
 describe('scalar sequence and string constructions', () => {
   it.each<[ScalarSequenceConstructionKind, string, string]>([
     ['integer-below-min', '5\n', '-1\n'],
@@ -335,6 +377,64 @@ describe('scalar sequence and string constructions', () => {
       constructionKind,
       input: illegal,
     })]));
+    expect(result.gaps).toEqual([]);
+  });
+
+  it.each([
+    ['duplicate label', '4\n1 1 3 4\n'],
+    ['out-of-range label', '4\n1 2 3 5\n'],
+    ['non-integer label', '4\n1 2 x 4\n'],
+    ['value-count mismatch', '4\n1 2 3\n'],
+  ])('rejects a noncanonical permutation recipe with an illegal %s source', (_name, seed) => {
+    const result = buildNoncanonicalPermutationProbe(seed);
+
+    expect(result.probes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetId: 'I_PERM' }),
+    ]));
+    expect(result.gaps).toEqual(expect.arrayContaining([{
+      targetId: 'I_PERM', targetKind: 'invariant', reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]));
+  });
+
+  it('keeps the legal noncanonical permutation probe deterministic without clock or random state', () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(123_456);
+    const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0.987654321);
+    try {
+      const first = buildNoncanonicalPermutationProbe('4\n1 2 3 4\n');
+      nowSpy.mockReturnValue(999_999);
+      randomSpy.mockReturnValue(0.123456789);
+      const second = buildNoncanonicalPermutationProbe('4\n1 2 3 4\n');
+
+      expect(second).toEqual(first);
+      expect(second.probes).toEqual([{
+        id: 'cb60ff91b4430c6832a0cf6a0d8d0f52',
+        targetId: 'I_PERM',
+        targetKind: 'invariant',
+        input: '4\n1 2 3 3\n',
+        constructionKind: 'permutation-duplicate-or-missing',
+      }]);
+      expect(second.gaps).toEqual([]);
+      expect(nowSpy).not.toHaveBeenCalled();
+      expect(randomSpy).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+      randomSpy.mockRestore();
+    }
+  });
+
+  it('preserves the canonical derived permutation fixture id order and output', () => {
+    const result = buildSingleTargetFixture(
+      'permutation-duplicate-or-missing',
+      '4\n1 2 3 4\n',
+    );
+
+    expect(result.probes).toEqual([{
+      id: '419f46b93255c79de399636ed0caf75d',
+      targetId: 'C1',
+      targetKind: 'constraint',
+      input: '4\n1 2 3 3\n',
+      constructionKind: 'permutation-duplicate-or-missing',
+    }]);
     expect(result.gaps).toEqual([]);
   });
 

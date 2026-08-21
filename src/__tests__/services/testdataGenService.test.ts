@@ -10102,6 +10102,26 @@ describe('materializeSandboxBlueprint 双重验证', () => {
   };
   const pairwiseStatement = 'Input has n values; all values must be pairwise different.';
   const pairwiseFormalInputs = ['4\n10 20 30 40', '4\n50 60 70 80'];
+  const permutationInputFields: ProblemSpecV1['inputFields'] = [
+    { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+    {
+      id: 'p', name: 'p', type: 'permutation',
+      encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+    },
+  ];
+  const permutationInvariant = {
+    id: 'I_PERM', kind: 'custom' as const,
+    expression: 'each label must occur exactly once',
+    machineCheckable: true,
+    evidence: { quote: 'each label must occur exactly once' },
+  };
+  const permutationRecipe = {
+    targetId: 'I_PERM',
+    constructionKind: 'permutation-duplicate-or-missing' as const,
+    fieldId: 'p',
+  };
+  const permutationStatement = 'Input has n labels; each label must occur exactly once.';
+  const invalidPermutationFormalInputs = ['4\n1 1 3 4', '4\n1 2 3 4'];
 
   function pairwiseProof(
     reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
@@ -10120,6 +10140,50 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       validatorManifest: { constraintIds: [], invariantIds: ['I_PAIRWISE'] },
       validatorProbeRecipes: [pairwiseRecipe],
     };
+  }
+
+  function permutationProof(
+    reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
+    riskTier: 'low' | 'medium' | 'high' | 'blocked' = 'medium',
+  ): ValidatorProofContext {
+    return makeValidatorCoverageProof(permutationStatement, {
+      inputFields: permutationInputFields,
+      constraints: [],
+      invariants: [permutationInvariant],
+    }, reliabilityMode, riskTier);
+  }
+
+  function permutationBlueprint() {
+    return {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_permutation()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: ['I_PERM'] },
+      validatorProbeRecipes: [permutationRecipe],
+    };
+  }
+
+  function makeWeakPermutationValidatorRunner(
+    blueprint: ReturnType<typeof permutationBlueprint>,
+  ) {
+    const invalidInvocations: Array<{ stdin: string; argv: string[] }> = [];
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      invocations => {
+        const typed = invocations as Array<{ stdin: string; argv: string[] }>;
+        invalidInvocations.push(...typed);
+        return Promise.resolve(typed.map(invocation => {
+          const values = invocation.stdin.trim().split('\n')[1]?.trim().split(/\s+/) || [];
+          const rejects = values.length >= 2
+            && values[values.length - 1] === values[values.length - 2];
+          return rejects
+            ? detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })
+            : detail();
+        }));
+      },
+      undefined,
+      invalidPermutationFormalInputs,
+    );
+    return { runner, invalidInvocations };
   }
 
   it('assigned subtask argv forms the legal validator partition without changing stdin', async () => {
@@ -10565,6 +10629,81 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       '"argv"',
       '"source":"recipe"',
     ]) expect(boundedState).not.toContain(forbidden);
+  });
+
+  it('does not materialize or credit a permutation probe from an already illegal source', async () => {
+    const blueprint = permutationBlueprint();
+    const { runner, invalidInvocations } = makeWeakPermutationValidatorRunner(blueprint);
+    const cache: MaterializationCacheState = {};
+
+    const result = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      permutationStatement,
+      runner as never,
+      permutationProof(),
+      undefined,
+      cache,
+    );
+
+    const validatorCalls = runner.runPythonBatchDetailed.mock.calls.filter(
+      call => call[0] === blueprint.validatorCode,
+    );
+    expect(validatorCalls).toHaveLength(1);
+    expect(invalidInvocations).toEqual([]);
+    expect((cache.validation as unknown as {
+      validatorTargetEvidence: Array<Record<string, unknown>>;
+    }).validatorTargetEvidence).toEqual([expect.objectContaining({
+      targetId: 'I_PERM', targetKind: 'invariant', declared: true,
+      constructed: false, execution: 'not-run',
+    })]);
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['I_PERM'],
+    }));
+    expect(result.verification).toMatchObject({ verified: false, wouldBlock: true });
+
+    const boundedState = JSON.stringify({
+      checkpoint: checkpointVerifierFromBlueprint(blueprint),
+      publicVerification: result.verification,
+      validation: cache.validation,
+    });
+    for (const forbidden of [
+      '4\\n1 1 3 4',
+      '4\\n1 1 3 3',
+      '"stdin"',
+      '"argv"',
+      '"source":"recipe"',
+    ]) expect(boundedState).not.toContain(forbidden);
+  });
+
+  it('keeps high-risk enforce on the coverage-missing gate for an illegal permutation source', async () => {
+    const blueprint = permutationBlueprint();
+    const { runner, invalidInvocations } = makeWeakPermutationValidatorRunner(blueprint);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      permutationStatement,
+      runner as never,
+      permutationProof('enforce', 'high'),
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      stage: 'validator',
+      artifact: 'coverage',
+      safeDetails: { missingCount: 1 },
+    });
+    const validatorCalls = runner.runPythonBatchDetailed.mock.calls.filter(
+      call => call[0] === blueprint.validatorCode,
+    );
+    expect(validatorCalls).toHaveLength(1);
+    expect(invalidInvocations).toEqual([]);
+    expect(JSON.stringify(failure)).not.toContain('4\\n1 1 3 4');
+    expect(JSON.stringify(failure)).not.toContain('4\\n1 1 3 3');
   });
 
   it('fails enforce when Validator accepts a noncanonical custom recipe probe', async () => {
