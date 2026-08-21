@@ -111,11 +111,16 @@ beforeEach(() => {
   // Existing characterization fixtures predate the observe-only extractor.
   // Tests that exercise Task 5 opt into observe explicitly with a grounded response.
   process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'legacy';
+  // Preserve pre-R1 dual-Spec characterization fixtures. Risk-gate tests below
+  // explicitly remove or override this switch to exercise the production default.
+  process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
 });
 
 afterEach(() => {
   delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   delete process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE;
+  delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+  delete process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS;
 });
 
 const groupedCoinStatement = `## 输入格式
@@ -2699,6 +2704,171 @@ describe('buildSkeletonPlan', () => {
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
+  describe('risk-gated Spec consensus', () => {
+    const lowStatement = 'Input one integer. Output it.';
+    const highStatement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error. Output it exactly.';
+
+    it('auto uses only Primary extraction for a low-risk run', async () => {
+      delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+      const spec = JSON.stringify(makeObservedProblemSpec(lowStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+      const baseClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }) };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'low auto', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).not.toHaveBeenCalled();
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+      expect(plan.modelRolesUsed).toEqual(['specPrimary']);
+      expect(plan.modelCallCount).toBe(2);
+      expect(plan.modelCallCount).toBeLessThan(40);
+    });
+
+    it('auto keeps dual extraction and adjudication for a high-risk run', async () => {
+      delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+      const primarySpec = makeObservedProblemSpec(highStatement);
+      const criticSpec = makeObservedProblemSpec(highStatement, { outputPolicy: { kind: 'token' } });
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(primarySpec));
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', JSON.stringify(criticSpec));
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [{
+          path: 'outputPolicy', selected: 'A', evidenceQuote: 'Output it exactly.', reason: 'exact output',
+        }],
+      }));
+
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'high auto', statementMarkdown: highStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).toHaveBeenCalledTimes(1);
+      expect(adjudicator.chat).toHaveBeenCalledTimes(1);
+    });
+
+    it('always forces dual extraction for a low-risk run', async () => {
+      process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+      const spec = JSON.stringify(makeObservedProblemSpec(lowStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+      const baseClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }) };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'low always', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).toHaveBeenCalledTimes(1);
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+      expect(plan.modelRolesUsed).toEqual(['specPrimary', 'specCritic']);
+    });
+
+    it('off uses only Primary extraction for a high-risk run', async () => {
+      process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'off';
+      const spec = JSON.stringify(makeObservedProblemSpec(highStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'high off', statementMarkdown: highStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).not.toHaveBeenCalled();
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+    });
+
+    it('legacy skips every Spec role even when consensus is forced', async () => {
+      process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+      const spec = JSON.stringify(makeObservedProblemSpec(lowStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+      const baseClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }) };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'legacy',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'legacy', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      });
+
+      expect(plan.files.length).toBeGreaterThan(0);
+      expect(baseClient.chat).toHaveBeenCalledTimes(1);
+      expect(primary.chat).not.toHaveBeenCalled();
+      expect(critic.chat).not.toHaveBeenCalled();
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+      expect(plan.specSchemaVersion).toBeUndefined();
+    });
+
+    it('stops at the run call limit before issuing a repair model call', async () => {
+      delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+      process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS = '2';
+      const primary = makeRoleClient(
+        'specPrimary', 'primary', 'spec-a',
+        JSON.stringify(makeObservedProblemSpec(lowStatement)),
+      );
+      const baseClient = {
+        chat: jest.fn()
+          .mockResolvedValueOnce({
+            content: makeAiJson({ templates: {} }),
+            usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+          })
+          .mockResolvedValueOnce({
+            content: '@@@TEMPLATE:py@@@\nprint(solve(input()))',
+            usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'repair' },
+          }),
+      };
+
+      await expect(new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'observe', roleClients: { specPrimary: primary },
+      }).generate({
+        problemTitle: 'budget', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      })).rejects.toMatchObject({
+        code: 'PIPELINE_BUDGET_EXHAUSTED',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        safeDetails: { callCount: 3, limit: 2 },
+      });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('keeps the complete normalized statement in the isolated kill-target prompt', () => {
     const tail = 'FINAL_KILL_TARGET_CONSTRAINT';
     const statement = `${'x'.repeat(12_100)}\r\n${tail}`;
@@ -5212,6 +5382,7 @@ describe('TestdataGenService.generate', () => {
       identity: 'ep2/model-b',
     });
     expect(plan.tokenUsage?.totalTokens).toBe(14);
+    expect(plan.modelCallCount).toBe(9);
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
     expect(progress.some(event => event.attempt === 2 && event.stage === 'blueprint')).toBe(true);
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 2 });

@@ -66,6 +66,24 @@ function client(
 }
 
 describe('deterministic ProblemSpec diff', () => {
+  it('normalizes full-width text, comparison symbols, and exact integer notation', () => {
+    const statement = `${STATEMENT}\n1 <= n <= 100000.`;
+    const primary = validSpec(statement, {
+      constraints: [{
+        id: 'c_primary', expression: '１　<=　ｎ　<=　１０^５', machineCheckable: true,
+        scope: 'global', evidence: { quote: '1 <= n <= 100000.' },
+      }],
+    });
+    const critic = validSpec(statement, {
+      constraints: [{
+        id: 'c_critic', expression: '1 ≤ n ≤ 100000', machineCheckable: true,
+        scope: 'global', evidence: { quote: '1 <= n <= 100000.' },
+      }],
+    });
+
+    expect(diffProblemSpecs(primary, critic)).toEqual([]);
+  });
+
   it('ignores model-generated field/constraint/invariant/subtask IDs when semantics match', () => {
     const primary = validSpec(STATEMENT, {
       testCaseMode: { kind: 'counted', countField: 't_a' },
@@ -118,8 +136,9 @@ describe('deterministic ProblemSpec diff', () => {
     });
 
     expect(diffProblemSpecs(primary, critic).map(conflict => conflict.path)).toEqual([
-      'problemKind', 'testCaseMode', 'inputFields', 'constraints', 'invariants',
-      'outputPolicy', 'operations', 'subtasks', 'uncertainties',
+      'problemKind', 'testCaseMode', 'inputFields',
+      'constraints[0]', 'constraints[1]', 'invariants[0]', 'invariants[1]',
+      'outputPolicy', 'operations', 'subtasks',
     ]);
   });
 
@@ -216,9 +235,115 @@ describe('deterministic ProblemSpec diff', () => {
 
     expect(diffProblemSpecs(primary, critic)).toEqual([]);
   });
+
+  it('reports only the unpaired invariant item instead of the whole bucket', () => {
+    const primary = validSpec();
+    const critic = validSpec(STATEMENT, { invariants: [] });
+
+    expect(diffProblemSpecs(primary, critic)).toEqual([
+      expect.objectContaining({ path: 'invariants[0]' }),
+    ]);
+  });
 });
 
 describe('dual ProblemSpec consensus and adjudication', () => {
+  it('reaches consensus without adjudication for equivalent numeric constraint notation', async () => {
+    const statement = `${STATEMENT}\n1 <= n <= 100000.`;
+    const primarySpec = validSpec(statement, {
+      constraints: [{
+        id: 'c_primary', expression: '1 <= n <= 10^5', machineCheckable: true,
+        scope: 'global', evidence: { quote: '1 <= n <= 100000.' },
+      }],
+    });
+    const criticSpec = validSpec(statement, {
+      constraints: [{
+        id: 'c_critic', expression: '1 ≤ n ≤ 100000', machineCheckable: true,
+        scope: 'global', evidence: { quote: '1 <= n <= 100000.' },
+      }],
+    });
+    const adjudicator = client('adjudicator', 'ep-c', 'judge', '{}');
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(statement),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+      adjudicator,
+    });
+
+    expect(result).toMatchObject({
+      status: 'consensus', conflictCount: 0, unresolvedConflictCount: 0,
+    });
+    expect(adjudicator.chat).not.toHaveBeenCalled();
+  });
+
+  it('unions Primary and Critic uncertainties without treating them as conflicts', async () => {
+    const primarySpec = validSpec(STATEMENT, {
+      uncertainties: [{ code: 'u_primary', description: 'primary uncertainty' }],
+    });
+    const criticSpec = validSpec(STATEMENT, {
+      uncertainties: [{ code: 'u_critic', description: 'critic uncertainty' }],
+    });
+    const adjudicator = client('adjudicator', 'ep-c', 'judge', '{}');
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(STATEMENT),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+      adjudicator,
+    });
+
+    expect(result).toMatchObject({ status: 'consensus', conflictCount: 0 });
+    expect(result.resolvedSpec?.uncertainties).toEqual([
+      primarySpec.uncertainties[0], criticSpec.uncertainties[0],
+    ]);
+    expect(adjudicator.chat).not.toHaveBeenCalled();
+  });
+
+  it('adjudicates exactly one genuinely missing constraint item', async () => {
+    const statement = `${STATEMENT}\nn is even.`;
+    const shared = validSpec(statement).constraints[0];
+    const missing = {
+      id: 'c_even', expression: 'n is even', machineCheckable: true as const,
+      scope: 'global' as const, evidence: { quote: 'n is even.' },
+    };
+    const primarySpec = validSpec(statement, { constraints: [shared, missing] });
+    const criticSpec = validSpec(statement, { constraints: [shared] });
+    const conflicts = diffProblemSpecs(primarySpec, criticSpec);
+    expect(conflicts).toEqual([
+      expect.objectContaining({
+        path: 'constraints[0]',
+        primaryValue: expect.objectContaining({ expression: 'n is even' }),
+        criticValue: null,
+      }),
+    ]);
+    const adjudicator = client('adjudicator', 'ep-c', 'judge', JSON.stringify({
+      resolvedSpec: primarySpec,
+      resolutions: [{
+        path: 'constraints[0]', selected: 'A', evidenceQuote: 'n is even.', reason: 'explicit limit',
+      }],
+    }));
+
+    const result = await runProblemSpecConsensus({
+      snapshot: createStatementSnapshot(statement),
+      requestedProblemKind: 'traditional',
+      hasCustomChecker: false,
+      primary: client('specPrimary', 'ep-a', 'primary', JSON.stringify(primarySpec)),
+      critic: client('specCritic', 'ep-b', 'critic', JSON.stringify(criticSpec)),
+      adjudicator,
+    });
+
+    expect(result).toMatchObject({
+      status: 'adjudicated', conflictCount: 1, unresolvedConflictCount: 0,
+      resolvedSpec: { outputPolicy: primarySpec.outputPolicy, invariants: primarySpec.invariants },
+    });
+    expect(adjudicator.chat).toHaveBeenCalledTimes(1);
+    expect(adjudicator.chat.mock.calls[0][0][0].content).toContain('"path":"constraints[0]"');
+  });
+
   it('gives Primary and Critic only the same StatementSnapshot and skips adjudicator without conflicts', async () => {
     const specJson = JSON.stringify(validSpec());
     const primary = client('specPrimary', 'ep-a', 'primary', specJson);
@@ -242,7 +367,7 @@ describe('dual ProblemSpec consensus and adjudication', () => {
     expect(JSON.stringify(critic.chat.mock.calls[0])).not.toContain('primary');
   });
 
-  it('calls adjudicator exactly once for conflicts and accepts explicit A, B, and new resolutions', async () => {
+  it('calls adjudicator exactly once for conflicts and accepts explicit A and B resolutions', async () => {
     const primarySpec = validSpec();
     const criticSpec = validSpec(STATEMENT, {
       testCaseMode: { kind: 'counted', countField: 'n' },
@@ -250,7 +375,7 @@ describe('dual ProblemSpec consensus and adjudication', () => {
       uncertainties: [{ code: 'u_output', description: 'output formatting ambiguous' }],
     });
     const conflicts = diffProblemSpecs(primarySpec, criticSpec);
-    expect(conflicts.map(item => item.path)).toEqual(['testCaseMode', 'outputPolicy', 'uncertainties']);
+    expect(conflicts.map(item => item.path)).toEqual(['testCaseMode', 'outputPolicy']);
     const resolvedSpec = validSpec(STATEMENT, {
       outputPolicy: { kind: 'token' },
       uncertainties: [{ code: 'u_resolved', description: 'resolved interpretation' }],
@@ -260,7 +385,6 @@ describe('dual ProblemSpec consensus and adjudication', () => {
       resolutions: [
         { path: 'testCaseMode', selected: 'A', evidenceQuote: 'The first line contains n.', reason: 'single input' },
         { path: 'outputPolicy', selected: 'B', evidenceQuote: 'Print the exact sum.', reason: 'tokenized output' },
-        { path: 'uncertainties', selected: 'new', evidenceQuote: 'Print the exact sum.', reason: 'remove unsupported ambiguity' },
       ],
     });
     const adjudicator = client('adjudicator', 'ep-c', 'judge', adjudication);
@@ -275,12 +399,12 @@ describe('dual ProblemSpec consensus and adjudication', () => {
     });
 
     expect(result).toMatchObject({
-      status: 'adjudicated', conflictCount: 3, unresolvedConflictCount: 0,
+      status: 'adjudicated', conflictCount: 2, unresolvedConflictCount: 0,
       resolutions: expect.arrayContaining([
         expect.objectContaining({ selected: 'A' }),
         expect.objectContaining({ selected: 'B' }),
-        expect.objectContaining({ selected: 'new' }),
       ]),
+      resolvedSpec: { uncertainties: criticSpec.uncertainties },
     });
     expect(adjudicator.chat).toHaveBeenCalledTimes(1);
     expect(adjudicator.chat.mock.calls[0][0][0].content).toContain(STATEMENT);

@@ -46,7 +46,9 @@ import {
 import {
   assessTestdataRisk,
   getTestdataDirectFallbackEnabled,
+  getTestdataMaxModelCalls,
   getTestdataReliabilityMode,
+  getTestdataSpecConsensusMode,
   type TestdataReliabilityMode,
   type TestdataRiskAssessment,
 } from './testdata/risk';
@@ -453,6 +455,8 @@ export interface GenerationPlan {
   specConflictCount?: number;
   unresolvedConflictCount?: number;
   modelRolesUsed?: TestdataModelRole[];
+  /** Server-counted logical AI chat calls for this run, including semantic fallback. */
+  modelCallCount?: number;
   /** 仅保存在 Hydro 本地，apply 时用于判断教师是否修改。 */
   originalFileHashes?: Record<string, string>;
   problemType: 'function' | 'traditional';
@@ -7215,6 +7219,8 @@ export interface TestdataGenServiceOptions {
   reliabilityMode?: TestdataReliabilityMode;
   /** Task 6 role-scoped clients; omitted for compatibility and ignored in legacy mode. */
   roleClients?: TestdataRoleClients;
+  /** Internal: semantic fallback shares the parent run's model-call budget. */
+  modelCallBudget?: { callCount: number; limit: number };
 }
 
 interface IndependentVerifierCallState {
@@ -7396,6 +7402,8 @@ export class TestdataGenService {
   private activeRoleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
   private restoredRoleDependencies: Partial<Record<TestdataModelRole, string>> = {};
   private activePipelineContext?: TestdataPipelineContext;
+  private modelCallBudget: { callCount: number; limit: number };
+  private readonly ownsModelCallBudget: boolean;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
@@ -7404,6 +7412,11 @@ export class TestdataGenService {
     this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
     this.reliabilityMode = serviceOptions.reliabilityMode || getTestdataReliabilityMode();
     this.roleClients = this.reliabilityMode === 'legacy' ? undefined : serviceOptions.roleClients;
+    this.ownsModelCallBudget = !serviceOptions.modelCallBudget;
+    this.modelCallBudget = serviceOptions.modelCallBudget || {
+      callCount: 0,
+      limit: getTestdataMaxModelCalls(),
+    };
   }
 
   private assessRisk(params: GenerateTestdataParams, specConflict = false): TestdataRiskAssessment {
@@ -7429,21 +7442,27 @@ export class TestdataGenService {
   private async observeProblemSpec(
     params: GenerateTestdataParams,
     snapshot: StatementSnapshot,
+    requiresConsensus: boolean,
   ): Promise<ProblemSpecObservation | undefined> {
     if (this.reliabilityMode === 'legacy') return undefined;
     const role = (name: Extract<TestdataModelRole,
-      'specPrimary' | 'specCritic' | 'adjudicator'>) => ({
-      role: name,
-      client: this.roleClients?.[name]?.client || this.aiClient,
-      identity: this.roleClients?.[name]?.identity,
-    });
+      'specPrimary' | 'specCritic' | 'adjudicator'>) => {
+      const client = this.roleClients?.[name]?.client || this.aiClient;
+      return {
+        role: name,
+        client: this.clientWithModelCallBudget(client),
+        identity: this.roleClients?.[name]?.identity,
+      };
+    };
     const consensus = await runProblemSpecConsensus({
       snapshot,
       requestedProblemKind: params.options.problemKind,
       hasCustomChecker: hasCustomChecker(params.existingConfig),
       primary: role('specPrimary'),
-      critic: role('specCritic'),
-      adjudicator: role('adjudicator'),
+      ...(requiresConsensus ? {
+        critic: role('specCritic'),
+        adjudicator: role('adjudicator'),
+      } : {}),
       callOptions: this.getCallOptions(params),
     });
     Object.assign(this.activeRoleIdentities, consensus.roleIdentities);
@@ -7556,10 +7575,10 @@ export class TestdataGenService {
   private clientForRole(role: Extract<TestdataModelRole,
     'oracle' | 'artifacts' | 'verifier'>, trackIdentity = true): MultiModelClient {
     const client = this.roleClients?.[role]?.client || this.aiClient;
-    if (!trackIdentity) return client;
+    if (!trackIdentity) return this.clientWithModelCallBudget(client);
     return {
       chat: async (...args: Parameters<MultiModelClient['chat']>) => {
-        const result = await client.chat(...args);
+        const result = await this.chatWithModelCallBudget(client, ...args);
         const signal = args[2]?.signal;
         if (signal?.aborted) {
           throw signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
@@ -7570,10 +7589,42 @@ export class TestdataGenService {
     } as MultiModelClient;
   }
 
+  private consumeModelCall(): void {
+    this.modelCallBudget.callCount += 1;
+    if (this.modelCallBudget.callCount <= this.modelCallBudget.limit) return;
+    throw new TestdataPipelineError(
+      '本次测试数据生成已达到 AI 调用次数上限。',
+      'PIPELINE_BUDGET_EXHAUSTED',
+      'pipeline',
+      'pipeline',
+      'no-retry',
+      {
+        callCount: this.modelCallBudget.callCount,
+        limit: this.modelCallBudget.limit,
+      },
+    );
+  }
+
+  private async chatWithModelCallBudget(
+    client: Pick<MultiModelClient, 'chat'>,
+    ...args: Parameters<MultiModelClient['chat']>
+  ): Promise<ChatResult> {
+    this.consumeModelCall();
+    return client.chat(...args);
+  }
+
+  private clientWithModelCallBudget(client: Pick<MultiModelClient, 'chat'>): MultiModelClient {
+    return {
+      chat: (...args: Parameters<MultiModelClient['chat']>) => (
+        this.chatWithModelCallBudget(client, ...args)
+      ),
+    } as MultiModelClient;
+  }
+
   private async chatForCombinedRepair(
     ...args: Parameters<MultiModelClient['chat']>
   ): Promise<ChatResult> {
-    const result = await this.aiClient.chat(...args);
+    const result = await this.chatWithModelCallBudget(this.aiClient, ...args);
     // The combined repair protocol may replace the ORACLE-bearing solution as well as
     // artifacts, so its successful model is the new Oracle identity for independence.
     this.activeRoleIdentities.oracle = { ...result.usedModel };
@@ -7630,6 +7681,7 @@ export class TestdataGenService {
   private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
     plan.runId = params.runId || plan.runId || createTestdataRunId();
     plan.promptVersion = TESTDATA_PIPELINE_PROMPT_VERSION;
+    plan.modelCallCount = this.modelCallBudget.callCount;
     plan.originalFileHashes = computeOriginalFileHashes(plan.files.map(file => ({
       name: file.name,
       content: normalizeFileContent(file.content),
@@ -7716,6 +7768,9 @@ export class TestdataGenService {
   }
 
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
+    if (this.ownsModelCallBudget) {
+      this.modelCallBudget = { callCount: 0, limit: getTestdataMaxModelCalls() };
+    }
     this.activeModelTelemetry = undefined;
     this.activeRoleIdentities = {};
     this.restoredRoleDependencies = {};
@@ -7740,7 +7795,14 @@ export class TestdataGenService {
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const initialRisk = this.assessRisk(params);
-    const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
+    const specConsensusMode = getTestdataSpecConsensusMode();
+    const requiresConsensus = specConsensusMode === 'always'
+      || (specConsensusMode === 'auto' && initialRisk.requiresSpecConsensus);
+    const problemSpecObservation = await this.observeProblemSpec(
+      params,
+      snapshot,
+      requiresConsensus,
+    );
     this.notifyProblemSpecObservation(params, problemSpecObservation);
     const risk = this.assessRisk(params, (problemSpecObservation?.conflictCount || 0) > 0);
     if (this.reliabilityMode === 'enforce' && !problemSpecObservation?.resolvedSpec) {
@@ -8030,6 +8092,7 @@ export class TestdataGenService {
           semanticModelFallback: false,
           reliabilityMode: this.reliabilityMode,
           roleClients: fallbackRoleClients,
+          modelCallBudget: this.modelCallBudget,
         },
       );
       try {
@@ -8148,7 +8211,7 @@ export class TestdataGenService {
     this.emitProgress(params, 'blueprint', 12);
     // Task 6 只路由已拆分的 sandbox stages。直出协议仍是同时生成解法、ORACLE
     // 与外围制品的兼容单体 prompt，Task 7 拆分前必须继续使用场景/base client。
-    const directClient = this.aiClient;
+    const directClient = this.clientWithModelCallBudget(this.aiClient);
     const initialResult = await directClient.chat(
       [{ role: 'user', content: userPrompt }],
       systemPrompt,
@@ -8537,7 +8600,7 @@ export class TestdataGenService {
     // Optional discrimination calls share the configured verifier client but are not
     // the Independent Verifier artifact dependency. Do not let them relabel a restored
     // verifier checkpoint with an unrelated fresh model hash.
-    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const verifierClient = this.clientForRole('verifier', false);
     const result = await verifierClient.chat(
       [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
       buildKillTargetsSystemPrompt(!!input.context),
@@ -8559,7 +8622,7 @@ export class TestdataGenService {
     results: ChatResult[],
     context?: TestdataPipelineContext,
   ): Promise<HackCandidate[]> {
-    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const verifierClient = this.clientForRole('verifier', false);
     const result = await verifierClient.chat(
       [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }],
       buildHackCasesSystemPrompt(),

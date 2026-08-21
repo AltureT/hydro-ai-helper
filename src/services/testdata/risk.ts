@@ -2,6 +2,8 @@ import { hasParseableStatementSamples } from './statementSamples';
 
 export type TestdataReliabilityMode = 'legacy' | 'observe' | 'enforce';
 
+export type TestdataSpecConsensusMode = 'auto' | 'always' | 'off';
+
 export type TestdataRiskTier = 'low' | 'medium' | 'high' | 'blocked';
 
 export interface TestdataRiskAssessment {
@@ -78,6 +80,22 @@ export function getTestdataDirectFallbackEnabled(
   return String(raw || '').trim().toLowerCase() === 'true';
 }
 
+export function getTestdataSpecConsensusMode(
+  raw = process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS,
+): TestdataSpecConsensusMode {
+  const value = String(raw || 'auto').trim().toLowerCase();
+  return value === 'always' || value === 'off' ? value : 'auto';
+}
+
+export function getTestdataMaxModelCalls(
+  raw = process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS,
+): number {
+  const value = String(raw || '').trim();
+  if (!/^\d+$/.test(value)) return 40;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 40;
+}
+
 export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssessment {
   const statement = String(input.statement || '');
   const reasons: RiskSignal[] = [];
@@ -137,7 +155,7 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
       ? input.directFallbackEnabled && input.confirmDirectFallback === true
       : false;
   const requiresSandbox = !allowsDirectFallback;
-  const requiresSpecConsensus = !!input.specConflict || tier === 'high' || tier === 'blocked';
+  const requiresSpecConsensus = !!input.specConflict || tier !== 'low';
   const requiresIndependentModels = tier === 'high' || tier === 'blocked';
 
   return {

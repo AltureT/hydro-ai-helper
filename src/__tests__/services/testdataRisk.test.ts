@@ -1,7 +1,9 @@
 import {
   assessTestdataRisk,
   getTestdataDirectFallbackEnabled,
+  getTestdataMaxModelCalls,
   getTestdataReliabilityMode,
+  getTestdataSpecConsensusMode,
   type TestdataRiskInput,
 } from '../../services/testdata/risk';
 import { extractStatementSamples } from '../../services/testdataGenService';
@@ -21,6 +23,8 @@ describe('deterministic test-data risk assessment', () => {
   afterEach(() => {
     delete process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE;
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+    delete process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS;
+    delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
   });
 
   it.each([
@@ -50,6 +54,19 @@ describe('deterministic test-data risk assessment', () => {
     expect(assess({ statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.` })).toMatchObject({ score: 5, tier: 'medium' });
     expect(assess({ statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.\nSubtask 1.` })).toMatchObject({ score: 7, tier: 'high' });
     expect(assess({ statement: `${sampleStatement}\nProcess ADD operations.\nGiven a graph.\nSubtask 1.` })).toMatchObject({ score: 6, tier: 'high' });
+  });
+
+  it('requires Spec consensus for medium, high, and blocked tiers only', () => {
+    expect(assess()).toMatchObject({ tier: 'low', requiresSpecConsensus: false });
+    expect(assess({
+      statement: `${sampleStatement}\nFloating point values are accepted.`,
+    })).toMatchObject({ tier: 'medium', requiresSpecConsensus: true });
+    expect(assess({
+      statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.\nSubtask 1.`,
+    })).toMatchObject({ tier: 'high', requiresSpecConsensus: true });
+    expect(assess({ statementTruncated: true })).toMatchObject({
+      tier: 'blocked', requiresSpecConsensus: true,
+    });
   });
 
   it.each([
@@ -206,5 +223,25 @@ describe('deterministic test-data risk assessment', () => {
     expect(getTestdataDirectFallbackEnabled()).toBe(true);
     process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = '1';
     expect(getTestdataDirectFallbackEnabled()).toBe(false);
+  });
+
+  it('normalizes the Spec consensus rollout switch and defaults invalid values to auto', () => {
+    expect(getTestdataSpecConsensusMode()).toBe('auto');
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'ALWAYS';
+    expect(getTestdataSpecConsensusMode()).toBe('always');
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'off';
+    expect(getTestdataSpecConsensusMode()).toBe('off');
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'invalid';
+    expect(getTestdataSpecConsensusMode()).toBe('auto');
+  });
+
+  it('accepts only a positive integer model-call limit and otherwise defaults to 40', () => {
+    expect(getTestdataMaxModelCalls()).toBe(40);
+    process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS = '7';
+    expect(getTestdataMaxModelCalls()).toBe(7);
+    for (const invalid of ['0', '-1', '1.5', 'invalid', '9007199254740992']) {
+      process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS = invalid;
+      expect(getTestdataMaxModelCalls()).toBe(40);
+    }
   });
 });

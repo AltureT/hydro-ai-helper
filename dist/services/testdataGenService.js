@@ -5738,6 +5738,11 @@ class TestdataGenService {
         this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
         this.reliabilityMode = serviceOptions.reliabilityMode || (0, risk_1.getTestdataReliabilityMode)();
         this.roleClients = this.reliabilityMode === 'legacy' ? undefined : serviceOptions.roleClients;
+        this.ownsModelCallBudget = !serviceOptions.modelCallBudget;
+        this.modelCallBudget = serviceOptions.modelCallBudget || {
+            callCount: 0,
+            limit: (0, risk_1.getTestdataMaxModelCalls)(),
+        };
     }
     assessRisk(params, specConflict = false) {
         const customChecker = hasCustomChecker(params.existingConfig);
@@ -5757,21 +5762,26 @@ class TestdataGenService {
         plan.reliabilityMode = this.reliabilityMode;
         return plan;
     }
-    async observeProblemSpec(params, snapshot) {
+    async observeProblemSpec(params, snapshot, requiresConsensus) {
         if (this.reliabilityMode === 'legacy')
             return undefined;
-        const role = (name) => ({
-            role: name,
-            client: this.roleClients?.[name]?.client || this.aiClient,
-            identity: this.roleClients?.[name]?.identity,
-        });
+        const role = (name) => {
+            const client = this.roleClients?.[name]?.client || this.aiClient;
+            return {
+                role: name,
+                client: this.clientWithModelCallBudget(client),
+                identity: this.roleClients?.[name]?.identity,
+            };
+        };
         const consensus = await (0, specConsensus_1.runProblemSpecConsensus)({
             snapshot,
             requestedProblemKind: params.options.problemKind,
             hasCustomChecker: hasCustomChecker(params.existingConfig),
             primary: role('specPrimary'),
-            critic: role('specCritic'),
-            adjudicator: role('adjudicator'),
+            ...(requiresConsensus ? {
+                critic: role('specCritic'),
+                adjudicator: role('adjudicator'),
+            } : {}),
             callOptions: this.getCallOptions(params),
         });
         Object.assign(this.activeRoleIdentities, consensus.roleIdentities);
@@ -5874,10 +5884,10 @@ class TestdataGenService {
     clientForRole(role, trackIdentity = true) {
         const client = this.roleClients?.[role]?.client || this.aiClient;
         if (!trackIdentity)
-            return client;
+            return this.clientWithModelCallBudget(client);
         return {
             chat: async (...args) => {
-                const result = await client.chat(...args);
+                const result = await this.chatWithModelCallBudget(client, ...args);
                 const signal = args[2]?.signal;
                 if (signal?.aborted) {
                     throw signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
@@ -5887,8 +5897,26 @@ class TestdataGenService {
             },
         };
     }
+    consumeModelCall() {
+        this.modelCallBudget.callCount += 1;
+        if (this.modelCallBudget.callCount <= this.modelCallBudget.limit)
+            return;
+        throw new failures_1.TestdataPipelineError('本次测试数据生成已达到 AI 调用次数上限。', 'PIPELINE_BUDGET_EXHAUSTED', 'pipeline', 'pipeline', 'no-retry', {
+            callCount: this.modelCallBudget.callCount,
+            limit: this.modelCallBudget.limit,
+        });
+    }
+    async chatWithModelCallBudget(client, ...args) {
+        this.consumeModelCall();
+        return client.chat(...args);
+    }
+    clientWithModelCallBudget(client) {
+        return {
+            chat: (...args) => (this.chatWithModelCallBudget(client, ...args)),
+        };
+    }
     async chatForCombinedRepair(...args) {
-        const result = await this.aiClient.chat(...args);
+        const result = await this.chatWithModelCallBudget(this.aiClient, ...args);
         // The combined repair protocol may replace the ORACLE-bearing solution as well as
         // artifacts, so its successful model is the new Oracle identity for independence.
         this.activeRoleIdentities.oracle = { ...result.usedModel };
@@ -5928,6 +5956,7 @@ class TestdataGenService {
     attachRunMetadata(plan, params) {
         plan.runId = params.runId || plan.runId || (0, runTelemetry_1.createTestdataRunId)();
         plan.promptVersion = pipelineContext_1.TESTDATA_PIPELINE_PROMPT_VERSION;
+        plan.modelCallCount = this.modelCallBudget.callCount;
         plan.originalFileHashes = (0, runTelemetry_1.computeOriginalFileHashes)(plan.files.map(file => ({
             name: file.name,
             content: normalizeFileContent(file.content),
@@ -6002,6 +6031,9 @@ class TestdataGenService {
         }
     }
     async generate(params) {
+        if (this.ownsModelCallBudget) {
+            this.modelCallBudget = { callCount: 0, limit: (0, risk_1.getTestdataMaxModelCalls)() };
+        }
         this.activeModelTelemetry = undefined;
         this.activeRoleIdentities = {};
         this.restoredRoleDependencies = {};
@@ -6023,7 +6055,10 @@ class TestdataGenService {
         assertExistingConfigParsable(params.existingConfig);
         this.emitProgress(params, 'preparing', 2);
         const initialRisk = this.assessRisk(params);
-        const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
+        const specConsensusMode = (0, risk_1.getTestdataSpecConsensusMode)();
+        const requiresConsensus = specConsensusMode === 'always'
+            || (specConsensusMode === 'auto' && initialRisk.requiresSpecConsensus);
+        const problemSpecObservation = await this.observeProblemSpec(params, snapshot, requiresConsensus);
         this.notifyProblemSpecObservation(params, problemSpecObservation);
         const risk = this.assessRisk(params, (problemSpecObservation?.conflictCount || 0) > 0);
         if (this.reliabilityMode === 'enforce' && !problemSpecObservation?.resolvedSpec) {
@@ -6234,6 +6269,7 @@ class TestdataGenService {
                 semanticModelFallback: false,
                 reliabilityMode: this.reliabilityMode,
                 roleClients: fallbackRoleClients,
+                modelCallBudget: this.modelCallBudget,
             });
             try {
                 this.emitProgress(params, 'model_escalation', 60, 2);
@@ -6325,7 +6361,7 @@ class TestdataGenService {
         this.emitProgress(params, 'blueprint', 12);
         // Task 6 只路由已拆分的 sandbox stages。直出协议仍是同时生成解法、ORACLE
         // 与外围制品的兼容单体 prompt，Task 7 拆分前必须继续使用场景/base client。
-        const directClient = this.aiClient;
+        const directClient = this.clientWithModelCallBudget(this.aiClient);
         const initialResult = await directClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         const results = [initialResult];
         this.emitProgress(params, 'blueprint', 48);
@@ -6598,7 +6634,7 @@ class TestdataGenService {
         // Optional discrimination calls share the configured verifier client but are not
         // the Independent Verifier artifact dependency. Do not let them relabel a restored
         // verifier checkpoint with an unrelated fresh model hash.
-        const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+        const verifierClient = this.clientForRole('verifier', false);
         const result = await verifierClient.chat([{ role: 'user', content: buildKillTargetsUserPrompt(input) }], buildKillTargetsSystemPrompt(!!input.context), {
             ...this.getCallOptions({ signal: input.signal }),
             timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
@@ -6607,7 +6643,7 @@ class TestdataGenService {
         return parseKillTargetsResponse(result.content);
     }
     async generateHackCandidates(params, analysis, target, timeoutMs, signal, results, context) {
-        const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+        const verifierClient = this.clientForRole('verifier', false);
         const result = await verifierClient.chat([{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }], buildHackCasesSystemPrompt(), {
             ...this.getCallOptions({ signal, onProgress: params.onProgress }),
             timeoutMs,

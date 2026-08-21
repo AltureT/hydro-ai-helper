@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getTestdataReliabilityMode = getTestdataReliabilityMode;
 exports.getTestdataDirectFallbackEnabled = getTestdataDirectFallbackEnabled;
+exports.getTestdataSpecConsensusMode = getTestdataSpecConsensusMode;
+exports.getTestdataMaxModelCalls = getTestdataMaxModelCalls;
 exports.assessTestdataRisk = assessTestdataRisk;
 const statementSamples_1 = require("./statementSamples");
 const CUSTOM_CHECKER_SIGNAL = {
@@ -35,6 +37,17 @@ function getTestdataReliabilityMode(raw = process.env.AI_HELPER_TESTDATA_RELIABI
 }
 function getTestdataDirectFallbackEnabled(raw = process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK) {
     return String(raw || '').trim().toLowerCase() === 'true';
+}
+function getTestdataSpecConsensusMode(raw = process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS) {
+    const value = String(raw || 'auto').trim().toLowerCase();
+    return value === 'always' || value === 'off' ? value : 'auto';
+}
+function getTestdataMaxModelCalls(raw = process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS) {
+    const value = String(raw || '').trim();
+    if (!/^\d+$/.test(value))
+        return 40;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 40;
 }
 function assessTestdataRisk(input) {
     const statement = String(input.statement || '');
@@ -70,7 +83,7 @@ function assessTestdataRisk(input) {
             ? input.directFallbackEnabled && input.confirmDirectFallback === true
             : false;
     const requiresSandbox = !allowsDirectFallback;
-    const requiresSpecConsensus = !!input.specConflict || tier === 'high' || tier === 'blocked';
+    const requiresSpecConsensus = !!input.specConflict || tier !== 'low';
     const requiresIndependentModels = tier === 'high' || tier === 'blocked';
     return {
         tier,
