@@ -150,6 +150,8 @@ const TESTDATA_EVENT_TYPES = new Set([
 const TESTDATA_RELIABILITY_MODES = new Set(['legacy', 'observe', 'enforce']);
 const TESTDATA_GENERATION_MODES = new Set(['direct', 'sandbox']);
 const TESTDATA_RISK_TIERS = new Set(['low', 'medium', 'high', 'blocked']);
+const TESTDATA_SPEC_CONSENSUS_STATUSES = new Set(['consensus', 'adjudicated', 'unresolved']);
+const TESTDATA_SPEC_CONSENSUS_ROLES = new Set(['specPrimary', 'specCritic', 'adjudicator']);
 const TESTDATA_PROBLEM_KINDS = new Set(['traditional', 'function']);
 const TESTDATA_STATEMENT_BUCKETS = new Set(['0-4k', '4k-16k', '16k-20k', 'over-20k']);
 const TESTDATA_MODEL_ROLES = new Set(['primary', 'fallback']);
@@ -202,6 +204,7 @@ const TESTDATA_EVENT_FIELDS = new Set([
   'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
   'statementLengthBucket', 'specSchemaVersion', 'specExtractionSucceeded',
   'specConstraintCount', 'specInvariantCount', 'specUncertaintyCount',
+  'specConsensusStatus', 'specConflictCount', 'specUnresolvedConflictCount', 'specRolesUsed',
   'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
   'durationMs', 'tokenCount', 'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated',
   'stressGenerated', 'stressValid', 'stressDroppedInvalid', 'stressUnique', 'stressCompared',
@@ -225,6 +228,7 @@ const TESTDATA_NUMBER_LIMITS = {
   editedFileCount: [0, 80],
   specSchemaVersion: [1, 1], specConstraintCount: [0, 512],
   specInvariantCount: [0, 256], specUncertaintyCount: [0, 100],
+  specConflictCount: [0, 1024], specUnresolvedConflictCount: [0, 1024],
 };
 
 function canonicalTestdataValue(value) {
@@ -288,6 +292,11 @@ export function validateTestdataQualityEventPayload(value) {
   assertTestdataEnum(value.riskTier, TESTDATA_RISK_TIERS, 'riskTier');
   assertTestdataEnum(value.problemKind, TESTDATA_PROBLEM_KINDS, 'problemKind');
   assertTestdataEnum(value.statementLengthBucket, TESTDATA_STATEMENT_BUCKETS, 'statementLengthBucket');
+  assertTestdataEnum(
+    value.specConsensusStatus,
+    TESTDATA_SPEC_CONSENSUS_STATUSES,
+    'specConsensusStatus',
+  );
   assertTestdataEnum(value.stage, TESTDATA_STAGES, 'stage');
   assertTestdataEnum(value.failureCode, TESTDATA_FAILURE_CODES, 'failureCode');
   assertTestdataEnum(value.artifact, TESTDATA_ARTIFACTS, 'artifact');
@@ -304,6 +313,10 @@ export function validateTestdataQualityEventPayload(value) {
   assertTestdataArray(value.templateLanguagesVerified, TESTDATA_TEMPLATE_LANGUAGES, 'templateLanguagesVerified', 3);
   assertTestdataArray(value.templateFailureKinds, TESTDATA_TEMPLATE_FAILURE_KINDS, 'templateFailureKinds', 3);
   assertTestdataArray(value.changedFileKinds, TESTDATA_CHANGED_FILE_KINDS, 'changedFileKinds', 9);
+  assertTestdataArray(value.specRolesUsed, TESTDATA_SPEC_CONSENSUS_ROLES, 'specRolesUsed', 3);
+  if (Array.isArray(value.specRolesUsed) && value.specRolesUsed.length === 0) {
+    throw new HttpError(400, 'specRolesUsed is invalid');
+  }
   if (value.eventType === 'stage_completed' && value.stage === undefined) throw new HttpError(400, 'stage is required');
   if (value.eventType === 'stage_failed'
     && [value.stage, value.failureCode, value.artifact, value.retryPolicy].some(item => item === undefined)) {
@@ -319,7 +332,8 @@ export function validateTestdataQualityEventPayload(value) {
   }
   const specFields = [
     value.specSchemaVersion, value.specExtractionSucceeded, value.specConstraintCount,
-    value.specInvariantCount, value.specUncertaintyCount,
+    value.specInvariantCount, value.specUncertaintyCount, value.specConsensusStatus,
+    value.specConflictCount, value.specUnresolvedConflictCount, value.specRolesUsed,
   ];
   if (specFields.some(item => item !== undefined)) {
     if (value.eventType !== 'run_completed' || value.specSchemaVersion !== 1
@@ -332,6 +346,14 @@ export function validateTestdataQualityEventPayload(value) {
       : counts.some(item => item !== undefined)) {
       throw new HttpError(400, 'problem spec observation counts are invalid');
     }
+  }
+  const consensusFields = [
+    value.specConsensusStatus, value.specConflictCount,
+    value.specUnresolvedConflictCount, value.specRolesUsed,
+  ];
+  if (consensusFields.some(item => item !== undefined)
+    && consensusFields.some(item => item === undefined)) {
+    throw new HttpError(400, 'problem spec consensus observation is invalid');
   }
   if (value.eventType === 'teacher_outcome' && value.teacherOutcome === undefined) {
     throw new HttpError(400, 'teacherOutcome is required');
@@ -427,7 +449,8 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          completed_at, generation_mode, reliability_mode, risk_tier, problem_kind,
          has_subtasks, has_custom_checker, has_samples, has_stateful_operations, statement_length_bucket,
          spec_schema_version, spec_extraction_succeeded, spec_constraint_count,
-         spec_invariant_count, spec_uncertainty_count,
+         spec_invariant_count, spec_uncertainty_count, spec_consensus_status,
+         spec_conflict_count, spec_unresolved_conflict_count, spec_roles_used,
          pipeline_completed, verified, would_block, model_escalated,
          stress_generated, stress_valid, stress_dropped_invalid, stress_unique,
          stress_compared, stress_agreed, template_py_requested, template_py_verified,
@@ -435,7 +458,7 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          template_cc_verified, template_failure_kinds, checker_configured, checker_read,
          checker_compiled, checker_executed, checker_infra_failures, checker_failure_kind,
          model_role, model_identity_hash
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM testdata_event_slots
          WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
@@ -460,6 +483,10 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          spec_constraint_count = excluded.spec_constraint_count,
          spec_invariant_count = excluded.spec_invariant_count,
          spec_uncertainty_count = excluded.spec_uncertainty_count,
+         spec_consensus_status = excluded.spec_consensus_status,
+         spec_conflict_count = excluded.spec_conflict_count,
+         spec_unresolved_conflict_count = excluded.spec_unresolved_conflict_count,
+         spec_roles_used = excluded.spec_roles_used,
          pipeline_completed = excluded.pipeline_completed,
          verified = excluded.verified,
          would_block = excluded.would_block,
@@ -497,6 +524,9 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
       nullableNumber(event.specSchemaVersion), nullableBoolean(event.specExtractionSucceeded),
       nullableNumber(event.specConstraintCount), nullableNumber(event.specInvariantCount),
       nullableNumber(event.specUncertaintyCount),
+      event.specConsensusStatus ?? null, nullableNumber(event.specConflictCount),
+      nullableNumber(event.specUnresolvedConflictCount),
+      event.specRolesUsed ? JSON.stringify(event.specRolesUsed) : null,
       nullableBoolean(event.pipelineCompleted), nullableBoolean(event.verified),
       nullableBoolean(event.wouldBlock), nullableBoolean(event.modelEscalated),
       nullableNumber(event.stressGenerated), nullableNumber(event.stressValid),
@@ -789,6 +819,12 @@ async function handleDashboardTestdataQuality(request, env) {
         COALESCE(SUM(CASE WHEN would_block = 1 THEN 1 ELSE 0 END), 0) AS would_block
        FROM testdata_runs WHERE received_at >= ? GROUP BY plugin_version ORDER BY runs DESC`,
     ).bind(receivedAtCutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_consensus */ spec_consensus_status AS key, COUNT(*) AS count
+       FROM testdata_runs
+       WHERE received_at >= ? AND spec_consensus_status IS NOT NULL
+       GROUP BY spec_consensus_status ORDER BY count DESC`,
+    ).bind(receivedAtCutoff),
   ];
   const results = await env.DB.batch(queries);
   const rows = results.map(result => result?.results || []);
@@ -850,6 +886,7 @@ async function handleDashboardTestdataQuality(request, env) {
       constraint_count: Number(totals.spec_constraint_count) || 0,
       invariant_count: Number(totals.spec_invariant_count) || 0,
       uncertainty_count: Number(totals.spec_uncertainty_count) || 0,
+      consensus_statuses: distribution(rows[11], TESTDATA_SPEC_CONSENSUS_STATUSES),
     },
     templates,
     checker: {

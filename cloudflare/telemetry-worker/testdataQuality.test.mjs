@@ -155,6 +155,21 @@ test('problem spec observation migration adds only bounded aggregate columns', a
   ]) assert.doesNotMatch(sql, new RegExp(`ADD COLUMN ${forbidden}`, 'i'));
 });
 
+test('spec consensus migration adds only nullable enum, count, and role columns', async () => {
+  const sql = await readFile(
+    new URL('./migrations/0011_testdata_spec_consensus.sql', import.meta.url),
+    'utf8',
+  );
+  for (const column of [
+    'spec_consensus_status', 'spec_conflict_count',
+    'spec_unresolved_conflict_count', 'spec_roles_used',
+  ]) assert.match(sql, new RegExp(`ADD COLUMN ${column}`));
+  assert.match(sql, /consensus.*adjudicated.*unresolved/is);
+  for (const forbidden of [
+    'statement', 'quote', 'expression', 'reason', 'problem_id', 'metadata',
+  ]) assert.doesNotMatch(sql, new RegExp(`ADD COLUMN ${forbidden}`, 'i'));
+});
+
 test('event fingerprints are canonical and change with safe payload content', async () => {
   const first = event();
   const reordered = Object.fromEntries(Object.entries(first).reverse());
@@ -170,8 +185,12 @@ test('worker validator accepts the closed contract and rejects privacy injection
     eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
     specSchemaVersion: 1, specExtractionSucceeded: true,
     specConstraintCount: 12, specInvariantCount: 3, specUncertaintyCount: 1,
+    specConsensusStatus: 'adjudicated', specConflictCount: 2,
+    specUnresolvedConflictCount: 0,
+    specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
   });
   assert.equal(validateTestdataQualityEventPayload(completed).specConstraintCount, 12);
+  assert.equal(validateTestdataQualityEventPayload(completed).specConsensusStatus, 'adjudicated');
   for (const [key, value] of [
     ['problemId', 'D3102'], ['title', 'secret'], ['statement', '# secret'],
     ['code', 'print(secret)'], ['input', 'secret'], ['output', 'secret'],
@@ -191,6 +210,11 @@ test('worker validator rejects invalid UUIDs, bounds, arrays, and enums', () => 
     event({ templateLanguagesRequested: ['py', 'rust'] }),
     event({ templateLanguagesRequested: ['py', 'py'] }),
     event({ riskTier: 'critical' }),
+    event({ specConsensusStatus: 'resolved' }),
+    event({ specConflictCount: -1 }),
+    event({ specUnresolvedConflictCount: 1_025 }),
+    event({ specRolesUsed: ['specPrimary', 'oracle'] }),
+    event({ specRolesUsed: ['specPrimary', 'specPrimary'] }),
     event({
       eventType: 'run_completed', pipelineCompleted: false, verified: true, wouldBlock: false,
     }),
@@ -215,6 +239,47 @@ test('worker validator rejects invalid UUIDs, bounds, arrays, and enums', () => 
       specSchemaVersion: 1, specExtractionSucceeded: false, specConstraintCount: 0,
     }),
   ]) assert.throws(() => validateTestdataQualityEventPayload(invalid));
+});
+
+test('POST /api/testdata-events fail-open accepts and stores bounded consensus fields', async () => {
+  const db = new FakeDb();
+  const completed = event({
+    eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+    specSchemaVersion: 1, specExtractionSucceeded: true,
+    specConstraintCount: 12, specInvariantCount: 3, specUncertaintyCount: 1,
+    specConsensusStatus: 'adjudicated', specConflictCount: 2,
+    specUnresolvedConflictCount: 0,
+    specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+  });
+  const response = await worker.fetch(
+    request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [completed] }, ''),
+    { DB: db },
+  );
+
+  assert.equal(response.status, 200);
+  const stored = db.executed.find(statement => statement.sql.includes('completed_event_id'));
+  for (const column of [
+    'spec_consensus_status', 'spec_conflict_count',
+    'spec_unresolved_conflict_count', 'spec_roles_used',
+  ]) assert.match(stored.sql, new RegExp(column));
+  assert.equal(stored.values.includes('adjudicated'), true);
+  assert.equal(stored.values.includes(2), true);
+  assert.equal(stored.values.includes('["specPrimary","specCritic","adjudicator"]'), true);
+});
+
+test('POST /api/testdata-events rejects invalid consensus enums and unknown fields before D1', async () => {
+  for (const invalidEvent of [
+    event({ specConsensusStatus: 'resolved' }),
+    event({ specResolutionReason: 'private model explanation' }),
+  ]) {
+    const db = new FakeDb();
+    const response = await worker.fetch(
+      request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [invalidEvent] }),
+      { DB: db, REPORT_TOKEN: 'report-secret' },
+    );
+    assert.equal(response.status, 400);
+    assert.equal(db.executed.length, 0);
+  }
 });
 
 test('worker validator accepts only canonical UTC ISO event timestamps', () => {
@@ -548,6 +613,11 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
         { model_role: 'fallback', runs: 4, completed: 3, verified: 2, failed: 1 },
       ],
       testdata_quality_versions: [{ plugin_version: '3.1.0', runs: 10, pipeline_completed: 8, verified: 5, would_block: 2 }],
+      testdata_quality_consensus: [
+        { key: 'consensus', count: 6 },
+        { key: 'adjudicated', count: 3 },
+        { key: 'unresolved', count: 1 },
+      ],
     },
   });
   const response = await worker.fetch(new Request(
@@ -566,6 +636,11 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
     constraint_count: 48,
     invariant_count: 11,
     uncertainty_count: 4,
+    consensus_statuses: [
+      { key: 'consensus', count: 6 },
+      { key: 'adjudicated', count: 3 },
+      { key: 'unresolved', count: 1 },
+    ],
   });
   assert.deepEqual(body.checker.infra_failure, { count: 1, total: 4, rate: 0.25 });
   assert.deepEqual(body.failure_codes, [
@@ -623,6 +698,7 @@ test('GET dashboard returns null rates and empty distributions for zero data', a
   assert.deepEqual(body.metrics.verified, { count: 0, total: 0, rate: null });
   assert.deepEqual(body.failure_codes, []);
   assert.deepEqual(body.failure_artifacts, []);
+  assert.deepEqual(body.problem_spec.consensus_statuses, []);
   assert.deepEqual(body.model_roles, {
     primary: {
       runs: 0,

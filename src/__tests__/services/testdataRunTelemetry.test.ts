@@ -93,6 +93,10 @@ describe('test-data quality event schema', () => {
       specConstraintCount: 12,
       specInvariantCount: 3,
       specUncertaintyCount: 1,
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
     }))).toEqual(expect.objectContaining({ verified: false, wouldBlock: true }));
 
     expect(parseTestdataQualityEvent(baseEvent({
@@ -176,6 +180,42 @@ describe('test-data quality event schema', () => {
       editedFileCount: 9,
       changedFileKinds: Array(10).fill('case-in') as never,
     }))).toThrow();
+  });
+
+  it('accepts only bounded closed consensus observation fields', () => {
+    const completed = {
+      ...baseEvent(),
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 12,
+      specInvariantCount: 3,
+      specUncertaintyCount: 1,
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+    };
+    expect(parseTestdataQualityEvent(completed)).toEqual(expect.objectContaining({
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+    }));
+
+    for (const patch of [
+      { specConsensusStatus: 'resolved' },
+      { specConflictCount: -1 },
+      { specUnresolvedConflictCount: 1025 },
+      { specRolesUsed: [] },
+      { specRolesUsed: ['specPrimary', 'oracle'] },
+      { specRolesUsed: ['specPrimary', 'specPrimary'] },
+    ]) {
+      expect(() => parseTestdataQualityEvent({ ...completed, ...patch })).toThrow();
+    }
   });
 
   it('rejects parseable but non-canonical timestamps', () => {
@@ -551,6 +591,10 @@ describe('TestdataRunTelemetryService', () => {
       constraintCount: 9,
       invariantCount: 2,
       uncertaintyCount: 1,
+      consensusStatus: 'adjudicated',
+      conflictCount: 2,
+      unresolvedConflictCount: 0,
+      rolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
       quote: 'SECRET_EVIDENCE_QUOTE',
     } as never);
     await session.fail(new Error('SECRET_PIPELINE_ERROR'));
@@ -563,6 +607,10 @@ describe('TestdataRunTelemetryService', () => {
       specConstraintCount: 9,
       specInvariantCount: 2,
       specUncertaintyCount: 1,
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
     }));
     expect(JSON.stringify(payloads)).not.toContain('SECRET_EVIDENCE_QUOTE');
     expect(JSON.stringify(payloads)).not.toContain('SECRET_PIPELINE_ERROR');

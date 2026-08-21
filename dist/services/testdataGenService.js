@@ -5750,7 +5750,6 @@ class TestdataGenService {
             statement: params.statementMarkdown,
             hasCustomChecker: customChecker,
             unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
-            statementTruncated: false,
             directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
             confirmDirectFallback: params.options.confirmDirectFallback,
             reliabilityMode: this.reliabilityMode,
@@ -5758,7 +5757,15 @@ class TestdataGenService {
         });
     }
     attachRisk(plan, risk) {
-        plan.risk = risk;
+        // Static risk only selects gates. wouldBlock is runtime evidence: by this point
+        // direct fallback, incomplete sandbox proof, and unresolved Spec consensus have
+        // all had a chance to mark the plan verification record.
+        plan.risk = {
+            ...risk,
+            ...(this.reliabilityMode === 'observe'
+                ? { wouldBlock: plan.verification?.wouldBlock === true }
+                : {}),
+        };
         plan.reliabilityMode = this.reliabilityMode;
         return plan;
     }
@@ -5804,7 +5811,6 @@ class TestdataGenService {
             rolesUsed: consensus.rolesUsed,
             roleIdentities: consensus.roleIdentities,
             identityWarningCodes: identityConflicts.map(() => 'SPEC_ROLE_IDENTITY_CONFLICT'),
-            wouldBlock: identityConflicts.length > 0 || consensus.unresolvedConflictCount > 0,
         };
     }
     attachProblemSpecObservation(plan, observation, risk) {
@@ -5851,8 +5857,10 @@ class TestdataGenService {
             }
             plan.notes = [plan.notes, warning].filter(Boolean).join('\n');
         }
+        const enforceBlocksIdentityConflict = (risk?.tier === 'high' || risk?.tier === 'blocked')
+            && runtimeIdentityConflicts.length > 0;
         const wouldBlock = observation.unresolvedConflictCount > 0
-            || (exposeIdentityWarnings && runtimeIdentityConflicts.length > 0);
+            || enforceBlocksIdentityConflict;
         if (wouldBlock && plan.verification) {
             plan.verification.verified = false;
             plan.verification.wouldBlock = true;
@@ -6108,6 +6116,15 @@ class TestdataGenService {
         const requiresProvidedCppOracle = params.options.problemKind !== 'function'
             && !!params.options.providedStd?.trim()
             && detectStdFilename(params.options.providedStd) === 'std.cc';
+        if (this.reliabilityMode === 'enforce'
+            && (this.mode === 'direct' || !this.sandboxRunner)) {
+            throw (0, failures_1.toPipelineError)(new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'), {
+                code: 'SANDBOX_REQUIRED',
+                stage: 'sandbox_check',
+                artifact: 'pipeline',
+                retryPolicy: 'no-retry',
+            });
+        }
         if (requiresProvidedCppOracle && (this.mode === 'direct' || !this.sandboxRunner)) {
             const detail = '当前生成模式未配置可执行 C++17 的 Hydro 沙箱';
             throw new TestdataGenerationError(`当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_ORACLE_UNAVAILABLE_KEY, detail);
@@ -6130,19 +6147,27 @@ class TestdataGenService {
                 this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
                 return this.attachRunMetadata(this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation, risk), risk), params);
             }
+            if (this.reliabilityMode === 'enforce') {
+                throw (0, failures_1.toPipelineError)(new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'), {
+                    code: 'SANDBOX_REQUIRED',
+                    stage: 'sandbox_check',
+                    artifact: 'pipeline',
+                    retryPolicy: 'no-retry',
+                });
+            }
             if (requiresProvidedCppOracle) {
                 const detail = 'Hydro 沙箱当前不可达，无法探测或使用 C++17 编译器';
                 throw new TestdataGenerationError(`当前沙箱无 C++ 编译能力，无法执行教师提供的标准答案。${detail}`, 'provided_cpp_oracle', [], false, exports.CPP_ORACLE_UNAVAILABLE_KEY, detail);
             }
             if (requiresAcceptedRecordVerification) {
                 throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'), {
-                    code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+                    code: 'SANDBOX_UNAVAILABLE',
                     stage: 'sandbox_check', artifact: 'pipeline',
                 });
             }
             if (this.mode === 'sandbox') {
                 throw (0, failures_1.toPipelineError)(new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'), {
-                    code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+                    code: 'SANDBOX_UNAVAILABLE',
                     stage: 'sandbox_check', artifact: 'pipeline',
                 });
             }
@@ -6160,9 +6185,6 @@ class TestdataGenService {
         const fallbackRisk = this.reliabilityMode === 'observe' ? initialRisk : risk;
         if (!fallbackRisk.allowsDirectFallback) {
             this.throwDirectFallbackBlocked(fallbackRisk);
-        }
-        if (customChecker && this.reliabilityMode === 'enforce') {
-            throw checkerPipelineError('CHECKER_REQUIRED_UNAVAILABLE', 'unavailable', '直出模式不能编译或执行题目 checker');
         }
         const plan = await this.generateDirect(params, pipelineContext);
         if (this.mode === 'auto') {

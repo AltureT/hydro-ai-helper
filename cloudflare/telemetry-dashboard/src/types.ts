@@ -133,6 +133,12 @@ export interface TestdataQualityDistributionItem {
   count: number;
 }
 
+export type TestdataSpecConsensusStatus = 'consensus' | 'adjudicated' | 'unresolved';
+
+export interface TestdataSpecConsensusDistributionItem extends TestdataQualityDistributionItem {
+  key: TestdataSpecConsensusStatus;
+}
+
 export type TestdataModelRole = 'primary' | 'fallback';
 
 export interface TestdataModelRoleMetrics {
@@ -167,6 +173,7 @@ export interface TestdataQualityResponse {
     constraint_count: number;
     invariant_count: number;
     uncertainty_count: number;
+    consensus_statuses: TestdataSpecConsensusDistributionItem[];
   };
   templates?: Partial<Record<'py' | 'java' | 'cc', {
     requested: number;

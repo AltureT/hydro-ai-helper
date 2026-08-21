@@ -30,6 +30,12 @@ const CHECKER_FAILURE_KINDS = new Set(['unavailable', 'compile', 'infra', 'budge
 const GENERATION_MODES = new Set(['direct', 'sandbox']);
 const RELIABILITY_MODES = new Set(['legacy', 'observe', 'enforce']);
 const RISK_TIERS = new Set(['low', 'medium', 'high', 'blocked']);
+const SPEC_CONSENSUS_STATUSES = new Set([
+    'consensus', 'adjudicated', 'unresolved',
+]);
+const SPEC_CONSENSUS_ROLES = new Set([
+    'specPrimary', 'specCritic', 'adjudicator',
+]);
 const PROBLEM_KINDS = new Set(['traditional', 'function']);
 const STATEMENT_BUCKETS = new Set(['0-4k', '4k-16k', '16k-20k', 'over-20k']);
 const ARTIFACTS = new Set([
@@ -56,9 +62,33 @@ function boundedProblemSpecObservation(value) {
     if (value.schemaVersion !== 1 || typeof value.succeeded !== 'boolean')
         return undefined;
     const counts = [value.constraintCount, value.invariantCount, value.uncertaintyCount];
+    const consensusValues = [
+        value.consensusStatus, value.conflictCount, value.unresolvedConflictCount, value.rolesUsed,
+    ];
+    const hasConsensusObservation = consensusValues.some(item => item !== undefined);
+    if (hasConsensusObservation && (typeof value.consensusStatus !== 'string'
+        || !SPEC_CONSENSUS_STATUSES.has(value.consensusStatus)
+        || !Number.isSafeInteger(value.conflictCount)
+        || value.conflictCount < 0
+        || value.conflictCount > 1024
+        || !Number.isSafeInteger(value.unresolvedConflictCount)
+        || value.unresolvedConflictCount < 0
+        || value.unresolvedConflictCount > 1024
+        || !Array.isArray(value.rolesUsed)
+        || value.rolesUsed.length < 1
+        || value.rolesUsed.length > 3
+        || new Set(value.rolesUsed).size !== value.rolesUsed.length
+        || value.rolesUsed.some(role => !SPEC_CONSENSUS_ROLES.has(role))))
+        return undefined;
+    const consensusObservation = hasConsensusObservation ? {
+        consensusStatus: value.consensusStatus,
+        conflictCount: value.conflictCount,
+        unresolvedConflictCount: value.unresolvedConflictCount,
+        rolesUsed: [...value.rolesUsed],
+    } : {};
     if (!value.succeeded) {
         return counts.every(item => item === undefined)
-            ? { schemaVersion: 1, succeeded: false }
+            ? { schemaVersion: 1, succeeded: false, ...consensusObservation }
             : undefined;
     }
     const limits = [512, 256, 100];
@@ -70,6 +100,7 @@ function boundedProblemSpecObservation(value) {
         constraintCount: value.constraintCount,
         invariantCount: value.invariantCount,
         uncertaintyCount: value.uncertaintyCount,
+        ...consensusObservation,
     };
 }
 function problemSpecEventFields(observation) {
@@ -83,6 +114,12 @@ function problemSpecEventFields(observation) {
             specInvariantCount: observation.invariantCount,
             specUncertaintyCount: observation.uncertaintyCount,
         } : {}),
+        ...(observation.consensusStatus ? {
+            specConsensusStatus: observation.consensusStatus,
+            specConflictCount: observation.conflictCount,
+            specUnresolvedConflictCount: observation.unresolvedConflictCount,
+            specRolesUsed: observation.rolesUsed,
+        } : {}),
     };
 }
 const EVENT_FIELDS = new Set([
@@ -91,6 +128,7 @@ const EVENT_FIELDS = new Set([
     'problemKind', 'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
     'statementLengthBucket', 'specSchemaVersion', 'specExtractionSucceeded',
     'specConstraintCount', 'specInvariantCount', 'specUncertaintyCount',
+    'specConsensusStatus', 'specConflictCount', 'specUnresolvedConflictCount', 'specRolesUsed',
     'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
     'durationMs', 'tokenCount', 'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated',
     'stressGenerated', 'stressValid', 'stressDroppedInvalid', 'stressUnique', 'stressCompared',
@@ -122,6 +160,8 @@ const NUMBER_LIMITS = {
     specConstraintCount: { min: 0, max: 512 },
     specInvariantCount: { min: 0, max: 256 },
     specUncertaintyCount: { min: 0, max: 100 },
+    specConflictCount: { min: 0, max: 1024 },
+    specUnresolvedConflictCount: { min: 0, max: 1024 },
 };
 function assertEnum(value, values, field) {
     if (value !== undefined && (typeof value !== 'string' || !values.has(value))) {
@@ -187,6 +227,7 @@ function parseTestdataQualityEvent(value) {
     assertEnum(candidate.riskTier, RISK_TIERS, 'riskTier');
     assertEnum(candidate.problemKind, PROBLEM_KINDS, 'problemKind');
     assertEnum(candidate.statementLengthBucket, STATEMENT_BUCKETS, 'statementLengthBucket');
+    assertEnum(candidate.specConsensusStatus, SPEC_CONSENSUS_STATUSES, 'specConsensusStatus');
     assertEnum(candidate.stage, QUALITY_STAGES, 'stage');
     assertEnum(candidate.failureCode, FAILURE_CODES, 'failureCode');
     assertEnum(candidate.artifact, ARTIFACTS, 'artifact');
@@ -203,6 +244,10 @@ function parseTestdataQualityEvent(value) {
     assertArray(candidate.templateLanguagesVerified, TEMPLATE_LANGUAGES, 'templateLanguagesVerified', 3);
     assertArray(candidate.templateFailureKinds, TEMPLATE_FAILURE_KINDS, 'templateFailureKinds', 3);
     assertArray(candidate.changedFileKinds, CHANGED_FILE_KINDS, 'changedFileKinds', 9);
+    assertArray(candidate.specRolesUsed, SPEC_CONSENSUS_ROLES, 'specRolesUsed', 3);
+    if (Array.isArray(candidate.specRolesUsed) && candidate.specRolesUsed.length === 0) {
+        throw new TypeError('Invalid test-data telemetry field: specRolesUsed');
+    }
     if (candidate.eventType === 'stage_completed' && candidate.stage === undefined) {
         throw new TypeError('stage_completed requires stage');
     }
@@ -222,7 +267,8 @@ function parseTestdataQualityEvent(value) {
     }
     const specFields = [
         candidate.specSchemaVersion, candidate.specExtractionSucceeded, candidate.specConstraintCount,
-        candidate.specInvariantCount, candidate.specUncertaintyCount,
+        candidate.specInvariantCount, candidate.specUncertaintyCount, candidate.specConsensusStatus,
+        candidate.specConflictCount, candidate.specUnresolvedConflictCount, candidate.specRolesUsed,
     ];
     if (specFields.some(item => item !== undefined)) {
         if (candidate.eventType !== 'run_completed' || candidate.specSchemaVersion !== 1
@@ -237,6 +283,14 @@ function parseTestdataQualityEvent(value) {
             : counts.some(item => item !== undefined)) {
             throw new TypeError('Invalid problem spec observation counts');
         }
+    }
+    const consensusFields = [
+        candidate.specConsensusStatus, candidate.specConflictCount,
+        candidate.specUnresolvedConflictCount, candidate.specRolesUsed,
+    ];
+    if (consensusFields.some(item => item !== undefined)
+        && consensusFields.some(item => item === undefined)) {
+        throw new TypeError('Invalid problem spec consensus observation');
     }
     if (candidate.eventType === 'teacher_outcome' && candidate.teacherOutcome === undefined) {
         throw new TypeError('teacher_outcome requires teacherOutcome');
@@ -522,6 +576,10 @@ class TestdataRunTelemetrySession {
                         invariantCount: plan.problemSpecSummary.invariantCount,
                         uncertaintyCount: plan.problemSpecSummary.unresolvedUncertainties,
                     } : {}),
+                    consensusStatus: plan.specConsensusStatus,
+                    conflictCount: plan.specConflictCount,
+                    unresolvedConflictCount: plan.unresolvedConflictCount,
+                    rolesUsed: plan.modelRolesUsed,
                 })
                 : undefined;
             await this.service.emit(this.event('run_completed', {

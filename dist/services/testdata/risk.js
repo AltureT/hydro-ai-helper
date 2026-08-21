@@ -67,14 +67,14 @@ function assessTestdataRisk(input) {
     addIf(!(0, statementSamples_1.hasParseableStatementSamples)(statement), signal('NO_PARSEABLE_SAMPLES', 1, 'ai_helper_testdata_risk_no_parseable_samples'));
     addIf(hasMultipleGuaranteesOrConventions(statement), signal('MULTIPLE_GUARANTEES_OR_CONVENTIONS', 1, 'ai_helper_testdata_risk_multiple_guarantees_or_conventions'));
     addIf(!!input.specConflict, signal('SPEC_CONFLICT', 3, 'ai_helper_testdata_risk_spec_conflict'));
-    addIf(!!input.statementTruncated, signal('STATEMENT_TRUNCATED', 3, 'ai_helper_testdata_risk_statement_truncated'));
     if (input.unsupportedCustomChecker) {
         reasons.push(signal('UNSUPPORTED_CUSTOM_CHECKER', 0, 'ai_helper_testdata_risk_unsupported_custom_checker'));
     }
     const score = reasons.reduce((total, item) => total + item.weight, 0);
-    // A truncated statement is semantically incomplete: its missing constraints
-    // cannot be made safe by a direct-output confirmation.
-    const tier = input.unsupportedCustomChecker || input.statementTruncated
+    // StatementSnapshot never truncates: it preserves/chunks the complete normalized
+    // statement or throws SPEC_STATEMENT_TOO_LONG before risk assessment. Therefore
+    // no truncation flag can truthfully reach this deterministic risk contract.
+    const tier = input.unsupportedCustomChecker
         ? 'blocked'
         : tierForScore(score);
     const allowsDirectFallback = tier === 'low'
@@ -93,7 +93,6 @@ function assessTestdataRisk(input) {
         requiresSpecConsensus,
         requiresIndependentModels,
         allowsDirectFallback,
-        ...(input.reliabilityMode === 'observe' ? { wouldBlock: !allowsDirectFallback } : {}),
     };
 }
 //# sourceMappingURL=risk.js.map

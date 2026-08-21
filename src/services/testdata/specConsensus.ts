@@ -40,18 +40,22 @@ export interface SpecResolution {
 }
 
 export interface SpecConsensusClient {
-  role: Extract<TestdataModelRole, 'specPrimary' | 'specCritic' | 'adjudicator'>;
+  role: SpecConsensusRole;
   identity?: TestdataModelIdentity;
   client: Pick<MultiModelClient, 'chat'>;
 }
 
 export type SpecConsensusStatus = 'consensus' | 'adjudicated' | 'unresolved';
+export type SpecConsensusRole = Extract<
+  TestdataModelRole,
+  'specPrimary' | 'specCritic' | 'adjudicator'
+>;
 
 export interface SpecConsensusSafeSummary extends ProblemSpecSummary {
   status: SpecConsensusStatus;
   conflictCount: number;
   unresolvedConflictCount: number;
-  rolesUsed: TestdataModelRole[];
+  rolesUsed: SpecConsensusRole[];
 }
 
 export interface SpecConsensusResult {
@@ -64,7 +68,7 @@ export interface SpecConsensusResult {
   failureCode?: Extract<TestdataFailureCode,
     'SPEC_PARSE_FAILED' | 'SPEC_EVIDENCE_NOT_FOUND' | 'SPEC_CONSENSUS_REQUIRED'>;
   results: MultiModelChatResult[];
-  rolesUsed: TestdataModelRole[];
+  rolesUsed: SpecConsensusRole[];
   roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>>;
   safeSummary?: SpecConsensusSafeSummary;
 }
@@ -601,7 +605,7 @@ function safeSummary(
   status: SpecConsensusStatus,
   conflicts: SpecConflict[],
   unresolvedConflictCount: number,
-  rolesUsed: TestdataModelRole[],
+  rolesUsed: SpecConsensusRole[],
   spec?: ProblemSpecV1,
 ): SpecConsensusSafeSummary | undefined {
   if (!spec) return undefined;
@@ -636,7 +640,7 @@ export async function runProblemSpecConsensus(
     ...(input.critic ? [extract(input.critic)] : []),
   ]);
   const results = [primary.result, critic?.result].filter(Boolean) as MultiModelChatResult[];
-  const rolesUsed: TestdataModelRole[] = input.critic
+  const rolesUsed: SpecConsensusRole[] = input.critic
     ? ['specPrimary', 'specCritic']
     : ['specPrimary'];
   const roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};

@@ -5718,7 +5718,7 @@ describe('TestdataGenService.generate', () => {
       expect((service as any).activeRoleIdentities).toEqual({
         oracle: sharedModel, verifier: sharedModel,
       });
-      expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
+      expect(observed.verification).toMatchObject({ verified: true, wouldBlock: false });
       expect(observed.notesStructured.warnings).toContainEqual(
         expect.stringContaining('ORACLE_VERIFIER_IDENTITY_CONFLICT'),
       );
@@ -6716,7 +6716,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
     });
     expect(plan).toMatchObject({
-      risk: { tier: 'low', allowsDirectFallback: true, requiresSandbox: false, wouldBlock: false },
+      risk: { tier: 'low', allowsDirectFallback: true, requiresSandbox: false, wouldBlock: true },
       verification: {
         mode: 'direct',
         templateLanguages: ['py', 'java', 'cc'],
@@ -6728,7 +6728,7 @@ describe('TestdataGenService.generate', () => {
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
 
-  it('enforce direct fallback rejects a response that changes frozen problemKind', async () => {
+  it('observe direct fallback rejects a response that changes frozen problemKind', async () => {
     process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
     const statementMarkdown = 'Read one integer and print it.';
     const baseClient = {
@@ -6739,7 +6739,7 @@ describe('TestdataGenService.generate', () => {
     };
     const service = new TestdataGenService(baseClient as never, {
       mode: 'direct',
-      reliabilityMode: 'enforce',
+      reliabilityMode: 'observe',
       roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
     });
 
@@ -7647,23 +7647,71 @@ describe('TestdataGenService.generate', () => {
   it.each(['auto', 'sandbox', 'direct'] as const)(
     'enforce %s mode returns SANDBOX_REQUIRED when no safe direct path exists',
     async mode => {
-      delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+      process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+      const statementMarkdown = '## Input\n```input\n1\n```\n## Output\n```output\n1\n```';
       const runner = {
         isAvailable: jest.fn().mockResolvedValue(false),
         runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
       };
-      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      const generationClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson({ problemType: 'traditional' }),
+        usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+      }) };
+      const service = new TestdataGenService(generationClient as never, {
         mode,
         reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
         ...(mode === 'direct' ? {} : { sandboxRunner: runner }),
       });
-      await expect(service.generate({
-        problemTitle: 'low risk',
-        statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
-        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
-      })).rejects.toMatchObject({ code: 'SPEC_PARSE_FAILED', artifact: 'spec' });
+      try {
+        await expect(service.generate({
+          problemTitle: 'low risk',
+          statementMarkdown,
+          options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+        })).rejects.toMatchObject({
+          code: 'SANDBOX_REQUIRED', artifact: 'pipeline', retryPolicy: 'no-retry',
+        });
+        expect(generationClient.chat).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+      }
     },
   );
+
+  it.each([
+    ['low disabled', false, false, ''],
+    ['medium unconfirmed', true, false, 'Floating point output has absolute error.'],
+    ['medium confirmed', true, true, 'Floating point output has absolute error.'],
+    ['high confirmed', true, true, 'Floating point output. Given a graph. Subtask 1.'],
+  ] as const)('enforce auto mode closes sandbox absence for %s policy', async (
+    _label, directEnabled, confirmDirectFallback, riskText,
+  ) => {
+    if (directEnabled) process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    else delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+    const statementMarkdown = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${riskText}`;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+    };
+    const generationClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson({ problemType: 'traditional' }),
+      usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+    }) };
+    try {
+      await expect(new TestdataGenService(generationClient as never, {
+        mode: 'auto', sandboxRunner: runner, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+      }).generate({
+        problemTitle: 'sandbox closure', statementMarkdown,
+        options: {
+          problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback,
+        },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+      expect(generationClient.chat).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+    }
+  });
 
   it.each(['legacy', 'observe'] as const)(
     '%s sandbox mode preserves SANDBOX_UNAVAILABLE when the configured sandbox is unavailable',
@@ -7729,6 +7777,39 @@ describe('TestdataGenService.generate', () => {
     });
     expect(mockClient.chat).not.toHaveBeenCalled();
   });
+
+  it.each(['auto', 'direct'] as const)(
+    'enforce %s mode reports SANDBOX_REQUIRED for a C++ standard solution without a sandbox',
+    async mode => {
+      const statementMarkdown = 'Read one integer and print it.';
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(false),
+        runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+      };
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        mode,
+        reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+        ...(mode === 'auto' ? { sandboxRunner: runner } : {}),
+      });
+
+      await expect(service.generate({
+        problemTitle: 'C++ sandbox closure',
+        statementMarkdown,
+        options: {
+          problemKind: 'traditional',
+          caseCount: 1,
+          languages: [],
+          providedStd: '#include <iostream>\nint main() { return 0; }',
+          providedStdSource: 'manual',
+        },
+      })).rejects.toMatchObject({
+        code: 'SANDBOX_REQUIRED',
+        stage: 'sandbox_check',
+        artifact: 'pipeline',
+      });
+    },
+  );
 
   it('AI 选择的 C++ ORACLE 遇到编译基础设施失败时禁用 C++ 并定向改用 Python', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };

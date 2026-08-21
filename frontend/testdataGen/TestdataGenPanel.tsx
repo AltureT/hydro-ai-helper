@@ -29,6 +29,10 @@ import {
   type ProblemSpecSummaryData,
 } from './ProblemSpecSummaryView';
 import {
+  TestdataRiskSummaryView,
+  type TestdataRiskAssessment,
+} from './TestdataRiskSummaryView';
+import {
   getTestdataApplyPresentation,
   parseTestdataApplyResult,
   type TestdataApplyPresentation,
@@ -90,17 +94,6 @@ interface PlanVerification extends VerificationSummaryData {
     }>;
     allKilled: boolean;
   };
-}
-
-interface TestdataRiskAssessment {
-  tier: 'low' | 'medium' | 'high' | 'blocked';
-  score: number;
-  reasons: Array<{ code: string; weight: number; messageKey: string }>;
-  requiresSandbox: boolean;
-  requiresSpecConsensus: boolean;
-  requiresIndependentModels: boolean;
-  allowsDirectFallback: boolean;
-  wouldBlock?: boolean;
 }
 
 interface GenerationPlan {
@@ -1261,26 +1254,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     return (
       <div>
         {risk && (
-          <div style={{ ...getAlertStyle(risk.wouldBlock ? 'warning' : 'info'), marginBottom: SPACING.md }}>
-            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
-              {i18n('ai_helper_testdata_risk_title')}: {i18n(`ai_helper_testdata_risk_tier_${risk.tier}`)} · {risk.score}
-            </div>
-            <div style={{ fontSize: '13px' }}>
-              {i18n('ai_helper_testdata_risk_requires_sandbox')}: {i18n(risk.requiresSandbox ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_direct_allowed')}: {i18n(risk.allowsDirectFallback ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_requires_consensus')}: {i18n(risk.requiresSpecConsensus ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_requires_independent_models')}: {i18n(risk.requiresIndependentModels ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_mode')}: {plan.reliabilityMode || 'observe'}
-              {risk.wouldBlock && ` · ${i18n('ai_helper_testdata_risk_would_block')}`}
-            </div>
-            <ul style={{ margin: `${SPACING.xs} 0 0`, paddingLeft: SPACING.lg }}>
-              {risk.reasons.map(reason => (
-                <li key={reason.code} style={{ fontSize: '13px' }}>
-                  {i18n(reason.messageKey)} (+{reason.weight})
-                </li>
-              ))}
-            </ul>
-          </div>
+          <TestdataRiskSummaryView
+            risk={risk}
+            reliabilityMode={plan.reliabilityMode || 'observe'}
+            translate={i18n}
+          />
         )}
         <ProblemSpecSummaryView
           specSchemaVersion={plan.specSchemaVersion}

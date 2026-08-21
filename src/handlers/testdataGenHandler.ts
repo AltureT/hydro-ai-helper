@@ -640,7 +640,6 @@ function createTestdataTelemetrySession(input: {
     statement: input.statement,
     hasCustomChecker: customChecker,
     unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(input.existingConfig),
-    statementTruncated: false,
     directFallbackEnabled: getTestdataDirectFallbackEnabled(),
     confirmDirectFallback: input.options.confirmDirectFallback,
     reliabilityMode,
