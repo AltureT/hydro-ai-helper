@@ -5727,6 +5727,23 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
+  it('marks a verified sandbox plan unverified when Spec consensus remains unresolved', () => {
+    const plan = {
+      files: [], caseCount: 0, usedModel: '', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const service = new TestdataGenService({ chat: jest.fn() } as never);
+
+    const observed = (service as any).attachProblemSpecObservation(plan, {
+      schemaVersion: 1, results: [], status: 'unresolved', conflictCount: 1,
+      unresolvedConflictCount: 1, rolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+      roleIdentities: {}, identityWarningCodes: [], wouldBlock: true,
+    });
+
+    expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
   it('marks a high-tier runtime identity conflict unverified and would-block', () => {
     const sharedModel = {
       endpointId: 'shared-final', endpointName: 'shared', modelName: 'same-model',

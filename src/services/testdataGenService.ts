@@ -7549,9 +7549,9 @@ export class TestdataGenService {
       && runtimeIdentityConflicts.length > 0;
     const wouldBlock = observation.unresolvedConflictCount > 0
       || enforceBlocksIdentityConflict;
-    if (exposeIdentityWarnings && runtimeIdentityConflicts.length > 0 && plan.verification) {
-      plan.verification.verified = false;
-    }
+    const unverifiedBySpecObservation = observation.unresolvedConflictCount > 0
+      || (exposeIdentityWarnings && runtimeIdentityConflicts.length > 0);
+    if (unverifiedBySpecObservation && plan.verification) plan.verification.verified = false;
     if (wouldBlock && plan.verification) {
       plan.verification.wouldBlock = true;
     }
