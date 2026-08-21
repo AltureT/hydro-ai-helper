@@ -29,6 +29,10 @@ import {
   type ProblemSpecSummaryData,
 } from './ProblemSpecSummaryView';
 import {
+  CoverageSummaryView,
+  type CoverageSummaryData,
+} from './CoverageSummaryView';
+import {
   TestdataRiskSummaryView,
   type TestdataRiskAssessment,
 } from './TestdataRiskSummaryView';
@@ -94,6 +98,7 @@ interface PlanVerification extends VerificationSummaryData {
     }>;
     allKilled: boolean;
   };
+  coverage?: CoverageSummaryData;
 }
 
 interface GenerationPlan {
@@ -124,6 +129,7 @@ interface GenerationPlan {
     subtaskId?: number;
     target: string;
   }>;
+  coverageMode?: 'trusted-dsl' | 'ai-generator-unverified';
   usedModel?: string;
   verification?: PlanVerification;
   risk?: TestdataRiskAssessment;
@@ -1337,6 +1343,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               ))}
             </div>
           </div>
+        )}
+        {(verification?.coverage || plan.coverageMode) && (
+          <CoverageSummaryView
+            translate={i18n}
+            coverage={verification?.coverage || {
+              mode: plan.coverageMode || 'ai-generator-unverified',
+              matrix: [],
+              totalTargets: 0,
+              passedTargets: 0,
+              criticalMissing: 0,
+            }}
+          />
         )}
         {verification && (
           <div style={{ ...getAlertStyle(verification.verified === true ? 'success' : 'warning'), marginBottom: SPACING.md }}>

@@ -8634,6 +8634,323 @@ function twoCaseGen(): string {
   return JSON.stringify({ cases: [{ label: 'c1', input: '1' }, { label: 'c2', input: '2' }] });
 }
 
+function makeTrustedDslFixture(riskTier: 'medium' | 'high' = 'medium') {
+  const statement = createStatementSnapshot('Input n and n integers, where 1 <= n <= 3.');
+  const spec: ProblemSpecV1 = {
+    schemaVersion: 1,
+    statementHash: statement.statementHash,
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [
+      { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+      {
+        id: 'a', name: 'a', type: 'array',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      },
+    ],
+    constraints: [{
+      id: 'C1', expression: '1 <= n <= 3', machineCheckable: true,
+      scope: 'global', evidence: { quote: '1 <= n <= 3' },
+    }],
+    invariants: [],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+  };
+  const pipelineContext = createTestdataPipelineContext({
+    runId: `trusted-dsl-${riskTier}`,
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement,
+    spec,
+    risk: {
+      tier: riskTier,
+      score: riskTier === 'high' ? 7 : 3,
+      reasons: [],
+      requiresSandbox: true,
+      requiresSpecConsensus: true,
+      requiresIndependentModels: true,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const raw = ['@@@GENERATOR_PLAN@@@', JSON.stringify({
+    version: 1,
+    seed: 29,
+    cases: [
+      {
+        label: 'minimum',
+        fields: {
+          n: { kind: 'integer', value: 1 },
+          a: { kind: 'array', length: 1, min: 0, max: 0, pattern: 'all-equal' },
+        },
+      },
+      {
+        label: 'middle',
+        fields: {
+          n: { kind: 'integer', value: 2 },
+          a: { kind: 'array', length: 2, min: 0, max: 1, pattern: 'alternating' },
+        },
+      },
+    ],
+  })].join('\n');
+  const artifacts = parseGenerationArtifacts(raw, 'traditional', [], {
+    generatorDsl: { spec, expectedCaseCount: 2 },
+  });
+  return { statement, spec, pipelineContext, artifacts };
+}
+
+function makeTrustedTieredDslFixture() {
+  const statement = createStatementSnapshot(
+    'Input n and n integers, where 1 <= n <= 3. Subtask 1: n <= 1. Subtask 2: n <= 3.',
+  );
+  const spec: ProblemSpecV1 = {
+    schemaVersion: 1,
+    statementHash: statement.statementHash,
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [
+      { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+      {
+        id: 'a', name: 'a', type: 'array',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      },
+    ],
+    constraints: [
+      {
+        id: 'C1', expression: '1 <= n <= 3', machineCheckable: true,
+        scope: 'global', evidence: { quote: 'where 1 <= n <= 3.' },
+      },
+      {
+        id: 'C_subtask_1', expression: 'n <= 1', machineCheckable: true,
+        scope: { subtaskId: 1 }, evidence: { quote: 'Subtask 1: n <= 1.' },
+      },
+      {
+        id: 'C_subtask_2', expression: 'n <= 3', machineCheckable: true,
+        scope: { subtaskId: 2 }, evidence: { quote: 'Subtask 2: n <= 3.' },
+      },
+    ],
+    invariants: [],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [
+      { id: 1, score: 50, constraintIds: ['C_subtask_1'] },
+      { id: 2, score: 50, constraintIds: ['C_subtask_2'] },
+    ],
+    uncertainties: [],
+  };
+  const pipelineContext = createTestdataPipelineContext({
+    runId: 'trusted-tiered-dsl',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement,
+    spec,
+    risk: {
+      tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const raw = ['@@@GENERATOR_PLAN@@@', JSON.stringify({
+    version: 1,
+    seed: 31,
+    cases: [
+      {
+        label: 'model-subtask-1', subtaskId: 1,
+        fields: {
+          n: { kind: 'integer', value: 1 },
+          a: { kind: 'array', length: 1, min: 0, max: 0, pattern: 'all-equal' },
+        },
+      },
+      {
+        label: 'model-subtask-2', subtaskId: 2,
+        fields: {
+          n: { kind: 'integer', value: 2 },
+          a: { kind: 'array', length: 2, min: 0, max: 1, pattern: 'alternating' },
+        },
+      },
+    ],
+  })].join('\n');
+  const artifacts = parseGenerationArtifacts(raw, 'traditional', [], {
+    generatorDsl: { spec, expectedCaseCount: 2 },
+  });
+  return { pipelineContext, artifacts };
+}
+
+describe('trusted GeneratorPlan materialization and coverage integration', () => {
+  it('materializes structured cases in-process without executing generated code', async () => {
+    const fixture = makeTrustedDslFixture();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('trusted generator must not execute')),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+    const response = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'observe',
+        pipelineContext: fixture.pipelineContext,
+      },
+    });
+
+    expect(runner.runPython).not.toHaveBeenCalled();
+    expect(response.cases.map(item => item.input)).toEqual(['1\n0\n', '2\n0 1\n']);
+    expect(response.coverageMode).toBe('trusted-dsl');
+    expect(response.verification?.coverage).toMatchObject({
+      mode: 'trusted-dsl',
+      criticalMissing: 1,
+    });
+    expect(response.generatorCode).toContain('Server-generated trusted GeneratorPlan artifact');
+  });
+
+  it('blocks a trusted critical gap only for high-risk enforce before Oracle execution', async () => {
+    const fixture = makeTrustedDslFixture('high');
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const failure = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'enforce',
+        pipelineContext: fixture.pipelineContext,
+      },
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      stage: 'generator',
+      artifact: 'coverage',
+      safeDetails: { missingCount: 1 },
+    });
+    expect(runner.runPython).not.toHaveBeenCalled();
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'uses enabled server allocations instead of model-authored subtask ids',
+      {
+        enabled: true,
+        allocations: [
+          { caseNumber: 1, subtaskId: 1, guidance: 'server allocation' },
+          { caseNumber: 2, subtaskId: 1, guidance: 'server allocation' },
+        ],
+      },
+      1,
+    ],
+    [
+      'strips model-authored subtask ids when tiered allocation is disabled',
+      { enabled: false, allocations: [] },
+      0,
+    ],
+  ])('%s', async (_label, tieredDecision, expectedActual) => {
+    const fixture = makeTrustedTieredDslFixture();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('trusted generator must not execute')),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+
+    const response = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'observe',
+        pipelineContext: fixture.pipelineContext,
+        tieredDecision,
+      } as never,
+    });
+
+    expect(response.verification?.coverage.matrix.find(
+      row => row.targetKey === 'subtask-membership',
+    )?.actual).toBe(expectedActual);
+  });
+
+  it('uses server-swapped membership when evaluating scoped coverage rows', async () => {
+    const fixture = makeTrustedTieredDslFixture();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('trusted generator must not execute')),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+
+    const response = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'observe',
+        pipelineContext: fixture.pipelineContext,
+        tieredDecision: {
+          enabled: true,
+          allocations: [
+            { caseNumber: 1, subtaskId: 2, guidance: 'server allocation' },
+            { caseNumber: 2, subtaskId: 1, guidance: 'server allocation' },
+          ],
+        },
+      },
+    });
+
+    expect(response.verification?.coverage.matrix.find(row => (
+      row.targetKey === 'size-max' && row.fieldId === 'n' && row.subtaskId === 1
+    ))).toMatchObject({ actual: 0, status: 'fail' });
+  });
+});
+
 function makeTieredValidatorProof(statementMarkdown: string) {
   const statement = createStatementSnapshot(statementMarkdown);
   const subtasks = [
@@ -8836,6 +9153,111 @@ describe('两阶段沙箱蓝图', () => {
     expect(artifactsUser).toContain('第一阶段已验证且必须保持不变');
     expect(artifactsUser).toContain(solution.oracleCode.trim());
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
+  });
+
+  it('eligible frozen grammar requests a finite GeneratorPlan and parses only server-materialized code', () => {
+    const statement = createStatementSnapshot('Input n and an array of n integers.');
+    const spec: ProblemSpecV1 = {
+      schemaVersion: 1,
+      statementHash: statement.statementHash,
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [
+        { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+        {
+          id: 'a', name: 'a', type: 'array',
+          encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+        },
+      ],
+      constraints: [],
+      invariants: [],
+      outputPolicy: { kind: 'exact' },
+      subtasks: [],
+      uncertainties: [],
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'trusted-generator-plan-prompt',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec,
+      risk: {
+        tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: true, requiresIndependentModels: true,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+    const params = {
+      problemTitle: 'Array',
+      statementMarkdown: statement.normalizedMarkdown,
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] } as GenerateOptions,
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), params.options);
+    const generatorPlan = {
+      version: 1,
+      seed: 19,
+      cases: [
+        {
+          label: 'minimum',
+          fields: {
+            n: { kind: 'integer', value: 1 },
+            a: { kind: 'array', length: 1, min: 0, max: 0, pattern: 'all-equal' },
+          },
+        },
+        {
+          label: 'alternating',
+          fields: {
+            n: { kind: 'integer', value: 4 },
+            a: { kind: 'array', length: 4, min: 0, max: 1, pattern: 'alternating' },
+          },
+        },
+      ],
+    };
+    const raw = `@@@GENERATOR_PLAN@@@\n${JSON.stringify(generatorPlan)}`;
+    const parsed = parseGenerationArtifacts(raw, 'traditional', [], {
+      generatorDsl: { spec, expectedCaseCount: 2 },
+    });
+    const systemPrompt = buildGenerationArtifactsSystemPrompt(true, true);
+    const userPrompt = buildGenerationArtifactsUserPrompt(params, solution, undefined, context);
+
+    expect(systemPrompt).toContain('@@@GENERATOR_PLAN@@@');
+    expect(systemPrompt).toContain('不得输出 GENERATOR Python 代码');
+    expect(systemPrompt).not.toContain('完整 Python 3 输入生成器');
+    expect(userPrompt).toContain('GENERATOR_PLAN');
+    expect(userPrompt).toContain('服务端确定性物化');
+    expect(parsed.generatorPlan).toEqual(generatorPlan);
+    expect(parsed.generatorCode).toContain('Server-generated trusted GeneratorPlan artifact');
+    expect(parsed.generatorCode).not.toContain('model supplied code');
+  });
+
+  it('keeps legacy Python artifacts backward-compatible and marks them unverified', () => {
+    const artifacts = parseGenerationArtifacts(
+      makeGenerationArtifactsBlueprint('traditional'),
+      'traditional',
+      [],
+    );
+    const response = {
+      problemType: 'traditional' as const,
+      cases: [{ label: 'legacy max claim', input: '1\n', output: '1\n' }],
+      generatorCode: artifacts.generatorCode,
+      stdSolution: { code: 'print(input())' },
+      verification: {
+        mode: 'direct' as const,
+        oracleKind: 'ai-solution' as const,
+        verified: false,
+        wouldBlock: false,
+      },
+    };
+
+    const plan = assemblePlan(response, {
+      problemKind: 'traditional', caseCount: 1, languages: [],
+    }, { mode: 'direct' });
+
+    expect(artifacts.generatorPlan).toBeUndefined();
+    expect(plan.coverageMode).toBe('ai-generator-unverified');
+    expect(plan.verification?.coverage).toMatchObject({
+      mode: 'ai-generator-unverified', matrix: [],
+    });
   });
 
   it('分层启用时外围制品 Prompt 用子任务分配替换 small/medium/large 覆盖行', () => {
@@ -13212,6 +13634,48 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
     expect(byName('validator.py')).toMatchObject({ kind: 'validator', origin: 'executed' });
     expect(byName('config.yaml')?.origin).toBe('deterministic');
     expect(plan.verification?.mode).toBe('sandbox');
+  });
+
+  it('keeps a server-rendered GeneratorPlan artifact deterministic after coverage downgrade', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      generatorCode: [
+        '# Server-generated trusted GeneratorPlan artifact. Do not edit.',
+        "print('{\"cases\":[{\"label\":\"c1\",\"input\":\"1\\\\n\"}]}')",
+      ].join('\n'),
+      generatorPlan: {
+        version: 1,
+        seed: 47,
+        cases: [{
+          label: 'c1',
+          fields: { n: { kind: 'integer', value: 1 } },
+        }],
+      },
+      coverageMode: 'ai-generator-unverified',
+      stdSolution: { language: 'python', code: 'print(input())' },
+      verification: {
+        mode: 'sandbox',
+        oracleKind: 'ai-solution',
+        coverage: {
+          mode: 'ai-generator-unverified',
+          matrix: [], totalTargets: 0, passedTargets: 0, criticalMissing: 0,
+          featureExtractionFailed: true,
+        },
+      },
+    } as never;
+    const opts: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 1, languages: [],
+    };
+
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+
+    expect(plan.files.find(file => file.name === 'generator.py')).toMatchObject({
+      kind: 'generator',
+      origin: 'deterministic',
+    });
+    expect(plan.coverageMode).toBe('ai-generator-unverified');
+    expect(plan.verification?.coverage.mode).toBe('ai-generator-unverified');
   });
 
   it('direct 模式：数据 ai-only，且不写 brute/validator', () => {
