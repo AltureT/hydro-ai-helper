@@ -52,6 +52,7 @@ import {
   buildIndependentVerifierRepairPrompt,
   mergeSandboxBlueprintRepair,
   classifyValidatorInvalidResult,
+  checkpointVerifierFromBlueprint,
   hasCustomChecker,
   getTestlibCheckerFilename,
   extendDeadlineByBestEffortElapsed,
@@ -10041,15 +10042,15 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     blueprint: ReturnType<typeof tradBlueprint>,
     invalidResults: ReturnType<typeof detail>[] | ((invocations: unknown[]) => unknown),
     legalResults?: ReturnType<typeof detail>[],
+    formalInputs: string[] = ['5', '6'],
   ) {
     let validatorCalls = 0;
     return {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({
-        stdout: JSON.stringify({ cases: [
-          { label: 'formal-1', input: '5' },
-          { label: 'formal-2', input: '6' },
-        ] }),
+        stdout: JSON.stringify({ cases: formalInputs.map((input, index) => ({
+          label: `formal-${index + 1}`, input,
+        })) }),
         stderr: '',
       }),
       runPythonBatch: jest.fn(),
@@ -10083,6 +10084,43 @@ describe('materializeSandboxBlueprint 双重验证', () => {
   const belowMinRecipe = {
     targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
   };
+  const pairwiseInputFields: ProblemSpecV1['inputFields'] = [
+    { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+    {
+      id: 'a', name: 'a', type: 'array',
+      encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+    },
+  ];
+  const pairwiseInvariant = {
+    id: 'I_PAIRWISE', kind: 'custom' as const,
+    expression: 'all values must be pairwise different',
+    machineCheckable: true,
+    evidence: { quote: 'all values must be pairwise different' },
+  };
+  const pairwiseRecipe = {
+    targetId: 'I_PAIRWISE', constructionKind: 'duplicate-element' as const, fieldId: 'a',
+  };
+  const pairwiseStatement = 'Input has n values; all values must be pairwise different.';
+  const pairwiseFormalInputs = ['4\n10 20 30 40', '4\n50 60 70 80'];
+
+  function pairwiseProof(
+    reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
+  ): ValidatorProofContext {
+    return makeValidatorCoverageProof(pairwiseStatement, {
+      inputFields: pairwiseInputFields,
+      constraints: [],
+      invariants: [pairwiseInvariant],
+    }, reliabilityMode);
+  }
+
+  function pairwiseBlueprint() {
+    return {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_pairwise()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: ['I_PAIRWISE'] },
+      validatorProbeRecipes: [pairwiseRecipe],
+    };
+  }
 
   it('assigned subtask argv forms the legal validator partition without changing stdin', async () => {
     const statement = [
@@ -10492,6 +10530,157 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(evidence).toEqual(expect.arrayContaining([
       expect.objectContaining({ targetId: 'I1', targetKind: 'invariant', execution: 'rejected' }),
     ]));
+  });
+
+  it('covers a noncanonical custom recipe only after explicit Validator rejection', async () => {
+    const blueprint = pairwiseBlueprint();
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 7 });
+    const runner = makeValidatorCoverageRunner(
+      blueprint, [rejected], undefined, pairwiseFormalInputs,
+    );
+    const cache: MaterializationCacheState = {};
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof(), undefined, cache,
+    );
+
+    expect(runner.runPythonBatchDetailed.mock.calls[1][1]).toEqual([{
+      stdin: '4\n10 10 30 40\n', argv: [],
+    }]);
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 1,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['I_PAIRWISE'],
+      missingConstraintIds: [],
+    }));
+    const boundedState = JSON.stringify({
+      checkpoint: checkpointVerifierFromBlueprint(blueprint),
+      publicVerification: result.verification,
+      validation: cache.validation,
+    });
+    for (const forbidden of [
+      '4\\n10 20 30 40',
+      '4\\n10 10 30 40',
+      '"stdin"',
+      '"argv"',
+      '"source":"recipe"',
+    ]) expect(boundedState).not.toContain(forbidden);
+  });
+
+  it('fails enforce when Validator accepts a noncanonical custom recipe probe', async () => {
+    const blueprint = pairwiseBlueprint();
+    const runner = makeValidatorCoverageRunner(
+      blueprint, [detail({ stderr: 'PRIVATE_CUSTOM_PROBE_OUTPUT' })],
+      undefined, pairwiseFormalInputs,
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof('enforce'),
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_FALSE_ACCEPT', stage: 'validator', artifact: 'validator',
+      safeDetails: { invalidAccepted: 1, invalidRejected: 0 },
+    });
+    expect(failure.message).not.toContain('PRIVATE_CUSTOM_PROBE_OUTPUT');
+    expect(JSON.stringify(failure.safeDetails)).not.toContain('4\\n10 10 30 40');
+  });
+
+  it.each([
+    ['timeout', detail({
+      status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1,
+    })],
+    ['malformed detail', {}],
+  ])('does not count a custom recipe %s as rejection proof', async (_label, invalidResult) => {
+    const blueprint = pairwiseBlueprint();
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      [invalidResult as ReturnType<typeof detail>],
+      undefined,
+      pairwiseFormalInputs,
+    );
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof(),
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['I_PAIRWISE'],
+    }));
+  });
+
+  it('does not turn a custom recipe transport error into rejection proof or leak it', async () => {
+    const blueprint = pairwiseBlueprint();
+    const sentinel = 'PRIVATE_CUSTOM_RECIPE_TRANSPORT';
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      () => Promise.reject(Object.assign(new Error(sentinel), {
+        request: { stdin: sentinel, argv: [sentinel] },
+      })),
+      undefined,
+      pairwiseFormalInputs,
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof(),
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
+      safeDetails: { failureKind: 'infra' },
+    });
+    expect(JSON.stringify(failure)).not.toContain(sentinel);
+  });
+
+  it('keeps scoped custom false accept under SUBTASK_CONSTRAINT_VIOLATION semantics', async () => {
+    const statement = 'Subtask 1: all values must be pairwise different.';
+    const scopedConstraint = {
+      id: 'C_PAIRWISE', expression: 'all values must be pairwise different',
+      machineCheckable: true, scope: { subtaskId: 1 },
+      evidence: { quote: 'all values must be pairwise different' },
+    };
+    const tieredDecision = {
+      enabled: true,
+      allocations: [
+        { caseNumber: 1, subtaskId: 1, guidance: 'pairwise' },
+        { caseNumber: 2, subtaskId: 1, guidance: 'pairwise' },
+      ],
+      subtasks: [{ id: 1, score: 100, constraints: 'pairwise different' }],
+    };
+    const proof = makeValidatorCoverageProof(statement, {
+      inputFields: pairwiseInputFields,
+      constraints: [scopedConstraint],
+      invariants: [],
+      subtasks: [{ id: 1, score: 100, constraintIds: ['C_PAIRWISE'] }],
+    }, 'enforce', 'medium', tieredDecision);
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_pairwise()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C_PAIRWISE'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C_PAIRWISE', constructionKind: 'duplicate-element' as const, fieldId: 'a',
+      }],
+    };
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+    const runner = makeValidatorCoverageRunner(
+      blueprint, [detail(), rejected, rejected], undefined, pairwiseFormalInputs,
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator', artifact: 'validator', retryPolicy: 'repair-artifact',
+      safeDetails: { invalidAccepted: 1, invalidRejected: 2 },
+    });
+    expect(runner.runPythonBatchDetailed.mock.calls[1][1][0]).toEqual({
+      stdin: '4\n10 10 30 40\n', argv: ['--subtask', '1'],
+    });
   });
 
   it('does not cover an operation range when a state-only Validator rejects the same mutation', async () => {

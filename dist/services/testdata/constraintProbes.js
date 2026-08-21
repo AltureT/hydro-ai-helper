@@ -154,19 +154,32 @@ function integerBounds(expression, fieldId) {
         return { max: Number(upper[1]) };
     return {};
 }
-function constructIntegerMutation(input, spec, target, fieldId, encoding, kind) {
+function constructIntegerMutation(input, spec, target, fieldId, encoding, kind, source) {
     const location = parseLocation(encoding);
     if (!location)
         return 'UNPARSEABLE_ENCODING';
     if (!scalarLocationIsUnambiguous(spec, fieldId, location))
         return 'UNPARSEABLE_ENCODING';
-    const bounds = integerBounds(target.expression, fieldId);
-    const boundary = kind === 'integer-below-min' ? bounds.min : bounds.max;
-    if (!Number.isSafeInteger(boundary))
-        return 'UNSUPPORTED_TARGET';
-    const replacement = kind === 'integer-below-min'
-        ? boundary - 1
-        : boundary + 1;
+    let replacement;
+    if (source === 'recipe') {
+        const raw = tokenValuesAtLine(input, location.line)?.[location.token - 1];
+        const current = raw && /^-?(0|[1-9]\d*)$/.test(raw) ? Number(raw) : NaN;
+        if (!Number.isSafeInteger(current))
+            return 'MUTATION_NOT_ISOLATED';
+        replacement = kind === 'integer-below-min'
+            ? Number.MIN_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
+        if (replacement === current)
+            return 'MUTATION_NOT_ISOLATED';
+    }
+    else {
+        const bounds = integerBounds(target.expression, fieldId);
+        const boundary = kind === 'integer-below-min' ? bounds.min : bounds.max;
+        if (!Number.isSafeInteger(boundary))
+            return 'UNSUPPORTED_TARGET';
+        replacement = kind === 'integer-below-min'
+            ? boundary - 1
+            : boundary + 1;
+    }
     if (!Number.isSafeInteger(replacement))
         return 'UNSUPPORTED_TARGET';
     return replaceToken(input, location, String(replacement)) || 'MUTATION_NOT_ISOLATED';
@@ -225,14 +238,14 @@ function resolveSequenceLayout(input, spec, fieldId) {
         countFieldId: range.countFieldId,
     };
 }
-function constructSequenceMutation(input, spec, target, fieldId, kind) {
+function constructSequenceMutation(input, spec, target, fieldId, kind, source) {
     const layout = resolveSequenceLayout(input, spec, fieldId);
     if (typeof layout === 'string')
         return layout;
     const escapedField = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const escapedCount = layout.countFieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (kind === 'array-length-mismatch') {
-        if (!new RegExp(`^length\\(${escapedField}\\) = ${escapedCount}$`)
+        if (source === 'derived' && !new RegExp(`^length\\(${escapedField}\\) = ${escapedCount}$`)
             .test(target.expression))
             return 'UNSUPPORTED_TARGET';
         return removeToken(input, {
@@ -243,7 +256,8 @@ function constructSequenceMutation(input, spec, target, fieldId, kind) {
     if (layout.values.length < 2)
         return 'MUTATION_NOT_ISOLATED';
     if (kind === 'duplicate-element') {
-        if (!new RegExp(`^allDistinct\\(${escapedField}\\)$`).test(target.expression)) {
+        if (source === 'derived'
+            && !new RegExp(`^allDistinct\\(${escapedField}\\)$`).test(target.expression)) {
             return 'UNSUPPORTED_TARGET';
         }
         if (new Set(layout.values).size !== layout.values.length
@@ -254,8 +268,9 @@ function constructSequenceMutation(input, spec, target, fieldId, kind) {
             token: layout.startToken + 1,
         }, layout.values[0]) || 'MUTATION_NOT_ISOLATED';
     }
-    if (!new RegExp(`^permutation\\(${escapedField}, 1\\.\\.${escapedCount}\\)$`)
-        .test(target.expression))
+    if (source === 'derived'
+        && !new RegExp(`^permutation\\(${escapedField}, 1\\.\\.${escapedCount}\\)$`)
+            .test(target.expression))
         return 'UNSUPPORTED_TARGET';
     const replacement = layout.values[layout.values.length - 2];
     if (replacement === layout.values[layout.values.length - 1])
@@ -282,7 +297,7 @@ function structuralPredicate(expression, fieldId, vertexFieldId) {
         domainMin: match[2].startsWith('0') ? 0 : 1,
     };
 }
-function parseEdgeList(input, spec, target, fieldId, requireLegalTreeCount) {
+function parseEdgeList(input, spec, target, fieldId, requireLegalTreeCount, source = 'derived', constructionKind, recipeDomainMin) {
     const field = spec.inputFields.find(item => item.id === fieldId);
     if (!field || (field.type !== 'graph' && field.type !== 'tree'))
         return 'INVALID_RECIPE';
@@ -322,8 +337,10 @@ function parseEdgeList(input, spec, target, fieldId, requireLegalTreeCount) {
         }
     }
     const declaredPredicate = structuralPredicate(target.expression, fieldId, vertexFieldId);
-    if (!declaredPredicate)
+    if (source === 'derived' && !declaredPredicate)
         return 'UNSUPPORTED_TARGET';
+    if (source === 'recipe' && !constructionKind)
+        return 'INVALID_RECIPE';
     const lines = input.endsWith('\n') ? input.slice(0, -1).split('\n') : input.split('\n');
     const header = lines[0] === undefined ? [] : [...lines[0].matchAll(/\S+/g)].map(item => item[0]);
     if (header.length !== (edgeCountFieldId ? 2 : 1))
@@ -340,7 +357,6 @@ function parseEdgeList(input, spec, target, fieldId, requireLegalTreeCount) {
     if (field.type === 'tree' && requireLegalTreeCount && edgeLines.length !== vertexCount - 1) {
         return 'MUTATION_NOT_ISOLATED';
     }
-    const maxVertex = declaredPredicate.domainMin === 0 ? vertexCount - 1 : vertexCount;
     const edges = [];
     for (const line of edgeLines) {
         const tokens = [...line.matchAll(/\S+/g)].map(item => item[0]);
@@ -348,16 +364,27 @@ function parseEdgeList(input, spec, target, fieldId, requireLegalTreeCount) {
             return 'MUTATION_NOT_ISOLATED';
         const left = /^-?(0|[1-9]\d*)$/.test(tokens[0]) ? Number(tokens[0]) : NaN;
         const right = /^-?(0|[1-9]\d*)$/.test(tokens[1]) ? Number(tokens[1]) : NaN;
-        if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)
-            || left < declaredPredicate.domainMin || right < declaredPredicate.domainMin
-            || left > maxVertex || right > maxVertex)
+        if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)) {
             return 'MUTATION_NOT_ISOLATED';
+        }
         edges.push([left, right]);
     }
+    const domainCandidates = [0, 1].filter(domainMin => {
+        const maxVertex = domainMin === 0 ? vertexCount - 1 : vertexCount;
+        return edges.every(([left, right]) => left >= domainMin && right >= domainMin
+            && left <= maxVertex && right <= maxVertex);
+    });
+    const domainMin = source === 'derived'
+        ? declaredPredicate?.domainMin
+        : recipeDomainMin ?? (domainCandidates.length === 1 ? domainCandidates[0] : undefined);
+    if (domainMin === undefined)
+        return 'UNPARSEABLE_ENCODING';
+    if (!domainCandidates.includes(domainMin))
+        return 'MUTATION_NOT_ISOLATED';
     return {
         vertexCount,
         ...(edgeCount === undefined ? {} : { edgeCount }),
-        domainMin: declaredPredicate.domainMin,
+        domainMin,
         edges,
         lines,
     };
@@ -466,10 +493,10 @@ function appendEdgeLine(input, edge, line) {
     lines.splice(lines.length - 1, 0, `${edge[0]} ${edge[1]}`);
     return { input: lines.join('\n'), position: { line, token: 1 } };
 }
-function constructStructuralMutation(input, spec, target, fieldId, kind) {
-    const source = parseEdgeList(input, spec, target, fieldId, true);
-    if (typeof source === 'string')
-        return source;
+function constructStructuralMutation(input, spec, target, fieldId, kind, source) {
+    const sourceLayout = parseEdgeList(input, spec, target, fieldId, true, source, kind);
+    if (typeof sourceLayout === 'string')
+        return sourceLayout;
     const expectedPredicate = kind === 'graph-self-loop' || kind === 'graph-duplicate-edge'
         ? 'simpleGraph'
         : kind === 'graph-disconnected' ? 'connected'
@@ -482,47 +509,51 @@ function constructStructuralMutation(input, spec, target, fieldId, kind) {
                 .exec(field.encoding)?.[1]);
     const declared = vertexFieldId
         && structuralPredicate(target.expression, fieldId, vertexFieldId);
-    if (!declared || declared.predicate !== expectedPredicate)
+    if (source === 'derived' && (!declared || declared.predicate !== expectedPredicate)) {
         return 'UNSUPPORTED_TARGET';
-    const sourceValid = expectedPredicate === 'simpleGraph' ? isSimpleUndirected(source)
-        : expectedPredicate === 'connected' ? isSimpleUndirected(source) && isConnected(source)
-            : expectedPredicate === 'tree' ? isTree(source)
-                : !hasSelfLoop(source.edges) && !hasDuplicateEdge(source.edges, true)
-                    && !hasDirectedCycle(source);
+    }
+    const sourceValid = expectedPredicate === 'simpleGraph' ? isSimpleUndirected(sourceLayout)
+        : expectedPredicate === 'connected'
+            ? isSimpleUndirected(sourceLayout) && isConnected(sourceLayout)
+            : expectedPredicate === 'tree' ? isTree(sourceLayout)
+                : !hasSelfLoop(sourceLayout.edges) && !hasDuplicateEdge(sourceLayout.edges, true)
+                    && !hasDirectedCycle(sourceLayout);
     if (!sourceValid)
         return 'MUTATION_NOT_ISOLATED';
     let mutation;
     if (kind === 'graph-self-loop') {
-        const first = source.edges[0];
+        const first = sourceLayout.edges[0];
         mutation = first && replaceToken(input, { line: 2, token: 2 }, String(first[0]));
     }
     else if (kind === 'graph-duplicate-edge') {
-        mutation = source.edges.length >= 2 ? replaceEdgeLine(input, 3, source.edges[0]) : undefined;
+        mutation = sourceLayout.edges.length >= 2
+            ? replaceEdgeLine(input, 3, sourceLayout.edges[0]) : undefined;
     }
     else if (kind === 'graph-disconnected') {
-        const removed = removeLine(input, source.lines.length);
-        const decremented = source.edgeCount !== undefined
-            && replaceToken(input, { line: 1, token: 2 }, String(source.edgeCount - 1));
-        mutation = removed && decremented && removeLine(decremented.input, source.lines.length);
+        const removed = removeLine(input, sourceLayout.lines.length);
+        const decremented = sourceLayout.edgeCount !== undefined
+            && replaceToken(input, { line: 1, token: 2 }, String(sourceLayout.edgeCount - 1));
+        mutation = removed && decremented
+            && removeLine(decremented.input, sourceLayout.lines.length);
     }
     else if (kind === 'tree-missing-edge') {
-        mutation = removeLine(input, source.lines.length);
+        mutation = removeLine(input, sourceLayout.lines.length);
     }
     else if (kind === 'tree-cycle') {
-        const lastEdge = source.edges[source.edges.length - 1];
-        mutation = lastEdge && replaceEdgeLine(input, source.lines.length, [lastEdge[0], source.domainMin]);
+        const lastEdge = sourceLayout.edges[sourceLayout.edges.length - 1];
+        mutation = lastEdge && replaceEdgeLine(input, sourceLayout.lines.length, [lastEdge[0], sourceLayout.domainMin]);
     }
     else {
-        const lastVertex = source.domainMin + source.vertexCount - 1;
-        const incremented = source.edgeCount !== undefined
-            && replaceToken(input, { line: 1, token: 2 }, String(source.edgeCount + 1));
+        const lastVertex = sourceLayout.domainMin + sourceLayout.vertexCount - 1;
+        const incremented = sourceLayout.edgeCount !== undefined
+            && replaceToken(input, { line: 1, token: 2 }, String(sourceLayout.edgeCount + 1));
         mutation = incremented
-            ? appendEdgeLine(incremented.input, [lastVertex, source.domainMin], source.lines.length + 1)
+            ? appendEdgeLine(incremented.input, [lastVertex, sourceLayout.domainMin], sourceLayout.lines.length + 1)
             : undefined;
     }
     if (!mutation)
         return 'MUTATION_NOT_ISOLATED';
-    const mutated = parseEdgeList(mutation.input, spec, target, fieldId, kind !== 'tree-missing-edge');
+    const mutated = parseEdgeList(mutation.input, spec, target, fieldId, kind !== 'tree-missing-edge', source, kind, sourceLayout.domainMin);
     if (typeof mutated === 'string')
         return 'MUTATION_NOT_ISOLATED';
     const isolated = kind === 'graph-self-loop'
@@ -560,7 +591,7 @@ function intersectBounds(current, next) {
         ...(max === undefined ? {} : { max }),
     };
 }
-function resolveArgumentBounds(spec, target, fieldId) {
+function resolveArgumentBounds(spec, target, fieldId, source) {
     let all = {};
     let nonTarget = {};
     let targetBounds;
@@ -571,6 +602,9 @@ function resolveArgumentBounds(spec, target, fieldId) {
                 && constraint.scope.subtaskId === target.subtaskId);
         if (!applicable)
             continue;
+        if (source === 'recipe' && target.kind === 'constraint' && constraint.id === target.id) {
+            continue;
+        }
         const bounds = integerBounds(constraint.expression, fieldId);
         const recognized = bounds.min !== undefined || bounds.max !== undefined;
         if (!recognized) {
@@ -596,10 +630,11 @@ function resolveArgumentBounds(spec, target, fieldId) {
             nonTarget = nextNonTarget;
         }
     }
-    if (recognizedCount === 0)
+    if (source === 'derived' && recognizedCount === 0)
         return 'UNSUPPORTED_TARGET';
-    if (target.kind === 'constraint' && !targetBounds)
+    if (source === 'derived' && target.kind === 'constraint' && !targetBounds) {
         return 'UNSUPPORTED_TARGET';
+    }
     return {
         all,
         nonTarget,
@@ -785,7 +820,7 @@ function presentBefore(spec, operations, beforeIndex, fieldId) {
     }
     return present;
 }
-function constructOperationMutation(input, spec, target, fieldId, operationName, kind) {
+function constructOperationMutation(input, spec, target, fieldId, operationName, kind, source) {
     const operations = parseOperations(input, spec);
     if (typeof operations === 'string')
         return operations;
@@ -796,7 +831,7 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
     const argumentIndex = operationArgumentIndex(spec, selectedName, fieldId);
     if (argumentIndex === undefined)
         return 'INVALID_RECIPE';
-    const resolvedBounds = resolveArgumentBounds(spec, target, fieldId);
+    const resolvedBounds = resolveArgumentBounds(spec, target, fieldId, source);
     if (typeof resolvedBounds === 'string')
         return resolvedBounds;
     const bounds = resolvedBounds.all;
@@ -811,7 +846,8 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
     let replacement;
     if (kind === 'add-existing-object') {
         if (selectedName !== 'ADD'
-            || target.expression !== `${selectedName} requires absent(${fieldId})`) {
+            || (source === 'derived'
+                && target.expression !== `${selectedName} requires absent(${fieldId})`)) {
             return 'UNSUPPORTED_TARGET';
         }
         const sourceViolations = statefulViolations(spec, operations, fieldId);
@@ -831,7 +867,8 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
     }
     else if (kind === 'delete-missing-object') {
         if (selectedName !== 'DEL'
-            || target.expression !== `${selectedName} requires present(${fieldId})`) {
+            || (source === 'derived'
+                && target.expression !== `${selectedName} requires present(${fieldId})`)) {
             return 'UNSUPPORTED_TARGET';
         }
         const sourceViolations = statefulViolations(spec, operations, fieldId);
@@ -854,10 +891,16 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
     }
     else {
         const targetBounds = resolvedBounds.target;
-        if (!targetBounds)
-            return 'UNSUPPORTED_TARGET';
         targetIndex = operations.findIndex(operation => operation.name === selectedName);
-        if (targetIndex >= 0) {
+        if (source === 'recipe' && targetIndex >= 0) {
+            const original = operations[targetIndex].arguments[argumentIndex];
+            replacement = [
+                resolvedBounds.nonTarget.max ?? Number.MAX_SAFE_INTEGER,
+                resolvedBounds.nonTarget.min ?? Number.MIN_SAFE_INTEGER,
+            ].find(candidate => candidate !== original
+                && valueSatisfiesBounds(candidate, resolvedBounds.nonTarget));
+        }
+        else if (targetBounds && targetIndex >= 0) {
             replacement = findTargetViolation(targetBounds, resolvedBounds.nonTarget);
         }
     }
@@ -872,6 +915,10 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
         return 'MUTATION_NOT_ISOLATED';
     if (kind === 'operation-argument-out-of-range') {
         const mutatedValue = mutatedOperations[targetIndex]?.arguments[argumentIndex];
+        if (source === 'recipe') {
+            return valueSatisfiesBounds(mutatedValue, resolvedBounds.nonTarget)
+                ? mutation : 'MUTATION_NOT_ISOLATED';
+        }
         const targetBounds = resolvedBounds.target;
         const violatesTarget = (targetBounds.min !== undefined && mutatedValue < targetBounds.min)
             || (targetBounds.max !== undefined && mutatedValue > targetBounds.max);
@@ -884,20 +931,21 @@ function constructOperationMutation(input, spec, target, fieldId, operationName,
         && violations[0].name === selectedName
         ? mutation : 'MUTATION_NOT_ISOLATED';
 }
-function constructSubtaskUpperBoundMutation(input, spec, target, fieldId, encoding) {
+function constructSubtaskUpperBoundMutation(input, spec, target, fieldId, encoding, source) {
     if (target.subtaskId === undefined)
         return 'UNSUPPORTED_TARGET';
-    return constructIntegerMutation(input, spec, target, fieldId, encoding, 'integer-above-max');
+    return constructIntegerMutation(input, spec, target, fieldId, encoding, 'integer-above-max', source);
 }
-function constructStringMutation(input, spec, target, fieldId, encoding) {
+function constructStringMutation(input, spec, target, fieldId, encoding, source) {
     const location = parseLocation(encoding);
     if (!location)
         return 'UNPARSEABLE_ENCODING';
     if (!scalarLocationIsUnambiguous(spec, fieldId, location))
         return 'UNPARSEABLE_ENCODING';
     const escapedField = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (!new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-        .test(target.expression))
+    if (source === 'derived'
+        && !new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
+            .test(target.expression))
         return 'UNSUPPORTED_TARGET';
     const lineTokens = tokenValuesAtLine(input, location.line);
     const value = lineTokens?.[location.token - 1];
@@ -1197,7 +1245,7 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
             return [{ target, request: namedRequest }];
         }
         const request = deriveConstructionRequests(spec, target)[0];
-        return request ? [{ target, request }] : [];
+        return request ? [{ target, request: { ...request, source: 'derived' } }] : [];
     });
 }
 function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, request) {
@@ -1206,11 +1254,13 @@ function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, reque
         return false;
     }
     return semantics.every(item => {
+        const named = item.target.id === target.id && item.target.kind === target.kind;
+        if (named && request.source === 'recipe')
+            return true;
         const sourceValid = evaluateRecognizedSemantic(sourceInput, spec, item.target, item.request);
         if (sourceValid !== true)
             return false;
         const mutatedValid = evaluateRecognizedSemantic(mutatedInput, spec, item.target, item.request);
-        const named = item.target.id === target.id && item.target.kind === target.kind;
         return named ? mutatedValid === false : mutatedValid === true;
     });
 }
@@ -1223,7 +1273,7 @@ function constructMutationForRequest(input, spec, target, request) {
     if (request.constructionKind === 'integer-below-min'
         || request.constructionKind === 'integer-above-max') {
         return field.type === 'integer'
-            ? constructIntegerMutation(input, spec, target, field.id, field.encoding, request.constructionKind) : 'INVALID_RECIPE';
+            ? constructIntegerMutation(input, spec, target, field.id, field.encoding, request.constructionKind, request.source) : 'INVALID_RECIPE';
     }
     if (request.constructionKind === 'array-length-mismatch'
         || request.constructionKind === 'duplicate-element'
@@ -1231,12 +1281,12 @@ function constructMutationForRequest(input, spec, target, request) {
         const expectedType = request.constructionKind === 'permutation-duplicate-or-missing'
             ? 'permutation' : 'array';
         return field.type === expectedType
-            ? constructSequenceMutation(input, spec, target, field.id, request.constructionKind)
+            ? constructSequenceMutation(input, spec, target, field.id, request.constructionKind, request.source)
             : 'INVALID_RECIPE';
     }
     if (request.constructionKind === 'illegal-string-character') {
         return field.type === 'string'
-            ? constructStringMutation(input, spec, target, field.id, field.encoding)
+            ? constructStringMutation(input, spec, target, field.id, field.encoding, request.source)
             : 'INVALID_RECIPE';
     }
     if (request.constructionKind === 'graph-self-loop'
@@ -1245,16 +1295,20 @@ function constructMutationForRequest(input, spec, target, request) {
         || request.constructionKind === 'tree-missing-edge'
         || request.constructionKind === 'tree-cycle'
         || request.constructionKind === 'dag-cycle') {
-        return constructStructuralMutation(input, spec, target, field.id, request.constructionKind);
+        const expectedType = request.constructionKind === 'tree-missing-edge'
+            || request.constructionKind === 'tree-cycle' ? 'tree' : 'graph';
+        return field.type === expectedType
+            ? constructStructuralMutation(input, spec, target, field.id, request.constructionKind, request.source)
+            : 'INVALID_RECIPE';
     }
     if (request.constructionKind === 'add-existing-object'
         || request.constructionKind === 'delete-missing-object'
         || request.constructionKind === 'operation-argument-out-of-range') {
-        return constructOperationMutation(input, spec, target, field.id, request.operationName, request.constructionKind);
+        return constructOperationMutation(input, spec, target, field.id, request.operationName, request.constructionKind, request.source);
     }
     if (request.constructionKind === 'subtask-upper-bound') {
         return field.type === 'integer'
-            ? constructSubtaskUpperBoundMutation(input, spec, target, field.id, field.encoding)
+            ? constructSubtaskUpperBoundMutation(input, spec, target, field.id, field.encoding, request.source)
             : 'INVALID_RECIPE';
     }
     return 'UNSUPPORTED_TARGET';
@@ -1309,7 +1363,10 @@ function buildConstraintProbes(input) {
             effectiveSeed,
         };
     }
-    const deterministicRequests = machineTargets.flatMap(target => (deriveConstructionRequests(input.spec, target).map(request => ({ target, request }))));
+    const deterministicRequests = machineTargets.flatMap(target => (deriveConstructionRequests(input.spec, target).map(request => ({
+        target,
+        request: { ...request, source: 'derived' },
+    }))));
     const deterministicallyAttemptedTargets = new Set(deterministicRequests.map(({ target }) => (canonicalJson({ targetId: target.id, targetKind: target.kind, subtaskId: target.subtaskId }))));
     const customRequests = recipes.flatMap(recipe => {
         const target = findTarget(input.spec, recipe.targetId);
@@ -1333,7 +1390,7 @@ function buildConstraintProbes(input) {
             gaps.push(gap(target, 'INVALID_RECIPE'));
             return [];
         }
-        return [{ target, request: resolved }];
+        return [{ target, request: { ...resolved, source: 'recipe' } }];
     });
     for (const { target, request } of [...deterministicRequests, ...customRequests]) {
         const seed = selectSeed(seeds, target);

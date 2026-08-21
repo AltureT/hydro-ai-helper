@@ -274,6 +274,52 @@ function buildSingleTargetFixture(
   });
 }
 
+function noncanonicalPairwiseDistinctSpec(): ProblemSpecV1 {
+  return {
+    schemaVersion: 1,
+    statementHash: '1'.repeat(64),
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [
+      { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+      {
+        id: 'a', name: 'a', type: 'array',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      },
+    ],
+    constraints: [{
+      id: 'C_LENGTH', expression: 'length(a) = n', machineCheckable: true,
+      scope: 'global', evidence: { quote: 'exactly n values' },
+    }],
+    invariants: [{
+      id: 'I_PAIRWISE', kind: 'custom',
+      expression: 'all values must be pairwise different',
+      machineCheckable: true,
+      evidence: { quote: 'all values must be pairwise different' },
+    }],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+  };
+}
+
+const pairwiseDistinctRecipe: ValidatorProbeRecipe = {
+  targetId: 'I_PAIRWISE', constructionKind: 'duplicate-element', fieldId: 'a',
+};
+
+function buildNoncanonicalPairwiseProbe(
+  spec = noncanonicalPairwiseDistinctSpec(),
+  input = '4\n10 20 30 40\n',
+) {
+  return buildConstraintProbes({
+    spec,
+    statementHash: '1'.repeat(64),
+    specHash: '2'.repeat(64),
+    seeds: [{ source: 'formal', index: 1, input }],
+    recipes: [pairwiseDistinctRecipe],
+  });
+}
+
 describe('scalar sequence and string constructions', () => {
   it.each<[ScalarSequenceConstructionKind, string, string]>([
     ['integer-below-min', '5\n', '-1\n'],
@@ -290,6 +336,96 @@ describe('scalar sequence and string constructions', () => {
       input: illegal,
     })]));
     expect(result.gaps).toEqual([]);
+  });
+
+  it('constructs a bounded duplicate-element probe for a noncanonical custom invariant', () => {
+    const result = buildNoncanonicalPairwiseProbe();
+
+    expect(result.probes).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: '09c9a5588b60e18a08c5c8232bc89968',
+      targetId: 'I_PAIRWISE',
+      targetKind: 'invariant',
+      constructionKind: 'duplicate-element',
+      input: '4\n10 10 30 40\n',
+    })]));
+    expect(result.gaps).toEqual([]);
+  });
+
+  it('reconstructs the same custom probe and id without clock or random state', () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(123_456);
+    const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0.987654321);
+    try {
+      const first = buildNoncanonicalPairwiseProbe();
+      nowSpy.mockReturnValue(999_999);
+      randomSpy.mockReturnValue(0.123456789);
+      const second = buildNoncanonicalPairwiseProbe();
+      const firstCustom = first.probes.find(probe => probe.targetId === 'I_PAIRWISE');
+      const secondCustom = second.probes.find(probe => probe.targetId === 'I_PAIRWISE');
+
+      expect(secondCustom).toEqual(firstCustom);
+      expect(secondCustom).toEqual(expect.objectContaining({
+        id: '09c9a5588b60e18a08c5c8232bc89968',
+        input: '4\n10 10 30 40\n',
+      }));
+      expect(nowSpy).not.toHaveBeenCalled();
+      expect(randomSpy).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+      randomSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['missing field', (spec: ProblemSpecV1) => spec, 'missing', '4\n10 20 30 40\n',
+      'INVALID_RECIPE'],
+    ['incompatible field type', (spec: ProblemSpecV1) => spec, 'n', '4\n10 20 30 40\n',
+      'INVALID_RECIPE'],
+    ['ambiguous field encoding', (spec: ProblemSpecV1) => {
+      spec.inputFields.push({
+        id: 'shadow', name: 'shadow', type: 'array',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      });
+      return spec;
+    }, 'a', '4\n10 20 30 40\n', 'UNPARSEABLE_ENCODING'],
+    ['invalid legal seed', (spec: ProblemSpecV1) => spec, 'a', '4\n10 10 30 40\n',
+      'MUTATION_NOT_ISOLATED'],
+  ] as const)(
+    'returns a bounded gap for a custom recipe with %s',
+    (_name, changeSpec, fieldId, seed, reasonCode) => {
+      const spec = changeSpec(noncanonicalPairwiseDistinctSpec());
+      const result = buildConstraintProbes({
+        spec,
+        statementHash: '1'.repeat(64),
+        specHash: '2'.repeat(64),
+        seeds: [{ source: 'formal', index: 1, input: seed }],
+        recipes: [{ ...pairwiseDistinctRecipe, fieldId }],
+      });
+
+      expect(result.probes).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ targetId: 'I_PAIRWISE' }),
+      ]));
+      expect(result.gaps).toEqual(expect.arrayContaining([{
+        targetId: 'I_PAIRWISE', targetKind: 'invariant', reasonCode,
+      }]));
+    },
+  );
+
+  it('does not credit a custom mutation that also breaks another canonical semantic', () => {
+    const spec = noncanonicalPairwiseDistinctSpec();
+    spec.invariants.push({
+      id: 'I_CANONICAL', kind: 'custom', expression: 'allDistinct(a)',
+      machineCheckable: true, evidence: { quote: 'all values are distinct' },
+    });
+
+    const result = buildNoncanonicalPairwiseProbe(spec);
+
+    expect(result.probes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetId: 'I_PAIRWISE' }),
+    ]));
+    expect(result.gaps).toEqual(expect.arrayContaining([{
+      targetId: 'I_PAIRWISE', targetKind: 'invariant',
+      reasonCode: 'MUTATION_NOT_ISOLATED',
+    }]));
   });
 });
 
@@ -794,7 +930,40 @@ describe('target-isolated proof construction', () => {
     },
   );
 
-  it('infers an omitted custom-recipe field only when the compatible field is unique', () => {
+  it.each(everyFamily)(
+    '%s uses its closed construction semantic for a noncanonical accepted recipe',
+    (_kind, makeFixture) => {
+      const { spec, recipe, legal } = makeFixture();
+      const target = spec.constraints.find(item => item.id === recipe.targetId)
+        || spec.invariants.find(item => item.id === recipe.targetId)!;
+      target.expression = 'a genuinely noncanonical custom policy';
+      const targetSubtaskId = 'scope' in target && target.scope !== 'global'
+        ? target.scope.subtaskId : undefined;
+
+      const result = buildConstraintProbes({
+        spec,
+        statementHash: '1'.repeat(64),
+        specHash: '2'.repeat(64),
+        seeds: [{
+          source: 'formal', index: 1, input: legal,
+          ...(targetSubtaskId === undefined ? {} : { subtaskId: targetSubtaskId }),
+        }],
+        recipes: [recipe],
+      });
+
+      expect(result.probes).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          targetId: recipe.targetId,
+          constructionKind: recipe.constructionKind,
+        }),
+      ]));
+      expect(result.gaps).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ targetId: recipe.targetId }),
+      ]));
+    },
+  );
+
+  it('uses an extreme server-owned value for a noncanonical integer recipe with a unique field', () => {
     const spec = integerSpec();
     spec.constraints[0].expression = 'n has a custom upper policy';
     const result = buildConstraintProbes({
@@ -805,9 +974,11 @@ describe('target-isolated proof construction', () => {
       recipes: [{ targetId: 'C1', constructionKind: 'integer-above-max' }],
     });
 
-    expect(result.gaps).toEqual([{
-      targetId: 'C1', targetKind: 'constraint', reasonCode: 'UNSUPPORTED_TARGET',
-    }]);
+    expect(result.probes).toEqual([expect.objectContaining({
+      targetId: 'C1', targetKind: 'constraint', constructionKind: 'integer-above-max',
+      input: `${Number.MAX_SAFE_INTEGER}\n`,
+    })]);
+    expect(result.gaps).toEqual([]);
   });
 
   it('does not apply model recipes after a deterministic target was attempted', () => {
@@ -1155,9 +1326,6 @@ describe('constraint probe scope gaps bounds and privacy', () => {
         id: 'shadow', name: 'shadow', type: 'integer', encoding: 'line:1 token:1',
       });
     }, 'UNPARSEABLE_ENCODING'],
-    ['unsupported expression', (spec: ProblemSpecV1) => {
-      spec.constraints[0].expression = 'n is small';
-    }, 'UNSUPPORTED_TARGET'],
   ] as const)('%s returns a bounded gap', (_name, changeSpec, reasonCode) => {
     const spec = integerSpec();
     changeSpec(spec);
@@ -1174,6 +1342,23 @@ describe('constraint probe scope gaps bounds and privacy', () => {
     expect(result.probes).toEqual([]);
     expect(result.gaps).toEqual([{
       targetId: 'C1', targetKind: 'constraint', reasonCode,
+    }]);
+  });
+
+  it('keeps a noncanonical server-derived target unsupported without an accepted recipe', () => {
+    const spec = integerSpec();
+    spec.constraints[0].expression = 'n is small';
+
+    const result = buildConstraintProbes({
+      spec,
+      statementHash: '1'.repeat(64),
+      specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 1, input: '5\n' }],
+    });
+
+    expect(result.probes).toEqual([]);
+    expect(result.gaps).toEqual([{
+      targetId: 'C1', targetKind: 'constraint', reasonCode: 'UNSUPPORTED_TARGET',
     }]);
   });
 
