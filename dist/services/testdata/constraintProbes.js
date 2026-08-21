@@ -1,9 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.getConstraintProbeSource = getConstraintProbeSource;
 exports.buildConstraintProbes = buildConstraintProbes;
 const crypto_1 = require("crypto");
 const MAX_PROBE_INPUT_BYTES = 256 * 1024;
 const MAX_PROBE_RECIPES = 64;
+const constraintProbeSources = new WeakMap();
+function getConstraintProbeSource(probe) {
+    return constraintProbeSources.get(probe);
+}
 function canonicalize(value) {
     if (Array.isArray(value))
         return value.map(item => canonicalize(item));
@@ -419,13 +424,21 @@ function hasDuplicateEdge(edges, directed) {
 }
 function isConnected(layout) {
     const start = layout.domainMin;
+    const adjacency = new Map();
+    for (const [left, right] of layout.edges) {
+        const leftNeighbours = adjacency.get(left) || [];
+        leftNeighbours.push(right);
+        adjacency.set(left, leftNeighbours);
+        const rightNeighbours = adjacency.get(right) || [];
+        rightNeighbours.push(left);
+        adjacency.set(right, rightNeighbours);
+    }
     const seen = new Set([start]);
     const pending = [start];
-    while (pending.length > 0) {
-        const vertex = pending.pop();
-        for (const [left, right] of layout.edges) {
-            const next = left === vertex ? right : right === vertex ? left : undefined;
-            if (next !== undefined && !seen.has(next)) {
+    for (let index = 0; index < pending.length; index++) {
+        const vertex = pending[index];
+        for (const next of adjacency.get(vertex) || []) {
+            if (!seen.has(next)) {
                 seen.add(next);
                 pending.push(next);
             }
@@ -463,25 +476,33 @@ function hasDirectedCycle(layout) {
         neighbours.push(right);
         adjacency.set(left, neighbours);
     }
-    const visiting = new Set();
-    const visited = new Set();
-    const visit = (vertex) => {
-        if (visiting.has(vertex))
-            return true;
-        if (visited.has(vertex))
-            return false;
-        visiting.add(vertex);
-        for (const neighbour of adjacency.get(vertex) || []) {
-            if (visit(neighbour))
-                return true;
-        }
-        visiting.delete(vertex);
-        visited.add(vertex);
-        return false;
-    };
+    const state = new Map();
     for (let offset = 0; offset < layout.vertexCount; offset++) {
-        if (visit(layout.domainMin + offset))
-            return true;
+        const start = layout.domainMin + offset;
+        if (state.has(start))
+            continue;
+        const stack = [{
+                vertex: start,
+                nextIndex: 0,
+            }];
+        state.set(start, 'visiting');
+        while (stack.length > 0) {
+            const current = stack[stack.length - 1];
+            const neighbours = adjacency.get(current.vertex) || [];
+            if (current.nextIndex >= neighbours.length) {
+                state.set(current.vertex, 'visited');
+                stack.pop();
+                continue;
+            }
+            const neighbour = neighbours[current.nextIndex];
+            current.nextIndex += 1;
+            if (state.get(neighbour) === 'visiting')
+                return true;
+            if (state.get(neighbour) === 'visited')
+                continue;
+            state.set(neighbour, 'visiting');
+            stack.push({ vertex: neighbour, nextIndex: 0 });
+        }
     }
     return false;
 }
@@ -1439,14 +1460,16 @@ function buildConstraintProbes(input) {
             effectiveSeed,
             mutationPosition: mutation.position,
         })).slice(0, 32);
-        probes.push({
+        const probe = {
             id,
             targetId: target.id,
             targetKind: target.kind,
             input: mutation.input,
             ...(target.subtaskId === undefined ? {} : { subtaskId: target.subtaskId }),
             constructionKind: request.constructionKind,
-        });
+        };
+        constraintProbeSources.set(probe, request.source);
+        probes.push(probe);
     }
     const seenProbeIds = new Set();
     const deduplicatedProbes = probes.filter(probe => {

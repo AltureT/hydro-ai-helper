@@ -623,6 +623,43 @@ describe('structural constructions', () => {
     })]);
     expect(result.gaps).toEqual([]);
   });
+
+  it('constructs a disconnected probe from a 30000-edge star within two seconds', () => {
+    const edgeCount = 30_000;
+    const legal = `${edgeCount + 1} ${edgeCount}\n${Array.from(
+      { length: edgeCount },
+      (_unused, index) => `1 ${index + 2}`,
+    ).join('\n')}\n`;
+
+    const startedAt = Date.now();
+    const result = buildStructuralFixture('graph-disconnected', legal);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(result.probes).toEqual([expect.objectContaining({
+      constructionKind: 'graph-disconnected',
+      input: expect.stringContaining(`${edgeCount + 1} ${edgeCount - 1}\n`),
+    })]);
+    expect(result.gaps).toEqual([]);
+    expect(elapsedMs).toBeLessThan(2_000);
+  }, 120_000);
+
+  it('handles a 20000-edge DAG chain and detects its deep cyclic mutation without throwing', () => {
+    const edgeCount = 20_000;
+    const legal = `${edgeCount + 1} ${edgeCount}\n${Array.from(
+      { length: edgeCount },
+      (_unused, index) => `${index + 1} ${index + 2}`,
+    ).join('\n')}\n`;
+
+    let result: ReturnType<typeof buildStructuralFixture> | undefined;
+    expect(() => {
+      result = buildStructuralFixture('dag-cycle', legal);
+    }).not.toThrow();
+    expect(result?.probes).toEqual([expect.objectContaining({
+      constructionKind: 'dag-cycle',
+      input: expect.stringContaining(`${edgeCount + 1} 1\n`),
+    })]);
+    expect(result?.gaps).toEqual([]);
+  });
 });
 
 function operationSpec(constructionKind: OperationConstructionKind): {

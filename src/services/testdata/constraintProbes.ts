@@ -72,6 +72,17 @@ interface InternalProbeRequest extends ValidatorProbeRecipe {
   source: 'derived' | 'recipe';
 }
 
+const constraintProbeSources = new WeakMap<
+ConstraintProbe,
+InternalProbeRequest['source']
+>();
+
+export function getConstraintProbeSource(
+  probe: ConstraintProbe,
+): InternalProbeRequest['source'] | undefined {
+  return constraintProbeSources.get(probe);
+}
+
 type StructuralConstructionKind =
   | 'graph-self-loop'
   | 'graph-duplicate-edge'
@@ -554,13 +565,21 @@ function hasDuplicateEdge(edges: readonly [number, number][], directed: boolean)
 
 function isConnected(layout: EdgeListLayout): boolean {
   const start = layout.domainMin;
+  const adjacency = new Map<number, number[]>();
+  for (const [left, right] of layout.edges) {
+    const leftNeighbours = adjacency.get(left) || [];
+    leftNeighbours.push(right);
+    adjacency.set(left, leftNeighbours);
+    const rightNeighbours = adjacency.get(right) || [];
+    rightNeighbours.push(left);
+    adjacency.set(right, rightNeighbours);
+  }
   const seen = new Set<number>([start]);
   const pending: number[] = [start];
-  while (pending.length > 0) {
-    const vertex = pending.pop() as number;
-    for (const [left, right] of layout.edges) {
-      const next = left === vertex ? right : right === vertex ? left : undefined;
-      if (next !== undefined && !seen.has(next)) {
+  for (let index = 0; index < pending.length; index++) {
+    const vertex = pending[index];
+    for (const next of adjacency.get(vertex) || []) {
+      if (!seen.has(next)) {
         seen.add(next);
         pending.push(next);
       }
@@ -598,21 +617,30 @@ function hasDirectedCycle(layout: EdgeListLayout): boolean {
     neighbours.push(right);
     adjacency.set(left, neighbours);
   }
-  const visiting = new Set<number>();
-  const visited = new Set<number>();
-  const visit = (vertex: number): boolean => {
-    if (visiting.has(vertex)) return true;
-    if (visited.has(vertex)) return false;
-    visiting.add(vertex);
-    for (const neighbour of adjacency.get(vertex) || []) {
-      if (visit(neighbour)) return true;
-    }
-    visiting.delete(vertex);
-    visited.add(vertex);
-    return false;
-  };
+  const state = new Map<number, 'visiting' | 'visited'>();
   for (let offset = 0; offset < layout.vertexCount; offset++) {
-    if (visit(layout.domainMin + offset)) return true;
+    const start = layout.domainMin + offset;
+    if (state.has(start)) continue;
+    const stack: Array<{ vertex: number; nextIndex: number }> = [{
+      vertex: start,
+      nextIndex: 0,
+    }];
+    state.set(start, 'visiting');
+    while (stack.length > 0) {
+      const current = stack[stack.length - 1];
+      const neighbours = adjacency.get(current.vertex) || [];
+      if (current.nextIndex >= neighbours.length) {
+        state.set(current.vertex, 'visited');
+        stack.pop();
+        continue;
+      }
+      const neighbour = neighbours[current.nextIndex];
+      current.nextIndex += 1;
+      if (state.get(neighbour) === 'visiting') return true;
+      if (state.get(neighbour) === 'visited') continue;
+      state.set(neighbour, 'visiting');
+      stack.push({ vertex: neighbour, nextIndex: 0 });
+    }
   }
   return false;
 }
@@ -1718,14 +1746,16 @@ export function buildConstraintProbes(
       effectiveSeed,
       mutationPosition: mutation.position,
     })).slice(0, 32);
-    probes.push({
+    const probe: ConstraintProbe = {
       id,
       targetId: target.id,
       targetKind: target.kind,
       input: mutation.input,
       ...(target.subtaskId === undefined ? {} : { subtaskId: target.subtaskId }),
       constructionKind: request.constructionKind,
-    });
+    };
+    constraintProbeSources.set(probe, request.source);
+    probes.push(probe);
   }
 
   const seenProbeIds = new Set<string>();

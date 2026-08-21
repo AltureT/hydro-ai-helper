@@ -3586,8 +3586,9 @@ function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, e
         'not-run': 0,
         'infra-gap': 1,
         'timeout-gap': 2,
-        'false-accept': 3,
-        rejected: 4,
+        'not-proven': 3,
+        'false-accept': 4,
+        rejected: 5,
     };
     probes.forEach((probe, index) => {
         const evidence = evidenceByTarget.get(validatorEvidenceKey(probe.targetKind, probe.targetId));
@@ -3669,8 +3670,12 @@ async function runValidatorInvalidProof(input) {
         }
         executions = results.map(classifyValidatorInvalidResult);
     }
-    const probeExecutions = executions.slice(0, build.probes.length);
-    const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, probeExecutions);
+    const proofExecutions = executions.map((execution, index) => (execution === 'false-accept'
+        && invalidInvocations[index]?.probe
+        && (0, constraintProbes_1.getConstraintProbeSource)(invalidInvocations[index].probe) === 'recipe'
+        ? 'not-proven'
+        : execution));
+    const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, proofExecutions.slice(0, build.probes.length));
     const coveredIds = targetEvidence.filter(item => (item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const missingIds = targetEvidence.filter(item => !(item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const summary = {
@@ -3678,13 +3683,13 @@ async function runValidatorInvalidProof(input) {
         casesChecked: input.legalCasesChecked,
         validAccepted: input.validAccepted,
         invalidRejected: executions.filter(item => item === 'rejected').length,
-        invalidAccepted: executions.filter(item => item === 'false-accept').length,
+        invalidAccepted: proofExecutions.filter(item => item === 'false-accept').length,
         coveredConstraintIds: [...new Set(coveredIds)].sort(),
         missingConstraintIds: [...new Set(missingIds)].sort(),
     };
     const manifestComplete = input.blueprint.validatorManifestStatus === 'valid'
         && targetEvidence.every(item => item.declared);
-    const falseAcceptedInvocations = invalidInvocations.filter((_item, index) => executions[index] === 'false-accept');
+    const falseAcceptedInvocations = invalidInvocations.filter((_item, index) => proofExecutions[index] === 'false-accept');
     const policy = applyValidatorProofPolicy({
         reliabilityMode: input.proof.reliabilityMode,
         riskTier: input.proof.pipelineContext.risk.tier,

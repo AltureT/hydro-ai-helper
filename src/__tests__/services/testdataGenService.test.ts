@@ -10706,23 +10706,34 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(JSON.stringify(failure)).not.toContain('4\\n1 1 3 3');
   });
 
-  it('fails enforce when Validator accepts a noncanonical custom recipe probe', async () => {
+  it('records an accepted custom recipe as a not-proven coverage gap in enforce', async () => {
     const blueprint = pairwiseBlueprint();
     const runner = makeValidatorCoverageRunner(
       blueprint, [detail({ stderr: 'PRIVATE_CUSTOM_PROBE_OUTPUT' })],
       undefined, pairwiseFormalInputs,
     );
+    const cache: MaterializationCacheState = {};
 
-    const failure = await materializeWithValidatorProof(
+    const result = await materializeWithValidatorProof(
       blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof('enforce'),
-    ).catch(error => error);
+      undefined, cache,
+    );
 
-    expect(failure).toMatchObject({
-      code: 'VALIDATOR_FALSE_ACCEPT', stage: 'validator', artifact: 'validator',
-      safeDetails: { invalidAccepted: 1, invalidRejected: 0 },
-    });
-    expect(failure.message).not.toContain('PRIVATE_CUSTOM_PROBE_OUTPUT');
-    expect(JSON.stringify(failure.safeDetails)).not.toContain('4\\n10 10 30 40');
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['I_PAIRWISE'],
+    }));
+    expect((cache.validation as unknown as {
+      validatorTargetEvidence: Array<Record<string, unknown>>;
+    }).validatorTargetEvidence).toEqual([expect.objectContaining({
+      targetId: 'I_PAIRWISE', constructed: true, execution: 'not-proven',
+    })]);
+    expect(JSON.stringify({ result, validation: cache.validation }))
+      .not.toContain('PRIVATE_CUSTOM_PROBE_OUTPUT');
+    expect(JSON.stringify({ result, validation: cache.validation }))
+      .not.toContain('4\\n10 10 30 40');
   });
 
   it.each([
@@ -10774,7 +10785,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(JSON.stringify(failure)).not.toContain(sentinel);
   });
 
-  it('keeps scoped custom false accept under SUBTASK_CONSTRAINT_VIOLATION semantics', async () => {
+  it('records a scoped custom recipe accept as a gap while protocol probes still reject', async () => {
     const statement = 'Subtask 1: all values must be pairwise different.';
     const scopedConstraint = {
       id: 'C_PAIRWISE', expression: 'all values must be pairwise different',
@@ -10808,15 +10819,16 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       blueprint, [detail(), rejected, rejected], undefined, pairwiseFormalInputs,
     );
 
-    const failure = await materializeWithValidatorProof(
+    const result = await materializeWithValidatorProof(
       blueprint, tradOpts, statement, runner as never, proof,
-    ).catch(error => error);
+    );
 
-    expect(failure).toMatchObject({
-      code: 'SUBTASK_CONSTRAINT_VIOLATION',
-      stage: 'validator', artifact: 'validator', retryPolicy: 'repair-artifact',
-      safeDetails: { invalidAccepted: 1, invalidRejected: 2 },
-    });
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidAccepted: 0,
+      invalidRejected: 2,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C_PAIRWISE'],
+    }));
     expect(runner.runPythonBatchDetailed.mock.calls[1][1][0]).toEqual({
       stdin: '4\n10 10 30 40\n', argv: ['--subtask', '1'],
     });
@@ -11292,7 +11304,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     },
   );
 
-  it('enforce ordinary false accept is Validator-owned and sanitized', async () => {
+  it('enforce derived false accept stays Validator-owned and sanitized', async () => {
     const statement = 'Every input satisfies 0 <= n <= 10.';
     const proof = makeValidatorCoverageProof(
       statement, { constraints: [globalConstraint] }, 'enforce', 'medium',
