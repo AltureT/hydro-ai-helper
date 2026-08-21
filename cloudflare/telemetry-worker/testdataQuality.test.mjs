@@ -157,7 +157,7 @@ test('problem spec observation migration adds only bounded aggregate columns', a
 
 test('spec consensus migration adds only nullable enum, count, and role columns', async () => {
   const sql = await readFile(
-    new URL('./migrations/0011_testdata_spec_consensus.sql', import.meta.url),
+    new URL('./migrations/0013_testdata_spec_consensus.sql', import.meta.url),
     'utf8',
   );
   for (const column of [

@@ -195,6 +195,14 @@ describe('VerificationSummaryView', () => {
     expect(markup).not.toContain('Would block');
   });
 
+  it('fails closed for legacy verification data without authoritative evidence', () => {
+    const markup = render({ mode: 'sandbox' } as unknown as VerificationSummaryData);
+
+    expect(markup).toContain('Unverified');
+    expect(markup).not.toContain('Verified');
+    expect(markup).not.toContain('Would block');
+  });
+
   it('does not render unrecognized failure details', () => {
     const markup = render({
       verified: false,

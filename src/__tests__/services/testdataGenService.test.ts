@@ -5718,13 +5718,42 @@ describe('TestdataGenService.generate', () => {
       expect((service as any).activeRoleIdentities).toEqual({
         oracle: sharedModel, verifier: sharedModel,
       });
-      expect(observed.verification).toMatchObject({ verified: true, wouldBlock: false });
+      expect(observed.verification).toMatchObject({ verified: false, wouldBlock: false });
       expect(observed.notesStructured.warnings).toContainEqual(
         expect.stringContaining('ORACLE_VERIFIER_IDENTITY_CONFLICT'),
       );
     } finally {
       generateWithSandbox.mockRestore();
     }
+  });
+
+  it('marks a high-tier runtime identity conflict unverified and would-block', () => {
+    const sharedModel = {
+      endpointId: 'shared-final', endpointName: 'shared', modelName: 'same-model',
+    };
+    const plan = {
+      files: [], caseCount: 0, usedModel: 'shared/same-model', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce',
+    });
+    (service as any).activeRoleIdentities = {
+      oracle: sharedModel,
+      verifier: sharedModel,
+    };
+
+    const observed = (service as any).attachProblemSpecObservation(plan, {
+      schemaVersion: 1, results: [], status: 'consensus', conflictCount: 0,
+      unresolvedConflictCount: 0, rolesUsed: ['specPrimary', 'specCritic'],
+      roleIdentities: {}, identityWarningCodes: [], wouldBlock: false,
+    }, {
+      tier: 'high', score: 8, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    });
+
+    expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
   });
 
   it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
