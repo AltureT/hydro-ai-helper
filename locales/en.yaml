@@ -1314,3 +1314,4 @@ ai_helper_testdata_direct_confirmation_required: "Unverified direct generation i
 ai_helper_testdata_direct_confirmation_action: "Confirm unverified direct generation"
 ai_helper_testdata_discrimination_summary: "Discrimination check: {0}/{1} targets killed"
 ai_helper_testdata_discrimination_warning: "Some targets survived or could not be checked; review the generation notes"
+ai_helper_testdata_kill_targets_capped_warning: "The model returned {0} kill targets; the server kept only the first {1}."

@@ -1314,3 +1314,4 @@ ai_helper_testdata_direct_confirmation_required: "此中风险题目只有再次
 ai_helper_testdata_direct_confirmation_action: "确认未经验证的直出生成"
 ai_helper_testdata_discrimination_summary: "区分度验证：已卡住 {0}/{1} 个靶子"
 ai_helper_testdata_discrimination_warning: "仍有靶子未被卡住或未完成验证，请查看生成说明并人工复核"
+ai_helper_testdata_kill_targets_capped_warning: "模型返回了 {0} 个错误解靶子；服务端仅保留前 {1} 个。"

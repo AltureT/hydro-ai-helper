@@ -36,7 +36,9 @@ import {
   buildSandboxBlueprintUserPrompt,
   buildIndependentVerifierSystemPrompt,
   buildIndependentVerifierUserPrompt,
+  buildHackCasesUserPrompt,
   buildKillTargetsUserPrompt,
+  parseKillTargetsResponse,
   parseOracleLanguage,
   parseSubtasksSection,
   parseSandboxBlueprint,
@@ -1576,7 +1578,11 @@ describe('Hydro 沙箱生成蓝图', () => {
       undefined,
       true,
     );
-    expect(response.verification?.sampleCheck).toEqual({ total: 1, passed: 0 });
+    expect(response.verification?.sampleCheck).toEqual({
+      total: 1,
+      passed: 0,
+      skipped: [{ sampleIndex: 1, skippedReason: 'checker-infra-error' }],
+    });
   });
 
   it('可执行 checker 用 testlib 语义回归题面样例，而非纯文本比较', async () => {
@@ -2908,6 +2914,102 @@ describe('TestdataGenService.generate', () => {
     expect(prompt).not.toContain('题面（最多 6000 字符）');
   });
 
+  it('caps five parsed kill-target sections at the first two and records a structured warning', () => {
+    const raw = Array.from({ length: 5 }, (_, index) => [
+      `=== KILL_TARGET:${index % 2 === 0 ? 'boundary' : 'wrong-algorithm'} ===`,
+      `DESC: target-${index + 1}`,
+      '```python',
+      `print(${index + 1})`,
+      '```',
+    ].join('\n')).join('\n');
+    const notesStructured = { warnings: [] as string[], system: [] as string[] };
+
+    const targets = parseKillTargetsResponse(raw, notesStructured);
+
+    expect(targets).toHaveLength(2);
+    expect(targets.map((target: { description: string }) => target.description))
+      .toEqual(['target-1', 'target-2']);
+    expect(notesStructured.warnings).toEqual([
+      '模型返回了 5 个错误解靶子；服务端仅保留前 2 个。',
+    ]);
+  });
+
+  it.each([0, 1, 2])(
+    'keeps %i parsed kill-target sections unchanged without a warning',
+    count => {
+      const raw = Array.from({ length: count }, (_, index) => [
+        '=== KILL_TARGET:boundary ===',
+        `DESC: target-${index + 1}`,
+        '```python',
+        `print(${index + 1})`,
+        '```',
+      ].join('\n')).join('\n');
+      const notesStructured = { warnings: [] as string[], system: [] as string[] };
+
+      const targets = parseKillTargetsResponse(raw, notesStructured);
+
+      expect(targets).toHaveLength(count);
+      expect(targets.map((target: { description: string }) => target.description))
+        .toEqual(Array.from({ length: count }, (_, index) => `target-${index + 1}`));
+      expect(notesStructured.warnings).toEqual([]);
+    },
+  );
+
+  it('marks frozen kill-target sample truncation only when sample content exceeds 1000 chars', () => {
+    const statement = 'Read one integer and print it.';
+    const snapshot = createStatementSnapshot(statement);
+    const context = createTestdataPipelineContext({
+      runId: 'kill-target-truncation',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(statement, { problemKind: 'traditional' }),
+      risk: {
+        tier: 'low', score: 0, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+
+    const overLimit = buildKillTargetsUserPrompt({
+      statement: '', analysis: '', context,
+      samples: [{ input: 'i'.repeat(1001), output: 'o'.repeat(1000) }],
+    });
+    const atLimit = buildKillTargetsUserPrompt({
+      statement: '', analysis: '', context,
+      samples: [{ input: 'i'.repeat(1000), output: 'o'.repeat(1000) }],
+    });
+
+    expect(overLimit).toContain('i'.repeat(1000));
+    expect(overLimit).toContain('（样例过长已截断）');
+    expect(atLimit).not.toContain('（样例过长已截断）');
+  });
+
+  it('marks legacy kill-target and hack analysis only when their existing limits truncate it', () => {
+    const target = {
+      kind: 'wrong-algorithm' as const,
+      description: 'greedy mistake',
+      code: 'print(input())',
+    };
+    const overLimitKillPrompt = buildKillTargetsUserPrompt({
+      statement: 'statement', analysis: 'a'.repeat(2001), samples: [],
+    });
+    const atLimitKillPrompt = buildKillTargetsUserPrompt({
+      statement: 'statement', analysis: 'a'.repeat(2000), samples: [],
+    });
+    const overLimitHackPrompt = buildHackCasesUserPrompt({
+      analysis: 'a'.repeat(3001), target,
+    });
+    const atLimitHackPrompt = buildHackCasesUserPrompt({
+      analysis: 'a'.repeat(3000), target,
+    });
+
+    expect(overLimitKillPrompt).toContain('（分析过长已截断）');
+    expect(atLimitKillPrompt).not.toContain('（分析过长已截断）');
+    expect(overLimitHackPrompt).toContain('（分析过长已截断）');
+    expect(atLimitHackPrompt).not.toContain('（分析过长已截断）');
+  });
+
   it('freezes independently grounded Primary/Critic consensus for downstream use and exposes only its summary', async () => {
     process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = '## Constraints\nn >= 1';
@@ -3647,6 +3749,11 @@ describe('TestdataGenService.generate', () => {
       caseCount: 1,
       languages: [],
     };
+    const checkpointKillTargets = Array.from({ length: 5 }, (_, index) => ({
+      kind: 'boundary' as const,
+      description: `checkpoint target ${index + 1}`,
+      code: `print("wrong")  # checkpoint target ${index + 1}\n`,
+    }));
     const checkpoint = {
       solution: parseSolutionBlueprint(
         makeSolutionBlueprint('traditional'),
@@ -3662,7 +3769,7 @@ describe('TestdataGenService.generate', () => {
         makeIndependentVerifierBlueprint(),
         [],
       ),
-      killTargets: [],
+      killTargets: checkpointKillTargets,
     };
     const mockClient = { chat: jest.fn() };
     const onCheckpoint = jest.fn().mockRejectedValue(new Error('checkpoint store unavailable'));
@@ -3677,7 +3784,9 @@ describe('TestdataGenService.generate', () => {
       runPythonBatch: jest.fn(),
       runPythonBatchDetailed: jest.fn().mockImplementation(
         (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
-          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+          code.includes('sys.exit(0)')
+            ? detail()
+            : detail({ stdout: code.includes('checkpoint target') ? 'wrong\n' : input }))),
       ),
     };
 
@@ -3697,11 +3806,18 @@ describe('TestdataGenService.generate', () => {
       solution: checkpoint.solution,
       artifacts: checkpoint.artifacts,
       verifier: checkpoint.verifier,
-      killTargets: [],
+      killTargets: checkpointKillTargets.slice(0, 2),
     }));
     expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+    expect(plan.verification?.discrimination?.targets
+      .filter(target => target.description.startsWith('checkpoint target'))
+      .map(target => target.description))
+      .toEqual(['checkpoint target 1', 'checkpoint target 2']);
+    expect(plan.notesStructured?.warnings).toContain(
+      '模型返回了 5 个错误解靶子；服务端仅保留前 2 个。',
+    );
   });
 
   it('checkpoint v2 在 frozen Spec 与依赖 hash 一致时正确恢复', async () => {
@@ -7669,6 +7785,76 @@ describe('TestdataGenService.generate', () => {
         compiled: true,
         executed: true,
         infraFailures: expect.any(Number),
+        failureKind: 'infra',
+      },
+    });
+    expect(plan.verification?.checkerCheck?.infraFailures).toBeGreaterThan(0);
+  });
+
+  it('records which statement sample was skipped when a ready checker has an infra error', async () => {
+    const statement = [
+      '```input1', '1', '```', '```output1', '1', '```',
+      '```input2', '2', '```', '```output2', '2', '```',
+      '```input3', '3', '```', '```output3', '3', '```',
+    ].join('\n');
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV3Checkpoint(statement, {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    }, 'traditional', true);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: 'accepted sample 1' }),
+        detail({
+          accepted: false,
+          timedOut: false,
+          status: 'Internal Error',
+          exitStatus: undefined,
+          error: 'checker transport failed',
+        }),
+        detail({ stdout: 'accepted sample 3' }),
+      ]),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))
+      )),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(statement, 'traditional', true),
+    }).generate({
+      problemTitle: 'checker samples',
+      statementMarkdown: statement,
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint,
+    });
+
+    expect(plan.verification).toMatchObject({
+      verified: false,
+      wouldBlock: true,
+      sampleCheck: {
+        total: 3,
+        passed: 2,
+        skipped: [{ sampleIndex: 2, skippedReason: 'checker-infra-error' }],
+      },
+      checkerCheck: {
         failureKind: 'infra',
       },
     });

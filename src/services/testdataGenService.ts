@@ -336,6 +336,8 @@ export interface ParseIndependentVerifierOptions {
 
 export type KillTargetKind = 'boundary' | 'wrong-algorithm' | 'overflow-sim';
 
+const MAX_KILL_TARGETS = 2;
+
 export interface KillTarget {
   kind: KillTargetKind;
   /** AI 对该错误解错误方式的一句话描述（面向教师展示）。 */
@@ -404,7 +406,15 @@ export interface PlanVerification {
   wouldBlock: boolean;
   /** 首选模型自动修复后仍失败，整条管线从下一配置模型重新运行并成功。 */
   modelEscalation?: { fromModel: string; toModel: string };
-  sampleCheck?: { total: number; passed: number };
+  sampleCheck?: {
+    total: number;
+    passed: number;
+    skipped?: Array<{
+      /** 题面样例序号，从 1 开始。 */
+      sampleIndex: number;
+      skippedReason: 'checker-infra-error';
+    }>;
+  };
   bruteCheck?: { compared: number; agreed: number; skippedTimeout: number[]; disagreed: number[] };
   /** 独立 BRUTE 在内部小数据集上的强制对拍；压力阶段不允许超时跳过。 */
   stressCheck?: {
@@ -2127,6 +2137,17 @@ DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\``;
 }
 
+function truncatePromptText(value: string, limit: number, marker: string): string {
+  const excerpt = value.slice(0, limit);
+  return value.length > limit ? `${excerpt}${marker}` : excerpt;
+}
+
+function stringifySamplePromptText(value: string): string {
+  const limit = 1000;
+  const excerpt = value.slice(0, limit);
+  return `${JSON.stringify(excerpt)}${value.length > limit ? '（样例过长已截断）' : ''}`;
+}
+
 export function buildKillTargetsUserPrompt(input: {
   statement: string;
   analysis: string;
@@ -2144,8 +2165,8 @@ export function buildKillTargetsUserPrompt(input: {
       '【公开题面样例（最多 3 组，错误解必须全部通过）】',
       ...(samples.length > 0
         ? samples.flatMap((sample, index) => [
-          `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
-          `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+          `样例 ${index + 1} 输入：${stringifySamplePromptText(comparableFileContent(sample.input))}`,
+          `样例 ${index + 1} 输出：${stringifySamplePromptText(comparableFileContent(sample.output))}`,
         ])
         : ['题面未解析到公开样例。']),
       '',
@@ -2154,7 +2175,7 @@ export function buildKillTargetsUserPrompt(input: {
     ].join('\n');
   }
   const statement = completeStatementForGenerationPrompt(input.statement);
-  const analysis = input.analysis.slice(0, 2000);
+  const analysis = truncatePromptText(input.analysis, 2000, '（分析过长已截断）');
   const samples = input.samples.slice(0, 3);
   return [
     '【既有解法分析】',
@@ -2166,8 +2187,8 @@ export function buildKillTargetsUserPrompt(input: {
     '【题面样例（最多 3 组，错误解必须全部通过）】',
     ...(samples.length > 0
       ? samples.flatMap((sample, index) => [
-        `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
-        `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+        `样例 ${index + 1} 输入：${stringifySamplePromptText(comparableFileContent(sample.input))}`,
+        `样例 ${index + 1} 输出：${stringifySamplePromptText(comparableFileContent(sample.output))}`,
       ])
       : ['题面未解析到样例。']),
     '',
@@ -2240,7 +2261,8 @@ export function buildHackCasesUserPrompt(input: {
   }
   return [
     '【既有解法与 stdin 编码分析】',
-    input.analysis.slice(0, 3000) || '未提供额外分析，请依据错误模式构造合法小规模输入。',
+    truncatePromptText(input.analysis, 3000, '（分析过长已截断）')
+      || '未提供额外分析，请依据错误模式构造合法小规模输入。',
     '',
     '【幸存错误模式】',
     input.target.description,
@@ -2660,8 +2682,24 @@ function assertSelectedTemplateSolutions(
   }
 }
 
+function capKillTargets(
+  targets: KillTarget[],
+  notesStructured?: Pick<StructuredGenerationNotes, 'warnings'>,
+): KillTarget[] {
+  if (targets.length > MAX_KILL_TARGETS) {
+    const warning = `模型返回了 ${targets.length} 个错误解靶子；服务端仅保留前 ${MAX_KILL_TARGETS} 个。`;
+    if (notesStructured && !notesStructured.warnings.includes(warning)) {
+      notesStructured.warnings.push(warning);
+    }
+  }
+  return targets.slice(0, MAX_KILL_TARGETS);
+}
+
 /** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
-export function parseKillTargetsResponse(raw: string): KillTarget[] {
+export function parseKillTargetsResponse(
+  raw: string,
+  notesStructured?: Pick<StructuredGenerationNotes, 'warnings'>,
+): KillTarget[] {
   const allowedKinds = new Set<KillTargetKind>(['boundary', 'wrong-algorithm', 'overflow-sim']);
   const markerRe = /^\s*===\s*KILL_TARGET:([a-z-]+)\s*===\s*$/i;
   const sections: Array<{ kind: string; lines: string[] }> = [];
@@ -2678,7 +2716,7 @@ export function parseKillTargetsResponse(raw: string): KillTarget[] {
     }
   }
 
-  return sections.flatMap(section => {
+  const targets = sections.flatMap(section => {
     if (!allowedKinds.has(section.kind as KillTargetKind)) return [];
     const content = section.lines.join('\n');
     const description = section.lines
@@ -2699,6 +2737,7 @@ export function parseKillTargetsResponse(raw: string): KillTarget[] {
       code: normalizeExecutableContent(rawCode),
     }];
   });
+  return capKillTargets(targets, notesStructured);
 }
 
 /** 解析定向补刀候选；单节损坏、空输入或超过 2000 字符时直接丢弃。 */
@@ -5912,11 +5951,17 @@ export async function materializeSandboxBlueprint(
       || { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
   };
   if (blueprint.problemType === 'traditional' || samples.length > 0) {
+    const skippedSamples = sampleCheckerVerdicts?.flatMap((verdict, index) => (
+      verdict === 'infra-error'
+        ? [{ sampleIndex: index + 1, skippedReason: 'checker-infra-error' as const }]
+        : []
+    )) ?? [];
     verification.sampleCheck = {
       total: samples.length,
       passed: customChecker
         ? (sampleCheckerVerdicts?.filter(verdict => verdict === 'accept').length ?? 0)
         : samples.length,
+      ...(skippedSamples.length > 0 ? { skipped: skippedSamples } : {}),
     };
   }
   if (bruteCheck) verification.bruteCheck = bruteCheck;
@@ -8621,7 +8666,7 @@ export class TestdataGenService {
     samples: SampleIO[];
     signal?: AbortSignal;
     context?: TestdataPipelineContext;
-  }, results?: ChatResult[]): Promise<KillTarget[]> {
+  }, results?: ChatResult[], warnings?: string[]): Promise<KillTarget[]> {
     // Optional discrimination calls share the configured verifier client but are not
     // the Independent Verifier artifact dependency. Do not let them relabel a restored
     // verifier checkpoint with an unrelated fresh model hash.
@@ -8635,7 +8680,7 @@ export class TestdataGenService {
       },
     );
     results?.push(result);
-    return parseKillTargetsResponse(result.content);
+    return parseKillTargetsResponse(result.content, warnings ? { warnings } : undefined);
   }
 
   private async generateHackCandidates(
@@ -9175,20 +9220,24 @@ export class TestdataGenService {
       context,
     );
     const optionalDiscriminationResults: ChatResult[] = [];
+    const killTargetWarnings: string[] = [];
+    const restoredKillTargets = Array.isArray(checkpoint?.killTargets)
+      ? capKillTargets(checkpoint.killTargets, { warnings: killTargetWarnings })
+      : undefined;
     // 并发完成顺序不可作为因果顺序：两个必需阶段各自持有稳定的失败上下文，
     // 成功后再按“外围制品 → 独立验证器”的固定顺序合并；可选补刀模型单独归档。
     const artifactsResults: ChatResult[] = [...results];
     const verifierResults: ChatResult[] = [...results];
     const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
-      Array.isArray(checkpoint?.killTargets)
-        ? Promise.resolve(checkpoint.killTargets)
+      restoredKillTargets
+        ? Promise.resolve(restoredKillTargets)
         : this.generateKillTargets({
           statement: context ? '' : params.statementMarkdown,
           analysis: context ? '' : solution.analysis || '',
           samples: killTargetSamples,
           signal: params.signal,
           context,
-        }, optionalDiscriminationResults)
+        }, optionalDiscriminationResults, killTargetWarnings)
           .then(targets => {
             void this.emitCheckpoint(params, { killTargets: targets });
             return targets;
@@ -9704,6 +9753,15 @@ export class TestdataGenService {
       context,
       tieredDecision,
     );
+    for (const warning of killTargetWarnings) {
+      response.notes = [response.notes, warning].filter(Boolean).join('\n');
+      if (!response.notesStructured) {
+        response.notesStructured = { warnings: [], system: [] };
+      }
+      if (!response.notesStructured.warnings.includes(warning)) {
+        response.notesStructured.warnings.push(warning);
+      }
+    }
     appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
     if (customChecker && this.reliabilityMode === 'enforce') {
       const check = checkerExecutor.check;

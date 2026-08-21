@@ -125,6 +125,7 @@ function comparableFileContent(content) {
         .trimEnd();
 }
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
+const MAX_KILL_TARGETS = 2;
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
     MIN_CASES: 1,
@@ -1499,6 +1500,15 @@ DESC: 一句话说明该错误解会在哪类输入上出错
 完整 Python 3 程序
 \`\`\``;
 }
+function truncatePromptText(value, limit, marker) {
+    const excerpt = value.slice(0, limit);
+    return value.length > limit ? `${excerpt}${marker}` : excerpt;
+}
+function stringifySamplePromptText(value) {
+    const limit = 1000;
+    const excerpt = value.slice(0, limit);
+    return `${JSON.stringify(excerpt)}${value.length > limit ? '（样例过长已截断）' : ''}`;
+}
 function buildKillTargetsUserPrompt(input) {
     if (input.context) {
         const samples = input.samples.slice(0, 3);
@@ -1510,8 +1520,8 @@ function buildKillTargetsUserPrompt(input) {
             '【公开题面样例（最多 3 组，错误解必须全部通过）】',
             ...(samples.length > 0
                 ? samples.flatMap((sample, index) => [
-                    `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
-                    `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+                    `样例 ${index + 1} 输入：${stringifySamplePromptText(comparableFileContent(sample.input))}`,
+                    `样例 ${index + 1} 输出：${stringifySamplePromptText(comparableFileContent(sample.output))}`,
                 ])
                 : ['题面未解析到公开样例。']),
             '',
@@ -1520,7 +1530,7 @@ function buildKillTargetsUserPrompt(input) {
         ].join('\n');
     }
     const statement = completeStatementForGenerationPrompt(input.statement);
-    const analysis = input.analysis.slice(0, 2000);
+    const analysis = truncatePromptText(input.analysis, 2000, '（分析过长已截断）');
     const samples = input.samples.slice(0, 3);
     return [
         '【既有解法分析】',
@@ -1532,8 +1542,8 @@ function buildKillTargetsUserPrompt(input) {
         '【题面样例（最多 3 组，错误解必须全部通过）】',
         ...(samples.length > 0
             ? samples.flatMap((sample, index) => [
-                `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
-                `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+                `样例 ${index + 1} 输入：${stringifySamplePromptText(comparableFileContent(sample.input))}`,
+                `样例 ${index + 1} 输出：${stringifySamplePromptText(comparableFileContent(sample.output))}`,
             ])
             : ['题面未解析到样例。']),
         '',
@@ -1593,7 +1603,8 @@ function buildHackCasesUserPrompt(input) {
     }
     return [
         '【既有解法与 stdin 编码分析】',
-        input.analysis.slice(0, 3000) || '未提供额外分析，请依据错误模式构造合法小规模输入。',
+        truncatePromptText(input.analysis, 3000, '（分析过长已截断）')
+            || '未提供额外分析，请依据错误模式构造合法小规模输入。',
         '',
         '【幸存错误模式】',
         input.target.description,
@@ -1925,8 +1936,17 @@ function assertSelectedTemplateSolutions(problemType, solutions, options, owner)
         throw new Error(`${owner}未返回已选语言的 SOLUTION：${missing.join('、')}`);
     }
 }
+function capKillTargets(targets, notesStructured) {
+    if (targets.length > MAX_KILL_TARGETS) {
+        const warning = `模型返回了 ${targets.length} 个错误解靶子；服务端仅保留前 ${MAX_KILL_TARGETS} 个。`;
+        if (notesStructured && !notesStructured.warnings.includes(warning)) {
+            notesStructured.warnings.push(warning);
+        }
+    }
+    return targets.slice(0, MAX_KILL_TARGETS);
+}
 /** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
-function parseKillTargetsResponse(raw) {
+function parseKillTargetsResponse(raw, notesStructured) {
     const allowedKinds = new Set(['boundary', 'wrong-algorithm', 'overflow-sim']);
     const markerRe = /^\s*===\s*KILL_TARGET:([a-z-]+)\s*===\s*$/i;
     const sections = [];
@@ -1942,7 +1962,7 @@ function parseKillTargetsResponse(raw) {
             current.lines.push(line);
         }
     }
-    return sections.flatMap(section => {
+    const targets = sections.flatMap(section => {
         if (!allowedKinds.has(section.kind))
             return [];
         const content = section.lines.join('\n');
@@ -1964,6 +1984,7 @@ function parseKillTargetsResponse(raw) {
                 code: normalizeExecutableContent(rawCode),
             }];
     });
+    return capKillTargets(targets, notesStructured);
 }
 /** 解析定向补刀候选；单节损坏、空输入或超过 2000 字符时直接丢弃。 */
 function parseHackCasesResponse(raw) {
@@ -4583,11 +4604,15 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 || { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
         };
         if (blueprint.problemType === 'traditional' || samples.length > 0) {
+            const skippedSamples = sampleCheckerVerdicts?.flatMap((verdict, index) => (verdict === 'infra-error'
+                ? [{ sampleIndex: index + 1, skippedReason: 'checker-infra-error' }]
+                : [])) ?? [];
             verification.sampleCheck = {
                 total: samples.length,
                 passed: customChecker
                     ? (sampleCheckerVerdicts?.filter(verdict => verdict === 'accept').length ?? 0)
                     : samples.length,
+                ...(skippedSamples.length > 0 ? { skipped: skippedSamples } : {}),
             };
         }
         if (bruteCheck)
@@ -6655,7 +6680,7 @@ class TestdataGenService {
             };
         }
     }
-    async generateKillTargets(input, results) {
+    async generateKillTargets(input, results, warnings) {
         // Optional discrimination calls share the configured verifier client but are not
         // the Independent Verifier artifact dependency. Do not let them relabel a restored
         // verifier checkpoint with an unrelated fresh model hash.
@@ -6665,7 +6690,7 @@ class TestdataGenService {
             timeoutMs: KILL_TARGET_AI_TIMEOUT_MS,
         });
         results?.push(result);
-        return parseKillTargetsResponse(result.content);
+        return parseKillTargetsResponse(result.content, warnings ? { warnings } : undefined);
     }
     async generateHackCandidates(params, analysis, target, timeoutMs, signal, results, context) {
         const verifierClient = this.clientForRole('verifier', false);
@@ -7090,20 +7115,24 @@ class TestdataGenService {
             report('artifacts', 36);
             const killTargetSamples = buildKillTargetPromptSamples(solution, expectedFunctionSamples, context);
             const optionalDiscriminationResults = [];
+            const killTargetWarnings = [];
+            const restoredKillTargets = Array.isArray(checkpoint?.killTargets)
+                ? capKillTargets(checkpoint.killTargets, { warnings: killTargetWarnings })
+                : undefined;
             // 并发完成顺序不可作为因果顺序：两个必需阶段各自持有稳定的失败上下文，
             // 成功后再按“外围制品 → 独立验证器”的固定顺序合并；可选补刀模型单独归档。
             const artifactsResults = [...results];
             const verifierResults = [...results];
             const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
-                Array.isArray(checkpoint?.killTargets)
-                    ? Promise.resolve(checkpoint.killTargets)
+                restoredKillTargets
+                    ? Promise.resolve(restoredKillTargets)
                     : this.generateKillTargets({
                         statement: context ? '' : params.statementMarkdown,
                         analysis: context ? '' : solution.analysis || '',
                         samples: killTargetSamples,
                         signal: params.signal,
                         context,
-                    }, optionalDiscriminationResults)
+                    }, optionalDiscriminationResults, killTargetWarnings)
                         .then(targets => {
                         void this.emitCheckpoint(params, { killTargets: targets });
                         return targets;
@@ -7468,6 +7497,15 @@ class TestdataGenService {
             const initialCaseCount = response.cases.length;
             response.discriminationInitialCaseCount = initialCaseCount;
             response = await this.repairSurvivingKillTargets(params, blueprint, response, response.discriminationKillTargets || [], runner, optionalDiscriminationResults, checkerExecutor, context, tieredDecision);
+            for (const warning of killTargetWarnings) {
+                response.notes = [response.notes, warning].filter(Boolean).join('\n');
+                if (!response.notesStructured) {
+                    response.notesStructured = { warnings: [], system: [] };
+                }
+                if (!response.notesStructured.warnings.includes(warning)) {
+                    response.notesStructured.warnings.push(warning);
+                }
+            }
             appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
             if (customChecker && this.reliabilityMode === 'enforce') {
                 const check = checkerExecutor.check;
