@@ -7381,6 +7381,8 @@ export interface GenerateTestdataParams {
   existingConfig?: string;
   /** testlib checker 配置与读取制品的显式状态。 */
   checkerArtifacts?: TestlibCheckerArtifacts;
+  /** 已经 handler 权限过滤，仅限本次请求内 mutation 评估的历史错误源码。 */
+  historicalMutationCandidates?: import('./testdata/mutation').HistoricalMutationCandidate[];
   /** 服务端规则引擎的填空题初判信号 */
   fillInDetected?: boolean;
   signal?: AbortSignal;

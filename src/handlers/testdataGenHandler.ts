@@ -11,8 +11,9 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 
-import { Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
+import { ContestModel, Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
+import { createHash } from 'crypto';
 import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import { createTestdataRoleClientsFromConfig } from '../services/testdata/modelRoles';
@@ -89,6 +90,11 @@ import {
   type TestdataTeacherOutcomeReason,
 } from '../services/testdata/runTelemetry';
 import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../services/testdata/pipelineContext';
+import {
+  MAX_HISTORICAL_MUTATION_CANDIDATES,
+  normalizeMutationLanguage,
+  type HistoricalMutationCandidate,
+} from '../services/testdata/mutation';
 
 export const TestdataGenHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
@@ -189,6 +195,11 @@ interface AcceptedStdCandidate {
 
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
 const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
+const HISTORICAL_MUTATION_RECORD_LANGUAGES = [
+  ...PYTHON3_RECORD_LANGUAGES,
+  'cc', 'cc.cc17', 'cpp', 'cpp17', 'c++17',
+];
+const HISTORICAL_MUTATION_RECORD_LIMIT = 64;
 
 function canReadAllRecordCodes(handler: Handler): boolean {
   const user = handler.user;
@@ -199,6 +210,102 @@ function canReadAllRecordCodes(handler: Handler): boolean {
     && PERM.PERM_READ_RECORD_CODE !== undefined
     && user.hasPerm(PERM.PERM_READ_RECORD_CODE);
   return hasPriv || hasPerm;
+}
+
+interface HistoricalMutationRecordLite {
+  _id: ObjectIdType;
+  domainId?: string;
+  pid?: string | number;
+  status: number;
+  lang: string;
+  code: string;
+  contest?: unknown;
+}
+
+function historicalExpectedStatus(
+  status: number,
+): HistoricalMutationCandidate['expectedStatus'] | undefined {
+  if (status === STATUS.STATUS_WRONG_ANSWER) return 'wrong-answer';
+  if (status === STATUS.STATUS_RUNTIME_ERROR) return 'runtime-error';
+  if (status === STATUS.STATUS_TIME_LIMIT_EXCEEDED) return 'time-limit';
+  return undefined;
+}
+
+/**
+ * 读取历史错误提交作为请求内 mutation 候选。缺少独立源码读取权限或任一查询不确定时
+ * 均 fail closed；候选不会携带记录 ID、digest 或竞赛元数据。
+ */
+export async function loadHistoricalMutationCandidates(
+  handler: Handler,
+  domainId: string,
+  problemDocId: number,
+): Promise<HistoricalMutationCandidate[]> {
+  if (!canReadAllRecordCodes(handler)) return [];
+
+  let records: HistoricalMutationRecordLite[];
+  try {
+    records = await db.collection<HistoricalMutationRecordLite>('record')
+      .find({
+        domainId,
+        pid: problemDocId,
+        status: { $in: [
+          STATUS.STATUS_WRONG_ANSWER,
+          STATUS.STATUS_RUNTIME_ERROR,
+          STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+        ] },
+        lang: { $in: HISTORICAL_MUTATION_RECORD_LANGUAGES },
+        code: { $type: 'string', $ne: '' },
+      }, {
+        projection: { _id: 1, status: 1, lang: 1, code: 1, contest: 1 },
+      })
+      .sort({ _id: -1 })
+      .limit(HISTORICAL_MUTATION_RECORD_LIMIT)
+      .toArray();
+  } catch {
+    return [];
+  }
+
+  const contestDone = new Map<string, boolean>();
+  const isEligibleContest = async (contest: unknown): Promise<boolean> => {
+    if (contest === undefined || contest === null) return true;
+    const key = String(contest);
+    const cached = contestDone.get(key);
+    if (cached !== undefined) return cached;
+    try {
+      const tdoc = await ContestModel.get(domainId, contest);
+      const done = !!tdoc && ContestModel.isDone(tdoc);
+      contestDone.set(key, done);
+      return done;
+    } catch {
+      contestDone.set(key, false);
+      return false;
+    }
+  };
+
+  const seenSourceDigests = new Set<string>();
+  const candidates: HistoricalMutationCandidate[] = [];
+  for (const record of records) {
+    if ((record.domainId !== undefined && record.domainId !== domainId)
+      || (record.pid !== undefined && String(record.pid) !== String(problemDocId))) continue;
+    const expectedStatus = historicalExpectedStatus(record.status);
+    const language = typeof record.lang === 'string'
+      ? normalizeMutationLanguage(record.lang)
+      : undefined;
+    const source = typeof record.code === 'string' ? record.code.trim() : '';
+    if (!expectedStatus
+      || !language
+      || !source
+      || source.startsWith('@@hydro_submission_file@@')
+      || source.length > TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD
+      || !(await isEligibleContest(record.contest))) continue;
+
+    const digest = createHash('sha256').update(source).digest('hex');
+    if (seenSourceDigests.has(digest)) continue;
+    seenSourceDigests.add(digest);
+    candidates.push({ language, source, expectedStatus });
+    if (candidates.length >= MAX_HISTORICAL_MUTATION_CANDIDATES) break;
+  }
+  return candidates;
 }
 
 function acceptedStdRecordQuery(
@@ -757,13 +864,14 @@ interface BackgroundGenerationParams {
   checkpoint?: TestdataGenerationCheckpoint;
   checkpointHashes: TestdataCheckpointHashes;
   checkerArtifacts?: TestlibCheckerArtifacts;
+  historicalMutationCandidates: HistoricalMutationCandidate[];
   translate: (key: string) => string;
 }
 
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    checkpoint, checkpointHashes, checkerArtifacts, translate,
+    checkpoint, checkpointHashes, checkerArtifacts, historicalMutationCandidates, translate,
   } = params;
   const jobId = String(job._id);
   const generationMode = getTestdataGenerationMode();
@@ -867,6 +975,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       existingFiles,
       existingConfig: pdoc.config,
       checkerArtifacts,
+      historicalMutationCandidates,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
       checkpoint,
@@ -1026,6 +1135,11 @@ export class TestdataGenGenerateHandler extends Handler {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
       }
+      const historicalMutationCandidates = await loadHistoricalMutationCandidates(
+        this,
+        domainId,
+        pdoc.docId,
+      );
 
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
 
@@ -1104,6 +1218,7 @@ export class TestdataGenGenerateHandler extends Handler {
         existingFiles,
         existingConfig: pdoc.config,
         checkerArtifacts,
+        historicalMutationCandidates,
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
         onProgress: progress => {
@@ -1296,6 +1411,11 @@ export class TestdataGenJobStartHandler extends Handler {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
       }
+      const historicalMutationCandidates = await loadHistoricalMutationCandidates(
+        this,
+        domainId,
+        pdoc.docId,
+      );
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
@@ -1412,6 +1532,7 @@ export class TestdataGenJobStartHandler extends Handler {
           checkpoint,
           checkpointHashes,
           checkerArtifacts,
+          historicalMutationCandidates,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {
           console.error('[TestdataGenJob] unhandled background failure:', err);
