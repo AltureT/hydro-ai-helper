@@ -188,6 +188,15 @@ export interface TestdataQualityResponse {
     infra_failure?: TestdataQualityRate;
     infra_failures?: number;
   };
+  mutation?: {
+    runs: number;
+    generated: number;
+    historical: number;
+    viable: number;
+    killed: number;
+    survived: number;
+    average_score: number | null;
+  };
   stress?: Partial<Record<
     'generated' | 'valid' | 'dropped_invalid' | 'unique' | 'compared' | 'agreed',
     number

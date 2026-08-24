@@ -15,6 +15,11 @@ import {
   type TestdataRetryPolicy,
 } from './failures';
 import type { TestdataReliabilityMode, TestdataRiskTier } from './risk';
+import {
+  MUTATION_OPERATOR_IDS,
+  type MutationGateMode,
+  type MutationOperatorId,
+} from './mutation';
 import type {
   SpecConsensusRole,
   SpecConsensusStatus,
@@ -145,6 +150,16 @@ export interface TestdataQualityEvent {
   checkerInfraFailures?: number;
   checkerFailureKind?: 'unavailable' | 'compile' | 'infra' | 'budget' | 'reject';
 
+  mutationGate?: MutationGateMode;
+  mutationStatus?: 'completed' | 'partial' | 'skipped';
+  mutationGenerated?: number;
+  mutationHistorical?: number;
+  mutationViable?: number;
+  mutationKilled?: number;
+  mutationSurvived?: number;
+  mutationScore?: number;
+  mutationOperators?: Array<{ id: MutationOperatorId; viable: number; killed: number }>;
+
   modelRole?: 'primary' | 'fallback';
   modelIdentityHash?: string;
 
@@ -225,6 +240,7 @@ interface TestdataPlanLike {
       infraFailures?: number;
       failureKind?: string;
     };
+    mutation?: unknown;
   };
 }
 
@@ -274,6 +290,13 @@ const CHANGED_FILE_KINDS = new Set<TestdataChangedFileKind>([
 const TEMPLATE_LANGUAGES = new Set(['py', 'java', 'cc']);
 const TEMPLATE_FAILURE_KINDS = new Set(['compile', 'runtime', 'budget', 'mismatch', 'checker-infra']);
 const CHECKER_FAILURE_KINDS = new Set(['unavailable', 'compile', 'infra', 'budget', 'reject']);
+const MUTATION_GATES = new Set(['off', 'observe', 'enforce']);
+const MUTATION_STATUSES = new Set(['completed', 'partial', 'skipped']);
+const MUTATION_SKIP_REASONS = new Set([
+  'gate-off', 'sandbox-unavailable', 'unsupported-source', 'no-candidates',
+  'no-viable-candidates', 'checker-infra', 'sandbox-infra', 'budget-exhausted',
+]);
+const MUTATION_OPERATORS = new Set<string>(MUTATION_OPERATOR_IDS);
 const GENERATION_MODES = new Set(['direct', 'sandbox']);
 const RELIABILITY_MODES = new Set(['legacy', 'observe', 'enforce']);
 const RISK_TIERS = new Set(['low', 'medium', 'high', 'blocked']);
@@ -296,7 +319,7 @@ const PROGRESS_STAGES = [
   'preparing', 'sandbox_check', 'blueprint', 'blueprint_repair', 'solution_verification',
   'artifacts', 'templates', 'independent_verifier', 'verifier_repair', 'generating_inputs',
   'validating_inputs', 'running_oracle', 'checking_templates', 'stress_testing',
-  'discrimination_testing', 'pipeline_repair', 'model_fallback', 'model_escalation',
+  'discrimination_testing', 'mutation_testing', 'pipeline_repair', 'model_fallback', 'model_escalation',
   'assembling', 'complete', 'apply', 'semantic_fallback',
 ] as const;
 const QUALITY_STAGES = new Set<string>([...PROGRESS_STAGES, ...TESTDATA_FAILURE_STAGES]);
@@ -305,6 +328,132 @@ const MODEL_ROLES = new Set(['primary', 'fallback']);
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+
+const MUTATION_SUMMARY_FIELDS = new Set([
+  'mode', 'status', 'generated', 'historical', 'viable', 'killed', 'survived',
+  'score', 'operators', 'skippedReason',
+]);
+const MUTATION_EVENT_FIELDS: Array<keyof TestdataQualityEvent> = [
+  'mutationGate', 'mutationStatus', 'mutationGenerated', 'mutationHistorical',
+  'mutationViable', 'mutationKilled', 'mutationSurvived', 'mutationScore',
+  'mutationOperators',
+];
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeMutationSummary(
+  value: unknown,
+  validateRawShape: boolean,
+): {
+  mode: MutationGateMode;
+  status: 'completed' | 'partial' | 'skipped';
+  generated: number;
+  historical: number;
+  viable: number;
+  killed: number;
+  survived: number;
+  score?: number;
+  operators: Array<{ id: MutationOperatorId; viable: number; killed: number }>;
+} | undefined {
+  if (!isPlainRecord(value)) return undefined;
+  if (validateRawShape) {
+    if (Object.keys(value).some(key => !MUTATION_SUMMARY_FIELDS.has(key))) return undefined;
+    if (value.status === 'completed') {
+      if (value.skippedReason !== undefined) return undefined;
+    } else if (typeof value.skippedReason !== 'string'
+      || !MUTATION_SKIP_REASONS.has(value.skippedReason)) return undefined;
+  }
+  if (typeof value.mode !== 'string' || !MUTATION_GATES.has(value.mode)
+    || typeof value.status !== 'string' || !MUTATION_STATUSES.has(value.status)) return undefined;
+
+  const counts = [value.generated, value.historical, value.viable, value.killed, value.survived];
+  if (counts.some(count => !Number.isSafeInteger(count) || (count as number) < 0
+    || (count as number) > 20)) return undefined;
+  const [generated, historical, viable, killed, survived] = counts as number[];
+  if (generated + historical > 20 || viable > generated + historical
+    || killed + survived !== viable) return undefined;
+
+  if (!Array.isArray(value.operators) || value.operators.length > MUTATION_OPERATOR_IDS.length) {
+    return undefined;
+  }
+  const operators: Array<{ id: MutationOperatorId; viable: number; killed: number }> = [];
+  const ids = new Set<string>();
+  for (const item of value.operators) {
+    if (!isPlainRecord(item)
+      || Object.keys(item).some(key => !['id', 'viable', 'killed'].includes(key))
+      || Object.keys(item).length !== 3
+      || typeof item.id !== 'string' || !MUTATION_OPERATORS.has(item.id) || ids.has(item.id)
+      || !Number.isSafeInteger(item.viable) || (item.viable as number) < 0
+      || (item.viable as number) > 20
+      || !Number.isSafeInteger(item.killed) || (item.killed as number) < 0
+      || (item.killed as number) > (item.viable as number)) return undefined;
+    ids.add(item.id);
+    operators.push({
+      id: item.id as MutationOperatorId,
+      viable: item.viable as number,
+      killed: item.killed as number,
+    });
+  }
+  if (operators.reduce((sum, item) => sum + item.viable, 0) !== viable
+    || operators.reduce((sum, item) => sum + item.killed, 0) !== killed) return undefined;
+
+  if (viable === 0) {
+    if (value.score !== undefined) return undefined;
+  } else if (typeof value.score !== 'number' || !Number.isFinite(value.score)
+    || Math.abs(value.score - killed / viable) > Number.EPSILON) return undefined;
+
+  return {
+    mode: value.mode as MutationGateMode,
+    status: value.status as 'completed' | 'partial' | 'skipped',
+    generated,
+    historical,
+    viable,
+    killed,
+    survived,
+    ...(viable > 0 ? { score: value.score as number } : {}),
+    operators,
+  };
+}
+
+function mutationEventFields(value: unknown): Partial<TestdataQualityEvent> {
+  const summary = normalizeMutationSummary(value, true);
+  if (!summary) return {};
+  return {
+    mutationGate: summary.mode,
+    mutationStatus: summary.status,
+    mutationGenerated: summary.generated,
+    mutationHistorical: summary.historical,
+    mutationViable: summary.viable,
+    mutationKilled: summary.killed,
+    mutationSurvived: summary.survived,
+    mutationScore: summary.score,
+    mutationOperators: summary.operators,
+  };
+}
+
+function assertMutationEventFields(candidate: Record<string, unknown>): void {
+  const present = MUTATION_EVENT_FIELDS.filter(field => candidate[field] !== undefined);
+  if (present.length === 0) return;
+  const required = MUTATION_EVENT_FIELDS.filter(field => field !== 'mutationScore');
+  if (candidate.eventType !== 'run_completed'
+    || required.some(field => candidate[field] === undefined)) {
+    throw new TypeError('Invalid mutation telemetry observation');
+  }
+  const normalized = normalizeMutationSummary({
+    mode: candidate.mutationGate,
+    status: candidate.mutationStatus,
+    generated: candidate.mutationGenerated,
+    historical: candidate.mutationHistorical,
+    viable: candidate.mutationViable,
+    killed: candidate.mutationKilled,
+    survived: candidate.mutationSurvived,
+    score: candidate.mutationScore,
+    operators: candidate.mutationOperators,
+  }, false);
+  if (!normalized) throw new TypeError('Invalid mutation telemetry observation');
+}
 
 function boundedProblemSpecObservation(
   value: TestdataProblemSpecObservation,
@@ -390,7 +539,9 @@ const EVENT_FIELDS = new Set<keyof TestdataQualityEvent>([
   'templateFailureKinds', 'checkerConfigured', 'checkerRead', 'checkerCompiled',
   'checkerExecuted', 'checkerInfraFailures', 'checkerFailureKind', 'modelRole',
   'modelIdentityHash', 'teacherOutcome', 'teacherOutcomeReason', 'editedFileCount',
-  'changedFileKinds',
+  'changedFileKinds', 'mutationGate', 'mutationStatus', 'mutationGenerated',
+  'mutationHistorical', 'mutationViable', 'mutationKilled', 'mutationSurvived',
+  'mutationScore', 'mutationOperators',
 ]);
 
 const BOOLEAN_FIELDS: Array<keyof TestdataQualityEvent> = [
@@ -417,6 +568,11 @@ const NUMBER_LIMITS: Partial<Record<keyof TestdataQualityEvent, { min: number; m
   specUncertaintyCount: { min: 0, max: 100 },
   specConflictCount: { min: 0, max: 1024 },
   specUnresolvedConflictCount: { min: 0, max: 1024 },
+  mutationGenerated: { min: 0, max: 20 },
+  mutationHistorical: { min: 0, max: 20 },
+  mutationViable: { min: 0, max: 20 },
+  mutationKilled: { min: 0, max: 20 },
+  mutationSurvived: { min: 0, max: 20 },
 };
 
 function assertEnum(value: unknown, values: Set<string>, field: string): void {
@@ -491,6 +647,8 @@ export function parseTestdataQualityEvent(value: unknown): TestdataQualityEvent 
   assertEnum(candidate.artifact, ARTIFACTS, 'artifact');
   assertEnum(candidate.retryPolicy, RETRY_POLICIES, 'retryPolicy');
   assertEnum(candidate.checkerFailureKind, CHECKER_FAILURE_KINDS, 'checkerFailureKind');
+  assertEnum(candidate.mutationGate, MUTATION_GATES, 'mutationGate');
+  assertEnum(candidate.mutationStatus, MUTATION_STATUSES, 'mutationStatus');
   assertEnum(candidate.modelRole, MODEL_ROLES, 'modelRole');
   assertEnum(candidate.teacherOutcome, TEACHER_OUTCOMES, 'teacherOutcome');
   assertEnum(candidate.teacherOutcomeReason, TEACHER_REASONS, 'teacherOutcomeReason');
@@ -506,6 +664,12 @@ export function parseTestdataQualityEvent(value: unknown): TestdataQualityEvent 
   if (Array.isArray(candidate.specRolesUsed) && candidate.specRolesUsed.length === 0) {
     throw new TypeError('Invalid test-data telemetry field: specRolesUsed');
   }
+  if (candidate.mutationScore !== undefined
+    && (typeof candidate.mutationScore !== 'number' || !Number.isFinite(candidate.mutationScore)
+      || candidate.mutationScore < 0 || candidate.mutationScore > 1)) {
+    throw new TypeError('Invalid test-data telemetry field: mutationScore');
+  }
+  assertMutationEventFields(candidate);
 
   if (candidate.eventType === 'stage_completed' && candidate.stage === undefined) {
     throw new TypeError('stage_completed requires stage');
@@ -906,6 +1070,7 @@ export class TestdataRunTelemetrySession {
         checkerExecuted: checker?.executed,
         checkerInfraFailures: checker?.infraFailures,
         checkerFailureKind: checkerFailureKind(checker?.failureKind),
+        ...mutationEventFields(verification?.mutation),
       }), {
         modelRole,
         ...(identity ? { modelIdentity: identity } : {}),

@@ -11,6 +11,26 @@ import { TestdataPipelineError } from '../../services/testdata/failures';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const EVENT_ID = '22222222-2222-4222-8222-222222222222';
+const MUTATION_FIELDS = [
+  'mutationGate', 'mutationStatus', 'mutationGenerated', 'mutationHistorical',
+  'mutationViable', 'mutationKilled', 'mutationSurvived', 'mutationScore',
+  'mutationOperators',
+] as const;
+
+const VALID_MUTATION_SUMMARY = {
+  mode: 'observe',
+  status: 'completed',
+  generated: 2,
+  historical: 1,
+  viable: 3,
+  killed: 2,
+  survived: 1,
+  score: 2 / 3,
+  operators: [
+    { id: 'comparison-boundary', viable: 2, killed: 1 },
+    { id: 'historical-submission', viable: 1, killed: 1 },
+  ],
+} as const;
 
 function baseEvent(overrides: Partial<TestdataQualityEvent> = {}): TestdataQualityEvent {
   return {
@@ -216,6 +236,54 @@ describe('test-data quality event schema', () => {
     ]) {
       expect(() => parseTestdataQualityEvent({ ...completed, ...patch })).toThrow();
     }
+  });
+
+  it('accepts only a complete internally consistent mutation aggregate', () => {
+    const completed = {
+      ...baseEvent(),
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      mutationGate: 'observe',
+      mutationStatus: 'completed',
+      mutationGenerated: 2,
+      mutationHistorical: 1,
+      mutationViable: 3,
+      mutationKilled: 2,
+      mutationSurvived: 1,
+      mutationScore: 2 / 3,
+      mutationOperators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'historical-submission', viable: 1, killed: 1 },
+      ],
+    };
+    expect(parseTestdataQualityEvent(completed)).toEqual(expect.objectContaining({
+      mutationGate: 'observe',
+      mutationStatus: 'completed',
+      mutationScore: 2 / 3,
+    }));
+
+    for (const patch of [
+      { mutationStatus: undefined },
+      { mutationGenerated: 21 },
+      { mutationKilled: 1 },
+      { mutationScore: 0.5 },
+      { mutationOperators: [{ id: 'unknown', viable: 3, killed: 2 }] },
+      { mutationOperators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'comparison-boundary', viable: 1, killed: 1 },
+      ] },
+      { mutationOperators: [{
+        id: 'comparison-boundary', viable: 3, killed: 2, source: 'private source',
+      }] },
+    ]) {
+      expect(() => parseTestdataQualityEvent({ ...completed, ...patch })).toThrow(/mutation|field/i);
+    }
+
+    expect(() => parseTestdataQualityEvent(baseEvent({
+      mutationGate: 'observe',
+    } as never))).toThrow(/mutation/i);
   });
 
   it('rejects parseable but non-canonical timestamps', () => {
@@ -557,6 +625,77 @@ describe('TestdataRunTelemetryService', () => {
     expect(JSON.stringify(completed)).not.toContain('fallback-private');
     expect(completed?.modelIdentityHash).toMatch(/^[a-f0-9]{64}$/);
     expect(completed?.modelRole).toBe('fallback');
+  });
+
+  it('emits only validated mutation aggregates on completion', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    await service.createSession({ runId: RUN_ID }).complete({
+      verification: {
+        mode: 'sandbox',
+        verified: true,
+        wouldBlock: false,
+        mutation: VALID_MUTATION_SUMMARY,
+      },
+    } as never);
+
+    const completed = payloads.flatMap(payload => payload.events).at(-1);
+    expect(completed).toEqual(expect.objectContaining({
+      mutationGate: 'observe',
+      mutationStatus: 'completed',
+      mutationGenerated: 2,
+      mutationHistorical: 1,
+      mutationViable: 3,
+      mutationKilled: 2,
+      mutationSurvived: 1,
+      mutationScore: 2 / 3,
+      mutationOperators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'historical-submission', viable: 1, killed: 1 },
+      ],
+    }));
+    expect(JSON.stringify(completed)).not.toContain('source');
+  });
+
+  it('drops the whole mutation observation when any aggregate is malformed', async () => {
+    const malicious = [
+      { ...VALID_MUTATION_SUMMARY, source: 'private source sentinel' },
+      { ...VALID_MUTATION_SUMMARY, recordId: 'private record sentinel' },
+      { ...VALID_MUTATION_SUMMARY, output: 'private output sentinel' },
+      { ...VALID_MUTATION_SUMMARY, position: 42 },
+      { ...VALID_MUTATION_SUMMARY, generated: -1 },
+      { ...VALID_MUTATION_SUMMARY, generated: 20, historical: 1 },
+      { ...VALID_MUTATION_SUMMARY, killed: 1 },
+      { ...VALID_MUTATION_SUMMARY, score: 0.5 },
+      { ...VALID_MUTATION_SUMMARY, operators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'comparison-boundary', viable: 1, killed: 1 },
+      ] },
+      { ...VALID_MUTATION_SUMMARY, operators: [{
+        id: 'comparison-boundary', viable: 3, killed: 2, input: 'private input sentinel',
+      }] },
+      { ...VALID_MUTATION_SUMMARY, operators: Array(7).fill({
+        id: 'comparison-boundary', viable: 3, killed: 2,
+      }) },
+    ];
+
+    for (const mutation of malicious) {
+      const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+      const service = new TestdataRunTelemetryService(
+        { getInstall: jest.fn().mockResolvedValue(install) },
+        { send: jest.fn(async payload => { payloads.push(payload); }) },
+      );
+      await service.createSession({ runId: RUN_ID }).complete({
+        verification: { mode: 'sandbox', verified: true, wouldBlock: false, mutation },
+      } as never);
+      const completed = payloads.flatMap(payload => payload.events).at(-1);
+      expect(completed?.eventType).toBe('run_completed');
+      for (const field of MUTATION_FIELDS) expect(completed).not.toHaveProperty(field);
+      expect(JSON.stringify(completed)).not.toContain('private');
+    }
   });
 
   it('reports a failed observe extraction without free text or evidence', async () => {

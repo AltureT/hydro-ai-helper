@@ -37,6 +37,15 @@ test('test-data quality API requests the bounded window and preserves model-role
           failed: { count: 1, total: 1, rate: 1 },
         },
       },
+      mutation: {
+        runs: 1,
+        generated: 2,
+        historical: 1,
+        viable: 3,
+        killed: 2,
+        survived: 1,
+        average_score: 2 / 3,
+      },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
 
@@ -51,6 +60,15 @@ test('test-data quality API requests the bounded window and preserves model-role
       { key: 'consensus', count: 1 },
       { key: 'adjudicated', count: 1 },
     ]);
+    assert.deepEqual(response.mutation, {
+      runs: 1,
+      generated: 2,
+      historical: 1,
+      viable: 3,
+      killed: 2,
+      survived: 1,
+      average_score: 2 / 3,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

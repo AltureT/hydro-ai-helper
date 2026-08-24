@@ -158,6 +158,12 @@ const TESTDATA_MODEL_ROLES = new Set(['primary', 'fallback']);
 const TESTDATA_TEMPLATE_LANGUAGES = new Set(['py', 'java', 'cc']);
 const TESTDATA_TEMPLATE_FAILURE_KINDS = new Set(['compile', 'runtime', 'budget', 'mismatch', 'checker-infra']);
 const TESTDATA_CHECKER_FAILURE_KINDS = new Set(['unavailable', 'compile', 'infra', 'budget', 'reject']);
+const TESTDATA_MUTATION_GATES = new Set(['off', 'observe', 'enforce']);
+const TESTDATA_MUTATION_STATUSES = new Set(['completed', 'partial', 'skipped']);
+const TESTDATA_MUTATION_OPERATORS = new Set([
+  'comparison-boundary', 'equality-negation', 'logical-connector',
+  'arithmetic-operator', 'constant-off-by-one', 'historical-submission',
+]);
 const TESTDATA_TEACHER_OUTCOMES = new Set(['accepted_unchanged', 'accepted_edited', 'discarded', 'regenerated']);
 const TESTDATA_TEACHER_REASONS = new Set([
   'wrong_answer', 'invalid_input', 'weak_coverage', 'template_problem', 'checker_problem', 'other',
@@ -176,7 +182,8 @@ const TESTDATA_FAILURE_CODES = new Set([
   'ORACLE_BRUTE_DIVERGENCE', 'BRUTE_RUNTIME_FAILED', 'BRUTE_TIMEOUT',
   'TEMPLATE_COMPILE_FAILED', 'TEMPLATE_RUNTIME_FAILED', 'TEMPLATE_OUTPUT_MISMATCH',
   'CHECKER_REQUIRED_UNAVAILABLE', 'CHECKER_COMPILE_FAILED', 'CHECKER_RUNTIME_FAILED',
-  'SUBTASK_CONSTRAINT_VIOLATION', 'MUTATION_SCORE_TOO_LOW', 'TRUSTED_SOLUTIONS_DIVERGED',
+  'SUBTASK_CONSTRAINT_VIOLATION', 'MUTATION_EVIDENCE_UNAVAILABLE',
+  'MUTATION_SCORE_TOO_LOW', 'TRUSTED_SOLUTIONS_DIVERGED',
   'COVERAGE_REQUIREMENT_MISSING', 'PIPELINE_BUDGET_EXHAUSTED', 'CANCELLED', 'UNKNOWN',
 ]);
 const TESTDATA_ARTIFACTS = new Set([
@@ -196,7 +203,7 @@ const TESTDATA_STAGES = new Set([
   'config_parse', 'direct_parse', 'direct_repair', 'full', 'function-samples', 'generator',
   'independent_verifier_parse', 'oracle', 'pipeline', 'provided_cpp_oracle',
   'provided_cpp_oracle_infra', 'sandbox_budget', 'solution_blueprint', 'stress-generator',
-  'template', 'template-py', 'template_missing', 'unknown', 'validator',
+  'template', 'template-py', 'template_missing', 'unknown', 'validator', 'mutation_testing',
 ]);
 const TESTDATA_EVENT_FIELDS = new Set([
   'schemaVersion', 'eventId', 'runId', 'sequence', 'eventType', 'occurredAt', 'pluginVersion',
@@ -212,7 +219,9 @@ const TESTDATA_EVENT_FIELDS = new Set([
   'templateFailureKinds', 'checkerConfigured', 'checkerRead', 'checkerCompiled',
   'checkerExecuted', 'checkerInfraFailures', 'checkerFailureKind', 'modelRole',
   'modelIdentityHash', 'teacherOutcome', 'teacherOutcomeReason', 'editedFileCount',
-  'changedFileKinds',
+  'changedFileKinds', 'mutationGate', 'mutationStatus', 'mutationGenerated',
+  'mutationHistorical', 'mutationViable', 'mutationKilled', 'mutationSurvived',
+  'mutationScore', 'mutationOperators',
 ]);
 const TESTDATA_BOOLEAN_FIELDS = [
   'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
@@ -229,7 +238,15 @@ const TESTDATA_NUMBER_LIMITS = {
   specSchemaVersion: [1, 1], specConstraintCount: [0, 512],
   specInvariantCount: [0, 256], specUncertaintyCount: [0, 100],
   specConflictCount: [0, 1024], specUnresolvedConflictCount: [0, 1024],
+  mutationGenerated: [0, 20], mutationHistorical: [0, 20], mutationViable: [0, 20],
+  mutationKilled: [0, 20], mutationSurvived: [0, 20],
 };
+
+const TESTDATA_MUTATION_EVENT_FIELDS = [
+  'mutationGate', 'mutationStatus', 'mutationGenerated', 'mutationHistorical',
+  'mutationViable', 'mutationKilled', 'mutationSurvived', 'mutationScore',
+  'mutationOperators',
+];
 
 function canonicalTestdataValue(value) {
   if (Array.isArray(value)) return value.map(canonicalTestdataValue);
@@ -258,6 +275,61 @@ function assertTestdataArray(value, allowed, field, maxLength) {
     || value.some(item => typeof item !== 'string' || !allowed.has(item))) {
     throw new HttpError(400, `${field} is invalid`);
   }
+}
+
+function validateTestdataMutationFields(value) {
+  const present = TESTDATA_MUTATION_EVENT_FIELDS.filter(field => value[field] !== undefined);
+  if (present.length === 0) return undefined;
+  const required = TESTDATA_MUTATION_EVENT_FIELDS.filter(field => field !== 'mutationScore');
+  if (value.eventType !== 'run_completed' || required.some(field => value[field] === undefined)) {
+    throw new HttpError(400, 'mutation observation is invalid');
+  }
+  assertTestdataEnum(value.mutationGate, TESTDATA_MUTATION_GATES, 'mutationGate');
+  assertTestdataEnum(value.mutationStatus, TESTDATA_MUTATION_STATUSES, 'mutationStatus');
+
+  const generated = value.mutationGenerated;
+  const historical = value.mutationHistorical;
+  const viable = value.mutationViable;
+  const killed = value.mutationKilled;
+  const survived = value.mutationSurvived;
+  if (generated + historical > 20 || viable > generated + historical
+    || killed + survived !== viable) {
+    throw new HttpError(400, 'mutation counts are invalid');
+  }
+  if (viable === 0) {
+    if (value.mutationScore !== undefined) {
+      throw new HttpError(400, 'mutationScore is invalid');
+    }
+  } else if (typeof value.mutationScore !== 'number' || !Number.isFinite(value.mutationScore)
+    || value.mutationScore < 0 || value.mutationScore > 1
+    || Math.abs(value.mutationScore - killed / viable) > Number.EPSILON) {
+    throw new HttpError(400, 'mutationScore is invalid');
+  }
+
+  if (!Array.isArray(value.mutationOperators)
+    || value.mutationOperators.length > TESTDATA_MUTATION_OPERATORS.size) {
+    throw new HttpError(400, 'mutationOperators is invalid');
+  }
+  const operators = [];
+  const ids = new Set();
+  for (const item of value.mutationOperators) {
+    if (!isRecord(item) || Object.keys(item).length !== 3
+      || Object.keys(item).some(key => !['id', 'viable', 'killed'].includes(key))
+      || typeof item.id !== 'string' || !TESTDATA_MUTATION_OPERATORS.has(item.id)
+      || ids.has(item.id)
+      || !Number.isSafeInteger(item.viable) || item.viable < 0 || item.viable > 20
+      || !Number.isSafeInteger(item.killed) || item.killed < 0 || item.killed > item.viable) {
+      throw new HttpError(400, 'mutationOperators is invalid');
+    }
+    ids.add(item.id);
+    operators.push({ id: item.id, viable: item.viable, killed: item.killed });
+  }
+  if (operators.reduce((sum, item) => sum + item.viable, 0) !== viable
+    || operators.reduce((sum, item) => sum + item.killed, 0) !== killed
+    || new TextEncoder().encode(JSON.stringify(operators)).byteLength > 1024) {
+    throw new HttpError(400, 'mutationOperators is invalid');
+  }
+  return operators;
 }
 
 export function validateTestdataQualityEventPayload(value) {
@@ -302,6 +374,8 @@ export function validateTestdataQualityEventPayload(value) {
   assertTestdataEnum(value.artifact, TESTDATA_ARTIFACTS, 'artifact');
   assertTestdataEnum(value.retryPolicy, TESTDATA_RETRY_POLICIES, 'retryPolicy');
   assertTestdataEnum(value.checkerFailureKind, TESTDATA_CHECKER_FAILURE_KINDS, 'checkerFailureKind');
+  assertTestdataEnum(value.mutationGate, TESTDATA_MUTATION_GATES, 'mutationGate');
+  assertTestdataEnum(value.mutationStatus, TESTDATA_MUTATION_STATUSES, 'mutationStatus');
   assertTestdataEnum(value.modelRole, TESTDATA_MODEL_ROLES, 'modelRole');
   assertTestdataEnum(value.teacherOutcome, TESTDATA_TEACHER_OUTCOMES, 'teacherOutcome');
   assertTestdataEnum(value.teacherOutcomeReason, TESTDATA_TEACHER_REASONS, 'teacherOutcomeReason');
@@ -317,6 +391,7 @@ export function validateTestdataQualityEventPayload(value) {
   if (Array.isArray(value.specRolesUsed) && value.specRolesUsed.length === 0) {
     throw new HttpError(400, 'specRolesUsed is invalid');
   }
+  const mutationOperators = validateTestdataMutationFields(value);
   if (value.eventType === 'stage_completed' && value.stage === undefined) throw new HttpError(400, 'stage is required');
   if (value.eventType === 'stage_failed'
     && [value.stage, value.failureCode, value.artifact, value.retryPolicy].some(item => item === undefined)) {
@@ -365,7 +440,10 @@ export function validateTestdataQualityEventPayload(value) {
     && value.teacherOutcome !== 'accepted_edited') {
     throw new HttpError(400, 'edit fields are invalid');
   }
-  return { ...value };
+  return {
+    ...value,
+    ...(mutationOperators ? { mutationOperators } : {}),
+  };
 }
 
 export function parseTestdataQualityDays(url) {
@@ -457,8 +535,11 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          template_java_requested, template_java_verified, template_cc_requested,
          template_cc_verified, template_failure_kinds, checker_configured, checker_read,
          checker_compiled, checker_executed, checker_infra_failures, checker_failure_kind,
+         mutation_gate, mutation_status, mutation_generated, mutation_historical,
+         mutation_viable, mutation_killed, mutation_survived, mutation_score,
+         mutation_operators,
          model_role, model_identity_hash
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM testdata_event_slots
          WHERE event_id = ? AND instance_id = ? AND run_id = ? AND sequence = ?
@@ -510,6 +591,15 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
          checker_executed = excluded.checker_executed,
          checker_infra_failures = excluded.checker_infra_failures,
          checker_failure_kind = excluded.checker_failure_kind,
+         mutation_gate = excluded.mutation_gate,
+         mutation_status = excluded.mutation_status,
+         mutation_generated = excluded.mutation_generated,
+         mutation_historical = excluded.mutation_historical,
+         mutation_viable = excluded.mutation_viable,
+         mutation_killed = excluded.mutation_killed,
+         mutation_survived = excluded.mutation_survived,
+         mutation_score = excluded.mutation_score,
+         mutation_operators = excluded.mutation_operators,
          model_role = excluded.model_role,
          model_identity_hash = excluded.model_identity_hash
        WHERE testdata_runs.completed_event_id IS NULL
@@ -542,6 +632,11 @@ function buildTestdataIngestStatement(env, instanceId, event, payloadHash) {
       nullableBoolean(event.checkerConfigured), nullableBoolean(event.checkerRead),
       nullableBoolean(event.checkerCompiled), nullableBoolean(event.checkerExecuted),
       nullableNumber(event.checkerInfraFailures), event.checkerFailureKind ?? null,
+      event.mutationGate ?? null, event.mutationStatus ?? null,
+      nullableNumber(event.mutationGenerated), nullableNumber(event.mutationHistorical),
+      nullableNumber(event.mutationViable), nullableNumber(event.mutationKilled),
+      nullableNumber(event.mutationSurvived), nullableNumber(event.mutationScore),
+      event.mutationOperators ? JSON.stringify(event.mutationOperators) : null,
       event.modelRole ?? null, event.modelIdentityHash ?? null,
       event.eventId, instanceId, event.runId, event.sequence, event.eventType, payloadHash,
     );
@@ -742,6 +837,13 @@ async function handleDashboardTestdataQuality(request, env) {
         COALESCE(SUM(stress_unique), 0) AS stress_unique,
         COALESCE(SUM(stress_compared), 0) AS stress_compared,
         COALESCE(SUM(stress_agreed), 0) AS stress_agreed,
+        COALESCE(SUM(CASE WHEN mutation_gate IS NOT NULL THEN 1 ELSE 0 END), 0) AS mutation_runs,
+        COALESCE(SUM(mutation_generated), 0) AS mutation_generated,
+        COALESCE(SUM(mutation_historical), 0) AS mutation_historical,
+        COALESCE(SUM(mutation_viable), 0) AS mutation_viable,
+        COALESCE(SUM(mutation_killed), 0) AS mutation_killed,
+        COALESCE(SUM(mutation_survived), 0) AS mutation_survived,
+        AVG(mutation_score) AS mutation_average_score,
         COALESCE(SUM(CASE WHEN checker_configured = 1 THEN 1 ELSE 0 END), 0) AS checker_configured,
         COALESCE(SUM(CASE WHEN checker_read = 1 THEN 1 ELSE 0 END), 0) AS checker_read,
         COALESCE(SUM(CASE WHEN checker_compiled = 1 THEN 1 ELSE 0 END), 0) AS checker_compiled,
@@ -899,6 +1001,18 @@ async function handleDashboardTestdataQuality(request, env) {
         totals.checker_configured,
       ),
       infra_failures: Number(totals.checker_infra_failures) || 0,
+    },
+    mutation: {
+      runs: Number(totals.mutation_runs) || 0,
+      generated: Number(totals.mutation_generated) || 0,
+      historical: Number(totals.mutation_historical) || 0,
+      viable: Number(totals.mutation_viable) || 0,
+      killed: Number(totals.mutation_killed) || 0,
+      survived: Number(totals.mutation_survived) || 0,
+      average_score: totals.mutation_average_score === null
+        || totals.mutation_average_score === undefined
+        ? null
+        : Number(totals.mutation_average_score),
     },
     stress: {
       generated: Number(totals.stress_generated) || 0,
