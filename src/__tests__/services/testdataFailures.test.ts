@@ -1,4 +1,5 @@
 import {
+  TESTDATA_FAILURE_CODES,
   TESTDATA_FAILURE_STAGES,
   TestdataPipelineError,
   extractTestdataFailureMetadata,
@@ -14,6 +15,45 @@ import {
 } from '../../services/testdataGenService';
 
 describe('typed test-data pipeline failures', () => {
+  it('publishes mutation failure codes and canonical stage with no-retry policy', () => {
+    expect(TESTDATA_FAILURE_CODES).toEqual(expect.arrayContaining([
+      'MUTATION_SCORE_TOO_LOW',
+      'MUTATION_EVIDENCE_UNAVAILABLE',
+    ]));
+    expect(TESTDATA_FAILURE_STAGES).toContain('mutation_testing');
+    expect(repairPolicyForFailure({
+      code: 'MUTATION_SCORE_TOO_LOW', artifact: 'mutation',
+    })).toBe('no-retry');
+    expect(repairPolicyForFailure({
+      code: 'MUTATION_EVIDENCE_UNAVAILABLE', artifact: 'mutation',
+    })).toBe('no-retry');
+  });
+
+  it('mutation failure details accept bounded aggregates and reject source-like fields', () => {
+    expect(new TestdataPipelineError(
+      'mutation score too low',
+      'MUTATION_SCORE_TOO_LOW',
+      'mutation_testing',
+      'mutation',
+      'no-retry',
+      {
+        viable: 10, killed: 7, survived: 3, score: 0.7, threshold: 0.8,
+        failureKind: 'score-too-low',
+      },
+    ).safeDetails).toEqual({
+      viable: 10, killed: 7, survived: 3, score: 0.7, threshold: 0.8,
+      failureKind: 'score-too-low',
+    });
+    expect(() => new TestdataPipelineError(
+      'unsafe',
+      'MUTATION_EVIDENCE_UNAVAILABLE',
+      'mutation_testing',
+      'mutation',
+      'no-retry',
+      { source: 'print(0)' },
+    )).toThrow(/Unsafe test-data failure detail key/);
+  });
+
   it('publishes one canonical stage allowlist without underscore aliases', () => {
     expect(TESTDATA_FAILURE_STAGES).toEqual(expect.arrayContaining([
       'function-samples',

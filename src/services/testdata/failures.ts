@@ -31,6 +31,7 @@ export type TestdataFailureCode =
   | 'CHECKER_RUNTIME_FAILED'
   | 'SUBTASK_CONSTRAINT_VIOLATION'
   | 'MUTATION_SCORE_TOO_LOW'
+  | 'MUTATION_EVIDENCE_UNAVAILABLE'
   | 'TRUSTED_SOLUTIONS_DIVERGED'
   | 'COVERAGE_REQUIREMENT_MISSING'
   | 'PIPELINE_BUDGET_EXHAUSTED'
@@ -70,6 +71,7 @@ export const TESTDATA_FAILURE_CODES: readonly TestdataFailureCode[] = [
   'CHECKER_RUNTIME_FAILED',
   'SUBTASK_CONSTRAINT_VIOLATION',
   'MUTATION_SCORE_TOO_LOW',
+  'MUTATION_EVIDENCE_UNAVAILABLE',
   'TRUSTED_SOLUTIONS_DIVERGED',
   'COVERAGE_REQUIREMENT_MISSING',
   'PIPELINE_BUDGET_EXHAUSTED',
@@ -115,6 +117,7 @@ export const TESTDATA_FAILURE_STAGES = [
   'function-samples',
   'generator',
   'independent_verifier_parse',
+  'mutation_testing',
   'oracle',
   'pipeline',
   'pipeline_repair',
@@ -199,14 +202,19 @@ const SAFE_DETAIL_KEYS = new Set([
   'maxBytes',
   'missingCount',
   'minimumUnique',
+  'killed',
   'oracleLanguage',
   'protocolProbe',
   'sample',
   'status',
+  'score',
   'subtaskId',
+  'survived',
+  'threshold',
   'uniqueCount',
   'unresolvedConflictCount',
   'validCount',
+  'viable',
 ]);
 
 function copyValidatedSafeDetails(details: TestdataSafeDetails): TestdataSafeDetails {
@@ -281,6 +289,8 @@ export function repairPolicyForFailure(
       return 'rerun-spec';
     case 'SANDBOX_REQUIRED':
     case 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED':
+    case 'MUTATION_SCORE_TOO_LOW':
+    case 'MUTATION_EVIDENCE_UNAVAILABLE':
     case 'PIPELINE_BUDGET_EXHAUSTED':
     case 'CANCELLED':
       return 'no-retry';

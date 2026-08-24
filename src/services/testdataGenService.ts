@@ -124,6 +124,18 @@ import {
   type CoverageMode,
   type CoverageVerification,
 } from './testdata/coverage';
+import {
+  generateMutationCandidates,
+  getMutationGateMode,
+  mergeMutationCandidates,
+  type HistoricalMutationCandidate,
+  type MutationGateMode,
+} from './testdata/mutation';
+import {
+  evaluateMutationCandidates,
+  MUTATION_SCORE_THRESHOLD,
+  type MutationVerificationSummary,
+} from './testdata/mutationRunner';
 
 export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
 
@@ -454,6 +466,75 @@ export interface PlanVerification {
   discrimination?: DiscriminationCheck;
   /** 从服务端结构化值计算的语义覆盖矩阵；不信任模型 label。 */
   coverage?: CoverageVerification;
+  /** 仅含封闭计数与 operator ID 的 mutation 证据摘要。 */
+  mutation?: MutationVerificationSummary;
+}
+
+type MutationGateFailureKind = 'partial' | 'no-viable' | 'score-unavailable' | 'score-too-low';
+
+function mutationGateError(
+  summary: MutationVerificationSummary,
+  code: 'MUTATION_SCORE_TOO_LOW' | 'MUTATION_EVIDENCE_UNAVAILABLE',
+  failureKind: MutationGateFailureKind,
+): TestdataPipelineError {
+  return new TestdataPipelineError(
+    code === 'MUTATION_SCORE_TOO_LOW'
+      ? 'mutation score 未达到 enforce 阈值，已停止生成。'
+      : 'mutation 证据不完整，无法在 enforce 模式下证明测试数据区分度。',
+    code,
+    'mutation_testing',
+    'mutation',
+    'no-retry',
+    {
+      viable: summary.viable,
+      killed: summary.killed,
+      survived: summary.survived,
+      ...(summary.score === undefined ? {} : { score: summary.score }),
+      threshold: MUTATION_SCORE_THRESHOLD,
+      failureKind,
+    },
+  );
+}
+
+export function applyMutationGate(
+  verification: Pick<PlanVerification, 'verified' | 'wouldBlock'>,
+  summary: MutationVerificationSummary,
+): void {
+  const unavailable = summary.status !== 'completed'
+    || summary.viable === 0
+    || summary.score === undefined;
+  const tooLow = summary.score !== undefined && summary.score < MUTATION_SCORE_THRESHOLD;
+  if (summary.mode === 'observe') {
+    if (unavailable || tooLow) verification.wouldBlock = true;
+    return;
+  }
+  if (summary.mode !== 'enforce') return;
+  if (unavailable) {
+    const failureKind: MutationGateFailureKind = summary.viable === 0
+      ? 'no-viable'
+      : summary.status !== 'completed'
+        ? 'partial'
+        : 'score-unavailable';
+    throw mutationGateError(summary, 'MUTATION_EVIDENCE_UNAVAILABLE', failureKind);
+  }
+  if (tooLow) throw mutationGateError(summary, 'MUTATION_SCORE_TOO_LOW', 'score-too-low');
+}
+
+function skippedMutationSummary(
+  mode: MutationGateMode,
+  skippedReason: MutationVerificationSummary['skippedReason'],
+): MutationVerificationSummary {
+  return {
+    mode,
+    status: 'skipped',
+    generated: 0,
+    historical: 0,
+    viable: 0,
+    killed: 0,
+    survived: 0,
+    operators: [],
+    skippedReason,
+  };
 }
 
 export interface StructuredGenerationNotes {
@@ -7346,6 +7427,7 @@ export type TestdataGenerationProgressStage =
   | 'checking_templates'
   | 'stress_testing'
   | 'discrimination_testing'
+  | 'mutation_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -7382,7 +7464,9 @@ export interface GenerateTestdataParams {
   /** testlib checker 配置与读取制品的显式状态。 */
   checkerArtifacts?: TestlibCheckerArtifacts;
   /** 已经 handler 权限过滤，仅限本次请求内 mutation 评估的历史错误源码。 */
-  historicalMutationCandidates?: import('./testdata/mutation').HistoricalMutationCandidate[];
+  historicalMutationCandidates?: HistoricalMutationCandidate[];
+  /** generate() 在单次运行入口冻结；内部语义 fallback 必须复用同一值。 */
+  mutationGateMode?: MutationGateMode;
   /** 服务端规则引擎的填空题初判信号 */
   fillInDetected?: boolean;
   signal?: AbortSignal;
@@ -8001,6 +8085,7 @@ export class TestdataGenService {
         ...params,
         runId: params.runId || createTestdataRunId(),
         statementMarkdown: snapshot.normalizedMarkdown,
+        mutationGateMode: getMutationGateMode(process.env.AI_HELPER_TESTDATA_MUTATION_GATE),
       }, snapshot);
     } catch (error) {
       rememberFailureModelTelemetry(error, this.activeModelTelemetry);
@@ -8203,7 +8288,17 @@ export class TestdataGenService {
     if (!fallbackRisk.allowsDirectFallback) {
       this.throwDirectFallbackBlocked(fallbackRisk);
     }
+    const directMutationSummary = params.mutationGateMode === 'off'
+      ? undefined
+      : skippedMutationSummary(params.mutationGateMode || 'observe', 'sandbox-unavailable');
+    if (directMutationSummary?.mode === 'enforce') {
+      applyMutationGate({ verified: false, wouldBlock: false }, directMutationSummary);
+    }
     const plan = await this.generateDirect(params, pipelineContext);
+    if (directMutationSummary && plan.verification) {
+      plan.verification.mutation = directMutationSummary;
+      applyMutationGate(plan.verification, directMutationSummary);
+    }
     if (this.mode === 'auto') {
       const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
       plan.notes = [
@@ -9968,6 +10063,47 @@ export class TestdataGenService {
         );
       }
     }
+    report('mutation_testing', 94);
+    // 正常入口已在 generate() 冻结；仅为内部/旧测试直接调用该方法时补齐。
+    const mutationMode = params.mutationGateMode
+      ?? getMutationGateMode(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+    const mutationSummary = mutationMode === 'off'
+      ? skippedMutationSummary('off', 'gate-off')
+      : await evaluateMutationCandidates({
+        mode: mutationMode,
+        candidates: mergeMutationCandidates(
+          generateMutationCandidates(
+            response.oracleCode || '',
+            response.oracleLanguage || 'python',
+          ),
+          response.problemType === 'traditional'
+            ? params.historicalMutationCandidates || []
+            : [],
+        ),
+        cases: response.cases.map(item => ({ input: item.input, answer: item.output })),
+        runner,
+        customChecker,
+        ...(customChecker && checkerExecutor.status === 'ready' ? {
+          judgeWithChecker: (cases, opts) => checkerExecutor.runBatch(cases, opts),
+        } : {}),
+        signal: params.signal,
+        correctnessDeadlineAt: Date.now()
+          + Math.max(0, materializationCache.correctnessBudgetRemainingMs || 0),
+      });
+    if (!response.verification) {
+      response.verification = {
+        mode: 'sandbox',
+        oracleKind: params.options.providedStd?.trim()
+          ? params.options.providedStdSource === 'accepted-record'
+            ? 'accepted-record'
+            : 'provided-std'
+          : 'ai-solution',
+        verified: false,
+        wouldBlock: true,
+      };
+    }
+    response.verification.mutation = mutationSummary;
+    applyMutationGate(response.verification, mutationSummary);
     if (finalOracleIdentity) this.activeRoleIdentities.oracle = finalOracleIdentity;
     if (finalVerifierIdentity) this.activeRoleIdentities.verifier = finalVerifierIdentity;
     this.assertCheckpointRoleIndependence(risk, checkpoint);
@@ -9979,12 +10115,20 @@ export class TestdataGenService {
       existingConfig: params.existingConfig,
       tieredDecision,
     });
-    return this.applyResultMetadata(finalizePlanVerification(
+    const finalizedPlan = finalizePlanVerification(
       plan,
       params.options.languages,
       customChecker,
       this.reliabilityMode,
-    ), [...results, ...optionalDiscriminationResults]);
+    );
+    if (finalizedPlan.verification) {
+      // finalize 只负责既有正确性门槛；mutation observe 标志在其后独立叠加。
+      applyMutationGate(finalizedPlan.verification, mutationSummary);
+    }
+    return this.applyResultMetadata(
+      finalizedPlan,
+      [...results, ...optionalDiscriminationResults],
+    );
     } finally {
       await checkerExecutor.dispose();
     }

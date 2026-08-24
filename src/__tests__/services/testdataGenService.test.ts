@@ -47,6 +47,7 @@ import {
   parseIndependentVerifierBlueprint,
   parseGeneratorOutput,
   materializeSandboxBlueprint,
+  applyMutationGate,
   finalizePlanVerification,
   verifySolutionBlueprintSamples,
   classifySandboxRepairScope,
@@ -99,6 +100,12 @@ import {
   SANDBOX_TOTAL_BUDGET_MS,
   SandboxBudgetExceededError,
 } from '../../services/goJudgeSandboxService';
+import * as mutationRunner from '../../services/testdata/mutationRunner';
+
+const evaluateMutationCandidatesMock = jest.spyOn(
+  mutationRunner,
+  'evaluateMutationCandidates',
+);
 
 const baseOptions: GenerateOptions = {
   problemKind: 'auto',
@@ -113,6 +120,8 @@ beforeEach(() => {
   // Existing characterization fixtures predate the observe-only extractor.
   // Tests that exercise Task 5 opt into observe explicitly with a grounded response.
   process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'legacy';
+  process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+  evaluateMutationCandidatesMock.mockReset();
 });
 
 afterEach(() => {
@@ -120,6 +129,11 @@ afterEach(() => {
   delete process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE;
   delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
   delete process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS;
+  delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+});
+
+afterAll(() => {
+  evaluateMutationCandidatesMock.mockRestore();
 });
 
 const groupedCoinStatement = `## 输入格式
@@ -8492,6 +8506,301 @@ describe('TestdataGenService.generate', () => {
     });
     await expect(promise).rejects.toThrow(/JSON/);
     expect(mockClient.chat).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('mutation evidence gate', () => {
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 1, languages: [],
+  };
+  const checkpoint = {
+    solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+    artifacts: parseGenerationArtifacts(
+      makeGenerationArtifactsBlueprint('traditional'),
+      'traditional',
+      [],
+    ),
+    verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+    killTargets: [],
+  };
+  const historical = [{
+    language: 'python' as const,
+    source: 'value = int(input())\nprint(value if value < 0 else 0)',
+    expectedStatus: 'wrong-answer' as const,
+  }];
+
+  function generationParams(overrides: Record<string, unknown> = {}) {
+    return {
+      problemTitle: 'mutation gate',
+      statementMarkdown: 'Input one integer. Output it.',
+      options,
+      checkpoint,
+      historicalMutationCandidates: historical,
+      ...overrides,
+    };
+  }
+
+  function mockMutationSummary(input: {
+    status: 'completed' | 'partial' | 'skipped';
+    viable: number;
+    killed: number;
+    survived: number;
+    score?: number;
+    skippedReason?: mutationRunner.MutationVerificationSummary['skippedReason'];
+  }) {
+    evaluateMutationCandidatesMock.mockImplementation(async request => ({
+      mode: request.mode,
+      generated: request.candidates.filter(candidate => candidate.origin === 'generated').length,
+      historical: request.candidates.filter(candidate => candidate.origin === 'historical').length,
+      operators: input.viable > 0 ? [{
+        id: 'historical-submission', viable: input.viable, killed: input.killed,
+      }] : [],
+      ...input,
+    }));
+  }
+
+  it.each([
+    ['observe', 0.70, false, true],
+    ['observe', 0.80, false, false],
+    ['enforce', 0.70, true, false],
+  ] as const)('mutation gate %s at score %s applies the configured boundary', async (
+    gate,
+    score,
+    throws,
+    wouldBlock,
+  ) => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = gate;
+    mockMutationSummary({
+      status: 'completed', viable: 10, killed: score * 10,
+      survived: 10 - score * 10, score,
+    });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+      reliabilityMode: 'legacy', semanticModelFallback: false,
+    });
+    const action = service.generate(generationParams());
+
+    if (throws) {
+      await expect(action).rejects.toMatchObject({
+        code: 'MUTATION_SCORE_TOO_LOW',
+        stage: 'mutation_testing',
+        artifact: 'mutation',
+        retryPolicy: 'no-retry',
+      });
+    } else {
+      const plan = await action;
+      expect(plan.verification).toMatchObject({
+        verified: false,
+        wouldBlock,
+        mutation: { mode: gate, score, viable: 10 },
+      });
+    }
+  });
+
+  it('mutation gate off attaches a skipped summary without calling the evaluator', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+      reliabilityMode: 'legacy', semanticModelFallback: false,
+    }).generate(generationParams());
+
+    expect(evaluateMutationCandidatesMock).not.toHaveBeenCalled();
+    expect(plan.verification?.mutation).toEqual({
+      mode: 'off',
+      status: 'skipped',
+      generated: 0,
+      historical: 0,
+      viable: 0,
+      killed: 0,
+      survived: 0,
+      operators: [],
+      skippedReason: 'gate-off',
+    });
+  });
+
+  it.each([
+    ['observe', 'partial', 2, 1, 1, 0.5, 'sandbox-infra', false],
+    ['observe', 'skipped', 0, 0, 0, undefined, 'no-viable-candidates', false],
+    ['enforce', 'partial', 2, 1, 1, 0.5, 'checker-infra', true],
+    ['enforce', 'skipped', 0, 0, 0, undefined, 'no-viable-candidates', true],
+  ] as const)(
+    'mutation evidence %s rejects unavailable %s summaries only in enforce',
+    async (gate, status, viable, killed, survived, score, skippedReason, throws) => {
+      process.env.AI_HELPER_TESTDATA_MUTATION_GATE = gate;
+      mockMutationSummary({ status, viable, killed, survived, score, skippedReason });
+      const action = new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+        reliabilityMode: 'legacy', semanticModelFallback: false,
+      }).generate(generationParams());
+
+      if (throws) {
+        await expect(action).rejects.toMatchObject({
+          code: 'MUTATION_EVIDENCE_UNAVAILABLE',
+          stage: 'mutation_testing',
+          artifact: 'mutation',
+          retryPolicy: 'no-retry',
+        });
+      } else {
+        await expect(action).resolves.toMatchObject({
+          verification: { verified: false, wouldBlock: true },
+        });
+      }
+    },
+  );
+
+  it('mutation enforce rejects direct mode before any model call or evaluator call', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'enforce';
+    const client = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson({ problemType: 'traditional', cases: [{ input: '1', output: '1' }] }),
+      usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+    }) };
+
+    await expect(new TestdataGenService(client as never, {
+      mode: 'direct', reliabilityMode: 'legacy', semanticModelFallback: false,
+    }).generate({
+      problemTitle: 'direct mutation enforce',
+      statementMarkdown: 'Input one integer. Output it.',
+      options,
+      historicalMutationCandidates: historical,
+    })).rejects.toMatchObject({
+      code: 'MUTATION_EVIDENCE_UNAVAILABLE',
+      stage: 'mutation_testing',
+      retryPolicy: 'no-retry',
+    });
+    expect(client.chat).not.toHaveBeenCalled();
+    expect(evaluateMutationCandidatesMock).not.toHaveBeenCalled();
+  });
+
+  it('mutation uses fresh request candidates without changing checkpoint payloads', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'observe';
+    const seenHistoricalSources: string[][] = [];
+    evaluateMutationCandidatesMock.mockImplementation(async request => {
+      seenHistoricalSources.push(request.candidates
+        .filter(candidate => candidate.origin === 'historical')
+        .map(candidate => candidate.source));
+      return {
+        mode: request.mode,
+        status: 'completed',
+        generated: 0,
+        historical: 1,
+        viable: 1,
+        killed: 1,
+        survived: 0,
+        score: 1,
+        operators: [{ id: 'historical-submission', viable: 1, killed: 1 }],
+      };
+    });
+    const checkpointEmissions: unknown[][] = [];
+    for (const source of ['print("FRESH_HISTORY_A")', 'print("FRESH_HISTORY_B")']) {
+      const emitted: unknown[] = [];
+      await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+        reliabilityMode: 'legacy', semanticModelFallback: false,
+      }).generate(generationParams({
+        historicalMutationCandidates: [{
+          language: 'python', source, expectedStatus: 'wrong-answer',
+        }],
+        onCheckpoint: (update: unknown) => { emitted.push(update); },
+      }));
+      checkpointEmissions.push(emitted);
+    }
+
+    expect(seenHistoricalSources).toEqual([
+      ['print("FRESH_HISTORY_A")'],
+      ['print("FRESH_HISTORY_B")'],
+    ]);
+    expect(checkpointEmissions[0]).toEqual(checkpointEmissions[1]);
+    expect(JSON.stringify(checkpointEmissions)).not.toContain('FRESH_HISTORY_');
+  });
+
+  it('mutation observe adds no model calls compared with off', async () => {
+    const run = async (gate: 'off' | 'observe') => {
+      process.env.AI_HELPER_TESTDATA_MUTATION_GATE = gate;
+      const client = { chat: jest.fn() };
+      if (gate === 'observe') {
+        mockMutationSummary({
+          status: 'completed', viable: 1, killed: 1, survived: 0, score: 1,
+        });
+      }
+      const plan = await new TestdataGenService(client as never, {
+        mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+        reliabilityMode: 'legacy', semanticModelFallback: false,
+      }).generate(generationParams());
+      return { calls: client.chat.mock.calls.length, modelCallCount: plan.modelCallCount };
+    };
+
+    const off = await run('off');
+    const observe = await run('observe');
+    expect(observe).toEqual(off);
+  });
+
+  it('mutation custom checker infrastructure errors stay partial without text fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'observe';
+    const runner = {
+      ...makeCheckpointRunner(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'mutation-checker' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(
+        (_fileId: string, cases: Array<{ output: string }>) => Promise.resolve(
+          cases.map(item => item.output === 'MUTATION_CHECKER_INFRA'
+            ? detail({ status: 'Internal Error', accepted: false, exitStatus: undefined })
+            : detail()),
+        ),
+      ),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    evaluateMutationCandidatesMock.mockImplementation(async request => {
+      expect(request.customChecker).toBe(true);
+      expect(request.judgeWithChecker).toBeDefined();
+      await expect(request.judgeWithChecker?.([{
+        input: '1', output: 'MUTATION_CHECKER_INFRA', answer: '1',
+      }], {
+        deadlineAt: Date.now() + 1_000,
+      })).resolves.toEqual(['infra-error']);
+      return {
+        mode: request.mode,
+        status: 'partial',
+        generated: 0,
+        historical: 1,
+        viable: 0,
+        killed: 0,
+        survived: 0,
+        operators: [],
+        skippedReason: 'checker-infra',
+      };
+    });
+
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never,
+      reliabilityMode: 'legacy', semanticModelFallback: false,
+    }).generate(generationParams({
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true,
+        read: true,
+        checkerSource: 'int main() { return 0; }',
+        checkerHeaders: {},
+      },
+    }));
+
+    expect(plan.verification).toMatchObject({
+      wouldBlock: true,
+      mutation: { status: 'partial', skippedReason: 'checker-infra' },
+    });
+    expect(runner.runCheckerBatchDetailed).toHaveBeenCalledWith(
+      'mutation-checker',
+      [{ input: '1', output: 'MUTATION_CHECKER_INFRA', answer: '1' }],
+      expect.any(Object),
+    );
+  });
+
+  it('applyMutationGate never turns an existing failed verification into verified', () => {
+    const verification = { verified: false, wouldBlock: false };
+    applyMutationGate(verification, {
+      mode: 'observe', status: 'completed', generated: 1, historical: 0,
+      viable: 1, killed: 1, survived: 0, score: 1,
+      operators: [{ id: 'comparison-boundary', viable: 1, killed: 1 }],
+    });
+    expect(verification).toEqual({ verified: false, wouldBlock: false });
   });
 });
 

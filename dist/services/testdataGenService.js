@@ -19,6 +19,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenService = exports.TestdataGenerationError = exports.CPP_ORACLE_INFRA_FAILURE_KEY = exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY = exports.CPP_ORACLE_UNAVAILABLE_KEY = exports.TESTDATA_CONFIG_UNPARSABLE_KEY = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = exports.extractStatementSamples = void 0;
+exports.applyMutationGate = applyMutationGate;
 exports.partitionStressValidation = partitionStressValidation;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
 exports.validateGenerateOptions = validateGenerateOptions;
@@ -115,6 +116,8 @@ const templateVerifier_1 = require("./testdata/templateVerifier");
 const runTelemetry_1 = require("./testdata/runTelemetry");
 const generatorDsl_1 = require("./testdata/generatorDsl");
 const coverage_1 = require("./testdata/coverage");
+const mutation_1 = require("./testdata/mutation");
+const mutationRunner_1 = require("./testdata/mutationRunner");
 var statementSamples_2 = require("./testdata/statementSamples");
 Object.defineProperty(exports, "extractStatementSamples", { enumerable: true, get: function () { return statementSamples_2.extractStatementSamples; } });
 function comparableFileContent(content) {
@@ -128,6 +131,54 @@ function comparableFileContent(content) {
 }
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 const MAX_KILL_TARGETS = 2;
+function mutationGateError(summary, code, failureKind) {
+    return new failures_1.TestdataPipelineError(code === 'MUTATION_SCORE_TOO_LOW'
+        ? 'mutation score 未达到 enforce 阈值，已停止生成。'
+        : 'mutation 证据不完整，无法在 enforce 模式下证明测试数据区分度。', code, 'mutation_testing', 'mutation', 'no-retry', {
+        viable: summary.viable,
+        killed: summary.killed,
+        survived: summary.survived,
+        ...(summary.score === undefined ? {} : { score: summary.score }),
+        threshold: mutationRunner_1.MUTATION_SCORE_THRESHOLD,
+        failureKind,
+    });
+}
+function applyMutationGate(verification, summary) {
+    const unavailable = summary.status !== 'completed'
+        || summary.viable === 0
+        || summary.score === undefined;
+    const tooLow = summary.score !== undefined && summary.score < mutationRunner_1.MUTATION_SCORE_THRESHOLD;
+    if (summary.mode === 'observe') {
+        if (unavailable || tooLow)
+            verification.wouldBlock = true;
+        return;
+    }
+    if (summary.mode !== 'enforce')
+        return;
+    if (unavailable) {
+        const failureKind = summary.viable === 0
+            ? 'no-viable'
+            : summary.status !== 'completed'
+                ? 'partial'
+                : 'score-unavailable';
+        throw mutationGateError(summary, 'MUTATION_EVIDENCE_UNAVAILABLE', failureKind);
+    }
+    if (tooLow)
+        throw mutationGateError(summary, 'MUTATION_SCORE_TOO_LOW', 'score-too-low');
+}
+function skippedMutationSummary(mode, skippedReason) {
+    return {
+        mode,
+        status: 'skipped',
+        generated: 0,
+        historical: 0,
+        viable: 0,
+        killed: 0,
+        survived: 0,
+        operators: [],
+        skippedReason,
+    };
+}
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
 exports.TESTDATA_GEN_LIMITS = {
     MIN_CASES: 1,
@@ -6186,6 +6237,7 @@ class TestdataGenService {
                 ...params,
                 runId: params.runId || (0, runTelemetry_1.createTestdataRunId)(),
                 statementMarkdown: snapshot.normalizedMarkdown,
+                mutationGateMode: (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE),
             }, snapshot);
         }
         catch (error) {
@@ -6320,7 +6372,17 @@ class TestdataGenService {
         if (!fallbackRisk.allowsDirectFallback) {
             this.throwDirectFallbackBlocked(fallbackRisk);
         }
+        const directMutationSummary = params.mutationGateMode === 'off'
+            ? undefined
+            : skippedMutationSummary(params.mutationGateMode || 'observe', 'sandbox-unavailable');
+        if (directMutationSummary?.mode === 'enforce') {
+            applyMutationGate({ verified: false, wouldBlock: false }, directMutationSummary);
+        }
         const plan = await this.generateDirect(params, pipelineContext);
+        if (directMutationSummary && plan.verification) {
+            plan.verification.mutation = directMutationSummary;
+            applyMutationGate(plan.verification, directMutationSummary);
+        }
         if (this.mode === 'auto') {
             const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
             plan.notes = [
@@ -7644,6 +7706,41 @@ class TestdataGenService {
                     throw checkerPipelineError('CHECKER_RUNTIME_FAILED', check.failureKind === 'budget' ? 'budget' : 'infra', 'checker 未完成可信语义执行');
                 }
             }
+            report('mutation_testing', 94);
+            // 正常入口已在 generate() 冻结；仅为内部/旧测试直接调用该方法时补齐。
+            const mutationMode = params.mutationGateMode
+                ?? (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const mutationSummary = mutationMode === 'off'
+                ? skippedMutationSummary('off', 'gate-off')
+                : await (0, mutationRunner_1.evaluateMutationCandidates)({
+                    mode: mutationMode,
+                    candidates: (0, mutation_1.mergeMutationCandidates)((0, mutation_1.generateMutationCandidates)(response.oracleCode || '', response.oracleLanguage || 'python'), response.problemType === 'traditional'
+                        ? params.historicalMutationCandidates || []
+                        : []),
+                    cases: response.cases.map(item => ({ input: item.input, answer: item.output })),
+                    runner,
+                    customChecker,
+                    ...(customChecker && checkerExecutor.status === 'ready' ? {
+                        judgeWithChecker: (cases, opts) => checkerExecutor.runBatch(cases, opts),
+                    } : {}),
+                    signal: params.signal,
+                    correctnessDeadlineAt: Date.now()
+                        + Math.max(0, materializationCache.correctnessBudgetRemainingMs || 0),
+                });
+            if (!response.verification) {
+                response.verification = {
+                    mode: 'sandbox',
+                    oracleKind: params.options.providedStd?.trim()
+                        ? params.options.providedStdSource === 'accepted-record'
+                            ? 'accepted-record'
+                            : 'provided-std'
+                        : 'ai-solution',
+                    verified: false,
+                    wouldBlock: true,
+                };
+            }
+            response.verification.mutation = mutationSummary;
+            applyMutationGate(response.verification, mutationSummary);
             if (finalOracleIdentity)
                 this.activeRoleIdentities.oracle = finalOracleIdentity;
             if (finalVerifierIdentity)
@@ -7657,7 +7754,12 @@ class TestdataGenService {
                 existingConfig: params.existingConfig,
                 tieredDecision,
             });
-            return this.applyResultMetadata(finalizePlanVerification(plan, params.options.languages, customChecker, this.reliabilityMode), [...results, ...optionalDiscriminationResults]);
+            const finalizedPlan = finalizePlanVerification(plan, params.options.languages, customChecker, this.reliabilityMode);
+            if (finalizedPlan.verification) {
+                // finalize 只负责既有正确性门槛；mutation observe 标志在其后独立叠加。
+                applyMutationGate(finalizedPlan.verification, mutationSummary);
+            }
+            return this.applyResultMetadata(finalizedPlan, [...results, ...optionalDiscriminationResults]);
         }
         finally {
             await checkerExecutor.dispose();
