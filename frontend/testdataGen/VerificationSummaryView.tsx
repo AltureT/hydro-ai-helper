@@ -31,6 +31,27 @@ export interface VerificationSummaryData {
     coveredConstraintIds?: string[];
     missingConstraintIds?: string[];
   };
+  mutation?: unknown;
+}
+
+interface TrustedMutationSummary {
+  mode: 'off' | 'observe' | 'enforce';
+  status: 'completed' | 'partial' | 'skipped';
+  generated: number;
+  historical: number;
+  viable: number;
+  killed: number;
+  survived: number;
+  score?: number;
+  operators: Array<{
+    id: 'comparison-boundary' | 'equality-negation' | 'logical-connector'
+      | 'arithmetic-operator' | 'constant-off-by-one' | 'historical-submission';
+    viable: number;
+    killed: number;
+  }>;
+  skippedReason?: 'gate-off' | 'sandbox-unavailable' | 'unsupported-source'
+    | 'no-candidates' | 'no-viable-candidates' | 'checker-infra'
+    | 'sandbox-infra' | 'budget-exhausted';
 }
 
 type Translate = (key: string, ...args: Array<string | number>) => string;
@@ -42,11 +63,75 @@ const TEMPLATE_FAILURE_KINDS = new Set([
 const CHECKER_FAILURE_KINDS = new Set([
   'unavailable', 'compile', 'infra', 'budget', 'reject',
 ]);
+const MUTATION_MODES = new Set(['off', 'observe', 'enforce']);
+const MUTATION_STATUSES = new Set(['completed', 'partial', 'skipped']);
+const MUTATION_SKIP_REASONS = new Set([
+  'gate-off', 'sandbox-unavailable', 'unsupported-source', 'no-candidates',
+  'no-viable-candidates', 'checker-infra', 'sandbox-infra', 'budget-exhausted',
+]);
+const MUTATION_OPERATOR_IDS = new Set([
+  'comparison-boundary', 'equality-negation', 'logical-connector',
+  'arithmetic-operator', 'constant-off-by-one', 'historical-submission',
+]);
+const MUTATION_SUMMARY_KEYS = new Set([
+  'mode', 'status', 'generated', 'historical', 'viable', 'killed', 'survived',
+  'score', 'operators', 'skippedReason',
+]);
 const VALIDATOR_EVIDENCE_ID_MAX_LENGTH = 64;
 const VALIDATOR_EVIDENCE_TARGET_MAX_COUNT = 768;
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isTrustedMutationSummary(value: unknown): value is TrustedMutationSummary {
+  if (!isRecord(value)
+    || Object.keys(value).some(key => !MUTATION_SUMMARY_KEYS.has(key))
+    || typeof value.mode !== 'string' || !MUTATION_MODES.has(value.mode)
+    || typeof value.status !== 'string' || !MUTATION_STATUSES.has(value.status)) return false;
+  if (value.status === 'completed') {
+    if (value.skippedReason !== undefined) return false;
+  } else if (typeof value.skippedReason !== 'string'
+    || !MUTATION_SKIP_REASONS.has(value.skippedReason)) return false;
+
+  const counts = [value.generated, value.historical, value.viable, value.killed, value.survived];
+  if (counts.some(count => !Number.isSafeInteger(count) || (count as number) < 0
+    || (count as number) > 20)) return false;
+  const [generated, historical, viable, killed, survived] = counts as number[];
+  if (generated + historical > 20 || viable > generated + historical
+    || killed + survived !== viable) return false;
+  if (viable === 0) {
+    if (value.score !== undefined) return false;
+  } else if (typeof value.score !== 'number' || !Number.isFinite(value.score)
+    || value.score < 0 || value.score > 1
+    || Math.abs(value.score - killed / viable) > Number.EPSILON) return false;
+
+  if (!Array.isArray(value.operators) || value.operators.length > MUTATION_OPERATOR_IDS.size) {
+    return false;
+  }
+  const seen = new Set<string>();
+  let operatorViable = 0;
+  let operatorKilled = 0;
+  for (let index = 0; index < value.operators.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value.operators, index)) return false;
+    const operator = value.operators[index];
+    if (!isRecord(operator) || Object.keys(operator).length !== 3
+      || Object.keys(operator).some(key => !['id', 'viable', 'killed'].includes(key))
+      || typeof operator.id !== 'string' || !MUTATION_OPERATOR_IDS.has(operator.id)
+      || seen.has(operator.id)
+      || !Number.isSafeInteger(operator.viable) || (operator.viable as number) < 0
+      || (operator.viable as number) > 20
+      || !Number.isSafeInteger(operator.killed) || (operator.killed as number) < 0
+      || (operator.killed as number) > (operator.viable as number)) return false;
+    seen.add(operator.id);
+    operatorViable += operator.viable as number;
+    operatorKilled += operator.killed as number;
+  }
+  return operatorViable === viable && operatorKilled === killed;
 }
 
 function isBoundedValidatorIdArray(value: unknown): value is string[] {
@@ -251,6 +336,77 @@ export function VerificationSummaryView(props: {
       { key: 'validator', 'aria-label': validatorLabel },
       React.createElement('div', { style: { fontWeight: 600, marginTop: '6px' } }, validatorLabel),
       evidenceRow(validatorEvidence),
+    ));
+  }
+
+  if (verification.mutation !== undefined) {
+    const mutationLabel = translate('ai_helper_testdata_mutation_title');
+    const mutation = isTrustedMutationSummary(verification.mutation)
+      ? verification.mutation
+      : undefined;
+    const mutationEvidence = mutation ? [
+      React.createElement(
+        'span',
+        { key: 'mode' },
+        `${translate('ai_helper_testdata_mutation_mode')}: ${translate(`ai_helper_testdata_mutation_mode_${mutation.mode}`)}`,
+      ),
+      React.createElement(
+        'span',
+        { key: 'status' },
+        `${translate('ai_helper_testdata_mutation_status')}: ${translate(`ai_helper_testdata_mutation_status_${mutation.status}`)}`,
+      ),
+      React.createElement(
+        'strong',
+        { key: 'score' },
+        mutation.score === undefined
+          ? translate('ai_helper_testdata_mutation_unavailable')
+          : `${mutation.killed}/${mutation.viable} (${Math.round(mutation.score * 100)}%)`,
+      ),
+      React.createElement(
+        'span',
+        { key: 'generated' },
+        `${translate('ai_helper_testdata_mutation_generated')}: ${mutation.generated}`,
+      ),
+      React.createElement(
+        'span',
+        { key: 'historical' },
+        `${translate('ai_helper_testdata_mutation_historical')}: ${mutation.historical}`,
+      ),
+      React.createElement(
+        'span',
+        { key: 'viable' },
+        `${translate('ai_helper_testdata_mutation_viable')}: ${mutation.viable}`,
+      ),
+      React.createElement(
+        'span',
+        { key: 'killed' },
+        `${translate('ai_helper_testdata_mutation_killed')}: ${mutation.killed}`,
+      ),
+      React.createElement(
+        'span',
+        { key: 'survived' },
+        `${translate('ai_helper_testdata_mutation_survived')}: ${mutation.survived}`,
+      ),
+      ...(mutation.skippedReason ? [React.createElement(
+        'span',
+        { key: 'skip' },
+        `${translate('ai_helper_testdata_mutation_skip_reason')}: ${translate(`ai_helper_testdata_mutation_skip_${mutation.skippedReason.replace(/-/g, '_')}`)}`,
+      )] : []),
+      ...mutation.operators.map(operator => React.createElement(
+        'span',
+        { key: operator.id },
+        `${translate(`ai_helper_testdata_mutation_operator_${operator.id.replace(/-/g, '_')}`)}: ${operator.killed}/${operator.viable}`,
+      )),
+    ] : [React.createElement(
+      'strong',
+      { key: 'unavailable' },
+      translate('ai_helper_testdata_mutation_unavailable'),
+    )];
+    rows.push(React.createElement(
+      'div',
+      { key: 'mutation', 'aria-label': mutationLabel },
+      React.createElement('div', { style: { fontWeight: 600, marginTop: '6px' } }, mutationLabel),
+      evidenceRow(mutationEvidence),
     ));
   }
 

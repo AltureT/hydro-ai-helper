@@ -185,6 +185,7 @@ type GenerationProgressStage =
   | 'checking_templates'
   | 'stress_testing'
   | 'discrimination_testing'
+  | 'mutation_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -242,7 +243,10 @@ const GENERATION_STAGE_GROUPS: Array<{
   { key: 'inputs', stages: ['generating_inputs', 'validating_inputs'] },
   {
     key: 'verify',
-    stages: ['running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing', 'pipeline_repair', 'model_escalation'],
+    stages: [
+      'running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing',
+      'mutation_testing', 'pipeline_repair', 'model_escalation',
+    ],
   },
   { key: 'finish', stages: ['assembling', 'complete'] },
 ];

@@ -35,6 +35,7 @@ type VerificationSummaryData = {
     coveredConstraintIds?: string[];
     missingConstraintIds?: string[];
   };
+  mutation?: unknown;
 };
 
 const { VerificationSummaryView } = require(
@@ -71,6 +72,28 @@ const translations: Record<string, string> = {
   ai_helper_testdata_verify_validator_coverage: 'Constraint coverage',
   ai_helper_testdata_verify_yes: 'Yes',
   ai_helper_testdata_verify_no: 'No',
+  ai_helper_testdata_mutation_title: 'Mutation evidence',
+  ai_helper_testdata_mutation_unavailable: 'Unavailable',
+  ai_helper_testdata_mutation_mode: 'Gate',
+  ai_helper_testdata_mutation_mode_off: 'Off',
+  ai_helper_testdata_mutation_mode_observe: 'Observe',
+  ai_helper_testdata_mutation_mode_enforce: 'Enforce',
+  ai_helper_testdata_mutation_status: 'Status',
+  ai_helper_testdata_mutation_status_completed: 'Completed',
+  ai_helper_testdata_mutation_status_partial: 'Partial',
+  ai_helper_testdata_mutation_status_skipped: 'Skipped',
+  ai_helper_testdata_mutation_generated: 'Generated',
+  ai_helper_testdata_mutation_historical: 'Historical',
+  ai_helper_testdata_mutation_viable: 'Viable',
+  ai_helper_testdata_mutation_killed: 'Killed',
+  ai_helper_testdata_mutation_survived: 'Survived',
+  ai_helper_testdata_mutation_skip_reason: 'Reason',
+  ai_helper_testdata_mutation_skip_gate_off: 'Gate disabled',
+  ai_helper_testdata_mutation_skip_budget_exhausted: 'Budget exhausted',
+  ai_helper_testdata_mutation_operators: 'Operators',
+  ai_helper_testdata_mutation_operator_comparison_boundary: 'Boundary comparison',
+  ai_helper_testdata_mutation_operator_constant_off_by_one: 'Constant off-by-one',
+  ai_helper_testdata_mutation_operator_historical_submission: 'Historical submission',
 };
 
 function translate(key: string, ...args: Array<string | number>): string {
@@ -458,6 +481,101 @@ describe('VerificationSummaryView', () => {
     expect(markup).toContain('Legal inputs accepted');
     expect(markup).toContain('0/0');
     expect(markup).not.toContain('No validator provided');
+  });
+
+  it('renders completed mutation evidence using only bounded aggregates', () => {
+    const markup = render({
+      verified: true,
+      wouldBlock: false,
+      mutation: {
+        mode: 'enforce', status: 'completed', generated: 6, historical: 4,
+        viable: 10, killed: 8, survived: 2, score: 0.8,
+        operators: [
+          { id: 'comparison-boundary', viable: 7, killed: 6 },
+          { id: 'historical-submission', viable: 3, killed: 2 },
+        ],
+      },
+    });
+
+    expect(markup).toContain('Mutation evidence');
+    expect(markup).toContain('Enforce');
+    expect(markup).toContain('Completed');
+    expect(markup).toContain('8/10 (80%)');
+    expect(markup).toContain('Generated: 6');
+    expect(markup).toContain('Historical: 4');
+    expect(markup).toContain('Viable: 10');
+    expect(markup).toContain('Killed: 8');
+    expect(markup).toContain('Survived: 2');
+    expect(markup).toContain('Boundary comparison: 6/7');
+    expect(markup).toContain('Historical submission: 2/3');
+  });
+
+  it('renders observe low-score evidence as would-block without hiding aggregates', () => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      mutation: {
+        mode: 'observe', status: 'completed', generated: 7, historical: 3,
+        viable: 10, killed: 7, survived: 3, score: 0.7,
+        operators: [{ id: 'comparison-boundary', viable: 10, killed: 7 }],
+      },
+    });
+
+    expect(markup).toContain('Would block');
+    expect(markup).toContain('Observe');
+    expect(markup).toContain('7/10 (70%)');
+    expect(markup).not.toContain('Verified');
+  });
+
+  it.each([
+    ['partial', {
+      mode: 'observe', status: 'partial', generated: 1, historical: 0,
+      viable: 1, killed: 0, survived: 1, score: 0,
+      operators: [{ id: 'constant-off-by-one', viable: 1, killed: 0 }],
+      skippedReason: 'budget-exhausted',
+    }, ['Partial', '0/1 (0%)', 'Budget exhausted', 'Constant off-by-one: 0/1']],
+    ['skipped', {
+      mode: 'off', status: 'skipped', generated: 0, historical: 0,
+      viable: 0, killed: 0, survived: 0, operators: [], skippedReason: 'gate-off',
+    }, ['Off', 'Skipped', 'Unavailable', 'Gate disabled']],
+  ])('renders bounded %s mutation evidence', (_label, mutation, expected) => {
+    const markup = render({ mutation });
+    for (const text of expected) expect(markup).toContain(text);
+  });
+
+  it.each([
+    ['invalid totals', { generated: 20, historical: 1 }],
+    ['negative count', { generated: -1 }],
+    ['survivor mismatch', { survived: 1 }],
+    ['score mismatch', { score: 0.7 }],
+    ['duplicate operator', { operators: [
+      { id: 'comparison-boundary', viable: 7, killed: 6 },
+      { id: 'comparison-boundary', viable: 3, killed: 2 },
+    ] }],
+    ['unknown operator', { operators: [{ id: 'private-source', viable: 10, killed: 8 }] }],
+    ['arbitrary skip reason', { status: 'partial', skippedReason: '/private/reason' }],
+    ['sensitive field', { source: 'PRIVATE_MUTATION_SOURCE_SENTINEL' }],
+  ])('fails closed for %s in mutation evidence', (_label, patch) => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      mutation: {
+        mode: 'observe', status: 'completed', generated: 6, historical: 4,
+        viable: 10, killed: 8, survived: 2, score: 0.8,
+        operators: [
+          { id: 'comparison-boundary', viable: 7, killed: 6 },
+          { id: 'historical-submission', viable: 3, killed: 2 },
+        ],
+        ...patch,
+      },
+    });
+
+    expect(markup).toContain('Mutation evidence');
+    expect(markup).toContain('Unavailable');
+    expect(markup).not.toContain('Completed');
+    expect(markup).not.toContain('80%');
+    expect(markup).not.toContain('PRIVATE_MUTATION_SOURCE_SENTINEL');
+    expect(markup).not.toContain('/private/reason');
   });
 
   it('falls back to ran and casesChecked for legacy validator evidence', () => {
