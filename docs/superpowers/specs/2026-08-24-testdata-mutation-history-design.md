@@ -2,7 +2,7 @@
 
 日期：2026-08-24
 
-状态：待 Owner 审阅
+状态：Owner 已确认
 
 基线：`claude/testdata-phase-c@47dc183`
 
@@ -160,7 +160,7 @@ mutation 评估只在以下条件成立时运行：沙箱模式可用、正式 c
 
 建议新增失败码：
 
-- `MUTATION_SCORE_LOW`：完整证据且分数低于 0.8；
+- `MUTATION_SCORE_TOO_LOW`：完整证据且分数低于 0.8（复用仓库已预留失败码）；
 - `MUTATION_EVIDENCE_UNAVAILABLE`：显式 mutation enforce 下没有完整、非基础设施的可用证据。
 
 两者均为 `stage=mutation_testing`、`artifact=mutation`、`retryPolicy=no-retry`，不触发 AI repair；safeDetails 只含计数、score、门槛和闭集 reason。
