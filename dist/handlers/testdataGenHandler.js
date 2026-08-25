@@ -14,8 +14,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenJobDismissHandler = exports.TestdataGenJobCancelHandler = exports.TestdataGenJobStatusHandler = exports.TestdataGenJobStartHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
 exports.loadTestlibCheckerArtifacts = loadTestlibCheckerArtifacts;
+exports.loadHistoricalMutationCandidates = loadHistoricalMutationCandidates;
 exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
+const crypto_1 = require("crypto");
 const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
 const modelRoles_1 = require("../services/testdata/modelRoles");
@@ -33,6 +35,7 @@ const mongo_1 = require("../utils/mongo");
 const testdataGenerationJob_1 = require("../models/testdataGenerationJob");
 const runTelemetry_1 = require("../services/testdata/runTelemetry");
 const pipelineContext_1 = require("../services/testdata/pipelineContext");
+const mutation_1 = require("../services/testdata/mutation");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
 function normalizeCheckerPath(filename) {
@@ -104,6 +107,11 @@ async function loadTestlibCheckerArtifacts(domainId, pdoc) {
 }
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
 const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
+const HISTORICAL_MUTATION_RECORD_LANGUAGES = [
+    ...PYTHON3_RECORD_LANGUAGES,
+    'cc', 'cc.cc17', 'cpp', 'cpp17', 'c++17',
+];
+const HISTORICAL_MUTATION_RECORD_LIMIT = 64;
 function canReadAllRecordCodes(handler) {
     const user = handler.user;
     const hasPriv = typeof user?.hasPriv === 'function'
@@ -113,6 +121,92 @@ function canReadAllRecordCodes(handler) {
         && hydrooj_1.PERM.PERM_READ_RECORD_CODE !== undefined
         && user.hasPerm(hydrooj_1.PERM.PERM_READ_RECORD_CODE);
     return hasPriv || hasPerm;
+}
+function historicalExpectedStatus(status) {
+    if (status === hydrooj_1.STATUS.STATUS_WRONG_ANSWER)
+        return 'wrong-answer';
+    if (status === hydrooj_1.STATUS.STATUS_RUNTIME_ERROR)
+        return 'runtime-error';
+    if (status === hydrooj_1.STATUS.STATUS_TIME_LIMIT_EXCEEDED)
+        return 'time-limit';
+    return undefined;
+}
+/**
+ * 读取历史错误提交作为请求内 mutation 候选。缺少独立源码读取权限或任一查询不确定时
+ * 均 fail closed；候选不会携带记录 ID、digest 或竞赛元数据。
+ */
+async function loadHistoricalMutationCandidates(handler, domainId, problemDocId) {
+    if (!canReadAllRecordCodes(handler))
+        return [];
+    let records;
+    try {
+        records = await hydrooj_1.db.collection('record')
+            .find({
+            domainId,
+            pid: problemDocId,
+            status: { $in: [
+                    hydrooj_1.STATUS.STATUS_WRONG_ANSWER,
+                    hydrooj_1.STATUS.STATUS_RUNTIME_ERROR,
+                    hydrooj_1.STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+                ] },
+            lang: { $in: HISTORICAL_MUTATION_RECORD_LANGUAGES },
+            code: { $type: 'string', $ne: '' },
+        }, {
+            projection: { _id: 1, status: 1, lang: 1, code: 1, contest: 1 },
+        })
+            .sort({ _id: -1 })
+            .limit(HISTORICAL_MUTATION_RECORD_LIMIT)
+            .toArray();
+    }
+    catch {
+        return [];
+    }
+    const contestDone = new Map();
+    const isEligibleContest = async (contest) => {
+        if (contest === undefined || contest === null)
+            return true;
+        const key = String(contest);
+        const cached = contestDone.get(key);
+        if (cached !== undefined)
+            return cached;
+        try {
+            const tdoc = await hydrooj_1.ContestModel.get(domainId, contest);
+            const done = !!tdoc && hydrooj_1.ContestModel.isDone(tdoc);
+            contestDone.set(key, done);
+            return done;
+        }
+        catch {
+            contestDone.set(key, false);
+            return false;
+        }
+    };
+    const seenSourceDigests = new Set();
+    const candidates = [];
+    for (const record of records) {
+        if ((record.domainId !== undefined && record.domainId !== domainId)
+            || (record.pid !== undefined && String(record.pid) !== String(problemDocId)))
+            continue;
+        const expectedStatus = historicalExpectedStatus(record.status);
+        const language = typeof record.lang === 'string'
+            ? (0, mutation_1.normalizeMutationLanguage)(record.lang)
+            : undefined;
+        const source = typeof record.code === 'string' ? record.code.trim() : '';
+        if (!expectedStatus
+            || !language
+            || !source
+            || source.startsWith('@@hydro_submission_file@@')
+            || source.length > testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD
+            || !(await isEligibleContest(record.contest)))
+            continue;
+        const digest = (0, crypto_1.createHash)('sha256').update(source).digest('hex');
+        if (seenSourceDigests.has(digest))
+            continue;
+        seenSourceDigests.add(digest);
+        candidates.push({ language, source, expectedStatus });
+        if (candidates.length >= mutation_1.MAX_HISTORICAL_MUTATION_CANDIDATES)
+            break;
+    }
+    return candidates;
 }
 function acceptedStdRecordQuery(handler, domainId, problemDocId) {
     return {
@@ -464,7 +558,6 @@ function createTestdataTelemetrySession(input) {
         statement: input.statement,
         hasCustomChecker: customChecker,
         unsupportedCustomChecker: customChecker && !(0, testdataGenService_1.getTestlibCheckerFilename)(input.existingConfig),
-        statementTruncated: false,
         directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
         confirmDirectFallback: input.options.confirmDirectFallback,
         reliabilityMode,
@@ -550,7 +643,7 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, mutationGateMode, historicalMutationCandidates, translate, } = params;
     const jobId = String(job._id);
     const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
     const telemetrySession = createTestdataTelemetrySession({
@@ -653,6 +746,8 @@ async function runBackgroundGeneration(params) {
             existingFiles,
             existingConfig: pdoc.config,
             checkerArtifacts,
+            mutationGateMode,
+            historicalMutationCandidates,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
             checkpoint,
@@ -800,6 +895,10 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
             }
+            const mutationGateMode = (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const historicalMutationCandidates = mutationGateMode === 'off'
+                ? []
+                : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
             const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
             const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
@@ -875,6 +974,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 existingFiles,
                 existingConfig: pdoc.config,
                 checkerArtifacts,
+                mutationGateMode,
+                historicalMutationCandidates,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
                 onProgress: progress => {
@@ -1058,6 +1159,10 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
             }
+            const mutationGateMode = (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const historicalMutationCandidates = mutationGateMode === 'off'
+                ? []
+                : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
@@ -1163,6 +1268,8 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     checkpoint,
                     checkpointHashes,
                     checkerArtifacts,
+                    mutationGateMode,
+                    historicalMutationCandidates,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {
                     console.error('[TestdataGenJob] unhandled background failure:', err);

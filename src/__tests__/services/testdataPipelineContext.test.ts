@@ -3,6 +3,8 @@ import {
   assertProblemSpecUnchanged,
   createTestdataPipelineContext,
   hashTestdataRoleIdentity,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+  TESTDATA_PIPELINE_PROMPT_VERSION,
 } from '../../services/testdata/pipelineContext';
 import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
 import type { TestdataRiskAssessment } from '../../services/testdata/risk';
@@ -16,6 +18,7 @@ import {
   buildSandboxRepairPrompt,
   buildSolutionBlueprintUserPrompt,
   buildTestdataUserPrompt,
+  checkpointVerifierFromBlueprint,
   type BuildUserPromptParams,
   type SandboxSolutionBlueprint,
   TestdataGenService,
@@ -64,7 +67,7 @@ function lowRisk(): TestdataRiskAssessment {
 function createContext(spec = validSpec()) {
   return createTestdataPipelineContext({
     runId: 'run-task7',
-    promptVersion: 'testdata-generation-v2',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
     statement,
     spec,
     risk: lowRisk(),
@@ -75,6 +78,116 @@ function createContext(spec = validSpec()) {
 }
 
 describe('frozen test-data pipeline context', () => {
+  it('uses prompt v3 while preserving checkpoint schema v2', () => {
+    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v3');
+    expect(TESTDATA_CHECKPOINT_SCHEMA_VERSION).toBe(2);
+  });
+
+  it('checkpoints cloned Manifest metadata without materialized probe payloads', () => {
+    const manifest = { constraintIds: ['C1'], invariantIds: ['I1'] };
+    const recipes = [{
+      targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+      operationName: 'append',
+      rawProbeInput: 'SECRET_RECIPE_RAW_PROBE',
+      seed: ['SECRET_RECIPE_SEED'],
+      materialized: { effectiveInput: 'SECRET_RECIPE_EFFECTIVE_INPUT' },
+      invocationPayload: { argv: ['--subtask', 'SECRET_RECIPE_SUBTASK'] },
+    }];
+    const blueprint = {
+      problemType: 'traditional' as const,
+      generatorCode: 'print(1)',
+      oracleCode: 'print(input())',
+      bruteCode: 'print(input())',
+      validatorCode: 'import sys\nsys.exit(0)',
+      stressGeneratorCode: 'print(1)',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: manifest,
+      validatorProbeRecipes: recipes,
+      materializedProbeInputs: ['SECRET_RAW_PROBE'],
+      legalSeedArray: ['SECRET_SEED'],
+      effectiveInput: 'SECRET_EFFECTIVE_INPUT',
+      subtaskInvocationPayload: ['--subtask', '1'],
+    };
+    const checkpoint = checkpointVerifierFromBlueprint(blueprint);
+
+    manifest.constraintIds.push('MUTATED');
+    recipes[0].fieldId = 'mutated';
+    expect(checkpoint).toEqual(expect.objectContaining({
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+        operationName: 'append',
+      }],
+    }));
+    const serialized = JSON.stringify(checkpoint);
+    for (const forbidden of [
+      'SECRET_RAW_PROBE', 'SECRET_SEED', 'SECRET_EFFECTIVE_INPUT',
+      'SECRET_RECIPE_RAW_PROBE', 'SECRET_RECIPE_SEED', 'SECRET_RECIPE_EFFECTIVE_INPUT',
+      'SECRET_RECIPE_SUBTASK', 'rawProbeInput', 'seed', 'materialized', 'invocationPayload',
+      'subtaskInvocationPayload', 'materializedProbeInputs', 'legalSeedArray',
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it('drops malformed checkpoint recipes without serializing allowed-slot runtime payloads', () => {
+    const validRecipe = {
+      targetId: 'C1',
+      constructionKind: 'integer-below-min' as const,
+      fieldId: 'n',
+      operationName: 'append',
+    };
+    const boundaryRecipe = {
+      targetId: 'T'.repeat(64),
+      constructionKind: 'subtask-upper-bound' as const,
+      fieldId: 'F'.repeat(64),
+      operationName: 'O'.repeat(256),
+    };
+    const malformedValues: Array<[string, unknown]> = [
+      ['nested', { outer: { sensitive: 'SECRET_ALLOWED_SLOT_NESTED' } }],
+      ['object', { sensitive: 'SECRET_ALLOWED_SLOT_OBJECT' }],
+      ['array', ['SECRET_ALLOWED_SLOT_ARRAY']],
+      ['number', 8675309],
+      ['null', null],
+      ['empty', ''],
+      ['overlong', `SECRET_ALLOWED_SLOT_OVERLONG_${'x'.repeat(300)}`],
+    ];
+    const malformedRecipes = (
+      ['targetId', 'constructionKind', 'fieldId', 'operationName'] as const
+    ).flatMap(slot => malformedValues.map(([, value]) => ({
+      ...validRecipe,
+      [slot]: value,
+    })));
+    const checkpoint = checkpointVerifierFromBlueprint({
+      problemType: 'traditional',
+      generatorCode: 'print(1)',
+      oracleCode: 'print(input())',
+      bruteCode: 'print(input())',
+      validatorCode: 'import sys\nsys.exit(0)',
+      stressGeneratorCode: 'print(1)',
+      validatorProbeRecipes: [
+        validRecipe,
+        boundaryRecipe,
+        ...malformedRecipes,
+        { ...validRecipe, constructionKind: 'SECRET_UNKNOWN_CONSTRUCTION_KIND' },
+      ] as any,
+    });
+
+    expect(checkpoint.validatorProbeRecipes).toEqual([validRecipe, boundaryRecipe]);
+    const serialized = JSON.stringify(checkpoint);
+    for (const forbidden of [
+      'SECRET_ALLOWED_SLOT_NESTED',
+      'SECRET_ALLOWED_SLOT_OBJECT',
+      'SECRET_ALLOWED_SLOT_ARRAY',
+      '8675309',
+      'SECRET_ALLOWED_SLOT_OVERLONG',
+      'SECRET_UNKNOWN_CONSTRUCTION_KIND',
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
   it('keeps specHash stable when semantically identical object keys arrive in a different order', () => {
     const reordered = JSON.parse(JSON.stringify(validSpec(), [
       'uncertainties', 'subtasks', 'outputPolicy', 'caseSensitive', 'kind',
@@ -91,7 +204,7 @@ describe('frozen test-data pipeline context', () => {
     const sourceRisk = lowRisk();
     const context = createTestdataPipelineContext({
       runId: 'run-task7',
-      promptVersion: 'testdata-generation-v2',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       statement,
       spec: sourceSpec,
       risk: sourceRisk,
@@ -173,7 +286,7 @@ describe('frozen test-data pipeline context', () => {
     expect(prompt).toContain('不得修改');
   });
 
-  it('emits v2 checkpoint metadata with hashes only, never statement, Spec, or endpointId', async () => {
+  it('emits v3 checkpoint metadata with hashes only, never statement, Spec, or endpointId', async () => {
     const context = createContext();
     const onCheckpoint = jest.fn();
     const service = new TestdataGenService({ chat: jest.fn() } as never, {
@@ -195,7 +308,7 @@ describe('frozen test-data pipeline context', () => {
     const update = onCheckpoint.mock.calls[0][0];
     expect(update).toMatchObject({
       checkpointSchemaVersion: 2,
-      promptVersion: 'testdata-generation-v2',
+      promptVersion: 'testdata-generation-v3',
       statementHash: statement.statementHash,
       specHash: context.specHash,
       roleDependencies: { oracle: expect.stringMatching(/^[a-f0-9]{64}$/) },
@@ -302,7 +415,7 @@ describe('role prompt isolation around the frozen spec', () => {
     };
     return createTestdataPipelineContext({
       runId: 'semantic-role-isolation',
-      promptVersion: 'testdata-generation-v2',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       statement: semanticStatement,
       spec,
       risk: lowRisk(),
@@ -357,7 +470,7 @@ describe('role prompt isolation around the frozen spec', () => {
     const functionStatement = createStatementSnapshot('Call transform with values and label.');
     const functionContext = createTestdataPipelineContext({
       runId: 'function-interface-contract',
-      promptVersion: 'testdata-generation-v2',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       statement: functionStatement,
       spec: {
         schemaVersion: 1,

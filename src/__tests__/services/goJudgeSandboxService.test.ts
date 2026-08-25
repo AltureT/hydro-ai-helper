@@ -129,6 +129,83 @@ describe('GoJudgeSandboxRunner', () => {
 });
 
 describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
+  it('appends structured argv without modifying stdin or using a shell', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runPythonBatchDetailed('print(1)', [{
+      stdin: '5\n',
+      argv: ['--subtask', '2'],
+    }] as any);
+
+    expect(http.post.mock.calls[0][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/python3', 'main.py', '--subtask', '2'],
+      files: expect.arrayContaining([{ content: '5\n' }]),
+    }));
+  });
+
+  it('keeps legacy string invocations byte-for-byte compatible', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runPythonBatchDetailed('print(1)', ['5\n']);
+
+    expect(http.post.mock.calls[0][1].cmd[0].args).toEqual(['/usr/bin/python3', 'main.py']);
+    expect(http.post.mock.calls[0][1].cmd[0].files[0]).toEqual({ content: '5\n' });
+  });
+
+  it('rejects invalid argv invocations before making an HTTP request', async () => {
+    const http = { get: jest.fn(), post: jest.fn() };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const invalidInputs: unknown[] = [
+      { stdin: '', argv: Array.from({ length: 17 }, () => 'x') },
+      { stdin: '', argv: ['中'.repeat(43)] },
+      { stdin: '', argv: ['nul\0byte'] },
+      { stdin: '', argv: ['line\nbreak'] },
+      { stdin: '', argv: ['carriage\rreturn'] },
+      { stdin: '', argv: ['control\x1f'] },
+      { stdin: '', argv: ['delete\x7f'] },
+      { stdin: '', argv: [1] },
+      {},
+      null,
+      { stdin: '', argv: null },
+      { stdin: '', argv: false },
+      { stdin: '', argv: 0 },
+      { stdin: '', argv: '' },
+      { stdin: '', argv: 'not-an-array' },
+    ];
+
+    for (const input of invalidInputs) {
+      await expect(runner.runPythonBatchDetailed('print(1)', [input] as any))
+        .rejects.toThrow(/Invalid Python (invocation|argv)/);
+    }
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('passes literal shell metacharacters as separate inert argv elements', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const argv = ['$(touch x)', '`uname`', 'two words', ';'];
+
+    await runner.runPythonBatchDetailed('print(1)', [{ stdin: '', argv }] as any);
+
+    const args = http.post.mock.calls[0][1].cmd[0].args;
+    expect(args).toEqual(['/usr/bin/python3', 'main.py', ...argv]);
+    expect(args).not.toContain('/bin/sh');
+    expect(args).not.toContain('/bin/bash');
+    expect(args).not.toContain('-c');
+    expect(args).not.toContain(argv.join(' '));
+  });
+
   it('按 status 分类，不因单条失败抛错（Accepted/TLE/RE/OLE）', async () => {
     const http = {
       get: jest.fn(),

@@ -14,6 +14,13 @@ export interface PythonRunResult {
   stderr: string;
 }
 
+export interface PythonRunInvocation {
+  stdin: string;
+  argv?: string[];
+}
+
+export type PythonBatchInput = string | PythonRunInvocation;
+
 /** 宽容批量执行的单条结果：不因单条失败抛错，由调用方按 status 分类处理。 */
 export interface PythonRunDetail {
   status: string;        // go-judge 原文，如 'Accepted' | 'Time Limit Exceeded' | ...
@@ -63,7 +70,7 @@ export interface TestdataSandboxRunner {
   isAvailable(signal?: AbortSignal): Promise<boolean>;
   runPython(code: string, stdin?: string, signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult>;
   runPythonBatch(code: string, inputs: string[], signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult[]>;
-  runPythonBatchDetailed(code: string, inputs: string[], opts?: PythonBatchOptions): Promise<PythonRunDetail[]>;
+  runPythonBatchDetailed(code: string, inputs: PythonBatchInput[], opts?: PythonBatchOptions): Promise<PythonRunDetail[]>;
   /** 可选编译能力；缺失时上层必须保持 Python-only 降级行为。 */
   compileCpp?(source: string, opts?: CppCompileOptions): Promise<CppCompileResult>;
   compileJava?(
@@ -221,16 +228,34 @@ function normalizeHost(host: string): string {
   return parsed.toString().replace(/\/+$/, '');
 }
 
+function normalizePythonBatchInput(input: PythonBatchInput): PythonRunInvocation {
+  if (typeof input === 'string') return { stdin: input, argv: [] };
+  if (!input || typeof input !== 'object') throw new TypeError('Invalid Python invocation');
+  const argv = input.argv === undefined ? [] : input.argv;
+  if (typeof input.stdin !== 'string' || !Array.isArray(argv) || argv.length > 16) {
+    throw new TypeError('Invalid Python invocation');
+  }
+  for (const arg of argv) {
+    if (typeof arg !== 'string'
+      || Buffer.byteLength(arg, 'utf8') > 128
+      // eslint-disable-next-line no-control-regex
+      || /[\0\r\n\x00-\x1f\x7f]/.test(arg)) {
+      throw new TypeError('Invalid Python argv');
+    }
+  }
+  return { stdin: input.stdin, argv: [...argv] };
+}
+
 function buildPythonCommand(
   code: string,
-  stdin: string,
+  invocation: PythonRunInvocation,
   limits: { cpuLimit?: number; clockLimit?: number } = {},
 ) {
   return {
-    args: ['/usr/bin/python3', 'main.py'],
+    args: ['/usr/bin/python3', 'main.py', ...(invocation.argv || [])],
     env: ['PATH=/usr/bin:/bin', 'PYTHONIOENCODING=utf-8', 'PYTHONDONTWRITEBYTECODE=1'],
     files: [
-      { content: stdin },
+      { content: invocation.stdin },
       { name: 'stdout', max: STDOUT_LIMIT_BYTES },
       { name: 'stderr', max: STDERR_LIMIT_BYTES },
     ],
@@ -599,13 +624,14 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
    */
   async runPythonBatchDetailed(
     code: string,
-    inputs: string[],
+    inputs: PythonBatchInput[],
     opts: PythonBatchOptions = {},
   ): Promise<PythonRunDetail[]> {
+    const invocations = inputs.map(normalizePythonBatchInput);
     return this.runBatchDetailed(
-      inputs,
+      invocations,
       opts,
-      (input, limits) => buildPythonCommand(code, input, limits),
+      (invocation, limits) => buildPythonCommand(code, invocation, limits),
     );
   }
 

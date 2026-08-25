@@ -124,12 +124,31 @@ function normalizeHost(host) {
     }
     return parsed.toString().replace(/\/+$/, '');
 }
-function buildPythonCommand(code, stdin, limits = {}) {
+function normalizePythonBatchInput(input) {
+    if (typeof input === 'string')
+        return { stdin: input, argv: [] };
+    if (!input || typeof input !== 'object')
+        throw new TypeError('Invalid Python invocation');
+    const argv = input.argv === undefined ? [] : input.argv;
+    if (typeof input.stdin !== 'string' || !Array.isArray(argv) || argv.length > 16) {
+        throw new TypeError('Invalid Python invocation');
+    }
+    for (const arg of argv) {
+        if (typeof arg !== 'string'
+            || Buffer.byteLength(arg, 'utf8') > 128
+            // eslint-disable-next-line no-control-regex
+            || /[\0\r\n\x00-\x1f\x7f]/.test(arg)) {
+            throw new TypeError('Invalid Python argv');
+        }
+    }
+    return { stdin: input.stdin, argv: [...argv] };
+}
+function buildPythonCommand(code, invocation, limits = {}) {
     return {
-        args: ['/usr/bin/python3', 'main.py'],
+        args: ['/usr/bin/python3', 'main.py', ...(invocation.argv || [])],
         env: ['PATH=/usr/bin:/bin', 'PYTHONIOENCODING=utf-8', 'PYTHONDONTWRITEBYTECODE=1'],
         files: [
-            { content: stdin },
+            { content: invocation.stdin },
             { name: 'stdout', max: STDOUT_LIMIT_BYTES },
             { name: 'stderr', max: STDERR_LIMIT_BYTES },
         ],
@@ -431,7 +450,8 @@ class GoJudgeSandboxRunner {
      * 按 SANDBOX_CHUNK_SIZE 分块、默认块间串行；块请求 timeout = chunkSize × clockLimit + 15s。
      */
     async runPythonBatchDetailed(code, inputs, opts = {}) {
-        return this.runBatchDetailed(inputs, opts, (input, limits) => buildPythonCommand(code, input, limits));
+        const invocations = inputs.map(normalizePythonBatchInput);
+        return this.runBatchDetailed(invocations, opts, (invocation, limits) => buildPythonCommand(code, invocation, limits));
     }
     /** 宽容执行已缓存的二进制，分块、限额与绝对截止时间语义和 Python 完全一致。 */
     async runCompiledBatchDetailed(fileId, inputs, opts = {}) {

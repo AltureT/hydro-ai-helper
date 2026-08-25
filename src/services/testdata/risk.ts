@@ -2,6 +2,8 @@ import { hasParseableStatementSamples } from './statementSamples';
 
 export type TestdataReliabilityMode = 'legacy' | 'observe' | 'enforce';
 
+export type TestdataSpecConsensusMode = 'auto' | 'always' | 'off';
+
 export type TestdataRiskTier = 'low' | 'medium' | 'high' | 'blocked';
 
 export interface TestdataRiskAssessment {
@@ -25,7 +27,6 @@ export interface TestdataRiskInput {
   hasCustomChecker?: boolean;
   unsupportedCustomChecker?: boolean;
   specConflict?: boolean;
-  statementTruncated?: boolean;
   directFallbackEnabled: boolean;
   confirmDirectFallback?: boolean;
   reliabilityMode: TestdataReliabilityMode;
@@ -78,6 +79,22 @@ export function getTestdataDirectFallbackEnabled(
   return String(raw || '').trim().toLowerCase() === 'true';
 }
 
+export function getTestdataSpecConsensusMode(
+  raw = process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS,
+): TestdataSpecConsensusMode {
+  const value = String(raw || 'auto').trim().toLowerCase();
+  return value === 'always' || value === 'off' ? value : 'auto';
+}
+
+export function getTestdataMaxModelCalls(
+  raw = process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS,
+): number {
+  const value = String(raw || '').trim();
+  if (!/^\d+$/.test(value)) return 40;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 40;
+}
+
 export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssessment {
   const statement = String(input.statement || '');
   const reasons: RiskSignal[] = [];
@@ -116,9 +133,6 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
   addIf(!!input.specConflict, signal(
     'SPEC_CONFLICT', 3, 'ai_helper_testdata_risk_spec_conflict',
   ));
-  addIf(!!input.statementTruncated, signal(
-    'STATEMENT_TRUNCATED', 3, 'ai_helper_testdata_risk_statement_truncated',
-  ));
   if (input.unsupportedCustomChecker) {
     reasons.push(signal(
       'UNSUPPORTED_CUSTOM_CHECKER', 0, 'ai_helper_testdata_risk_unsupported_custom_checker',
@@ -126,9 +140,10 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
   }
 
   const score = reasons.reduce((total, item) => total + item.weight, 0);
-  // A truncated statement is semantically incomplete: its missing constraints
-  // cannot be made safe by a direct-output confirmation.
-  const tier: TestdataRiskTier = input.unsupportedCustomChecker || input.statementTruncated
+  // StatementSnapshot never truncates: it preserves/chunks the complete normalized
+  // statement or throws SPEC_STATEMENT_TOO_LONG before risk assessment. Therefore
+  // no truncation flag can truthfully reach this deterministic risk contract.
+  const tier: TestdataRiskTier = input.unsupportedCustomChecker
     ? 'blocked'
     : tierForScore(score);
   const allowsDirectFallback = tier === 'low'
@@ -137,7 +152,7 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
       ? input.directFallbackEnabled && input.confirmDirectFallback === true
       : false;
   const requiresSandbox = !allowsDirectFallback;
-  const requiresSpecConsensus = !!input.specConflict || tier === 'high' || tier === 'blocked';
+  const requiresSpecConsensus = !!input.specConflict || tier !== 'low';
   const requiresIndependentModels = tier === 'high' || tier === 'blocked';
 
   return {
@@ -148,6 +163,5 @@ export function assessTestdataRisk(input: TestdataRiskInput): TestdataRiskAssess
     requiresSpecConsensus,
     requiresIndependentModels,
     allowsDirectFallback,
-    ...(input.reliabilityMode === 'observe' ? { wouldBlock: !allowsDirectFallback } : {}),
   };
 }

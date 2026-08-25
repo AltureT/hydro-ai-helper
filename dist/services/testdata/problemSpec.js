@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.UNCERTAINTY_MAX_COUNT = void 0;
 exports.parseProblemSpecV1 = parseProblemSpecV1;
 exports.validateProblemSpecV1 = validateProblemSpecV1;
 exports.locateStatementEvidence = locateStatementEvidence;
@@ -17,7 +18,7 @@ const CONSTRAINT_MAX_COUNT = 512;
 const INVARIANT_MAX_COUNT = 256;
 const OPERATION_MAX_COUNT = 128;
 const SUBTASK_MAX_COUNT = 100;
-const UNCERTAINTY_MAX_COUNT = 100;
+exports.UNCERTAINTY_MAX_COUNT = 100;
 const STRING_ARRAY_MAX_COUNT = 128;
 const ID_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
@@ -204,7 +205,7 @@ function validateShape(value) {
         positiveInteger(subtask.score, 100);
         uniqueStrings(subtask.constraintIds);
     }
-    for (const rawUncertainty of boundedArray(spec.uncertainties, UNCERTAINTY_MAX_COUNT)) {
+    for (const rawUncertainty of boundedArray(spec.uncertainties, exports.UNCERTAINTY_MAX_COUNT)) {
         const uncertainty = asObject(rawUncertainty);
         exactKeys(uncertainty, ['code', 'description', 'evidence'], ['code', 'description']);
         boundedString(uncertainty.code, ID_MAX_LENGTH, ID_PATTERN);

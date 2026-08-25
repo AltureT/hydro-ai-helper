@@ -9,11 +9,87 @@ const problemSpecPrompts_1 = require("./problemSpecPrompts");
 const ADJUDICATION_MAX_LENGTH = 768 * 1024;
 const RESOLUTION_REASON_MAX_LENGTH = 2048;
 const RESOLUTION_EVIDENCE_MAX_LENGTH = 4096;
+function halfWidth(value) {
+    return [...value].map(character => {
+        const code = character.charCodeAt(0);
+        if (code === 0x3000)
+            return ' ';
+        if (code >= 0xFF01 && code <= 0xFF5E)
+            return String.fromCharCode(code - 0xFEE0);
+        return character;
+    }).join('');
+}
+function canonicalIntegerToken(token) {
+    const power = /^(\d+)\^(\d+)$/.exec(token);
+    if (power) {
+        const exponent = Number(power[2]);
+        if (!Number.isSafeInteger(exponent) || exponent > 1000
+            || power[1].length * Math.max(1, exponent) > 4096)
+            return token;
+        return (BigInt(power[1]) ** BigInt(exponent)).toString();
+    }
+    const numeric = /^(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
+    if (!numeric)
+        return token;
+    const whole = numeric[1];
+    const fraction = numeric[2] || '';
+    const exponent = numeric[3] === undefined ? 0 : Number(numeric[3]);
+    if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 4096)
+        return token;
+    const digits = `${whole}${fraction}`;
+    const decimalPosition = whole.length + exponent;
+    if (decimalPosition <= 0)
+        return /^0+$/.test(digits) ? '0' : token;
+    if (decimalPosition < digits.length && !/^0+$/.test(digits.slice(decimalPosition)))
+        return token;
+    const integer = decimalPosition >= digits.length
+        ? `${digits}${'0'.repeat(decimalPosition - digits.length)}`
+        : digits.slice(0, decimalPosition);
+    return BigInt(integer || '0').toString();
+}
 function text(value) {
-    return value.trim().replace(/\s+/g, ' ');
+    return halfWidth(value)
+        .replace(/≤/g, '<=')
+        .replace(/≥/g, '>=')
+        .replace(/≠/g, '!=')
+        .replace(/(?<![\p{L}\p{N}_.])(?:\d+\^\d+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\p{L}\p{N}_.])/gu, canonicalIntegerToken)
+        .trim()
+        .replace(/\s+/g, ' ');
 }
 function signature(value) {
     return JSON.stringify(value);
+}
+function normalizedUncertainty(uncertainty) {
+    return {
+        description: text(uncertainty.description),
+        ...(uncertainty.evidence !== undefined ? { evidence: text(uncertainty.evidence) } : {}),
+    };
+}
+function mergeUncertainties(primary, critic) {
+    const seenDescriptions = new Set();
+    const seenCodes = new Set();
+    return [...primary.uncertainties, ...critic.uncertainties].filter(uncertainty => {
+        const key = signature(normalizedUncertainty(uncertainty));
+        if (seenCodes.has(uncertainty.code) || seenDescriptions.has(key))
+            return false;
+        seenCodes.add(uncertainty.code);
+        seenDescriptions.add(key);
+        return true;
+    }).slice(0, problemSpec_1.UNCERTAINTY_MAX_COUNT);
+}
+function mergeValidatedSpec(base, primary, critic, input) {
+    const merged = { ...base, uncertainties: mergeUncertainties(primary, critic) };
+    try {
+        return (0, problemSpec_1.validateProblemSpecV1)(merged, {
+            hasCustomChecker: input.hasCustomChecker,
+            ...(input.requestedProblemKind === 'auto'
+                ? {}
+                : { expectedProblemKind: input.requestedProblemKind }),
+        });
+    }
+    catch {
+        return primary;
+    }
 }
 function normalizedSpec(spec) {
     const sortObjects = (items) => [...items].sort((left, right) => (signature(left).localeCompare(signature(right))));
@@ -84,27 +160,99 @@ function normalizedSpec(spec) {
                 .map(id => constraintSignatures.get(id) || 'missing')
                 .sort(),
         }))),
-        uncertainties: sortObjects(spec.uncertainties.map(uncertainty => ({
-            description: text(uncertainty.description),
-            ...(uncertainty.evidence !== undefined ? { evidence: text(uncertainty.evidence) } : {}),
-        }))),
+        uncertainties: sortObjects(spec.uncertainties.map(normalizedUncertainty)),
     };
 }
-const DIFF_PATHS = [
-    'problemKind', 'testCaseMode', 'inputFields', 'constraints', 'invariants',
-    'outputPolicy', 'operations', 'subtasks', 'uncertainties',
+const WHOLE_DIFF_PATHS = [
+    'problemKind', 'testCaseMode', 'inputFields', 'outputPolicy', 'operations', 'subtasks',
 ];
+function overlappingItemSignature(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item))
+        return signature(item);
+    const object = item;
+    if (typeof object.expression !== 'string')
+        return signature(item);
+    return signature({
+        ...object,
+        expression: object.expression.replace(/(?<![\p{L}\p{N}_.])\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\p{L}\p{N}_.])/gu, '#').replace(/\s*(<=|>=|!=|==|<|>)\s*/g, '$1'),
+    });
+}
+function wholeConflict(path, left, right) {
+    return (0, util_1.isDeepStrictEqual)(left[path], right[path])
+        ? []
+        : [{
+                path,
+                kind: 'value-mismatch',
+                primaryValue: left[path],
+                criticValue: right[path],
+            }];
+}
+function itemConflicts(path, primaryItems, criticItems) {
+    const primaryBySignature = new Map();
+    const criticBySignature = new Map();
+    const add = (target, item) => {
+        const key = signature(item);
+        target.set(key, [...(target.get(key) || []), item]);
+    };
+    primaryItems.forEach(item => add(primaryBySignature, item));
+    criticItems.forEach(item => add(criticBySignature, item));
+    const unmatchedPrimary = [];
+    const unmatchedCritic = [];
+    const keys = [...new Set([...primaryBySignature.keys(), ...criticBySignature.keys()])].sort();
+    for (const key of keys) {
+        const primary = primaryBySignature.get(key) || [];
+        const critic = criticBySignature.get(key) || [];
+        const paired = Math.min(primary.length, critic.length);
+        unmatchedPrimary.push(...primary.slice(paired));
+        unmatchedCritic.push(...critic.slice(paired));
+    }
+    const primaryByOverlap = new Map();
+    const criticByOverlap = new Map();
+    const addOverlap = (target, item) => {
+        const key = overlappingItemSignature(item);
+        target.set(key, [...(target.get(key) || []), item]);
+    };
+    unmatchedPrimary.forEach(item => addOverlap(primaryByOverlap, item));
+    unmatchedCritic.forEach(item => addOverlap(criticByOverlap, item));
+    const unpaired = [];
+    const overlapKeys = [
+        ...new Set([...primaryByOverlap.keys(), ...criticByOverlap.keys()]),
+    ].sort();
+    for (const key of overlapKeys) {
+        const primary = primaryByOverlap.get(key) || [];
+        const critic = criticByOverlap.get(key) || [];
+        const paired = Math.min(primary.length, critic.length);
+        for (let index = 0; index < paired; index += 1) {
+            unpaired.push({ primaryValue: primary[index], criticValue: critic[index] });
+        }
+        primary.slice(paired).forEach(item => unpaired.push({ primaryValue: item, criticValue: null }));
+        critic.slice(paired).forEach(item => unpaired.push({ primaryValue: null, criticValue: item }));
+    }
+    return unpaired.map((item, index) => ({
+        path: `${path}[${index}]`,
+        kind: 'value-mismatch',
+        ...item,
+    }));
+}
 function diffProblemSpecs(primary, critic) {
     const left = normalizedSpec(primary);
     const right = normalizedSpec(critic);
-    return DIFF_PATHS.flatMap(path => (0, util_1.isDeepStrictEqual)(left[path], right[path])
-        ? []
-        : [{ path, kind: 'value-mismatch', primaryValue: left[path], criticValue: right[path] }]);
+    return [
+        ...['problemKind', 'testCaseMode', 'inputFields']
+            .flatMap(path => wholeConflict(path, left, right)),
+        ...itemConflicts('constraints', left.constraints, right.constraints),
+        ...itemConflicts('invariants', left.invariants, right.invariants),
+        ...['outputPolicy', 'operations', 'subtasks']
+            .flatMap(path => wholeConflict(path, left, right)),
+    ];
 }
 function isCancellation(error) {
     const candidate = error;
     return !!candidate && (candidate.name === 'AbortError' || candidate.name === 'CanceledError'
         || candidate.code === 'ERR_CANCELED' || candidate.category === 'aborted');
+}
+function isModelCallBudgetExhausted(error) {
+    return error instanceof failures_1.TestdataPipelineError && error.code === 'PIPELINE_BUDGET_EXHAUSTED';
 }
 function failureCode(error) {
     if (error instanceof failures_1.TestdataPipelineError && error.code === 'SPEC_EVIDENCE_NOT_FOUND') {
@@ -129,6 +277,61 @@ function exactKeys(value, allowed) {
     if (Object.keys(value).some(key => !allowed.includes(key))
         || allowed.some(key => !Object.prototype.hasOwnProperty.call(value, key))) {
         throw new TypeError('invalid adjudication keys');
+    }
+}
+function throwInvalidAdjudication(message) {
+    throw new failures_1.TestdataPipelineError(message, 'SPEC_CONSENSUS_REQUIRED', 'spec_consensus', 'spec', 'manual-review');
+}
+function commonItems(primary, critic) {
+    const criticCounts = new Map();
+    critic.forEach(item => {
+        const key = signature(item);
+        criticCounts.set(key, (criticCounts.get(key) || 0) + 1);
+    });
+    return primary.filter(item => {
+        const key = signature(item);
+        const count = criticCounts.get(key) || 0;
+        if (count === 0)
+            return false;
+        criticCounts.set(key, count - 1);
+        return true;
+    });
+}
+function verifyResolvedItems(path, primary, critic, resolved, conflicts, resolutions) {
+    const itemPathPattern = new RegExp(`^${path}\\[\\d+\\]$`);
+    const pathConflicts = conflicts.filter(conflict => itemPathPattern.test(conflict.path));
+    const expected = commonItems(primary, critic);
+    let newItemCount = 0;
+    for (const resolution of resolutions.filter(item => itemPathPattern.test(item.path))) {
+        const conflict = pathConflicts.find(item => item.path === resolution.path);
+        if (!conflict)
+            throwInvalidAdjudication('裁决引用了未知冲突条目。');
+        if (resolution.selected === 'new') {
+            newItemCount += 1;
+            continue;
+        }
+        const selected = resolution.selected === 'A'
+            ? conflict.primaryValue
+            : conflict.criticValue;
+        if (selected !== null)
+            expected.push(selected);
+    }
+    const remaining = [...resolved];
+    for (const item of expected) {
+        const key = signature(item);
+        const index = remaining.findIndex(candidate => signature(candidate) === key);
+        if (index < 0)
+            throwInvalidAdjudication('裁决结果修改或删除了已达成共识的条目。');
+        remaining.splice(index, 1);
+    }
+    if (remaining.length !== newItemCount) {
+        throwInvalidAdjudication('裁决结果包含未声明的新增条目。');
+    }
+    const knownConflictValues = new Set(pathConflicts.flatMap(conflict => ([conflict.primaryValue, conflict.criticValue]
+        .filter(value => value !== null)
+        .map(signature))));
+    if (remaining.some(item => knownConflictValues.has(signature(item)))) {
+        throwInvalidAdjudication('裁决把既有条目错误标记为 new。');
     }
 }
 function parseAdjudication(raw, conflicts, primary, critic, input) {
@@ -170,12 +373,13 @@ function parseAdjudication(raw, conflicts, primary, critic, input) {
         for (const resolution of resolutions) {
             (0, problemSpec_1.locateStatementEvidence)(input.snapshot, { quote: resolution.evidenceQuote });
         }
-        const resolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
+        const modelResolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
+        const resolvedSpec = mergeValidatedSpec(modelResolvedSpec, primary, critic, input);
         const normalizedResolved = normalizedSpec(resolvedSpec);
         const normalizedPrimary = normalizedSpec(primary);
         const normalizedCritic = normalizedSpec(critic);
         const conflictPaths = new Set(conflicts.map(conflict => conflict.path));
-        for (const path of DIFF_PATHS) {
+        for (const path of WHOLE_DIFF_PATHS) {
             if (conflictPaths.has(path))
                 continue;
             if (!(0, util_1.isDeepStrictEqual)(normalizedPrimary[path], normalizedCritic[path])
@@ -183,7 +387,11 @@ function parseAdjudication(raw, conflicts, primary, critic, input) {
                 throw new failures_1.TestdataPipelineError('裁决结果修改了无冲突字段。', 'SPEC_CONSENSUS_REQUIRED', 'spec_consensus', 'spec', 'manual-review');
             }
         }
+        verifyResolvedItems('constraints', normalizedPrimary.constraints, normalizedCritic.constraints, normalizedResolved.constraints, conflicts, resolutions);
+        verifyResolvedItems('invariants', normalizedPrimary.invariants, normalizedCritic.invariants, normalizedResolved.invariants, conflicts, resolutions);
         for (const resolution of resolutions) {
+            if (/^(?:constraints|invariants)\[\d+\]$/.test(resolution.path))
+                continue;
             const conflict = conflicts.find(item => item.path === resolution.path);
             const actual = normalizedResolved[resolution.path];
             const matchesA = !!conflict && (0, util_1.isDeepStrictEqual)(actual, conflict.primaryValue);
@@ -207,7 +415,7 @@ function parseAdjudication(raw, conflicts, primary, critic, input) {
 }
 function buildAdjudicatorPrompts(snapshot, primary, critic, conflicts) {
     return {
-        systemPrompt: '你是 OJ 题意裁决器。只输出严格 JSON：resolvedSpec 和 resolutions。不得生成 ORACLE、validator、生成器或代码。每个冲突必须恰好一条 resolution，selected 只能是 A、B、new，evidenceQuote 必须逐字来自题面。',
+        systemPrompt: '你是 OJ 题意裁决器。只输出严格 JSON：resolvedSpec 和 resolutions。不得生成 ORACLE、validator、生成器或代码。只裁决 SERVER CONFLICTS 中列出的整字段或未配对条目；每个冲突必须恰好一条 resolution，selected 只能是 A、B、new，evidenceQuote 必须逐字来自题面。',
         userPrompt: [
             '=== COMPLETE STATEMENT ===',
             snapshot.normalizedMarkdown,
@@ -239,19 +447,49 @@ async function runProblemSpecConsensus(input) {
             return { result, spec: validateExtractedSpec(result.content, input) };
         }
         catch (error) {
-            if (isCancellation(error))
+            if (isCancellation(error) || isModelCallBudgetExhausted(error))
                 throw error;
             return { error };
         }
     };
-    const [primary, critic] = await Promise.all([extract(input.primary), extract(input.critic)]);
-    const results = [primary.result, critic.result].filter(Boolean);
-    const rolesUsed = ['specPrimary', 'specCritic'];
+    const [primary, critic] = await Promise.all([
+        extract(input.primary),
+        ...(input.critic ? [extract(input.critic)] : []),
+    ]);
+    const results = [primary.result, critic?.result].filter(Boolean);
+    const rolesUsed = input.critic
+        ? ['specPrimary', 'specCritic']
+        : ['specPrimary'];
     const roleIdentities = {};
     if (primary.result)
         roleIdentities.specPrimary = { ...primary.result.usedModel };
-    if (critic.result)
+    if (critic?.result)
         roleIdentities.specCritic = { ...critic.result.usedModel };
+    if (!input.critic) {
+        if (!primary.spec) {
+            return {
+                status: 'unresolved',
+                conflictCount: 0,
+                unresolvedConflictCount: 1,
+                conflicts: [],
+                failureCode: failureCode(primary.error),
+                results,
+                rolesUsed,
+                roleIdentities,
+            };
+        }
+        return {
+            status: 'consensus',
+            conflictCount: 0,
+            unresolvedConflictCount: 0,
+            conflicts: [],
+            resolvedSpec: primary.spec,
+            results,
+            rolesUsed,
+            roleIdentities,
+            safeSummary: safeSummary('consensus', [], 0, rolesUsed, primary.spec),
+        };
+    }
     if (!primary.spec || !critic.spec) {
         const error = primary.error || critic.error;
         return {
@@ -266,17 +504,18 @@ async function runProblemSpecConsensus(input) {
         };
     }
     const conflicts = diffProblemSpecs(primary.spec, critic.spec);
+    const mergedSpec = mergeValidatedSpec(primary.spec, primary.spec, critic.spec, input);
     if (conflicts.length === 0) {
         return {
             status: 'consensus',
             conflictCount: 0,
             unresolvedConflictCount: 0,
             conflicts,
-            resolvedSpec: primary.spec,
+            resolvedSpec: mergedSpec,
             results,
             rolesUsed,
             roleIdentities,
-            safeSummary: safeSummary('consensus', conflicts, 0, rolesUsed, primary.spec),
+            safeSummary: safeSummary('consensus', conflicts, 0, rolesUsed, mergedSpec),
         };
     }
     if (!input.adjudicator) {
@@ -313,7 +552,7 @@ async function runProblemSpecConsensus(input) {
         };
     }
     catch (error) {
-        if (isCancellation(error))
+        if (isCancellation(error) || isModelCallBudgetExhausted(error))
             throw error;
         return {
             status: 'unresolved',
