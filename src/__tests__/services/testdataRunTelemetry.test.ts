@@ -269,6 +269,13 @@ describe('test-data quality event schema', () => {
       { mutationGenerated: 21 },
       { mutationKilled: 1 },
       { mutationScore: 0.5 },
+      { mutationGate: 'off', mutationStatus: 'skipped' },
+      { mutationStatus: 'skipped' },
+      {
+        mutationGenerated: 0, mutationHistorical: 0, mutationViable: 0,
+        mutationKilled: 0, mutationSurvived: 0, mutationScore: undefined,
+        mutationOperators: [],
+      },
       { mutationOperators: [{ id: 'unknown', viable: 3, killed: 2 }] },
       { mutationOperators: [
         { id: 'comparison-boundary', viable: 2, killed: 1 },
@@ -670,6 +677,29 @@ describe('TestdataRunTelemetryService', () => {
       { ...VALID_MUTATION_SUMMARY, generated: 20, historical: 1 },
       { ...VALID_MUTATION_SUMMARY, killed: 1 },
       { ...VALID_MUTATION_SUMMARY, score: 0.5 },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        mode: 'off', status: 'skipped', skippedReason: 'gate-off',
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        status: 'skipped', skippedReason: 'budget-exhausted',
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        status: 'partial', skippedReason: 'no-candidates',
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        status: 'skipped', skippedReason: 'checker-infra',
+        generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+        score: undefined, operators: [],
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+        score: undefined, operators: [],
+      },
       { ...VALID_MUTATION_SUMMARY, operators: [
         { id: 'comparison-boundary', viable: 2, killed: 1 },
         { id: 'comparison-boundary', viable: 1, killed: 1 },

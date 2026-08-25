@@ -92,8 +92,10 @@ import {
 import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../services/testdata/pipelineContext';
 import {
   MAX_HISTORICAL_MUTATION_CANDIDATES,
+  getMutationGateMode,
   normalizeMutationLanguage,
   type HistoricalMutationCandidate,
+  type MutationGateMode,
 } from '../services/testdata/mutation';
 
 export const TestdataGenHandlerPriv = PRIV.PRIV_USER_PROFILE;
@@ -864,6 +866,7 @@ interface BackgroundGenerationParams {
   checkpoint?: TestdataGenerationCheckpoint;
   checkpointHashes: TestdataCheckpointHashes;
   checkerArtifacts?: TestlibCheckerArtifacts;
+  mutationGateMode: MutationGateMode;
   historicalMutationCandidates: HistoricalMutationCandidate[];
   translate: (key: string) => string;
 }
@@ -871,7 +874,8 @@ interface BackgroundGenerationParams {
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    checkpoint, checkpointHashes, checkerArtifacts, historicalMutationCandidates, translate,
+    checkpoint, checkpointHashes, checkerArtifacts, mutationGateMode,
+    historicalMutationCandidates, translate,
   } = params;
   const jobId = String(job._id);
   const generationMode = getTestdataGenerationMode();
@@ -975,6 +979,7 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       existingFiles,
       existingConfig: pdoc.config,
       checkerArtifacts,
+      mutationGateMode,
       historicalMutationCandidates,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
@@ -1135,11 +1140,12 @@ export class TestdataGenGenerateHandler extends Handler {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
       }
-      const historicalMutationCandidates = await loadHistoricalMutationCandidates(
-        this,
-        domainId,
-        pdoc.docId,
+      const mutationGateMode = getMutationGateMode(
+        process.env.AI_HELPER_TESTDATA_MUTATION_GATE,
       );
+      const historicalMutationCandidates = mutationGateMode === 'off'
+        ? []
+        : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
 
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
 
@@ -1218,6 +1224,7 @@ export class TestdataGenGenerateHandler extends Handler {
         existingFiles,
         existingConfig: pdoc.config,
         checkerArtifacts,
+        mutationGateMode,
         historicalMutationCandidates,
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
@@ -1411,11 +1418,12 @@ export class TestdataGenJobStartHandler extends Handler {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
       }
-      const historicalMutationCandidates = await loadHistoricalMutationCandidates(
-        this,
-        domainId,
-        pdoc.docId,
+      const mutationGateMode = getMutationGateMode(
+        process.env.AI_HELPER_TESTDATA_MUTATION_GATE,
       );
+      const historicalMutationCandidates = mutationGateMode === 'off'
+        ? []
+        : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
@@ -1532,6 +1540,7 @@ export class TestdataGenJobStartHandler extends Handler {
           checkpoint,
           checkpointHashes,
           checkerArtifacts,
+          mutationGateMode,
           historicalMutationCandidates,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {

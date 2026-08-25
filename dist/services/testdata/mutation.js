@@ -194,12 +194,15 @@ function skipCppPreprocessor(source, start) {
     return source.length;
 }
 function skipCppRawString(source, start) {
-    if (!source.startsWith('R"', start))
+    const prefix = ['u8R"', 'uR"', 'UR"', 'LR"', 'R"']
+        .find(candidate => source.startsWith(candidate, start));
+    if (!prefix)
         return undefined;
-    const delimiterEnd = source.indexOf('(', start + 2);
-    if (delimiterEnd === -1 || delimiterEnd - (start + 2) > 16)
+    const delimiterStart = start + prefix.length;
+    const delimiterEnd = source.indexOf('(', delimiterStart);
+    if (delimiterEnd === -1 || delimiterEnd - delimiterStart > 16)
         return undefined;
-    const delimiter = source.slice(start + 2, delimiterEnd);
+    const delimiter = source.slice(delimiterStart, delimiterEnd);
     if (/\s|\\|\)/.test(delimiter))
         return undefined;
     const close = `)${delimiter}"`;

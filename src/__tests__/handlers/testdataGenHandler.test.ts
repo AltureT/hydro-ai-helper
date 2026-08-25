@@ -621,6 +621,44 @@ describe('TestdataGenGenerateHandler', () => {
     }
   });
 
+  it('mutation gate off skips historical source reads in synchronous generation', async () => {
+    const previousGate = process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+    const { find } = mockFindOne(PROBLEM_DOC, [{
+      _id: new ObjectId(),
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_WRONG_ANSWER,
+      lang: 'py.py3',
+      code: 'print("PRIVATE_SYNC_HISTORY")',
+      contest: null,
+    }]);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+
+    try {
+      await handler.post();
+      expect(find).not.toHaveBeenCalled();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        mutationGateMode: 'off',
+        historicalMutationCandidates: [],
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+      if (previousGate === undefined) delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+      else process.env.AI_HELPER_TESTDATA_MUTATION_GATE = previousGate;
+    }
+  });
+
   it('同步入口在 AI 客户端初始化失败前已记录 run_started', async () => {
     mockFindOne(PROBLEM_DOC);
     const clientError = new Error('client setup failed');
@@ -1420,6 +1458,59 @@ describe('Testdata generation background jobs', () => {
     }
   });
 
+  it('mutation gate off skips historical source reads in background generation', async () => {
+    const previousGate = process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+    const { find } = mockFindOne(PROBLEM_DOC, [{
+      _id: new ObjectId(),
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_RUNTIME_ERROR,
+      lang: 'py.py3',
+      code: 'print("PRIVATE_BACKGROUND_HISTORY")',
+      contest: null,
+    }]);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      hasReadCode: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(find).not.toHaveBeenCalled();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        mutationGateMode: 'off',
+        historicalMutationCandidates: [],
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+      if (previousGate === undefined) delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+      else process.env.AI_HELPER_TESTDATA_MUTATION_GATE = previousGate;
+    }
+  });
+
   it('starting a new preview records regenerated for the replaced completed run', async () => {
     mockFindOne(PROBLEM_DOC);
     const replaced = makeGenerationJob({ status: 'completed', active: false });
@@ -1784,6 +1875,8 @@ describe('Testdata generation background jobs', () => {
 
   it('resumeFromJobId 校验命中后把 checkpoint 传入服务并异步保存新阶段', async () => {
     mockFindOne(PROBLEM_DOC);
+    const legacySeed = 161803398;
+    const legacyLabel = 'PRIVATE_RESUME_GENERATOR_PLAN_INPUT';
     const options = {
       problemKind: 'traditional' as const,
       fillInMode: 'auto' as const,
@@ -1801,10 +1894,21 @@ describe('Testdata generation background jobs', () => {
       checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
       promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       specHash: 'a'.repeat(64),
-      roleDependencies: { oracle: 'b'.repeat(64) },
+      roleDependencies: { oracle: 'b'.repeat(64), artifacts: 'c'.repeat(64) },
       solution: {
         problemType: 'traditional' as const,
         oracleCode: 'print(input())',
+      },
+      artifacts: {
+        generatorCode: `# seed=${legacySeed}\nprint(${JSON.stringify(legacyLabel)})`,
+        generatorPlan: {
+          version: 1 as const,
+          seed: legacySeed,
+          cases: [{
+            label: legacyLabel,
+            fields: { n: { kind: 'integer' as const, value: 1 } },
+          }],
+        },
       },
     };
     const interruptedJob = makeGenerationJob({
@@ -1871,7 +1975,12 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
 
-      expect(receivedParams?.checkpoint).toBe(checkpoint);
+      expect(receivedParams?.checkpoint).toEqual(expect.objectContaining({
+        solution: checkpoint.solution,
+      }));
+      expect(receivedParams?.checkpoint).not.toHaveProperty('artifacts');
+      expect(JSON.stringify(receivedParams?.checkpoint)).not.toContain(String(legacySeed));
+      expect(JSON.stringify(receivedParams?.checkpoint)).not.toContain(legacyLabel);
       expect((receivedParams?.options as { confirmDirectFallback?: boolean } | undefined)
         ?.confirmDirectFallback).toBe(true);
       expect(maxActiveCheckpointWrites).toBe(1);

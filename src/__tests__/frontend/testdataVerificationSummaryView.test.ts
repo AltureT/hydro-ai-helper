@@ -554,6 +554,23 @@ describe('VerificationSummaryView', () => {
     ] }],
     ['unknown operator', { operators: [{ id: 'private-source', viable: 10, killed: 8 }] }],
     ['arbitrary skip reason', { status: 'partial', skippedReason: '/private/reason' }],
+    ['partial with a terminal skip reason', { status: 'partial', skippedReason: 'no-candidates' }],
+    ['skipped with a partial-only reason', {
+      status: 'skipped', skippedReason: 'checker-infra',
+      generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+      score: undefined, operators: [],
+    }],
+    ['off with evidence', { mode: 'off', status: 'skipped', skippedReason: 'gate-off' }],
+    ['skipped with viable evidence', { status: 'skipped', skippedReason: 'budget-exhausted' }],
+    ['completed without viable evidence', {
+      generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+      score: undefined, operators: [],
+    }],
+    ['off with a non-gate reason', {
+      mode: 'off', status: 'skipped', generated: 0, historical: 0,
+      viable: 0, killed: 0, survived: 0, score: undefined, operators: [],
+      skippedReason: 'budget-exhausted',
+    }],
     ['sensitive field', { source: 'PRIVATE_MUTATION_SOURCE_SENTINEL' }],
   ])('fails closed for %s in mutation evidence', (_label, patch) => {
     const markup = render({

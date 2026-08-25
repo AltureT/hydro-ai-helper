@@ -1074,6 +1074,15 @@ function makeFrozenSpecRoleClients(
   };
 }
 
+function makeAvailableSandboxRunner() {
+  return {
+    isAvailable: jest.fn().mockResolvedValue(true),
+    runPython: jest.fn(),
+    runPythonBatch: jest.fn(),
+    runPythonBatchDetailed: jest.fn(),
+  };
+}
+
 function makeFrozenV3Checkpoint<T extends Record<string, unknown>>(
   statementMarkdown: string,
   checkpoint: T,
@@ -3292,7 +3301,8 @@ describe('TestdataGenService.generate', () => {
     const baseClient = { chat: jest.fn() };
 
     await expect(new TestdataGenService(baseClient as never, {
-      mode: 'direct', reliabilityMode: 'enforce', roleClients: roles,
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce', roleClients: roles,
     }).generate({
       problemTitle: 'high risk', statementMarkdown: statement,
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
@@ -3325,7 +3335,8 @@ describe('TestdataGenService.generate', () => {
     const baseClient = { chat: jest.fn() };
 
     await expect(new TestdataGenService(baseClient as never, {
-      mode: 'direct', reliabilityMode: 'enforce', roleClients: roles,
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce', roleClients: roles,
     }).generate({
       problemTitle: 'final risk identity gate', statementMarkdown: statement,
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
@@ -3353,13 +3364,18 @@ describe('TestdataGenService.generate', () => {
     primary.identities.push(sharedFallback);
     critic.identities.push(sharedFallback);
 
-    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
-      mode: 'direct', reliabilityMode: 'enforce',
+    const error = await new TestdataGenService({
+      chat: jest.fn().mockRejectedValue(new Error('AFTER_SPEC_GATE')),
+    } as never, {
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce',
       roleClients: { specPrimary: primary, specCritic: critic },
     }).generate({
       problemTitle: 'unused configured overlap', statementMarkdown: statement,
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
-    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    }).then(() => undefined, caught => caught);
+    expect(error).toBeDefined();
+    expect(error).not.toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED' });
     expect(primary.chat).toHaveBeenCalledTimes(1);
     expect(critic.chat).toHaveBeenCalledTimes(1);
   });
@@ -3375,7 +3391,8 @@ describe('TestdataGenService.generate', () => {
     };
 
     await expect(new TestdataGenService(baseClient as never, {
-      mode: 'direct', reliabilityMode: 'enforce',
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce',
     }).generate({
       problemTitle: 'base identity collision', statementMarkdown: statement,
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
@@ -3436,7 +3453,8 @@ describe('TestdataGenService.generate', () => {
     };
 
     await expect(new TestdataGenService({ chat: jest.fn() } as never, {
-      mode: 'direct', reliabilityMode: 'enforce', roleClients: roles,
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce', roleClients: roles,
     }).generate({
       problemTitle: 'high conflict', statementMarkdown: statement,
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
@@ -6976,7 +6994,7 @@ describe('TestdataGenService.generate', () => {
         problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
       },
     })).rejects.toMatchObject({
-      code: reliabilityMode === 'enforce' ? 'SPEC_PARSE_FAILED' : 'SANDBOX_REQUIRED',
+      code: 'SANDBOX_REQUIRED',
     });
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
   });
@@ -7903,10 +7921,11 @@ describe('TestdataGenService.generate', () => {
         content: makeAiJson({ problemType: 'traditional' }),
         usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
       }) };
+      const roleClients = makeFrozenSpecRoleClients(statementMarkdown, 'traditional');
       const service = new TestdataGenService(generationClient as never, {
         mode,
         reliabilityMode: 'enforce',
-        roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+        roleClients,
         ...(mode === 'direct' ? {} : { sandboxRunner: runner }),
       });
       try {
@@ -7918,6 +7937,8 @@ describe('TestdataGenService.generate', () => {
           code: 'SANDBOX_REQUIRED', artifact: 'pipeline', retryPolicy: 'no-retry',
         });
         expect(generationClient.chat).not.toHaveBeenCalled();
+        expect(roleClients.specPrimary?.client.chat).not.toHaveBeenCalled();
+        expect(roleClients.specCritic?.client.chat).not.toHaveBeenCalled();
       } finally {
         delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
       }

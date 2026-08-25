@@ -234,6 +234,13 @@ test('worker validator accepts only complete internally consistent mutation aggr
     { mutationHistorical: 19 },
     { mutationSurvived: 2 },
     { mutationScore: 0.5 },
+    { mutationGate: 'off', mutationStatus: 'skipped' },
+    { mutationStatus: 'skipped' },
+    {
+      mutationGenerated: 0, mutationHistorical: 0, mutationViable: 0,
+      mutationKilled: 0, mutationSurvived: 0, mutationScore: undefined,
+      mutationOperators: [],
+    },
     { mutationOperators: [{ id: 'unknown', viable: 3, killed: 2 }] },
     { mutationOperators: [
       { id: 'comparison-boundary', viable: 2, killed: 1 },

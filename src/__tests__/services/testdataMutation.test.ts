@@ -76,6 +76,24 @@ describe('testdata mutation contracts', () => {
     }]);
   });
 
+  it('skips every standard C++ raw-string prefix before scanning numbers or operators', () => {
+    const source = [
+      'const char* plain = R"(plain < 3)";',
+      'const char8_t* utf8 = u8R"tag(utf8 " <= 41)tag";',
+      'const char16_t* utf16 = uR"tag(utf16 > 5)tag";',
+      'const char32_t* utf32 = UR"tag(utf32 == 7)tag";',
+      'const wchar_t* wide = LR"tag(wide + 11)tag";',
+      'if (left < right) {}',
+    ].join('\n');
+
+    expect(generateMutationCandidates(source, 'cpp')).toEqual([{
+      origin: 'generated',
+      language: 'cpp',
+      operatorId: 'comparison-boundary',
+      source: source.replace('if (left < right)', 'if (left <= right)'),
+    }]);
+  });
+
   it.each([
     ['python', 'if left < right:\n    pass', 'comparison-boundary', 'if left <= right:\n    pass'],
     ['python', 'if left == right:\n    pass', 'equality-negation', 'if left != right:\n    pass'],

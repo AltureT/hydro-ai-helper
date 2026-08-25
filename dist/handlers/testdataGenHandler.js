@@ -643,7 +643,7 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, historicalMutationCandidates, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, mutationGateMode, historicalMutationCandidates, translate, } = params;
     const jobId = String(job._id);
     const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
     const telemetrySession = createTestdataTelemetrySession({
@@ -746,6 +746,7 @@ async function runBackgroundGeneration(params) {
             existingFiles,
             existingConfig: pdoc.config,
             checkerArtifacts,
+            mutationGateMode,
             historicalMutationCandidates,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
@@ -894,7 +895,10 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
             }
-            const historicalMutationCandidates = await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
+            const mutationGateMode = (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const historicalMutationCandidates = mutationGateMode === 'off'
+                ? []
+                : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
             const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
             const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
@@ -970,6 +974,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 existingFiles,
                 existingConfig: pdoc.config,
                 checkerArtifacts,
+                mutationGateMode,
                 historicalMutationCandidates,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
@@ -1154,7 +1159,10 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
             }
-            const historicalMutationCandidates = await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
+            const mutationGateMode = (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const historicalMutationCandidates = mutationGateMode === 'off'
+                ? []
+                : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
@@ -1260,6 +1268,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     checkpoint,
                     checkpointHashes,
                     checkerArtifacts,
+                    mutationGateMode,
                     historicalMutationCandidates,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {

@@ -162,6 +162,36 @@ function checkpointVerifierDeclaration(value: unknown): IndependentVerifierBluep
   };
 }
 
+function checkpointArtifactsDeclaration(
+  artifacts: SandboxGenerationArtifacts | undefined,
+): SandboxGenerationArtifacts | undefined {
+  if (!artifacts || artifacts.generatorPlan !== undefined
+    || typeof artifacts.generatorCode !== 'string') return undefined;
+  return {
+    generatorCode: artifacts.generatorCode,
+    ...(artifacts.templates === undefined ? {} : { templates: artifacts.templates }),
+    ...(typeof artifacts.notes === 'string' ? { notes: artifacts.notes } : {}),
+  };
+}
+
+function sanitizeResumeCheckpoint(
+  checkpoint: TestdataGenerationCheckpoint,
+): TestdataGenerationCheckpoint {
+  if (checkpoint.artifacts === undefined && checkpoint.verifier === undefined) return checkpoint;
+  const artifacts = checkpointArtifactsDeclaration(checkpoint.artifacts);
+  const verifier = checkpointVerifierDeclaration(checkpoint.verifier);
+  const {
+    artifacts: _unsafeArtifacts,
+    verifier: _unsafeVerifier,
+    ...safeCheckpoint
+  } = checkpoint;
+  return {
+    ...safeCheckpoint,
+    ...(artifacts === undefined ? {} : { artifacts }),
+    ...(verifier === undefined ? {} : { verifier }),
+  };
+}
+
 export interface TestdataGenerationCheckpointPayload {
   checkpointSchemaVersion?: typeof TESTDATA_CHECKPOINT_SCHEMA_VERSION;
   promptVersion?: string;
@@ -314,7 +344,9 @@ export function filterTestdataCheckpointUpdate(
   for (const key of keys) {
     const value = key === 'verifier'
       ? checkpointVerifierDeclaration(update.verifier)
-      : update[key];
+      : key === 'artifacts'
+        ? checkpointArtifactsDeclaration(update.artifacts)
+        : update[key];
     if (value === undefined) continue;
     try {
       if (Buffer.byteLength(JSON.stringify(value), 'utf8') <= TESTDATA_CHECKPOINT_FIELD_MAX_BYTES) {
@@ -348,7 +380,7 @@ export function selectTestdataResumeCheckpoint(
     || checkpoint.statementHash !== expected.statementHash) {
     return undefined;
   }
-  if (!isV2) return checkpoint;
+  if (!isV2) return sanitizeResumeCheckpoint(checkpoint);
   if ((expected.checkpointSchemaVersion !== undefined
       && expected.checkpointSchemaVersion !== checkpoint.checkpointSchemaVersion)
     || (expected.promptVersion !== undefined && expected.promptVersion !== checkpoint.promptVersion)
@@ -359,7 +391,7 @@ export function selectTestdataResumeCheckpoint(
       .some(value => !/^[a-f0-9]{64}$/.test(value || ''))) {
     return undefined;
   }
-  return checkpoint;
+  return sanitizeResumeCheckpoint(checkpoint);
 }
 
 export interface TestdataGenerationJob {

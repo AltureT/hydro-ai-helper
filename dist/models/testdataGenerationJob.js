@@ -118,6 +118,28 @@ function checkpointVerifierDeclaration(value) {
         ...(validatorProbeRecipes === undefined ? {} : { validatorProbeRecipes }),
     };
 }
+function checkpointArtifactsDeclaration(artifacts) {
+    if (!artifacts || artifacts.generatorPlan !== undefined
+        || typeof artifacts.generatorCode !== 'string')
+        return undefined;
+    return {
+        generatorCode: artifacts.generatorCode,
+        ...(artifacts.templates === undefined ? {} : { templates: artifacts.templates }),
+        ...(typeof artifacts.notes === 'string' ? { notes: artifacts.notes } : {}),
+    };
+}
+function sanitizeResumeCheckpoint(checkpoint) {
+    if (checkpoint.artifacts === undefined && checkpoint.verifier === undefined)
+        return checkpoint;
+    const artifacts = checkpointArtifactsDeclaration(checkpoint.artifacts);
+    const verifier = checkpointVerifierDeclaration(checkpoint.verifier);
+    const { artifacts: _unsafeArtifacts, verifier: _unsafeVerifier, ...safeCheckpoint } = checkpoint;
+    return {
+        ...safeCheckpoint,
+        ...(artifacts === undefined ? {} : { artifacts }),
+        ...(verifier === undefined ? {} : { verifier }),
+    };
+}
 function normalizeForStableJson(value) {
     if (Array.isArray(value))
         return value.map(item => normalizeForStableJson(item));
@@ -201,7 +223,9 @@ function filterTestdataCheckpointUpdate(update) {
     for (const key of keys) {
         const value = key === 'verifier'
             ? checkpointVerifierDeclaration(update.verifier)
-            : update[key];
+            : key === 'artifacts'
+                ? checkpointArtifactsDeclaration(update.artifacts)
+                : update[key];
         if (value === undefined)
             continue;
         try {
@@ -237,7 +261,7 @@ function selectTestdataResumeCheckpoint(job, expected) {
         return undefined;
     }
     if (!isV2)
-        return checkpoint;
+        return sanitizeResumeCheckpoint(checkpoint);
     if ((expected.checkpointSchemaVersion !== undefined
         && expected.checkpointSchemaVersion !== checkpoint.checkpointSchemaVersion)
         || (expected.promptVersion !== undefined && expected.promptVersion !== checkpoint.promptVersion)
@@ -248,7 +272,7 @@ function selectTestdataResumeCheckpoint(job, expected) {
             .some(value => !/^[a-f0-9]{64}$/.test(value || ''))) {
         return undefined;
     }
-    return checkpoint;
+    return sanitizeResumeCheckpoint(checkpoint);
 }
 exports.TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
 exports.TESTDATA_JOB_LEASE_MS = 90 * 1000;

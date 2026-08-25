@@ -8085,7 +8085,8 @@ export class TestdataGenService {
         ...params,
         runId: params.runId || createTestdataRunId(),
         statementMarkdown: snapshot.normalizedMarkdown,
-        mutationGateMode: getMutationGateMode(process.env.AI_HELPER_TESTDATA_MUTATION_GATE),
+        mutationGateMode: params.mutationGateMode
+          ?? getMutationGateMode(process.env.AI_HELPER_TESTDATA_MUTATION_GATE),
       }, snapshot);
     } catch (error) {
       rememberFailureModelTelemetry(error, this.activeModelTelemetry);
@@ -8097,6 +8098,33 @@ export class TestdataGenService {
     params: GenerateTestdataParams,
     snapshot: StatementSnapshot,
   ): Promise<GenerationPlan> {
+    let enforceSandboxAvailable: boolean | undefined;
+    if (this.reliabilityMode === 'enforce') {
+      if (this.mode === 'direct' || !this.sandboxRunner) {
+        throw toPipelineError(
+          new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'),
+          {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+          },
+        );
+      }
+      this.emitProgress(params, 'sandbox_check', 5);
+      enforceSandboxAvailable = await this.sandboxRunner.isAvailable(params.signal);
+      if (!enforceSandboxAvailable) {
+        throw toPipelineError(
+          new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'),
+          {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+          },
+        );
+      }
+    }
     assertExistingConfigParsable(params.existingConfig);
     this.emitProgress(params, 'preparing', 2);
     const initialRisk = this.assessRisk(params);
@@ -8177,18 +8205,6 @@ export class TestdataGenService {
     const requiresProvidedCppOracle = params.options.problemKind !== 'function'
       && !!params.options.providedStd?.trim()
       && detectStdFilename(params.options.providedStd) === 'std.cc';
-    if (this.reliabilityMode === 'enforce'
-      && (this.mode === 'direct' || !this.sandboxRunner)) {
-      throw toPipelineError(
-        new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'),
-        {
-          code: 'SANDBOX_REQUIRED',
-          stage: 'sandbox_check',
-          artifact: 'pipeline',
-          retryPolicy: 'no-retry',
-        },
-      );
-    }
     if (requiresProvidedCppOracle && (this.mode === 'direct' || !this.sandboxRunner)) {
       const detail = '当前生成模式未配置可执行 C++17 的 Hydro 沙箱';
       throw new TestdataGenerationError(
@@ -8215,7 +8231,8 @@ export class TestdataGenService {
     }
     if (this.mode !== 'direct' && this.sandboxRunner) {
       this.emitProgress(params, 'sandbox_check', 5);
-      const available = await this.sandboxRunner.isAvailable(params.signal);
+      const available = enforceSandboxAvailable
+        ?? await this.sandboxRunner.isAvailable(params.signal);
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(
           params,

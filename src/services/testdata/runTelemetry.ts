@@ -296,6 +296,13 @@ const MUTATION_SKIP_REASONS = new Set([
   'gate-off', 'sandbox-unavailable', 'unsupported-source', 'no-candidates',
   'no-viable-candidates', 'checker-infra', 'sandbox-infra', 'budget-exhausted',
 ]);
+const MUTATION_PARTIAL_REASONS = new Set([
+  'checker-infra', 'sandbox-infra', 'budget-exhausted',
+]);
+const MUTATION_SKIPPED_REASONS = new Set([
+  'sandbox-unavailable', 'unsupported-source', 'no-candidates',
+  'no-viable-candidates', 'budget-exhausted',
+]);
 const MUTATION_OPERATORS = new Set<string>(MUTATION_OPERATOR_IDS);
 const GENERATION_MODES = new Set(['direct', 'sandbox']);
 const RELIABILITY_MODES = new Set(['legacy', 'observe', 'enforce']);
@@ -403,6 +410,24 @@ function normalizeMutationSummary(
     if (value.score !== undefined) return undefined;
   } else if (typeof value.score !== 'number' || !Number.isFinite(value.score)
     || Math.abs(value.score - killed / viable) > Number.EPSILON) return undefined;
+
+  if (value.mode === 'off') {
+    if (value.status !== 'skipped'
+      || generated !== 0 || historical !== 0 || viable !== 0
+      || killed !== 0 || survived !== 0 || operators.length !== 0
+      || value.score !== undefined
+      || (validateRawShape && value.skippedReason !== 'gate-off')) return undefined;
+  } else {
+    if (validateRawShape && value.skippedReason === 'gate-off') return undefined;
+    if (value.status === 'completed' && viable === 0) return undefined;
+    if (validateRawShape && value.status === 'partial'
+      && !MUTATION_PARTIAL_REASONS.has(value.skippedReason as string)) return undefined;
+    if (value.status === 'skipped'
+      && (viable !== 0 || killed !== 0 || survived !== 0
+        || operators.length !== 0 || value.score !== undefined
+        || (validateRawShape
+          && !MUTATION_SKIPPED_REASONS.has(value.skippedReason as string)))) return undefined;
+  }
 
   return {
     mode: value.mode as MutationGateMode,

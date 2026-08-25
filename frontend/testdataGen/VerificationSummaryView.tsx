@@ -69,6 +69,13 @@ const MUTATION_SKIP_REASONS = new Set([
   'gate-off', 'sandbox-unavailable', 'unsupported-source', 'no-candidates',
   'no-viable-candidates', 'checker-infra', 'sandbox-infra', 'budget-exhausted',
 ]);
+const MUTATION_PARTIAL_REASONS = new Set([
+  'checker-infra', 'sandbox-infra', 'budget-exhausted',
+]);
+const MUTATION_SKIPPED_REASONS = new Set([
+  'sandbox-unavailable', 'unsupported-source', 'no-candidates',
+  'no-viable-candidates', 'budget-exhausted',
+]);
 const MUTATION_OPERATOR_IDS = new Set([
   'comparison-boundary', 'equality-negation', 'logical-connector',
   'arithmetic-operator', 'constant-off-by-one', 'historical-submission',
@@ -131,7 +138,25 @@ function isTrustedMutationSummary(value: unknown): value is TrustedMutationSumma
     operatorViable += operator.viable as number;
     operatorKilled += operator.killed as number;
   }
-  return operatorViable === viable && operatorKilled === killed;
+  if (operatorViable !== viable || operatorKilled !== killed) return false;
+  if (value.mode === 'off') {
+    return value.status === 'skipped'
+      && value.skippedReason === 'gate-off'
+      && generated === 0 && historical === 0 && viable === 0
+      && killed === 0 && survived === 0 && value.score === undefined
+      && value.operators.length === 0;
+  }
+  if (value.skippedReason === 'gate-off') return false;
+  if (value.status === 'completed') return viable > 0;
+  if (value.status === 'partial') {
+    return MUTATION_PARTIAL_REASONS.has(value.skippedReason as string);
+  }
+  if (value.status === 'skipped') {
+    return viable === 0 && killed === 0 && survived === 0
+      && value.score === undefined && value.operators.length === 0
+      && MUTATION_SKIPPED_REASONS.has(value.skippedReason as string);
+  }
+  return false;
 }
 
 function isBoundedValidatorIdArray(value: unknown): value is string[] {

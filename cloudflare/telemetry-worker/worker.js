@@ -329,6 +329,23 @@ function validateTestdataMutationFields(value) {
     || new TextEncoder().encode(JSON.stringify(operators)).byteLength > 1024) {
     throw new HttpError(400, 'mutationOperators is invalid');
   }
+  if (value.mutationGate === 'off') {
+    if (value.mutationStatus !== 'skipped'
+      || generated !== 0 || historical !== 0 || viable !== 0
+      || killed !== 0 || survived !== 0 || operators.length !== 0
+      || value.mutationScore !== undefined) {
+      throw new HttpError(400, 'mutation state is invalid');
+    }
+  } else {
+    if (value.mutationStatus === 'completed' && viable === 0) {
+      throw new HttpError(400, 'mutation state is invalid');
+    }
+    if (value.mutationStatus === 'skipped'
+      && (viable !== 0 || killed !== 0 || survived !== 0
+        || operators.length !== 0 || value.mutationScore !== undefined)) {
+      throw new HttpError(400, 'mutation state is invalid');
+    }
+  }
   return operators;
 }
 
