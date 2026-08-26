@@ -6,7 +6,9 @@ import { SandboxBudgetExceededError } from '../../services/goJudgeSandboxService
 import type { MutationCandidate } from '../../services/testdata/mutation';
 import {
   MUTATION_BUDGET_MS,
+  MUTATION_CONCURRENCY_DEFAULT,
   evaluateMutationCandidates,
+  getMutationConcurrency,
   type MutationCheckerJudge,
 } from '../../services/testdata/mutationRunner';
 
@@ -78,8 +80,26 @@ function baseInput(
 }
 
 describe('testdata mutation sandbox runner', () => {
+  afterEach(() => {
+    delete process.env.AI_HELPER_TESTDATA_MUTATION_CONCURRENCY;
+  });
+
   it('exports the independent 120 second mutation budget', () => {
     expect(MUTATION_BUDGET_MS).toBe(120_000);
+  });
+
+  it.each([
+    [undefined, MUTATION_CONCURRENCY_DEFAULT],
+    ['1', 1],
+    ['2', 2],
+    ['4', 4],
+    ['', MUTATION_CONCURRENCY_DEFAULT],
+    ['0', MUTATION_CONCURRENCY_DEFAULT],
+    ['5', MUTATION_CONCURRENCY_DEFAULT],
+    ['2.5', MUTATION_CONCURRENCY_DEFAULT],
+    [' 2 ', MUTATION_CONCURRENCY_DEFAULT],
+  ])('parses bounded mutation concurrency %p as %d', (raw, expected) => {
+    expect(getMutationConcurrency(raw)).toBe(expected);
   });
 
   it.each([
@@ -306,6 +326,78 @@ describe('testdata mutation sandbox runner', () => {
       skippedReason: 'budget-exhausted',
     });
     expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+  });
+
+  it('starts a bounded window concurrently but aggregates in candidate order', async () => {
+    const runner = makeRunner();
+    const started: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    runner.runPythonBatchDetailed.mockImplementation(async (source: string) => {
+      started.push(source);
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await gate;
+      active--;
+      return [detail({ stdout: source.includes('wrong') ? 'wrong\n' : '1\n' })];
+    });
+    const candidates = [
+      pythonCandidate({ operatorId: 'comparison-boundary', source: 'first-wrong' }),
+      pythonCandidate({ operatorId: 'logical-connector', source: 'second-ok' }),
+      pythonCandidate({ operatorId: 'historical-submission', source: 'third-wrong' }),
+    ];
+
+    const evaluation = evaluateMutationCandidates(baseInput(runner, candidates));
+    await Promise.resolve();
+    await Promise.resolve();
+    const startedBeforeRelease = [...started];
+    release();
+    const summary = await evaluation;
+
+    expect(startedBeforeRelease).toEqual(['first-wrong', 'second-ok']);
+    expect(maxActive).toBe(2);
+    expect(summary.operators).toEqual([
+      { id: 'comparison-boundary', viable: 1, killed: 1 },
+      { id: 'logical-connector', viable: 1, killed: 0 },
+      { id: 'historical-submission', viable: 1, killed: 1 },
+    ]);
+  });
+
+  it('does not start a later window after a budget outcome in the current window', async () => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed
+      .mockRejectedValueOnce(new SandboxBudgetExceededError())
+      .mockResolvedValue([detail()]);
+    const candidates = [
+      pythonCandidate({ source: 'first' }),
+      pythonCandidate({ source: 'second' }),
+      pythonCandidate({ source: 'must-not-start' }),
+    ];
+
+    const summary = await evaluateMutationCandidates(baseInput(runner, candidates));
+
+    expect(summary).toMatchObject({ status: 'partial', skippedReason: 'budget-exhausted' });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+    expect(runner.runPythonBatchDetailed.mock.calls.map(call => call[0]))
+      .toEqual(['first', 'second']);
+  });
+
+  it('reruns a concurrent timeout alone before counting the candidate', async () => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed
+      .mockResolvedValueOnce([detail({
+        status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1,
+      })])
+      .mockResolvedValueOnce([detail({ stdout: '1\n' })]);
+
+    const summary = await evaluateMutationCandidates(baseInput(runner));
+
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+    expect(summary).toMatchObject({
+      status: 'completed', viable: 1, killed: 0, survived: 1, score: 0,
+    });
   });
 
   it('aggregates viable and killed counts without returning candidate source', async () => {

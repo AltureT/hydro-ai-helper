@@ -144,6 +144,11 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # generate: openssl ra
 - Defaults to `300` seconds; accepts `30`–`1800`; invalid values fall back to the default
 - Only bounds a stuck call; it does not reduce output tokens, reasoning effort, or verification stages
 
+`AI_HELPER_TESTDATA_MUTATION_CONCURRENCY` (optional) — sandbox window size for mutation testing:
+
+- Defaults to `2`; accepts `1`–`4`; invalid values fall back to the default
+- Candidates are still accounted for in source order; a first timeout in a concurrent window is rerun alone before it can count as killed
+
 ### Admin Setup
 
 Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" tab:

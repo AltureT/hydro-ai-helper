@@ -144,6 +144,11 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # 生成：openssl ran
 - 默认 `300` 秒，可设置范围 `30`–`1800` 秒；非法值自动回退默认值
 - 只限制卡住的单次调用，不缩减模型输出 token、推理强度或验证步骤
 
+`AI_HELPER_TESTDATA_MUTATION_CONCURRENCY`（可选）— 变异测试的沙箱并发窗口大小：
+
+- 默认 `2`，可设置范围 `1`–`4`；非法值自动回退默认值
+- 候选仍按原始顺序记账；并发窗口里的首次超时会单独复跑确认，避免把瞬时拥塞误记为已杀死
+
 ### 管理员配置
 
 登录后访问 **控制面板 → AI 助手**（`/ai-helper`）→「AI 配置」Tab：
