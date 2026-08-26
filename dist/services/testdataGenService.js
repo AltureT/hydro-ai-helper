@@ -104,6 +104,7 @@ const goJudgeSandboxService_1 = require("./goJudgeSandboxService");
 const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
+const latency_1 = require("./testdata/latency");
 const statementSamples_1 = require("./testdata/statementSamples");
 const validatorManifest_1 = require("./testdata/validatorManifest");
 const constraintProbes_1 = require("./testdata/constraintProbes");
@@ -6269,6 +6270,11 @@ class TestdataGenService {
             }
         }
         assertExistingConfigParsable(params.existingConfig);
+        const observeSandboxAvailability = this.reliabilityMode === 'observe'
+            && this.mode !== 'direct'
+            && this.sandboxRunner
+            ? this.sandboxRunner.isAvailable(params.signal).then(available => ({ ok: true, available }), error => ({ ok: false, error }))
+            : undefined;
         this.emitProgress(params, 'preparing', 2);
         const initialRisk = this.assessRisk(params);
         const specConsensusMode = (0, risk_1.getTestdataSpecConsensusMode)();
@@ -6340,8 +6346,18 @@ class TestdataGenService {
         }
         if (this.mode !== 'direct' && this.sandboxRunner) {
             this.emitProgress(params, 'sandbox_check', 5);
-            const available = enforceSandboxAvailable
-                ?? await this.sandboxRunner.isAvailable(params.signal);
+            let available = enforceSandboxAvailable;
+            if (available === undefined) {
+                const availability = observeSandboxAvailability
+                    ? await observeSandboxAvailability
+                    : {
+                        ok: true,
+                        available: await this.sandboxRunner.isAvailable(params.signal),
+                    };
+                if (availability.ok === false)
+                    throw availability.error;
+                available = availability.available;
+            }
             if (available) {
                 const plan = await this.generateSandboxWithSemanticFallback(params, this.sandboxRunner, risk, pipelineContext);
                 this.emitProgress(params, 'complete', 100, plan.verification?.modelEscalation ? 2 : 1);
@@ -6412,9 +6428,8 @@ class TestdataGenService {
         return {
             signal: params.signal,
             maxTokens: null,
-            // 测试数据生成以正确性优先：不由插件设置模型截止时间。调用只会在
-            // 上游明确失败、服务进程中断或用户主动取消时结束。
-            timeoutMs: null,
+            // 保留完整输出预算，只给单次模型调用设置宽松且可配置的墙钟上限。
+            timeoutMs: (0, latency_1.getTestdataModelTimeoutMs)(),
             // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
             retryTimeouts: false,
             onAttempt: event => {

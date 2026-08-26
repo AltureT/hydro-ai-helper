@@ -139,6 +139,11 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # 生成：openssl ran
 - `sandbox` — 强制要求沙箱，不可用时安全失败
 - `direct` — 始终使用直出模式（不推荐）
 
+`AI_HELPER_TESTDATA_MODEL_TIMEOUT_SECONDS`（可选）— AI 测试数据生成中单次模型调用的墙钟上限：
+
+- 默认 `300` 秒，可设置范围 `30`–`1800` 秒；非法值自动回退默认值
+- 只限制卡住的单次调用，不缩减模型输出 token、推理强度或验证步骤
+
 ### 管理员配置
 
 登录后访问 **控制面板 → AI 助手**（`/ai-helper`）→「AI 配置」Tab：

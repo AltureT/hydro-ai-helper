@@ -52,6 +52,7 @@ import {
   type TestdataReliabilityMode,
   type TestdataRiskAssessment,
 } from './testdata/risk';
+import { getTestdataModelTimeoutMs } from './testdata/latency';
 import {
   extractStatementSamples,
   type StatementSample,
@@ -8126,6 +8127,14 @@ export class TestdataGenService {
       }
     }
     assertExistingConfigParsable(params.existingConfig);
+    const observeSandboxAvailability = this.reliabilityMode === 'observe'
+      && this.mode !== 'direct'
+      && this.sandboxRunner
+      ? this.sandboxRunner.isAvailable(params.signal).then(
+        available => ({ ok: true as const, available }),
+        error => ({ ok: false as const, error }),
+      )
+      : undefined;
     this.emitProgress(params, 'preparing', 2);
     const initialRisk = this.assessRisk(params);
     const specConsensusMode = getTestdataSpecConsensusMode();
@@ -8231,8 +8240,17 @@ export class TestdataGenService {
     }
     if (this.mode !== 'direct' && this.sandboxRunner) {
       this.emitProgress(params, 'sandbox_check', 5);
-      const available = enforceSandboxAvailable
-        ?? await this.sandboxRunner.isAvailable(params.signal);
+      let available = enforceSandboxAvailable;
+      if (available === undefined) {
+        const availability = observeSandboxAvailability
+          ? await observeSandboxAvailability
+          : {
+            ok: true as const,
+            available: await this.sandboxRunner.isAvailable(params.signal),
+          };
+        if (availability.ok === false) throw availability.error;
+        available = availability.available;
+      }
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(
           params,
@@ -8338,9 +8356,8 @@ export class TestdataGenService {
     return {
       signal: params.signal,
       maxTokens: null,
-      // 测试数据生成以正确性优先：不由插件设置模型截止时间。调用只会在
-      // 上游明确失败、服务进程中断或用户主动取消时结束。
-      timeoutMs: null,
+      // 保留完整输出预算，只给单次模型调用设置宽松且可配置的墙钟上限。
+      timeoutMs: getTestdataModelTimeoutMs(),
       // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
       retryTimeouts: false,
       onAttempt: event => {

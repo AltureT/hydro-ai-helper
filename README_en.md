@@ -139,6 +139,11 @@ export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # generate: openssl ra
 - `sandbox` — require the sandbox and fail safely when unavailable
 - `direct` — always use direct output (not recommended)
 
+`AI_HELPER_TESTDATA_MODEL_TIMEOUT_SECONDS` (optional) — wall-clock limit for each model call during AI testdata generation:
+
+- Defaults to `300` seconds; accepts `30`–`1800`; invalid values fall back to the default
+- Only bounds a stuck call; it does not reduce output tokens, reasoning effort, or verification stages
+
 ### Admin Setup
 
 Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" tab:
