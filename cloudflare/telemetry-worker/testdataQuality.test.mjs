@@ -716,6 +716,17 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
         { key: 'adjudicated', count: 3 },
         { key: 'unresolved', count: 1 },
       ],
+      testdata_quality_stage_latency: [
+        {
+          stage: 'blueprint', runs: 10,
+          b_1000: 4, b_3000: 1, b_10000: 4, b_30000: 1,
+        },
+        {
+          stage: 'mutation_testing', runs: 3,
+          b_120000: 1, b_300000: 2,
+        },
+        { stage: 'private-stage', runs: 99, b_1000: 99 },
+      ],
     },
   });
   const response = await worker.fetch(new Request(
@@ -759,6 +770,10 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   assert.deepEqual(body.failure_artifacts, [
     { key: 'checker', count: 2 }, { key: 'pipeline', count: 1 },
   ]);
+  assert.deepEqual(body.stage_latency, [
+    { stage: 'blueprint', runs: 10, p50Ms: 3000, p95Ms: 30000 },
+    { stage: 'mutation_testing', runs: 3, p50Ms: 300000, p95Ms: 300000 },
+  ]);
   assert.deepEqual(body.model_roles, {
     primary: {
       runs: 6,
@@ -783,6 +798,7 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   for (const marker of [
     'testdata_quality_outcomes', 'testdata_quality_failures',
     'testdata_quality_stages', 'testdata_quality_artifacts',
+    'testdata_quality_stage_latency',
   ]) {
     const receivedAtCutoff = db.bound.find(statement => statement.sql.includes(marker)).values[0];
     assert.match(receivedAtCutoff, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -805,6 +821,7 @@ test('GET dashboard returns null rates and empty distributions for zero data', a
   assert.deepEqual(body.metrics.verified, { count: 0, total: 0, rate: null });
   assert.deepEqual(body.failure_codes, []);
   assert.deepEqual(body.failure_artifacts, []);
+  assert.deepEqual(body.stage_latency, []);
   assert.deepEqual(body.problem_spec.consensus_statuses, []);
   assert.deepEqual(body.mutation, {
     runs: 0,

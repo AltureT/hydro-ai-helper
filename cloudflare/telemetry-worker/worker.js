@@ -205,6 +205,19 @@ const TESTDATA_STAGES = new Set([
   'provided_cpp_oracle_infra', 'sandbox_budget', 'solution_blueprint', 'stress-generator',
   'template', 'template-py', 'template_missing', 'unknown', 'validator', 'mutation_testing',
 ]);
+const TESTDATA_STAGE_LATENCY_BUCKETS = [
+  ['b_1000', 1_000],
+  ['b_3000', 3_000],
+  ['b_10000', 10_000],
+  ['b_30000', 30_000],
+  ['b_60000', 60_000],
+  ['b_120000', 120_000],
+  ['b_300000', 300_000],
+  ['b_600000', 600_000],
+  ['b_1800000', 1_800_000],
+  ['b_3600000', 3_600_000],
+  ['b_86400000', 86_400_000],
+];
 const TESTDATA_EVENT_FIELDS = new Set([
   'schemaVersion', 'eventId', 'runId', 'sequence', 'eventType', 'occurredAt', 'pluginVersion',
   'promptVersion', 'generationMode', 'reliabilityMode', 'riskTier', 'problemKind',
@@ -827,6 +840,28 @@ function testdataRateMetric(count, total) {
   return { count: safeCount, total: safeTotal, rate: safeTotal > 0 ? safeCount / safeTotal : null };
 }
 
+function testdataStageLatencyPercentile(row, percentile) {
+  const runs = Number(row.runs) || 0;
+  if (runs <= 0) return null;
+  const target = Math.ceil(runs * percentile);
+  let cumulative = 0;
+  for (const [key, upperMs] of TESTDATA_STAGE_LATENCY_BUCKETS) {
+    cumulative += Number(row[key]) || 0;
+    if (cumulative >= target) return upperMs;
+  }
+  return null;
+}
+
+function testdataStageLatencyBucketSql() {
+  return TESTDATA_STAGE_LATENCY_BUCKETS.map(([key, upperMs], index) => {
+    const lowerMs = index === 0 ? null : TESTDATA_STAGE_LATENCY_BUCKETS[index - 1][1];
+    const range = lowerMs === null
+      ? `duration_ms <= ${upperMs}`
+      : `duration_ms > ${lowerMs} AND duration_ms <= ${upperMs}`;
+    return `COALESCE(SUM(CASE WHEN ${range} THEN 1 ELSE 0 END), 0) AS ${key}`;
+  }).join(',\n        ');
+}
+
 async function handleDashboardTestdataQuality(request, env) {
   if (request.method !== 'GET') return json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
   if (!isDashboardAuthorized(request, env)) return json({ success: false, error: 'Unauthorized' }, { status: 401 });
@@ -944,6 +979,13 @@ async function handleDashboardTestdataQuality(request, env) {
        WHERE received_at >= ? AND spec_consensus_status IS NOT NULL
        GROUP BY spec_consensus_status ORDER BY count DESC`,
     ).bind(receivedAtCutoff),
+    env.DB.prepare(
+      `SELECT /* testdata_quality_stage_latency */ stage, COUNT(*) AS runs,
+        ${testdataStageLatencyBucketSql()}
+       FROM testdata_stage_events
+       WHERE event_type = 'stage_completed' AND received_at >= ? AND duration_ms IS NOT NULL
+       GROUP BY stage`,
+    ).bind(receivedAtCutoff),
   ];
   const results = await env.DB.batch(queries);
   const rows = results.map(result => result?.results || []);
@@ -999,6 +1041,14 @@ async function handleDashboardTestdataQuality(request, env) {
     failure_stages: distribution(rows[3], TESTDATA_STAGES),
     failure_artifacts: distribution(rows[4], TESTDATA_ARTIFACTS),
     risk_tiers: distribution(rows[5], TESTDATA_RISK_TIERS),
+    stage_latency: rows[12]
+      .filter(item => TESTDATA_STAGES.has(item.stage))
+      .map(item => ({
+        stage: item.stage,
+        runs: Number(item.runs) || 0,
+        p50Ms: testdataStageLatencyPercentile(item, 0.5),
+        p95Ms: testdataStageLatencyPercentile(item, 0.95),
+      })),
     model_roles: modelRoles,
     problem_spec: {
       extraction_succeeded: testdataRateMetric(totals.spec_succeeded, totals.spec_attempted),
