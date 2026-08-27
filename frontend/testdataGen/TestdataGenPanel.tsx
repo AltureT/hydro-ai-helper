@@ -25,6 +25,18 @@ import {
   type VerificationSummaryData,
 } from './VerificationSummaryView';
 import {
+  ProblemSpecSummaryView,
+  type ProblemSpecSummaryData,
+} from './ProblemSpecSummaryView';
+import {
+  CoverageSummaryView,
+  type CoverageSummaryData,
+} from './CoverageSummaryView';
+import {
+  TestdataRiskSummaryView,
+  type TestdataRiskAssessment,
+} from './TestdataRiskSummaryView';
+import {
   getTestdataApplyPresentation,
   parseTestdataApplyResult,
   type TestdataApplyPresentation,
@@ -75,7 +87,6 @@ interface PlanVerification extends VerificationSummaryData {
     droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
-  validator?: { ran: boolean; casesChecked: number };
   discrimination?: {
     targets: Array<{
       kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
@@ -87,22 +98,18 @@ interface PlanVerification extends VerificationSummaryData {
     }>;
     allKilled: boolean;
   };
-}
-
-interface TestdataRiskAssessment {
-  tier: 'low' | 'medium' | 'high' | 'blocked';
-  score: number;
-  reasons: Array<{ code: string; weight: number; messageKey: string }>;
-  requiresSandbox: boolean;
-  requiresSpecConsensus: boolean;
-  requiresIndependentModels: boolean;
-  allowsDirectFallback: boolean;
-  wouldBlock?: boolean;
+  coverage?: CoverageSummaryData;
 }
 
 interface GenerationPlan {
   runId: string;
   promptVersion: string;
+  specSchemaVersion?: number;
+  problemSpecSummary?: ProblemSpecSummaryData;
+  specConsensusStatus?: 'consensus' | 'adjudicated' | 'unresolved';
+  specConflictCount?: number;
+  unresolvedConflictCount?: number;
+  modelRolesUsed?: string[];
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
   analysis?: string;
@@ -122,6 +129,7 @@ interface GenerationPlan {
     subtaskId?: number;
     target: string;
   }>;
+  coverageMode?: 'trusted-dsl' | 'ai-generator-unverified';
   usedModel?: string;
   verification?: PlanVerification;
   risk?: TestdataRiskAssessment;
@@ -177,6 +185,7 @@ type GenerationProgressStage =
   | 'checking_templates'
   | 'stress_testing'
   | 'discrimination_testing'
+  | 'mutation_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -234,7 +243,10 @@ const GENERATION_STAGE_GROUPS: Array<{
   { key: 'inputs', stages: ['generating_inputs', 'validating_inputs'] },
   {
     key: 'verify',
-    stages: ['running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing', 'pipeline_repair', 'model_escalation'],
+    stages: [
+      'running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing',
+      'mutation_testing', 'pipeline_repair', 'model_escalation',
+    ],
   },
   { key: 'finish', stages: ['assembling', 'complete'] },
 ];
@@ -1252,27 +1264,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     return (
       <div>
         {risk && (
-          <div style={{ ...getAlertStyle(risk.wouldBlock ? 'warning' : 'info'), marginBottom: SPACING.md }}>
-            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
-              {i18n('ai_helper_testdata_risk_title')}: {i18n(`ai_helper_testdata_risk_tier_${risk.tier}`)} · {risk.score}
-            </div>
-            <div style={{ fontSize: '13px' }}>
-              {i18n('ai_helper_testdata_risk_requires_sandbox')}: {i18n(risk.requiresSandbox ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_direct_allowed')}: {i18n(risk.allowsDirectFallback ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_requires_consensus')}: {i18n(risk.requiresSpecConsensus ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_requires_independent_models')}: {i18n(risk.requiresIndependentModels ? 'ai_helper_testdata_risk_yes' : 'ai_helper_testdata_risk_no')}
-              {' · '}{i18n('ai_helper_testdata_risk_mode')}: {plan.reliabilityMode || 'observe'}
-              {risk.wouldBlock && ` · ${i18n('ai_helper_testdata_risk_would_block')}`}
-            </div>
-            <ul style={{ margin: `${SPACING.xs} 0 0`, paddingLeft: SPACING.lg }}>
-              {risk.reasons.map(reason => (
-                <li key={reason.code} style={{ fontSize: '13px' }}>
-                  {i18n(reason.messageKey)} (+{reason.weight})
-                </li>
-              ))}
-            </ul>
-          </div>
+          <TestdataRiskSummaryView
+            risk={risk}
+            reliabilityMode={plan.reliabilityMode || 'observe'}
+            translate={i18n}
+          />
         )}
+        <ProblemSpecSummaryView
+          specSchemaVersion={plan.specSchemaVersion}
+          summary={plan.problemSpecSummary}
+          consensusStatus={plan.specConsensusStatus}
+          conflictCount={plan.specConflictCount}
+          unresolvedConflictCount={plan.unresolvedConflictCount}
+          rolesUsed={plan.modelRolesUsed}
+        />
         {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
           <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
@@ -1343,6 +1348,18 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             </div>
           </div>
         )}
+        {(verification?.coverage || plan.coverageMode) && (
+          <CoverageSummaryView
+            translate={i18n}
+            coverage={verification?.coverage || {
+              mode: plan.coverageMode || 'ai-generator-unverified',
+              matrix: [],
+              totalTargets: 0,
+              passedTargets: 0,
+              criticalMissing: 0,
+            }}
+          />
+        )}
         {verification && (
           <div style={{ ...getAlertStyle(verification.verified === true ? 'success' : 'warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
@@ -1387,11 +1404,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {` · ${i18n('ai_helper_testdata_verify_stress_generated')}: ${stressCheck.generated}`}
                 {stressCheck.uniqueInputs !== undefined
                   && ` · ${i18n('ai_helper_testdata_verify_stress_unique')}: ${stressCheck.uniqueInputs}/${stressCheck.generated}`}
-              </div>
-            )}
-            {verification.validator && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_validator')}: {verification.validator.ran ? verification.validator.casesChecked : i18n('ai_helper_testdata_verify_validator_none')}
               </div>
             )}
             {discrimination && (

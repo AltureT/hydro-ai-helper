@@ -11,10 +11,12 @@
  * 生成结果包含完整标程，学生角色（无上述权限）无法访问任何端点。
  */
 
-import { Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
+import { ContestModel, Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
+import { createHash } from 'crypto';
 import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
+import { createTestdataRoleClientsFromConfig } from '../services/testdata/modelRoles';
 import {
   TestdataGenService,
   GenerateOptions,
@@ -65,6 +67,7 @@ import { getDomainId } from '../utils/domainHelper';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import {
   TestdataGenerationJobModel,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
   TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
   computeTestdataCheckpointHashes,
   selectTestdataResumeCheckpoint,
@@ -86,6 +89,14 @@ import {
   type TestdataTelemetryModel,
   type TestdataTeacherOutcomeReason,
 } from '../services/testdata/runTelemetry';
+import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../services/testdata/pipelineContext';
+import {
+  MAX_HISTORICAL_MUTATION_CANDIDATES,
+  getMutationGateMode,
+  normalizeMutationLanguage,
+  type HistoricalMutationCandidate,
+  type MutationGateMode,
+} from '../services/testdata/mutation';
 
 export const TestdataGenHandlerPriv = PRIV.PRIV_USER_PROFILE;
 
@@ -186,6 +197,11 @@ interface AcceptedStdCandidate {
 
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
 const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
+const HISTORICAL_MUTATION_RECORD_LANGUAGES = [
+  ...PYTHON3_RECORD_LANGUAGES,
+  'cc', 'cc.cc17', 'cpp', 'cpp17', 'c++17',
+];
+const HISTORICAL_MUTATION_RECORD_LIMIT = 64;
 
 function canReadAllRecordCodes(handler: Handler): boolean {
   const user = handler.user;
@@ -196,6 +212,102 @@ function canReadAllRecordCodes(handler: Handler): boolean {
     && PERM.PERM_READ_RECORD_CODE !== undefined
     && user.hasPerm(PERM.PERM_READ_RECORD_CODE);
   return hasPriv || hasPerm;
+}
+
+interface HistoricalMutationRecordLite {
+  _id: ObjectIdType;
+  domainId?: string;
+  pid?: string | number;
+  status: number;
+  lang: string;
+  code: string;
+  contest?: unknown;
+}
+
+function historicalExpectedStatus(
+  status: number,
+): HistoricalMutationCandidate['expectedStatus'] | undefined {
+  if (status === STATUS.STATUS_WRONG_ANSWER) return 'wrong-answer';
+  if (status === STATUS.STATUS_RUNTIME_ERROR) return 'runtime-error';
+  if (status === STATUS.STATUS_TIME_LIMIT_EXCEEDED) return 'time-limit';
+  return undefined;
+}
+
+/**
+ * 读取历史错误提交作为请求内 mutation 候选。缺少独立源码读取权限或任一查询不确定时
+ * 均 fail closed；候选不会携带记录 ID、digest 或竞赛元数据。
+ */
+export async function loadHistoricalMutationCandidates(
+  handler: Handler,
+  domainId: string,
+  problemDocId: number,
+): Promise<HistoricalMutationCandidate[]> {
+  if (!canReadAllRecordCodes(handler)) return [];
+
+  let records: HistoricalMutationRecordLite[];
+  try {
+    records = await db.collection<HistoricalMutationRecordLite>('record')
+      .find({
+        domainId,
+        pid: problemDocId,
+        status: { $in: [
+          STATUS.STATUS_WRONG_ANSWER,
+          STATUS.STATUS_RUNTIME_ERROR,
+          STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+        ] },
+        lang: { $in: HISTORICAL_MUTATION_RECORD_LANGUAGES },
+        code: { $type: 'string', $ne: '' },
+      }, {
+        projection: { _id: 1, status: 1, lang: 1, code: 1, contest: 1 },
+      })
+      .sort({ _id: -1 })
+      .limit(HISTORICAL_MUTATION_RECORD_LIMIT)
+      .toArray();
+  } catch {
+    return [];
+  }
+
+  const contestDone = new Map<string, boolean>();
+  const isEligibleContest = async (contest: unknown): Promise<boolean> => {
+    if (contest === undefined || contest === null) return true;
+    const key = String(contest);
+    const cached = contestDone.get(key);
+    if (cached !== undefined) return cached;
+    try {
+      const tdoc = await ContestModel.get(domainId, contest);
+      const done = !!tdoc && ContestModel.isDone(tdoc);
+      contestDone.set(key, done);
+      return done;
+    } catch {
+      contestDone.set(key, false);
+      return false;
+    }
+  };
+
+  const seenSourceDigests = new Set<string>();
+  const candidates: HistoricalMutationCandidate[] = [];
+  for (const record of records) {
+    if ((record.domainId !== undefined && record.domainId !== domainId)
+      || (record.pid !== undefined && String(record.pid) !== String(problemDocId))) continue;
+    const expectedStatus = historicalExpectedStatus(record.status);
+    const language = typeof record.lang === 'string'
+      ? normalizeMutationLanguage(record.lang)
+      : undefined;
+    const source = typeof record.code === 'string' ? record.code.trim() : '';
+    if (!expectedStatus
+      || !language
+      || !source
+      || source.startsWith('@@hydro_submission_file@@')
+      || source.length > TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD
+      || !(await isEligibleContest(record.contest))) continue;
+
+    const digest = createHash('sha256').update(source).digest('hex');
+    if (seenSourceDigests.has(digest)) continue;
+    seenSourceDigests.add(digest);
+    candidates.push({ language, source, expectedStatus });
+    if (candidates.length >= MAX_HISTORICAL_MUTATION_CANDIDATES) break;
+  }
+  return candidates;
 }
 
 function acceptedStdRecordQuery(
@@ -637,7 +749,6 @@ function createTestdataTelemetrySession(input: {
     statement: input.statement,
     hasCustomChecker: customChecker,
     unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(input.existingConfig),
-    statementTruncated: input.statement.length > TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH,
     directFallbackEnabled: getTestdataDirectFallbackEnabled(),
     confirmDirectFallback: input.options.confirmDirectFallback,
     reliabilityMode,
@@ -665,14 +776,34 @@ function createTestdataTelemetrySession(input: {
 
 function serializeGenerationPlan(plan: GenerationPlan | undefined) {
   if (!plan) return undefined;
-  // Hashes are server-authoritative apply state. They are persisted with the job
-  // but never sent to the browser and are never accepted back from the client.
+  // Hashes/model identity and any future complete spec are server-only. The
+  // browser receives only the bounded ProblemSpec summary declared on GenerationPlan.
   const {
     originalFileHashes: _serverOnlyHashes,
     modelTelemetry: _serverOnlyModelTelemetry,
+    problemSpec: _serverOnlyProblemSpec,
+    primarySpec: _serverOnlyPrimarySpec,
+    criticSpec: _serverOnlyCriticSpec,
+    resolvedSpec: _serverOnlyResolvedSpec,
+    specConflicts: _serverOnlySpecConflicts,
+    adjudication: _serverOnlyAdjudication,
     ...clientPlan
-  } = plan;
+  } = plan as GenerationPlan & {
+    problemSpec?: unknown;
+    primarySpec?: unknown;
+    criticSpec?: unknown;
+    resolvedSpec?: unknown;
+    specConflicts?: unknown;
+    adjudication?: unknown;
+  };
   return clientPlan;
+}
+
+function generationPlanForJobStorage(plan: GenerationPlan): GenerationPlan {
+  // Runtime endpoint/model identity is needed only long enough to derive the
+  // keyed telemetry hash. It must not become durable Job state.
+  const { modelTelemetry: _runtimeOnlyModelTelemetry, ...storedPlan } = plan;
+  return storedPlan;
 }
 
 function serializeGenerationJob(job: TestdataGenerationJob) {
@@ -735,13 +866,16 @@ interface BackgroundGenerationParams {
   checkpoint?: TestdataGenerationCheckpoint;
   checkpointHashes: TestdataCheckpointHashes;
   checkerArtifacts?: TestlibCheckerArtifacts;
+  mutationGateMode: MutationGateMode;
+  historicalMutationCandidates: HistoricalMutationCandidate[];
   translate: (key: string) => string;
 }
 
 async function runBackgroundGeneration(params: BackgroundGenerationParams): Promise<void> {
   const {
     ctx, jobModel, job, pdoc, statement, options, existingFiles,
-    checkpoint, checkpointHashes, checkerArtifacts, translate,
+    checkpoint, checkpointHashes, checkerArtifacts, mutationGateMode,
+    historicalMutationCandidates, translate,
   } = params;
   const jobId = String(job._id);
   const generationMode = getTestdataGenerationMode();
@@ -761,6 +895,17 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
   let checkpointWrites = Promise.resolve();
   let checkpointRevision = 0;
   const checkpointPayload: TestdataGenerationCheckpointPayload = {};
+  let checkpointMetadata: Pick<TestdataGenerationCheckpointEnvelope,
+    'checkpointSchemaVersion' | 'promptVersion' | 'statementHash' | 'specHash' | 'roleDependencies'> = {};
+  if (checkpoint?.checkpointSchemaVersion === TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+    checkpointMetadata = {
+      checkpointSchemaVersion: checkpoint.checkpointSchemaVersion,
+      promptVersion: checkpoint.promptVersion,
+      statementHash: checkpoint.statementHash,
+      specHash: checkpoint.specHash,
+      roleDependencies: checkpoint.roleDependencies,
+    };
+  }
   for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
     if (checkpoint?.[key] !== undefined) checkpointPayload[key] = checkpoint[key] as never;
   }
@@ -771,13 +916,24 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
         delete checkpointPayload[key];
       }
+      checkpointMetadata = {};
     } else {
       for (const key of ['solution', 'artifacts', 'verifier', 'killTargets'] as const) {
         if (update[key] !== undefined) checkpointPayload[key] = update[key] as never;
       }
+      if (update.checkpointSchemaVersion === TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+        checkpointMetadata = {
+          checkpointSchemaVersion: update.checkpointSchemaVersion,
+          promptVersion: update.promptVersion,
+          statementHash: update.statementHash,
+          specHash: update.specHash,
+          roleDependencies: update.roleDependencies,
+        };
+      }
     }
     const envelope: TestdataGenerationCheckpointEnvelope = {
       revision: ++checkpointRevision,
+      ...checkpointMetadata,
       ...checkpointPayload,
     };
     checkpointWrites = checkpointWrites
@@ -798,18 +954,22 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
   try {
     await jobModel.markRunning(job._id);
     ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
-    const aiClient = await createMultiModelClientFromConfig(ctx, undefined, 'testdataGeneration');
+    const reliabilityMode = getTestdataReliabilityMode();
     const sandboxHost = String(SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
     const sandboxRunner = new GoJudgeSandboxRunner(sandboxHost);
-    const cppOracleAvailable = await probeCppOracleAvailability(
-      sandboxRunner,
-      generationMode,
-      ac.signal,
-    );
+    const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
+      createMultiModelClientFromConfig(ctx, undefined, 'testdataGeneration'),
+      reliabilityMode === 'legacy'
+        ? Promise.resolve(undefined)
+        : createTestdataRoleClientsFromConfig(ctx),
+      probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
+    ]);
     const service = new TestdataGenService(aiClient, {
       sandboxRunner,
       mode: generationMode,
       cppOracleAvailable,
+      reliabilityMode,
+      roleClients,
     });
     const plan = await service.generate({
       runId: job.runId,
@@ -819,6 +979,8 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
       existingFiles,
       existingConfig: pdoc.config,
       checkerArtifacts,
+      mutationGateMode,
+      historicalMutationCandidates,
       fillInDetected: isFillInBlankProblem(statement),
       signal: ac.signal,
       checkpoint,
@@ -829,13 +991,16 @@ async function runBackgroundGeneration(params: BackgroundGenerationParams): Prom
           .then(() => jobModel.updateProgress(job._id, progress))
           .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
       },
+      onProblemSpecObservation: observation => {
+        telemetrySession?.observeProblemSpec?.(observation);
+      },
     });
     await checkpointWrites;
     await progressWrites;
     if (ac.signal.aborted) {
       throw Object.assign(new Error('canceled'), { name: 'AbortError' });
     }
-    const saved = await jobModel.complete(job._id, plan);
+    const saved = await jobModel.complete(job._id, generationPlanForJobStorage(plan));
     if (!saved) return;
     emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
 
@@ -975,6 +1140,12 @@ export class TestdataGenGenerateHandler extends Handler {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
       }
+      const mutationGateMode = getMutationGateMode(
+        process.env.AI_HELPER_TESTDATA_MUTATION_GATE,
+      );
+      const historicalMutationCandidates = mutationGateMode === 'off'
+        ? []
+        : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
 
       this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { /* best-effort */ });
 
@@ -1030,14 +1201,20 @@ export class TestdataGenGenerateHandler extends Handler {
         configuredMode: generationMode,
       });
       emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
-      const [aiClient, cppOracleAvailable] = await Promise.all([
+      const reliabilityMode = getTestdataReliabilityMode();
+      const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
         createMultiModelClientFromConfig(this.ctx, undefined, 'testdataGeneration'),
+        reliabilityMode === 'legacy'
+          ? Promise.resolve(undefined)
+          : createTestdataRoleClientsFromConfig(this.ctx),
         probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
       ]);
       const service = new TestdataGenService(aiClient, {
         sandboxRunner,
         mode: generationMode,
         cppOracleAvailable,
+        reliabilityMode,
+        roleClients,
       });
       const plan = await service.generate({
         runId,
@@ -1047,11 +1224,16 @@ export class TestdataGenGenerateHandler extends Handler {
         existingFiles,
         existingConfig: pdoc.config,
         checkerArtifacts,
+        mutationGateMode,
+        historicalMutationCandidates,
         fillInDetected: isFillInBlankProblem(statement),
         signal: requestAc.signal,
         onProgress: progress => {
           emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
           progressStream?.writeEvent('progress', progress);
+        },
+        onProblemSpecObservation: observation => {
+          telemetrySession?.observeProblemSpec?.(observation);
         },
       });
       emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
@@ -1236,6 +1418,12 @@ export class TestdataGenJobStartHandler extends Handler {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
       }
+      const mutationGateMode = getMutationGateMode(
+        process.env.AI_HELPER_TESTDATA_MUTATION_GATE,
+      );
+      const historicalMutationCandidates = mutationGateMode === 'off'
+        ? []
+        : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
@@ -1257,6 +1445,9 @@ export class TestdataGenJobStartHandler extends Handler {
             problemId: pdoc.pid || String(pdoc.docId),
             createdBy: this.user?._id,
             ...checkpointHashes,
+            checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+            promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+            allowV1: getTestdataReliabilityMode() === 'legacy',
           });
         } catch {
           // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。
@@ -1349,6 +1540,8 @@ export class TestdataGenJobStartHandler extends Handler {
           checkpoint,
           checkpointHashes,
           checkerArtifacts,
+          mutationGateMode,
+          historicalMutationCandidates,
           translate: key => backgroundTranslations[key] || key,
         }).catch(err => {
           console.error('[TestdataGenJob] unhandled background failure:', err);

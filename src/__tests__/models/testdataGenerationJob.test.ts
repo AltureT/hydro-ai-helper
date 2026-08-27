@@ -4,6 +4,7 @@ jest.mock('../../utils/ensureObjectId', () => ({
 
 import {
   TestdataGenerationJobModel,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
   TESTDATA_JOB_LEASE_MS,
   TESTDATA_JOB_RETENTION_MS,
   TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
@@ -11,6 +12,7 @@ import {
   filterTestdataCheckpointUpdate,
   selectTestdataResumeCheckpoint,
 } from '../../models/testdataGenerationJob';
+import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../../services/testdata/pipelineContext';
 
 function createMockCollection() {
   return {
@@ -184,6 +186,7 @@ describe('TestdataGenerationJobModel', () => {
       createdBy: createParams.createdBy,
       optionsHash: 'options',
       statementHash: 'statement',
+      allowV1: true,
     };
     expect(selectTestdataResumeCheckpoint(job, expected)).toBe(checkpoint);
     for (const mismatch of [
@@ -200,6 +203,254 @@ describe('TestdataGenerationJobModel', () => {
       expect(selectTestdataResumeCheckpoint({ ...job, ...mismatch } as never, expected))
         .toBeUndefined();
     }
+  });
+
+  it('识别 v1 但只有显式 legacy 回滚路径可以复用', () => {
+    const checkpoint = {
+      revision: 1,
+      optionsHash: 'options',
+      statementHash: 'statement',
+      solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' },
+    };
+    const job = {
+      ...createParams,
+      status: 'interrupted' as const,
+      checkpoint,
+    };
+    const expected = {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      optionsHash: 'options',
+      statementHash: 'statement',
+    };
+
+    expect(selectTestdataResumeCheckpoint(job, expected)).toBeUndefined();
+    expect(selectTestdataResumeCheckpoint(job, { ...expected, allowV1: true })).toBe(checkpoint);
+  });
+
+  it('v3 仅在 schema、prompt、statement、spec 与 options 全部一致时恢复', () => {
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      revision: 7,
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { oracle: 'b'.repeat(64), verifier: 'c'.repeat(64) },
+      solution: { problemType: 'traditional' as const, oracleCode: 'print(1)' },
+    };
+    const job = { ...createParams, status: 'interrupted' as const, checkpoint };
+    const expected = {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+    };
+
+    expect(selectTestdataResumeCheckpoint(job, expected)).toBe(checkpoint);
+    for (const mismatch of [
+      { checkpointSchemaVersion: 1 },
+      { promptVersion: 'testdata-generation-v2' },
+      { optionsHash: 'other' },
+      { statementHash: 'other' },
+      { specHash: 'd'.repeat(64) },
+    ]) {
+      expect(selectTestdataResumeCheckpoint(job, { ...expected, ...mismatch } as never))
+        .toBeUndefined();
+    }
+    expect(JSON.stringify(checkpoint.roleDependencies)).not.toContain('endpointId');
+  });
+
+  it('v3 prompt invalidates v2 verifier checkpoints and restores safe v3 metadata', () => {
+    const verifier = {
+      bruteCode: 'print(input())',
+      validatorCode: 'import sys\nsys.exit(0)',
+      stressGeneratorCode: 'print(1)',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [{
+        targetId: 'C1' as const,
+        constructionKind: 'integer-below-min' as const,
+        fieldId: 'n',
+      }],
+    };
+    const checkpointBase = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      revision: 8,
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { verifier: 'b'.repeat(64) },
+      verifier,
+    };
+    const expected = {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+    };
+    const v2Job = {
+      ...createParams,
+      status: 'interrupted' as const,
+      checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v2' },
+    };
+    const v3Job = {
+      ...createParams,
+      status: 'interrupted' as const,
+      checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v3' },
+    };
+
+    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v3');
+    expect(selectTestdataResumeCheckpoint(v2Job, expected)).toBeUndefined();
+    expect(selectTestdataResumeCheckpoint(v3Job, expected)?.verifier)
+      .toEqual(expect.objectContaining({
+        validatorManifestStatus: 'valid',
+        validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      }));
+    const serialized = JSON.stringify(selectTestdataResumeCheckpoint(v3Job, expected)?.verifier);
+    for (const forbidden of [
+      'materializedProbeInputs', 'legalSeedArray', 'effectiveInput', 'subtaskInvocationPayload',
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it('checkpoint privacy projects verifier proof declarations and drops raw probes, argv, and seeds', () => {
+    const privateProbe = 'PRIVATE_INVALID_PROBE_INPUT';
+    const filtered = filterTestdataCheckpointUpdate({
+      revision: 9,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { verifier: 'b'.repeat(64) },
+      verifier: {
+        bruteCode: 'print(input())',
+        validatorCode: 'raise SystemExit(0)',
+        stressGeneratorCode: 'print(1)',
+        validatorManifestStatus: 'valid',
+        validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+        validatorProbeRecipes: [{
+          targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+          input: privateProbe,
+          argv: ['--subtask', privateProbe],
+          seed: privateProbe,
+        } as never],
+        materializedProbeInputs: [privateProbe],
+        invalidInvocations: [{ stdin: privateProbe, argv: ['--subtask', '1'] }],
+        effectiveSeed: privateProbe,
+      } as never,
+    });
+
+    expect(filtered.verifier).toEqual({
+      bruteCode: 'print(input())',
+      validatorCode: 'raise SystemExit(0)',
+      stressGeneratorCode: 'print(1)',
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+      }],
+    });
+    expect(JSON.stringify(filtered)).not.toContain(privateProbe);
+    expect(JSON.stringify(filtered)).not.toContain('materializedProbeInputs');
+    expect(JSON.stringify(filtered)).not.toContain('invalidInvocations');
+    expect(JSON.stringify(filtered)).not.toContain('effectiveSeed');
+  });
+
+  it('checkpoint privacy drops trusted generator plans instead of persisting seed or DSL inputs', () => {
+    const privateSeed = 314159265;
+    const privateLabel = 'PRIVATE_GENERATOR_PLAN_INPUT';
+    const filtered = filterTestdataCheckpointUpdate({
+      revision: 10,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { artifacts: 'b'.repeat(64) },
+      artifacts: {
+        generatorCode: `# seed=${privateSeed}\nprint(${JSON.stringify(privateLabel)})`,
+        generatorPlan: {
+          version: 1 as const,
+          seed: privateSeed,
+          cases: [{
+            label: privateLabel,
+            fields: { n: { kind: 'integer' as const, value: 1 } },
+          }],
+        },
+      },
+    });
+
+    expect(filtered.artifacts).toBeUndefined();
+    expect(JSON.stringify(filtered)).not.toContain(String(privateSeed));
+    expect(JSON.stringify(filtered)).not.toContain(privateLabel);
+  });
+
+  it('drops legacy generator plans before resume while preserving independent verifier work', () => {
+    const privateSeed = 271828182;
+    const privateLabel = 'PRIVATE_LEGACY_GENERATOR_PLAN_INPUT';
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      revision: 11,
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+      roleDependencies: { artifacts: 'b'.repeat(64), verifier: 'c'.repeat(64) },
+      artifacts: {
+        generatorCode: `# seed=${privateSeed}\nprint(${JSON.stringify(privateLabel)})`,
+        generatorPlan: {
+          version: 1 as const,
+          seed: privateSeed,
+          cases: [{
+            label: privateLabel,
+            fields: { n: { kind: 'integer' as const, value: 1 } },
+          }],
+        },
+      },
+      verifier: {
+        bruteCode: 'print(input())',
+        validatorCode: 'raise SystemExit(0)',
+        stressGeneratorCode: 'print(1)',
+        validatorManifestStatus: 'valid' as const,
+        validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      },
+    };
+    const restored = selectTestdataResumeCheckpoint({
+      ...createParams,
+      status: 'interrupted',
+      checkpoint,
+    }, {
+      domainId: createParams.domainId,
+      problemDocId: createParams.problemDocId,
+      problemId: createParams.problemId,
+      createdBy: createParams.createdBy,
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: 'testdata-generation-v3',
+      optionsHash: 'options',
+      statementHash: 'statement',
+      specHash: 'a'.repeat(64),
+    });
+
+    expect(restored?.artifacts).toBeUndefined();
+    expect(restored?.verifier).toEqual(expect.objectContaining({
+      bruteCode: 'print(input())',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+    }));
+    expect(JSON.stringify(restored)).not.toContain(String(privateSeed));
+    expect(JSON.stringify(restored)).not.toContain(privateLabel);
   });
 
   it('checkpoint envelope 字段超限时丢弃该字段及所有下游字段', () => {
@@ -295,6 +546,7 @@ describe('TestdataGenerationJobModel', () => {
       createdBy: createParams.createdBy,
       optionsHash: 'options',
       statementHash: 'statement',
+      allowV1: true,
     });
     expect(restored?.solution?.solutions).toEqual(solutions);
   });
@@ -349,7 +601,7 @@ describe('TestdataGenerationJobModel', () => {
     const { model, collection } = createModel();
     const plan = {
       runId: '11111111-1111-4111-8111-111111111111',
-      promptVersion: 'testdata-generation-v1',
+      promptVersion: 'testdata-generation-v3',
       originalFileHashes: {},
       problemType: 'traditional' as const,
       files: [],

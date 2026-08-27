@@ -65,6 +65,7 @@ export const STATUS = {
 export const ContestModel = {
   get: jest.fn(),
   isOngoing: jest.fn(),
+  isDone: jest.fn(),
 };
 
 export function definePlugin(options: any) {

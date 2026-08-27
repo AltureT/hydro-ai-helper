@@ -31,6 +31,7 @@ export type TestdataFailureCode =
   | 'CHECKER_RUNTIME_FAILED'
   | 'SUBTASK_CONSTRAINT_VIOLATION'
   | 'MUTATION_SCORE_TOO_LOW'
+  | 'MUTATION_EVIDENCE_UNAVAILABLE'
   | 'TRUSTED_SOLUTIONS_DIVERGED'
   | 'COVERAGE_REQUIREMENT_MISSING'
   | 'PIPELINE_BUDGET_EXHAUSTED'
@@ -70,6 +71,7 @@ export const TESTDATA_FAILURE_CODES: readonly TestdataFailureCode[] = [
   'CHECKER_RUNTIME_FAILED',
   'SUBTASK_CONSTRAINT_VIOLATION',
   'MUTATION_SCORE_TOO_LOW',
+  'MUTATION_EVIDENCE_UNAVAILABLE',
   'TRUSTED_SOLUTIONS_DIVERGED',
   'COVERAGE_REQUIREMENT_MISSING',
   'PIPELINE_BUDGET_EXHAUSTED',
@@ -115,6 +117,7 @@ export const TESTDATA_FAILURE_STAGES = [
   'function-samples',
   'generator',
   'independent_verifier_parse',
+  'mutation_testing',
   'oracle',
   'pipeline',
   'pipeline_repair',
@@ -124,6 +127,7 @@ export const TESTDATA_FAILURE_STAGES = [
   'sandbox_check',
   'solution_blueprint',
   'solution_verification',
+  'spec_consensus',
   'stress-generator',
   'stress_testing',
   'template',
@@ -181,6 +185,7 @@ const SAFE_DETAIL_KEYS = new Set([
   'actualCount',
   'candidate',
   'caseIndex',
+  'callCount',
   'checkerUsed',
   'contentHash',
   'droppedCount',
@@ -188,14 +193,28 @@ const SAFE_DETAIL_KEYS = new Set([
   'expectedCount',
   'failureKind',
   'generatedCount',
+  'conflictCount',
+  'identityConflictCount',
+  'invalidAccepted',
+  'invalidRejected',
+  'limit',
   'indexes',
   'maxBytes',
+  'missingCount',
   'minimumUnique',
+  'killed',
   'oracleLanguage',
+  'protocolProbe',
   'sample',
   'status',
+  'score',
+  'subtaskId',
+  'survived',
+  'threshold',
   'uniqueCount',
+  'unresolvedConflictCount',
   'validCount',
+  'viable',
 ]);
 
 function copyValidatedSafeDetails(details: TestdataSafeDetails): TestdataSafeDetails {
@@ -270,6 +289,8 @@ export function repairPolicyForFailure(
       return 'rerun-spec';
     case 'SANDBOX_REQUIRED':
     case 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED':
+    case 'MUTATION_SCORE_TOO_LOW':
+    case 'MUTATION_EVIDENCE_UNAVAILABLE':
     case 'PIPELINE_BUDGET_EXHAUSTED':
     case 'CANCELLED':
       return 'no-retry';
@@ -277,8 +298,11 @@ export function repairPolicyForFailure(
     case 'CHECKER_REQUIRED_UNAVAILABLE':
     case 'CHECKER_COMPILE_FAILED':
     case 'CHECKER_RUNTIME_FAILED':
-    case 'SUBTASK_CONSTRAINT_VIOLATION':
       return 'manual-review';
+    case 'SUBTASK_CONSTRAINT_VIOLATION':
+      return error.artifact === 'validator' || error.artifact === 'generator'
+        ? 'repair-artifact'
+        : 'manual-review';
     case 'UNKNOWN':
       if (error.artifact === 'spec') return 'rerun-spec';
       return error.artifact === 'pipeline' ? 'switch-model' : 'repair-artifact';

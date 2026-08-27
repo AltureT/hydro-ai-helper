@@ -11,6 +11,26 @@ import { TestdataPipelineError } from '../../services/testdata/failures';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const EVENT_ID = '22222222-2222-4222-8222-222222222222';
+const MUTATION_FIELDS = [
+  'mutationGate', 'mutationStatus', 'mutationGenerated', 'mutationHistorical',
+  'mutationViable', 'mutationKilled', 'mutationSurvived', 'mutationScore',
+  'mutationOperators',
+] as const;
+
+const VALID_MUTATION_SUMMARY = {
+  mode: 'observe',
+  status: 'completed',
+  generated: 2,
+  historical: 1,
+  viable: 3,
+  killed: 2,
+  survived: 1,
+  score: 2 / 3,
+  operators: [
+    { id: 'comparison-boundary', viable: 2, killed: 1 },
+    { id: 'historical-submission', viable: 1, killed: 1 },
+  ],
+} as const;
 
 function baseEvent(overrides: Partial<TestdataQualityEvent> = {}): TestdataQualityEvent {
   return {
@@ -88,6 +108,15 @@ describe('test-data quality event schema', () => {
       checkerExecuted: false,
       checkerInfraFailures: 1,
       checkerFailureKind: 'infra',
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 12,
+      specInvariantCount: 3,
+      specUncertaintyCount: 1,
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
     }))).toEqual(expect.objectContaining({ verified: false, wouldBlock: true }));
 
     expect(parseTestdataQualityEvent(baseEvent({
@@ -111,6 +140,12 @@ describe('test-data quality event schema', () => {
     ['output', 'secret output'],
     ['apiBase', 'https://private.example/v1'],
     ['apiKey', 'sk-secret'],
+    ['endpointUrl', 'https://private.example/v1'],
+    ['resolvedSpec', { constraints: [] }],
+    ['specConflicts', [{ path: 'constraints', primaryValue: 'secret' }]],
+    ['evidenceQuote', 'secret quote'],
+    ['expression', 'secret expression'],
+    ['reason', 'secret adjudication reason'],
     ['stderr', 'secret stderr'],
     ['stdout', 'secret stdout'],
     ['message', 'raw error'],
@@ -133,6 +168,10 @@ describe('test-data quality event schema', () => {
     ['riskTier', 'critical'],
     ['stage', 'arbitrary-private-stage'],
     ['failureCode', 'RAW_ERROR_MESSAGE'],
+    ['specSchemaVersion', 2],
+    ['specConstraintCount', 513],
+    ['specInvariantCount', 257],
+    ['specUncertaintyCount', 101],
   ])('rejects invalid bounded field %s', (key, value) => {
     const event = baseEvent({
       eventType: key === 'stage' || key === 'failureCode' ? 'stage_failed' : 'run_completed',
@@ -161,6 +200,97 @@ describe('test-data quality event schema', () => {
       editedFileCount: 9,
       changedFileKinds: Array(10).fill('case-in') as never,
     }))).toThrow();
+  });
+
+  it('accepts only bounded closed consensus observation fields', () => {
+    const completed = {
+      ...baseEvent(),
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 12,
+      specInvariantCount: 3,
+      specUncertaintyCount: 1,
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+    };
+    expect(parseTestdataQualityEvent(completed)).toEqual(expect.objectContaining({
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+    }));
+
+    for (const patch of [
+      { specConsensusStatus: 'resolved' },
+      { specConflictCount: -1 },
+      { specUnresolvedConflictCount: 1025 },
+      { specRolesUsed: [] },
+      { specRolesUsed: ['specPrimary', 'oracle'] },
+      { specRolesUsed: ['specPrimary', 'specPrimary'] },
+    ]) {
+      expect(() => parseTestdataQualityEvent({ ...completed, ...patch })).toThrow();
+    }
+  });
+
+  it('accepts only a complete internally consistent mutation aggregate', () => {
+    const completed = {
+      ...baseEvent(),
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      mutationGate: 'observe',
+      mutationStatus: 'completed',
+      mutationGenerated: 2,
+      mutationHistorical: 1,
+      mutationViable: 3,
+      mutationKilled: 2,
+      mutationSurvived: 1,
+      mutationScore: 2 / 3,
+      mutationOperators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'historical-submission', viable: 1, killed: 1 },
+      ],
+    };
+    expect(parseTestdataQualityEvent(completed)).toEqual(expect.objectContaining({
+      mutationGate: 'observe',
+      mutationStatus: 'completed',
+      mutationScore: 2 / 3,
+    }));
+
+    for (const patch of [
+      { mutationStatus: undefined },
+      { mutationGenerated: 21 },
+      { mutationKilled: 1 },
+      { mutationScore: 0.5 },
+      { mutationGate: 'off', mutationStatus: 'skipped' },
+      { mutationStatus: 'skipped' },
+      {
+        mutationGenerated: 0, mutationHistorical: 0, mutationViable: 0,
+        mutationKilled: 0, mutationSurvived: 0, mutationScore: undefined,
+        mutationOperators: [],
+      },
+      { mutationOperators: [{ id: 'unknown', viable: 3, killed: 2 }] },
+      { mutationOperators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'comparison-boundary', viable: 1, killed: 1 },
+      ] },
+      { mutationOperators: [{
+        id: 'comparison-boundary', viable: 3, killed: 2, source: 'private source',
+      }] },
+    ]) {
+      expect(() => parseTestdataQualityEvent({ ...completed, ...patch })).toThrow(/mutation|field/i);
+    }
+
+    expect(() => parseTestdataQualityEvent(baseEvent({
+      mutationGate: 'observe',
+    } as never))).toThrow(/mutation/i);
   });
 
   it('rejects parseable but non-canonical timestamps', () => {
@@ -203,6 +333,23 @@ describe('test-data quality event schema', () => {
       teacherOutcome: 'discarded',
       teacherOutcomeReason: 'weak_coverage',
     })).teacherOutcomeReason).toBe('weak_coverage');
+    expect(() => parseTestdataQualityEvent(baseEvent({
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+    }))).toThrow(/spec/i);
+    expect(() => parseTestdataQualityEvent(baseEvent({
+      eventType: 'run_completed',
+      pipelineCompleted: true,
+      verified: true,
+      wouldBlock: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: false,
+      specConstraintCount: 0,
+    }))).toThrow(/spec/i);
   });
 });
 
@@ -426,6 +573,13 @@ describe('TestdataRunTelemetryService', () => {
     await session.start();
     await session.complete({
       problemType: 'function',
+      specSchemaVersion: 1,
+      problemSpecSummary: {
+        statementHash: 'c'.repeat(64),
+        constraintCount: 12,
+        invariantCount: 3,
+        unresolvedUncertainties: 1,
+      },
       usedModel: 'primary-private → fallback-private',
       modelTelemetry: {
         role: 'fallback',
@@ -468,10 +622,167 @@ describe('TestdataRunTelemetryService', () => {
       templateFailureKinds: ['compile'],
       checkerCompiled: true,
       checkerExecuted: true,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 12,
+      specInvariantCount: 3,
+      specUncertaintyCount: 1,
     }));
+    expect(JSON.stringify(completed)).not.toContain('cccccccccccc');
     expect(JSON.stringify(completed)).not.toContain('fallback-private');
     expect(completed?.modelIdentityHash).toMatch(/^[a-f0-9]{64}$/);
     expect(completed?.modelRole).toBe('fallback');
+  });
+
+  it('emits only validated mutation aggregates on completion', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    await service.createSession({ runId: RUN_ID }).complete({
+      verification: {
+        mode: 'sandbox',
+        verified: true,
+        wouldBlock: false,
+        mutation: VALID_MUTATION_SUMMARY,
+      },
+    } as never);
+
+    const completed = payloads.flatMap(payload => payload.events).at(-1);
+    expect(completed).toEqual(expect.objectContaining({
+      mutationGate: 'observe',
+      mutationStatus: 'completed',
+      mutationGenerated: 2,
+      mutationHistorical: 1,
+      mutationViable: 3,
+      mutationKilled: 2,
+      mutationSurvived: 1,
+      mutationScore: 2 / 3,
+      mutationOperators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'historical-submission', viable: 1, killed: 1 },
+      ],
+    }));
+    expect(JSON.stringify(completed)).not.toContain('source');
+  });
+
+  it('drops the whole mutation observation when any aggregate is malformed', async () => {
+    const malicious = [
+      { ...VALID_MUTATION_SUMMARY, source: 'private source sentinel' },
+      { ...VALID_MUTATION_SUMMARY, recordId: 'private record sentinel' },
+      { ...VALID_MUTATION_SUMMARY, output: 'private output sentinel' },
+      { ...VALID_MUTATION_SUMMARY, position: 42 },
+      { ...VALID_MUTATION_SUMMARY, generated: -1 },
+      { ...VALID_MUTATION_SUMMARY, generated: 20, historical: 1 },
+      { ...VALID_MUTATION_SUMMARY, killed: 1 },
+      { ...VALID_MUTATION_SUMMARY, score: 0.5 },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        mode: 'off', status: 'skipped', skippedReason: 'gate-off',
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        status: 'skipped', skippedReason: 'budget-exhausted',
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        status: 'partial', skippedReason: 'no-candidates',
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        status: 'skipped', skippedReason: 'checker-infra',
+        generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+        score: undefined, operators: [],
+      },
+      {
+        ...VALID_MUTATION_SUMMARY,
+        generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+        score: undefined, operators: [],
+      },
+      { ...VALID_MUTATION_SUMMARY, operators: [
+        { id: 'comparison-boundary', viable: 2, killed: 1 },
+        { id: 'comparison-boundary', viable: 1, killed: 1 },
+      ] },
+      { ...VALID_MUTATION_SUMMARY, operators: [{
+        id: 'comparison-boundary', viable: 3, killed: 2, input: 'private input sentinel',
+      }] },
+      { ...VALID_MUTATION_SUMMARY, operators: Array(7).fill({
+        id: 'comparison-boundary', viable: 3, killed: 2,
+      }) },
+    ];
+
+    for (const mutation of malicious) {
+      const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+      const service = new TestdataRunTelemetryService(
+        { getInstall: jest.fn().mockResolvedValue(install) },
+        { send: jest.fn(async payload => { payloads.push(payload); }) },
+      );
+      await service.createSession({ runId: RUN_ID }).complete({
+        verification: { mode: 'sandbox', verified: true, wouldBlock: false, mutation },
+      } as never);
+      const completed = payloads.flatMap(payload => payload.events).at(-1);
+      expect(completed?.eventType).toBe('run_completed');
+      for (const field of MUTATION_FIELDS) expect(completed).not.toHaveProperty(field);
+      expect(JSON.stringify(completed)).not.toContain('private');
+    }
+  });
+
+  it('reports a failed observe extraction without free text or evidence', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    const session = service.createSession({ runId: RUN_ID });
+    await session.complete({
+      specSchemaVersion: 1,
+      verification: { mode: 'sandbox', verified: true, wouldBlock: false },
+    });
+    expect(payloads[0].events[0]).toEqual(expect.objectContaining({
+      specSchemaVersion: 1,
+      specExtractionSucceeded: false,
+    }));
+    expect(payloads[0].events[0]).not.toHaveProperty('specConstraintCount');
+    expect(JSON.stringify(payloads)).not.toMatch(/quote|expression|uncertainty description/i);
+  });
+
+  it('retains only bounded spec observation fields when the old pipeline later fails', async () => {
+    const payloads: Array<{ events: TestdataQualityEvent[] }> = [];
+    const service = new TestdataRunTelemetryService(
+      { getInstall: jest.fn().mockResolvedValue(install) },
+      { send: jest.fn(async payload => { payloads.push(payload); }) },
+    );
+    const session = service.createSession({ runId: RUN_ID });
+    session.observeProblemSpec({
+      schemaVersion: 1,
+      succeeded: true,
+      constraintCount: 9,
+      invariantCount: 2,
+      uncertaintyCount: 1,
+      consensusStatus: 'adjudicated',
+      conflictCount: 2,
+      unresolvedConflictCount: 0,
+      rolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+      quote: 'SECRET_EVIDENCE_QUOTE',
+    } as never);
+    await session.fail(new Error('SECRET_PIPELINE_ERROR'));
+
+    const completed = payloads.flatMap(payload => payload.events).at(-1);
+    expect(completed).toEqual(expect.objectContaining({
+      pipelineCompleted: false,
+      specSchemaVersion: 1,
+      specExtractionSucceeded: true,
+      specConstraintCount: 9,
+      specInvariantCount: 2,
+      specUncertaintyCount: 1,
+      specConsensusStatus: 'adjudicated',
+      specConflictCount: 2,
+      specUnresolvedConflictCount: 0,
+      specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+    }));
+    expect(JSON.stringify(payloads)).not.toContain('SECRET_EVIDENCE_QUOTE');
+    expect(JSON.stringify(payloads)).not.toContain('SECRET_PIPELINE_ERROR');
   });
 
   it('uses the same local HMAC identity for successful and failed runs', async () => {

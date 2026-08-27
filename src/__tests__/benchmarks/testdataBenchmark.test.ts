@@ -109,7 +109,7 @@ function validPlan(): GenerationPlan {
   );
   return {
     runId: '11111111-1111-4111-8111-111111111111',
-    promptVersion: 'testdata-generation-v1',
+    promptVersion: 'testdata-generation-v3',
     problemType: 'traditional',
     files,
     caseCount: 8,

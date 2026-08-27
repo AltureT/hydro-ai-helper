@@ -133,6 +133,12 @@ export interface TestdataQualityDistributionItem {
   count: number;
 }
 
+export type TestdataSpecConsensusStatus = 'consensus' | 'adjudicated' | 'unresolved';
+
+export interface TestdataSpecConsensusDistributionItem extends TestdataQualityDistributionItem {
+  key: TestdataSpecConsensusStatus;
+}
+
 export type TestdataModelRole = 'primary' | 'fallback';
 
 export interface TestdataModelRoleMetrics {
@@ -140,6 +146,13 @@ export interface TestdataModelRoleMetrics {
   completed: TestdataQualityRate;
   verified: TestdataQualityRate;
   failed: TestdataQualityRate;
+}
+
+export interface TestdataStageLatency {
+  stage: string;
+  runs: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
 }
 
 export interface TestdataQualityResponse {
@@ -161,7 +174,15 @@ export interface TestdataQualityResponse {
   failure_stages?: TestdataQualityDistributionItem[];
   failure_artifacts?: TestdataQualityDistributionItem[];
   risk_tiers?: TestdataQualityDistributionItem[];
+  stage_latency?: TestdataStageLatency[];
   model_roles?: Record<TestdataModelRole, TestdataModelRoleMetrics>;
+  problem_spec?: {
+    extraction_succeeded: TestdataQualityRate;
+    constraint_count: number;
+    invariant_count: number;
+    uncertainty_count: number;
+    consensus_statuses: TestdataSpecConsensusDistributionItem[];
+  };
   templates?: Partial<Record<'py' | 'java' | 'cc', {
     requested: number;
     verified: number;
@@ -174,6 +195,15 @@ export interface TestdataQualityResponse {
     executed?: TestdataQualityRate;
     infra_failure?: TestdataQualityRate;
     infra_failures?: number;
+  };
+  mutation?: {
+    runs: number;
+    generated: number;
+    historical: number;
+    viable: number;
+    killed: number;
+    survived: number;
+    average_score: number | null;
   };
   stress?: Partial<Record<
     'generated' | 'valid' | 'dropped_invalid' | 'unique' | 'compared' | 'agreed',

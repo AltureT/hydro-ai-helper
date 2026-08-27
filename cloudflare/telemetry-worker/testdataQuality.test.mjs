@@ -141,6 +141,50 @@ test('model role index is an idempotent incremental migration', async () => {
   assert.match(sql, /ON testdata_runs\(model_role\)/i);
 });
 
+test('problem spec observation migration adds only bounded aggregate columns', async () => {
+  const sql = await readFile(
+    new URL('./migrations/0012_testdata_problem_spec_observation.sql', import.meta.url),
+    'utf8',
+  );
+  for (const column of [
+    'spec_schema_version', 'spec_extraction_succeeded', 'spec_constraint_count',
+    'spec_invariant_count', 'spec_uncertainty_count',
+  ]) assert.match(sql, new RegExp(`ADD COLUMN ${column}`));
+  for (const forbidden of [
+    'statement', 'title', 'problem_id', 'quote', 'expression', 'description', 'metadata',
+  ]) assert.doesNotMatch(sql, new RegExp(`ADD COLUMN ${forbidden}`, 'i'));
+});
+
+test('spec consensus migration adds only nullable enum, count, and role columns', async () => {
+  const sql = await readFile(
+    new URL('./migrations/0013_testdata_spec_consensus.sql', import.meta.url),
+    'utf8',
+  );
+  for (const column of [
+    'spec_consensus_status', 'spec_conflict_count',
+    'spec_unresolved_conflict_count', 'spec_roles_used',
+  ]) assert.match(sql, new RegExp(`ADD COLUMN ${column}`));
+  assert.match(sql, /consensus.*adjudicated.*unresolved/is);
+  for (const forbidden of [
+    'statement', 'quote', 'expression', 'reason', 'problem_id', 'metadata',
+  ]) assert.doesNotMatch(sql, new RegExp(`ADD COLUMN ${forbidden}`, 'i'));
+});
+
+test('mutation migration adds only nullable bounded aggregate columns', async () => {
+  const sql = await readFile(
+    new URL('./migrations/0014_testdata_mutation.sql', import.meta.url),
+    'utf8',
+  );
+  for (const column of [
+    'mutation_gate', 'mutation_status', 'mutation_generated', 'mutation_historical',
+    'mutation_viable', 'mutation_killed', 'mutation_survived', 'mutation_score',
+    'mutation_operators',
+  ]) assert.match(sql, new RegExp(`ADD COLUMN ${column}`));
+  for (const forbidden of [
+    'statement', 'source', 'record_id', 'problem_id', 'input', 'output', 'position', 'metadata',
+  ]) assert.doesNotMatch(sql, new RegExp(`ADD COLUMN ${forbidden}`, 'i'));
+});
+
 test('event fingerprints are canonical and change with safe payload content', async () => {
   const first = event();
   const reordered = Object.fromEntries(Object.entries(first).reverse());
@@ -152,7 +196,16 @@ test('event fingerprints are canonical and change with safe payload content', as
 });
 
 test('worker validator accepts the closed contract and rejects privacy injection', () => {
-  assert.equal(validateTestdataQualityEventPayload(event()).eventType, 'run_started');
+  const completed = event({
+    eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+    specSchemaVersion: 1, specExtractionSucceeded: true,
+    specConstraintCount: 12, specInvariantCount: 3, specUncertaintyCount: 1,
+    specConsensusStatus: 'adjudicated', specConflictCount: 2,
+    specUnresolvedConflictCount: 0,
+    specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+  });
+  assert.equal(validateTestdataQualityEventPayload(completed).specConstraintCount, 12);
+  assert.equal(validateTestdataQualityEventPayload(completed).specConsensusStatus, 'adjudicated');
   for (const [key, value] of [
     ['problemId', 'D3102'], ['title', 'secret'], ['statement', '# secret'],
     ['code', 'print(secret)'], ['input', 'secret'], ['output', 'secret'],
@@ -160,6 +213,54 @@ test('worker validator accepts the closed contract and rejects privacy injection
   ]) {
     assert.throws(() => validateTestdataQualityEventPayload({ ...event(), [key]: value }), /unknown field/i);
   }
+});
+
+test('worker validator accepts only complete internally consistent mutation aggregates', () => {
+  const completed = event({
+    eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+    mutationGate: 'observe', mutationStatus: 'completed', mutationGenerated: 2,
+    mutationHistorical: 1, mutationViable: 3, mutationKilled: 2, mutationSurvived: 1,
+    mutationScore: 2 / 3,
+    mutationOperators: [
+      { id: 'comparison-boundary', viable: 2, killed: 1 },
+      { id: 'historical-submission', viable: 1, killed: 1 },
+    ],
+  });
+  assert.equal(validateTestdataQualityEventPayload(completed).mutationKilled, 2);
+
+  for (const patch of [
+    { mutationGate: undefined },
+    { mutationGenerated: 21 },
+    { mutationHistorical: 19 },
+    { mutationSurvived: 2 },
+    { mutationScore: 0.5 },
+    { mutationGate: 'off', mutationStatus: 'skipped' },
+    { mutationStatus: 'skipped' },
+    {
+      mutationGenerated: 0, mutationHistorical: 0, mutationViable: 0,
+      mutationKilled: 0, mutationSurvived: 0, mutationScore: undefined,
+      mutationOperators: [],
+    },
+    { mutationOperators: [{ id: 'unknown', viable: 3, killed: 2 }] },
+    { mutationOperators: [
+      { id: 'comparison-boundary', viable: 2, killed: 1 },
+      { id: 'comparison-boundary', viable: 1, killed: 1 },
+    ] },
+    { mutationOperators: [{
+      id: 'comparison-boundary', viable: 3, killed: 2, output: 'private output',
+    }] },
+  ]) assert.throws(
+    () => validateTestdataQualityEventPayload({ ...completed, ...patch }),
+    /mutation|field/i,
+  );
+
+  assert.throws(() => validateTestdataQualityEventPayload(event({
+    mutationGate: 'observe',
+  })), /mutation/i);
+  assert.equal(validateTestdataQualityEventPayload(event({
+    eventType: 'stage_failed', stage: 'mutation_testing',
+    failureCode: 'MUTATION_EVIDENCE_UNAVAILABLE', artifact: 'mutation', retryPolicy: 'no-retry',
+  })).failureCode, 'MUTATION_EVIDENCE_UNAVAILABLE');
 });
 
 test('worker validator rejects invalid UUIDs, bounds, arrays, and enums', () => {
@@ -172,13 +273,108 @@ test('worker validator rejects invalid UUIDs, bounds, arrays, and enums', () => 
     event({ templateLanguagesRequested: ['py', 'rust'] }),
     event({ templateLanguagesRequested: ['py', 'py'] }),
     event({ riskTier: 'critical' }),
+    event({ specConsensusStatus: 'resolved' }),
+    event({ specConflictCount: -1 }),
+    event({ specUnresolvedConflictCount: 1_025 }),
+    event({ specRolesUsed: ['specPrimary', 'oracle'] }),
+    event({ specRolesUsed: ['specPrimary', 'specPrimary'] }),
     event({
       eventType: 'run_completed', pipelineCompleted: false, verified: true, wouldBlock: false,
     }),
     event({
       eventType: 'run_completed', pipelineCompleted: false, verified: false, wouldBlock: true,
     }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 2, specExtractionSucceeded: false,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 1, specExtractionSucceeded: true, specConstraintCount: 513,
+      specInvariantCount: 0, specUncertaintyCount: 0,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 1, specExtractionSucceeded: true,
+    }),
+    event({
+      eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+      specSchemaVersion: 1, specExtractionSucceeded: false, specConstraintCount: 0,
+    }),
   ]) assert.throws(() => validateTestdataQualityEventPayload(invalid));
+});
+
+test('POST /api/testdata-events fail-open accepts and stores bounded consensus fields', async () => {
+  const db = new FakeDb();
+  const completed = event({
+    eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+    specSchemaVersion: 1, specExtractionSucceeded: true,
+    specConstraintCount: 12, specInvariantCount: 3, specUncertaintyCount: 1,
+    specConsensusStatus: 'adjudicated', specConflictCount: 2,
+    specUnresolvedConflictCount: 0,
+    specRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+  });
+  const response = await worker.fetch(
+    request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [completed] }, ''),
+    { DB: db },
+  );
+
+  assert.equal(response.status, 200);
+  const stored = db.executed.find(statement => statement.sql.includes('completed_event_id'));
+  for (const column of [
+    'spec_consensus_status', 'spec_conflict_count',
+    'spec_unresolved_conflict_count', 'spec_roles_used',
+  ]) assert.match(stored.sql, new RegExp(column));
+  assert.equal(stored.values.includes('adjudicated'), true);
+  assert.equal(stored.values.includes(2), true);
+  assert.equal(stored.values.includes('["specPrimary","specCritic","adjudicator"]'), true);
+});
+
+test('POST /api/testdata-events fail-open stores only mutation aggregates', async () => {
+  const db = new FakeDb();
+  const completed = event({
+    eventType: 'run_completed', pipelineCompleted: true, verified: true, wouldBlock: false,
+    mutationGate: 'enforce', mutationStatus: 'completed', mutationGenerated: 2,
+    mutationHistorical: 1, mutationViable: 3, mutationKilled: 2, mutationSurvived: 1,
+    mutationScore: 2 / 3,
+    mutationOperators: [
+      { id: 'comparison-boundary', viable: 2, killed: 1 },
+      { id: 'historical-submission', viable: 1, killed: 1 },
+    ],
+  });
+  const response = await worker.fetch(
+    request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [completed] }, ''),
+    { DB: db },
+  );
+
+  assert.equal(response.status, 200);
+  const stored = db.executed.find(statement => statement.sql.includes('completed_event_id'));
+  for (const column of [
+    'mutation_gate', 'mutation_status', 'mutation_generated', 'mutation_historical',
+    'mutation_viable', 'mutation_killed', 'mutation_survived', 'mutation_score',
+    'mutation_operators',
+  ]) assert.match(stored.sql, new RegExp(column));
+  assert.equal(stored.values.includes('enforce'), true);
+  assert.equal(stored.values.includes(2 / 3), true);
+  const serialized = JSON.stringify(stored);
+  for (const forbidden of ['source', 'record_id', 'problem_id', 'private input', 'private output']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test('POST /api/testdata-events rejects invalid consensus enums and unknown fields before D1', async () => {
+  for (const invalidEvent of [
+    event({ specConsensusStatus: 'resolved' }),
+    event({ specResolutionReason: 'private model explanation' }),
+  ]) {
+    const db = new FakeDb();
+    const response = await worker.fetch(
+      request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [invalidEvent] }),
+      { DB: db, REPORT_TOKEN: 'report-secret' },
+    );
+    assert.equal(response.status, 400);
+    assert.equal(db.executed.length, 0);
+  }
 });
 
 test('worker validator accepts only canonical UTC ISO event timestamps', () => {
@@ -375,6 +571,11 @@ test('completion-first delivery preserves statement buckets and late starts back
     hasSamples: true,
     hasStatefulOperations: false,
     statementLengthBucket: '4k-16k',
+    specSchemaVersion: 1,
+    specExtractionSucceeded: true,
+    specConstraintCount: 12,
+    specInvariantCount: 3,
+    specUncertaintyCount: 1,
   });
   const completedResponse = await worker.fetch(
     request('/api/testdata-events', { instanceId: INSTANCE_ID, events: [completed] }),
@@ -389,7 +590,9 @@ test('completion-first delivery preserves statement buckets and late starts back
   assert.equal((completionSql.match(/\?/g) || []).length, completionStatement.values.length);
   for (const column of [
     'has_subtasks', 'has_custom_checker', 'has_samples',
-    'has_stateful_operations', 'statement_length_bucket',
+    'has_stateful_operations', 'statement_length_bucket', 'spec_schema_version',
+    'spec_extraction_succeeded', 'spec_constraint_count', 'spec_invariant_count',
+    'spec_uncertainty_count',
   ]) assert.match(completionSql, new RegExp(column));
   assert.equal(completionStatement.values.includes('4k-16k'), true);
 
@@ -470,10 +673,15 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
     rows: {
       testdata_quality_totals: [{
         total_runs: 10, pipeline_completed: 8, verified: 5, would_block: 2,
+        spec_attempted: 7, spec_succeeded: 5, spec_constraint_count: 48,
+        spec_invariant_count: 11, spec_uncertainty_count: 4,
         stress_generated: 600, stress_valid: 560, stress_dropped_invalid: 40,
         stress_unique: 540, stress_compared: 560, stress_agreed: 550,
         checker_configured: 4, checker_read: 4, checker_compiled: 3,
         checker_executed: 3, checker_infra_failures: 2, checker_infra_failed_runs: 1,
+        mutation_runs: 3, mutation_generated: 6, mutation_historical: 2,
+        mutation_viable: 8, mutation_killed: 6, mutation_survived: 2,
+        mutation_average_score: 0.75,
       }],
       testdata_quality_outcomes: [{
         total_outcomes: 6, accepted_unchanged: 2, accepted_edited: 2, discarded: 1, regenerated: 1,
@@ -503,6 +711,22 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
         { model_role: 'fallback', runs: 4, completed: 3, verified: 2, failed: 1 },
       ],
       testdata_quality_versions: [{ plugin_version: '3.1.0', runs: 10, pipeline_completed: 8, verified: 5, would_block: 2 }],
+      testdata_quality_consensus: [
+        { key: 'consensus', count: 6 },
+        { key: 'adjudicated', count: 3 },
+        { key: 'unresolved', count: 1 },
+      ],
+      testdata_quality_stage_latency: [
+        {
+          stage: 'blueprint', runs: 10,
+          b_1000: 4, b_3000: 1, b_10000: 4, b_30000: 1,
+        },
+        {
+          stage: 'mutation_testing', runs: 3,
+          b_120000: 1, b_300000: 2,
+        },
+        { stage: 'private-stage', runs: 99, b_1000: 99 },
+      ],
     },
   });
   const response = await worker.fetch(new Request(
@@ -516,7 +740,27 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   assert.deepEqual(body.metrics.accepted_unchanged, { count: 2, total: 6, rate: 1 / 3 });
   assert.deepEqual(body.metrics.model_escalation_rescue, { count: 1, total: 2, rate: 0.5 });
   assert.deepEqual(body.metrics.verified_but_teacher_changed, { count: 2, total: 4, rate: 0.5 });
+  assert.deepEqual(body.problem_spec, {
+    extraction_succeeded: { count: 5, total: 7, rate: 5 / 7 },
+    constraint_count: 48,
+    invariant_count: 11,
+    uncertainty_count: 4,
+    consensus_statuses: [
+      { key: 'consensus', count: 6 },
+      { key: 'adjudicated', count: 3 },
+      { key: 'unresolved', count: 1 },
+    ],
+  });
   assert.deepEqual(body.checker.infra_failure, { count: 1, total: 4, rate: 0.25 });
+  assert.deepEqual(body.mutation, {
+    runs: 3,
+    generated: 6,
+    historical: 2,
+    viable: 8,
+    killed: 6,
+    survived: 2,
+    average_score: 0.75,
+  });
   assert.deepEqual(body.failure_codes, [
     { key: 'CHECKER_RUNTIME_FAILED', count: 2 }, { key: 'UNKNOWN', count: 1 },
   ]);
@@ -525,6 +769,10 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   ]);
   assert.deepEqual(body.failure_artifacts, [
     { key: 'checker', count: 2 }, { key: 'pipeline', count: 1 },
+  ]);
+  assert.deepEqual(body.stage_latency, [
+    { stage: 'blueprint', runs: 10, p50Ms: 3000, p95Ms: 30000 },
+    { stage: 'mutation_testing', runs: 3, p50Ms: 300000, p95Ms: 300000 },
   ]);
   assert.deepEqual(body.model_roles, {
     primary: {
@@ -550,6 +798,7 @@ test('GET dashboard returns aggregate-only rates with explicit denominators and 
   for (const marker of [
     'testdata_quality_outcomes', 'testdata_quality_failures',
     'testdata_quality_stages', 'testdata_quality_artifacts',
+    'testdata_quality_stage_latency',
   ]) {
     const receivedAtCutoff = db.bound.find(statement => statement.sql.includes(marker)).values[0];
     assert.match(receivedAtCutoff, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -572,6 +821,17 @@ test('GET dashboard returns null rates and empty distributions for zero data', a
   assert.deepEqual(body.metrics.verified, { count: 0, total: 0, rate: null });
   assert.deepEqual(body.failure_codes, []);
   assert.deepEqual(body.failure_artifacts, []);
+  assert.deepEqual(body.stage_latency, []);
+  assert.deepEqual(body.problem_spec.consensus_statuses, []);
+  assert.deepEqual(body.mutation, {
+    runs: 0,
+    generated: 0,
+    historical: 0,
+    viable: 0,
+    killed: 0,
+    survived: 0,
+    average_score: null,
+  });
   assert.deepEqual(body.model_roles, {
     primary: {
       runs: 0,

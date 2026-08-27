@@ -50,7 +50,7 @@ export const getFeedback = (limit = 50, offset = 0) =>
 export const getFeatureHealth = (usageDays = 30) =>
   fetchApi<FeatureHealthResponse>(`/api/dashboard/feature-health?days=${usageDays}`);
 
-export const getTestdataQuality = (days = 30) =>
+export const getTestdataQuality = (days = 30): Promise<TestdataQualityResponse> =>
   fetchApi<TestdataQualityResponse>(`/api/dashboard/testdata-quality?days=${days}`);
 
 export const getAlerts = (limit = 50) =>

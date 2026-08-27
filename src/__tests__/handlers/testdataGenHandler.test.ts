@@ -4,7 +4,7 @@
  */
 
 import { Readable } from 'stream';
-import { db, PERM, PRIV, ProblemModel, StorageModel } from 'hydrooj';
+import { ContestModel, db, PERM, PRIV, ProblemModel, STATUS, StorageModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
@@ -16,6 +16,7 @@ import {
   TestdataGenApplyHandler,
   TestdataGenHandlerPriv,
   extractStatementMarkdown,
+  loadHistoricalMutationCandidates,
   loadTestlibCheckerArtifacts,
 } from '../../handlers/testdataGenHandler';
 import * as openaiClient from '../../services/openaiClient';
@@ -28,9 +29,17 @@ import { TestdataPipelineError } from '../../services/testdata/failures';
 import { ObjectId } from '../../utils/mongo';
 import {
   TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
   computeTestdataCheckpointHashes,
 } from '../../models/testdataGenerationJob';
-import { computeOriginalFileHashes } from '../../services/testdata/runTelemetry';
+import {
+  computeOriginalFileHashes,
+} from '../../services/testdata/runTelemetry';
+import { TESTDATA_PIPELINE_PROMPT_VERSION } from '../../services/testdata/pipelineContext';
+
+jest.mock('../../services/testdata/modelRoles', () => ({
+  createTestdataRoleClientsFromConfig: jest.fn().mockResolvedValue({}),
+}));
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -241,6 +250,154 @@ describe('loadTestlibCheckerArtifacts', () => {
   });
 });
 
+describe('historical mutation candidates', () => {
+  function mockHistoricalRecords(records: Array<Record<string, unknown>>) {
+    const toArray = jest.fn().mockResolvedValue(records);
+    const limit = jest.fn().mockReturnValue({ toArray });
+    const sort = jest.fn().mockReturnValue({ limit });
+    const find = jest.fn().mockReturnValue({ sort });
+    (db.collection as jest.Mock).mockReturnValue({ find });
+    return { find, limit, toArray };
+  }
+
+  function historicalRecord(overrides: Record<string, unknown> = {}) {
+    return {
+      _id: new ObjectId(),
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_WRONG_ANSWER,
+      lang: 'py.py3',
+      code: 'print(0)',
+      contest: null,
+      ...overrides,
+    };
+  }
+
+  it('historical mutation: does not query record code without independent code-read permission', async () => {
+    const { find } = mockHistoricalRecords([]);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: false,
+    });
+
+    await expect(loadHistoricalMutationCandidates(handler, 'system', 1530))
+      .resolves.toEqual([]);
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  it('historical mutation: keeps only same-problem WA RE TLE from non-contest or completed contests', async () => {
+    const records = [
+      historicalRecord({ status: STATUS.STATUS_WRONG_ANSWER, code: 'print(0)' }),
+      historicalRecord({
+        status: STATUS.STATUS_RUNTIME_ERROR,
+        lang: 'cc.cc17',
+        code: 'int main(){return 1;}',
+        contest: 'done',
+      }),
+      historicalRecord({
+        status: STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+        code: 'while True: pass',
+        contest: 'open',
+      }),
+      historicalRecord({ status: STATUS.STATUS_ACCEPTED, code: 'print(1)' }),
+      historicalRecord({ domainId: 'other', code: 'print(2)' }),
+      historicalRecord({ pid: 999, code: 'print(3)' }),
+    ];
+    const { find, limit } = mockHistoricalRecords(records);
+    (ContestModel.get as jest.Mock).mockImplementation(async (_domainId, contest) => (
+      contest === 'done' || contest === 'open' ? { _id: contest } : null
+    ));
+    (ContestModel.isDone as jest.Mock).mockImplementation(tdoc => tdoc._id === 'done');
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+    });
+
+    await expect(loadHistoricalMutationCandidates(handler, 'system', 1530)).resolves.toEqual([
+      { language: 'python', source: 'print(0)', expectedStatus: 'wrong-answer' },
+      { language: 'cpp', source: 'int main(){return 1;}', expectedStatus: 'runtime-error' },
+    ]);
+    expect(find).toHaveBeenCalledWith({
+      domainId: 'system',
+      pid: 1530,
+      status: { $in: [
+        STATUS.STATUS_WRONG_ANSWER,
+        STATUS.STATUS_RUNTIME_ERROR,
+        STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+      ] },
+      lang: { $in: expect.arrayContaining(['py.py3', 'py.pypy3', 'cc.cc17']) },
+      code: { $type: 'string', $ne: '' },
+    }, {
+      projection: { _id: 1, status: 1, lang: 1, code: 1, contest: 1 },
+    });
+    expect(limit).toHaveBeenCalledWith(64);
+  });
+
+  it('historical mutation: rejects unsafe source, deduplicates by digest, and caps newest candidates at eight', async () => {
+    const unique = Array.from({ length: 10 }, (_, index) => historicalRecord({
+      code: `print(${index})`,
+    }));
+    mockHistoricalRecords([
+      historicalRecord({ code: '@@hydro_submission_file@@/secret.py' }),
+      historicalRecord({ code: 'x'.repeat(200_001) }),
+      historicalRecord({ lang: 'java', code: 'class Main {}' }),
+      historicalRecord({ code: 'print(0)\n' }),
+      ...unique,
+    ]);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+    });
+
+    const result = await loadHistoricalMutationCandidates(handler, 'system', 1530);
+
+    expect(result).toHaveLength(8);
+    expect(result.map(candidate => candidate.source)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `print(${index})`),
+    );
+    expect(result.every(candidate => !Object.prototype.hasOwnProperty.call(candidate, 'digest')))
+      .toBe(true);
+  });
+
+  it('historical mutation: excludes missing, ongoing, and failed contest lookups', async () => {
+    mockHistoricalRecords([
+      historicalRecord({ code: 'print(1)', contest: 'missing' }),
+      historicalRecord({ code: 'print(2)', contest: 'ongoing' }),
+      historicalRecord({ code: 'print(3)', contest: 'failed' }),
+      historicalRecord({ code: 'print(4)', contest: 'done' }),
+    ]);
+    (ContestModel.get as jest.Mock).mockImplementation(async (_domainId, contest) => {
+      if (contest === 'failed') throw new Error('contest database unavailable');
+      if (contest === 'missing') return null;
+      return { _id: contest };
+    });
+    (ContestModel.isDone as jest.Mock).mockImplementation(tdoc => tdoc._id === 'done');
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+    });
+
+    await expect(loadHistoricalMutationCandidates(handler, 'system', 1530)).resolves.toEqual([
+      { language: 'python', source: 'print(4)', expectedStatus: 'wrong-answer' },
+    ]);
+  });
+
+  it('historical mutation: fails closed when the record query fails', async () => {
+    const toArray = jest.fn().mockRejectedValue(new Error('record database unavailable'));
+    const limit = jest.fn().mockReturnValue({ toArray });
+    const sort = jest.fn().mockReturnValue({ limit });
+    const find = jest.fn().mockReturnValue({ sort });
+    (db.collection as jest.Mock).mockReturnValue({ find });
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+    });
+
+    await expect(loadHistoricalMutationCandidates(handler, 'system', 1530))
+      .resolves.toEqual([]);
+  });
+});
+
 // ─── 导出 ─────────────────────────────────────────────────────────────────────
 
 describe('exports', () => {
@@ -422,6 +579,83 @@ describe('TestdataGenGenerateHandler', () => {
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
+    }
+  });
+
+  it('historical mutation: synchronous generation passes authorized source only to the service call', async () => {
+    const sentinel = 'print("HISTORICAL_MUTATION_SYNC_SENTINEL")';
+    mockFindOne(PROBLEM_DOC, [{
+      _id: new ObjectId(),
+      uid: 99,
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_WRONG_ANSWER,
+      lang: 'py.py3',
+      code: sentinel,
+      contest: null,
+    }]);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+
+    try {
+      await handler.post();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        historicalMutationCandidates: [{
+          language: 'python',
+          source: sentinel,
+          expectedStatus: 'wrong-answer',
+        }],
+      }));
+      expect(JSON.stringify(handler.response.body)).not.toContain(sentinel);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('mutation gate off skips historical source reads in synchronous generation', async () => {
+    const previousGate = process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+    const { find } = mockFindOne(PROBLEM_DOC, [{
+      _id: new ObjectId(),
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_WRONG_ANSWER,
+      lang: 'py.py3',
+      code: 'print("PRIVATE_SYNC_HISTORY")',
+      contest: null,
+    }]);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenGenerateHandler, {
+      own: true,
+      hasReadCode: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+
+    try {
+      await handler.post();
+      expect(find).not.toHaveBeenCalled();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        mutationGateMode: 'off',
+        historicalMutationCandidates: [],
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+      if (previousGate === undefined) delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+      else process.env.AI_HELPER_TESTDATA_MUTATION_GATE = previousGate;
     }
   });
 
@@ -1111,6 +1345,7 @@ describe('Testdata generation background jobs', () => {
       problemType: 'traditional',
       files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
       caseCount: 1,
+      modelTelemetry: { role: 'primary', identity: 'endpoint-secret-id/private-model' },
     };
     const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
       .mockResolvedValue({} as never);
@@ -1133,10 +1368,146 @@ describe('Testdata generation background jobs', () => {
       }));
       await new Promise(resolve => setImmediate(resolve));
       expect(jobModel.markRunning).toHaveBeenCalledWith(job._id);
-      expect(jobModel.complete).toHaveBeenCalledWith(job._id, plan);
+      expect(jobModel.complete).toHaveBeenCalledWith(job._id, {
+        problemType: 'traditional',
+        files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
+        caseCount: 1,
+      });
+      expect(JSON.stringify(jobModel.complete.mock.calls[0][1]))
+        .not.toContain('endpoint-secret-id');
     } finally {
       genSpy.mockRestore();
       clientSpy.mockRestore();
+    }
+  });
+
+  it('historical mutation: background source stays in-memory and out of jobs, checkpoints, telemetry, and response', async () => {
+    const sentinel = 'print("HISTORICAL_MUTATION_BACKGROUND_SENTINEL")';
+    mockFindOne(PROBLEM_DOC, [{
+      _id: new ObjectId(),
+      uid: 99,
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_RUNTIME_ERROR,
+      lang: 'py.py3',
+      code: sentinel,
+      contest: null,
+    }]);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      updateCheckpoint: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const telemetry = {
+      start: jest.fn(),
+      progress: jest.fn(),
+      complete: jest.fn(),
+      fail: jest.fn(),
+    };
+    const createSession = jest.fn().mockReturnValue(telemetry);
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate')
+      .mockImplementation(async (params: any) => {
+        await params.onCheckpoint?.({
+          checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+          promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+        });
+        return { problemType: 'traditional', files: [], caseCount: 0 } as never;
+      });
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      hasReadCode: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => {
+      if (name === 'testdataGenerationJobModel') return jobModel;
+      if (name === 'testdataRunTelemetry') return { createSession };
+      return undefined;
+    });
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        historicalMutationCandidates: [{
+          language: 'python',
+          source: sentinel,
+          expectedStatus: 'runtime-error',
+        }],
+      }));
+      const persistenceAndOutput = {
+        createJob: jobModel.createOrGetActive.mock.calls,
+        checkpoints: jobModel.updateCheckpoint.mock.calls,
+        completedPlans: jobModel.complete.mock.calls,
+        telemetrySession: createSession.mock.calls,
+        telemetryEvents: Object.values(telemetry).flatMap(mock => mock.mock.calls),
+        response: handler.response.body,
+      };
+      expect(JSON.stringify(persistenceAndOutput)).not.toContain(sentinel);
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+    }
+  });
+
+  it('mutation gate off skips historical source reads in background generation', async () => {
+    const previousGate = process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+    const { find } = mockFindOne(PROBLEM_DOC, [{
+      _id: new ObjectId(),
+      domainId: 'system',
+      pid: 1530,
+      status: STATUS.STATUS_RUNTIME_ERROR,
+      lang: 'py.py3',
+      code: 'print("PRIVATE_BACKGROUND_HISTORY")',
+      contest: null,
+    }]);
+    const job = makeGenerationJob({ status: 'pending', startedAt: null });
+    const jobModel = {
+      findRestorable: jest.fn().mockResolvedValue(null),
+      createOrGetActive: jest.fn().mockResolvedValue({ job, created: true }),
+      markRunning: jest.fn().mockResolvedValue(undefined),
+      renewLease: jest.fn().mockResolvedValue(true),
+      updateProgress: jest.fn().mockResolvedValue(undefined),
+      complete: jest.fn().mockResolvedValue(true),
+      fail: jest.fn().mockResolvedValue(undefined),
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const clientSpy = jest.spyOn(openaiClient, 'createMultiModelClientFromConfig')
+      .mockResolvedValue({} as never);
+    const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
+      problemType: 'traditional', files: [], caseCount: 0,
+    } as never);
+    const handler = setupHandler(TestdataGenJobStartHandler, {
+      own: true,
+      hasReadCode: true,
+      body: { problemId: 'D3102', problemKind: 'traditional', caseCount: 1 },
+    });
+    handler.ctx.get = jest.fn((name: string) => (
+      name === 'testdataGenerationJobModel' ? jobModel : undefined
+    ));
+
+    try {
+      await handler.post();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(find).not.toHaveBeenCalled();
+      expect(genSpy).toHaveBeenCalledWith(expect.objectContaining({
+        mutationGateMode: 'off',
+        historicalMutationCandidates: [],
+      }));
+    } finally {
+      genSpy.mockRestore();
+      clientSpy.mockRestore();
+      if (previousGate === undefined) delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+      else process.env.AI_HELPER_TESTDATA_MUTATION_GATE = previousGate;
     }
   });
 
@@ -1170,7 +1541,7 @@ describe('Testdata generation background jobs', () => {
     };
     const plan = {
       runId: job.runId,
-      promptVersion: 'testdata-generation-v1',
+      promptVersion: 'testdata-generation-v2',
       originalFileHashes: {},
       problemType: 'traditional',
       files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
@@ -1329,7 +1700,7 @@ describe('Testdata generation background jobs', () => {
       .mockResolvedValue({} as never);
     const genSpy = jest.spyOn(TestdataGenService.prototype, 'generate').mockResolvedValue({
       runId: job.runId,
-      promptVersion: 'testdata-generation-v1',
+      promptVersion: 'testdata-generation-v2',
       originalFileHashes: {},
       problemType: 'traditional',
       files: [],
@@ -1504,6 +1875,8 @@ describe('Testdata generation background jobs', () => {
 
   it('resumeFromJobId 校验命中后把 checkpoint 传入服务并异步保存新阶段', async () => {
     mockFindOne(PROBLEM_DOC);
+    const legacySeed = 161803398;
+    const legacyLabel = 'PRIVATE_RESUME_GENERATOR_PLAN_INPUT';
     const options = {
       problemKind: 'traditional' as const,
       fillInMode: 'auto' as const,
@@ -1518,9 +1891,24 @@ describe('Testdata generation background jobs', () => {
     const checkpoint = {
       revision: 2,
       ...computeTestdataCheckpointHashes(options, PROBLEM_DOC.content),
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      specHash: 'a'.repeat(64),
+      roleDependencies: { oracle: 'b'.repeat(64), artifacts: 'c'.repeat(64) },
       solution: {
         problemType: 'traditional' as const,
         oracleCode: 'print(input())',
+      },
+      artifacts: {
+        generatorCode: `# seed=${legacySeed}\nprint(${JSON.stringify(legacyLabel)})`,
+        generatorPlan: {
+          version: 1 as const,
+          seed: legacySeed,
+          cases: [{
+            label: legacyLabel,
+            fields: { n: { kind: 'integer' as const, value: 1 } },
+          }],
+        },
       },
     };
     const interruptedJob = makeGenerationJob({
@@ -1587,7 +1975,12 @@ describe('Testdata generation background jobs', () => {
       await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
 
-      expect(receivedParams?.checkpoint).toBe(checkpoint);
+      expect(receivedParams?.checkpoint).toEqual(expect.objectContaining({
+        solution: checkpoint.solution,
+      }));
+      expect(receivedParams?.checkpoint).not.toHaveProperty('artifacts');
+      expect(JSON.stringify(receivedParams?.checkpoint)).not.toContain(String(legacySeed));
+      expect(JSON.stringify(receivedParams?.checkpoint)).not.toContain(legacyLabel);
       expect((receivedParams?.options as { confirmDirectFallback?: boolean } | undefined)
         ?.confirmDirectFallback).toBe(true);
       expect(maxActiveCheckpointWrites).toBe(1);
@@ -1600,6 +1993,11 @@ describe('Testdata generation background jobs', () => {
         }),
         {
           revision: 1,
+          checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+          promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+          statementHash: checkpoint.statementHash,
+          specHash: checkpoint.specHash,
+          roleDependencies: checkpoint.roleDependencies,
           solution: checkpoint.solution,
           killTargets: [],
         },
@@ -1613,6 +2011,11 @@ describe('Testdata generation background jobs', () => {
         }),
         {
           revision: 2,
+          checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+          promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+          statementHash: checkpoint.statementHash,
+          specHash: checkpoint.specHash,
+          roleDependencies: checkpoint.roleDependencies,
           solution: checkpoint.solution,
           artifacts: { generatorCode: 'print(1)' },
           killTargets: [],
@@ -1723,15 +2126,30 @@ describe('Testdata generation background jobs', () => {
     expect(handler.response.body.code).toBe('JOB_NOT_FOUND');
   });
 
-  it('job status keeps original file hashes server-local', async () => {
+  it('job status exposes only the ProblemSpec summary and keeps internal fields server-local', async () => {
     mockFindOne(PROBLEM_DOC);
     const job = makeGenerationJob({
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         originalFileHashes: { '1.in': 'a'.repeat(64) },
         modelTelemetry: { role: 'fallback', identity: 'endpoint-id/private-model' },
+        specSchemaVersion: 1,
+        problemSpecSummary: {
+          statementHash: 'b'.repeat(64),
+          constraintCount: 2,
+          invariantCount: 1,
+          unresolvedUncertainties: 0,
+        },
+        problemSpec: {
+          constraints: [{ evidence: { quote: 'SECRET_EVIDENCE_QUOTE', startOffset: 7 } }],
+        },
+        primarySpec: { expression: 'SECRET_PRIMARY_EXPRESSION' },
+        criticSpec: { expression: 'SECRET_CRITIC_EXPRESSION' },
+        resolvedSpec: { evidenceQuote: 'SECRET_RESOLVED_QUOTE' },
+        specConflicts: [{ path: 'constraints', primaryValue: 'SECRET_CONFLICT_VALUE' }],
+        adjudication: { reason: 'SECRET_ADJUDICATION_REASON' },
         problemType: 'traditional',
         files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
         caseCount: 1,
@@ -1752,6 +2170,20 @@ describe('Testdata generation background jobs', () => {
     expect(handler.response.body.job.plan.runId).toBe('11111111-1111-4111-8111-111111111111');
     expect(handler.response.body.job.plan).not.toHaveProperty('originalFileHashes');
     expect(handler.response.body.job.plan).not.toHaveProperty('modelTelemetry');
+    expect(handler.response.body.job.plan).not.toHaveProperty('problemSpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('primarySpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('criticSpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('resolvedSpec');
+    expect(handler.response.body.job.plan).not.toHaveProperty('specConflicts');
+    expect(handler.response.body.job.plan).not.toHaveProperty('adjudication');
+    expect(handler.response.body.job.plan.problemSpecSummary).toEqual({
+      statementHash: 'b'.repeat(64),
+      constraintCount: 2,
+      invariantCount: 1,
+      unresolvedUncertainties: 0,
+    });
+    expect(JSON.stringify(handler.response.body.job.plan)).not.toContain('SECRET_EVIDENCE_QUOTE');
+    expect(JSON.stringify(handler.response.body.job.plan)).not.toContain('SECRET_ADJUDICATION_REASON');
   });
 
   it('cancel endpoint persists cancellation and returns the canceled state', async () => {
@@ -2079,7 +2511,7 @@ describe('TestdataGenApplyHandler', () => {
       active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional',
         files: originalFiles,
         caseCount: 1,
@@ -2143,7 +2575,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2201,7 +2633,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2252,7 +2684,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2295,7 +2727,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional', files: originalFiles, caseCount: 1,
         originalFileHashes: computeOriginalFileHashes(originalFiles),
       },
@@ -2340,7 +2772,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional',
         files: [
           { name: '1.in', content: '1\n', kind: 'case-in' },
@@ -2463,7 +2895,7 @@ describe('TestdataGenApplyHandler', () => {
       status: 'completed', active: false,
       plan: {
         runId: '11111111-1111-4111-8111-111111111111',
-        promptVersion: 'testdata-generation-v1',
+        promptVersion: 'testdata-generation-v2',
         problemType: 'traditional',
         files: [{ name: '1.in', content: '1\n', kind: 'case-in' }],
         caseCount: 1,

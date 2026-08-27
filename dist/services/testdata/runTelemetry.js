@@ -9,6 +9,7 @@ exports.getStatementLengthBucket = getStatementLengthBucket;
 const crypto_1 = require("crypto");
 const telemetryService_1 = require("../telemetryService");
 const failures_1 = require("./failures");
+const mutation_1 = require("./mutation");
 exports.TESTDATA_PROMPT_VERSION = 'testdata-generation-v1';
 exports.TESTDATA_QUALITY_SCHEMA_VERSION = 1;
 exports.TESTDATA_TEACHER_OUTCOME_SEQUENCE = 1000000;
@@ -27,9 +28,29 @@ const CHANGED_FILE_KINDS = new Set([
 const TEMPLATE_LANGUAGES = new Set(['py', 'java', 'cc']);
 const TEMPLATE_FAILURE_KINDS = new Set(['compile', 'runtime', 'budget', 'mismatch', 'checker-infra']);
 const CHECKER_FAILURE_KINDS = new Set(['unavailable', 'compile', 'infra', 'budget', 'reject']);
+const MUTATION_GATES = new Set(['off', 'observe', 'enforce']);
+const MUTATION_STATUSES = new Set(['completed', 'partial', 'skipped']);
+const MUTATION_SKIP_REASONS = new Set([
+    'gate-off', 'sandbox-unavailable', 'unsupported-source', 'no-candidates',
+    'no-viable-candidates', 'checker-infra', 'sandbox-infra', 'budget-exhausted',
+]);
+const MUTATION_PARTIAL_REASONS = new Set([
+    'checker-infra', 'sandbox-infra', 'budget-exhausted',
+]);
+const MUTATION_SKIPPED_REASONS = new Set([
+    'sandbox-unavailable', 'unsupported-source', 'no-candidates',
+    'no-viable-candidates', 'budget-exhausted',
+]);
+const MUTATION_OPERATORS = new Set(mutation_1.MUTATION_OPERATOR_IDS);
 const GENERATION_MODES = new Set(['direct', 'sandbox']);
 const RELIABILITY_MODES = new Set(['legacy', 'observe', 'enforce']);
 const RISK_TIERS = new Set(['low', 'medium', 'high', 'blocked']);
+const SPEC_CONSENSUS_STATUSES = new Set([
+    'consensus', 'adjudicated', 'unresolved',
+]);
+const SPEC_CONSENSUS_ROLES = new Set([
+    'specPrimary', 'specCritic', 'adjudicator',
+]);
 const PROBLEM_KINDS = new Set(['traditional', 'function']);
 const STATEMENT_BUCKETS = new Set(['0-4k', '4k-16k', '16k-20k', 'over-20k']);
 const ARTIFACTS = new Set([
@@ -43,7 +64,7 @@ const PROGRESS_STAGES = [
     'preparing', 'sandbox_check', 'blueprint', 'blueprint_repair', 'solution_verification',
     'artifacts', 'templates', 'independent_verifier', 'verifier_repair', 'generating_inputs',
     'validating_inputs', 'running_oracle', 'checking_templates', 'stress_testing',
-    'discrimination_testing', 'pipeline_repair', 'model_fallback', 'model_escalation',
+    'discrimination_testing', 'mutation_testing', 'pipeline_repair', 'model_fallback', 'model_escalation',
     'assembling', 'complete', 'apply', 'semantic_fallback',
 ];
 const QUALITY_STAGES = new Set([...PROGRESS_STAGES, ...failures_1.TESTDATA_FAILURE_STAGES]);
@@ -52,23 +73,235 @@ const MODEL_ROLES = new Set(['primary', 'fallback']);
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+const MUTATION_SUMMARY_FIELDS = new Set([
+    'mode', 'status', 'generated', 'historical', 'viable', 'killed', 'survived',
+    'score', 'operators', 'skippedReason',
+]);
+const MUTATION_EVENT_FIELDS = [
+    'mutationGate', 'mutationStatus', 'mutationGenerated', 'mutationHistorical',
+    'mutationViable', 'mutationKilled', 'mutationSurvived', 'mutationScore',
+    'mutationOperators',
+];
+function isPlainRecord(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+function normalizeMutationSummary(value, validateRawShape) {
+    if (!isPlainRecord(value))
+        return undefined;
+    if (validateRawShape) {
+        if (Object.keys(value).some(key => !MUTATION_SUMMARY_FIELDS.has(key)))
+            return undefined;
+        if (value.status === 'completed') {
+            if (value.skippedReason !== undefined)
+                return undefined;
+        }
+        else if (typeof value.skippedReason !== 'string'
+            || !MUTATION_SKIP_REASONS.has(value.skippedReason))
+            return undefined;
+    }
+    if (typeof value.mode !== 'string' || !MUTATION_GATES.has(value.mode)
+        || typeof value.status !== 'string' || !MUTATION_STATUSES.has(value.status))
+        return undefined;
+    const counts = [value.generated, value.historical, value.viable, value.killed, value.survived];
+    if (counts.some(count => !Number.isSafeInteger(count) || count < 0
+        || count > 20))
+        return undefined;
+    const [generated, historical, viable, killed, survived] = counts;
+    if (generated + historical > 20 || viable > generated + historical
+        || killed + survived !== viable)
+        return undefined;
+    if (!Array.isArray(value.operators) || value.operators.length > mutation_1.MUTATION_OPERATOR_IDS.length) {
+        return undefined;
+    }
+    const operators = [];
+    const ids = new Set();
+    for (const item of value.operators) {
+        if (!isPlainRecord(item)
+            || Object.keys(item).some(key => !['id', 'viable', 'killed'].includes(key))
+            || Object.keys(item).length !== 3
+            || typeof item.id !== 'string' || !MUTATION_OPERATORS.has(item.id) || ids.has(item.id)
+            || !Number.isSafeInteger(item.viable) || item.viable < 0
+            || item.viable > 20
+            || !Number.isSafeInteger(item.killed) || item.killed < 0
+            || item.killed > item.viable)
+            return undefined;
+        ids.add(item.id);
+        operators.push({
+            id: item.id,
+            viable: item.viable,
+            killed: item.killed,
+        });
+    }
+    if (operators.reduce((sum, item) => sum + item.viable, 0) !== viable
+        || operators.reduce((sum, item) => sum + item.killed, 0) !== killed)
+        return undefined;
+    if (viable === 0) {
+        if (value.score !== undefined)
+            return undefined;
+    }
+    else if (typeof value.score !== 'number' || !Number.isFinite(value.score)
+        || Math.abs(value.score - killed / viable) > Number.EPSILON)
+        return undefined;
+    if (value.mode === 'off') {
+        if (value.status !== 'skipped'
+            || generated !== 0 || historical !== 0 || viable !== 0
+            || killed !== 0 || survived !== 0 || operators.length !== 0
+            || value.score !== undefined
+            || (validateRawShape && value.skippedReason !== 'gate-off'))
+            return undefined;
+    }
+    else {
+        if (validateRawShape && value.skippedReason === 'gate-off')
+            return undefined;
+        if (value.status === 'completed' && viable === 0)
+            return undefined;
+        if (validateRawShape && value.status === 'partial'
+            && !MUTATION_PARTIAL_REASONS.has(value.skippedReason))
+            return undefined;
+        if (value.status === 'skipped'
+            && (viable !== 0 || killed !== 0 || survived !== 0
+                || operators.length !== 0 || value.score !== undefined
+                || (validateRawShape
+                    && !MUTATION_SKIPPED_REASONS.has(value.skippedReason))))
+            return undefined;
+    }
+    return {
+        mode: value.mode,
+        status: value.status,
+        generated,
+        historical,
+        viable,
+        killed,
+        survived,
+        ...(viable > 0 ? { score: value.score } : {}),
+        operators,
+    };
+}
+function mutationEventFields(value) {
+    const summary = normalizeMutationSummary(value, true);
+    if (!summary)
+        return {};
+    return {
+        mutationGate: summary.mode,
+        mutationStatus: summary.status,
+        mutationGenerated: summary.generated,
+        mutationHistorical: summary.historical,
+        mutationViable: summary.viable,
+        mutationKilled: summary.killed,
+        mutationSurvived: summary.survived,
+        mutationScore: summary.score,
+        mutationOperators: summary.operators,
+    };
+}
+function assertMutationEventFields(candidate) {
+    const present = MUTATION_EVENT_FIELDS.filter(field => candidate[field] !== undefined);
+    if (present.length === 0)
+        return;
+    const required = MUTATION_EVENT_FIELDS.filter(field => field !== 'mutationScore');
+    if (candidate.eventType !== 'run_completed'
+        || required.some(field => candidate[field] === undefined)) {
+        throw new TypeError('Invalid mutation telemetry observation');
+    }
+    const normalized = normalizeMutationSummary({
+        mode: candidate.mutationGate,
+        status: candidate.mutationStatus,
+        generated: candidate.mutationGenerated,
+        historical: candidate.mutationHistorical,
+        viable: candidate.mutationViable,
+        killed: candidate.mutationKilled,
+        survived: candidate.mutationSurvived,
+        score: candidate.mutationScore,
+        operators: candidate.mutationOperators,
+    }, false);
+    if (!normalized)
+        throw new TypeError('Invalid mutation telemetry observation');
+}
+function boundedProblemSpecObservation(value) {
+    if (value.schemaVersion !== 1 || typeof value.succeeded !== 'boolean')
+        return undefined;
+    const counts = [value.constraintCount, value.invariantCount, value.uncertaintyCount];
+    const consensusValues = [
+        value.consensusStatus, value.conflictCount, value.unresolvedConflictCount, value.rolesUsed,
+    ];
+    const hasConsensusObservation = consensusValues.some(item => item !== undefined);
+    if (hasConsensusObservation && (typeof value.consensusStatus !== 'string'
+        || !SPEC_CONSENSUS_STATUSES.has(value.consensusStatus)
+        || !Number.isSafeInteger(value.conflictCount)
+        || value.conflictCount < 0
+        || value.conflictCount > 1024
+        || !Number.isSafeInteger(value.unresolvedConflictCount)
+        || value.unresolvedConflictCount < 0
+        || value.unresolvedConflictCount > 1024
+        || !Array.isArray(value.rolesUsed)
+        || value.rolesUsed.length < 1
+        || value.rolesUsed.length > 3
+        || new Set(value.rolesUsed).size !== value.rolesUsed.length
+        || value.rolesUsed.some(role => !SPEC_CONSENSUS_ROLES.has(role))))
+        return undefined;
+    const consensusObservation = hasConsensusObservation ? {
+        consensusStatus: value.consensusStatus,
+        conflictCount: value.conflictCount,
+        unresolvedConflictCount: value.unresolvedConflictCount,
+        rolesUsed: [...value.rolesUsed],
+    } : {};
+    if (!value.succeeded) {
+        return counts.every(item => item === undefined)
+            ? { schemaVersion: 1, succeeded: false, ...consensusObservation }
+            : undefined;
+    }
+    const limits = [512, 256, 100];
+    if (counts.some((item, index) => (!Number.isSafeInteger(item) || item < 0 || item > limits[index])))
+        return undefined;
+    return {
+        schemaVersion: 1,
+        succeeded: true,
+        constraintCount: value.constraintCount,
+        invariantCount: value.invariantCount,
+        uncertaintyCount: value.uncertaintyCount,
+        ...consensusObservation,
+    };
+}
+function problemSpecEventFields(observation) {
+    if (!observation)
+        return {};
+    return {
+        specSchemaVersion: 1,
+        specExtractionSucceeded: observation.succeeded,
+        ...(observation.succeeded ? {
+            specConstraintCount: observation.constraintCount,
+            specInvariantCount: observation.invariantCount,
+            specUncertaintyCount: observation.uncertaintyCount,
+        } : {}),
+        ...(observation.consensusStatus ? {
+            specConsensusStatus: observation.consensusStatus,
+            specConflictCount: observation.conflictCount,
+            specUnresolvedConflictCount: observation.unresolvedConflictCount,
+            specRolesUsed: observation.rolesUsed,
+        } : {}),
+    };
+}
 const EVENT_FIELDS = new Set([
     'schemaVersion', 'eventId', 'runId', 'sequence', 'eventType', 'occurredAt',
     'pluginVersion', 'promptVersion', 'generationMode', 'reliabilityMode', 'riskTier',
     'problemKind', 'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations',
-    'statementLengthBucket', 'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
+    'statementLengthBucket', 'specSchemaVersion', 'specExtractionSucceeded',
+    'specConstraintCount', 'specInvariantCount', 'specUncertaintyCount',
+    'specConsensusStatus', 'specConflictCount', 'specUnresolvedConflictCount', 'specRolesUsed',
+    'stage', 'failureCode', 'artifact', 'retryPolicy', 'attempt',
     'durationMs', 'tokenCount', 'pipelineCompleted', 'verified', 'wouldBlock', 'modelEscalated',
     'stressGenerated', 'stressValid', 'stressDroppedInvalid', 'stressUnique', 'stressCompared',
     'stressAgreed', 'templateLanguagesRequested', 'templateLanguagesVerified',
     'templateFailureKinds', 'checkerConfigured', 'checkerRead', 'checkerCompiled',
     'checkerExecuted', 'checkerInfraFailures', 'checkerFailureKind', 'modelRole',
     'modelIdentityHash', 'teacherOutcome', 'teacherOutcomeReason', 'editedFileCount',
-    'changedFileKinds',
+    'changedFileKinds', 'mutationGate', 'mutationStatus', 'mutationGenerated',
+    'mutationHistorical', 'mutationViable', 'mutationKilled', 'mutationSurvived',
+    'mutationScore', 'mutationOperators',
 ]);
 const BOOLEAN_FIELDS = [
     'hasSubtasks', 'hasCustomChecker', 'hasSamples', 'hasStatefulOperations', 'pipelineCompleted',
     'verified', 'wouldBlock', 'modelEscalated', 'checkerConfigured', 'checkerRead',
-    'checkerCompiled', 'checkerExecuted',
+    'checkerCompiled', 'checkerExecuted', 'specExtractionSucceeded',
 ];
 const NUMBER_LIMITS = {
     sequence: { min: 1, max: exports.TESTDATA_TEACHER_OUTCOME_SEQUENCE },
@@ -83,6 +316,17 @@ const NUMBER_LIMITS = {
     stressAgreed: { min: 0, max: 1000000 },
     checkerInfraFailures: { min: 0, max: 1000000 },
     editedFileCount: { min: 0, max: 80 },
+    specSchemaVersion: { min: 1, max: 1 },
+    specConstraintCount: { min: 0, max: 512 },
+    specInvariantCount: { min: 0, max: 256 },
+    specUncertaintyCount: { min: 0, max: 100 },
+    specConflictCount: { min: 0, max: 1024 },
+    specUnresolvedConflictCount: { min: 0, max: 1024 },
+    mutationGenerated: { min: 0, max: 20 },
+    mutationHistorical: { min: 0, max: 20 },
+    mutationViable: { min: 0, max: 20 },
+    mutationKilled: { min: 0, max: 20 },
+    mutationSurvived: { min: 0, max: 20 },
 };
 function assertEnum(value, values, field) {
     if (value !== undefined && (typeof value !== 'string' || !values.has(value))) {
@@ -148,11 +392,14 @@ function parseTestdataQualityEvent(value) {
     assertEnum(candidate.riskTier, RISK_TIERS, 'riskTier');
     assertEnum(candidate.problemKind, PROBLEM_KINDS, 'problemKind');
     assertEnum(candidate.statementLengthBucket, STATEMENT_BUCKETS, 'statementLengthBucket');
+    assertEnum(candidate.specConsensusStatus, SPEC_CONSENSUS_STATUSES, 'specConsensusStatus');
     assertEnum(candidate.stage, QUALITY_STAGES, 'stage');
     assertEnum(candidate.failureCode, FAILURE_CODES, 'failureCode');
     assertEnum(candidate.artifact, ARTIFACTS, 'artifact');
     assertEnum(candidate.retryPolicy, RETRY_POLICIES, 'retryPolicy');
     assertEnum(candidate.checkerFailureKind, CHECKER_FAILURE_KINDS, 'checkerFailureKind');
+    assertEnum(candidate.mutationGate, MUTATION_GATES, 'mutationGate');
+    assertEnum(candidate.mutationStatus, MUTATION_STATUSES, 'mutationStatus');
     assertEnum(candidate.modelRole, MODEL_ROLES, 'modelRole');
     assertEnum(candidate.teacherOutcome, TEACHER_OUTCOMES, 'teacherOutcome');
     assertEnum(candidate.teacherOutcomeReason, TEACHER_REASONS, 'teacherOutcomeReason');
@@ -164,6 +411,16 @@ function parseTestdataQualityEvent(value) {
     assertArray(candidate.templateLanguagesVerified, TEMPLATE_LANGUAGES, 'templateLanguagesVerified', 3);
     assertArray(candidate.templateFailureKinds, TEMPLATE_FAILURE_KINDS, 'templateFailureKinds', 3);
     assertArray(candidate.changedFileKinds, CHANGED_FILE_KINDS, 'changedFileKinds', 9);
+    assertArray(candidate.specRolesUsed, SPEC_CONSENSUS_ROLES, 'specRolesUsed', 3);
+    if (Array.isArray(candidate.specRolesUsed) && candidate.specRolesUsed.length === 0) {
+        throw new TypeError('Invalid test-data telemetry field: specRolesUsed');
+    }
+    if (candidate.mutationScore !== undefined
+        && (typeof candidate.mutationScore !== 'number' || !Number.isFinite(candidate.mutationScore)
+            || candidate.mutationScore < 0 || candidate.mutationScore > 1)) {
+        throw new TypeError('Invalid test-data telemetry field: mutationScore');
+    }
+    assertMutationEventFields(candidate);
     if (candidate.eventType === 'stage_completed' && candidate.stage === undefined) {
         throw new TypeError('stage_completed requires stage');
     }
@@ -180,6 +437,33 @@ function parseTestdataQualityEvent(value) {
     if (candidate.eventType === 'run_completed' && candidate.pipelineCompleted === false
         && (candidate.verified === true || candidate.wouldBlock === true)) {
         throw new TypeError('verified/wouldBlock require pipelineCompleted');
+    }
+    const specFields = [
+        candidate.specSchemaVersion, candidate.specExtractionSucceeded, candidate.specConstraintCount,
+        candidate.specInvariantCount, candidate.specUncertaintyCount, candidate.specConsensusStatus,
+        candidate.specConflictCount, candidate.specUnresolvedConflictCount, candidate.specRolesUsed,
+    ];
+    if (specFields.some(item => item !== undefined)) {
+        if (candidate.eventType !== 'run_completed' || candidate.specSchemaVersion !== 1
+            || typeof candidate.specExtractionSucceeded !== 'boolean') {
+            throw new TypeError('Invalid problem spec observation');
+        }
+        const counts = [
+            candidate.specConstraintCount, candidate.specInvariantCount, candidate.specUncertaintyCount,
+        ];
+        if (candidate.specExtractionSucceeded
+            ? counts.some(item => item === undefined)
+            : counts.some(item => item !== undefined)) {
+            throw new TypeError('Invalid problem spec observation counts');
+        }
+    }
+    const consensusFields = [
+        candidate.specConsensusStatus, candidate.specConflictCount,
+        candidate.specUnresolvedConflictCount, candidate.specRolesUsed,
+    ];
+    if (consensusFields.some(item => item !== undefined)
+        && consensusFields.some(item => item === undefined)) {
+        throw new TypeError('Invalid problem spec consensus observation');
     }
     if (candidate.eventType === 'teacher_outcome' && candidate.teacherOutcome === undefined) {
         throw new TypeError('teacher_outcome requires teacherOutcome');
@@ -354,6 +638,13 @@ class TestdataRunTelemetrySession {
         this.sequence = 0;
         this.terminal = false;
     }
+    observeProblemSpec(observation) {
+        if (this.terminal)
+            return;
+        const bounded = boundedProblemSpecObservation(observation);
+        if (bounded)
+            this.problemSpecObservation = bounded;
+    }
     event(eventType, fields = {}) {
         return parseTestdataQualityEvent({
             schemaVersion: exports.TESTDATA_QUALITY_SCHEMA_VERSION,
@@ -427,6 +718,7 @@ class TestdataRunTelemetrySession {
                 verified: false,
                 wouldBlock: false,
                 modelEscalated: (this.currentStage?.attempt || 1) > 1,
+                ...problemSpecEventFields(this.problemSpecObservation),
             }), terminalModel);
         }
         catch {
@@ -448,6 +740,21 @@ class TestdataRunTelemetrySession {
                 ? 'fallback'
                 : 'primary';
             const identity = plan.modelTelemetry?.identity;
+            const planSpecObservation = plan.specSchemaVersion === 1
+                ? boundedProblemSpecObservation({
+                    schemaVersion: 1,
+                    succeeded: !!plan.problemSpecSummary,
+                    ...(plan.problemSpecSummary ? {
+                        constraintCount: plan.problemSpecSummary.constraintCount,
+                        invariantCount: plan.problemSpecSummary.invariantCount,
+                        uncertaintyCount: plan.problemSpecSummary.unresolvedUncertainties,
+                    } : {}),
+                    consensusStatus: plan.specConsensusStatus,
+                    conflictCount: plan.specConflictCount,
+                    unresolvedConflictCount: plan.unresolvedConflictCount,
+                    rolesUsed: plan.modelRolesUsed,
+                })
+                : undefined;
             await this.service.emit(this.event('run_completed', {
                 generationMode: verification?.mode,
                 reliabilityMode: plan.reliabilityMode || this.context.reliabilityMode,
@@ -458,6 +765,7 @@ class TestdataRunTelemetrySession {
                 verified: verification?.verified === true,
                 wouldBlock: verification?.wouldBlock === true,
                 modelEscalated,
+                ...problemSpecEventFields(planSpecObservation || this.problemSpecObservation),
                 stressGenerated: stress?.generated,
                 stressValid: stress?.generated === undefined
                     ? undefined
@@ -475,6 +783,7 @@ class TestdataRunTelemetrySession {
                 checkerExecuted: checker?.executed,
                 checkerInfraFailures: checker?.infraFailures,
                 checkerFailureKind: checkerFailureKind(checker?.failureKind),
+                ...mutationEventFields(verification?.mutation),
             }), {
                 modelRole,
                 ...(identity ? { modelIdentity: identity } : {}),

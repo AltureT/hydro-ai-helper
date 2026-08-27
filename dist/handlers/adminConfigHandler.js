@@ -134,6 +134,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     endpoints: endpointsWithMaskedKeys,
                     selectedModels: config.selectedModels || [],
                     scenarioModels: config.scenarioModels || {},
+                    testdataRoleModels: config.testdataRoleModels || {},
                     apiBaseUrl: config.apiBaseUrl,
                     modelName: config.modelName,
                     rateLimitPerMinute: config.rateLimitPerMinute,
@@ -231,6 +232,19 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     }
                     body.scenarioModels = remapped;
                 }
+                if (body.testdataRoleModels !== undefined && Object.keys(idMapping).length > 0) {
+                    const remapped = {};
+                    for (const role of aiConfig_1.TESTDATA_MODEL_ROLES) {
+                        const chain = body.testdataRoleModels[role];
+                        if (Array.isArray(chain)) {
+                            remapped[role] = chain.map(sm => ({
+                                ...sm,
+                                endpointId: idMapping[sm.endpointId] || sm.endpointId,
+                            }));
+                        }
+                    }
+                    body.testdataRoleModels = remapped;
+                }
             }
             // 处理选中的模型
             if (body.selectedModels !== undefined) {
@@ -248,6 +262,18 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     }
                 }
                 partial.scenarioModels = sanitized;
+            }
+            if (body.testdataRoleModels !== undefined) {
+                const sanitized = {};
+                for (const role of aiConfig_1.TESTDATA_MODEL_ROLES) {
+                    const chain = body.testdataRoleModels?.[role];
+                    if (Array.isArray(chain)) {
+                        sanitized[role] = chain
+                            .filter(sm => sm && typeof sm.endpointId === 'string' && typeof sm.modelName === 'string')
+                            .map(sm => ({ endpointId: sm.endpointId, modelName: sm.modelName }));
+                    }
+                }
+                partial.testdataRoleModels = sanitized;
             }
             // 旧版单端点字段（向后兼容）
             if (body.apiBaseUrl !== undefined) {
@@ -365,6 +391,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     endpoints: endpointsWithMaskedKeys,
                     selectedModels: updatedConfig.selectedModels || [],
                     scenarioModels: updatedConfig.scenarioModels || {},
+                    testdataRoleModels: updatedConfig.testdataRoleModels || {},
                     apiBaseUrl: updatedConfig.apiBaseUrl,
                     modelName: updatedConfig.modelName,
                     rateLimitPerMinute: updatedConfig.rateLimitPerMinute,
