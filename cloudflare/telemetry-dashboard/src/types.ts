@@ -148,6 +148,13 @@ export interface TestdataModelRoleMetrics {
   failed: TestdataQualityRate;
 }
 
+export interface TestdataStageLatency {
+  stage: string;
+  runs: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+}
+
 export interface TestdataQualityResponse {
   window_days: number;
   total_runs: number;
@@ -167,6 +174,7 @@ export interface TestdataQualityResponse {
   failure_stages?: TestdataQualityDistributionItem[];
   failure_artifacts?: TestdataQualityDistributionItem[];
   risk_tiers?: TestdataQualityDistributionItem[];
+  stage_latency?: TestdataStageLatency[];
   model_roles?: Record<TestdataModelRole, TestdataModelRoleMetrics>;
   problem_spec?: {
     extraction_succeeded: TestdataQualityRate;

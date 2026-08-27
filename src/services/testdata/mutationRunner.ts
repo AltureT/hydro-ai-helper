@@ -11,6 +11,21 @@ import {
 
 export const MUTATION_BUDGET_MS = 120_000;
 export const MUTATION_SCORE_THRESHOLD = 0.8;
+export const MUTATION_CONCURRENCY_DEFAULT = 2;
+export const MUTATION_CONCURRENCY_MIN = 1;
+export const MUTATION_CONCURRENCY_MAX = 4;
+
+export function getMutationConcurrency(
+  raw = process.env.AI_HELPER_TESTDATA_MUTATION_CONCURRENCY,
+): number {
+  if (!raw || !/^\d+$/.test(raw)) return MUTATION_CONCURRENCY_DEFAULT;
+  const concurrency = Number(raw);
+  return Number.isSafeInteger(concurrency)
+    && concurrency >= MUTATION_CONCURRENCY_MIN
+    && concurrency <= MUTATION_CONCURRENCY_MAX
+    ? concurrency
+    : MUTATION_CONCURRENCY_DEFAULT;
+}
 
 export type MutationSkipReason =
   | 'gate-off'
@@ -52,7 +67,7 @@ export type MutationCheckerJudge = (
 ) => Promise<Array<'accept' | 'reject' | 'infra-error'>>;
 
 type CandidateOutcome = 'killed' | 'survived' | 'non-viable' | 'checker-infra'
-  | 'sandbox-infra' | 'budget-exhausted';
+  | 'sandbox-infra' | 'budget-exhausted' | 'timeout-pending';
 
 const EXPLICIT_KILLED_STATUSES = new Set([
   'Wrong Answer',
@@ -92,11 +107,12 @@ function throwIfCancelled(signal: AbortSignal | undefined, error?: unknown): voi
 function classifyExecutionDetails(
   details: readonly (PythonRunDetail | undefined)[],
   expectedLength: number,
-): 'accepted' | 'killed' | 'infra' {
+): 'accepted' | 'killed' | 'timeout' | 'infra' {
   if (details.length !== expectedLength) return 'infra';
   for (const item of details) {
     if (!item || typeof item.status !== 'string') return 'infra';
-    if (item.timedOut || EXPLICIT_KILLED_STATUSES.has(item.status)) return 'killed';
+    if (item.timedOut) return 'timeout';
+    if (EXPLICIT_KILLED_STATUSES.has(item.status)) return 'killed';
     if (item.status === 'Accepted' && item.accepted && (item.exitStatus ?? 0) === 0) continue;
     if (item.status === 'Accepted' && Number.isInteger(item.exitStatus) && item.exitStatus !== 0) {
       return 'killed';
@@ -163,6 +179,7 @@ async function runAcceptedCandidate(input: {
   }
   const execution = classifyExecutionDetails(details, input.cases.length);
   if (execution === 'infra') return 'sandbox-infra';
+  if (execution === 'timeout') return 'timeout-pending';
   if (execution === 'killed') return 'killed';
   return judgeAcceptedOutputs({ ...input, details });
 }
@@ -263,38 +280,58 @@ export async function evaluateMutationCandidates(input: {
   if (Date.now() >= deadlineAt) return emptySummary(input.mode, input.candidates, 'budget-exhausted');
 
   const operatorSummaries = new Map<MutationOperatorId, MutationOperatorSummary>();
+  const concurrency = getMutationConcurrency();
   let viable = 0;
   let killed = 0;
   let partialReason: MutationSkipReason | undefined;
-  for (const candidate of input.candidates) {
+  candidateWindows: for (let windowStart = 0;
+    windowStart < input.candidates.length;
+    windowStart += concurrency) {
+    throwIfCancelled(input.signal);
     if (Date.now() >= deadlineAt) {
       partialReason = 'budget-exhausted';
       break;
     }
-    const outcome = await evaluateCandidate({ ...input, candidate, deadlineAt });
-    if (outcome === 'non-viable') continue;
-    if (outcome === 'checker-infra') {
-      partialReason = partialReason || 'checker-infra';
-      continue;
+    const window = input.candidates.slice(windowStart, windowStart + concurrency);
+    const initialOutcomes = await Promise.all(window.map(candidate => evaluateCandidate({
+      ...input,
+      candidate,
+      deadlineAt,
+    })));
+    for (let index = 0; index < window.length; index++) {
+      const candidate = window[index];
+      let outcome = initialOutcomes[index];
+      if (outcome === 'timeout-pending') {
+        throwIfCancelled(input.signal);
+        outcome = Date.now() >= deadlineAt
+          ? 'budget-exhausted'
+          : await evaluateCandidate({ ...input, candidate, deadlineAt });
+        if (outcome === 'timeout-pending') outcome = 'killed';
+      }
+      if (outcome === 'non-viable') continue;
+      if (outcome === 'checker-infra') {
+        partialReason = partialReason || 'checker-infra';
+        continue;
+      }
+      if (outcome === 'sandbox-infra') {
+        partialReason = partialReason || 'sandbox-infra';
+        continue;
+      }
+      if (outcome === 'budget-exhausted') {
+        partialReason = 'budget-exhausted';
+        break candidateWindows;
+      }
+      viable++;
+      if (outcome === 'killed') killed++;
+      const aggregate = operatorSummaries.get(candidate.operatorId) || {
+        id: candidate.operatorId,
+        viable: 0,
+        killed: 0,
+      };
+      aggregate.viable++;
+      if (outcome === 'killed') aggregate.killed++;
+      operatorSummaries.set(candidate.operatorId, aggregate);
     }
-    if (outcome === 'sandbox-infra') {
-      partialReason = partialReason || 'sandbox-infra';
-      continue;
-    }
-    if (outcome === 'budget-exhausted') {
-      partialReason = 'budget-exhausted';
-      break;
-    }
-    viable++;
-    if (outcome === 'killed') killed++;
-    const aggregate = operatorSummaries.get(candidate.operatorId) || {
-      id: candidate.operatorId,
-      viable: 0,
-      killed: 0,
-    };
-    aggregate.viable++;
-    if (outcome === 'killed') aggregate.killed++;
-    operatorSummaries.set(candidate.operatorId, aggregate);
   }
 
   if (viable === 0 && !partialReason) {

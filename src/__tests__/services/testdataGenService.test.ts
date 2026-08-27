@@ -101,6 +101,7 @@ import {
   SandboxBudgetExceededError,
 } from '../../services/goJudgeSandboxService';
 import * as mutationRunner from '../../services/testdata/mutationRunner';
+import { TESTDATA_MODEL_TIMEOUT_DEFAULT_MS } from '../../services/testdata/latency';
 
 const evaluateMutationCandidatesMock = jest.spyOn(
   mutationRunner,
@@ -130,6 +131,7 @@ afterEach(() => {
   delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
   delete process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS;
   delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+  delete process.env.AI_HELPER_TESTDATA_MODEL_TIMEOUT_SECONDS;
 });
 
 afterAll(() => {
@@ -4416,9 +4418,9 @@ describe('TestdataGenService.generate', () => {
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toContain('提莫攻击');
     expect(systemPrompt).toContain('JSON');
-    // 不限输出长度，且不由插件为长推理设置截止时间。
+    // 不限输出长度，只对卡住的单次调用施加宽松墙钟上限。
     expect(callOptions.maxTokens).toBeNull();
-    expect(callOptions.timeoutMs).toBeNull();
+    expect(callOptions.timeoutMs).toBe(TESTDATA_MODEL_TIMEOUT_DEFAULT_MS);
     expect(callOptions.retryTimeouts).toBe(false);
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
@@ -7906,6 +7908,41 @@ describe('TestdataGenService.generate', () => {
     })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
     expect(mockClient.chat).not.toHaveBeenCalled();
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('observe mode overlaps one sandbox health probe with ProblemSpec generation', async () => {
+    const statementMarkdown = 'Read one integer and print it.';
+    const primary = makeRoleClient('specPrimary', 'spec-primary', 'spec-primary-model');
+    let resolveSpec!: () => void;
+    primary.chat.mockImplementation(() => new Promise(resolve => {
+      resolveSpec = () => resolve({
+        content: JSON.stringify(makeObservedProblemSpec(statementMarkdown, {
+          problemKind: 'traditional',
+        })),
+        usedModel: primary.identity,
+      });
+    }));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+    };
+    const generation = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner, reliabilityMode: 'observe',
+      roleClients: { specPrimary: primary },
+    }).generate({
+      problemTitle: 'health overlap',
+      statementMarkdown,
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    const availabilityCallsBeforeSpecResolved = runner.isAvailable.mock.calls.length;
+    resolveSpec();
+
+    await expect(generation).rejects.toMatchObject({ code: 'SANDBOX_UNAVAILABLE' });
+    expect(availabilityCallsBeforeSpecResolved).toBe(1);
+    expect(runner.isAvailable).toHaveBeenCalledTimes(1);
   });
 
   it.each(['auto', 'sandbox', 'direct'] as const)(
