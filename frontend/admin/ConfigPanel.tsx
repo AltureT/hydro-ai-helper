@@ -14,10 +14,15 @@ import {
 import type {
   Endpoint, ConfigState, APIConfigResponse, TelemetryStatus,
   AIScenarioKey, SelectedModel, ScenarioModelsState,
+  TestdataModelRole, TestdataRoleModelsState,
 } from './configTypes';
 
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
   studentChat: [], learningSummary: [], teachingAnalysis: [], testdataGeneration: [],
+};
+
+const EMPTY_TESTDATA_ROLE_MODELS: TestdataRoleModelsState = {
+  specPrimary: [], specCritic: [], oracle: [], artifacts: [], verifier: [], adjudicator: [],
 };
 
 function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]>>): ScenarioModelsState {
@@ -29,11 +34,25 @@ function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]
   };
 }
 
+function parseTestdataRoleModels(
+  raw?: Partial<Record<TestdataModelRole, SelectedModel[]>>,
+): TestdataRoleModelsState {
+  return {
+    specPrimary: raw?.specPrimary || [],
+    specCritic: raw?.specCritic || [],
+    oracle: raw?.oracle || [],
+    artifacts: raw?.artifacts || [],
+    verifier: raw?.verifier || [],
+    adjudicator: raw?.adjudicator || [],
+  };
+}
+
 function toConfigState(raw: APIConfigResponse['config']): ConfigState {
   if (!raw) {
     return {
       endpoints: [], selectedModels: [],
       scenarioModels: { ...EMPTY_SCENARIO_MODELS },
+      testdataRoleModels: { ...EMPTY_TESTDATA_ROLE_MODELS },
       apiBaseUrl: '', modelName: '',
       rateLimitPerMinute: 5, timeoutSeconds: 30,
       systemPromptTemplate: '',
@@ -48,6 +67,7 @@ function toConfigState(raw: APIConfigResponse['config']): ConfigState {
     endpoints: (raw.endpoints || []).map((endpoint) => ({ ...endpoint, newApiKey: '' })),
     selectedModels: raw.selectedModels || [],
     scenarioModels: parseScenarioModels(raw.scenarioModels),
+    testdataRoleModels: parseTestdataRoleModels(raw.testdataRoleModels),
     apiBaseUrl: raw.apiBaseUrl || '',
     modelName: raw.modelName || '',
     rateLimitPerMinute: raw.rateLimitPerMinute ?? 5,
@@ -131,6 +151,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         }));
         body.selectedModels = config.selectedModels;
         body.scenarioModels = config.scenarioModels;
+        body.testdataRoleModels = config.testdataRoleModels;
       } else {
         body.apiBaseUrl = config.apiBaseUrl.trim();
         body.modelName = config.modelName.trim();
@@ -241,6 +262,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           teachingAnalysis: dropEndpoint(prev.scenarioModels.teachingAnalysis),
           testdataGeneration: dropEndpoint(prev.scenarioModels.testdataGeneration),
         },
+        testdataRoleModels: {
+          specPrimary: dropEndpoint(prev.testdataRoleModels.specPrimary),
+          specCritic: dropEndpoint(prev.testdataRoleModels.specCritic),
+          oracle: dropEndpoint(prev.testdataRoleModels.oracle),
+          artifacts: dropEndpoint(prev.testdataRoleModels.artifacts),
+          verifier: dropEndpoint(prev.testdataRoleModels.verifier),
+          adjudicator: dropEndpoint(prev.testdataRoleModels.adjudicator),
+        },
       };
     });
   }, []);
@@ -284,6 +313,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
     setConfig(prev => {
       if (!prev) return prev;
       return { ...prev, scenarioModels: { ...prev.scenarioModels, [scenario]: chain } };
+    });
+  }, []);
+
+  const updateTestdataRoleModels = useCallback((role: TestdataModelRole, chain: SelectedModel[]) => {
+    setConfig(prev => {
+      if (!prev) return prev;
+      return { ...prev, testdataRoleModels: { ...prev.testdataRoleModels, [role]: chain } };
     });
   }, []);
 
@@ -386,6 +422,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
               globalModels={config.selectedModels}
               scenarioModels={config.scenarioModels}
               onChange={updateScenarioModels}
+              testdataRoleModels={config.testdataRoleModels}
+              onTestdataRoleChange={updateTestdataRoleModels}
               disabled={isBusy}
             />
           </div>

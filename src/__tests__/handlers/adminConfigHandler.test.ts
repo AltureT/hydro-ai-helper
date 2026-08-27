@@ -82,6 +82,47 @@ describe('AdminConfigHandler', () => {
     expect(handler.response.body.config.extraJailbreakPatternsText).toBe('custom-rule');
     expect(handler.response.body).not.toHaveProperty('jailbreakLogs');
   });
+
+  it('remaps temporary endpoint IDs in every test-data role chain before persistence', async () => {
+    const handler = new AdminConfigHandler();
+    const updatedConfig = {
+      endpoints: [], selectedModels: [], scenarioModels: {}, testdataRoleModels: {},
+      rateLimitPerMinute: 5, timeoutSeconds: 30, updatedAt: new Date('2026-08-20T00:00:00.000Z'),
+    };
+    const getConfig = jest.fn()
+      .mockResolvedValueOnce({ endpoints: [] })
+      .mockResolvedValueOnce(updatedConfig);
+    const updateConfig = jest.fn().mockResolvedValue(undefined);
+    handler.request = {
+      headers: { 'x-requested-with': 'XMLHttpRequest' },
+      body: {
+        endpoints: [{
+          id: 'temp-1', name: 'New', apiBaseUrl: 'https://new.invalid/v1',
+          apiKey: 'secret', models: ['model-a'], enabled: true,
+        }],
+        testdataRoleModels: {
+          specPrimary: [{ endpointId: 'temp-1', modelName: 'model-a' }],
+          adjudicator: [{ endpointId: 'temp-1', modelName: 'model-a' }],
+        },
+      },
+    };
+    handler.response = {};
+    handler.translate = jest.fn((key: string) => key);
+    handler.ctx = {
+      Route: jest.fn(),
+      get: jest.fn((name: string) => name === 'aiConfigModel' ? { getConfig, updateConfig } : undefined),
+    };
+
+    await handler.put();
+
+    const partial = updateConfig.mock.calls[0][0];
+    const realId = partial.endpoints[0].id;
+    expect(realId).not.toBe('temp-1');
+    expect(partial.testdataRoleModels).toEqual({
+      specPrimary: [{ endpointId: realId, modelName: 'model-a' }],
+      adjudicator: [{ endpointId: realId, modelName: 'model-a' }],
+    });
+  });
 });
 
 function createLogsHandler(query: Record<string, string> = {}) {

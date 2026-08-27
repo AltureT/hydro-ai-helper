@@ -45,7 +45,8 @@ class PluginInstallModel {
                 installedVersion: version,
                 lastVersion: version,
                 domainsSeen: [],
-                telemetryEnabled: true
+                telemetryEnabled: true,
+                testdataTelemetryHmacKey: (0, crypto_1.randomBytes)(32).toString('hex'),
             });
             console.log('[PluginInstallModel] Install record created');
             return;
@@ -57,6 +58,9 @@ class PluginInstallModel {
         if (!PluginInstallModel.UUID_RE.test(existing.instanceId || '')) {
             updates.instanceId = (0, crypto_1.randomUUID)();
             console.log('[PluginInstallModel] Replaced legacy deterministic instanceId with unique UUID');
+        }
+        if (!PluginInstallModel.HMAC_KEY_RE.test(existing.testdataTelemetryHmacKey || '')) {
+            updates.testdataTelemetryHmacKey = (0, crypto_1.randomBytes)(32).toString('hex');
         }
         await this.collection.updateOne({ _id: this.FIXED_ID }, { $set: updates });
         console.log('[PluginInstallModel] Install record updated, version:', version);
@@ -108,4 +112,5 @@ exports.PluginInstallModel = PluginInstallModel;
 // 合法 instanceId 的格式（randomUUID v4）。任何不匹配此格式的值都是
 // v2.0.x 残留的「确定性哈希」ID，需要迁移为唯一 UUID。
 PluginInstallModel.UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+PluginInstallModel.HMAC_KEY_RE = /^[a-f0-9]{64}$/;
 //# sourceMappingURL=pluginInstall.js.map

@@ -5,6 +5,7 @@
  * 约定：数据库中最多只有一条配置记录(固定 ID = 'default')
  *
  * v2 新增：支持多 API 端点配置、模型自动获取、Fallback 机制
+ * v3 新增：测试数据生成的独立角色模型链
  */
 
 import type { Db, Collection } from 'mongodb';
@@ -12,7 +13,7 @@ import { randomUUID } from 'crypto';
 import { reEncrypt } from '../lib/crypto';
 
 /** 当前配置版本号 */
-export const CURRENT_CONFIG_VERSION = 2;
+export const CURRENT_CONFIG_VERSION = 3;
 
 /**
  * API 端点配置
@@ -52,6 +53,20 @@ export const AI_SCENARIOS: readonly AIScenario[] = ['studentChat', 'learningSumm
  */
 export type ScenarioModelConfig = Partial<Record<AIScenario, SelectedModel[]>>;
 
+export type TestdataModelRole =
+  | 'specPrimary'
+  | 'specCritic'
+  | 'oracle'
+  | 'artifacts'
+  | 'verifier'
+  | 'adjudicator';
+
+export const TESTDATA_MODEL_ROLES: readonly TestdataModelRole[] = [
+  'specPrimary', 'specCritic', 'oracle', 'artifacts', 'verifier', 'adjudicator',
+] as const;
+
+export type TestdataRoleModelConfig = Partial<Record<TestdataModelRole, SelectedModel[]>>;
+
 /**
  * 预算配置
  */
@@ -63,7 +78,7 @@ export interface BudgetConfig {
 }
 
 /**
- * AI 配置接口 (v2)
+ * AI 配置接口 (v3)
  */
 export interface AIConfig {
   _id: string;                  // 固定为 'default'
@@ -71,6 +86,7 @@ export interface AIConfig {
   endpoints: APIEndpoint[];     // API 端点列表
   selectedModels: SelectedModel[]; // 选中的模型（按 fallback 顺序）
   scenarioModels?: ScenarioModelConfig; // 按场景覆盖的模型链（可选，空=跟随全局）
+  testdataRoleModels?: TestdataRoleModelConfig; // 测试数据角色覆盖（可选，空=按兼容链回退）
   rateLimitPerMinute: number;   // 频率限制(每分钟最大请求数)
   timeoutSeconds: number;       // 超时时间(秒)
   systemPromptTemplate?: string; // 系统提示词模板(可选)
@@ -99,6 +115,9 @@ interface LegacyAIConfig {
   configVersion?: number;
   endpoints?: APIEndpoint[];
   selectedModels?: SelectedModel[];
+  scenarioModels?: ScenarioModelConfig;
+  testdataRoleModels?: TestdataRoleModelConfig;
+  budgetConfig?: BudgetConfig;
 }
 
 /**
@@ -159,11 +178,24 @@ export class AIConfigModel {
    * 从旧版配置迁移到新版
    */
   private migrateFromLegacy(legacy: LegacyAIConfig): AIConfig {
-    console.log('[AIConfigModel] Migrating from legacy config to v2...');
+    console.log('[AIConfigModel] Migrating AI config to v3...');
 
-    // 如果已有 endpoints，规范化并保留现有数据
-    if (legacy.endpoints && legacy.endpoints.length > 0) {
-      const normalizedEndpoints = legacy.endpoints.map((endpoint, index) => ({
+    // v2 is already a structured configuration. Upgrade only the schema version and
+    // supply required arrays when they are absent; explicit empty chains, stale model
+    // references, endpoint structure, and unknown fields must remain byte-for-byte data.
+    if (legacy.configVersion === 2) {
+      return {
+        ...legacy,
+        configVersion: CURRENT_CONFIG_VERSION,
+        endpoints: legacy.endpoints ?? [],
+        selectedModels: legacy.selectedModels ?? [],
+      } as AIConfig;
+    }
+
+    // v1 已有部分结构化字段，但仍需要原有的端点归一化、引用过滤与链推导。
+    // 继续展开对象以保留其未知字段；无版本 legacy 才在下方完整重建。
+    if (legacy.configVersion) {
+      const normalizedEndpoints = (legacy.endpoints || []).map((endpoint, index) => ({
         id: endpoint.id || randomUUID(),
         name: endpoint.name || `Endpoint ${index + 1}`,
         apiBaseUrl: endpoint.apiBaseUrl || legacy.apiBaseUrl || '',
@@ -322,7 +354,24 @@ export class AIConfigModel {
       scenarioModels = cleaned;
     }
 
-    await this.updateConfig({ endpoints, selectedModels, ...(scenarioModels ? { scenarioModels } : {}) });
+    let testdataRoleModels = config.testdataRoleModels;
+    if (testdataRoleModels) {
+      const cleaned: TestdataRoleModelConfig = {};
+      for (const role of TESTDATA_MODEL_ROLES) {
+        const chain = testdataRoleModels[role];
+        if (Array.isArray(chain)) {
+          cleaned[role] = chain.filter(sm => sm.endpointId !== endpointId);
+        }
+      }
+      testdataRoleModels = cleaned;
+    }
+
+    await this.updateConfig({
+      endpoints,
+      selectedModels,
+      ...(scenarioModels ? { scenarioModels } : {}),
+      ...(testdataRoleModels ? { testdataRoleModels } : {}),
+    });
   }
 
   /**

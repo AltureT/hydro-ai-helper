@@ -14,11 +14,16 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TestdataGenApplyHandler = exports.TestdataGenSkeletonHandler = exports.TestdataGenJobDismissHandler = exports.TestdataGenJobCancelHandler = exports.TestdataGenJobStatusHandler = exports.TestdataGenJobStartHandler = exports.TestdataGenGenerateHandler = exports.TestdataGenContextHandler = exports.TestdataGenHandlerPriv = void 0;
 exports.loadTestlibCheckerArtifacts = loadTestlibCheckerArtifacts;
+exports.loadHistoricalMutationCandidates = loadHistoricalMutationCandidates;
 exports.extractStatementMarkdown = extractStatementMarkdown;
 const hydrooj_1 = require("hydrooj");
+const crypto_1 = require("crypto");
 const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
+const modelRoles_1 = require("../services/testdata/modelRoles");
 const testdataGenService_1 = require("../services/testdataGenService");
+const failures_1 = require("../services/testdata/failures");
+const risk_1 = require("../services/testdata/risk");
 const codeSelectionService_1 = require("../services/analyzers/codeSelectionService");
 const goJudgeSandboxService_1 = require("../services/goJudgeSandboxService");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
@@ -28,6 +33,9 @@ const limits_1 = require("../constants/limits");
 const domainHelper_1 = require("../utils/domainHelper");
 const mongo_1 = require("../utils/mongo");
 const testdataGenerationJob_1 = require("../models/testdataGenerationJob");
+const runTelemetry_1 = require("../services/testdata/runTelemetry");
+const pipelineContext_1 = require("../services/testdata/pipelineContext");
+const mutation_1 = require("../services/testdata/mutation");
 exports.TestdataGenHandlerPriv = hydrooj_1.PRIV.PRIV_USER_PROFILE;
 const DOC_TYPE_PROBLEM = 10;
 function normalizeCheckerPath(filename) {
@@ -52,8 +60,7 @@ async function readStorageText(storagePath) {
     return Buffer.concat(chunks).toString('utf8');
 }
 /**
- * 尽力读取 testlib checker 与同目录头文件。任一文件不可读时整组省略，
- * 让 service 完整回退到原有自定义 checker 跳过语义。
+ * 读取 testlib checker 与同目录头文件，并对每个路径返回显式制品状态。
  */
 async function loadTestlibCheckerArtifacts(domainId, pdoc) {
     let configured;
@@ -61,19 +68,22 @@ async function loadTestlibCheckerArtifacts(domainId, pdoc) {
         configured = (0, testdataGenService_1.getTestlibCheckerFilename)(pdoc.config);
     }
     catch {
-        // config 解析硬错误由 service 的统一 guard 报出；此处只负责尽力取文件。
-        return undefined;
+        // config 解析硬错误由 service 的统一 guard 报出；这里仍保持显式未配置状态。
+        return { configured: false, read: false };
     }
-    const checkerFilename = configured ? normalizeCheckerPath(configured) : undefined;
-    if (!checkerFilename)
-        return undefined;
+    if (!configured)
+        return { configured: false, read: false };
+    const checkerFilename = normalizeCheckerPath(configured);
+    if (!checkerFilename) {
+        return { configured: true, read: false, failureKind: 'invalid-path' };
+    }
     const files = (pdoc.data || []).flatMap(item => {
         const storageName = normalizeCheckerPath(String(item._id ?? item.name ?? ''));
         return storageName ? [{ storageName, logicalName: storageName }] : [];
     });
     const checkerFile = files.find(file => file.logicalName === checkerFilename);
     if (!checkerFile)
-        return undefined;
+        return { configured: true, read: false, failureKind: 'missing' };
     const checkerDir = path_1.posix.dirname(checkerFilename);
     const headerFiles = files.filter(file => path_1.posix.dirname(file.logicalName) === checkerDir
         && file.logicalName.toLowerCase().endsWith('.h'));
@@ -85,16 +95,23 @@ async function loadTestlibCheckerArtifacts(domainId, pdoc) {
             await readStorageText(`${storageBase}/${file.storageName}`),
         ]));
         return {
+            configured: true,
+            read: true,
             checkerSource,
             checkerHeaders: Object.fromEntries(headerEntries),
         };
     }
     catch {
-        return undefined;
+        return { configured: true, read: false, failureKind: 'read' };
     }
 }
 const PYTHON3_RECORD_LANGUAGES = ['py', 'py.py3', 'py.pypy3', 'python', 'python3'];
 const ACCEPTED_STD_CANDIDATE_LIMIT = 8;
+const HISTORICAL_MUTATION_RECORD_LANGUAGES = [
+    ...PYTHON3_RECORD_LANGUAGES,
+    'cc', 'cc.cc17', 'cpp', 'cpp17', 'c++17',
+];
+const HISTORICAL_MUTATION_RECORD_LIMIT = 64;
 function canReadAllRecordCodes(handler) {
     const user = handler.user;
     const hasPriv = typeof user?.hasPriv === 'function'
@@ -104,6 +121,92 @@ function canReadAllRecordCodes(handler) {
         && hydrooj_1.PERM.PERM_READ_RECORD_CODE !== undefined
         && user.hasPerm(hydrooj_1.PERM.PERM_READ_RECORD_CODE);
     return hasPriv || hasPerm;
+}
+function historicalExpectedStatus(status) {
+    if (status === hydrooj_1.STATUS.STATUS_WRONG_ANSWER)
+        return 'wrong-answer';
+    if (status === hydrooj_1.STATUS.STATUS_RUNTIME_ERROR)
+        return 'runtime-error';
+    if (status === hydrooj_1.STATUS.STATUS_TIME_LIMIT_EXCEEDED)
+        return 'time-limit';
+    return undefined;
+}
+/**
+ * 读取历史错误提交作为请求内 mutation 候选。缺少独立源码读取权限或任一查询不确定时
+ * 均 fail closed；候选不会携带记录 ID、digest 或竞赛元数据。
+ */
+async function loadHistoricalMutationCandidates(handler, domainId, problemDocId) {
+    if (!canReadAllRecordCodes(handler))
+        return [];
+    let records;
+    try {
+        records = await hydrooj_1.db.collection('record')
+            .find({
+            domainId,
+            pid: problemDocId,
+            status: { $in: [
+                    hydrooj_1.STATUS.STATUS_WRONG_ANSWER,
+                    hydrooj_1.STATUS.STATUS_RUNTIME_ERROR,
+                    hydrooj_1.STATUS.STATUS_TIME_LIMIT_EXCEEDED,
+                ] },
+            lang: { $in: HISTORICAL_MUTATION_RECORD_LANGUAGES },
+            code: { $type: 'string', $ne: '' },
+        }, {
+            projection: { _id: 1, status: 1, lang: 1, code: 1, contest: 1 },
+        })
+            .sort({ _id: -1 })
+            .limit(HISTORICAL_MUTATION_RECORD_LIMIT)
+            .toArray();
+    }
+    catch {
+        return [];
+    }
+    const contestDone = new Map();
+    const isEligibleContest = async (contest) => {
+        if (contest === undefined || contest === null)
+            return true;
+        const key = String(contest);
+        const cached = contestDone.get(key);
+        if (cached !== undefined)
+            return cached;
+        try {
+            const tdoc = await hydrooj_1.ContestModel.get(domainId, contest);
+            const done = !!tdoc && hydrooj_1.ContestModel.isDone(tdoc);
+            contestDone.set(key, done);
+            return done;
+        }
+        catch {
+            contestDone.set(key, false);
+            return false;
+        }
+    };
+    const seenSourceDigests = new Set();
+    const candidates = [];
+    for (const record of records) {
+        if ((record.domainId !== undefined && record.domainId !== domainId)
+            || (record.pid !== undefined && String(record.pid) !== String(problemDocId)))
+            continue;
+        const expectedStatus = historicalExpectedStatus(record.status);
+        const language = typeof record.lang === 'string'
+            ? (0, mutation_1.normalizeMutationLanguage)(record.lang)
+            : undefined;
+        const source = typeof record.code === 'string' ? record.code.trim() : '';
+        if (!expectedStatus
+            || !language
+            || !source
+            || source.startsWith('@@hydro_submission_file@@')
+            || source.length > testdataGenService_1.TESTDATA_GEN_LIMITS.MAX_PROVIDED_STD
+            || !(await isEligibleContest(record.contest)))
+            continue;
+        const digest = (0, crypto_1.createHash)('sha256').update(source).digest('hex');
+        if (seenSourceDigests.has(digest))
+            continue;
+        seenSourceDigests.add(digest);
+        candidates.push({ language, source, expectedStatus });
+        if (candidates.length >= mutation_1.MAX_HISTORICAL_MUTATION_CANDIDATES)
+            break;
+    }
+    return candidates;
 }
 function acceptedStdRecordQuery(handler, domainId, problemDocId) {
     return {
@@ -351,6 +454,148 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
 exports.TestdataGenContextHandler = TestdataGenContextHandler;
 const backgroundGenerationControllers = new Map();
 const TESTDATA_JOB_HEARTBEAT_MS = 30000;
+function buildCancellationJobError(translate) {
+    return {
+        message: translate('ai_helper_err_ai_aborted'),
+        code: 'CLIENT_ABORTED',
+        failureCode: 'CANCELLED',
+        stage: 'canceled',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        retryable: false,
+    };
+}
+function buildCancellationResponse(translate) {
+    const { message, ...contract } = buildCancellationJobError(translate);
+    return { error: message, ...contract };
+}
+const KNOWN_AI_ERROR_CATEGORIES = new Set([
+    'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
+]);
+function isKnownAIErrorCategory(value) {
+    return typeof value === 'string' && KNOWN_AI_ERROR_CATEGORIES.has(value);
+}
+function captureTestdataGenerationFailure(ctx, feature, err) {
+    const reporter = ctx.get?.('errorReporter');
+    if (!reporter?.capture)
+        return;
+    const failure = (0, failures_1.extractTestdataFailureMetadata)(err);
+    if (failure) {
+        reporter.capture('api_failure', feature, 'Typed test-data pipeline failure', undefined, undefined, {
+            failureCode: failure.failureCode,
+            stage: failure.stage,
+            artifact: failure.artifact,
+            retryPolicy: failure.retryPolicy,
+            ...failure.safeDetails,
+        });
+        return;
+    }
+    const safeMetadata = {};
+    if (err instanceof openaiClient_1.AIServiceError) {
+        safeMetadata.aiCategory = isKnownAIErrorCategory(err.category) ? err.category : 'unknown';
+        if (typeof err.isRetryable === 'boolean')
+            safeMetadata.retryable = err.isRetryable;
+        const totalAttempts = err.context?.totalAttempts;
+        if (typeof totalAttempts === 'number'
+            && Number.isSafeInteger(totalAttempts)
+            && totalAttempts >= 0
+            && totalAttempts <= 1000) {
+            safeMetadata.attemptCount = totalAttempts;
+        }
+    }
+    reporter.capture('api_failure', feature, 'Untyped test-data generation failure', undefined, err instanceof Error ? err.stack : undefined, safeMetadata);
+}
+function testdataFailureModel(error, testdataMetadata, aiMetadata) {
+    const explicitRole = testdataMetadata?.modelTelemetryRole;
+    const explicitIdentity = testdataMetadata?.modelTelemetryIdentity;
+    if ((explicitRole === 'primary' || explicitRole === 'fallback')
+        && typeof explicitIdentity === 'string' && explicitIdentity) {
+        return { modelRole: explicitRole, modelIdentity: explicitIdentity };
+    }
+    const localAiContext = error instanceof openaiClient_1.AIServiceError ? error.context : undefined;
+    const attempts = localAiContext?.attempts || aiMetadata?.attempts;
+    const aiAttempts = Array.isArray(attempts)
+        ? attempts.flatMap(value => {
+            if (!value || typeof value !== 'object' || Array.isArray(value))
+                return [];
+            const attempt = value;
+            if (typeof attempt.model !== 'string' || !attempt.model)
+                return [];
+            return [typeof attempt.endpoint === 'string' && attempt.endpoint
+                    ? `${attempt.endpoint}/${attempt.model}`
+                    : attempt.model];
+        })
+        : [];
+    const directModelName = localAiContext?.modelName
+        || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : undefined);
+    const directEndpointId = localAiContext?.endpointId;
+    const directModel = directModelName
+        ? [directEndpointId ? `${directEndpointId}/${directModelName}` : directModelName]
+        : [];
+    const identities = [...new Set(aiAttempts.length > 0 ? aiAttempts : directModel)];
+    return {
+        modelRole: identities.length > 1 ? 'fallback' : 'primary',
+        ...(identities.length > 0 ? { modelIdentity: identities[identities.length - 1] } : {}),
+    };
+}
+function emitTestdataTelemetryBestEffort(action) {
+    if (!action)
+        return;
+    try {
+        void Promise.resolve(action()).catch(() => undefined);
+    }
+    catch {
+        // Quality telemetry must never change generation, apply, or teacher-outcome behavior.
+    }
+}
+function createTestdataTelemetrySession(input) {
+    const telemetry = input.ctx.get('testdataRunTelemetry');
+    if (!telemetry)
+        return undefined;
+    const reliabilityMode = (0, risk_1.getTestdataReliabilityMode)();
+    const customChecker = (0, testdataGenService_1.hasCustomChecker)(input.existingConfig);
+    const risk = (0, risk_1.assessTestdataRisk)({
+        statement: input.statement,
+        hasCustomChecker: customChecker,
+        unsupportedCustomChecker: customChecker && !(0, testdataGenService_1.getTestlibCheckerFilename)(input.existingConfig),
+        directFallbackEnabled: (0, risk_1.getTestdataDirectFallbackEnabled)(),
+        confirmDirectFallback: input.options.confirmDirectFallback,
+        reliabilityMode,
+    });
+    return telemetry.createSession({
+        runId: input.runId,
+        ...(input.configuredMode === 'direct' || input.configuredMode === 'sandbox'
+            ? { generationMode: input.configuredMode }
+            : {}),
+        reliabilityMode,
+        riskTier: risk.tier,
+        ...(input.options.problemKind === 'traditional' || input.options.problemKind === 'function'
+            ? { problemKind: input.options.problemKind }
+            : {}),
+        hasSubtasks: risk.reasons.some(reason => reason.code === 'SUBTASKS'),
+        hasCustomChecker: customChecker,
+        hasSamples: (0, testdataGenService_1.extractStatementSamples)(input.statement).length > 0,
+        hasStatefulOperations: risk.reasons.some(reason => reason.code === 'STATEFUL_OPERATIONS'),
+        statementLengthBucket: (0, runTelemetry_1.getStatementLengthBucket)(input.statement.length),
+        templateLanguagesRequested: [...input.options.languages],
+        checkerConfigured: input.checkerArtifacts?.configured ?? false,
+        checkerRead: input.checkerArtifacts?.read ?? false,
+    });
+}
+function serializeGenerationPlan(plan) {
+    if (!plan)
+        return undefined;
+    // Hashes/model identity and any future complete spec are server-only. The
+    // browser receives only the bounded ProblemSpec summary declared on GenerationPlan.
+    const { originalFileHashes: _serverOnlyHashes, modelTelemetry: _serverOnlyModelTelemetry, problemSpec: _serverOnlyProblemSpec, primarySpec: _serverOnlyPrimarySpec, criticSpec: _serverOnlyCriticSpec, resolvedSpec: _serverOnlyResolvedSpec, specConflicts: _serverOnlySpecConflicts, adjudication: _serverOnlyAdjudication, ...clientPlan } = plan;
+    return clientPlan;
+}
+function generationPlanForJobStorage(plan) {
+    // Runtime endpoint/model identity is needed only long enough to derive the
+    // keyed telemetry hash. It must not become durable Job state.
+    const { modelTelemetry: _runtimeOnlyModelTelemetry, ...storedPlan } = plan;
+    return storedPlan;
+}
 function serializeGenerationJob(job) {
     return {
         id: String(job._id),
@@ -361,7 +606,7 @@ function serializeGenerationJob(job) {
         status: job.status,
         progress: job.progress,
         error: job.error,
-        plan: job.status === 'completed' ? job.plan : undefined,
+        plan: job.status === 'completed' ? serializeGenerationPlan(job.plan) : undefined,
         createdAt: job.createdAt?.toISOString?.() || job.createdAt,
         startedAt: job.startedAt?.toISOString?.() || job.startedAt,
         updatedAt: job.updatedAt?.toISOString?.() || job.updatedAt,
@@ -398,14 +643,35 @@ async function findAuthorizedGenerationJob(handler, jobModel, jobId) {
     return { job, pdoc };
 }
 async function runBackgroundGeneration(params) {
-    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, translate, } = params;
+    const { ctx, jobModel, job, pdoc, statement, options, existingFiles, checkpoint, checkpointHashes, checkerArtifacts, mutationGateMode, historicalMutationCandidates, translate, } = params;
     const jobId = String(job._id);
+    const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
+    const telemetrySession = createTestdataTelemetrySession({
+        ctx,
+        runId: job.runId,
+        statement,
+        options,
+        existingConfig: pdoc.config,
+        checkerArtifacts,
+        configuredMode: generationMode,
+    });
+    emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
     const ac = new AbortController();
     backgroundGenerationControllers.set(jobId, ac);
     let progressWrites = Promise.resolve();
     let checkpointWrites = Promise.resolve();
     let checkpointRevision = 0;
     const checkpointPayload = {};
+    let checkpointMetadata = {};
+    if (checkpoint?.checkpointSchemaVersion === testdataGenerationJob_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+        checkpointMetadata = {
+            checkpointSchemaVersion: checkpoint.checkpointSchemaVersion,
+            promptVersion: checkpoint.promptVersion,
+            statementHash: checkpoint.statementHash,
+            specHash: checkpoint.specHash,
+            roleDependencies: checkpoint.roleDependencies,
+        };
+    }
     for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
         if (checkpoint?.[key] !== undefined)
             checkpointPayload[key] = checkpoint[key];
@@ -415,15 +681,26 @@ async function runBackgroundGeneration(params) {
             for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
                 delete checkpointPayload[key];
             }
+            checkpointMetadata = {};
         }
         else {
             for (const key of ['solution', 'artifacts', 'verifier', 'killTargets']) {
                 if (update[key] !== undefined)
                     checkpointPayload[key] = update[key];
             }
+            if (update.checkpointSchemaVersion === testdataGenerationJob_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION) {
+                checkpointMetadata = {
+                    checkpointSchemaVersion: update.checkpointSchemaVersion,
+                    promptVersion: update.promptVersion,
+                    statementHash: update.statementHash,
+                    specHash: update.specHash,
+                    roleDependencies: update.roleDependencies,
+                };
+            }
         }
         const envelope = {
             revision: ++checkpointRevision,
+            ...checkpointMetadata,
             ...checkpointPayload,
         };
         checkpointWrites = checkpointWrites
@@ -444,31 +721,45 @@ async function runBackgroundGeneration(params) {
     try {
         await jobModel.markRunning(job._id);
         ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
-        const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration');
+        const reliabilityMode = (0, risk_1.getTestdataReliabilityMode)();
         const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
         const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
-        const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
-        const cppOracleAvailable = await probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal);
+        const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
+            (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'testdataGeneration'),
+            reliabilityMode === 'legacy'
+                ? Promise.resolve(undefined)
+                : (0, modelRoles_1.createTestdataRoleClientsFromConfig)(ctx),
+            probeCppOracleAvailability(sandboxRunner, generationMode, ac.signal),
+        ]);
         const service = new testdataGenService_1.TestdataGenService(aiClient, {
             sandboxRunner,
             mode: generationMode,
             cppOracleAvailable,
+            reliabilityMode,
+            roleClients,
         });
         const plan = await service.generate({
+            runId: job.runId,
             problemTitle: pdoc.title || job.problemId,
             statementMarkdown: statement,
             options,
             existingFiles,
             existingConfig: pdoc.config,
-            ...checkerArtifacts,
+            checkerArtifacts,
+            mutationGateMode,
+            historicalMutationCandidates,
             fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
             signal: ac.signal,
             checkpoint,
             onCheckpoint: persistCheckpoint,
             onProgress: progress => {
+                emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
                 progressWrites = progressWrites
                     .then(() => jobModel.updateProgress(job._id, progress))
                     .catch(err => console.warn('[TestdataGenJob] progress update failed:', err));
+            },
+            onProblemSpecObservation: observation => {
+                telemetrySession?.observeProblemSpec?.(observation);
             },
         });
         await checkpointWrites;
@@ -476,9 +767,10 @@ async function runBackgroundGeneration(params) {
         if (ac.signal.aborted) {
             throw Object.assign(new Error('canceled'), { name: 'AbortError' });
         }
-        const saved = await jobModel.complete(job._id, plan);
+        const saved = await jobModel.complete(job._id, generationPlanForJobStorage(plan));
         if (!saved)
             return;
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
         ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
         const successfulModel = typeof plan.usedModel === 'string'
             ? plan.usedModel.split(' → ').pop()?.trim()
@@ -492,11 +784,13 @@ async function runBackgroundGeneration(params) {
     catch (err) {
         await checkpointWrites;
         if ((0, testdataGenService_1.isCancellation)(err)) {
-            await jobModel.cancel(job._id);
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
+            await jobModel.cancel(job._id, buildCancellationJobError(translate));
             return;
         }
         console.error('[TestdataGenJob] generation failed:', err);
         const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+        const failureMetadata = (0, failures_1.extractTestdataFailureMetadata)(err);
         const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
         const testdataUserMessage = resolveTestdataUserMessage(translate, err);
         const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
@@ -506,7 +800,8 @@ async function runBackgroundGeneration(params) {
         const failedModel = usedModels[usedModels.length - 1]
             || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
         ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-        ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: job.problemId, jobId, ...testdataMetadata, ...aiMetadata });
+        captureTestdataGenerationFailure(ctx, 'testdata_gen', err);
+        emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err, testdataFailureModel(err, testdataMetadata, aiMetadata))));
         const jobError = err instanceof openaiClient_1.AIServiceError
             ? {
                 message: translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -519,7 +814,13 @@ async function runBackgroundGeneration(params) {
                     ? testdataUserMessage
                     : err instanceof Error ? err.message : translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
-                retryable: true,
+                ...(failureMetadata ? {
+                    failureCode: failureMetadata.failureCode,
+                    stage: failureMetadata.stage,
+                    artifact: failureMetadata.artifact,
+                    retryPolicy: failureMetadata.retryPolicy,
+                } : {}),
+                retryable: failureMetadata?.retryPolicy !== 'no-retry',
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
             };
         await jobModel.fail(job._id, jobError);
@@ -541,6 +842,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
         let keepaliveTimer;
         let streamRawRes;
         let streamCloseListener;
+        let telemetrySession;
         try {
             if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
                 return;
@@ -581,6 +883,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 providedStd: resolvedStd.providedStd,
                 providedStdSource: resolvedStd.providedStdSource,
                 extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+                confirmDirectFallback: body.confirmDirectFallback === true,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
             if (optionError) {
@@ -592,8 +895,11 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
             }
+            const mutationGateMode = (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const historicalMutationCandidates = mutationGateMode === 'off'
+                ? []
+                : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_generation').catch(() => { });
-            const aiClient = await (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration');
             const sandboxHost = String(hydrooj_1.SystemModel.get('hydrojudge.sandbox_host') || 'http://localhost:5050/');
             const sandboxRunner = new goJudgeSandboxService_1.GoJudgeSandboxRunner(sandboxHost);
             const generationMode = (0, goJudgeSandboxService_1.getTestdataGenerationMode)();
@@ -614,7 +920,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             // （aborted / 底层 socket 已销毁），此时直接 499，不白跑整条管线。
             if (rawReq?.aborted || rawReq?.socket?.destroyed) {
                 this.response.status = 499;
-                this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                this.response.body = buildCancellationResponse(key => this.translate(key));
                 this.response.type = 'application/json';
                 return;
             }
@@ -633,26 +939,54 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     progressStream?.writeComment('keepalive');
                 }, limits_1.API_DEFAULTS.SSE_KEEPALIVE_INTERVAL_MS);
             }
-            const [cppOracleAvailable, checkerArtifacts] = await Promise.all([
+            const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
+            const runId = (0, runTelemetry_1.createTestdataRunId)();
+            telemetrySession = createTestdataTelemetrySession({
+                ctx: this.ctx,
+                runId,
+                statement,
+                options,
+                existingConfig: pdoc.config,
+                checkerArtifacts,
+                configuredMode: generationMode,
+            });
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.start()));
+            const reliabilityMode = (0, risk_1.getTestdataReliabilityMode)();
+            const [aiClient, roleClients, cppOracleAvailable] = await Promise.all([
+                (0, openaiClient_1.createMultiModelClientFromConfig)(this.ctx, undefined, 'testdataGeneration'),
+                reliabilityMode === 'legacy'
+                    ? Promise.resolve(undefined)
+                    : (0, modelRoles_1.createTestdataRoleClientsFromConfig)(this.ctx),
                 probeCppOracleAvailability(sandboxRunner, generationMode, requestAc.signal),
-                loadTestlibCheckerArtifacts(domainId, pdoc),
             ]);
             const service = new testdataGenService_1.TestdataGenService(aiClient, {
                 sandboxRunner,
                 mode: generationMode,
                 cppOracleAvailable,
+                reliabilityMode,
+                roleClients,
             });
             const plan = await service.generate({
+                runId,
                 problemTitle: pdoc.title || problemId,
                 statementMarkdown: statement,
                 options,
                 existingFiles,
                 existingConfig: pdoc.config,
-                ...checkerArtifacts,
+                checkerArtifacts,
+                mutationGateMode,
+                historicalMutationCandidates,
                 fillInDetected: (0, codeSelectionService_1.isFillInBlankProblem)(statement),
                 signal: requestAc.signal,
-                onProgress: progress => progressStream?.writeEvent('progress', progress),
+                onProgress: progress => {
+                    emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.progress(progress)));
+                    progressStream?.writeEvent('progress', progress);
+                },
+                onProblemSpecObservation: observation => {
+                    telemetrySession?.observeProblemSpec?.(observation);
+                },
             });
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.complete(plan)));
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_generation').catch(() => { });
             const successfulModel = typeof plan.usedModel === 'string'
                 ? plan.usedModel.split(' → ').pop()?.trim()
@@ -663,34 +997,32 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             }
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', successfulModel || '', true).catch(() => { });
             if (progressStream) {
-                progressStream.writeEvent('result', { plan });
+                progressStream.writeEvent('result', { plan: serializeGenerationPlan(plan) });
                 progressStream.end();
             }
             else {
-                this.response.body = { plan };
+                this.response.body = { plan: serializeGenerationPlan(plan) };
                 this.response.type = 'application/json';
             }
         }
         catch (err) {
             // 客户端主动断开：非故障，不上报也不打 error 日志
             if ((0, testdataGenService_1.isCancellation)(err)) {
+                emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err)));
                 if (progressStream) {
-                    progressStream.writeEvent('error', {
-                        error: this.translate('ai_helper_err_ai_aborted'),
-                        code: 'CLIENT_ABORTED',
-                        retryable: true,
-                    });
+                    progressStream.writeEvent('error', buildCancellationResponse(key => this.translate(key)));
                     progressStream.end();
                 }
                 else {
                     this.response.status = 499;
-                    this.response.body = { error: this.translate('ai_helper_err_ai_aborted'), code: 'CLIENT_ABORTED' };
+                    this.response.body = buildCancellationResponse(key => this.translate(key));
                     this.response.type = 'application/json';
                 }
                 return;
             }
             console.error('[TestdataGenGenerateHandler.post] error:', err);
             const testdataMetadata = (0, testdataGenService_1.extractTestdataErrorMetadata)(err);
+            const failureMetadata = (0, failures_1.extractTestdataFailureMetadata)(err);
             const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
             const testdataUserMessage = resolveTestdataUserMessage(key => this.translate(key), err);
             const aiMetadata = (0, openaiClient_1.extractAiErrorMetadata)(err);
@@ -700,11 +1032,8 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
             const failedModel = usedModels[usedModels.length - 1]
                 || (typeof aiMetadata?.modelName === 'string' ? aiMetadata.modelName : '');
             this.ctx.get('featureStatsModel')?.recordModelOutcome?.('testdata_generation', failedModel, false).catch(() => { });
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_gen', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, {
-                problemId: String(this.request.body?.problemId || ''),
-                ...testdataMetadata,
-                ...aiMetadata,
-            });
+            captureTestdataGenerationFailure(this.ctx, 'testdata_gen', err);
+            emitTestdataTelemetryBestEffort(telemetrySession && (() => telemetrySession.fail(err, testdataFailureModel(err, testdataMetadata, aiMetadata))));
             if (err instanceof openaiClient_1.AIServiceError) {
                 const errorBody = {
                     error: this.translate(openaiClient_1.USER_ERROR_MESSAGE_KEYS[err.category]),
@@ -729,7 +1058,13 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                     ? testdataUserMessage
                     : err instanceof Error ? err.message : this.translate('ai_helper_err_internal'),
                 code: 'GENERATION_FAILED',
-                retryable: true,
+                ...(failureMetadata ? {
+                    failureCode: failureMetadata.failureCode,
+                    stage: failureMetadata.stage,
+                    artifact: failureMetadata.artifact,
+                    retryPolicy: failureMetadata.retryPolicy,
+                } : {}),
+                retryable: failureMetadata?.retryPolicy !== 'no-retry',
                 recommendDeeperReasoning: (0, testdataGenService_1.shouldRecommendDeeperReasoning)(err),
             };
             if (progressStream) {
@@ -737,7 +1072,9 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 progressStream.end();
             }
             else {
-                this.response.status = testdataUserMessageKey ? 400 : 502;
+                this.response.status = err?.userMessageKey
+                    ? 400
+                    : 502;
                 this.response.body = errorBody;
                 this.response.type = 'application/json';
             }
@@ -810,6 +1147,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 providedStd: resolvedStd.providedStd,
                 providedStdSource: resolvedStd.providedStdSource,
                 extraRequirements: typeof body.extraRequirements === 'string' ? body.extraRequirements : undefined,
+                confirmDirectFallback: body.confirmDirectFallback === true,
             };
             const optionError = (0, testdataGenService_1.validateGenerateOptions)(options);
             if (optionError) {
@@ -821,14 +1159,17 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
             }
+            const mutationGateMode = (0, mutation_1.getMutationGateMode)(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+            const historicalMutationCandidates = mutationGateMode === 'off'
+                ? []
+                : await loadHistoricalMutationCandidates(this, domainId, pdoc.docId);
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
             const checkerArtifacts = await loadTestlibCheckerArtifacts(domainId, pdoc);
             const checkpointHashes = (0, testdataGenerationJob_1.computeTestdataCheckpointHashes)(options, statement, {
                 existingConfig: pdoc.config,
-                checkerSource: checkerArtifacts?.checkerSource,
-                checkerHeaders: checkerArtifacts?.checkerHeaders,
+                checkerArtifacts,
             });
             let checkpoint;
             const resumeFromJobId = typeof body.resumeFromJobId === 'string'
@@ -843,10 +1184,45 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                         problemId: pdoc.pid || String(pdoc.docId),
                         createdBy: this.user?._id,
                         ...checkpointHashes,
+                        checkpointSchemaVersion: testdataGenerationJob_1.TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+                        promptVersion: pipelineContext_1.TESTDATA_PIPELINE_PROMPT_VERSION,
+                        allowV1: (0, risk_1.getTestdataReliabilityMode)() === 'legacy',
                     });
                 }
                 catch {
                     // 断点 ID、作用域或内容异常都静默退回全新生成，不向外泄露任务信息。
+                }
+            }
+            let replacedJob;
+            const replacesJobId = typeof body.replacesJobId === 'string'
+                ? body.replacesJobId.trim()
+                : '';
+            if (replacesJobId) {
+                const authorized = await findAuthorizedGenerationJob(this, jobModel, replacesJobId);
+                if (!authorized)
+                    return;
+                if (authorized.job.status !== 'completed') {
+                    sendError(this, 400, 'JOB_RESULT_UNAVAILABLE', 'ai_helper_testdata_job_result_unavailable');
+                    return;
+                }
+                replacedJob = authorized.job;
+            }
+            let regeneratedOutcome;
+            if (replacedJob) {
+                try {
+                    regeneratedOutcome = await jobModel.recordTeacherOutcome(replacedJob._id, {
+                        eventId: (0, runTelemetry_1.createTestdataEventId)(),
+                        outcome: 'regenerated',
+                    });
+                }
+                catch (err) {
+                    console.error('[TestdataGenJob] regenerated outcome persistence failed:', err);
+                    sendError(this, 500, 'REGENERATION_OUTCOME_PERSIST_FAILED', 'ai_helper_err_internal');
+                    return;
+                }
+                if (regeneratedOutcome.state === 'conflict') {
+                    sendError(this, 409, 'OUTCOME_ALREADY_RECORDED', 'ai_helper_testdata_outcome_already_recorded');
+                    return;
                 }
             }
             const { job, created } = await jobModel.createOrGetActive({
@@ -856,6 +1232,15 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 problemTitle: pdoc.title || problemId,
                 createdBy: this.user?._id,
             });
+            if (replacedJob && regeneratedOutcome) {
+                const telemetry = this.ctx.get('testdataRunTelemetry');
+                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
+                    runId: replacedJob.runId,
+                    eventId: regeneratedOutcome.record.eventId,
+                    occurredAt: regeneratedOutcome.record.recordedAt,
+                    outcome: regeneratedOutcome.record.outcome,
+                })));
+            }
             if (created) {
                 // 只保留后台任务真正需要的翻译文本，避免长任务闭包持有整个请求 Handler。
                 const backgroundTranslations = {
@@ -866,6 +1251,10 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     [testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY]: this.translate(testdataGenService_1.CPP_ORACLE_INFRA_FAILURE_KEY),
                 };
                 for (const key of Object.values(openaiClient_1.USER_ERROR_MESSAGE_KEYS)) {
+                    backgroundTranslations[key] = this.translate(key);
+                }
+                for (const code of failures_1.TESTDATA_FAILURE_CODES) {
+                    const key = (0, failures_1.getUserMessageKeyForFailure)(code);
                     backgroundTranslations[key] = this.translate(key);
                 }
                 void runBackgroundGeneration({
@@ -879,6 +1268,8 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                     checkpoint,
                     checkpointHashes,
                     checkerArtifacts,
+                    mutationGateMode,
+                    historicalMutationCandidates,
                     translate: key => backgroundTranslations[key] || key,
                 }).catch(err => {
                     console.error('[TestdataGenJob] unhandled background failure:', err);
@@ -937,7 +1328,7 @@ class TestdataGenJobCancelHandler extends hydrooj_1.Handler {
             const authorized = await findAuthorizedGenerationJob(this, jobModel, jobId);
             if (!authorized)
                 return;
-            await jobModel.cancel(authorized.job._id);
+            await jobModel.cancel(authorized.job._id, buildCancellationJobError(key => this.translate(key)));
             backgroundGenerationControllers.get(jobId)?.abort();
             const updated = await jobModel.findById(authorized.job._id);
             this.response.body = { job: updated ? serializeGenerationJob(updated) : undefined };
@@ -964,8 +1355,43 @@ class TestdataGenJobDismissHandler extends hydrooj_1.Handler {
             const authorized = await findAuthorizedGenerationJob(this, jobModel, String(this.request.params.jobId || ''));
             if (!authorized)
                 return;
+            if (authorized.job.status !== 'completed') {
+                sendError(this, 400, 'JOB_RESULT_UNAVAILABLE', 'ai_helper_testdata_job_result_unavailable');
+                return;
+            }
+            const allowedReasons = new Set([
+                'wrong_answer', 'invalid_input', 'weak_coverage',
+                'template_problem', 'checker_problem', 'other',
+            ]);
+            const rawReason = this.request.body?.reason;
+            const reason = rawReason === undefined || rawReason === ''
+                ? undefined
+                : typeof rawReason === 'string' && allowedReasons.has(rawReason)
+                    ? rawReason
+                    : null;
+            if (reason === null) {
+                sendError(this, 400, 'INVALID_OUTCOME_REASON', 'ai_helper_testdata_outcome_invalid_reason');
+                return;
+            }
+            const outcome = await jobModel.recordTeacherOutcome(authorized.job._id, {
+                eventId: (0, runTelemetry_1.createTestdataEventId)(),
+                outcome: 'discarded',
+                ...(reason ? { reason } : {}),
+            });
+            if (outcome.state === 'conflict') {
+                sendError(this, 409, 'OUTCOME_ALREADY_RECORDED', 'ai_helper_testdata_outcome_already_recorded');
+                return;
+            }
+            const telemetry = this.ctx.get('testdataRunTelemetry');
+            emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
+                runId: authorized.job.runId,
+                eventId: outcome.record.eventId,
+                occurredAt: outcome.record.recordedAt,
+                outcome: outcome.record.outcome,
+                reason: outcome.record.reason,
+            })));
             await jobModel.dismiss(authorized.job._id);
-            this.response.body = { dismissed: true };
+            this.response.body = { dismissed: true, outcome: outcome.state };
             this.response.type = 'application/json';
         }
         catch (err) {
@@ -1028,12 +1454,12 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
                 .filter(Boolean);
             const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(pdoc.content), existingFiles, pdoc.config);
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { });
-            this.response.body = { plan };
+            this.response.body = { plan: serializeGenerationPlan(plan) };
             this.response.type = 'application/json';
         }
         catch (err) {
             console.error('[TestdataGenSkeletonHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_skeleton', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || '') });
+            captureTestdataGenerationFailure(this.ctx, 'testdata_skeleton', err);
             const testdataUserMessageKey = (0, testdataGenService_1.extractTestdataUserMessageKey)(err);
             if (testdataUserMessageKey) {
                 sendError(this, 400, 'INVALID_EXISTING_CONFIG', testdataUserMessageKey);
@@ -1051,6 +1477,13 @@ exports.TestdataGenSkeletonHandler = TestdataGenSkeletonHandler;
  */
 class TestdataGenApplyHandler extends hydrooj_1.Handler {
     async post() {
+        let claimedJobModel;
+        let claimedJobId;
+        let outcomeClaimId;
+        let releaseOutcomeClaim = false;
+        let outcomeClaimHeartbeatTimer;
+        let outcomeClaimLeaseLost = false;
+        let renewOutcomeClaim;
         try {
             if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
                 return;
@@ -1082,6 +1515,10 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                     return;
                 if (authorized.job.problemDocId !== pdoc.docId || authorized.job.status !== 'completed') {
                     sendError(this, 400, 'JOB_RESULT_UNAVAILABLE', 'ai_helper_testdata_job_result_unavailable');
+                    return;
+                }
+                if (authorized.job.teacherOutcome || authorized.job.appliedAt) {
+                    sendError(this, 409, 'OUTCOME_ALREADY_RECORDED', 'ai_helper_testdata_outcome_already_recorded');
                     return;
                 }
                 generationJob = authorized.job;
@@ -1125,6 +1562,39 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'TOTAL_TOO_LARGE', 'ai_helper_testdata_err_total_too_large');
                 return;
             }
+            if (generationJob && generationJobModel) {
+                outcomeClaimId = (0, runTelemetry_1.createTestdataEventId)();
+                const claimed = await generationJobModel.claimTeacherOutcome(generationJob._id, outcomeClaimId);
+                if (!claimed) {
+                    sendError(this, 409, 'OUTCOME_ALREADY_RECORDED', 'ai_helper_testdata_outcome_already_recorded');
+                    return;
+                }
+                claimedJobModel = generationJobModel;
+                claimedJobId = generationJob._id;
+                releaseOutcomeClaim = true;
+                let renewal = Promise.resolve(true);
+                renewOutcomeClaim = () => {
+                    renewal = renewal.then(async (active) => {
+                        if (!active)
+                            return false;
+                        try {
+                            const renewed = await generationJobModel.renewTeacherOutcomeClaim(generationJob._id, outcomeClaimId);
+                            if (!renewed)
+                                outcomeClaimLeaseLost = true;
+                            return renewed;
+                        }
+                        catch (err) {
+                            outcomeClaimLeaseLost = true;
+                            console.warn('[TestdataGenApplyHandler] outcome claim renewal failed:', err);
+                            return false;
+                        }
+                    });
+                    return renewal;
+                };
+                outcomeClaimHeartbeatTimer = setInterval(() => {
+                    void renewOutcomeClaim?.();
+                }, Math.max(1000, Math.floor(testdataGenerationJob_1.TESTDATA_TEACHER_OUTCOME_CLAIM_LEASE_MS / 3)));
+            }
             this.ctx.get('featureStatsModel')?.recordAttempt('testdata_apply').catch(() => { });
             // config.yaml 最后写入：确保测试点文件就位后再触发评测设置同步
             validated.sort((a, b) => {
@@ -1135,6 +1605,8 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
             const written = [];
             const failed = [];
             for (const f of validated) {
+                if (renewOutcomeClaim && !(await renewOutcomeClaim()))
+                    break;
                 try {
                     await hydrooj_1.ProblemModel.addTestdata(domainId, pdoc.docId, f.name, Buffer.from(f.content, 'utf-8'), this.user?._id);
                     written.push(f.name);
@@ -1144,10 +1616,131 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
                     failed.push({ name: f.name, error: err instanceof Error ? err.message : String(err) });
                 }
             }
+            if (renewOutcomeClaim && !outcomeClaimLeaseLost && !(await renewOutcomeClaim())) {
+                outcomeClaimLeaseLost = true;
+            }
+            if (outcomeClaimHeartbeatTimer) {
+                clearInterval(outcomeClaimHeartbeatTimer);
+                outcomeClaimHeartbeatTimer = undefined;
+            }
+            if (outcomeClaimLeaseLost) {
+                releaseOutcomeClaim = false;
+                this.response.status = 409;
+                this.response.body = {
+                    written,
+                    failed,
+                    error: this.translate('ai_helper_testdata_outcome_already_recorded'),
+                    code: 'APPLY_STATE_CONFLICT',
+                };
+                this.response.type = 'application/json';
+                return;
+            }
             if (written.length > 0 && failed.length === 0) {
                 this.ctx.get('featureStatsModel')?.recordSuccess('testdata_apply').catch(() => { });
                 if (generationJob && generationJobModel) {
-                    await generationJobModel.markApplied(generationJob._id);
+                    const plan = generationJob.plan;
+                    let teacherOutcomeConflict = false;
+                    if (plan?.runId && plan.originalFileHashes && outcomeClaimId) {
+                        try {
+                            const appliedHashes = (0, runTelemetry_1.computeOriginalFileHashes)(validated);
+                            const changedFileNames = new Set(validated
+                                .filter(file => plan.originalFileHashes?.[file.name] !== appliedHashes[file.name])
+                                .map(file => file.name));
+                            const plannedKinds = new Map(plan.files.map(file => [file.name, file.kind]));
+                            const changedFileKinds = [...new Set([...changedFileNames]
+                                    .map(name => plannedKinds.get(name))
+                                    .filter((kind) => kind !== undefined))];
+                            const input = changedFileNames.size === 0
+                                ? {
+                                    eventId: outcomeClaimId,
+                                    outcome: 'accepted_unchanged',
+                                }
+                                : {
+                                    eventId: outcomeClaimId,
+                                    outcome: 'accepted_edited',
+                                    editedFileCount: changedFileNames.size,
+                                    changedFileKinds,
+                                };
+                            const outcome = await generationJobModel.recordTeacherOutcome(generationJob._id, input, outcomeClaimId);
+                            if (outcome.state === 'recorded') {
+                                const telemetry = this.ctx.get('testdataRunTelemetry');
+                                emitTestdataTelemetryBestEffort(telemetry && (() => telemetry.emitTeacherOutcome({
+                                    runId: plan.runId,
+                                    eventId: outcome.record.eventId,
+                                    occurredAt: outcome.record.recordedAt,
+                                    outcome: outcome.record.outcome,
+                                    reason: outcome.record.reason,
+                                    editedFileCount: outcome.record.editedFileCount,
+                                    changedFileKinds: outcome.record.changedFileKinds,
+                                })));
+                            }
+                            else {
+                                teacherOutcomeConflict = true;
+                            }
+                        }
+                        catch (err) {
+                            // Local outcome persistence is the source of truth for the teacher loop.
+                            // If it fails after files were written, retain the claim and surface the
+                            // real file result instead of falsely reporting a completed apply.
+                            teacherOutcomeConflict = true;
+                            console.warn('[TestdataGenApplyHandler] teacher outcome persistence failed:', err);
+                        }
+                    }
+                    if (outcomeClaimId) {
+                        if (teacherOutcomeConflict) {
+                            // claim 所有权异常时 fail closed；文件真实写入结果仍随响应返回。
+                            releaseOutcomeClaim = false;
+                            this.response.status = 409;
+                            this.response.body = {
+                                written,
+                                failed,
+                                error: this.translate('ai_helper_testdata_outcome_already_recorded'),
+                                code: 'APPLY_STATE_CONFLICT',
+                            };
+                            this.response.type = 'application/json';
+                            return;
+                        }
+                        try {
+                            const markedApplied = await generationJobModel.markApplied(generationJob._id, outcomeClaimId);
+                            if (!markedApplied) {
+                                releaseOutcomeClaim = false;
+                                this.response.status = 409;
+                                this.response.body = {
+                                    written,
+                                    failed,
+                                    error: this.translate('ai_helper_testdata_outcome_already_recorded'),
+                                    code: 'APPLY_STATE_CONFLICT',
+                                };
+                                this.response.type = 'application/json';
+                                return;
+                            }
+                            releaseOutcomeClaim = false;
+                        }
+                        catch (err) {
+                            // 文件已写入但 claim 无法原子终结：保留 claim 并显式返回状态冲突。
+                            releaseOutcomeClaim = false;
+                            console.warn('[TestdataGenApplyHandler] applied state persistence failed:', err);
+                            this.response.status = 409;
+                            this.response.body = {
+                                written,
+                                failed,
+                                error: this.translate('ai_helper_testdata_outcome_already_recorded'),
+                                code: 'APPLY_STATE_CONFLICT',
+                            };
+                            this.response.type = 'application/json';
+                            return;
+                        }
+                    }
+                }
+            }
+            else if (failed.length > 0 && generationJob?.runId) {
+                const telemetry = this.ctx.get('testdataRunTelemetry');
+                try {
+                    const event = await generationJobModel?.getOrCreateApplyFailureEvent(generationJob._id, generationJob.applyFailureEventId);
+                    emitTestdataTelemetryBestEffort(telemetry && event && (() => telemetry.emitApplyFailure(generationJob.runId, event.eventId, event.occurredAt)));
+                }
+                catch (err) {
+                    console.warn('[TestdataGenApplyHandler] apply failure event persistence failed:', err);
                 }
             }
             this.response.body = { written, failed };
@@ -1155,8 +1748,20 @@ class TestdataGenApplyHandler extends hydrooj_1.Handler {
         }
         catch (err) {
             console.error('[TestdataGenApplyHandler.post] error:', err);
-            this.ctx.get('errorReporter')?.capture('api_failure', 'testdata_apply', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { problemId: String(this.request.body?.problemId || '') });
+            captureTestdataGenerationFailure(this.ctx, 'testdata_apply', err);
             sendError(this, 500, 'INTERNAL_ERROR', 'ai_helper_err_internal');
+        }
+        finally {
+            if (outcomeClaimHeartbeatTimer)
+                clearInterval(outcomeClaimHeartbeatTimer);
+            if (releaseOutcomeClaim && claimedJobModel && claimedJobId && outcomeClaimId) {
+                try {
+                    await claimedJobModel.releaseTeacherOutcomeClaim(claimedJobId, outcomeClaimId);
+                }
+                catch (err) {
+                    console.warn('[TestdataGenApplyHandler] outcome claim release failed:', err);
+                }
+            }
         }
     }
 }

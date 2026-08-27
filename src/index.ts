@@ -126,6 +126,7 @@ import { VersionService } from './services/versionService';
 import { TelemetryService } from './services/telemetryService';
 import { EffectivenessService } from './services/effectivenessService';
 import { ErrorReporter } from './services/errorReporter';
+import { TestdataRunTelemetryService } from './services/testdata/runTelemetry';
 import { RequestStatsModel } from './models/requestStats';
 import { FeatureStatsModel } from './models/featureStats';
 console.log('[AI-Helper] services OK');
@@ -274,6 +275,12 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const packageJson = require('../package.json');
     const currentVersion = packageJson.version || '1.8.0';
     await pluginInstallModel.createIfMissing(currentVersion);
+    // 专用质量遥测独立于通用错误分诊；发送前每次重读 telemetryEnabled，
+    // 构造和发送失败均由 service 内部吞掉，不得阻断插件 apply 或业务 apply。
+    const testdataRunTelemetry = new TestdataRunTelemetryService(
+      pluginInstallModel,
+      { pluginVersion: currentVersion },
+    );
 
     // 密钥轮换：当 OLD_ENCRYPTION_KEY 存在时，自动重加密所有 API Key
     if (process.env.OLD_ENCRYPTION_KEY) {
@@ -307,6 +314,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('studentHistoryModel', studentHistoryModel);
     ctx.provide('teachingSummaryModel', teachingSummaryModel);
     ctx.provide('errorReporter', errorReporter);
+    ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
 
     // 初始化版本服务
     const versionService = new VersionService(versionCacheModel);

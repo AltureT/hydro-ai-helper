@@ -1,4 +1,7 @@
-import { getTelemetryToken } from '../../services/telemetryService';
+import {
+  getTelemetryToken,
+  serializeRemoteModelStats,
+} from '../../services/telemetryService';
 
 /**
  * Guards the telemetry-auth decision (2026-06 incident).
@@ -32,5 +35,35 @@ describe('getTelemetryToken', () => {
   it('trims surrounding whitespace from the env var', () => {
     process.env.AI_HELPER_TELEMETRY_TOKEN = '  spaced-token  ';
     expect(getTelemetryToken()).toBe('spaced-token');
+  });
+});
+
+describe('serializeRemoteModelStats', () => {
+  it('never uploads raw test-data model names through the legacy heartbeat', () => {
+    const serialized = serializeRemoteModelStats([
+      {
+        scenario: 'testdata_generation',
+        modelName: 'private-testdata-model',
+        date: '2026-08-20',
+        attempts: 2,
+        successes: 1,
+      },
+      {
+        scenario: 'student_chat',
+        modelName: 'chat-model',
+        date: '2026-08-20',
+        attempts: 3,
+        successes: 3,
+      },
+    ]);
+
+    expect(serialized).toEqual([{
+      scenario: 'student_chat',
+      model_name: 'chat-model',
+      date: '2026-08-20',
+      attempts: 3,
+      successes: 3,
+    }]);
+    expect(JSON.stringify(serialized)).not.toContain('private-testdata-model');
   });
 });

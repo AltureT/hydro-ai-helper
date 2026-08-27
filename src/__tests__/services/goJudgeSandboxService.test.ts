@@ -129,6 +129,83 @@ describe('GoJudgeSandboxRunner', () => {
 });
 
 describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
+  it('appends structured argv without modifying stdin or using a shell', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runPythonBatchDetailed('print(1)', [{
+      stdin: '5\n',
+      argv: ['--subtask', '2'],
+    }] as any);
+
+    expect(http.post.mock.calls[0][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/python3', 'main.py', '--subtask', '2'],
+      files: expect.arrayContaining([{ content: '5\n' }]),
+    }));
+  });
+
+  it('keeps legacy string invocations byte-for-byte compatible', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runPythonBatchDetailed('print(1)', ['5\n']);
+
+    expect(http.post.mock.calls[0][1].cmd[0].args).toEqual(['/usr/bin/python3', 'main.py']);
+    expect(http.post.mock.calls[0][1].cmd[0].files[0]).toEqual({ content: '5\n' });
+  });
+
+  it('rejects invalid argv invocations before making an HTTP request', async () => {
+    const http = { get: jest.fn(), post: jest.fn() };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const invalidInputs: unknown[] = [
+      { stdin: '', argv: Array.from({ length: 17 }, () => 'x') },
+      { stdin: '', argv: ['中'.repeat(43)] },
+      { stdin: '', argv: ['nul\0byte'] },
+      { stdin: '', argv: ['line\nbreak'] },
+      { stdin: '', argv: ['carriage\rreturn'] },
+      { stdin: '', argv: ['control\x1f'] },
+      { stdin: '', argv: ['delete\x7f'] },
+      { stdin: '', argv: [1] },
+      {},
+      null,
+      { stdin: '', argv: null },
+      { stdin: '', argv: false },
+      { stdin: '', argv: 0 },
+      { stdin: '', argv: '' },
+      { stdin: '', argv: 'not-an-array' },
+    ];
+
+    for (const input of invalidInputs) {
+      await expect(runner.runPythonBatchDetailed('print(1)', [input] as any))
+        .rejects.toThrow(/Invalid Python (invocation|argv)/);
+    }
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('passes literal shell metacharacters as separate inert argv elements', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const argv = ['$(touch x)', '`uname`', 'two words', ';'];
+
+    await runner.runPythonBatchDetailed('print(1)', [{ stdin: '', argv }] as any);
+
+    const args = http.post.mock.calls[0][1].cmd[0].args;
+    expect(args).toEqual(['/usr/bin/python3', 'main.py', ...argv]);
+    expect(args).not.toContain('/bin/sh');
+    expect(args).not.toContain('/bin/bash');
+    expect(args).not.toContain('-c');
+    expect(args).not.toContain(argv.join(' '));
+  });
+
   it('按 status 分类，不因单条失败抛错（Accepted/TLE/RE/OLE）', async () => {
     const http = {
       get: jest.fn(),
@@ -238,9 +315,14 @@ describe('GoJudgeSandboxRunner.runPythonBatchDetailed', () => {
   it('绝对截止时间已耗尽时不再发起新的沙箱分块请求', async () => {
     const http = { get: jest.fn(), post: jest.fn() };
     const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
-    await expect(runner.runPythonBatchDetailed('print(1)', ['a'], {
+    const failure = await runner.runPythonBatchDetailed('print(1)', ['a'], {
       deadlineAt: Date.now() - 1,
-    })).rejects.toThrow(/沙箱执行总时长超出预算/);
+    }).catch(error => error);
+    expect(failure).toMatchObject({
+      name: 'SandboxBudgetExceededError',
+      code: 'SANDBOX_BUDGET_EXHAUSTED',
+    });
+    expect(failure.message).toMatch(/沙箱执行总时长超出预算/);
     expect(http.post).not.toHaveBeenCalled();
   });
 
@@ -359,10 +441,9 @@ describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
     const lateRunner = new GoJudgeSandboxRunner('http://localhost:5050', lateHttp);
     await expect(lateRunner.compileCpp('int main() {}', {
       deadlineAt: 2_000,
-    })).resolves.toEqual({
-      ok: false,
-      kind: 'infra',
-      error: expect.stringContaining('总时长'),
+    })).rejects.toMatchObject({
+      name: 'SandboxBudgetExceededError',
+      code: 'SANDBOX_BUDGET_EXHAUSTED',
     });
     expect(lateHttp.delete).toHaveBeenCalledWith(
       'http://localhost:5050/file/late-prog',
@@ -483,6 +564,231 @@ describe('GoJudgeSandboxRunner C++ cached artifact infrastructure', () => {
       'http://localhost:5050/file/cached%2Fprog',
       expect.objectContaining({ timeout: 3000, proxy: false }),
     );
+  });
+});
+
+describe('GoJudgeSandboxRunner Java cached artifact infrastructure', () => {
+  it('compileJava builds Main.jar from Main.java and Solution.java', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [{
+          status: 'Accepted',
+          exitStatus: 0,
+          files: { stdout: '', stderr: '' },
+          fileIds: { 'Main.jar': 'cached-main-1' },
+        }],
+      }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await expect(runner.compileJava('public class Main {}', 'class Solution {}'))
+      .resolves.toEqual({ ok: true, fileId: 'cached-main-1' });
+    expect(http.post).toHaveBeenCalledWith(
+      'http://localhost:5050/run',
+      { cmd: [expect.objectContaining({
+        args: [
+          '/usr/bin/bash', '-c',
+          'javac -d /w -encoding utf8 ./Main.java ./Solution.java && jar cvf Main.jar *.class >/dev/null',
+        ],
+        copyIn: {
+          'Main.java': { content: 'public class Main {}' },
+          'Solution.java': { content: 'class Solution {}' },
+        },
+        copyOutCached: ['Main.jar'],
+      })] },
+      expect.objectContaining({ proxy: false }),
+    );
+  });
+
+  it('runJavaBatchDetailed executes a cached Main.jar', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runJavaBatchDetailed('cached-main-1', ['2 3\n']);
+
+    expect(http.post.mock.calls[0][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/java', '-cp', 'Main.jar', 'Main'],
+      copyIn: { 'Main.jar': { fileId: 'cached-main-1' } },
+    }));
+  });
+
+  it('uses a Java-specific runtime proc limit while Python and C++ remain at 16', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({ data: [goJudgeResult()] }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await runner.runPythonBatchDetailed('print(1)', ['']);
+    await runner.runCompiledBatchDetailed('cached-prog-1', ['']);
+    await runner.runJavaBatchDetailed('cached-main-1', ['']);
+
+    expect(http.post.mock.calls[0][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/python3', 'main.py'],
+      procLimit: 16,
+    }));
+    expect(http.post.mock.calls[1][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['prog'],
+      procLimit: 16,
+    }));
+    expect(http.post.mock.calls[2][1].cmd[0]).toEqual(expect.objectContaining({
+      args: ['/usr/bin/java', '-cp', 'Main.jar', 'Main'],
+      procLimit: 64,
+    }));
+  });
+
+  it('compileJava classifies javac failures as compile and transport failures as infra', async () => {
+    const compileHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [goJudgeResult({
+          status: 'Nonzero Exit Status',
+          exitStatus: 1,
+          files: { stdout: '', stderr: 'Main.java:1: error: reached end of file' },
+        })],
+      }),
+    };
+    const compileRunner = new GoJudgeSandboxRunner('http://localhost:5050', compileHttp);
+    await expect(compileRunner.compileJava('broken', 'class Solution {}')).resolves.toEqual({
+      ok: false,
+      kind: 'compile',
+      error: expect.stringContaining('reached end of file'),
+    });
+
+    const infraHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED')),
+    };
+    const infraRunner = new GoJudgeSandboxRunner('http://localhost:5050', infraHttp);
+    await expect(infraRunner.compileJava('public class Main {}', 'class Solution {}')).resolves.toEqual({
+      ok: false,
+      kind: 'infra',
+      error: expect.stringContaining('ECONNREFUSED'),
+    });
+  });
+
+  it('compileJava preserves budget errors and cleans all cache IDs from late or malformed responses', async () => {
+    const nowSpy = jest.spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000)
+      .mockReturnValue(3_000);
+    const lateHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [goJudgeResult({ fileIds: { 'Main.jar': 'late-main', debug: 'late-debug' } })],
+      }),
+      delete: jest.fn().mockResolvedValue({ data: undefined }),
+    };
+    const lateRunner = new GoJudgeSandboxRunner('http://localhost:5050', lateHttp);
+    await expect(lateRunner.compileJava('public class Main {}', 'class Solution {}', {
+      deadlineAt: 2_000,
+    })).rejects.toMatchObject({ code: 'SANDBOX_BUDGET_EXHAUSTED' });
+    expect(lateHttp.delete).toHaveBeenCalledWith(
+      'http://localhost:5050/file/late-main',
+      expect.anything(),
+    );
+    expect(lateHttp.delete).toHaveBeenCalledWith(
+      'http://localhost:5050/file/late-debug',
+      expect.anything(),
+    );
+    nowSpy.mockRestore();
+
+    const malformedHttp = {
+      get: jest.fn(),
+      post: jest.fn().mockResolvedValue({
+        data: [
+          null,
+          { ...goJudgeResult(), fileIds: { 'Main.jar': 'unexpected-main' } },
+          { ...goJudgeResult(), fileIds: { debug: 'unexpected-debug' } },
+        ],
+      }),
+      delete: jest.fn().mockResolvedValue({ data: undefined }),
+    };
+    const malformedRunner = new GoJudgeSandboxRunner('http://localhost:5050', malformedHttp);
+    await expect(malformedRunner.compileJava('public class Main {}', 'class Solution {}'))
+      .resolves.toEqual({
+        ok: false,
+        kind: 'infra',
+        error: expect.stringContaining('期望 1 个'),
+      });
+    expect(malformedHttp.delete).toHaveBeenCalledTimes(2);
+  });
+
+  it('compileJava rethrows the identical caller cancellation and cleans returned cache IDs', async () => {
+    const cancellation = Object.assign(new Error('caller canceled'), { name: 'AbortError' });
+    const controller = new AbortController();
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        return { data: [goJudgeResult({ fileIds: { 'Main.jar': 'canceled-main' } })] };
+      }),
+      delete: jest.fn().mockResolvedValue({ data: undefined }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await expect(runner.compileJava('public class Main {}', 'class Solution {}', {
+      signal: controller.signal,
+    })).rejects.toBe(cancellation);
+    expect(http.delete).toHaveBeenCalledWith(
+      'http://localhost:5050/file/canceled-main',
+      expect.anything(),
+    );
+  });
+
+  it('compileJava rethrows the caller cancellation when the in-flight HTTP request rejects differently', async () => {
+    const cancellation = Object.assign(new Error('caller canceled'), { name: 'AbortError' });
+    const axiosCancellation = Object.assign(new Error('axios canceled'), { name: 'CanceledError' });
+    const controller = new AbortController();
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw axiosCancellation;
+      }),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+
+    await expect(runner.compileJava('public class Main {}', 'class Solution {}', {
+      signal: controller.signal,
+    })).rejects.toBe(cancellation);
+  });
+
+  it('runJavaBatchDetailed reuses cached batch chunk, limit, and deadline semantics', async () => {
+    const http = {
+      get: jest.fn(),
+      post: jest.fn().mockImplementation(
+        (_url, body: { cmd: Array<{ files: Array<{ content?: string }> }> }) => ({
+          data: body.cmd.map(cmd => goJudgeResult({
+            files: { stdout: cmd.files[0].content || '', stderr: '' },
+          })),
+        }),
+      ),
+    };
+    const runner = new GoJudgeSandboxRunner('http://localhost:5050', http);
+    const inputs = ['a', 'b', 'c', 'd', 'e'];
+
+    await expect(runner.runJavaBatchDetailed('cached-main-1', inputs, {
+      cpuSeconds: 3,
+    })).resolves.toMatchObject(inputs.map(stdout => ({ accepted: true, stdout })));
+
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(http.post.mock.calls[0][1].cmd).toHaveLength(SANDBOX_CHUNK_SIZE);
+    expect(http.post.mock.calls[1][1].cmd).toHaveLength(1);
+    for (const call of http.post.mock.calls) {
+      expect(call[2]).toEqual(expect.objectContaining({ timeout: 39_000 }));
+      for (const command of call[1].cmd) {
+        expect(command).toEqual(expect.objectContaining({
+          args: ['/usr/bin/java', '-cp', 'Main.jar', 'Main'],
+          cpuLimit: 3_000_000_000,
+          clockLimit: 6_000_000_000,
+          copyIn: { 'Main.jar': { fileId: 'cached-main-1' } },
+        }));
+      }
+    }
   });
 });
 

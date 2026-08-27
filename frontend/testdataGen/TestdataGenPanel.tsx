@@ -13,6 +13,35 @@ import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
 } from '../utils/styles';
+import {
+  adaptBackgroundTestdataGenerationFailure,
+  adaptSynchronousTestdataGenerationFailure,
+  DirectFallbackConfirmationView,
+  resolveTestdataRetryGuidance,
+  type TestdataRetryGuidance,
+} from './retryPolicyHints';
+import {
+  VerificationSummaryView,
+  type VerificationSummaryData,
+} from './VerificationSummaryView';
+import {
+  ProblemSpecSummaryView,
+  type ProblemSpecSummaryData,
+} from './ProblemSpecSummaryView';
+import {
+  CoverageSummaryView,
+  type CoverageSummaryData,
+} from './CoverageSummaryView';
+import {
+  TestdataRiskSummaryView,
+  type TestdataRiskAssessment,
+} from './TestdataRiskSummaryView';
+import {
+  getTestdataApplyPresentation,
+  parseTestdataApplyResult,
+  type TestdataApplyPresentation,
+  type TestdataApplyResult,
+} from './applyResult';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -43,7 +72,7 @@ interface PlannedFile {
   origin?: 'executed' | 'deterministic' | 'ai-only';
 }
 
-interface PlanVerification {
+interface PlanVerification extends VerificationSummaryData {
   mode: 'sandbox' | 'direct';
   oracleKind: 'provided-std' | 'accepted-record' | 'ai-solution';
   modelEscalation?: { fromModel: string; toModel: string };
@@ -58,9 +87,6 @@ interface PlanVerification {
     droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
-  validator?: { ran: boolean; casesChecked: number };
-  templateCheck?: { lang: 'py'; total: number; passed: number; skippedTimeout: number[] };
-  checkerCheck?: { status: 'executed' | 'compile-failed'; runtimeSkipped: number };
   discrimination?: {
     targets: Array<{
       kind: 'boundary' | 'wrong-algorithm' | 'overflow-sim' | 'brute-complexity';
@@ -72,9 +98,18 @@ interface PlanVerification {
     }>;
     allKilled: boolean;
   };
+  coverage?: CoverageSummaryData;
 }
 
 interface GenerationPlan {
+  runId: string;
+  promptVersion: string;
+  specSchemaVersion?: number;
+  problemSpecSummary?: ProblemSpecSummaryData;
+  specConsensusStatus?: 'consensus' | 'adjudicated' | 'unresolved';
+  specConflictCount?: number;
+  unresolvedConflictCount?: number;
+  modelRolesUsed?: string[];
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
   analysis?: string;
@@ -94,8 +129,11 @@ interface GenerationPlan {
     subtaskId?: number;
     target: string;
   }>;
+  coverageMode?: 'trusted-dsl' | 'ai-generator-unverified';
   usedModel?: string;
   verification?: PlanVerification;
+  risk?: TestdataRiskAssessment;
+  reliabilityMode?: 'legacy' | 'observe' | 'enforce';
 }
 
 type BackgroundGenerationJobStatus =
@@ -116,6 +154,10 @@ interface BackgroundGenerationJob {
     message: string;
     code: string;
     category?: string;
+    failureCode?: string;
+    stage?: string;
+    artifact?: string;
+    retryPolicy?: string;
     retryable: boolean;
     recommendDeeperReasoning?: boolean;
   };
@@ -143,6 +185,7 @@ type GenerationProgressStage =
   | 'checking_templates'
   | 'stress_testing'
   | 'discrimination_testing'
+  | 'mutation_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -200,7 +243,10 @@ const GENERATION_STAGE_GROUPS: Array<{
   { key: 'inputs', stages: ['generating_inputs', 'validating_inputs'] },
   {
     key: 'verify',
-    stages: ['running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing', 'pipeline_repair', 'model_escalation'],
+    stages: [
+      'running_oracle', 'checking_templates', 'stress_testing', 'discrimination_testing',
+      'mutation_testing', 'pipeline_repair', 'model_escalation',
+    ],
   },
   { key: 'finish', stages: ['assembling', 'complete'] },
 ];
@@ -229,13 +275,27 @@ const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', mon
 interface ApiErrorDetails {
   message: string;
   recommendDeeperReasoning: boolean;
+  failureCode?: string;
+  stage?: string;
+  artifact?: string;
+  retryPolicy?: string;
 }
 
 class TestdataRequestError extends Error {
-  constructor(message: string, readonly recommendDeeperReasoning = false) {
+  constructor(
+    message: string,
+    readonly recommendDeeperReasoning = false,
+    readonly failureCode?: string,
+    readonly retryPolicy?: string,
+  ) {
     super(message);
     this.name = 'TestdataRequestError';
   }
+}
+
+function localizedFailureMessage(failureCode: string | undefined, fallback: string): string {
+  if (!failureCode) return fallback;
+  return i18n(`ai_helper_testdata_failure_${failureCode.toLowerCase()}`);
 }
 
 async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
@@ -243,8 +303,12 @@ async function parseErrorDetails(response: Response): Promise<ApiErrorDetails> {
     const data = await response.json();
     if (data?.error) {
       return {
-        message: String(data.error),
+        message: localizedFailureMessage(data.failureCode, String(data.error)),
         recommendDeeperReasoning: data.recommendDeeperReasoning === true,
+        failureCode: typeof data.failureCode === 'string' ? data.failureCode : undefined,
+        stage: typeof data.stage === 'string' ? data.stage : undefined,
+        artifact: typeof data.artifact === 'string' ? data.artifact : undefined,
+        retryPolicy: typeof data.retryPolicy === 'string' ? data.retryPolicy : undefined,
       };
     }
   } catch { /* ignore */ }
@@ -262,10 +326,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [collapsed, setCollapsed] = useState(true);
   const [phase, setPhase] = useState<PanelPhase>('form');
   const [error, setError] = useState<string | null>(null);
-  // 生成请求真正失败（AI 故障/超时）时提示骨架降级；本地校验错误不提示
-  const [showFallbackHint, setShowFallbackHint] = useState(false);
-  // 仅后端确认“自动修复后仍未通过解析/机器验证”时提示换用更深思考模型。
-  const [showDeeperReasoningHint, setShowDeeperReasoningHint] = useState(false);
+  const [retryGuidance, setRetryGuidance] = useState<TestdataRetryGuidance>('none');
   const [generationProgress, setGenerationProgress] = useState<GenerationProgressEvent>({
     stage: 'preparing', percent: 2, attempt: 1,
   });
@@ -307,10 +368,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // 生成结果状态
   const [plan, setPlan] = useState<GenerationPlan | null>(null);
+  const [confirmDirectFallback, setConfirmDirectFallback] = useState(false);
+  const [directFallbackConfirmationRequired, setDirectFallbackConfirmationRequired] = useState(false);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [selectedFiles, setSelectedFiles] = useState<Record<string, boolean>>({});
   const [activeFile, setActiveFile] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<{ written: string[]; failed: Array<{ name: string; error: string }> } | null>(null);
+  const [applyResult, setApplyResult] = useState<TestdataApplyResult | null>(null);
+  const [applyPresentation, setApplyPresentation] = useState<TestdataApplyPresentation | null>(null);
+  const [discardReason, setDiscardReason] = useState<'' | 'wrong_answer' | 'invalid_input' | 'weak_coverage' | 'template_problem' | 'checker_problem' | 'other'>('');
+  const [outcomeSubmitting, setOutcomeSubmitting] = useState(false);
 
   const rememberJob = useCallback((jobId: string | null) => {
     setGenerationJobId(jobId);
@@ -335,6 +401,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setSelectedFiles(selected);
     setActiveFile(newPlan.files[0].name);
     setApplyResult(null);
+    setApplyPresentation(null);
     setPhase('preview');
   }, []);
 
@@ -406,7 +473,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       rememberJob(null);
       setResumeCheckpointJobId(savedJob.id);
       setError(i18n('ai_helper_testdata_job_interrupted'));
-      setShowFallbackHint(true);
+      setRetryGuidance('none');
       setCollapsed(false);
       return;
     }
@@ -445,7 +512,12 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         if (!response.ok) {
           const details = await parseErrorDetails(response);
           if (response.status === 404 || response.status === 403) {
-            throw new TestdataRequestError(details.message);
+            throw new TestdataRequestError(
+              details.message,
+              details.recommendDeeperReasoning,
+              details.failureCode,
+              details.retryPolicy,
+            );
           }
           throw new Error(details.message);
         }
@@ -472,15 +544,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           setResumeCheckpointJobId(job.status === 'interrupted' ? job.id : null);
           setError(job.error?.code === 'WORKER_INTERRUPTED'
             ? i18n('ai_helper_testdata_job_interrupted')
-            : (job.error?.message || i18n('ai_helper_testdata_job_failed')));
-          setShowFallbackHint(true);
-          setShowDeeperReasoningHint(job.error?.recommendDeeperReasoning === true);
+            : localizedFailureMessage(
+              job.error?.failureCode,
+              job.error?.message || i18n('ai_helper_testdata_job_failed'),
+            ));
+          const failureUi = adaptBackgroundTestdataGenerationFailure(job.error || {});
+          setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
+          setRetryGuidance(failureUi.retryGuidance);
           setPhase('form');
         } else if (job.status === 'canceled') {
           terminal = true;
           rememberJob(null);
           setError(i18n('ai_helper_testdata_err_canceled'));
-          setShowFallbackHint(false);
+          setRetryGuidance('none');
           setPhase('form');
         }
       } catch (err) {
@@ -489,7 +565,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           terminal = true;
           rememberJob(null);
           setError(err instanceof Error ? err.message : String(err));
-          setShowFallbackHint(true);
+          setRetryGuidance(resolveTestdataRetryGuidance(
+            err instanceof TestdataRequestError ? err.retryPolicy : undefined,
+          ));
           setPhase('form');
         } else {
           console.warn('[AI-Helper] testdata generation job poll failed:', err);
@@ -516,14 +594,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   // ─── 生成 ───────────────────────────────────────────────────────────────────
 
-  const handleGenerate = useCallback(async (resumeFromJobId?: string) => {
+  const handleGenerate = useCallback(async (
+    resumeFromJobId?: string,
+    directFallbackConfirmed = confirmDirectFallback,
+    replacesJobId?: string,
+  ) => {
     setError(null);
-    setShowFallbackHint(false);
-    setShowDeeperReasoningHint(false);
+    setRetryGuidance('none');
+    setDirectFallbackConfirmationRequired(false);
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
     }
+    if (replacesJobId) rememberJob(null);
     const startedAt = Date.now();
     generationStartedAtRef.current = startedAt;
     generationLastEventAtRef.current = startedAt;
@@ -552,12 +635,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           providedStd: providedStd.trim() || undefined,
           acceptedStdRecordId: acceptedStdRecordId || undefined,
           extraRequirements: extraRequirements.trim() || undefined,
+          confirmDirectFallback: directFallbackConfirmed,
           resumeFromJobId,
+          replacesJobId,
         }),
       });
       if (!response.ok) {
         const details = await parseErrorDetails(response);
-        throw new TestdataRequestError(details.message, details.recommendDeeperReasoning);
+        throw new TestdataRequestError(
+          details.message,
+          details.recommendDeeperReasoning,
+          details.failureCode,
+          details.retryPolicy,
+        );
       }
       const data = await response.json() as { job: BackgroundGenerationJob };
       if (!data.job?.id) throw new Error(i18n('ai_helper_testdata_job_start_failed'));
@@ -569,16 +659,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         setGenerationProgress(data.job.progress);
       }
     } catch (err) {
+      if (replacesJobId) rememberJob(replacesJobId);
       setError(err instanceof Error ? err.message : String(err));
-      setShowFallbackHint(true);
-      setShowDeeperReasoningHint(
-        err instanceof TestdataRequestError && err.recommendDeeperReasoning,
-      );
-      setPhase('form');
+      const failureUi = adaptSynchronousTestdataGenerationFailure({
+        failureCode: err instanceof TestdataRequestError ? err.failureCode : undefined,
+        retryPolicy: err instanceof TestdataRequestError ? err.retryPolicy : undefined,
+      });
+      setDirectFallbackConfirmationRequired(failureUi.showDirectFallbackConfirmation);
+      setRetryGuidance(failureUi.retryGuidance);
+      setPhase(replacesJobId ? 'preview' : 'form');
     }
   }, [
     problemId, problemKind, fillInMode, caseCount,
-    dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements,
+    dataScale, languages, providedStd, acceptedStdRecordId, extraRequirements, confirmDirectFallback,
     rememberJob,
   ]);
 
@@ -597,7 +690,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       if (!response.ok) throw new Error((await parseErrorDetails(response)).message);
       rememberJob(null);
       setError(i18n('ai_helper_testdata_err_canceled'));
-      setShowFallbackHint(false);
+      setRetryGuidance('none');
       setPhase('form');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -610,8 +703,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const handleSkeleton = useCallback(async () => {
     setError(null);
-    setShowFallbackHint(false);
-    setShowDeeperReasoningHint(false);
+    setRetryGuidance('none');
     if (problemKind !== 'traditional' && languages.length === 0) {
       setError(i18n('ai_helper_testdata_err_no_languages'));
       return;
@@ -679,12 +771,24 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         credentials: 'include',
         body: JSON.stringify({ problemId, jobId: generationJobId || undefined, files }),
       });
+      const payload = await response.clone().json().catch(() => undefined);
       if (!response.ok) {
+        const actualResult = parseTestdataApplyResult(payload);
+        if (actualResult) {
+          setApplyResult(actualResult);
+          setApplyPresentation(getTestdataApplyPresentation(false, actualResult));
+          setError((await parseErrorDetails(response)).message);
+          setPhase('applied');
+          return;
+        }
         throw new Error((await parseErrorDetails(response)).message);
       }
-      const data = await response.json() as { written: string[]; failed: Array<{ name: string; error: string }> };
+      const data = parseTestdataApplyResult(payload);
+      if (!data) throw new Error(i18n('ai_helper_err_internal'));
       setApplyResult(data);
-      if (data.failed.length === 0) rememberJob(null);
+      const presentation = getTestdataApplyPresentation(true, data);
+      setApplyPresentation(presentation);
+      if (presentation === 'success') rememberJob(null);
       setPhase('applied');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -695,20 +799,29 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     generationJobId, rememberJob,
   ]);
 
-  const handleBackToForm = useCallback(async () => {
+  const handleDiscard = useCallback(async () => {
+    if (!window.confirm(i18n('ai_helper_testdata_discard_confirm'))) return;
     const jobId = generationJobId;
+    setOutcomeSubmitting(true);
     if (jobId) {
       try {
-        await fetch(
+        const response = await fetch(
           buildApiUrl(`/ai-helper/testdata-gen/jobs/${encodeURIComponent(jobId)}/dismiss`),
           {
             method: 'POST',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
             credentials: 'include',
+            body: JSON.stringify({ reason: discardReason || undefined }),
           },
         );
+        if (!response.ok) throw new Error((await parseErrorDetails(response)).message);
       } catch (err) {
-        console.warn('[AI-Helper] dismiss testdata generation job failed:', err);
+        setError(err instanceof Error ? err.message : String(err));
+        setOutcomeSubmitting(false);
+        return;
       }
     }
     rememberJob(null);
@@ -716,9 +829,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setFileContents({});
     setSelectedFiles({});
     setActiveFile(null);
+    setDiscardReason('');
     setError(null);
     setPhase('form');
-  }, [generationJobId, rememberJob]);
+    setOutcomeSubmitting(false);
+  }, [discardReason, generationJobId, rememberJob]);
+
+  const handleRegenerate = useCallback(() => {
+    void handleGenerate(undefined, confirmDirectFallback, generationJobId || undefined);
+  }, [confirmDirectFallback, generationJobId, handleGenerate]);
 
   // ─── 渲染 ───────────────────────────────────────────────────────────────────
 
@@ -937,14 +1056,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       {error && (
         <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.base }}>
           <div>{error}</div>
-          {showDeeperReasoningHint && (
+          {retryGuidance === 'switch-model' && (
             <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs, fontWeight: 600 }}>
               {i18n('ai_helper_testdata_deeper_reasoning_suggestion')}
             </div>
           )}
-          {showFallbackHint && (
+          {retryGuidance === 'manual-review' && (
+            <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs, fontWeight: 600 }}>
+              {i18n('ai_helper_testdata_manual_review_suggestion')}
+            </div>
+          )}
+          {retryGuidance === 'retry' && (
             <div style={{ ...TYPOGRAPHY.xs, marginTop: SPACING.xs }}>
-              {i18n('ai_helper_testdata_fallback_suggestion')}
+              {i18n('ai_helper_testdata_retry_suggestion')}
             </div>
           )}
           {resumeCheckpointJobId && (
@@ -1120,9 +1244,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     const active = activeFile && plan.files.some(f => f.name === activeFile) ? activeFile : orderedFiles[0]?.name;
     const selectedCount = plan.files.filter(f => selectedFiles[f.name]).length;
     const verification = plan.verification;
+    const risk = plan.risk;
     const bruteSkipped = verification?.bruteCheck?.skippedTimeout ?? [];
     const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
-    const templateSkipped = verification?.templateCheck?.skippedTimeout ?? [];
     const stressCheck = verification?.stressCheck;
     const discrimination = verification?.mode === 'sandbox'
       ? verification.discrimination
@@ -1137,28 +1261,23 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       && discrimination.allKilled
       && discriminationCheckedTargets.length > 0
       && discriminationKilled === discriminationCheckedTargets.length;
-    const hasAiOnlyCases = plan.files.some(
-      f => (f.kind === 'case-in' || f.kind === 'case-out') && f.origin === 'ai-only',
-    );
-    const stressPassed = !!stressCheck
-      && !stressCheck.skippedReason
-      && stressCheck.compared > 0
-      && stressCheck.agreed === stressCheck.compared
-      && (stressCheck.uniqueInputs === undefined
-        || stressCheck.uniqueInputs >= Math.ceil(stressCheck.generated * 0.8));
-    const legacyBrutePassed = !stressCheck
-      && (verification?.bruteCheck?.compared ?? 0) > 0
-      && bruteDisagreed.length === 0
-      && bruteSkipped.length === 0;
-    // 全绿门槛：优先要求内部压力对拍全量通过；旧后端回退原 BRUTE 判定。
-    const verificationAllGreen = verification?.mode === 'sandbox'
-      && !hasAiOnlyCases
-      && (stressPassed || legacyBrutePassed)
-      && templateSkipped.length === 0
-      && (!discrimination || discriminationAllKilled);
-
     return (
       <div>
+        {risk && (
+          <TestdataRiskSummaryView
+            risk={risk}
+            reliabilityMode={plan.reliabilityMode || 'observe'}
+            translate={i18n}
+          />
+        )}
+        <ProblemSpecSummaryView
+          specSchemaVersion={plan.specSchemaVersion}
+          summary={plan.problemSpecSummary}
+          consensusStatus={plan.specConsensusStatus}
+          conflictCount={plan.specConflictCount}
+          unresolvedConflictCount={plan.unresolvedConflictCount}
+          rolesUsed={plan.modelRolesUsed}
+        />
         {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
           <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
@@ -1229,11 +1348,24 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             </div>
           </div>
         )}
+        {(verification?.coverage || plan.coverageMode) && (
+          <CoverageSummaryView
+            translate={i18n}
+            coverage={verification?.coverage || {
+              mode: plan.coverageMode || 'ai-generator-unverified',
+              matrix: [],
+              totalTargets: 0,
+              passedTargets: 0,
+              criticalMissing: 0,
+            }}
+          />
+        )}
         {verification && (
-          <div style={{ ...getAlertStyle(verificationAllGreen ? 'success' : 'warning'), marginBottom: SPACING.md }}>
+          <div style={{ ...getAlertStyle(verification.verified === true ? 'success' : 'warning'), marginBottom: SPACING.md }}>
             <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
               {i18n('ai_helper_testdata_verify_title')}
             </div>
+            <VerificationSummaryView verification={verification} translate={i18n} />
             <div style={{ fontSize: '13px' }}>
               {i18n(verification.mode === 'sandbox' ? 'ai_helper_testdata_verify_mode_sandbox' : 'ai_helper_testdata_verify_mode_direct')}
             </div>
@@ -1272,28 +1404,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 {` · ${i18n('ai_helper_testdata_verify_stress_generated')}: ${stressCheck.generated}`}
                 {stressCheck.uniqueInputs !== undefined
                   && ` · ${i18n('ai_helper_testdata_verify_stress_unique')}: ${stressCheck.uniqueInputs}/${stressCheck.generated}`}
-              </div>
-            )}
-            {verification.validator && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_validator')}: {verification.validator.ran ? verification.validator.casesChecked : i18n('ai_helper_testdata_verify_validator_none')}
-              </div>
-            )}
-            {verification.templateCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_template')}: {verification.templateCheck.passed}/{verification.templateCheck.total}
-              </div>
-            )}
-            {verification.checkerCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n(verification.checkerCheck.status === 'executed'
-                  ? 'ai_helper_testdata_verify_checker_executed'
-                  : 'ai_helper_testdata_verify_checker_fallback')}
-                {verification.checkerCheck.runtimeSkipped > 0
-                  && ` · ${i18n(
-                    'ai_helper_testdata_verify_checker_runtime_skipped',
-                    verification.checkerCheck.runtimeSkipped,
-                  )}`}
               </div>
             )}
             {discrimination && (
@@ -1392,15 +1502,37 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         {error && (
           <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>{error}</div>
         )}
-        <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.base }}>
+        <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.base, flexWrap: 'wrap', alignItems: 'center' }}>
           <button style={getButtonStyle('primary')} onClick={handleApply}>
             {i18n('ai_helper_testdata_apply_btn', selectedCount)}
           </button>
           <button
             style={getButtonStyle('secondary')}
-            onClick={handleBackToForm}
+            onClick={handleRegenerate}
+            disabled={outcomeSubmitting}
           >
-            {i18n('ai_helper_testdata_back_btn')}
+            {i18n('ai_helper_testdata_regenerate_btn')}
+          </button>
+          <label style={{ ...TYPOGRAPHY.xs, color: COLORS.textSecondary, marginLeft: 'auto' }}>
+            {i18n('ai_helper_testdata_discard_reason_label')}{' '}
+            <select
+              value={discardReason}
+              onChange={event => setDiscardReason(event.target.value as typeof discardReason)}
+              disabled={outcomeSubmitting}
+              style={{ ...getInputStyle(), width: 'auto', display: 'inline-block', padding: '6px 8px' }}
+            >
+              <option value="">{i18n('ai_helper_testdata_discard_reason_none')}</option>
+              {(['wrong_answer', 'invalid_input', 'weak_coverage', 'template_problem', 'checker_problem', 'other'] as const).map(reason => (
+                <option key={reason} value={reason}>{i18n(`ai_helper_testdata_discard_reason_${reason}`)}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            style={getButtonStyle('secondary')}
+            onClick={() => void handleDiscard()}
+            disabled={outcomeSubmitting}
+          >
+            {i18n('ai_helper_testdata_discard_btn')}
           </button>
         </div>
       </div>
@@ -1415,9 +1547,21 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const renderApplied = () => (
     <div>
-      {applyResult && applyResult.failed.length === 0 ? (
+      {applyPresentation === 'conflict' ? (
+        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
+          <div>{error}</div>
+          <div style={{ marginTop: SPACING.xs }}>
+            {i18n('ai_helper_testdata_apply_partial', applyResult?.written.length ?? 0, applyResult?.failed.length ?? 0)}
+          </div>
+          {applyResult?.failed.map(f => (
+            <div key={f.name} style={{ fontFamily: MONO_FONT, fontSize: '12px', marginTop: SPACING.xs }}>
+              {f.name}: {f.error}
+            </div>
+          ))}
+        </div>
+      ) : applyPresentation === 'success' ? (
         <div style={{ ...getAlertStyle('success'), marginBottom: SPACING.base }}>
-          {i18n('ai_helper_testdata_apply_success', applyResult.written.length)}
+          {i18n('ai_helper_testdata_apply_success', applyResult?.written.length ?? 0)}
         </div>
       ) : (
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
@@ -1436,9 +1580,11 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         <button style={getButtonStyle('primary')} onClick={() => window.location.reload()}>
           {i18n('ai_helper_testdata_refresh_btn')}
         </button>
-        <button style={getButtonStyle('secondary')} onClick={() => { setPhase('preview'); setError(null); }}>
-          {i18n('ai_helper_testdata_back_to_preview_btn')}
-        </button>
+        {(applyPresentation === 'conflict' || (applyResult?.failed.length ?? 0) > 0) && (
+          <button style={getButtonStyle('secondary')} onClick={() => { setPhase('preview'); setError(null); }}>
+            {i18n('ai_helper_testdata_back_to_preview_btn')}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1464,6 +1610,19 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             {i18n('ai_helper_testdata_panel_subtitle')}
           </div>
           {phase === 'form' && renderForm()}
+          {phase === 'form' && (
+            <DirectFallbackConfirmationView
+              visible={directFallbackConfirmationRequired}
+              message={i18n('ai_helper_testdata_direct_confirmation_required')}
+              actionLabel={i18n('ai_helper_testdata_direct_confirmation_action')}
+              containerStyle={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}
+              buttonStyle={{ ...getButtonStyle('secondary'), marginTop: SPACING.sm }}
+              onConfirm={retryPayload => {
+                setConfirmDirectFallback(retryPayload.confirmDirectFallback);
+                void handleGenerate(undefined, retryPayload.confirmDirectFallback);
+              }}
+            />
+          )}
           {phase === 'generating' && renderGenerating()}
           {phase === 'preview' && renderPreview()}
           {phase === 'applying' && renderApplying()}

@@ -10,6 +10,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TelemetryService = void 0;
+exports.serializeRemoteModelStats = serializeRemoteModelStats;
 exports.getTelemetryToken = getTelemetryToken;
 exports.sendToEndpoint = sendToEndpoint;
 exports.getTelemetryBases = getTelemetryBases;
@@ -17,6 +18,23 @@ exports.buildTelemetryUrl = buildTelemetryUrl;
 exports.normalizeTelemetryBase = normalizeTelemetryBase;
 const crypto_1 = require("crypto");
 const axios_1 = __importDefault(require("axios"));
+const REMOTE_MODEL_STATS_EXCLUDED_SCENARIOS = new Set(['testdata_generation']);
+/**
+ * Task 4 test-data quality uses its closed role enum plus a local HMAC identity.
+ * Keep legacy per-model counters local for this scenario so historical rows can
+ * never leak a raw configured model name through the generic heartbeat.
+ */
+function serializeRemoteModelStats(stats) {
+    return stats
+        .filter(item => !REMOTE_MODEL_STATS_EXCLUDED_SCENARIOS.has(item.scenario))
+        .map(item => ({
+        scenario: item.scenario,
+        model_name: item.modelName,
+        date: item.date,
+        attempts: item.attempts,
+        successes: item.successes,
+    }));
+}
 /**
  * Telemetry Service 类
  */
@@ -206,13 +224,7 @@ class TelemetryService {
                     successes: f.successes,
                     last_success_at: f.lastSuccessAt ? f.lastSuccessAt.toISOString() : undefined,
                 })),
-                model_stats: stats.modelStats.map((item) => ({
-                    scenario: item.scenario,
-                    model_name: item.modelName,
-                    date: item.date,
-                    attempts: item.attempts,
-                    successes: item.successes,
-                })),
+                model_stats: serializeRemoteModelStats(stats.modelStats),
                 domain_hash: domainHash,
                 timestamp: new Date().toISOString()
             };

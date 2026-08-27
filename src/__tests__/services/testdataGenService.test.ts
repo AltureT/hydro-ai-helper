@@ -36,6 +36,9 @@ import {
   buildSandboxBlueprintUserPrompt,
   buildIndependentVerifierSystemPrompt,
   buildIndependentVerifierUserPrompt,
+  buildHackCasesUserPrompt,
+  buildKillTargetsUserPrompt,
+  parseKillTargetsResponse,
   parseOracleLanguage,
   parseSubtasksSection,
   parseSandboxBlueprint,
@@ -44,10 +47,15 @@ import {
   parseIndependentVerifierBlueprint,
   parseGeneratorOutput,
   materializeSandboxBlueprint,
+  applyMutationGate,
+  finalizePlanVerification,
   verifySolutionBlueprintSamples,
   classifySandboxRepairScope,
   buildSandboxRepairPrompt,
+  buildIndependentVerifierRepairPrompt,
   mergeSandboxBlueprintRepair,
+  classifyValidatorInvalidResult,
+  checkpointVerifierFromBlueprint,
   hasCustomChecker,
   getTestlibCheckerFilename,
   extendDeadlineByBestEffortElapsed,
@@ -61,18 +69,74 @@ import {
   extractTestdataErrorMetadata,
   shouldRecommendDeeperReasoning,
   GenerateOptions,
+  MaterializationCacheState,
+  ValidatorProofContext,
   TESTDATA_GEN_LIMITS,
 } from '../../services/testdataGenService';
 import {
+  TestdataPipelineError,
+  repairPolicyForFailure,
+} from '../../services/testdata/failures';
+import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
+import { VALIDATOR_PROBE_CONSTRUCTION_KINDS } from '../../services/testdata/validatorManifest';
+import {
+  createTestdataPipelineContext,
+  hashTestdataRoleIdentity,
+  TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+  TESTDATA_PIPELINE_PROMPT_VERSION,
+} from '../../services/testdata/pipelineContext';
+import {
+  STATEMENT_SNAPSHOT_HARD_LIMIT,
+  createStatementSnapshot,
+} from '../../services/testdata/statementSnapshot';
+import type {
+  TestdataRoleClient,
+  TestdataRoleClients,
+} from '../../services/testdata/modelRoles';
+import {
+  CHECKER_BUDGET_MS,
   DISCRIMINATION_BUDGET_MS,
+  GoJudgeSandboxRunner,
   SANDBOX_TOTAL_BUDGET_MS,
+  SandboxBudgetExceededError,
 } from '../../services/goJudgeSandboxService';
+import * as mutationRunner from '../../services/testdata/mutationRunner';
+import { TESTDATA_MODEL_TIMEOUT_DEFAULT_MS } from '../../services/testdata/latency';
+
+const evaluateMutationCandidatesMock = jest.spyOn(
+  mutationRunner,
+  'evaluateMutationCandidates',
+);
 
 const baseOptions: GenerateOptions = {
   problemKind: 'auto',
   caseCount: 3,
   languages: ['py', 'java', 'cc'],
 };
+
+// Older direct-mode unit coverage exercises parsing/assembly only. Keep its legacy
+// fixture path explicit while individual risk-gate tests override it as needed.
+beforeEach(() => {
+  process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+  // Existing characterization fixtures predate the observe-only extractor.
+  // Tests that exercise Task 5 opt into observe explicitly with a grounded response.
+  process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'legacy';
+  process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+  evaluateMutationCandidatesMock.mockReset();
+});
+
+afterEach(() => {
+  delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  delete process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE;
+  delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+  delete process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS;
+  delete process.env.AI_HELPER_TESTDATA_MUTATION_GATE;
+  delete process.env.AI_HELPER_TESTDATA_MODEL_TIMEOUT_SECONDS;
+});
+
+afterAll(() => {
+  evaluateMutationCandidatesMock.mockRestore();
+});
 
 const groupedCoinStatement = `## 输入格式
 
@@ -104,9 +168,13 @@ ACB
 
 function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
   const solutionSections = problemType === 'function' ? [
-    '@@@SOLUTION@@@',
+    '@@@SOLUTION:py@@@',
     'def solve(value):',
     '    return value',
+    '@@@SOLUTION:java@@@',
+    'class Solution { String solve(String value) { return value; } }',
+    '@@@SOLUTION:cc@@@',
+    'string solve(string value) { return value; }',
   ] : [];
   const templateSections = problemType === 'function' ? [
     '@@@TEMPLATE:py@@@',
@@ -137,9 +205,13 @@ function makeSandboxBlueprint(problemType: 'traditional' | 'function' = 'traditi
 
 function makeSolutionBlueprint(problemType: 'traditional' | 'function' = 'traditional'): string {
   const solutionSections = problemType === 'function' ? [
-    '@@@SOLUTION@@@',
+    '@@@SOLUTION:py@@@',
     'def solve(value):',
     '    return value',
+    '@@@SOLUTION:java@@@',
+    'class Solution { String solve(String value) { return value; } }',
+    '@@@SOLUTION:cc@@@',
+    'string solve(string value) { return value; }',
   ] : [];
   return [
     '@@@META@@@',
@@ -194,6 +266,43 @@ function makeIndependentVerifierBlueprint(
   ].join('\n');
 }
 
+function makeStrictIndependentVerifierBlueprint(
+  manifest = { constraintIds: ['C1'], invariantIds: ['I1'] },
+  recipes: unknown = { recipes: [] },
+): string {
+  return makeIndependentVerifierBlueprint().replace(
+    '@@@VALIDATOR@@@',
+    [
+      '@@@VALIDATOR_MANIFEST@@@',
+      JSON.stringify(manifest),
+      '@@@VALIDATOR_PROBE_RECIPES@@@',
+      JSON.stringify(recipes),
+      '@@@VALIDATOR@@@',
+    ].join('\n'),
+  );
+}
+
+function makeStrictVerifierSpec(): ProblemSpecV1 {
+  return {
+    schemaVersion: 1,
+    statementHash: 'a'.repeat(64),
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+    constraints: [{
+      id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+      evidence: { quote: 'n >= 1' },
+    }],
+    invariants: [{
+      id: 'I1', kind: 'custom', expression: 'n is valid', machineCheckable: true,
+      evidence: { quote: 'n is valid' },
+    }],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+  };
+}
+
 function makeEmptyKillTargetsResponse(): string {
   return '未生成可用的错误解靶子';
 }
@@ -246,6 +355,23 @@ function stressGeneratorStdout(): string {
       input: String(i + 1),
     })),
   });
+}
+
+function makeCheckpointRunner() {
+  return {
+    isAvailable: jest.fn().mockResolvedValue(true),
+    runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+      stdout: code.includes('stress generator')
+        ? stressGeneratorStdout()
+        : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+      stderr: '',
+    })),
+    runPythonBatch: jest.fn(),
+    runPythonBatchDetailed: jest.fn().mockImplementation(
+      (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+        code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+    ),
+  };
 }
 
 // ─── validateGenerateOptions ──────────────────────────────────────────────────
@@ -392,24 +518,71 @@ describe('parseSubtasksSection / allocateCasesToSubtasks', () => {
     expect(allocations.filter(item => item.subtaskId === 3)).toHaveLength(2);
   });
 
-  it('extendTieredAllocations 总数不变时原样返回同一分配', () => {
-    const base = allocateCasesToSubtasks(6, subtasks);
-    expect(extendTieredAllocations(base, 6, subtasks)).toBe(base);
+  it('weighted-deficit extension preserves the supplied prefix and follows Frozen order on ties', () => {
+    const prefix = [
+      { caseNumber: 1, subtaskId: 1, guidance: 'n <= 10' },
+      { caseNumber: 2, subtaskId: 2, guidance: 'n <= 100' },
+    ];
+    const frozenPrefix = prefix.map(item => ({ ...item }));
+    const frozenSubtasks = [
+      { id: 1, score: 30, constraints: 'n <= 10' },
+      { id: 2, score: 70, constraints: 'n <= 100' },
+    ];
+
+    expect(extendTieredAllocations(prefix, 5, frozenSubtasks)).toEqual([
+      { caseNumber: 1, subtaskId: 1, guidance: 'n <= 10' },
+      { caseNumber: 2, subtaskId: 2, guidance: 'n <= 100' },
+      { caseNumber: 3, subtaskId: 2, guidance: 'n <= 100' },
+      { caseNumber: 4, subtaskId: 2, guidance: 'n <= 100' },
+      { caseNumber: 5, subtaskId: 1, guidance: 'n <= 10' },
+    ]);
+    expect(prefix).toEqual(frozenPrefix);
+
+    const frozenOrderDiffersFromNumericOrder = [
+      { id: 9, score: 50, constraints: 'first in Frozen order' },
+      { id: 1, score: 50, constraints: 'second in Frozen order' },
+    ];
+    expect(extendTieredAllocations([
+      { caseNumber: 1, subtaskId: 9, guidance: 'first' },
+      { caseNumber: 2, subtaskId: 1, guidance: 'second' },
+    ], 3, frozenOrderDiffersFromNumericOrder)[2]).toEqual({
+      caseNumber: 3,
+      subtaskId: 9,
+      guidance: 'first in Frozen order',
+    });
   });
 
-  it('extendTieredAllocations 追加项保持原分配不变并归入最后一个子任务', () => {
-    const base = allocateCasesToSubtasks(6, subtasks);
-    const extended = extendTieredAllocations(base, 8, subtasks);
-    expect(extended.slice(0, 6)).toEqual(base);
-    expect(extended.slice(6).map(item => item.subtaskId)).toEqual([3, 3]);
-    expect(extended.slice(6).map(item => item.caseNumber)).toEqual([7, 8]);
-    expect(extended[6].guidance).toBe(subtasks[2].constraints);
-  });
+  it('prefix-preserving extension validates the full prefix and returns a clone at equal total', () => {
+    const frozenSubtasks = [
+      { id: 1, score: 30, constraints: 'n <= 10' },
+      { id: 2, score: 70, constraints: 'n <= 100' },
+    ];
+    const prefix = [
+      { caseNumber: 1, subtaskId: 1, guidance: 'n <= 10' },
+      { caseNumber: 2, subtaskId: 2, guidance: 'n <= 100' },
+    ];
+    const cloned = extendTieredAllocations(prefix, prefix.length, frozenSubtasks);
+    expect(cloned).toEqual(prefix);
+    expect(cloned).not.toBe(prefix);
 
-  it('extendTieredAllocations 原分配为空或总数变少时返回空数组', () => {
-    const base = allocateCasesToSubtasks(6, subtasks);
-    expect(extendTieredAllocations([], 3, subtasks)).toEqual([]);
-    expect(extendTieredAllocations(base, 5, subtasks)).toEqual([]);
+    expect(extendTieredAllocations([], 3, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations(prefix, 1, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations([
+      { caseNumber: 1, subtaskId: 3, guidance: 'unknown subtask' },
+    ], 2, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations([
+      { caseNumber: 2, subtaskId: 1, guidance: 'invalid case number' },
+    ], 2, frozenSubtasks)).toEqual([]);
+    expect(extendTieredAllocations([
+      { caseNumber: 1, subtaskId: 0, guidance: 'invalid subtask id' },
+    ], 2, frozenSubtasks)).toEqual([]);
+
+    for (const invalidScore of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(extendTieredAllocations(prefix, 3, [
+        { ...frozenSubtasks[0], score: invalidScore },
+        frozenSubtasks[1],
+      ])).toEqual([]);
+    }
   });
 
   it('测试点数恰好等于子任务数时每个子任务分配一个', () => {
@@ -867,6 +1040,169 @@ function makeAiJson(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+function makeObservedProblemSpec(
+  statementMarkdown: string,
+  overrides: Partial<ProblemSpecV1> = {},
+): ProblemSpecV1 {
+  const snapshot = createStatementSnapshot(statementMarkdown);
+  return {
+    schemaVersion: 1,
+    statementHash: snapshot.statementHash,
+    problemKind: 'function',
+    testCaseMode: { kind: 'single' },
+    inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+    constraints: [],
+    invariants: [],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+    ...overrides,
+  };
+}
+
+function makeFrozenSpecRoleClients(
+  statementMarkdown: string,
+  problemKind: 'traditional' | 'function' = 'traditional',
+  customChecker = false,
+): TestdataRoleClients {
+  const spec = makeObservedProblemSpec(statementMarkdown, {
+    problemKind,
+    outputPolicy: customChecker ? { kind: 'custom-checker' } : { kind: 'exact' },
+  });
+  const content = JSON.stringify(spec);
+  return {
+    specPrimary: makeRoleClient('specPrimary', 'spec-primary', 'spec-primary-model', content),
+    specCritic: makeRoleClient('specCritic', 'spec-critic', 'spec-critic-model', content),
+  };
+}
+
+function makeAvailableSandboxRunner() {
+  return {
+    isAvailable: jest.fn().mockResolvedValue(true),
+    runPython: jest.fn(),
+    runPythonBatch: jest.fn(),
+    runPythonBatchDetailed: jest.fn(),
+  };
+}
+
+function makeFrozenV3Checkpoint<T extends Record<string, unknown>>(
+  statementMarkdown: string,
+  checkpoint: T,
+  problemKind: 'traditional' | 'function' = 'traditional',
+  customChecker = false,
+): T & {
+  checkpointSchemaVersion: 2;
+  promptVersion: typeof TESTDATA_PIPELINE_PROMPT_VERSION;
+  statementHash: string;
+  specHash: string;
+  roleDependencies: Record<'oracle' | 'artifacts' | 'verifier', string>;
+} {
+  const snapshot = createStatementSnapshot(statementMarkdown);
+  const context = createTestdataPipelineContext({
+    runId: 'test-v3-checkpoint',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement: snapshot,
+    spec: makeObservedProblemSpec(statementMarkdown, {
+      problemKind,
+      outputPolicy: customChecker ? { kind: 'custom-checker' } : { kind: 'exact' },
+    }),
+    risk: {
+      tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const restoredVerifier = checkpoint.verifier;
+  const strictCheckpoint = restoredVerifier && typeof restoredVerifier === 'object'
+    ? {
+      ...checkpoint,
+      verifier: {
+        ...restoredVerifier,
+        ...(!('validatorManifestStatus' in restoredVerifier) ? {
+          validatorManifestStatus: 'valid' as const,
+          validatorManifest: { constraintIds: [], invariantIds: [] },
+          validatorProbeRecipes: [],
+        } : {}),
+      },
+    }
+    : checkpoint;
+  return {
+    ...strictCheckpoint,
+    checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statementHash: snapshot.statementHash,
+    specHash: context.specHash,
+    roleDependencies: {
+      oracle: hashTestdataRoleIdentity('checkpoint-oracle\0model'),
+      artifacts: hashTestdataRoleIdentity('checkpoint-artifacts\0model'),
+      verifier: hashTestdataRoleIdentity('checkpoint-verifier\0model'),
+    },
+  };
+}
+
+function makeRoleClient(
+  role: TestdataRoleClient['role'],
+  endpointId: string,
+  modelName: string,
+  ...responses: Array<string | Error>
+): TestdataRoleClient & { chat: jest.Mock } {
+  const chat = jest.fn();
+  for (const response of responses) {
+    if (response instanceof Error) chat.mockRejectedValueOnce(response);
+    else chat.mockResolvedValueOnce({
+      content: response,
+      usedModel: { endpointId, endpointName: `${endpointId}-name`, modelName },
+    });
+  }
+  const identity = { endpointId, endpointName: `${endpointId}-name`, modelName };
+  return {
+    role,
+    source: 'role',
+    chain: [identity],
+    identities: [identity],
+    identity,
+    client: { chat } as never,
+    chat,
+  };
+}
+
+function makeRoleClientWithActual(
+  role: TestdataRoleClient['role'],
+  configuredEndpointId: string,
+  configuredModelName: string,
+  actualEndpointId: string,
+  actualModelName: string,
+  ...responses: Array<string | Error>
+): TestdataRoleClient & { chat: jest.Mock } {
+  const chat = jest.fn();
+  for (const response of responses) {
+    if (response instanceof Error) chat.mockRejectedValueOnce(response);
+    else chat.mockResolvedValueOnce({
+        content: response,
+        usedModel: {
+          endpointId: actualEndpointId,
+          endpointName: `${actualEndpointId}-name`,
+          modelName: actualModelName,
+        },
+      });
+  }
+  const identity = {
+    endpointId: configuredEndpointId,
+    endpointName: `${configuredEndpointId}-name`,
+    modelName: configuredModelName,
+  };
+  return {
+    role,
+    source: 'role',
+    chain: [identity],
+    identities: [identity],
+    identity,
+    client: { chat } as never,
+    chat,
+  };
+}
+
 describe('parseGenerationResponse', () => {
   const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] };
 
@@ -1166,6 +1502,10 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(blueprint.generatorCode).toContain('json.dumps');
     expect(blueprint.oracleCode).toContain('print(input())');
     expect(blueprint.templates?.java).toContain('public class Main');
+    expect(blueprint.solutions).toEqual(expect.objectContaining({
+      py: expect.any(String), java: expect.any(String), cc: expect.any(String),
+    }));
+    expect(blueprint.solutionCode).toBe(blueprint.solutions?.py);
   });
 
   it('剥离每个蓝图代码节各自携带的 Markdown 围栏', () => {
@@ -1238,7 +1578,7 @@ describe('Hydro 沙箱生成蓝图', () => {
     );
   });
 
-  it('自定义 checker 题只验证标程可运行，不用纯文本相等误拒多解输出', async () => {
+  it('自定义 checker 不可用时不用纯文本判定并对未裁决样例记零分', async () => {
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
       runPython: jest.fn().mockResolvedValue({
@@ -1263,8 +1603,11 @@ describe('Hydro 沙箱生成蓝图', () => {
       undefined,
       true,
     );
-    expect(response.verification?.sampleCheck).toBeUndefined();
-    expect(response.notes).toContain('自定义 checker');
+    expect(response.verification?.sampleCheck).toEqual({
+      total: 1,
+      passed: 0,
+      skipped: [{ sampleIndex: 1, skippedReason: 'checker-infra-error' }],
+    });
   });
 
   it('可执行 checker 用 testlib 语义回归题面样例，而非纯文本比较', async () => {
@@ -1283,6 +1626,10 @@ describe('Hydro 沙箱生成蓝图', () => {
     const checkerExecutor = {
       status: 'ready' as const,
       runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: 1, passed: 1, infraFailures: 0,
+      },
       runBatch: jest.fn().mockResolvedValue(['accept']),
       runChecker: jest.fn().mockResolvedValue('accept'),
       dispose: jest.fn(),
@@ -1438,7 +1785,7 @@ describe('assemblePlan', () => {
       '既有完整测试点 #1 已并入子任务 1,请人工复核其子任务归属。',
     );
     expect(plan.notesStructured?.system).toContain(
-      '已按题面子任务表生成 2 档分层数据;VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,建议抽查各档 .in 是否符合对应约束',
+      '已按题面子任务表生成 2 档分层数据;VALIDATOR 已按服务器冻结分配校验全局约束与对应子任务约束,建议抽查各档 .in 是否符合对应约束',
     );
     expect(plan.notes).not.toContain('子任务分值合计为');
   });
@@ -1655,6 +2002,8 @@ describe('assemblePlan', () => {
     response.verification = {
       mode: 'sandbox',
       oracleKind: 'ai-solution',
+      verified: false,
+      wouldBlock: false,
       discrimination: {
         targets: [{
           kind: 'wrong-algorithm',
@@ -1697,6 +2046,8 @@ describe('assemblePlan', () => {
     response.verification = {
       mode: 'sandbox',
       oracleKind: 'ai-solution',
+      verified: false,
+      wouldBlock: false,
       discrimination: {
         targets: [
           {
@@ -1789,13 +2140,15 @@ describe('buildTestdataSystemPrompt / buildTestdataUserPrompt', () => {
     expect(up).toContain('CASE 5: large');
   });
 
-  it('超长题面被截断', () => {
+  it('超过旧提示长度的题面仍完整保留末尾约束', () => {
+    const tail = 'FINAL_CONSTRAINT_MUST_SURVIVE';
     const up = buildTestdataUserPrompt({
       problemTitle: 't',
-      statementMarkdown: 'x'.repeat(TESTDATA_GEN_LIMITS.MAX_STATEMENT_LENGTH + 100),
+      statementMarkdown: `${'x'.repeat(20_100)}${tail}`,
       options: baseOptions,
     });
-    expect(up).toContain('题面过长已截断');
+    expect(up).toContain(tail);
+    expect(up).not.toContain('题面过长已截断');
   });
 
   it('User Prompt 包含填空指定、数据规模与标准答案', () => {
@@ -1929,23 +2282,81 @@ describe('stage-specific sandbox repair', () => {
     expect(classifySandboxRepairScope(new Error('AC 候选标程与独立 BRUTE 不一致'))).toBe('accepted-std');
     expect(classifySandboxRepairScope(new Error('template.py 与标程不一致'))).toBe('template-py');
     expect(classifySandboxRepairScope(new Error('未知协议错误'))).toBe('full');
-    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options)).toContain('只输出修复后的 @@@GENERATOR@@@');
-    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options))
-      .toContain('同时输出修复后的 @@@GENERATOR@@@ 与 @@@VALIDATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('GENERATOR 超时'), options, 'generator')).toContain('只输出修复后的 @@@GENERATOR@@@');
+    expect(buildSandboxRepairPrompt(new Error('第 3 个压力 .in 未通过输入校验'), options, 'validator'))
+      .toContain('只输出修复后的 @@@VALIDATOR@@@');
+    const cppCompileFailure = new TestdataPipelineError(
+      'arbitrary compile wording A',
+      'ORACLE_COMPILE_FAILED',
+      'oracle',
+      'oracle',
+      'repair-artifact',
+      { failureKind: 'compile', oracleLanguage: 'cpp' },
+    );
     const cppRepair = buildSandboxRepairPrompt(
-      new Error('ORACLE_LANG=cpp 的 C++17 ORACLE 编译失败：prog.cc:7: error'),
+      cppCompileFailure,
       options,
+      'oracle',
     );
     expect(cppRepair).toContain('当前 ORACLE 语言为 C++17');
-    expect(cppRepair).toContain('prog.cc:7: error');
-    const cppInfraRepair = buildSandboxRepairPrompt(
-      new Error('ORACLE_CPP_INFRA：connect ECONNREFUSED'),
+    const sameTypedCppRepair = buildSandboxRepairPrompt(
+      new TestdataPipelineError(
+        'completely different localized wording B',
+        'ORACLE_COMPILE_FAILED',
+        'oracle',
+        'oracle',
+        'repair-artifact',
+        { failureKind: 'compile', oracleLanguage: 'cpp' },
+      ),
       options,
+      'oracle',
+    );
+    expect(sameTypedCppRepair).toContain('当前 ORACLE 语言为 C++17');
+    const cppInfraRepair = buildSandboxRepairPrompt(
+      new TestdataPipelineError(
+        'arbitrary infrastructure wording',
+        'ORACLE_COMPILE_FAILED',
+        'oracle',
+        'oracle',
+        'repair-artifact',
+        { failureKind: 'infra', oracleLanguage: 'cpp' },
+      ),
+      options,
+      'oracle',
     );
     expect(cppInfraRepair).toContain('改用 Python 3');
     expect(cppInfraRepair).not.toContain('保持该语言不变');
     expect(buildSandboxRepairPrompt(new Error('未知协议错误'), options))
       .toContain('若输出 @@@NOTES@@@，NOTES 至多 2 句');
+
+    const invalidStressInput = new TestdataPipelineError(
+      'STRESS_GENERATOR produced an invalid stdin payload',
+      'GENERATOR_INVALID_INPUT',
+      'stress-generator',
+      'stress-generator',
+      'repair-artifact',
+      { caseIndex: 2 },
+    );
+    const stressRepair = buildSandboxRepairPrompt(invalidStressInput, options);
+    expect(stressRepair).toContain('独立验证器的 STRESS_GENERATOR 未通过沙箱验证');
+    expect(stressRepair.match(/@@@STRESS_GENERATOR@@@/g)).toHaveLength(1);
+    expect(stressRepair).not.toContain('@@@BRUTE@@@');
+    expect(stressRepair).not.toContain('@@@VALIDATOR@@@');
+    expect(stressRepair).not.toContain('@@@SAMPLE_INPUTS@@@');
+
+    const invalidFunctionSample = new TestdataPipelineError(
+      'function sample transcoding failed',
+      'GENERATOR_INVALID_INPUT',
+      'function-samples',
+      'stress-generator',
+      'repair-artifact',
+      { caseIndex: 1 },
+    );
+    const functionSampleRepair = buildSandboxRepairPrompt(invalidFunctionSample, options);
+    expect(functionSampleRepair.match(/@@@SAMPLE_INPUTS@@@/g)).toHaveLength(1);
+    expect(functionSampleRepair).not.toContain('@@@BRUTE@@@');
+    expect(functionSampleRepair).not.toContain('@@@STRESS_GENERATOR@@@');
+    expect(functionSampleRepair).not.toContain('@@@VALIDATOR@@@');
     const tieredCoverage = allocateCasesToSubtasks(3, [
       { id: 1, score: 40, constraints: 'n<=100' },
       { id: 2, score: 60, constraints: 'n<=100000' },
@@ -1963,6 +2374,92 @@ describe('stage-specific sandbox repair', () => {
     }
   });
 
+  it('solution marker prompts require a qualified section for every selected language', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
+    const solutionPrompt = buildSolutionBlueprintUserPrompt({
+      problemTitle: '两数之和', statementMarkdown: '输入两个整数。', options: fnOptions,
+    });
+    const blueprintPrompt = buildSandboxBlueprintSystemPrompt();
+
+    for (const marker of ['@@@SOLUTION:py@@@', '@@@SOLUTION:java@@@', '@@@SOLUTION:cc@@@']) {
+      expect(solutionPrompt).toContain(marker);
+      expect(blueprintPrompt).toContain(marker);
+    }
+  });
+
+  it('template-java repair scope replaces only the Java template', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
+    const prompt = buildSandboxRepairPrompt(new Error('template.java 与标程不一致'), fnOptions, 'template-java');
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions);
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@SOLUTION:java@@@\nclass Solution { String solve(String v) { return v + "!"; } }\n@@@TEMPLATE:java@@@\npublic class Main {}',
+      'template-java',
+    );
+
+    expect(prompt).not.toContain('@@@SOLUTION:java@@@');
+    expect(prompt).toContain('@@@TEMPLATE:java@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:py@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:cc@@@');
+    expect(merged.solutions?.java).toBe(original.solutions?.java);
+    expect(merged.templates?.java).toContain('public class Main');
+    expect(merged.solutions?.py).toBe(original.solutions?.py);
+    expect(merged.solutions?.cc).toBe(original.solutions?.cc);
+    expect(merged.templates?.py).toBe(original.templates?.py);
+    expect(merged.templates?.cc).toBe(original.templates?.cc);
+  });
+
+  it('template-cc repair scope replaces only the C++ template', () => {
+    const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'] };
+    const prompt = buildSandboxRepairPrompt(new Error('template.cc 与标程不一致'), fnOptions, 'template-cc');
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions);
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@SOLUTION:cc@@@\nstring solve(string value) { return value + "!"; }\n@@@TEMPLATE:cc@@@\n#include "foo.cc"\nint main() { return 0; }',
+      'template-cc',
+    );
+
+    expect(prompt).not.toContain('@@@SOLUTION:cc@@@');
+    expect(prompt).toContain('@@@TEMPLATE:cc@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:py@@@');
+    expect(prompt).not.toContain('@@@SOLUTION:java@@@');
+    expect(merged.solutions?.cc).toBe(original.solutions?.cc);
+    expect(merged.templates?.cc).toContain('#include "foo.cc"');
+    expect(merged.solutions?.py).toBe(original.solutions?.py);
+    expect(merged.solutions?.java).toBe(original.solutions?.java);
+    expect(merged.templates?.py).toBe(original.templates?.py);
+    expect(merged.templates?.java).toBe(original.templates?.java);
+  });
+
+  it('legacy Python solution survives Java and C++ template repairs', () => {
+    const legacy = {
+      problemType: 'function' as const,
+      generatorCode: 'print("{}")',
+      oracleCode: 'print(input())',
+      solutionCode: 'def solve(value):\n    return value\n',
+      templates: {
+        py: 'print(solve(input()))\n',
+        java: 'public class Main {}\n',
+        cc: '#include "foo.cc"\nint main() { return 0; }\n',
+      },
+    };
+    const javaRepaired = mergeSandboxBlueprintRepair(
+      legacy,
+      '@@@SOLUTION:java@@@\nclass Solution {}\n@@@TEMPLATE:java@@@\npublic class Main { }',
+      'template-java',
+    );
+    const ccRepaired = mergeSandboxBlueprintRepair(
+      legacy,
+      '@@@SOLUTION:cc@@@\nint solve() { return 1; }\n@@@TEMPLATE:cc@@@\n#include "foo.cc"\nint main() { return 0; }',
+      'template-cc',
+    );
+
+    for (const repaired of [javaRepaired, ccRepaired]) {
+      expect(repaired.solutions?.py).toBe(legacy.solutionCode);
+      expect(repaired.solutionCode).toBe(legacy.solutionCode);
+    }
+  });
+
   it('定向替换 GENERATOR 并保留已验证的 ORACLE', () => {
     const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
     const merged = mergeSandboxBlueprintRepair(
@@ -1974,33 +2471,184 @@ describe('stage-specific sandbox repair', () => {
     expect(merged.oracleCode).toBe(original.oracleCode);
   });
 
-  it('Python 模板修复必须成对替换 SOLUTION 与 TEMPLATE:py', () => {
+  it('Generator-only repair preserves every non-Generator artifact byte-for-byte', () => {
+    const original = {
+      ...parseSandboxBlueprint(makeSandboxBlueprint('function'), {
+        problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+      }),
+      stressGeneratorCode: 'print(stress())  # frozen-stress\n',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-above-max' as const, fieldId: 'n',
+      }],
+      functionSampleInputs: [{ id: 'sample-1', input: '1\n' }],
+    };
+    const immutableBefore = JSON.stringify({
+      validatorCode: original.validatorCode,
+      validatorManifestStatus: original.validatorManifestStatus,
+      validatorManifest: original.validatorManifest,
+      validatorProbeRecipes: original.validatorProbeRecipes,
+      bruteCode: original.bruteCode,
+      stressGeneratorCode: original.stressGeneratorCode,
+      functionSampleInputs: original.functionSampleInputs,
+      oracleCode: original.oracleCode,
+      solutionCode: original.solutionCode,
+      solutions: original.solutions,
+      templates: original.templates,
+    });
+
+    const repaired = mergeSandboxBlueprintRepair(
+      original,
+      [
+        '@@@GENERATOR@@@', 'print("repaired-generator")',
+        '@@@VALIDATOR@@@', 'print("malicious-validator")',
+        '@@@VALIDATOR_MANIFEST@@@', '{"constraintIds":[],"invariantIds":[]}',
+        '@@@VALIDATOR_PROBE_RECIPES@@@', '{"recipes":[]}',
+        '@@@ORACLE@@@', 'print("malicious-oracle")',
+        '@@@SOLUTION:py@@@', 'def solve(): return "malicious"',
+        '@@@TEMPLATE:py@@@', 'print("malicious-template")',
+      ].join('\n'),
+      'generator',
+    );
+
+    expect(repaired.generatorCode).toContain('repaired-generator');
+    expect(JSON.stringify({
+      validatorCode: repaired.validatorCode,
+      validatorManifestStatus: repaired.validatorManifestStatus,
+      validatorManifest: repaired.validatorManifest,
+      validatorProbeRecipes: repaired.validatorProbeRecipes,
+      bruteCode: repaired.bruteCode,
+      stressGeneratorCode: repaired.stressGeneratorCode,
+      functionSampleInputs: repaired.functionSampleInputs,
+      oracleCode: repaired.oracleCode,
+      solutionCode: repaired.solutionCode,
+      solutions: repaired.solutions,
+      templates: repaired.templates,
+    })).toBe(immutableBefore);
+  });
+
+  it.each([
+    [
+      'stress-generator',
+      '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")',
+      '@@@BRUTE@@@\nprint("malicious-brute")',
+    ],
+    [
+      'brute',
+      '@@@BRUTE@@@\nprint("repaired-brute")',
+      '@@@VALIDATOR@@@\nprint("malicious-validator")',
+    ],
+    [
+      'function-samples',
+      '@@@SAMPLE_INPUTS@@@\n{"samples":[{"id":"1","input":"2 3"}]}',
+      '@@@VALIDATOR_MANIFEST@@@\n{"constraintIds":[],"invariantIds":[]}',
+    ],
+  ] as const)('%s repair rejects an adversarial extra verifier section', (
+    scope,
+    validSection,
+    maliciousSection,
+  ) => {
+    const original = {
+      ...parseSandboxBlueprint(makeSandboxBlueprint('function'), {
+        problemKind: 'function', caseCount: 1, languages: ['py'],
+      }),
+      bruteCode: 'print("frozen-brute")\n',
+      stressGeneratorCode: 'print("frozen-stress")\n',
+      validatorCode: 'raise SystemExit(0)  # frozen-validator\n',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: [] },
+      validatorProbeRecipes: [],
+      functionSampleInputs: [{ id: '1', input: '1 1\n' }],
+    };
+    expect(() => (mergeSandboxBlueprintRepair as any)(
+      original,
+      `${validSection}\n${maliciousSection}`,
+      scope,
+      [{ id: '1', input: 'a = 2, b = 3', output: '5' }],
+    )).toThrow(/只允许|单一|分节/);
+  });
+
+  it.each([
+    ['stress-generator', '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")', 'stressGeneratorCode'],
+    ['brute', '@@@BRUTE@@@\nprint("repaired-brute")', 'bruteCode'],
+    [
+      'function-samples',
+      '@@@SAMPLE_INPUTS@@@\n{"samples":[{"id":"1","input":"2 3"}]}',
+      'functionSampleInputs',
+    ],
+  ] as const)('%s repair changes exactly its single verifier section', (
+    scope,
+    response,
+    changedKey,
+  ) => {
+    const original = {
+      ...parseSandboxBlueprint(makeSandboxBlueprint('function'), {
+        problemKind: 'function', caseCount: 1, languages: ['py'],
+      }),
+      bruteCode: 'print("frozen-brute")\n',
+      stressGeneratorCode: 'print("frozen-stress")\n',
+      validatorCode: 'raise SystemExit(0)  # frozen-validator\n',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: [] },
+      validatorProbeRecipes: [],
+      functionSampleInputs: [{ id: '1', input: '1 1\n' }],
+    };
+    const repaired = (mergeSandboxBlueprintRepair as any)(
+      original,
+      response,
+      scope,
+      [{ id: '1', input: 'a = 2, b = 3', output: '5' }],
+    );
+    const before = { ...original, [changedKey]: undefined };
+    const after = { ...repaired, [changedKey]: undefined };
+
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+    if (changedKey === 'functionSampleInputs') {
+      expect(repaired.functionSampleInputs).toEqual([{ id: '1', input: '2 3\n' }]);
+    } else {
+      expect(repaired[changedKey]).toContain(`repaired-${scope === 'stress-generator' ? 'stress' : 'brute'}`);
+    }
+  });
+
+  it('Python 模板修复不允许改写已验证学生解', () => {
     const fnOptions: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
     const original = parseSandboxBlueprint(makeSandboxBlueprint('function'), fnOptions, { allowMissingTemplates: true });
     const merged = mergeSandboxBlueprintRepair(
       original,
-      '@@@SOLUTION@@@\ndef solve(x):\n    return x\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
+      '@@@SOLUTION:py@@@\ndef solve(x):\n    return "MALICIOUS_REWRITE"\n@@@TEMPLATE:py@@@\nprint(solve(input()))',
       'template-py',
     );
-    expect(merged.solutionCode).toContain('def solve');
+    expect(merged.solutionCode).toBe(original.solutionCode);
     expect(merged.templates?.py).toContain('print(solve');
   });
 
-  it('输入校验修复必须同时替换 GENERATOR 与 VALIDATOR', () => {
+  it('修复 VALIDATOR 不会改变已验证 GENERATOR', () => {
     const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
-    expect(() => mergeSandboxBlueprintRepair(
-      original,
-      '@@@GENERATOR@@@\nprint("{}")',
-      'validator',
-    )).toThrow(/未返回 VALIDATOR/);
-
     const merged = mergeSandboxBlueprintRepair(
       original,
-      '@@@GENERATOR@@@\nprint("{}")\n@@@VALIDATOR@@@\nimport sys\nsys.exit(0)',
+      '@@@GENERATOR@@@\nprint("MALICIOUS_GENERATOR_REWRITE")\n@@@VALIDATOR@@@\nimport sys\nsys.exit(0)',
       'validator',
     );
-    expect(merged.generatorCode).toContain('print');
+    expect(merged.generatorCode).toBe(original.generatorCode);
     expect(merged.validatorCode).toContain('sys.exit');
+    const prompt = buildSandboxRepairPrompt(new Error('validator rejected input'), options, 'validator');
+    expect(prompt).toContain('@@@VALIDATOR@@@');
+    expect(prompt).not.toContain('@@@GENERATOR@@@');
+  });
+
+  it('Oracle repair cannot replace the independent BRUTE section', () => {
+    const original = parseSandboxBlueprint(makeSandboxBlueprint('traditional'), options);
+    original.bruteCode = 'print("INDEPENDENT_BRUTE")\n';
+    const merged = mergeSandboxBlueprintRepair(
+      original,
+      '@@@ORACLE@@@\nprint(input())\n@@@BRUTE@@@\nprint("MALICIOUS_ORACLE_BRUTE")',
+      'oracle',
+    );
+
+    expect(merged.oracleCode).toContain('print(input())');
+    expect(merged.bruteCode).toBe(original.bruteCode);
+    expect(merged.bruteCode).not.toContain('MALICIOUS_ORACLE_BRUTE');
   });
 
   it('最终失败携带模型与阶段遥测元数据', () => {
@@ -2013,6 +2661,8 @@ describe('stage-specific sandbox repair', () => {
       endpointName: 'main',
       modelName: 'gpt-test',
       usedModels: ['main/gpt-test'],
+      modelTelemetryRole: 'primary',
+      modelTelemetryIdentity: 'ep1/gpt-test',
       aiAttemptCount: 1,
       recommendDeeperReasoning: true,
     }));
@@ -2082,6 +2732,859 @@ describe('buildSkeletonPlan', () => {
 // ─── TestdataGenService.generate ──────────────────────────────────────────────
 
 describe('TestdataGenService.generate', () => {
+  describe('risk-gated Spec consensus', () => {
+    const lowStatement = 'Input one integer. Output it.';
+    const highStatement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error. Output it exactly.';
+
+    it('auto uses only Primary extraction for a low-risk run', async () => {
+      delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+      const spec = JSON.stringify(makeObservedProblemSpec(lowStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+      const baseClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }) };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'low auto', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).not.toHaveBeenCalled();
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+      expect(plan.modelRolesUsed).toEqual(['specPrimary']);
+      expect(plan.modelCallCount).toBe(2);
+      expect(plan.modelCallCount).toBeLessThan(40);
+    });
+
+    it('production auto default keeps a low-risk observe sandbox run on Primary only', async () => {
+      const statement = 'Input one integer. Output it.';
+      const options: GenerateOptions = {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+      };
+      const roleClients = makeFrozenSpecRoleClients(statement, 'traditional');
+      const checkpoint = makeFrozenV3Checkpoint(statement, {
+        solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+        artifacts: parseGenerationArtifacts(
+          makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+        ),
+        verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+        killTargets: [],
+      });
+      const runner = makeCheckpointRunner();
+      const baseClient = { chat: jest.fn() };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'sandbox', sandboxRunner: runner, reliabilityMode: 'observe', roleClients,
+      }).generate({
+        problemTitle: 'default auto sandbox', statementMarkdown: statement, options, checkpoint,
+      });
+
+      expect(roleClients.specPrimary?.client.chat).toHaveBeenCalledTimes(1);
+      expect(roleClients.specCritic?.client.chat).not.toHaveBeenCalled();
+      expect(plan.modelRolesUsed).toEqual(['specPrimary']);
+      expect(plan.verification).toMatchObject({ mode: 'sandbox' });
+      expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+      expect(runner.runPython).toHaveBeenCalled();
+      expect(baseClient.chat).not.toHaveBeenCalled();
+    });
+
+    it('auto keeps dual extraction and adjudication for a high-risk run', async () => {
+      delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+      const primarySpec = makeObservedProblemSpec(highStatement);
+      const criticSpec = makeObservedProblemSpec(highStatement, { outputPolicy: { kind: 'token' } });
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(primarySpec));
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', JSON.stringify(criticSpec));
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [{
+          path: 'outputPolicy', selected: 'A', evidenceQuote: 'Output it exactly.', reason: 'exact output',
+        }],
+      }));
+
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'high auto', statementMarkdown: highStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).toHaveBeenCalledTimes(1);
+      expect(adjudicator.chat).toHaveBeenCalledTimes(1);
+    });
+
+    it('always forces dual extraction for a low-risk run', async () => {
+      process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+      const spec = JSON.stringify(makeObservedProblemSpec(lowStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+      const baseClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }) };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'low always', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).toHaveBeenCalledTimes(1);
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+      expect(plan.modelRolesUsed).toEqual(['specPrimary', 'specCritic']);
+    });
+
+    it('off uses only Primary extraction for a high-risk run', async () => {
+      process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'off';
+      const spec = JSON.stringify(makeObservedProblemSpec(highStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'direct', reliabilityMode: 'observe',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'high off', statementMarkdown: highStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(critic.chat).not.toHaveBeenCalled();
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+    });
+
+    it('legacy skips every Spec role even when consensus is forced', async () => {
+      process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+      const spec = JSON.stringify(makeObservedProblemSpec(lowStatement));
+      const primary = makeRoleClient('specPrimary', 'primary', 'spec-a', spec);
+      const critic = makeRoleClient('specCritic', 'critic', 'spec-b', spec);
+      const adjudicator = makeRoleClient('adjudicator', 'judge', 'spec-judge', '{}');
+      const baseClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }) };
+
+      const plan = await new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'legacy',
+        roleClients: { specPrimary: primary, specCritic: critic, adjudicator },
+      }).generate({
+        problemTitle: 'legacy', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      });
+
+      expect(plan.files.length).toBeGreaterThan(0);
+      expect(baseClient.chat).toHaveBeenCalledTimes(1);
+      expect(primary.chat).not.toHaveBeenCalled();
+      expect(critic.chat).not.toHaveBeenCalled();
+      expect(adjudicator.chat).not.toHaveBeenCalled();
+      expect(plan.specSchemaVersion).toBeUndefined();
+    });
+
+    it('stops at the run call limit before issuing a repair model call', async () => {
+      delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
+      process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS = '2';
+      const primary = makeRoleClient(
+        'specPrimary', 'primary', 'spec-a',
+        JSON.stringify(makeObservedProblemSpec(lowStatement)),
+      );
+      const baseClient = {
+        chat: jest.fn()
+          .mockResolvedValueOnce({
+            content: makeAiJson({ templates: {} }),
+            usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+          })
+          .mockResolvedValueOnce({
+            content: '@@@TEMPLATE:py@@@\nprint(solve(input()))',
+            usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'repair' },
+          }),
+      };
+
+      await expect(new TestdataGenService(baseClient as never, {
+        mode: 'direct', reliabilityMode: 'observe', roleClients: { specPrimary: primary },
+      }).generate({
+        problemTitle: 'budget', statementMarkdown: lowStatement,
+        options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      })).rejects.toMatchObject({
+        code: 'PIPELINE_BUDGET_EXHAUSTED',
+        artifact: 'pipeline',
+        retryPolicy: 'no-retry',
+        safeDetails: { callCount: 3, limit: 2 },
+      });
+
+      expect(primary.chat).toHaveBeenCalledTimes(1);
+      expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('keeps the complete normalized statement in the isolated kill-target prompt', () => {
+    const tail = 'FINAL_KILL_TARGET_CONSTRAINT';
+    const statement = `${'x'.repeat(12_100)}\r\n${tail}`;
+    const prompt = buildKillTargetsUserPrompt({ statement, analysis: '', samples: [] });
+
+    expect(prompt).toContain(tail);
+    expect(prompt).toContain(statement.replace(/\r\n/g, '\n'));
+    expect(prompt).not.toContain('题面（最多 6000 字符）');
+  });
+
+  it('caps five parsed kill-target sections at the first two and records a structured warning', () => {
+    const raw = Array.from({ length: 5 }, (_, index) => [
+      `=== KILL_TARGET:${index % 2 === 0 ? 'boundary' : 'wrong-algorithm'} ===`,
+      `DESC: target-${index + 1}`,
+      '```python',
+      `print(${index + 1})`,
+      '```',
+    ].join('\n')).join('\n');
+    const notesStructured = { warnings: [] as string[], system: [] as string[] };
+
+    const targets = parseKillTargetsResponse(raw, notesStructured);
+
+    expect(targets).toHaveLength(2);
+    expect(targets.map((target: { description: string }) => target.description))
+      .toEqual(['target-1', 'target-2']);
+    expect(notesStructured.warnings).toEqual([
+      '模型返回了 5 个错误解靶子；服务端仅保留前 2 个。',
+    ]);
+  });
+
+  it.each([0, 1, 2])(
+    'keeps %i parsed kill-target sections unchanged without a warning',
+    count => {
+      const raw = Array.from({ length: count }, (_, index) => [
+        '=== KILL_TARGET:boundary ===',
+        `DESC: target-${index + 1}`,
+        '```python',
+        `print(${index + 1})`,
+        '```',
+      ].join('\n')).join('\n');
+      const notesStructured = { warnings: [] as string[], system: [] as string[] };
+
+      const targets = parseKillTargetsResponse(raw, notesStructured);
+
+      expect(targets).toHaveLength(count);
+      expect(targets.map((target: { description: string }) => target.description))
+        .toEqual(Array.from({ length: count }, (_, index) => `target-${index + 1}`));
+      expect(notesStructured.warnings).toEqual([]);
+    },
+  );
+
+  it('marks frozen kill-target sample truncation only when sample content exceeds 1000 chars', () => {
+    const statement = 'Read one integer and print it.';
+    const snapshot = createStatementSnapshot(statement);
+    const context = createTestdataPipelineContext({
+      runId: 'kill-target-truncation',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(statement, { problemKind: 'traditional' }),
+      risk: {
+        tier: 'low', score: 0, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+
+    const overLimit = buildKillTargetsUserPrompt({
+      statement: '', analysis: '', context,
+      samples: [{ input: 'i'.repeat(1001), output: 'o'.repeat(1000) }],
+    });
+    const atLimit = buildKillTargetsUserPrompt({
+      statement: '', analysis: '', context,
+      samples: [{ input: 'i'.repeat(1000), output: 'o'.repeat(1000) }],
+    });
+
+    expect(overLimit).toContain('i'.repeat(1000));
+    expect(overLimit).toContain('（样例过长已截断）');
+    expect(atLimit).not.toContain('（样例过长已截断）');
+  });
+
+  it('marks legacy kill-target and hack analysis only when their existing limits truncate it', () => {
+    const target = {
+      kind: 'wrong-algorithm' as const,
+      description: 'greedy mistake',
+      code: 'print(input())',
+    };
+    const overLimitKillPrompt = buildKillTargetsUserPrompt({
+      statement: 'statement', analysis: 'a'.repeat(2001), samples: [],
+    });
+    const atLimitKillPrompt = buildKillTargetsUserPrompt({
+      statement: 'statement', analysis: 'a'.repeat(2000), samples: [],
+    });
+    const overLimitHackPrompt = buildHackCasesUserPrompt({
+      analysis: 'a'.repeat(3001), target,
+    });
+    const atLimitHackPrompt = buildHackCasesUserPrompt({
+      analysis: 'a'.repeat(3000), target,
+    });
+
+    expect(overLimitKillPrompt).toContain('（分析过长已截断）');
+    expect(atLimitKillPrompt).not.toContain('（分析过长已截断）');
+    expect(overLimitHackPrompt).toContain('（分析过长已截断）');
+    expect(atLimitHackPrompt).not.toContain('（分析过长已截断）');
+  });
+
+  it('freezes independently grounded Primary/Critic consensus for downstream use and exposes only its summary', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+    const statement = '## Constraints\nn >= 1';
+    const spec = makeObservedProblemSpec(statement, {
+      constraints: [{
+        id: 'c_n',
+        expression: 'SECRET_SPEC_EXPRESSION',
+        machineCheckable: true,
+        scope: 'global',
+        evidence: { quote: 'n >= 1', section: 'Constraints', startOffset: 0, endOffset: 1 },
+      }],
+      invariants: [{
+        id: 'i_n', kind: 'custom', expression: 'SECRET_SPEC_INVARIANT', machineCheckable: false,
+        evidence: { quote: 'n >= 1', section: 'Constraints' },
+      }],
+      uncertainties: [{ code: 'u_semantics', description: 'SECRET_SPEC_UNCERTAINTY' }],
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(spec),
+          usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: JSON.stringify(spec),
+          usage: { promptTokens: 11, completionTokens: 21, totalTokens: 32 },
+          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
+        })
+        .mockResolvedValueOnce({
+          content: makeAiJson(),
+          usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 },
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+        }),
+    };
+    const onProblemSpecObservation = jest.fn();
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'observed',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      onProblemSpecObservation,
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat.mock.calls[0][1]).toContain('严格 JSON');
+    expect(mockClient.chat.mock.calls[1][0]).toEqual(mockClient.chat.mock.calls[0][0]);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).toContain('SECRET_SPEC_EXPRESSION');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).toContain('SECRET_SPEC_INVARIANT');
+    expect(JSON.stringify(mockClient.chat.mock.calls[2])).toContain('SECRET_SPEC_UNCERTAINTY');
+    expect(plan.specSchemaVersion).toBe(1);
+    expect(plan.problemSpecSummary).toEqual({
+      statementHash: createStatementSnapshot(statement).statementHash,
+      constraintCount: 1,
+      invariantCount: 1,
+      unresolvedUncertainties: 1,
+    });
+    expect(plan).toMatchObject({
+      specConsensusStatus: 'consensus',
+      specConflictCount: 0,
+      unresolvedConflictCount: 0,
+      modelRolesUsed: ['specPrimary', 'specCritic'],
+    });
+    expect(plan).not.toHaveProperty('problemSpec');
+    expect(plan.tokenUsage?.totalTokens).toBe(362);
+    expect(onProblemSpecObservation).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      succeeded: true,
+      constraintCount: 1,
+      invariantCount: 1,
+      uncertaintyCount: 1,
+      conflictCount: 0,
+      consensusStatus: 'consensus',
+      unresolvedConflictCount: 0,
+      rolesUsed: ['specPrimary', 'specCritic'],
+    });
+  });
+
+  it.each([
+    ['SPEC_PARSE_FAILED', 'not strict json'],
+    ['SPEC_EVIDENCE_NOT_FOUND', JSON.stringify(makeObservedProblemSpec('## Constraints\nn >= 1', {
+      constraints: [{
+        id: 'c_n', expression: 'n is prime', machineCheckable: true, scope: 'global',
+        evidence: { quote: 'n is prime', section: 'Constraints' },
+      }],
+    }))],
+  ])('continues the old success path when observe extraction records %s', async (failureCode, specResponse) => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+    const statement = '## Constraints\nn >= 1';
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: specResponse,
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: specResponse,
+          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
+        })
+        .mockResolvedValueOnce({
+          content: makeAiJson(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+        }),
+    };
+    const onProblemSpecObservation = jest.fn();
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'observe failure',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+      onProblemSpecObservation,
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(plan.specSchemaVersion).toBe(1);
+    expect(plan.problemSpecSummary).toBeUndefined();
+    expect(plan.notesStructured?.warnings).toContainEqual(expect.stringContaining(failureCode));
+    expect(onProblemSpecObservation).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      succeeded: false,
+      conflictCount: 0,
+      consensusStatus: 'unresolved',
+      unresolvedConflictCount: 1,
+      rolesUsed: ['specPrimary', 'specCritic'],
+    });
+  });
+
+  it('keeps the complete statement in Spec extraction and trusted downstream evidence without truncation', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+    const tail = 'FINAL_CONSTRAINT_AT_STATEMENT_TAIL';
+    const statement = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_100)}${tail}`;
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec(statement)),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
+        })
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec(statement)),
+          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
+        })
+        .mockResolvedValueOnce({
+          content: makeAiJson(),
+          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+        }),
+    };
+
+    await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'long',
+      statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(3);
+    expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[1][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[2][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
+    expect(JSON.stringify(mockClient.chat.mock.calls)).not.toContain('题面过长已截断');
+  });
+
+  it('passes every verified callable interface into the real Artifacts role call', async () => {
+    const statement = 'Call transform with values and label.';
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    };
+    const interfaces = {
+      py: 'def transform(values: list[int], label: str) -> tuple[list[int], str]:\n    return values, label',
+      java: 'class Solution { public int[] transform(int[] values, String label) { return values; } }',
+      cc: 'class Solution { public: vector<string> transform(vector<int> values, string label); };',
+    };
+    const solutionResponse = [
+      '@@@META@@@',
+      'problemType: function',
+      'functionName: transform',
+      '@@@ANALYSIS@@@',
+      'TEACHER_ONLY_ANALYSIS',
+      '@@@ORACLE@@@',
+      'print(input()) # CORRECT_ORACLE_SOURCE',
+      '@@@SOLUTION:py@@@', interfaces.py,
+      '@@@SOLUTION:java@@@', interfaces.java,
+      '@@@SOLUTION:cc@@@', interfaces.cc,
+    ].join('\n');
+    const oracle = makeRoleClient('oracle', 'oracle-endpoint', 'oracle-model', solutionResponse);
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts-endpoint', 'artifacts-model',
+      new Error('ARTIFACT_PROMPT_CAPTURED'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-endpoint', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const snapshot = createStatementSnapshot(statement);
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'artifacts-interface-call',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(statement, { problemKind: 'function' }),
+      risk,
+      roleIdentities: {},
+    });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe',
+      roleClients: { oracle, artifacts, verifier },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'callable interfaces', statementMarkdown: statement, options,
+    }, {}, 1, risk, context)).rejects.toThrow('ARTIFACT_PROMPT_CAPTURED');
+
+    const prompt = artifacts.chat.mock.calls[0][0][0].content;
+    for (const [language, source] of Object.entries(interfaces)) {
+      expect(prompt).toContain(`SOLUTION:${language}`);
+      expect(prompt).toContain(source);
+    }
+    expect(prompt).not.toContain('CORRECT_ORACLE_SOURCE');
+    expect(prompt).not.toContain('TEACHER_ONLY_ANALYSIS');
+  });
+
+  it('observe warns and marks wouldBlock when configured Spec identities are exactly equal', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+    const statement = 'Input one integer. Output it.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const baseClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+      }),
+    };
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'same', 'same-model', specJson),
+      specCritic: makeRoleClient('specCritic', 'same', 'same-model', specJson),
+    };
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'observe', roleClients: roles,
+    }).generate({
+      problemTitle: 'identity warning', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(plan.verification).toMatchObject({ verified: false, wouldBlock: true });
+    expect(plan.notesStructured?.warnings).toContainEqual(expect.stringContaining('SPEC_ROLE_IDENTITY_CONFLICT'));
+    expect(JSON.stringify(plan)).not.toContain('same/same-model');
+  });
+
+  it('enforce + high blocks an exact Spec identity collision after both actual calls', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'same', 'same-model', specJson),
+      specCritic: makeRoleClient('specCritic', 'same', 'same-model', specJson),
+    };
+    const baseClient = { chat: jest.fn() };
+
+    await expect(new TestdataGenService(baseClient as never, {
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce', roleClients: roles,
+    }).generate({
+      problemTitle: 'high risk', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED', artifact: 'spec' });
+    expect(baseClient.chat).not.toHaveBeenCalled();
+    expect(roles.specPrimary?.client.chat).toHaveBeenCalledTimes(1);
+    expect(roles.specCritic?.client.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks actual Spec identity after adjudication raises final risk from medium to high', async () => {
+    const statement = 'Floating point output. Input one integer. Output it exactly.';
+    const primarySpec = makeObservedProblemSpec(statement);
+    const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClientWithActual(
+        'specPrimary', 'configured-primary', 'model-a', 'actual-shared', 'same-model',
+        JSON.stringify(primarySpec),
+      ),
+      specCritic: makeRoleClientWithActual(
+        'specCritic', 'configured-critic', 'model-b', 'actual-shared', 'same-model',
+        JSON.stringify(criticSpec),
+      ),
+      adjudicator: makeRoleClient('adjudicator', 'judge', 'judge-model', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [{
+          path: 'outputPolicy', selected: 'A', evidenceQuote: 'Output it exactly.', reason: 'exact output',
+        }],
+      })),
+    };
+    const baseClient = { chat: jest.fn() };
+
+    await expect(new TestdataGenService(baseClient as never, {
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce', roleClients: roles,
+    }).generate({
+      problemTitle: 'final risk identity gate', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+    expect(roles.specPrimary?.client.chat).toHaveBeenCalledTimes(1);
+    expect(roles.specCritic?.client.chat).toHaveBeenCalledTimes(1);
+    expect(roles.adjudicator?.client.chat).toHaveBeenCalledTimes(1);
+    expect(baseClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an unused shared configured fallback as an actual identity collision', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const primary = makeRoleClientWithActual(
+      'specPrimary', 'configured-primary', 'model-a', 'actual-primary', 'model-a', specJson,
+    );
+    const critic = makeRoleClientWithActual(
+      'specCritic', 'configured-critic', 'model-b', 'actual-critic', 'model-b', specJson,
+    );
+    const sharedFallback = {
+      endpointId: 'unused-shared', endpointName: 'unused-shared-name', modelName: 'fallback',
+    };
+    primary.identities.push(sharedFallback);
+    critic.identities.push(sharedFallback);
+
+    const error = await new TestdataGenService({
+      chat: jest.fn().mockRejectedValue(new Error('AFTER_SPEC_GATE')),
+    } as never, {
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce',
+      roleClients: { specPrimary: primary, specCritic: critic },
+    }).generate({
+      problemTitle: 'unused configured overlap', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    }).then(() => undefined, caught => caught);
+    expect(error).toBeDefined();
+    expect(error).not.toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED' });
+    expect(primary.chat).toHaveBeenCalledTimes(1);
+    expect(critic.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('detects that missing Spec role clients both actually used the base model', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const baseClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: specJson,
+        usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'shared-model' },
+      }),
+    };
+
+    await expect(new TestdataGenService(baseClient as never, {
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'base identity collision', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED', artifact: 'spec' });
+    expect(baseClient.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('tracks the actual Oracle and Verifier models instead of their configured first choices', async () => {
+    const actual = { endpointId: 'actual-shared', endpointName: 'actual', modelName: 'same-model' };
+    const oracle = makeRoleClientWithActual(
+      'oracle', 'configured-oracle', 'oracle-a', actual.endpointId, actual.modelName, 'oracle',
+    );
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'verifier-b', actual.endpointId, actual.modelName, 'verifier',
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { oracle, verifier },
+    });
+
+    await (service as any).clientForRole('oracle').chat([], '', {});
+    await (service as any).clientForRole('verifier').chat([], '', {});
+
+    expect(() => (service as any).assertIndependentRoleIdentities({
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    })).toThrow(expect.objectContaining({ code: 'SPEC_CONSENSUS_REQUIRED' }));
+  });
+
+  it('routes a combined full repair through base and attributes its replacement ORACLE identity', async () => {
+    const usedModel = { endpointId: 'base-repair', endpointName: 'base', modelName: 'repair-model' };
+    const baseClient = { chat: jest.fn().mockResolvedValue({ content: 'full repair', usedModel }) };
+    const artifacts = makeRoleClient('artifacts', 'artifacts', 'artifacts-model', 'unused');
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode: 'observe', roleClients: { artifacts },
+    });
+
+    const result = await (service as any).chatForCombinedRepair([], 'system', {});
+
+    expect(result.usedModel).toEqual(usedModel);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect((service as any).activeRoleIdentities.oracle).toEqual(usedModel);
+  });
+
+  it('enforce + high blocks unresolved adjudication with safe counts only', async () => {
+    const statement = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const primarySpec = makeObservedProblemSpec(statement);
+    const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(primarySpec)),
+      specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', JSON.stringify(criticSpec)),
+      adjudicator: makeRoleClient('adjudicator', 'judge', 'judge-model', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [],
+      })),
+      oracle: makeRoleClient('oracle', 'oracle', 'oracle-model'),
+      verifier: makeRoleClient('verifier', 'verifier', 'verifier-model'),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: makeAvailableSandboxRunner(),
+      reliabilityMode: 'enforce', roleClients: roles,
+    }).generate({
+      problemTitle: 'high conflict', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED',
+      safeDetails: expect.objectContaining({ conflictCount: 1, unresolvedConflictCount: 1 }),
+    });
+  });
+
+  it('observe continues the old generation after unresolved adjudication and exposes only safe conflict metadata', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+    const statement = 'Input one integer. Output it exactly.';
+    const primarySpec = makeObservedProblemSpec(statement);
+    const criticSpec = makeObservedProblemSpec(statement, { outputPolicy: { kind: 'token' } });
+    const secretReason = 'SECRET_ADJUDICATION_REASON';
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(primarySpec)),
+      specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', JSON.stringify(criticSpec)),
+      adjudicator: makeRoleClient('adjudicator', 'judge', 'judge-model', JSON.stringify({
+        resolvedSpec: primarySpec,
+        resolutions: [{ path: 'wrong-path', selected: 'new', evidenceQuote: 'Input one integer.', reason: secretReason }],
+      })),
+    };
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+    }) };
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'observe', roleClients: roles,
+    }).generate({
+      problemTitle: 'observe unresolved', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan).toMatchObject({
+      specConsensusStatus: 'unresolved', specConflictCount: 1, unresolvedConflictCount: 1,
+      modelRolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+      verification: { verified: false, wouldBlock: true },
+    });
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(JSON.stringify(plan)).not.toContain(secretReason);
+    expect(JSON.stringify(plan)).not.toContain('Input one integer.');
+    expect(plan).not.toHaveProperty('resolvedSpec');
+    expect(plan).not.toHaveProperty('conflicts');
+  });
+
+  it('propagates Critic cancellation without converting it into a spec parse failure', async () => {
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
+    const statement = 'Input one integer. Output it.';
+    const canceled = Object.assign(new Error('canceled'), { name: 'AbortError' });
+    const roles: TestdataRoleClients = {
+      specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', JSON.stringify(makeObservedProblemSpec(statement))),
+      specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', canceled),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'direct', reliabilityMode: 'observe', roleClients: roles,
+    }).generate({
+      problemTitle: 'cancel', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toBe(canceled);
+  });
+
+  it('keeps direct compatibility on the base client but makes frozen Spec its machine contract', async () => {
+    const statement = 'Input one integer. Output it.';
+    const specJson = JSON.stringify(makeObservedProblemSpec(statement));
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+    }) };
+    const artifacts = makeRoleClient('artifacts', 'artifacts', 'artifacts-model', makeAiJson());
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+      roleClients: {
+        specPrimary: makeRoleClient('specPrimary', 'primary', 'spec-a', specJson),
+        specCritic: makeRoleClient('specCritic', 'critic', 'spec-b', specJson),
+        artifacts,
+      },
+    }).generate({
+      problemTitle: 'direct compatibility', statementMarkdown: statement,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(baseClient.chat.mock.calls[0][0][0].content).toContain('FROZEN_PROBLEM_SPEC');
+    expect(baseClient.chat.mock.calls[0][0][0].content).toContain(statement);
+    expect(baseClient.chat.mock.calls[0][0][0].content).toContain('不得用题面重新定义 problemKind');
+    expect(artifacts.chat).not.toHaveBeenCalled();
+  });
+
+  it('legacy mode keeps the original single-client generation call and never invokes role clients', async () => {
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'base', endpointName: 'base', modelName: 'generation' },
+    }) };
+    const roleClient = makeRoleClient('specPrimary', 'primary', 'spec-a', '{}');
+
+    const plan = await new TestdataGenService(baseClient as never, {
+      mode: 'direct', reliabilityMode: 'legacy', roleClients: { specPrimary: roleClient },
+    }).generate({
+      problemTitle: 'legacy', statementMarkdown: 'Input one integer.',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(plan.files.length).toBeGreaterThan(0);
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(roleClient.chat).not.toHaveBeenCalled();
+    expect(plan.specSchemaVersion).toBeUndefined();
+  });
+
+  it('rejects a statement above the snapshot hard limit before any AI or sandbox call', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = { isAvailable: jest.fn() };
+
+    await expect(new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'too long',
+      statementMarkdown: 'x'.repeat(STATEMENT_SNAPSHOT_HARD_LIMIT + 1),
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({ code: 'SPEC_STATEMENT_TOO_LONG', retryPolicy: 'no-retry' });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
   it('best-effort checker 耗时扩展正确性截止时间，不消耗主预算', () => {
     expect(extendDeadlineByBestEffortElapsed(10_000, 2_000, 7_500)).toBe(15_500);
     expect(extendDeadlineByBestEffortElapsed(10_000, 7_500, 2_000)).toBe(10_000);
@@ -2106,11 +3609,172 @@ describe('TestdataGenService.generate', () => {
     });
 
     await expect(promise).rejects.toMatchObject({
+      code: 'SPEC_PARSE_FAILED',
+      stage: 'config_parse',
+      artifact: 'spec',
+      retryPolicy: 'no-retry',
       userMessageKey: 'ai_helper_testdata_err_config_unparsable',
       telemetryMetadata: expect.objectContaining({ failureStage: 'config_parse' }),
     });
     expect(mockClient.chat).not.toHaveBeenCalled();
     expect(runner.isAvailable).not.toHaveBeenCalled();
+  });
+
+  it('真实外围制品二次解析失败保持 artifacts_parse 契约且不误启完整模型重跑', async () => {
+    // Mutation caught: artifacts_parse falling back to UNKNOWN/pipeline or input-validity routing.
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: 'not generation artifacts', usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: 'still not generation artifacts', usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '外围制品解析守卫',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'artifacts_parse',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      recommendDeeperReasoning: true,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content).toContain('重新完整输出 @@@GENERATOR@@@');
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).toHaveBeenCalledWith(usedModel);
+    expect(runner.runPython).not.toHaveBeenCalled();
+  });
+
+  it('真实函数题 STRESS_GENERATOR 非法输入在修复请求失败后保持 stress-generator 契约', async () => {
+    // Mutation caught: stress-generator invalid input being misrouted as function sample transcoding.
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const assignmentStressCases = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, index) => ({ label: `stress-${index}`, input: `value = ${index}` }),
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair endpoint unavailable')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: assignmentStressCases }), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '函数输入协议守卫',
+      statementMarkdown: '函数题无公开样例',
+      options: { problemKind: 'function', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_INPUT',
+      stage: 'stress-generator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 1 },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.chat.mock.calls[4][0][2].content)
+      .toContain('请只输出修复后的 @@@STRESS_GENERATOR@@@');
+    expect(mockClient.chat.mock.calls[4][0][2].content)
+      .toContain('SAMPLE_INPUTS 与 frozen ProblemSpec 必须保持不变');
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('恢复 checkpoint 缺少已选 Java/C++ 解时重新生成全部依赖制品', async () => {
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    };
+    const checkpoint = {
+      solution: {
+        problemType: 'function' as const,
+        oracleCode: 'print(input())',
+        solutionCode: 'def solve(value):\n    return value\n',
+      },
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('function'),
+        'function',
+        options.languages,
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    };
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checkpoint-cc' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'checkpoint-java' }),
+      runJavaBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '断点函数题', statementMarkdown: '题面', options, checkpoint,
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.chat.mock.calls[0][0][0].content).toContain('断点函数题');
+    expect(mockClient.chat.mock.calls.some((call: unknown[]) =>
+      String((call[0] as Array<{ content?: string }>)[0]?.content).includes('第一阶段已验证且必须保持不变的解题蓝图'),
+    )).toBe(true);
   });
 
   it('checkpoint 命中四项制品时跳过对应 AI 调用但仍完整运行沙箱', async () => {
@@ -2119,6 +3783,11 @@ describe('TestdataGenService.generate', () => {
       caseCount: 1,
       languages: [],
     };
+    const checkpointKillTargets = Array.from({ length: 5 }, (_, index) => ({
+      kind: 'boundary' as const,
+      description: `checkpoint target ${index + 1}`,
+      code: `print("wrong")  # checkpoint target ${index + 1}\n`,
+    }));
     const checkpoint = {
       solution: parseSolutionBlueprint(
         makeSolutionBlueprint('traditional'),
@@ -2134,7 +3803,7 @@ describe('TestdataGenService.generate', () => {
         makeIndependentVerifierBlueprint(),
         [],
       ),
-      killTargets: [],
+      killTargets: checkpointKillTargets,
     };
     const mockClient = { chat: jest.fn() };
     const onCheckpoint = jest.fn().mockRejectedValue(new Error('checkpoint store unavailable'));
@@ -2149,7 +3818,9 @@ describe('TestdataGenService.generate', () => {
       runPythonBatch: jest.fn(),
       runPythonBatchDetailed: jest.fn().mockImplementation(
         (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
-          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+          code.includes('sys.exit(0)')
+            ? detail()
+            : detail({ stdout: code.includes('checkpoint target') ? 'wrong\n' : input }))),
       ),
     };
 
@@ -2169,11 +3840,561 @@ describe('TestdataGenService.generate', () => {
       solution: checkpoint.solution,
       artifacts: checkpoint.artifacts,
       verifier: checkpoint.verifier,
-      killTargets: [],
+      killTargets: checkpointKillTargets.slice(0, 2),
     }));
     expect(runner.runPython).toHaveBeenCalledTimes(2);
     expect(runner.runPythonBatchDetailed).toHaveBeenCalled();
     expect(plan.files.find(file => file.name === '1.out')?.content).toBe('1\n');
+    expect(plan.verification?.discrimination?.targets
+      .filter(target => target.description.startsWith('checkpoint target'))
+      .map(target => target.description))
+      .toEqual(['checkpoint target 1', 'checkpoint target 2']);
+    expect(plan.notesStructured?.warnings).toContain(
+      '模型返回了 5 个错误解靶子；服务端仅保留前 2 个。',
+    );
+  });
+
+  it('checkpoint v2 在 frozen Spec 与依赖 hash 一致时正确恢复', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const snapshot = createStatementSnapshot(statementMarkdown);
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-run',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: snapshot.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('oracle-endpoint\0oracle-model'),
+        artifacts: hashTestdataRoleIdentity('artifacts-endpoint\0artifacts-model'),
+        verifier: hashTestdataRoleIdentity('verifier-endpoint\0verifier-model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(
+        makeStrictIndependentVerifierBlueprint(
+          { constraintIds: [], invariantIds: [] },
+          { recipes: [] },
+        ),
+        [],
+        { frozenSpec: context.spec, requireValidatorManifest: true },
+      ),
+      killTargets: [],
+    };
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'observe',
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'checkpoint v2', statementMarkdown, options, checkpoint,
+    }, runner, 1, risk, context);
+
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === '1.out')?.content).toBe('1\n');
+  });
+
+  it('preserves full v2 dependency hashes across restore, emit, interruption, and restore again', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-roundtrip',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = makeFrozenV3Checkpoint(statementMarkdown, {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    });
+    const firstUpdates: any[] = [];
+    const firstClient = { chat: jest.fn() };
+    const firstService = new TestdataGenService(firstClient as never, {
+      reliabilityMode: 'observe',
+    });
+
+    await (firstService as any).generateWithSandbox({
+      problemTitle: 'checkpoint roundtrip', statementMarkdown, options, checkpoint,
+      onCheckpoint: (update: unknown) => { firstUpdates.push(update); },
+    }, makeCheckpointRunner(), 1, risk, context);
+
+    const reemitted = [...firstUpdates].reverse().find(update => (
+      update?.solution && update?.artifacts && update?.verifier && Array.isArray(update?.killTargets)
+    ));
+    expect(reemitted?.roleDependencies).toEqual(checkpoint.roleDependencies);
+    expect(JSON.stringify(reemitted)).not.toContain('checkpoint-oracle');
+    expect(JSON.stringify(reemitted)).not.toContain('checkpoint-artifacts');
+    expect(JSON.stringify(reemitted)).not.toContain('checkpoint-verifier');
+
+    const secondClient = { chat: jest.fn() };
+    const secondService = new TestdataGenService(secondClient as never, {
+      reliabilityMode: 'observe',
+    });
+    await (secondService as any).generateWithSandbox({
+      problemTitle: 'checkpoint roundtrip', statementMarkdown, options, checkpoint: reemitted,
+    }, makeCheckpointRunner(), 1, risk, context);
+
+    expect(firstClient.chat).not.toHaveBeenCalled();
+    expect(secondClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('merges restored Oracle provenance with fresh Artifacts and Verifier hashes', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v3-partial',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const restoredOracleHash = hashTestdataRoleIdentity('restored-oracle\0restored-model');
+    const checkpoint = {
+      ...makeFrozenV3Checkpoint(statementMarkdown, {
+        solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      }),
+      roleDependencies: { oracle: restoredOracleHash },
+    };
+    const artifacts = makeRoleClient(
+      'artifacts', 'fresh-artifacts', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'fresh-verifier', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: [], invariantIds: [] },
+      ),
+    );
+    const updates: any[] = [];
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { artifacts, verifier },
+    });
+
+    await (service as any).generateWithSandbox({
+      problemTitle: 'partial checkpoint', statementMarkdown, options, checkpoint,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, makeCheckpointRunner(), 1, risk, context);
+
+    const emitted = [...updates].reverse().find(update => update?.artifacts && update?.verifier);
+    expect(emitted.roleDependencies).toMatchObject({
+      oracle: restoredOracleHash,
+      artifacts: hashTestdataRoleIdentity('fresh-artifacts\0artifacts-model'),
+      verifier: hashTestdataRoleIdentity('fresh-verifier\0verifier-model'),
+    });
+    const serialized = JSON.stringify(emitted);
+    for (const secret of [
+      'restored-oracle', 'restored-model', 'fresh-artifacts', 'artifacts-model',
+      'fresh-verifier', 'verifier-model', 'endpointId', 'endpointName', 'modelName',
+    ]) expect(serialized).not.toContain(secret);
+  });
+
+  it('high-risk enforce regenerates checkpoint v1 solution and verifier when identities are unavailable', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    };
+    const oracle = makeRoleClient(
+      'oracle', 'oracle-actual', 'oracle-model', makeSolutionBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-actual', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts', 'artifacts-model', makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, verifier, artifacts },
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'high-risk checkpoint v1',
+      statementMarkdown: 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.',
+      options,
+      checkpoint,
+    }, runner, 1, {
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    });
+
+    expect(plan.files.find((file: { name: string }) => file.name === '1.out')?.content).toBe('1\n');
+    expect(oracle.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(artifacts.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('high-risk enforce rejects a fresh verifier that matches the restored Oracle identity', async () => {
+    const statementMarkdown = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'high' as const, score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v3-mixed-independence',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('shared-endpoint\0shared-model'),
+        verifier: hashTestdataRoleIdentity('previous-verifier\0previous-model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+    };
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'configured-model',
+      'shared-endpoint', 'shared-model',
+      makeEmptyKillTargetsResponse(),
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: [], invariantIds: [] },
+      ),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts-endpoint', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { verifier, artifacts },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'mixed v3 identity', statementMarkdown, options, checkpoint,
+    }, runner, 1, risk, context)).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED',
+      artifact: 'spec',
+    });
+  });
+
+  it('high-risk enforce rejects a fresh Oracle that matches the restored Verifier identity', async () => {
+    const statementMarkdown = 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const risk = {
+      tier: 'high' as const, score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'checkpoint-v2-reverse-mixed-independence',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('previous-oracle\0previous-model'),
+        verifier: hashTestdataRoleIdentity('shared-endpoint\0shared-model'),
+      },
+      verifier: parseIndependentVerifierBlueprint(
+        makeStrictIndependentVerifierBlueprint(
+          { constraintIds: [], invariantIds: [] },
+          { recipes: [] },
+        ),
+        [],
+        { frozenSpec: context.spec, requireValidatorManifest: true },
+      ),
+    };
+    const oracle = makeRoleClientWithActual(
+      'oracle', 'configured-oracle', 'configured-model',
+      'shared-endpoint', 'shared-model', makeSolutionBlueprint('traditional'),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts-endpoint', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'fresh-kill-target-endpoint', 'fresh-kill-target-model',
+      makeEmptyKillTargetsResponse(),
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { oracle, artifacts, verifier },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'reverse mixed v2 identity', statementMarkdown, options, checkpoint,
+    }, makeCheckpointRunner(), 1, risk, context)).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+  });
+
+  it('high-risk independence ignores a restored role hash after a fresh identity replaces it', () => {
+    const risk = {
+      tier: 'high' as const, score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce',
+    });
+    (service as any).activeRoleIdentities = {
+      oracle: {
+        endpointId: 'fresh-oracle-endpoint',
+        endpointName: 'fresh-oracle',
+        modelName: 'fresh-oracle-model',
+      },
+      verifier: {
+        endpointId: 'fresh-verifier-endpoint',
+        endpointName: 'fresh-verifier',
+        modelName: 'fresh-verifier-model',
+      },
+    };
+    const checkpoint = {
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('fresh-verifier-endpoint\0fresh-verifier-model'),
+        verifier: hashTestdataRoleIdentity('restored-verifier-endpoint\0restored-verifier-model'),
+      },
+    };
+
+    expect(() => (service as any).assertCheckpointRoleIndependence(risk, checkpoint))
+      .not.toThrow();
+    expect(() => (service as any).assertIndependentRoleIdentities(risk)).not.toThrow();
+  });
+
+  it('high-risk enforce rechecks independence after an Oracle repair replaces the final blueprint', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const brokenSolution = makeSolutionBlueprint('traditional').replace(
+      'print(input())',
+      'raise RuntimeError("broken oracle")',
+    );
+    const firstOracleModel = {
+      endpointId: 'oracle-first', endpointName: 'oracle-first', modelName: 'oracle-model',
+    };
+    const sharedModel = {
+      endpointId: 'shared-final', endpointName: 'shared-final', modelName: 'same-model',
+    };
+    const oracle = makeRoleClient('oracle', 'configured-oracle', 'oracle-model');
+    oracle.chat
+      .mockResolvedValueOnce({ content: brokenSolution, usedModel: firstOracleModel })
+      .mockResolvedValueOnce({ content: '@@@ORACLE@@@\nprint(input())', usedModel: sharedModel });
+    const verifier = makeRoleClientWithActual(
+      'verifier', 'configured-verifier', 'verifier-model',
+      sharedModel.endpointId, sharedModel.modelName,
+      makeEmptyKillTargetsResponse(),
+      makeIndependentVerifierBlueprint(),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'artifacts', 'artifacts-model', makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('RuntimeError')) {
+            return detail({
+              accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: 'broken oracle',
+            });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, verifier, artifacts },
+    });
+
+    await expect((service as any).generateWithSandbox({
+      problemTitle: 'final repair identity',
+      statementMarkdown: 'Graph tree dynamic ADD DEL ROLLBACK with floating point error.',
+      options,
+      checkpoint: { killTargets: [] },
+    }, runner, 1, {
+      tier: 'high', score: 6, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    })).rejects.toMatchObject({
+      code: 'SPEC_CONSENSUS_REQUIRED', stage: 'spec_consensus', artifact: 'spec',
+    });
+    expect(oracle.chat).toHaveBeenCalledTimes(2);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('完整三语言 checkpoint 跳过 AI 调用并仍实跑全部模板沙箱门槛', async () => {
+    const options: GenerateOptions = {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(
+        makeSolutionBlueprint('function'),
+        options,
+        [],
+      ),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('function'),
+        'function',
+        options.languages,
+      ),
+      verifier: parseIndependentVerifierBlueprint(
+        makeIndependentVerifierBlueprint(),
+        [],
+      ),
+      killTargets: [],
+    };
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input =>
+          code.includes('sys.exit(0)') ? detail() : detail({ stdout: input }))),
+      ),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'resume-cc' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'resume-java' }),
+      runJavaBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '三语言断点续跑',
+      statementMarkdown: '题面',
+      options,
+      checkpoint,
+    });
+
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(runner.runPythonBatchDetailed.mock.calls.some(([code]: [string]) => (
+      code.includes('def solve(value)') && code.includes('print(solve(input().strip()))')
+    ))).toBe(true);
+    expect(runner.compileCpp).toHaveBeenCalledWith(
+      expect.stringContaining('#include "foo.cc"'),
+      expect.objectContaining({ extraFiles: { 'foo.cc': expect.stringContaining('string solve') } }),
+    );
+    expect(runner.compileJava).toHaveBeenCalledWith(
+      expect.stringContaining('public class Main'),
+      expect.stringContaining('class Solution'),
+      expect.any(Object),
+    );
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'resume-cc', ['1\n'], expect.any(Object),
+    );
+    expect(runner.runJavaBatchDetailed).toHaveBeenCalledWith(
+      'resume-java', ['1\n'], expect.any(Object),
+    );
+    expect(plan.verification).toMatchObject({
+      templateLanguages: ['py', 'java', 'cc'],
+      templateChecks: {
+        py: { compiled: true, executed: true, total: 1, passed: 1 },
+        java: { compiled: true, executed: true, total: 1, passed: 1 },
+        cc: { compiled: true, executed: true, total: 1, passed: 1 },
+      },
+    });
   });
 
   it('调用 AI 客户端并返回组装后的计划', async () => {
@@ -2197,17 +4418,88 @@ describe('TestdataGenService.generate', () => {
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toContain('提莫攻击');
     expect(systemPrompt).toContain('JSON');
-    // 不限输出长度，且不由插件为长推理设置截止时间。
+    // 不限输出长度，只对卡住的单次调用施加宽松墙钟上限。
     expect(callOptions.maxTokens).toBeNull();
-    expect(callOptions.timeoutMs).toBeNull();
+    expect(callOptions.timeoutMs).toBe(TESTDATA_MODEL_TIMEOUT_DEFAULT_MS);
     expect(callOptions.retryTimeouts).toBe(false);
     expect(plan.files.map(f => f.name)).toContain('config.yaml');
     expect(plan.tokenUsage?.totalTokens).toBe(300);
     expect(plan.usedModel).toBe('main/gpt-test');
+    expect(plan.modelTelemetry).toEqual({
+      role: 'primary',
+      identity: 'ep1/gpt-test',
+    });
     expect(progress.map(event => event.stage)).toEqual(expect.arrayContaining([
       'preparing', 'blueprint', 'assembling', 'complete',
     ]));
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 1 });
+  });
+
+  it('普通网络 fallback 成功时保留后备角色与稳定本地身份', async () => {
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep2', endpointName: 'private-fallback', modelName: 'model-b' },
+        fallbackErrors: [{
+          endpoint: 'ep1',
+          model: 'model-a',
+          category: 'network',
+          message: 'private upstream error',
+        }],
+      }),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never).generate({
+      problemTitle: 'fallback',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(plan.usedModel).toBe('private-fallback/model-b');
+    expect(plan.modelTelemetry).toEqual({
+      role: 'fallback',
+      identity: 'ep2/model-b',
+    });
+  });
+
+  it('普通 fallback 返回后发生类型化解析失败仍保留后备角色', async () => {
+    const mockClient = {
+      chat: jest.fn().mockImplementation(async (_messages, _systemPrompt, callOptions) => {
+        callOptions.onAttempt?.({
+          type: 'fallback',
+          endpointId: 'ep2',
+          endpointName: 'private-fallback',
+          modelName: 'model-b',
+          attempt: 1,
+        });
+        return {
+          content: 'not a generation response',
+          usedModel: { endpointId: 'ep2', endpointName: 'private-fallback', modelName: 'model-b' },
+          fallbackErrors: [{
+            endpoint: 'ep1', model: 'model-a', category: 'network', message: 'private error',
+          }],
+        };
+      }),
+    };
+    const service = new TestdataGenService(mockClient as never);
+
+    let caught: unknown;
+    try {
+      await service.generate({
+        problemTitle: 'fallback parse failure',
+        statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TestdataPipelineError);
+    expect(extractTestdataErrorMetadata(caught)).toEqual(expect.objectContaining({
+      failureCode: 'GENERATOR_INVALID_JSON',
+      modelTelemetryRole: 'fallback',
+      modelTelemetryIdentity: 'ep2/model-b',
+    }));
   });
 
   it('沙箱模式并发生成三个独立阶段，错误解靶子失败仍继续组装文件', async () => {
@@ -2441,6 +4733,426 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('已为「只对已有输入返回正确答案」错误解定向补充 hack 测试点 #2。');
   });
 
+  it('prospective hack allocation validates before Oracle, rejects without committing, and commits accepted allocation', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const tieredSolution = [
+      '=== SUBTASKS ===',
+      '1 | 50 | n<=10',
+      '2 | 50 | n<=100',
+      makeSolutionBlueprint('traditional'),
+    ].join('\n');
+    const firstHackCandidates = [
+      '=== HACK_CASE ===',
+      'RATIONALE: rejected non-killing candidate',
+      '```text',
+      '3',
+      '```',
+      '=== HACK_CASE ===',
+      'RATIONALE: accepted candidate for target one',
+      '```text',
+      '4',
+      '```',
+    ].join('\n');
+    const secondHackCandidate = [
+      '=== HACK_CASE ===',
+      'RATIONALE: accepted candidate for target two',
+      '```text',
+      '5',
+      '```',
+    ].join('\n');
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: tieredSolution, usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: firstHackCandidates, usedModel })
+        .mockResolvedValueOnce({ content: secondHackCandidate, usedModel }),
+    };
+    const hackValidatorInvocations: Array<{ stdin: string; argv: string[] }> = [];
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [
+            { label: 'first', input: '1' },
+            { label: 'second', input: '2' },
+          ] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, values: Array<string | { stdin: string; argv?: string[] }>) => {
+          const invocations = values.map(value => typeof value === 'string'
+            ? { stdin: value, argv: [] as string[] }
+            : { stdin: value.stdin, argv: value.argv || [] });
+          if (code.includes('sys.exit(0)')) {
+            if (invocations.length === 1 && ['3', '4', '5'].includes(invocations[0].stdin.trim())) {
+              hackValidatorInvocations.push(invocations[0]);
+            }
+            return Promise.resolve(invocations.map(() => detail()));
+          }
+          return Promise.resolve(invocations.map(invocation => {
+            const stdin = invocation.stdin.trim();
+            if (code.includes('shared hack target one')) {
+              return detail({ stdout: stdin === '4' ? 'wrong\n' : `${stdin}\n` });
+            }
+            if (code.includes('shared hack target two')) {
+              return detail({ stdout: stdin === '5' ? 'wrong\n' : `${stdin}\n` });
+            }
+            return detail({ stdout: `${stdin}\n` });
+          }));
+        },
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'prospective hack allocation',
+      statementMarkdown: '题面',
+      options: {
+        problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [],
+      },
+    });
+
+    expect(hackValidatorInvocations).toEqual([
+      { stdin: '3\n', argv: ['--subtask', '1'] },
+      { stdin: '4\n', argv: ['--subtask', '1'] },
+      { stdin: '5\n', argv: ['--subtask', '2'] },
+    ]);
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2, 1, 2]);
+    expect(plan.verification?.discrimination?.targets.slice(0, 2)).toEqual([
+      expect.objectContaining({ killed: true, killedByCase: 3 }),
+      expect.objectContaining({ killed: true, killedByCase: 4 }),
+    ]);
+    expect(plan.files.find(file => file.name === '3.in')?.content).toBe('4\n');
+    expect(plan.files.find(file => file.name === '4.in')?.content).toBe('5\n');
+  });
+
+  it('hack Validator treats malformed accepted detail as sanitized sandbox infrastructure', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, values: Array<string | { stdin: string }>) => {
+          const inputs = values.map(value => typeof value === 'string' ? value : value.stdin);
+          if (code.includes('sys.exit(0)')) {
+            if (inputs.length === 1 && inputs[0].trim() === '2') {
+              return Promise.resolve([detail({ stdout: 7 })]);
+            }
+            return Promise.resolve(inputs.map(() => detail()));
+          }
+          if (code.includes('surviving wrong solution')) {
+            return Promise.resolve(inputs.map(input => detail({
+              stdout: input.trim() === '1' ? '1\n' : 'wrong\n',
+            })));
+          }
+          return Promise.resolve(inputs.map(input => detail({ stdout: input })));
+        },
+      ),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'malformed hack validator detail',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE',
+      stage: 'validator',
+      artifact: 'validator',
+      safeDetails: { caseIndex: 1, failureKind: 'protocol' },
+    });
+    expect(failure.message).not.toContain('private');
+  });
+
+  it('final hack allocation drives coverage and config without a last/widest fallback warning', () => {
+    const options: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [],
+    };
+    const subtasks = [
+      { id: 1, score: 50, constraints: 'n<=10' },
+      { id: 2, score: 50, constraints: 'n<=100' },
+    ];
+    const tieredDecision = resolveTieredSubtaskGeneration({
+      caseCount: 2, dataScale: 'auto', subtasks,
+    });
+    const response = parseGenerationResponse(makeAiJson({
+      problemType: 'traditional',
+      cases: [
+        { input: '1', output: '1' },
+        { input: '2', output: '2' },
+        { input: '3', output: '3' },
+        { input: '4', output: '4' },
+      ],
+    }), options);
+    response.subtasks = subtasks;
+    (response as unknown as { tieredAllocations: ReturnType<typeof extendTieredAllocations> })
+      .tieredAllocations = [
+        { caseNumber: 1, subtaskId: 1, guidance: 'n<=10' },
+        { caseNumber: 2, subtaskId: 2, guidance: 'n<=100' },
+        { caseNumber: 3, subtaskId: 2, guidance: 'n<=100' },
+        { caseNumber: 4, subtaskId: 1, guidance: 'n<=10' },
+      ];
+
+    const plan = assemblePlan(response, options, { mode: 'sandbox', tieredDecision });
+    const config = yaml.load(
+      plan.files.find(file => file.name === 'config.yaml')?.content || '',
+    ) as { subtasks: Array<{ id: number; cases: Array<{ input: string }> }> };
+
+    expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2, 2, 1]);
+    expect(config.subtasks.map(subtask => ({
+      id: subtask.id,
+      cases: subtask.cases.map(item => item.input),
+    }))).toEqual([
+      { id: 1, cases: ['1.in', '4.in'] },
+      { id: 2, cases: ['2.in', '3.in'] },
+    ]);
+    expect(plan.notes).not.toContain('现阶段补刀输入仍仅经全局校验');
+    expect(plan.notesStructured?.warnings.join('\n')).not.toMatch(/last|widest|补刀输入仍仅经全局校验/);
+  });
+
+  it('checker rejecting a deliberate wrong target leaves a verified plan without reject failure evidence', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec('题面', {
+            problemKind: 'traditional', outputPolicy: { kind: 'custom-checker' },
+          })),
+          usedModel,
+        })
+        .mockResolvedValueOnce({
+          content: JSON.stringify(makeObservedProblemSpec('题面', {
+            problemKind: 'traditional', outputPolicy: { kind: 'custom-checker' },
+          })),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({
+          content: [
+            '=== COMPLEXITY_GAP ===',
+            'none',
+            makeStrictIndependentVerifierBlueprint({ constraintIds: [], invariantIds: [] }),
+          ].join('\n'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(
+        (_fileId: string, cases: Array<{ output: string }>) => Promise.resolve(
+          cases.map(item => item.output === 'wrong\n'
+            ? detail({
+              accepted: false,
+              status: 'Nonzero Exit Status',
+              exitStatus: 1,
+            })
+            : detail()),
+        ),
+      ),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('surviving wrong solution')) {
+            return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+          }
+          return detail({ stdout: input });
+        })),
+      ),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+    }).generate({
+      problemTitle: 'checker expected reject',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(plan.verification).toMatchObject({
+      verified: true,
+      wouldBlock: false,
+      discrimination: {
+        allKilled: true,
+        targets: expect.arrayContaining([
+          expect.objectContaining({ killed: true, killedBy: 'wa' }),
+        ]),
+      },
+      checkerCheck: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        infraFailures: 0,
+      },
+    });
+    expect(plan.verification?.checkerCheck).not.toHaveProperty('failureKind');
+  });
+
+  it('补刀候选触发 System Error 时不追加 hack case 且不设置 killed', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('surviving wrong solution') && input.trim() === '2') {
+            return detail({
+              status: 'System Error',
+              accepted: false,
+              timedOut: false,
+              exitStatus: undefined,
+              stdout: '',
+              stderr: 'sandbox protocol failure',
+            });
+          }
+          if (code.includes('surviving wrong solution')) return detail({ stdout: input });
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀基础设施保护',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(plan.caseCount).toBe(1);
+    expect(plan.totalCaseCount).toBe(1);
+    expect(plan.files.some(file => file.name === '2.in')).toBe(false);
+    expect(plan.files.find(file => file.name === 'config.yaml')?.content)
+      .not.toContain('input: 2.in');
+    expect(plan.verification?.discrimination?.targets[0]).toMatchObject({
+      kind: 'wrong-algorithm',
+      killed: false,
+    });
+    expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedBy');
+    expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedByCase');
+  });
+
+  it('补刀收尾时已命中靶子不能掩盖另一个基础设施阻断', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({
+          content: [
+            '=== COMPLEXITY_GAP ===',
+            'none',
+            makeIndependentVerifierBlueprint(),
+          ].join('\n'),
+          usedModel,
+        })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: '正式', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+          if (code.includes('sys.exit(0)')) return detail();
+          if (code.includes('shared hack target one')) return detail({ stdout: 'wrong\n' });
+          if (code.includes('shared hack target two') && input.trim() === '2') {
+            return detail({
+              status: 'System Error',
+              accepted: false,
+              timedOut: false,
+              exitStatus: undefined,
+              stdout: '',
+              stderr: 'sandbox protocol failure',
+            });
+          }
+          if (code.includes('shared hack target two')) return detail({ stdout: input });
+          return detail({ stdout: input });
+        })),
+      ),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀混合阻断',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(plan.verification?.discrimination?.targets.slice(0, 2)).toEqual([
+      expect.objectContaining({ killed: true, killedBy: 'wa' }),
+      expect.objectContaining({ killed: false, skippedReason: 'checker-infra-error' }),
+    ]);
+    expect(plan.verification?.discrimination?.allKilled).toBe(false);
+  });
+
   it('补刀模型链到达区分度绝对截止时间时中止并静默保留未完成状态', async () => {
     jest.useFakeTimers();
     try {
@@ -2511,10 +5223,14 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
-  it('补刀模型等待期间的用户取消仍原样上抛', async () => {
+  it('补刀模型派生 signal 转发调用方的普通 Error 原因并原样上抛', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
-    const userAbort = Object.assign(new Error('user abort'), { name: 'AbortError' });
+    const cancellation = new Error('hack generation caller cancellation');
+    const transportCancellation = Object.assign(new Error('hack generation transport cancellation'), {
+      name: 'CanceledError',
+    });
     const controller = new AbortController();
+    let hackSignal: AbortSignal | undefined;
     const mockClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
@@ -2524,13 +5240,14 @@ describe('TestdataGenService.generate', () => {
           usedModel,
         })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
-        .mockImplementationOnce((_messages, _systemPrompt, options) => new Promise(
-          (_resolve, reject) => options.signal.addEventListener(
+        .mockImplementationOnce((_messages, _systemPrompt, options) => {
+          hackSignal = options.signal;
+          return new Promise((_resolve, reject) => options.signal.addEventListener(
             'abort',
-            () => reject(userAbort),
+            () => reject(transportCancellation),
             { once: true },
-          ),
-        )),
+          ));
+        }),
       createClientStartingAfter: jest.fn(),
     };
     const runner = {
@@ -2561,9 +5278,129 @@ describe('TestdataGenService.generate', () => {
 
     await new Promise(resolve => setImmediate(resolve));
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    controller.abort();
+    controller.abort(cancellation);
 
-    await expect(generationPromise).rejects.toBe(userAbort);
+    await expect(generationPromise).rejects.toBe(cancellation);
+    expect(hackSignal?.reason).toBe(cancellation);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('补刀候选校验在调用方取消后抛出原始原因且不返回追加计划', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const controller = new AbortController();
+    const cancellation = new Error('hack candidate caller cancellation');
+    const transportCancellation = Object.assign(new Error('hack candidate transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        async (code: string, inputs: string[]) => {
+          if (code.includes('sys.exit(0)') && inputs.length === 1 && inputs[0].trim() === '2') {
+            controller.abort(cancellation);
+            throw transportCancellation;
+          }
+          return inputs.map(input => {
+            if (code.includes('sys.exit(0)')) return detail();
+            if (code.includes('surviving wrong solution')) return detail({ stdout: input });
+            return detail({ stdout: input });
+          });
+        },
+      ),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀候选取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('补刀新增点复跑在调用方取消后抛出原始原因且不返回追加计划', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const controller = new AbortController();
+    const cancellation = new Error('hack replay caller cancellation');
+    const transportCancellation = Object.assign(new Error('hack replay transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeSharedHackKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: makeHackCaseResponse(), usedModel })
+        .mockRejectedValueOnce(new Error('second target hack generation failed'))
+        .mockRejectedValueOnce(new Error('second target hack retry failed')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        async (code: string, inputs: string[]) => {
+          if (
+            code.includes('shared hack target two')
+            && inputs.length === 1
+            && inputs[0].trim() === '2'
+          ) {
+            controller.abort(cancellation);
+            throw transportCancellation;
+          }
+          return inputs.map(input => {
+            if (code.includes('sys.exit(0)')) return detail();
+            if (code.includes('shared hack target one')) {
+              return detail({ stdout: input.trim() === '1' ? '1\n' : 'wrong\n' });
+            }
+            if (code.includes('shared hack target two')) return detail({ stdout: input });
+            return detail({ stdout: input });
+          });
+        },
+      ),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '补刀复跑取消测试',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).toHaveBeenCalledTimes(7);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
@@ -2672,6 +5509,8 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usage, usedModel: deeperModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usage, usedModel: deeperModel }),
     };
+    // Mutation caught: recursively applying semantic escalation after the second full run fails.
+    const thirdClient = { chat: jest.fn() };
     const primaryClient = {
       chat: jest.fn()
         .mockResolvedValueOnce({ content: brokenBlueprint, usage, usedModel: primaryModel })
@@ -2683,7 +5522,7 @@ describe('TestdataGenService.generate', () => {
           usage,
           usedModel: primaryModel,
         }),
-      createClientStartingAfter: jest.fn().mockReturnValue(fallbackClient),
+      createClientStartingAfter: jest.fn().mockReturnValueOnce(fallbackClient).mockReturnValueOnce(thirdClient),
     };
     const runner = {
       isAvailable: jest.fn().mockResolvedValue(true),
@@ -2713,6 +5552,8 @@ describe('TestdataGenService.generate', () => {
 
     expect(primaryClient.chat).toHaveBeenCalledTimes(5);
     expect(primaryClient.createClientStartingAfter).toHaveBeenCalledWith(primaryModel);
+    expect(primaryClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+    expect(thirdClient.chat).not.toHaveBeenCalled();
     expect(fallbackClient.chat).toHaveBeenCalledTimes(4);
     expect(plan.verification?.modelEscalation).toEqual({
       fromModel: 'primary/model-a',
@@ -2721,7 +5562,12 @@ describe('TestdataGenService.generate', () => {
     expect(plan.notes).toContain('下一配置模型');
     expect(plan.notesStructured?.system.some(note => note.includes('下一配置模型'))).toBe(true);
     expect(plan.usedModel).toBe('primary/model-a → deeper/model-b');
+    expect(plan.modelTelemetry).toEqual({
+      role: 'fallback',
+      identity: 'ep2/model-b',
+    });
     expect(plan.tokenUsage?.totalTokens).toBe(14);
+    expect(plan.modelCallCount).toBe(9);
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'model_escalation', attempt: 2 }));
     expect(progress.some(event => event.attempt === 2 && event.stage === 'blueprint')).toBe(true);
     expect(progress[progress.length - 1]).toEqual({ stage: 'complete', percent: 100, attempt: 2 });
@@ -2730,6 +5576,351 @@ describe('TestdataGenService.generate', () => {
     expect(clearCall).toBeGreaterThanOrEqual(0);
     expect(onCheckpoint.mock.invocationCallOrder[clearCall])
       .toBeLessThan(fallbackClient.chat.mock.invocationCallOrder[0]);
+  });
+
+  it('语义重跑推进失败角色的模型链并复用同一 frozen Spec', async () => {
+    const primaryModel = { endpointId: 'oracle-a', endpointName: 'oracle-a', modelName: 'model-a' };
+    const firstError = new TestdataGenerationError(
+      'oracle repair failed',
+      'solution_blueprint',
+      [{ content: 'broken', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'SPEC_PARSE_FAILED', artifact: 'spec', retryPolicy: 'switch-model',
+        failedModelRole: 'oracle',
+      } as any,
+    );
+    const oracleFallbackClient = { chat: jest.fn() };
+    const oracleAdvance = jest.fn().mockReturnValue(oracleFallbackClient);
+    const oracle = makeRoleClient('oracle', 'oracle-a', 'model-a');
+    Object.assign(oracle.client as object, { createClientStartingAfter: oracleAdvance });
+    const artifacts = makeRoleClient('artifacts', 'artifacts-a', 'model-a');
+    const verifier = makeRoleClient('verifier', 'verifier-a', 'model-a');
+    const baseAdvance = jest.fn();
+    const baseClient = { chat: jest.fn(), createClientStartingAfter: baseAdvance };
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'oracle-b/model-b', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    let retriedRoleClients: TestdataRoleClients | undefined;
+    const snapshot = createStatementSnapshot('Input one integer.');
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'semantic-fallback-context',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: snapshot,
+      spec: makeObservedProblemSpec(snapshot.normalizedMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockImplementationOnce(async function (this: TestdataGenService) {
+        retriedRoleClients = (this as any).roleClients;
+        return fallbackPlan;
+      });
+
+    try {
+      const service = new TestdataGenService(baseClient as never, {
+        reliabilityMode: 'observe',
+        roleClients: { oracle, artifacts, verifier },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'role fallback', statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() }, risk, context);
+
+      expect(firstError).toMatchObject({ failedModelRole: 'oracle' });
+      expect(plan).toBe(fallbackPlan);
+      expect(oracleAdvance).toHaveBeenCalledWith(primaryModel);
+      expect(baseAdvance).not.toHaveBeenCalled();
+      expect(retriedRoleClients?.oracle?.client).toBe(oracleFallbackClient);
+      expect(retriedRoleClients?.artifacts).toBe(artifacts);
+      expect(retriedRoleClients?.verifier).toBe(verifier);
+      expect(generateWithSandbox.mock.calls[0][4]).toBe(context);
+      expect(generateWithSandbox.mock.calls[1][4]).toBe(context);
+      expect(context.specHash).toBe(createTestdataPipelineContext({
+        runId: 'semantic-fallback-context-copy',
+        promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+        statement: snapshot,
+        spec: makeObservedProblemSpec(snapshot.normalizedMarkdown, { problemKind: 'traditional' }),
+        risk,
+        roleIdentities: {},
+      }).specHash);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('v3 checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
+    const statementMarkdown = 'Input one integer and output it.';
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV3Checkpoint(statementMarkdown, {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+      killTargets: [],
+    });
+    const risk = {
+      tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false,
+      allowsDirectFallback: false,
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'restored-full-materialization',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: createStatementSnapshot(statementMarkdown),
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk,
+      roleIdentities: {},
+    });
+    const fullMaterializationFailure = new TestdataGenerationError(
+      'frozen full materialization failure',
+      'pipeline_repair',
+      [],
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'UNKNOWN', artifact: 'pipeline', retryPolicy: 'switch-model',
+        failedModelRole: 'artifacts',
+        requiresIsolatedRegeneration: true,
+      },
+    );
+    const fallbackPlan = buildSkeletonPlan(options);
+    const onCheckpoint = jest.fn().mockResolvedValue(undefined);
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(fullMaterializationFailure)
+      .mockResolvedValueOnce(fallbackPlan);
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe',
+        roleClients: { artifacts: makeRoleClient('artifacts', 'artifact-a', 'model-a') },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'restored full materialization',
+        statementMarkdown,
+        options,
+        checkpoint,
+        onCheckpoint,
+      }, { isAvailable: jest.fn() }, risk, context);
+
+      expect(plan).toBe(fallbackPlan);
+      expect(generateWithSandbox).toHaveBeenCalledTimes(2);
+      expect(generateWithSandbox.mock.calls[0][0]).toEqual(expect.objectContaining({ checkpoint }));
+      expect(generateWithSandbox.mock.calls[1][0]).toEqual(expect.objectContaining({
+        checkpoint: undefined,
+      }));
+      expect(generateWithSandbox.mock.calls[1][4]).toBe(context);
+      expect(onCheckpoint).toHaveBeenCalledWith(null);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('语义 fallback 从失败角色的实际 usedModel 推进对应链而不使用其他角色的末项', async () => {
+    const artifactModel = {
+      endpointId: 'artifact-a', endpointName: 'artifact-a-name', modelName: 'artifact-model-a',
+    };
+    const nextArtifactModel = {
+      endpointId: 'artifact-b', endpointName: 'artifact-b-name', modelName: 'artifact-model-b',
+    };
+    const verifierModel = {
+      endpointId: 'verifier-a', endpointName: 'verifier-a-name', modelName: 'verifier-model-a',
+    };
+    const artifactFallbackClient = { chat: jest.fn() };
+    const artifactAdvance = jest.fn().mockReturnValue(artifactFallbackClient);
+    const artifacts: TestdataRoleClient = {
+      role: 'artifacts',
+      source: 'role',
+      chain: [artifactModel, nextArtifactModel],
+      identities: [artifactModel, nextArtifactModel],
+      identity: artifactModel,
+      client: { chat: jest.fn(), createClientStartingAfter: artifactAdvance } as never,
+    };
+    const firstError = new TestdataGenerationError(
+      'artifact repair failed after verifier had also completed',
+      'pipeline_repair',
+      [
+        { content: 'artifact result', usedModel: artifactModel },
+        { content: 'verifier result', usedModel: verifierModel },
+      ] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'GENERATOR_INVALID_JSON', artifact: 'generator', retryPolicy: 'switch-model',
+        failedModelRole: 'artifacts',
+      },
+    );
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'artifact-b-name/artifact-model-b', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockResolvedValueOnce(fallbackPlan);
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe', roleClients: { artifacts },
+      });
+      (service as any).activeRoleIdentities = {
+        artifacts: artifactModel,
+        verifier: verifierModel,
+      };
+
+      await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'disjoint role fallback',
+        statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() });
+
+      expect(artifactAdvance).toHaveBeenCalledTimes(1);
+      expect(artifactAdvance).toHaveBeenCalledWith(artifactModel);
+      expect(artifactAdvance).not.toHaveBeenCalledWith(verifierModel);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('propagates semantic fallback actual identities back to observe-mode warnings', async () => {
+    const primaryModel = { endpointId: 'oracle-a', endpointName: 'oracle-a', modelName: 'model-a' };
+    const sharedModel = { endpointId: 'shared-final', endpointName: 'shared', modelName: 'same-model' };
+    const firstError = new TestdataGenerationError(
+      'oracle repair failed',
+      'solution_blueprint',
+      [{ content: 'broken', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      {
+        code: 'SPEC_PARSE_FAILED', artifact: 'spec', retryPolicy: 'switch-model',
+        failedModelRole: 'oracle',
+      },
+    );
+    const oracle = makeRoleClient('oracle', 'oracle-a', 'model-a');
+    Object.assign(oracle.client as object, {
+      createClientStartingAfter: jest.fn().mockReturnValue({ chat: jest.fn() }),
+    });
+    const fallbackPlan = {
+      files: [], caseCount: 0, usedModel: 'shared/same-model', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as {
+        generateWithSandbox: (...args: unknown[]) => Promise<unknown>;
+      },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockImplementationOnce(async function (this: TestdataGenService) {
+        (this as any).activeRoleIdentities = {
+          oracle: sharedModel,
+          verifier: sharedModel,
+        };
+        return fallbackPlan;
+      });
+
+    try {
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        reliabilityMode: 'observe', roleClients: { oracle },
+      });
+      const plan = await (service as any).generateSandboxWithSemanticFallback({
+        problemTitle: 'identity propagation', statementMarkdown: 'Input one integer.',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }, { isAvailable: jest.fn() });
+      const observed = (service as any).attachProblemSpecObservation(plan, {
+        schemaVersion: 1, results: [], status: 'consensus', conflictCount: 0,
+        unresolvedConflictCount: 0, rolesUsed: ['specPrimary', 'specCritic'],
+        roleIdentities: {}, identityWarningCodes: [], wouldBlock: false,
+      }, {
+        tier: 'low', score: 1, reasons: [], requiresSandbox: false,
+        requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: true,
+      });
+
+      expect((service as any).activeRoleIdentities).toEqual({
+        oracle: sharedModel, verifier: sharedModel,
+      });
+      expect(observed.verification).toMatchObject({ verified: false, wouldBlock: false });
+      expect(observed.notesStructured.warnings).toContainEqual(
+        expect.stringContaining('ORACLE_VERIFIER_IDENTITY_CONFLICT'),
+      );
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
+  });
+
+  it('marks a verified sandbox plan unverified when Spec consensus remains unresolved', () => {
+    const plan = {
+      files: [], caseCount: 0, usedModel: '', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const service = new TestdataGenService({ chat: jest.fn() } as never);
+
+    const observed = (service as any).attachProblemSpecObservation(plan, {
+      schemaVersion: 1, results: [], status: 'unresolved', conflictCount: 1,
+      unresolvedConflictCount: 1, rolesUsed: ['specPrimary', 'specCritic', 'adjudicator'],
+      roleIdentities: {}, identityWarningCodes: [], wouldBlock: true,
+    });
+
+    expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('marks a high-tier runtime identity conflict unverified and would-block', () => {
+    const sharedModel = {
+      endpointId: 'shared-final', endpointName: 'shared', modelName: 'same-model',
+    };
+    const plan = {
+      files: [], caseCount: 0, usedModel: 'shared/same-model', notes: '',
+      notesStructured: { ai: '', system: [], warnings: [] },
+      verification: { mode: 'sandbox', oracleKind: 'ai-solution', verified: true, wouldBlock: false },
+    } as never;
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce',
+    });
+    (service as any).activeRoleIdentities = {
+      oracle: sharedModel,
+      verifier: sharedModel,
+    };
+
+    const observed = (service as any).attachProblemSpecObservation(plan, {
+      schemaVersion: 1, results: [], status: 'consensus', conflictCount: 0,
+      unresolvedConflictCount: 0, rolesUsed: ['specPrimary', 'specCritic'],
+      roleIdentities: {}, identityWarningCodes: [], wouldBlock: false,
+    }, {
+      tier: 'high', score: 8, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true, allowsDirectFallback: false,
+    });
+
+    expect(observed.verification).toMatchObject({ verified: false, wouldBlock: true });
   });
 
   it('沙箱验证中用户中止：原样上抛且不触发修复请求', async () => {
@@ -2784,9 +5975,13 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ stdout: JSON.stringify({ cases: [{ input: '1' }] }), stderr: '' })
         .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
-      runPythonBatchDetailed: jest.fn().mockRejectedValue(
-        new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'),
-      ),
+      runPythonBatchDetailed: jest.fn().mockRejectedValue(new TestdataPipelineError(
+        '沙箱执行总时长超出预算，请减少测试点数量后重试',
+        'PIPELINE_BUDGET_EXHAUSTED',
+        'sandbox_budget',
+        'pipeline',
+        'no-retry',
+      )),
     };
 
     const promise = new TestdataGenService(mockClient as never, {
@@ -2804,6 +5999,445 @@ describe('TestdataGenService.generate', () => {
     await expect(promise).rejects.toThrow(/停止后续修复与模型升级/);
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('沙箱阶段保留模型调用次数预算错误的文案与安全详情', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const modelCallBudgetError = new TestdataPipelineError(
+      '本次测试数据生成已达到 AI 调用次数上限。',
+      'PIPELINE_BUDGET_EXHAUSTED',
+      'pipeline',
+      'pipeline',
+      'no-retry',
+      { callCount: 5, limit: 4 },
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(modelCallBudgetError),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '模型调用预算传播',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED',
+      stage: 'pipeline',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+      safeDetails: { callCount: 5, limit: 4 },
+      recommendDeeperReasoning: false,
+    });
+    expect(failure.message).toContain('AI 调用次数上限');
+    expect(failure.message).not.toContain('沙箱验证已达到总时长上限');
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('真实 runner 预算错误穿过 generator 包装后仍为 no-retry 且零修复零模型升级', async () => {
+    const lowLevelRunner = new GoJudgeSandboxRunner('http://localhost:5050', {
+      get: jest.fn(),
+      post: jest.fn(),
+    });
+    const lowLevelBudgetError = await lowLevelRunner.runPythonBatchDetailed('print(1)', ['1'], {
+      deadlineAt: Date.now() - 1,
+    }).catch(error => error);
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('artifact repair must not run')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(lowLevelBudgetError),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '真实预算错误传播',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED',
+      stage: 'sandbox_budget',
+      artifact: 'pipeline',
+      retryPolicy: 'no-retry',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('首次沙箱失败直接消费错误自带的 no-retry 策略，不按 code 重新推导', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const terminal = new TestdataPipelineError(
+      'terminal generator contract',
+      'GENERATOR_INVALID_JSON',
+      'generator',
+      'generator',
+      'no-retry',
+      { caseIndex: 1 },
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair request must not run')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(terminal),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'retry policy source of truth',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'generator',
+      artifact: 'generator',
+      retryPolicy: 'no-retry',
+      safeDetails: { caseIndex: 1 },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('修复后再次失败仍消费新错误自带的 no-retry 策略', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const repairedTerminal = new TestdataPipelineError(
+      'repaired generator reached a terminal contract',
+      'GENERATOR_INVALID_JSON',
+      'generator',
+      'generator',
+      'no-retry',
+      { caseIndex: 2 },
+    );
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({
+          content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"input":"1"}]}))',
+          usedModel,
+        }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: 'not-json', stderr: '' })
+        .mockRejectedValueOnce(repairedTerminal),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'repaired retry policy source of truth',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'generator',
+      artifact: 'generator',
+      retryPolicy: 'no-retry',
+      safeDetails: { caseIndex: 2 },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('post-repair materialization cancellation rethrows the ordinary reason without model escalation', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const controller = new AbortController();
+    const cancellation = new Error('post-repair materialization cancellation');
+    const transportCancellation = Object.assign(new Error('post-repair transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: '@@@GENERATOR@@@\nimport json\nprint(json.dumps({"cases":[{"input":"1"}]}))',
+        usedModel,
+      }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({ stdout: 'not-json', stderr: '' })
+        .mockImplementationOnce(async () => {
+          controller.abort(cancellation);
+          throw transportCancellation;
+        }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+    const checkpoint = {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'legacy',
+    }).generate({
+      problemTitle: 'post-repair cancellation',
+      statementMarkdown: '题面',
+      options,
+      checkpoint,
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('STRESS_GENERATOR 自动修复请求失败时完整保留原失败契约', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const duplicatedStress = JSON.stringify({
+      cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, index) => ({
+        label: `duplicate-${index + 1}`,
+        input: '1',
+      })),
+    });
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockRejectedValueOnce(new Error('repair endpoint unavailable')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: duplicatedStress, stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 'stress repair contract',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'STRESS_LOW_DIVERSITY',
+      stage: 'stress-generator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: {
+        generatedCount: TESTDATA_GEN_LIMITS.STRESS_CASES,
+        uniqueCount: 1,
+        minimumUnique: Math.ceil(
+          TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO,
+        ),
+      },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['stress-generator', '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")'],
+    ['brute', '@@@BRUTE@@@\nprint(input())  # repaired-brute'],
+  ] as const)('%s materialization repair accepts only its single section', async (
+    scope,
+    repairContent,
+  ) => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: repairContent, usedModel }),
+    };
+    let stressRuns = 0;
+    let initialBruteFailed = false;
+    const duplicateStress = JSON.stringify({
+      cases: Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, (_, index) => ({
+        label: `duplicate-${index + 1}`, input: '1',
+      })),
+    });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => {
+        if (code.includes('stress generator') || code.includes('repaired-stress')) {
+          stressRuns++;
+          return Promise.resolve({
+            stdout: scope === 'stress-generator' && stressRuns === 1
+              ? duplicateStress
+              : stressGeneratorStdout(),
+            stderr: '',
+          });
+        }
+        return Promise.resolve({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+        });
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: any[]) => {
+        if (scope === 'brute'
+          && code.includes('independent brute')
+          && !code.includes('repaired-brute')
+          && !initialBruteFailed) {
+          initialBruteFailed = true;
+          return Promise.resolve(inputs.map(() => detail({
+            status: 'Runtime Error', accepted: false, exitStatus: 1,
+          })));
+        }
+        return Promise.resolve(inputs.map(input => detail({
+          stdout: typeof input === 'string' ? input : input.stdin,
+        })));
+      }),
+    };
+
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner as never, mode: 'sandbox', reliabilityMode: 'legacy',
+    }).generate({
+      problemTitle: `${scope} isolated repair`, statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    const repairPrompt = mockClient.chat.mock.calls[4][0][2].content;
+    const expectedMarker = scope === 'brute' ? '@@@BRUTE@@@' : '@@@STRESS_GENERATOR@@@';
+    expect(repairPrompt.match(new RegExp(expectedMarker, 'g'))).toHaveLength(1);
+    for (const marker of [
+      '@@@VALIDATOR@@@', '@@@VALIDATOR_MANIFEST@@@', '@@@VALIDATOR_PROBE_RECIPES@@@',
+    ]) expect(repairPrompt).not.toContain(marker);
+    expect(plan.files.find(file => file.name === 'validator.py')?.content).toContain('sys.exit(0)');
+    expect(plan.files.find(file => file.name === 'std.py')?.content).toContain('print(input())');
+    expect(plan.files.find(file => file.name === 'brute.py')?.content).toContain(
+      scope === 'brute' ? 'repaired-brute' : 'independent brute',
+    );
+  });
+
+  it.each([
+    ['ORACLE_BRUTE_DIVERGENCE', 'brute', 'adjudicate'],
+    ['PIPELINE_BUDGET_EXHAUSTED', 'pipeline', 'no-retry'],
+    ['ORACLE_COMPILE_FAILED', 'oracle', 'manual-review'],
+  ] as const)('第二模型最终 %s 保留终局策略且不再升级', async (code, artifact, retryPolicy) => {
+    const primaryModel = { endpointId: 'ep1', endpointName: 'primary', modelName: 'model-a' };
+    const fallbackModel = { endpointId: 'ep2', endpointName: 'fallback', modelName: 'model-b' };
+    const firstError = new TestdataGenerationError(
+      'primary repair failed',
+      'oracle',
+      [{ content: 'primary', usedModel: primaryModel }] as never,
+      true,
+      undefined,
+      undefined,
+      { code: 'ORACLE_RUNTIME_FAILED', artifact: 'oracle', retryPolicy: 'repair-artifact' },
+    );
+    const fallbackError = new TestdataGenerationError(
+      'fallback reached a terminal typed failure',
+      code === 'PIPELINE_BUDGET_EXHAUSTED' ? 'sandbox_budget' : 'stress_testing',
+      [{ content: 'fallback', usedModel: fallbackModel }] as never,
+      false,
+      undefined,
+      undefined,
+      { code, artifact, retryPolicy },
+    );
+    const generateWithSandbox = jest.spyOn(
+      TestdataGenService.prototype as unknown as { generateWithSandbox: (...args: unknown[]) => Promise<never> },
+      'generateWithSandbox',
+    )
+      .mockRejectedValueOnce(firstError)
+      .mockRejectedValueOnce(fallbackError);
+    const fallbackClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+    const primaryClient = {
+      chat: jest.fn(),
+      createClientStartingAfter: jest.fn().mockReturnValue(fallbackClient),
+    };
+    const runner = { isAvailable: jest.fn().mockResolvedValue(true) };
+
+    try {
+      const promise = new TestdataGenService(primaryClient as never, {
+        sandboxRunner: runner as never,
+        mode: 'sandbox',
+      }).generate({
+        problemTitle: '第二模型终局策略',
+        statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      });
+
+      await expect(promise).rejects.toMatchObject({
+        code,
+        artifact,
+        retryPolicy,
+        recommendDeeperReasoning: false,
+      });
+      expect(primaryClient.createClientStartingAfter).toHaveBeenCalledTimes(1);
+      expect(fallbackClient.createClientStartingAfter).not.toHaveBeenCalled();
+      expect(generateWithSandbox).toHaveBeenCalledTimes(2);
+    } finally {
+      generateWithSandbox.mockRestore();
+    }
   });
 
   it('修复请求本身被中止（AIServiceError aborted 形态）：原样上抛不包装', async () => {
@@ -2883,6 +6517,13 @@ describe('TestdataGenService.generate', () => {
         })
         .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
       runPythonBatch: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'repair-cc' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'repair-java' }),
+      runJavaBatchDetailed: jest.fn().mockImplementation((_fileId: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
     };
     const plan = await new TestdataGenService(mockClient as never, {
       sandboxRunner: runner, mode: 'sandbox',
@@ -2963,6 +6604,105 @@ describe('TestdataGenService.generate', () => {
     expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
   });
 
+  it('Generator-owned scoped formal rejection repairs only Generator and then revalidates', async () => {
+    const statementMarkdown = [
+      'Subtask 1 requires n <= 10.',
+      'Subtask 2 requires n <= 100.',
+    ].join('\n');
+    const proof = makeTieredValidatorProof(statementMarkdown);
+    const options: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 2, dataScale: 'auto', languages: [],
+    };
+    const tieredSolution = [
+      '=== SUBTASKS ===',
+      '1 | 30 | n <= 10',
+      '2 | 70 | n <= 100',
+      makeSolutionBlueprint('traditional'),
+    ].join('\n');
+    const initialArtifacts = makeGenerationArtifactsBlueprint('traditional');
+    const repairedGenerator = [
+      '@@@GENERATOR@@@',
+      'import json',
+      'print(json.dumps({"cases":[{"label":"fixed-1","input":"1"},{"label":"fixed-2","input":"50"}]}))',
+    ].join('\n');
+    const oracle = makeRoleClient(
+      'oracle', 'scoped-oracle', 'oracle-model', tieredSolution,
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'scoped-artifacts', 'artifacts-model', initialArtifacts, repairedGenerator,
+    );
+    const verifier = makeRoleClient(
+      'verifier', 'scoped-verifier', 'verifier-model',
+      makeEmptyKillTargetsResponse(),
+      makeStrictIndependentVerifierBlueprint({
+        constraintIds: ['C_subtask_1', 'C_subtask_2'], invariantIds: [],
+      }),
+    );
+    let generatorRuns = 0;
+    let validatorBatches = 0;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => {
+        if (code.includes('stress generator')) {
+          return Promise.resolve({ stdout: stressGeneratorStdout(), stderr: '' });
+        }
+        generatorRuns++;
+        return Promise.resolve({
+          stdout: JSON.stringify({ cases: generatorRuns === 1 ? [
+            { label: 'bad-1', input: '11' }, { label: 'ok-2', input: '50' },
+          ] : [
+            { label: 'fixed-1', input: '1' }, { label: 'fixed-2', input: '50' },
+          ] }),
+          stderr: '',
+        });
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: any[]) => {
+        if (code.includes('sys.exit(0)')) {
+          validatorBatches++;
+          if (validatorBatches === 1) {
+            return Promise.resolve(inputs.map((_input, index) => index === 0
+              ? detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })
+              : detail()));
+          }
+          if (validatorBatches === 2) return Promise.resolve(inputs.map(() => detail()));
+          return Promise.resolve(inputs.map(() => detail({
+            status: 'Nonzero Exit Status', accepted: false, exitStatus: 1,
+          })));
+        }
+        return Promise.resolve(inputs.map(input => detail({
+          stdout: typeof input === 'string' ? input : input.stdin,
+        })));
+      }),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      sandboxRunner: runner as never,
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      roleClients: { oracle, artifacts, verifier },
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'scoped repair', statementMarkdown, options,
+    }, runner, 1, proof.pipelineContext.risk, proof.pipelineContext);
+
+    expect(artifacts.chat).toHaveBeenCalledTimes(2);
+    const repairMessages = artifacts.chat.mock.calls[1][0];
+    expect(repairMessages[2].content).toContain('只输出修复后的 @@@GENERATOR@@@');
+    for (const forbidden of [
+      '@@@VALIDATOR@@@', '@@@VALIDATOR_MANIFEST@@@', '@@@VALIDATOR_PROBE_RECIPES@@@',
+      '@@@ORACLE@@@', '@@@SOLUTION', '@@@TEMPLATE',
+    ]) expect(repairMessages[2].content).not.toContain(forbidden);
+    expect(plan.files.find((file: { name: string }) => file.name === 'generator.py')?.content)
+      .toContain('fixed-1');
+    expect(plan.files.find((file: { name: string }) => file.name === 'validator.py')?.content)
+      .toContain('sys.exit(0)');
+    expect(plan.files.find((file: { name: string }) => file.name === 'std.py')?.content)
+      .toContain('print(input())');
+    expect(plan.caseCoverage?.map((item: { subtaskId?: number }) => item.subtaskId)).toEqual([1, 2]);
+    expect(generatorRuns).toBe(2);
+  });
+
   it('解题蓝图修复未返回 SUBTASKS 时保留初次解析的合法子任务', async () => {
     const initialSolution = [
       '=== SUBTASKS ===',
@@ -3024,7 +6764,7 @@ describe('TestdataGenService.generate', () => {
     expect(config.subtasks.map(subtask => subtask.score)).toEqual([40, 60]);
   });
 
-  it('压力对拍失败时只重生成独立验证器，不把 ORACLE 源码放入修复上下文', async () => {
+  it('ORACLE 与 BRUTE 分歧时进入裁决并停止自动修复', async () => {
     const brokenVerifier = makeIndependentVerifierBlueprint().replace(
       'print(input())  # independent brute',
       'print("wrong")  # broken independent brute',
@@ -3065,20 +6805,20 @@ describe('TestdataGenService.generate', () => {
         ins.map(input => detail({ stdout: code.includes('broken independent brute') ? 'wrong\n' : input })),
       )),
     };
-    const plan = await new TestdataGenService(mockClient as never, {
+    const promise = new TestdataGenService(mockClient as never, {
       sandboxRunner: runner, mode: 'sandbox',
     }).generate({
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
-    expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    const repairMessages = mockClient.chat.mock.calls[4][0];
-    expect(repairMessages[2].content).toContain('独立验证制品未通过');
-    expect(repairMessages[0].content).not.toContain('print(input())');
-    expect(repairMessages[1].content).not.toContain('@@@ORACLE@@@');
-    // 仅 BRUTE 发生变化：正式 GENERATOR 与 STRESS_GENERATOR 各只执行一次。
+    await expect(promise).rejects.toMatchObject({
+      code: 'ORACLE_BRUTE_DIVERGENCE',
+      artifact: 'brute',
+      retryPolicy: 'adjudicate',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(4);
     expect(runner.runPython).toHaveBeenCalledTimes(2);
-    expect(plan.verification?.stressCheck?.agreed).toBe(TESTDATA_GEN_LIMITS.STRESS_CASES);
   });
 
   it('初始蓝图分节损坏时请求完整蓝图后继续验证', async () => {
@@ -3128,7 +6868,8 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
 
-  it('auto 模式在沙箱不可达时回退兼容直出并明确提示', async () => {
+  it('沙箱不可达且管理员未显式允许时拒绝 low 风险直出', async () => {
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
     const mockClient = {
       chat: jest.fn().mockResolvedValue({
         content: makeAiJson(),
@@ -3141,17 +6882,1157 @@ describe('TestdataGenService.generate', () => {
       runPython: jest.fn(),
       runPythonBatch: jest.fn(),
     };
-    const plan = await new TestdataGenService(mockClient as never, {
+    await expect(new TestdataGenService(mockClient as never, {
       sandboxRunner: runner,
       mode: 'auto',
     }).generate({
-      problemTitle: '提莫攻击', statementMarkdown: '题面',
+      problemTitle: '提莫攻击', statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
       options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    })).rejects.toMatchObject({
+      code: 'SANDBOX_REQUIRED',
+      retryPolicy: 'no-retry',
     });
-    expect(plan.notes).toContain('沙箱当前不可达');
-    expect(plan.notesStructured?.warnings.some(note => note.includes('沙箱当前不可达'))).toBe(true);
+    expect(mockClient.chat).not.toHaveBeenCalled();
     expect(runner.runPython).not.toHaveBeenCalled();
   });
+
+  it('管理员显式允许时只为 low 风险使用未验证 direct fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'low risk',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
+    });
+    expect(plan).toMatchObject({
+      risk: { tier: 'low', allowsDirectFallback: true, requiresSandbox: false, wouldBlock: true },
+      verification: {
+        mode: 'direct',
+        templateLanguages: ['py', 'java', 'cc'],
+        verified: false,
+        wouldBlock: true,
+      },
+    });
+    expect(plan.verification?.templateChecks).toBeUndefined();
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('observe direct fallback rejects a response that changes frozen problemKind', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const statementMarkdown = 'Read one integer and print it.';
+    const baseClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson({ problemType: 'function' }),
+        usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+      }),
+    };
+    const service = new TestdataGenService(baseClient as never, {
+      mode: 'direct',
+      reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+    });
+
+    await expect(service.generate({
+      problemTitle: 'frozen direct kind',
+      statementMarkdown,
+      options: { problemKind: 'auto', caseCount: 2, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_PARSE_FAILED',
+      artifact: 'spec',
+      retryPolicy: 'rerun-spec',
+    });
+  });
+
+  it('medium risk requires an explicit direct-fallback confirmation', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const service = new TestdataGenService({ chat: jest.fn() } as never, { mode: 'direct' });
+    await expect(service.generate({
+      problemTitle: 'float',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```\nFloating point output has absolute error.',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'DIRECT_FALLBACK_CONFIRMATION_REQUIRED',
+      retryPolicy: 'no-retry',
+    });
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('medium risk can direct only after confirmation and is never marked sandbox verified', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'float',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```\nFloating point output has absolute error.',
+      options: {
+        problemKind: 'function', caseCount: 2, languages: ['py'], confirmDirectFallback: true,
+      },
+    });
+    expect(plan).toMatchObject({ risk: { tier: 'medium', allowsDirectFallback: true } });
+    expect(plan.verification).toEqual(expect.objectContaining({ mode: 'direct' }));
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it.each(['observe', 'enforce', 'legacy'] as const)('%s never permits confirmed high-risk direct fallback', async reliabilityMode => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'direct', reliabilityMode,
+    });
+    await expect(service.generate({
+      problemTitle: 'high risk',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```\nFloating point output. Given a graph. Subtask 1.',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
+      },
+    })).rejects.toMatchObject({
+      code: 'SANDBOX_REQUIRED',
+    });
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('legacy mode also sends a complete statement above the former prompt boundary', async () => {
+    const tail = 'LEGACY_TAIL_CONSTRAINT';
+    const statementMarkdown = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${'x'.repeat(20_001)}${tail}`;
+    const mockClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson(),
+      usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
+    }) };
+
+    await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'legacy',
+    }).generate({
+      problemTitle: 'long statement',
+      statementMarkdown,
+      options: { problemKind: 'function', caseCount: 2, languages: ['py'] },
+    });
+
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat.mock.calls[0][0][0].content).toContain(tail);
+    expect(mockClient.chat.mock.calls[0][0][0].content).not.toContain('题面过长已截断');
+  });
+
+  it('legacy mode rejects only the explicit snapshot hard limit before sandbox or AI calls', async () => {
+    const mockClient = { chat: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+    };
+    await expect(new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner,
+    }).generate({
+      problemTitle: 'long statement',
+      statementMarkdown: 'x'.repeat(STATEMENT_SNAPSHOT_HARD_LIMIT + 1),
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'SPEC_STATEMENT_TOO_LONG',
+      retryPolicy: 'no-retry',
+    });
+    expect(runner.isAvailable).not.toHaveBeenCalled();
+    expect(mockClient.chat).not.toHaveBeenCalled();
+  });
+
+  it('supported testlib custom checkers allow confirmed medium-risk direct fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: makeAiJson(),
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' },
+      }),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      mode: 'direct', reliabilityMode: 'observe',
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true,
+        read: true,
+        checkerSource: '#include "testlib.h"\nint main() {}\n',
+        checkerHeaders: { 'testlib.h': '// header\n' },
+      },
+      options: {
+        problemKind: 'function', caseCount: 2, languages: ['py'], confirmDirectFallback: true,
+      },
+    });
+    expect(plan).toMatchObject({
+      risk: { tier: 'medium', allowsDirectFallback: true, requiresSandbox: false },
+      verification: {
+        mode: 'direct',
+        verified: false,
+        wouldBlock: true,
+        checkerCheck: {
+          configured: true,
+          read: true,
+          compiled: false,
+          executed: false,
+          total: 0,
+          passed: 0,
+          infraFailures: 0,
+          failureKind: 'unavailable',
+        },
+      },
+    });
+    expect(mockClient.chat).toHaveBeenCalled();
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('enforce 在 checker 未读取时返回显式人工复核失败', async () => {
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox',
+      reliabilityMode: 'enforce',
+      sandboxRunner: { isAvailable: jest.fn().mockResolvedValue(true) } as never,
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+    });
+
+    await expect(service.generate({
+      problemTitle: 'checker',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: { configured: true, read: false, failureKind: 'missing' },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'CHECKER_REQUIRED_UNAVAILABLE',
+      artifact: 'checker',
+      retryPolicy: 'manual-review',
+      safeDetails: { failureKind: 'missing' },
+    });
+  });
+
+  it.each([
+    ['compileCpp', { runCheckerBatchDetailed: jest.fn() }],
+    ['runCheckerBatchDetailed', {
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'unused-checker-bin' }),
+    }],
+  ] as const)(
+    'enforce treats missing checker runner capability %s as preparation infrastructure failure',
+    async (_missingCapability, capabilities) => {
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        ...capabilities,
+      };
+
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+      }).generate({
+        problemTitle: 'checker capability',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({
+        code: 'CHECKER_RUNTIME_FAILED',
+        artifact: 'checker',
+        retryPolicy: 'manual-review',
+        safeDetails: { failureKind: 'infra' },
+      });
+    },
+  );
+
+  it.each([
+    ['compileCpp', { runCheckerBatchDetailed: jest.fn() }],
+    ['runCheckerBatchDetailed', {
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'unused-checker-bin' }),
+    }],
+  ] as const)(
+    'observe reports missing checker runner capability %s as generic preparation infrastructure failure',
+    async (_missingCapability, capabilities) => {
+      const options: GenerateOptions = {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        ...capabilities,
+        runPython: jest.fn().mockResolvedValue({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+        }),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+          Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+        )),
+      };
+
+      const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+      }).generate({
+        problemTitle: 'checker capability',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint: makeFrozenV3Checkpoint('题面', {
+          solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+          artifacts: parseGenerationArtifacts(
+            makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+          ),
+          verifier: {
+            bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+          },
+          killTargets: [],
+        }, 'traditional', true),
+      });
+
+      expect(plan.verification).toMatchObject({
+        verified: false,
+        wouldBlock: true,
+        checkerCheck: {
+          configured: true,
+          read: true,
+          compiled: false,
+          executed: false,
+          total: 0,
+          passed: 0,
+          infraFailures: 0,
+          failureKind: 'infra',
+        },
+      });
+      expect(plan.notes).toContain('checker 准备基础设施失败');
+      expect(plan.notes).not.toContain('checker 编译失败');
+      expect(plan.notesStructured?.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining('checker 准备基础设施失败'),
+      ]));
+    },
+  );
+
+  it('checker preparation rethrows the exact ordinary signal reason when compile resolves after abort', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('checker preparation caller cancellation');
+    const mockClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        return { ok: false, kind: 'infra', error: 'late infrastructure result' };
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+    }).generate({
+      problemTitle: 'checker cancellation boundary',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['successful cleanup', () => Promise.resolve()],
+    ['rejected cleanup', () => Promise.reject(new Error('cache cleanup unavailable'))],
+  ] as const)(
+    'checker preparation deletes a successful late cache after caller abort with %s',
+    async (_label, cleanup) => {
+      const controller = new AbortController();
+      const cancellation = new Error('checker cached compile caller cancellation');
+      const mockClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        compileCpp: jest.fn().mockImplementation(async () => {
+          controller.abort(cancellation);
+          return { ok: true, fileId: 'late-checker-cache' };
+        }),
+        runCheckerBatchDetailed: jest.fn(),
+        deleteCachedFile: jest.fn().mockImplementation(cleanup),
+      };
+
+      const failure = await new TestdataGenService(mockClient as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+      }).generate({
+        problemTitle: 'checker cached cancellation boundary',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+        signal: controller.signal,
+      }).catch(error => error);
+
+      expect(failure).toBe(cancellation);
+      expect(runner.deleteCachedFile).toHaveBeenCalledTimes(1);
+      expect(runner.deleteCachedFile).toHaveBeenCalledWith('late-checker-cache');
+      expect(mockClient.chat).not.toHaveBeenCalled();
+      expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+      expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+    },
+  );
+
+  it('enforce 在 checker 编译失败时保留 checker 类型化契约', async () => {
+    const privateDiagnostic = 'SECRET_CHECKER_SENTINEL /private/checker/path.cc:1: error';
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false, kind: 'compile', error: privateDiagnostic,
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'CHECKER_COMPILE_FAILED',
+      artifact: 'checker',
+      retryPolicy: 'manual-review',
+      safeDetails: { failureKind: 'compile' },
+    });
+    expect(failure.message).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(failure.message).not.toContain('/private/checker/path.cc');
+    expect(String(failure.cause)).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(String(failure.cause)).not.toContain('/private/checker/path.cc');
+    expect(String(failure.stack)).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(String(failure.stack)).not.toContain('/private/checker/path.cc');
+    expect(JSON.stringify(failure)).not.toContain('SECRET_CHECKER_SENTINEL');
+    expect(JSON.stringify(failure)).not.toContain('/private/checker/path.cc');
+  });
+
+  it.each([
+    ['compiler infrastructure result', () => Promise.resolve({
+      ok: false,
+      kind: 'infra',
+      error: 'SECRET_CHECKER_SENTINEL /private/checker/path.cc transport protocol',
+    }), 'infra'],
+    ['compiler transport failure', () => Promise.reject(
+      new Error('SECRET_CHECKER_SENTINEL at /private/checker/path.cc ECONNRESET'),
+    ), 'infra'],
+    ['compiler budget exhaustion', () => Promise.reject(new SandboxBudgetExceededError()), 'budget'],
+  ] as const)(
+    'enforce maps checker %s to a sanitized CHECKER_RUNTIME_FAILED',
+    async (_label, compileCpp, failureKind) => {
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        compileCpp: jest.fn().mockImplementation(compileCpp),
+        runCheckerBatchDetailed: jest.fn(),
+      };
+
+      const failure = await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+      }).generate({
+        problemTitle: 'checker',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      }).catch(error => error);
+
+      expect(failure).toMatchObject({
+        code: 'CHECKER_RUNTIME_FAILED',
+        artifact: 'checker',
+        retryPolicy: 'manual-review',
+        safeDetails: { failureKind },
+      });
+      expect(failure.message).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(failure.message).not.toContain('/private/checker/path.cc');
+      expect(String(failure.cause)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(String(failure.cause)).not.toContain('/private/checker/path.cc');
+      expect(String(failure.stack)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(String(failure.stack)).not.toContain('/private/checker/path.cc');
+      expect(JSON.stringify(failure)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(JSON.stringify(failure)).not.toContain('/private/checker/path.cc');
+    },
+  );
+
+  it.each([
+    ['compiler rejection', () => Promise.resolve({
+      ok: false,
+      kind: 'compile',
+      error: 'SECRET_CHECKER_SENTINEL /private/checker/path.cc syntax error',
+    }), 'compile', 'checker 编译失败'],
+    ['compiler transport failure', () => Promise.reject(
+      new Error('SECRET_CHECKER_SENTINEL at /private/checker/path.cc ECONNRESET'),
+    ), 'infra', 'checker 准备基础设施失败'],
+    ['compiler budget exhaustion', () => Promise.reject(
+      new SandboxBudgetExceededError(),
+    ), 'budget', 'checker 准备阶段预算耗尽'],
+  ] as const)(
+    'observe sanitizes checker %s and returns failed evidence',
+    async (_label, compileCpp, failureKind, expectedNote) => {
+      const options: GenerateOptions = {
+        problemKind: 'traditional', caseCount: 1, languages: [],
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        compileCpp: jest.fn().mockImplementation(compileCpp),
+        runCheckerBatchDetailed: jest.fn(),
+        runPython: jest.fn().mockResolvedValue({
+          stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+        }),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+          Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+        )),
+      };
+
+      const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+      }).generate({
+        problemTitle: 'checker privacy',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint: makeFrozenV3Checkpoint('题面', {
+          solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+          artifacts: parseGenerationArtifacts(
+            makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+          ),
+          verifier: {
+            bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+          },
+          killTargets: [],
+        }, 'traditional', true),
+      });
+
+      expect(plan.verification).toMatchObject({
+        verified: false,
+        wouldBlock: true,
+        checkerCheck: {
+          configured: true,
+          read: true,
+          compiled: false,
+          executed: false,
+          total: 0,
+          passed: 0,
+          infraFailures: 0,
+          failureKind,
+        },
+      });
+      expect(plan.notes).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(plan.notes).not.toContain('/private/checker/path.cc');
+      expect(plan.notes).toContain(expectedNote);
+      expect(JSON.stringify(plan)).not.toContain('SECRET_CHECKER_SENTINEL');
+      expect(JSON.stringify(plan)).not.toContain('/private/checker/path.cc');
+    },
+  );
+
+  it.each([
+    ['TLE', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+    ]), 'budget'],
+    ['testlib _fail', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: false, status: 'Nonzero Exit Status', exitStatus: 3 }),
+    ]), 'infra'],
+    ['unknown exit', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: false, status: 'Nonzero Exit Status', exitStatus: 9 }),
+    ]), 'infra'],
+    ['malformed status', jest.fn().mockResolvedValue([
+      detail({ accepted: false, timedOut: false, status: 'System Error', exitStatus: 1 }),
+    ]), 'infra'],
+    ['malformed response', jest.fn().mockResolvedValue([]), 'infra'],
+    ['transport failure', jest.fn().mockRejectedValue(new Error('ECONNRESET')), 'infra'],
+  ] as const)('enforce 将 checker %s 映射为 CHECKER_RUNTIME_FAILED', async (_label, runChecker, failureKind) => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: runChecker,
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    await expect(new TestdataGenService({
+      chat: jest.fn().mockResolvedValue({ content: makeSolutionBlueprint('traditional'), usedModel }),
+    } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+      roleClients: makeFrozenSpecRoleClients(
+        '```input1\n1\n```\n```output1\n1\n```',
+        'traditional',
+        true,
+      ),
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'CHECKER_RUNTIME_FAILED',
+      artifact: 'checker',
+      retryPolicy: 'manual-review',
+      safeDetails: { failureKind },
+    });
+  });
+
+  it('enforce 将 checker 总预算耗尽映射为 CHECKER_RUNTIME_FAILED', async () => {
+    let now = 10_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockImplementation(async () => {
+        now += CHECKER_BUDGET_MS;
+        return { ok: true, fileId: 'checker-bin' };
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    try {
+      await expect(new TestdataGenService({
+        chat: jest.fn().mockResolvedValue({ content: makeSolutionBlueprint('traditional'), usedModel }),
+      } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(
+          '```input1\n1\n```\n```output1\n1\n```',
+          'traditional',
+          true,
+        ),
+      }).generate({
+        problemTitle: 'checker',
+        statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({
+        code: 'CHECKER_RUNTIME_FAILED',
+        artifact: 'checker',
+        retryPolicy: 'manual-review',
+        safeDetails: { failureKind: 'budget' },
+      });
+      expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('real checker executor keeps an earlier caller deadline than its remaining checker budget', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV3Checkpoint('题面', {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: 'print(input()) # independent brute',
+        validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    }, 'traditional', true);
+    const startedAt = 10_000;
+    let now = startedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockResolvedValue([detail()]),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockImplementationOnce(async () => {
+          now = startedAt + SANDBOX_TOTAL_BUDGET_MS - 1_000;
+          return [detail({ stdout: '1\n' })];
+        }),
+      deleteCachedFile: jest.fn(),
+    };
+
+    try {
+      await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+      }).generate({
+        problemTitle: 'checker deadline',
+        statementMarkdown: '题面',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint,
+      });
+      expect(runner.runCheckerBatchDetailed).toHaveBeenCalledWith(
+        'checker-bin',
+        [{ input: '1\n', output: '1\n', answer: '1\n' }],
+        expect.objectContaining({ deadlineAt: startedAt + SANDBOX_TOTAL_BUDGET_MS }),
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('real checker executor preserves the exact caller cancellation reason identity', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV3Checkpoint('题面', {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: 'print(input()) # independent brute',
+        validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    }, 'traditional', true);
+    const controller = new AbortController();
+    const cancellation = new Error('caller cancellation identity');
+    const transportCancellation = Object.assign(new Error('transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportCancellation;
+      }),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients('题面', 'traditional', true),
+    }).generate({
+      problemTitle: 'checker cancellation',
+      statementMarkdown: '题面',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint,
+      signal: controller.signal,
+    })).rejects.toBe(cancellation);
+  });
+
+  it('solution sample checker cancellation rethrows the ordinary signal reason without AI repair', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const controller = new AbortController();
+    const cancellation = new Error('solution sample checker cancellation');
+    const transportCancellation = Object.assign(new Error('checker transport cancellation'), {
+      name: 'CanceledError',
+    });
+    const mockClient = {
+      chat: jest.fn().mockRejectedValue(new Error('solution repair must not run')),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportCancellation;
+      }),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const failure = await new TestdataGenService(mockClient as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(
+        '```input1\n1\n```\n```output1\n1\n```', 'traditional', true,
+      ),
+    }).generate({
+      problemTitle: 'solution sample cancellation',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint: makeFrozenV3Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
+        solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      }, 'traditional', true),
+      signal: controller.signal,
+    }).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
+  it('caller cancellation beats an exhausted checker budget and keeps the ordinary reason identity', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const controller = new AbortController();
+    const cancellation = new Error('cancellation before exhausted checker budget');
+    const mockClient = { chat: jest.fn(), createClientStartingAfter: jest.fn() };
+    let now = 10_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockImplementation(async () => {
+        now += CHECKER_BUDGET_MS;
+        controller.abort(cancellation);
+        return { ok: true, fileId: 'checker-bin' };
+      }),
+      runCheckerBatchDetailed: jest.fn(),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+        Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+      )),
+      deleteCachedFile: jest.fn(),
+    };
+
+    try {
+      const failure = await new TestdataGenService(mockClient as never, {
+        mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+        roleClients: makeFrozenSpecRoleClients(
+          '```input1\n1\n```\n```output1\n1\n```', 'traditional', true,
+        ),
+      }).generate({
+        problemTitle: 'checker cancellation priority',
+        statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+        existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+        checkerArtifacts: {
+          configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+        },
+        options,
+        checkpoint: makeFrozenV3Checkpoint('```input1\n1\n```\n```output1\n1\n```', {
+          solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+          artifacts: parseGenerationArtifacts(
+            makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+          ),
+          verifier: {
+            bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+          },
+          killTargets: [],
+        }, 'traditional', true),
+        signal: controller.signal,
+      }).catch(error => error);
+
+      expect(failure).toBe(cancellation);
+      expect(runner.runCheckerBatchDetailed).not.toHaveBeenCalled();
+      expect(mockClient.chat).not.toHaveBeenCalled();
+      expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('observe 保留 testlib _fail 基础设施证据并对未裁决样例记零分', async () => {
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV3Checkpoint(
+      '```input1\n1\n```\n```output1\n1\n```', {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+      }, 'traditional', true,
+    );
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockResolvedValue([
+        detail({
+          accepted: false,
+          timedOut: false,
+          status: 'Nonzero Exit Status',
+          exitStatus: 3,
+        }),
+      ]),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+        Promise.resolve(inputs.map(() => detail({ stdout: '1\n' })))
+      )),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(
+        '```input1\n1\n```\n```output1\n1\n```', 'traditional', true,
+      ),
+    }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '```input1\n1\n```\n```output1\n1\n```',
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint,
+    });
+
+    expect(plan.verification).toMatchObject({
+      verified: false,
+      wouldBlock: true,
+      sampleCheck: { total: 1, passed: 0 },
+      checkerCheck: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        infraFailures: expect.any(Number),
+        failureKind: 'infra',
+      },
+    });
+    expect(plan.verification?.checkerCheck?.infraFailures).toBeGreaterThan(0);
+  });
+
+  it('records which statement sample was skipped when a ready checker has an infra error', async () => {
+    const statement = [
+      '```input1', '1', '```', '```output1', '1', '```',
+      '```input2', '2', '```', '```output2', '2', '```',
+      '```input3', '3', '```', '```output3', '3', '```',
+    ].join('\n');
+    const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
+    const checkpoint = makeFrozenV3Checkpoint(statement, {
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: {
+        bruteCode: '', validatorCode: '', stressGeneratorCode: '', complexityGap: 'none' as const,
+      },
+      killTargets: [],
+    }, 'traditional', true);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'checker-bin' }),
+      runCheckerBatchDetailed: jest.fn().mockResolvedValue([
+        detail({ stdout: 'accepted sample 1' }),
+        detail({
+          accepted: false,
+          timedOut: false,
+          status: 'Internal Error',
+          exitStatus: undefined,
+          error: 'checker transport failed',
+        }),
+        detail({ stdout: 'accepted sample 3' }),
+      ]),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((_code: string, inputs: string[]) => (
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))
+      )),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never, reliabilityMode: 'observe',
+      roleClients: makeFrozenSpecRoleClients(statement, 'traditional', true),
+    }).generate({
+      problemTitle: 'checker samples',
+      statementMarkdown: statement,
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true, read: true, checkerSource: 'int main() {}', checkerHeaders: {},
+      },
+      options,
+      checkpoint,
+    });
+
+    expect(plan.verification).toMatchObject({
+      verified: false,
+      wouldBlock: true,
+      sampleCheck: {
+        total: 3,
+        passed: 2,
+        skipped: [{ sampleIndex: 2, skippedReason: 'checker-infra-error' }],
+      },
+      checkerCheck: {
+        failureKind: 'infra',
+      },
+    });
+    expect(plan.verification?.checkerCheck?.infraFailures).toBeGreaterThan(0);
+  });
+
+  it('unsupported custom checkers never use direct fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    const mockClient = { chat: jest.fn() };
+    await expect(new TestdataGenService(mockClient as never, { mode: 'direct' }).generate({
+      problemTitle: 'checker',
+      statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+      existingConfig: 'checker_type: custom\nchecker: checker.cc\n',
+      options: {
+        problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback: true,
+      },
+    })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+    expect(mockClient.chat).not.toHaveBeenCalled();
+    delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+  });
+
+  it('observe mode overlaps one sandbox health probe with ProblemSpec generation', async () => {
+    const statementMarkdown = 'Read one integer and print it.';
+    const primary = makeRoleClient('specPrimary', 'spec-primary', 'spec-primary-model');
+    let resolveSpec!: () => void;
+    primary.chat.mockImplementation(() => new Promise(resolve => {
+      resolveSpec = () => resolve({
+        content: JSON.stringify(makeObservedProblemSpec(statementMarkdown, {
+          problemKind: 'traditional',
+        })),
+        usedModel: primary.identity,
+      });
+    }));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+    };
+    const generation = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner, reliabilityMode: 'observe',
+      roleClients: { specPrimary: primary },
+    }).generate({
+      problemTitle: 'health overlap',
+      statementMarkdown,
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    const availabilityCallsBeforeSpecResolved = runner.isAvailable.mock.calls.length;
+    resolveSpec();
+
+    await expect(generation).rejects.toMatchObject({ code: 'SANDBOX_UNAVAILABLE' });
+    expect(availabilityCallsBeforeSpecResolved).toBe(1);
+    expect(runner.isAvailable).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['auto', 'sandbox', 'direct'] as const)(
+    'enforce %s mode returns SANDBOX_REQUIRED when no safe direct path exists',
+    async mode => {
+      process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+      const statementMarkdown = '## Input\n```input\n1\n```\n## Output\n```output\n1\n```';
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(false),
+        runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+      };
+      const generationClient = { chat: jest.fn().mockResolvedValue({
+        content: makeAiJson({ problemType: 'traditional' }),
+        usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+      }) };
+      const roleClients = makeFrozenSpecRoleClients(statementMarkdown, 'traditional');
+      const service = new TestdataGenService(generationClient as never, {
+        mode,
+        reliabilityMode: 'enforce',
+        roleClients,
+        ...(mode === 'direct' ? {} : { sandboxRunner: runner }),
+      });
+      try {
+        await expect(service.generate({
+          problemTitle: 'low risk',
+          statementMarkdown,
+          options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+        })).rejects.toMatchObject({
+          code: 'SANDBOX_REQUIRED', artifact: 'pipeline', retryPolicy: 'no-retry',
+        });
+        expect(generationClient.chat).not.toHaveBeenCalled();
+        expect(roleClients.specPrimary?.client.chat).not.toHaveBeenCalled();
+        expect(roleClients.specCritic?.client.chat).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+      }
+    },
+  );
+
+  it.each([
+    ['low disabled', false, false, ''],
+    ['medium unconfirmed', true, false, 'Floating point output has absolute error.'],
+    ['medium confirmed', true, true, 'Floating point output has absolute error.'],
+    ['high confirmed', true, true, 'Floating point output. Given a graph. Subtask 1.'],
+  ] as const)('enforce auto mode closes sandbox absence for %s policy', async (
+    _label, directEnabled, confirmDirectFallback, riskText,
+  ) => {
+    if (directEnabled) process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = 'true';
+    else delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+    const statementMarkdown = `## Input\n\`\`\`input\n1\n\`\`\`\n## Output\n\`\`\`output\n1\n\`\`\`\n${riskText}`;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(false),
+      runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+    };
+    const generationClient = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson({ problemType: 'traditional' }),
+      usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+    }) };
+    try {
+      await expect(new TestdataGenService(generationClient as never, {
+        mode: 'auto', sandboxRunner: runner, reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+      }).generate({
+        problemTitle: 'sandbox closure', statementMarkdown,
+        options: {
+          problemKind: 'traditional', caseCount: 1, languages: [], confirmDirectFallback,
+        },
+      })).rejects.toMatchObject({ code: 'SANDBOX_REQUIRED' });
+      expect(generationClient.chat).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+    }
+  });
+
+  it.each(['legacy', 'observe'] as const)(
+    '%s sandbox mode preserves SANDBOX_UNAVAILABLE when the configured sandbox is unavailable',
+    async reliabilityMode => {
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(false),
+        runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+      };
+      await expect(new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: runner, reliabilityMode,
+      }).generate({
+        problemTitle: 'low risk',
+        statementMarkdown: '## Input\n```input\n1\n```\n## Output\n```output\n1\n```',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+      })).rejects.toMatchObject({ code: 'SANDBOX_UNAVAILABLE' });
+    },
+  );
 
   it('教师 C++ 标程在 auto 模式沙箱不可达时给出编译能力硬错误，不降级直出', async () => {
     const mockClient = { chat: jest.fn() };
@@ -3200,6 +8081,39 @@ describe('TestdataGenService.generate', () => {
     });
     expect(mockClient.chat).not.toHaveBeenCalled();
   });
+
+  it.each(['auto', 'direct'] as const)(
+    'enforce %s mode reports SANDBOX_REQUIRED for a C++ standard solution without a sandbox',
+    async mode => {
+      const statementMarkdown = 'Read one integer and print it.';
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(false),
+        runPythonBatchDetailed: jest.fn(), runPython: jest.fn(), runPythonBatch: jest.fn(),
+      };
+      const service = new TestdataGenService({ chat: jest.fn() } as never, {
+        mode,
+        reliabilityMode: 'enforce',
+        roleClients: makeFrozenSpecRoleClients(statementMarkdown, 'traditional'),
+        ...(mode === 'auto' ? { sandboxRunner: runner } : {}),
+      });
+
+      await expect(service.generate({
+        problemTitle: 'C++ sandbox closure',
+        statementMarkdown,
+        options: {
+          problemKind: 'traditional',
+          caseCount: 1,
+          languages: [],
+          providedStd: '#include <iostream>\nint main() { return 0; }',
+          providedStdSource: 'manual',
+        },
+      })).rejects.toMatchObject({
+        code: 'SANDBOX_REQUIRED',
+        stage: 'sandbox_check',
+        artifact: 'pipeline',
+      });
+    },
+  );
 
   it('AI 选择的 C++ ORACLE 遇到编译基础设施失败时禁用 C++ 并定向改用 Python', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
@@ -3277,6 +8191,123 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'ORACLE_RUNTIME_FAILED',
+      detail({
+        accepted: false,
+        status: 'Nonzero Exit Status',
+        exitStatus: 1,
+        stderr: 'candidate runtime failed',
+      }),
+      { caseIndex: 1, candidate: true },
+    ],
+    [
+      'ORACLE_SAMPLE_MISMATCH',
+      detail({ stdout: 'wrong\n' }),
+      { caseIndex: 1, checkerUsed: false, candidate: true },
+    ],
+  ] as const)(
+    '历史 AC 候选第一阶段失败保留 %s，只增加 candidate 标记',
+    async (failureCode, oracleDetail, safeDetails) => {
+      const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+      const mockClient = {
+        chat: jest.fn().mockResolvedValueOnce({
+          content: makeSolutionBlueprint('traditional'),
+          usedModel,
+        }),
+        createClientStartingAfter: jest.fn(),
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true),
+        runPython: jest.fn(),
+        runPythonBatch: jest.fn(),
+        runPythonBatchDetailed: jest.fn().mockResolvedValue([oracleDetail]),
+      };
+
+      const promise = new TestdataGenService(mockClient as never, {
+        sandboxRunner: runner,
+        mode: 'sandbox',
+      }).generate({
+        problemTitle: 'historical AC candidate',
+        statementMarkdown: '```input1\n42\n```\n```output1\n42\n```',
+        options: {
+          problemKind: 'traditional',
+          caseCount: 1,
+          languages: [],
+          providedStd: 'print(input())',
+          providedStdSource: 'accepted-record',
+        },
+      });
+
+      await expect(promise).rejects.toMatchObject({
+        code: failureCode,
+        stage: 'solution_verification',
+        artifact: 'oracle',
+        retryPolicy: 'repair-artifact',
+        safeDetails,
+        recommendDeeperReasoning: false,
+      });
+      expect(mockClient.chat).toHaveBeenCalledTimes(1);
+      expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('历史 AC 候选编译失败保留 ORACLE_COMPILE_FAILED 契约并增加 candidate 标记', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn().mockResolvedValueOnce({
+        content: makeSolutionBlueprint('traditional'),
+        usedModel,
+      }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+      compileCpp: jest.fn().mockResolvedValue({
+        ok: false,
+        kind: 'compile',
+        error: 'candidate.cc:1: compile failed',
+      }),
+      runCompiledBatchDetailed: jest.fn(),
+      deleteCachedFile: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+      cppOracleAvailable: true,
+    }).generate({
+      problemTitle: 'historical C++ AC candidate',
+      statementMarkdown: '```input1\n42\n```\n```output1\n42\n```',
+      options: {
+        problemKind: 'traditional',
+        caseCount: 1,
+        languages: [],
+        providedStd: '#include <iostream>\nint main() { return broken; }',
+        providedStdSource: 'accepted-record',
+      },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'ORACLE_COMPILE_FAILED',
+      stage: 'provided_cpp_oracle',
+      artifact: 'oracle',
+      retryPolicy: 'manual-review',
+      safeDetails: {
+        failureKind: 'compile',
+        oracleLanguage: 'cpp',
+        candidate: true,
+      },
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+  });
+
   it('历史 AC 与独立 BRUTE 冲突时直接拒绝，不发起修复或模型升级', async () => {
     const mockClient = {
       chat: jest.fn()
@@ -3333,7 +8364,12 @@ describe('TestdataGenService.generate', () => {
       },
     });
     await expect(promise).rejects.toMatchObject({
-      telemetryMetadata: expect.objectContaining({ failureStage: 'accepted_std_verification' }),
+      code: 'TRUSTED_SOLUTIONS_DIVERGED',
+      stage: 'stress_testing',
+      artifact: 'oracle',
+      retryPolicy: 'adjudicate',
+      safeDetails: { caseIndex: 1, candidate: true },
+      telemetryMetadata: expect.objectContaining({ failureStage: 'stress_testing' }),
     });
     await expect(promise).rejects.toThrow(/系统不会修复 BRUTE 来迁就它/);
     expect(mockClient.chat).toHaveBeenCalledTimes(4);
@@ -3379,6 +8415,112 @@ describe('TestdataGenService.generate', () => {
     expect(plan.tokenUsage?.totalTokens).toBe(350);
   });
 
+  it('直出模板补全仍缺失时抛出对应语言的类型化失败', async () => {
+    const initial = makeDelimitedResponse().replace(
+      /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/,
+      '',
+    );
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: initial, usedModel })
+        .mockResolvedValueOnce({ content: '@@@NOTES@@@\nstill missing', usedModel }),
+    };
+
+    const promise = new TestdataGenService(mockClient as never).generate({
+      problemTitle: '约束子串',
+      statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 2, languages: ['py', 'java', 'cc'] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'TEMPLATE_COMPILE_FAILED',
+      stage: 'template_missing',
+      artifact: 'template-java',
+      retryPolicy: 'repair-artifact',
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['java', 'template-java'],
+    ['cc', 'template-cc'],
+  ] as const)('沙箱模板补全仍缺失 %s 时归因到对应 artifact', async (language, artifact) => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const marker = language === 'java'
+      ? /@@@TEMPLATE:java@@@[\s\S]*?(?=@@@TEMPLATE:cc@@@)/
+      : /@@@TEMPLATE:cc@@@[\s\S]*?(?=@@@NOTES@@@)/;
+    const artifacts = makeGenerationArtifactsBlueprint('function').replace(marker, '');
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('function'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: artifacts, usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@NOTES@@@\nstill missing', usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: '模板 artifact 归因',
+      statementMarkdown: '题面',
+      options: { problemKind: 'function', caseCount: 1, languages: [language] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'TEMPLATE_COMPILE_FAILED',
+      stage: 'template_missing',
+      artifact,
+      retryPolicy: 'repair-artifact',
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+  });
+
+  it('独立验证器二次解析失败映射到 coverage 并停止当前模型调用', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const invalidVerifier = '@@@BRUTE@@@\nprint(1)';
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: invalidVerifier, usedModel })
+        .mockResolvedValueOnce({ content: invalidVerifier, usedModel }),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const promise = new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner,
+      mode: 'sandbox',
+    }).generate({
+      problemTitle: 't',
+      statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      stage: 'independent_verifier_parse',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+      telemetryMetadata: expect.objectContaining({ failureStage: 'independent_verifier_parse' }),
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+  });
+
   it('AI 把变量赋值写入 .in 时要求完整修复后再组装', async () => {
     const invalid = makeDelimitedResponse().replace(
       '@@@CASE:1:IN:样例1@@@\n10101\n1',
@@ -3409,11 +8551,314 @@ describe('TestdataGenService.generate', () => {
   it('AI 返回非法内容时抛出中文错误', async () => {
     const mockClient = { chat: jest.fn().mockResolvedValue({ content: 'oops', usedModel: { endpointId: 'e', endpointName: 'n', modelName: 'm' } }) };
     const service = new TestdataGenService(mockClient as never);
-    await expect(service.generate({
+    const promise = service.generate({
       problemTitle: 't',
       statementMarkdown: 's',
       options: baseOptions,
-    })).rejects.toThrow(/JSON/);
+    });
+    await expect(promise).rejects.toMatchObject({
+      code: 'GENERATOR_INVALID_JSON',
+      stage: 'direct_parse',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+    });
+    await expect(promise).rejects.toThrow(/JSON/);
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('mutation evidence gate', () => {
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 1, languages: [],
+  };
+  const checkpoint = {
+    solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+    artifacts: parseGenerationArtifacts(
+      makeGenerationArtifactsBlueprint('traditional'),
+      'traditional',
+      [],
+    ),
+    verifier: parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint(), []),
+    killTargets: [],
+  };
+  const historical = [{
+    language: 'python' as const,
+    source: 'value = int(input())\nprint(value if value < 0 else 0)',
+    expectedStatus: 'wrong-answer' as const,
+  }];
+
+  function generationParams(overrides: Record<string, unknown> = {}) {
+    return {
+      problemTitle: 'mutation gate',
+      statementMarkdown: 'Input one integer. Output it.',
+      options,
+      checkpoint,
+      historicalMutationCandidates: historical,
+      ...overrides,
+    };
+  }
+
+  function mockMutationSummary(input: {
+    status: 'completed' | 'partial' | 'skipped';
+    viable: number;
+    killed: number;
+    survived: number;
+    score?: number;
+    skippedReason?: mutationRunner.MutationVerificationSummary['skippedReason'];
+  }) {
+    evaluateMutationCandidatesMock.mockImplementation(async request => ({
+      mode: request.mode,
+      generated: request.candidates.filter(candidate => candidate.origin === 'generated').length,
+      historical: request.candidates.filter(candidate => candidate.origin === 'historical').length,
+      operators: input.viable > 0 ? [{
+        id: 'historical-submission', viable: input.viable, killed: input.killed,
+      }] : [],
+      ...input,
+    }));
+  }
+
+  it.each([
+    ['observe', 0.70, false, true],
+    ['observe', 0.80, false, false],
+    ['enforce', 0.70, true, false],
+  ] as const)('mutation gate %s at score %s applies the configured boundary', async (
+    gate,
+    score,
+    throws,
+    wouldBlock,
+  ) => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = gate;
+    mockMutationSummary({
+      status: 'completed', viable: 10, killed: score * 10,
+      survived: 10 - score * 10, score,
+    });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+      reliabilityMode: 'legacy', semanticModelFallback: false,
+    });
+    const action = service.generate(generationParams());
+
+    if (throws) {
+      await expect(action).rejects.toMatchObject({
+        code: 'MUTATION_SCORE_TOO_LOW',
+        stage: 'mutation_testing',
+        artifact: 'mutation',
+        retryPolicy: 'no-retry',
+      });
+    } else {
+      const plan = await action;
+      expect(plan.verification).toMatchObject({
+        verified: false,
+        wouldBlock,
+        mutation: { mode: gate, score, viable: 10 },
+      });
+    }
+  });
+
+  it('mutation gate off attaches a skipped summary without calling the evaluator', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'off';
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+      reliabilityMode: 'legacy', semanticModelFallback: false,
+    }).generate(generationParams());
+
+    expect(evaluateMutationCandidatesMock).not.toHaveBeenCalled();
+    expect(plan.verification?.mutation).toEqual({
+      mode: 'off',
+      status: 'skipped',
+      generated: 0,
+      historical: 0,
+      viable: 0,
+      killed: 0,
+      survived: 0,
+      operators: [],
+      skippedReason: 'gate-off',
+    });
+  });
+
+  it.each([
+    ['observe', 'partial', 2, 1, 1, 0.5, 'sandbox-infra', false],
+    ['observe', 'skipped', 0, 0, 0, undefined, 'no-viable-candidates', false],
+    ['enforce', 'partial', 2, 1, 1, 0.5, 'checker-infra', true],
+    ['enforce', 'skipped', 0, 0, 0, undefined, 'no-viable-candidates', true],
+  ] as const)(
+    'mutation evidence %s rejects unavailable %s summaries only in enforce',
+    async (gate, status, viable, killed, survived, score, skippedReason, throws) => {
+      process.env.AI_HELPER_TESTDATA_MUTATION_GATE = gate;
+      mockMutationSummary({ status, viable, killed, survived, score, skippedReason });
+      const action = new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+        reliabilityMode: 'legacy', semanticModelFallback: false,
+      }).generate(generationParams());
+
+      if (throws) {
+        await expect(action).rejects.toMatchObject({
+          code: 'MUTATION_EVIDENCE_UNAVAILABLE',
+          stage: 'mutation_testing',
+          artifact: 'mutation',
+          retryPolicy: 'no-retry',
+        });
+      } else {
+        await expect(action).resolves.toMatchObject({
+          verification: { verified: false, wouldBlock: true },
+        });
+      }
+    },
+  );
+
+  it('mutation enforce rejects direct mode before any model call or evaluator call', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'enforce';
+    const client = { chat: jest.fn().mockResolvedValue({
+      content: makeAiJson({ problemType: 'traditional', cases: [{ input: '1', output: '1' }] }),
+      usedModel: { endpointId: 'direct', endpointName: 'direct', modelName: 'model' },
+    }) };
+
+    await expect(new TestdataGenService(client as never, {
+      mode: 'direct', reliabilityMode: 'legacy', semanticModelFallback: false,
+    }).generate({
+      problemTitle: 'direct mutation enforce',
+      statementMarkdown: 'Input one integer. Output it.',
+      options,
+      historicalMutationCandidates: historical,
+    })).rejects.toMatchObject({
+      code: 'MUTATION_EVIDENCE_UNAVAILABLE',
+      stage: 'mutation_testing',
+      retryPolicy: 'no-retry',
+    });
+    expect(client.chat).not.toHaveBeenCalled();
+    expect(evaluateMutationCandidatesMock).not.toHaveBeenCalled();
+  });
+
+  it('mutation uses fresh request candidates without changing checkpoint payloads', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'observe';
+    const seenHistoricalSources: string[][] = [];
+    evaluateMutationCandidatesMock.mockImplementation(async request => {
+      seenHistoricalSources.push(request.candidates
+        .filter(candidate => candidate.origin === 'historical')
+        .map(candidate => candidate.source));
+      return {
+        mode: request.mode,
+        status: 'completed',
+        generated: 0,
+        historical: 1,
+        viable: 1,
+        killed: 1,
+        survived: 0,
+        score: 1,
+        operators: [{ id: 'historical-submission', viable: 1, killed: 1 }],
+      };
+    });
+    const checkpointEmissions: unknown[][] = [];
+    for (const source of ['print("FRESH_HISTORY_A")', 'print("FRESH_HISTORY_B")']) {
+      const emitted: unknown[] = [];
+      await new TestdataGenService({ chat: jest.fn() } as never, {
+        mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+        reliabilityMode: 'legacy', semanticModelFallback: false,
+      }).generate(generationParams({
+        historicalMutationCandidates: [{
+          language: 'python', source, expectedStatus: 'wrong-answer',
+        }],
+        onCheckpoint: (update: unknown) => { emitted.push(update); },
+      }));
+      checkpointEmissions.push(emitted);
+    }
+
+    expect(seenHistoricalSources).toEqual([
+      ['print("FRESH_HISTORY_A")'],
+      ['print("FRESH_HISTORY_B")'],
+    ]);
+    expect(checkpointEmissions[0]).toEqual(checkpointEmissions[1]);
+    expect(JSON.stringify(checkpointEmissions)).not.toContain('FRESH_HISTORY_');
+  });
+
+  it('mutation observe adds no model calls compared with off', async () => {
+    const run = async (gate: 'off' | 'observe') => {
+      process.env.AI_HELPER_TESTDATA_MUTATION_GATE = gate;
+      const client = { chat: jest.fn() };
+      if (gate === 'observe') {
+        mockMutationSummary({
+          status: 'completed', viable: 1, killed: 1, survived: 0, score: 1,
+        });
+      }
+      const plan = await new TestdataGenService(client as never, {
+        mode: 'sandbox', sandboxRunner: makeCheckpointRunner() as never,
+        reliabilityMode: 'legacy', semanticModelFallback: false,
+      }).generate(generationParams());
+      return { calls: client.chat.mock.calls.length, modelCallCount: plan.modelCallCount };
+    };
+
+    const off = await run('off');
+    const observe = await run('observe');
+    expect(observe).toEqual(off);
+  });
+
+  it('mutation custom checker infrastructure errors stay partial without text fallback', async () => {
+    process.env.AI_HELPER_TESTDATA_MUTATION_GATE = 'observe';
+    const runner = {
+      ...makeCheckpointRunner(),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'mutation-checker' }),
+      runCheckerBatchDetailed: jest.fn().mockImplementation(
+        (_fileId: string, cases: Array<{ output: string }>) => Promise.resolve(
+          cases.map(item => item.output === 'MUTATION_CHECKER_INFRA'
+            ? detail({ status: 'Internal Error', accepted: false, exitStatus: undefined })
+            : detail()),
+        ),
+      ),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    evaluateMutationCandidatesMock.mockImplementation(async request => {
+      expect(request.customChecker).toBe(true);
+      expect(request.judgeWithChecker).toBeDefined();
+      await expect(request.judgeWithChecker?.([{
+        input: '1', output: 'MUTATION_CHECKER_INFRA', answer: '1',
+      }], {
+        deadlineAt: Date.now() + 1_000,
+      })).resolves.toEqual(['infra-error']);
+      return {
+        mode: request.mode,
+        status: 'partial',
+        generated: 0,
+        historical: 1,
+        viable: 0,
+        killed: 0,
+        survived: 0,
+        operators: [],
+        skippedReason: 'checker-infra',
+      };
+    });
+
+    const plan = await new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never,
+      reliabilityMode: 'legacy', semanticModelFallback: false,
+    }).generate(generationParams({
+      existingConfig: 'checker_type: testlib\nchecker: checker.cc\n',
+      checkerArtifacts: {
+        configured: true,
+        read: true,
+        checkerSource: 'int main() { return 0; }',
+        checkerHeaders: {},
+      },
+    }));
+
+    expect(plan.verification).toMatchObject({
+      wouldBlock: true,
+      mutation: { status: 'partial', skippedReason: 'checker-infra' },
+    });
+    expect(runner.runCheckerBatchDetailed).toHaveBeenCalledWith(
+      'mutation-checker',
+      [{ input: '1', output: 'MUTATION_CHECKER_INFRA', answer: '1' }],
+      expect.any(Object),
+    );
+  });
+
+  it('applyMutationGate never turns an existing failed verification into verified', () => {
+    const verification = { verified: false, wouldBlock: false };
+    applyMutationGate(verification, {
+      mode: 'observe', status: 'completed', generated: 1, historical: 0,
+      viable: 1, killed: 1, survived: 0, score: 1,
+      operators: [{ id: 'comparison-boundary', viable: 1, killed: 1 }],
+    });
+    expect(verification).toEqual({ verified: false, wouldBlock: false });
   });
 });
 
@@ -3421,8 +8866,133 @@ describe('TestdataGenService.generate', () => {
 
 /** 构造一条宽容明细，默认 Accepted。 */
 function detail(over: Record<string, unknown> = {}) {
-  return { status: 'Accepted', accepted: true, timedOut: false, exitStatus: 0, stdout: '', stderr: '', ...over };
+  const exitStatus = over.accepted === false
+    && over.status === 'Nonzero Exit Status'
+    && !Object.prototype.hasOwnProperty.call(over, 'exitStatus')
+    ? 1
+    : 0;
+  return { status: 'Accepted', accepted: true, timedOut: false, exitStatus, stdout: '', stderr: '', ...over };
 }
+
+describe('classifyValidatorInvalidResult invalid partition', () => {
+  it.each([
+    [
+      'explicit exit zero',
+      detail(),
+      'false-accept',
+    ],
+    [
+      'explicit nonzero exit',
+      detail({
+        status: 'Runtime Error', accepted: false, exitStatus: 1, stderr: 'invalid',
+      }),
+      'rejected',
+    ],
+    [
+      'timeout',
+      detail({
+        status: 'Time Limit Exceeded', accepted: false, timedOut: true,
+        exitStatus: undefined,
+      }),
+      'timeout-gap',
+    ],
+    [
+      'transport error',
+      detail({
+        status: 'Internal Error', accepted: false, exitStatus: undefined,
+        error: 'transport',
+      }),
+      'infra-gap',
+    ],
+    [
+      'missing exit status',
+      detail({ accepted: false, exitStatus: undefined }),
+      'infra-gap',
+    ],
+    [
+      'NaN exit status',
+      detail({ accepted: false, exitStatus: Number.NaN }),
+      'infra-gap',
+    ],
+    [
+      'nonzero exit with timeout',
+      detail({
+        status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1,
+      }),
+      'timeout-gap',
+    ],
+    [
+      'nonzero exit with malformed transport detail',
+      detail({
+        status: 'Runtime Error', accepted: false, exitStatus: 1, error: 'transport',
+      }),
+      'infra-gap',
+    ],
+  ])('classifies %s', (_label, result, expected) => {
+    expect(classifyValidatorInvalidResult(result)).toBe(expected);
+  });
+
+  it.each([
+    ['Internal Error with nonzero exit', detail({
+      status: 'Internal Error', accepted: false, exitStatus: 1,
+    })],
+    ['System Error with nonzero exit', detail({
+      status: 'System Error', accepted: false, exitStatus: 1,
+    })],
+    ['Accepted status with nonzero exit', detail({
+      status: 'Accepted', accepted: false, exitStatus: 1,
+    })],
+    ['accepted=true with nonzero exit', detail({
+      status: 'Runtime Error', accepted: true, exitStatus: 1,
+    })],
+    ['non-Accepted status with exit zero', detail({
+      status: 'Runtime Error', accepted: false, exitStatus: 0,
+    })],
+    ['unrecognized status with nonzero exit', detail({
+      status: 'Wrong Answer', accepted: false, exitStatus: 1,
+    })],
+    ['empty status with nonzero exit', detail({
+      status: '', accepted: false, exitStatus: 1,
+    })],
+    ['missing accepted flag', detail({
+      status: 'Runtime Error', accepted: undefined, exitStatus: 1,
+    })],
+    ['missing timeout flag', detail({
+      status: 'Runtime Error', accepted: false, timedOut: undefined, exitStatus: 1,
+    })],
+  ])('classifier rejects contradictory execution detail: %s', (_label, result) => {
+    expect(classifyValidatorInvalidResult(result)).toBe('infra-gap');
+  });
+
+  it.each([
+    ['missing fields', {}],
+    ['fractional nonzero exit', detail({
+      status: 'Nonzero Exit Status', accepted: false, exitStatus: 1.5,
+    })],
+    ['unsafe nonzero exit', detail({
+      status: 'Nonzero Exit Status', accepted: false,
+      exitStatus: Number.MAX_SAFE_INTEGER + 1,
+    })],
+    ['non-string stdout', detail({ stdout: 7 })],
+    ['non-string stderr', detail({ stderr: { private: true } })],
+  ])('treats malformed strict execution detail as an illegal-proof gap: %s', (
+    _label,
+    result,
+  ) => {
+    expect(classifyValidatorInvalidResult(result as never)).toBe('infra-gap');
+  });
+});
+
+describe('Validator-owned scoped false accept repair policy', () => {
+  it('repairs Validator-owned subtask violations without changing Generator ownership', () => {
+    expect(repairPolicyForFailure({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION', artifact: 'validator',
+    })).toBe('repair-artifact');
+    expect(repairPolicyForFailure({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION', artifact: 'generator',
+    })).toBe('repair-artifact');
+  });
+});
 
 const tradOpts: GenerateOptions = { problemKind: 'traditional', caseCount: 2, languages: [] };
 
@@ -3431,7 +9001,465 @@ function twoCaseGen(): string {
   return JSON.stringify({ cases: [{ label: 'c1', input: '1' }, { label: 'c2', input: '2' }] });
 }
 
+function makeTrustedDslFixture(riskTier: 'medium' | 'high' = 'medium') {
+  const statement = createStatementSnapshot('Input n and n integers, where 1 <= n <= 3.');
+  const spec: ProblemSpecV1 = {
+    schemaVersion: 1,
+    statementHash: statement.statementHash,
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [
+      { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+      {
+        id: 'a', name: 'a', type: 'array',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      },
+    ],
+    constraints: [{
+      id: 'C1', expression: '1 <= n <= 3', machineCheckable: true,
+      scope: 'global', evidence: { quote: '1 <= n <= 3' },
+    }],
+    invariants: [],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [],
+    uncertainties: [],
+  };
+  const pipelineContext = createTestdataPipelineContext({
+    runId: `trusted-dsl-${riskTier}`,
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement,
+    spec,
+    risk: {
+      tier: riskTier,
+      score: riskTier === 'high' ? 7 : 3,
+      reasons: [],
+      requiresSandbox: true,
+      requiresSpecConsensus: true,
+      requiresIndependentModels: true,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const raw = ['@@@GENERATOR_PLAN@@@', JSON.stringify({
+    version: 1,
+    seed: 29,
+    cases: [
+      {
+        label: 'minimum',
+        fields: {
+          n: { kind: 'integer', value: 1 },
+          a: { kind: 'array', length: 1, min: 0, max: 0, pattern: 'all-equal' },
+        },
+      },
+      {
+        label: 'middle',
+        fields: {
+          n: { kind: 'integer', value: 2 },
+          a: { kind: 'array', length: 2, min: 0, max: 1, pattern: 'alternating' },
+        },
+      },
+    ],
+  })].join('\n');
+  const artifacts = parseGenerationArtifacts(raw, 'traditional', [], {
+    generatorDsl: { spec, expectedCaseCount: 2 },
+  });
+  return { statement, spec, pipelineContext, artifacts };
+}
+
+function makeTrustedTieredDslFixture() {
+  const statement = createStatementSnapshot(
+    'Input n and n integers, where 1 <= n <= 3. Subtask 1: n <= 1. Subtask 2: n <= 3.',
+  );
+  const spec: ProblemSpecV1 = {
+    schemaVersion: 1,
+    statementHash: statement.statementHash,
+    problemKind: 'traditional',
+    testCaseMode: { kind: 'single' },
+    inputFields: [
+      { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+      {
+        id: 'a', name: 'a', type: 'array',
+        encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+      },
+    ],
+    constraints: [
+      {
+        id: 'C1', expression: '1 <= n <= 3', machineCheckable: true,
+        scope: 'global', evidence: { quote: 'where 1 <= n <= 3.' },
+      },
+      {
+        id: 'C_subtask_1', expression: 'n <= 1', machineCheckable: true,
+        scope: { subtaskId: 1 }, evidence: { quote: 'Subtask 1: n <= 1.' },
+      },
+      {
+        id: 'C_subtask_2', expression: 'n <= 3', machineCheckable: true,
+        scope: { subtaskId: 2 }, evidence: { quote: 'Subtask 2: n <= 3.' },
+      },
+    ],
+    invariants: [],
+    outputPolicy: { kind: 'exact' },
+    subtasks: [
+      { id: 1, score: 50, constraintIds: ['C_subtask_1'] },
+      { id: 2, score: 50, constraintIds: ['C_subtask_2'] },
+    ],
+    uncertainties: [],
+  };
+  const pipelineContext = createTestdataPipelineContext({
+    runId: 'trusted-tiered-dsl',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement,
+    spec,
+    risk: {
+      tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: true, requiresIndependentModels: true,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const raw = ['@@@GENERATOR_PLAN@@@', JSON.stringify({
+    version: 1,
+    seed: 31,
+    cases: [
+      {
+        label: 'model-subtask-1', subtaskId: 1,
+        fields: {
+          n: { kind: 'integer', value: 1 },
+          a: { kind: 'array', length: 1, min: 0, max: 0, pattern: 'all-equal' },
+        },
+      },
+      {
+        label: 'model-subtask-2', subtaskId: 2,
+        fields: {
+          n: { kind: 'integer', value: 2 },
+          a: { kind: 'array', length: 2, min: 0, max: 1, pattern: 'alternating' },
+        },
+      },
+    ],
+  })].join('\n');
+  const artifacts = parseGenerationArtifacts(raw, 'traditional', [], {
+    generatorDsl: { spec, expectedCaseCount: 2 },
+  });
+  return { pipelineContext, artifacts };
+}
+
+describe('trusted GeneratorPlan materialization and coverage integration', () => {
+  it('materializes structured cases in-process without executing generated code', async () => {
+    const fixture = makeTrustedDslFixture();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('trusted generator must not execute')),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+    const response = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'observe',
+        pipelineContext: fixture.pipelineContext,
+      },
+    });
+
+    expect(runner.runPython).not.toHaveBeenCalled();
+    expect(response.cases.map(item => item.input)).toEqual(['1\n0\n', '2\n0 1\n']);
+    expect(response.coverageMode).toBe('trusted-dsl');
+    expect(response.verification?.coverage).toMatchObject({
+      mode: 'trusted-dsl',
+      criticalMissing: 1,
+    });
+    expect(response.generatorCode).toContain('Server-generated trusted GeneratorPlan artifact');
+  });
+
+  it('blocks a trusted critical gap only for high-risk enforce before Oracle execution', async () => {
+    const fixture = makeTrustedDslFixture('high');
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn(),
+    };
+
+    const failure = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'enforce',
+        pipelineContext: fixture.pipelineContext,
+      },
+    }).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'COVERAGE_REQUIREMENT_MISSING',
+      stage: 'generator',
+      artifact: 'coverage',
+      safeDetails: { missingCount: 1 },
+    });
+    expect(runner.runPython).not.toHaveBeenCalled();
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'uses enabled server allocations instead of model-authored subtask ids',
+      {
+        enabled: true,
+        allocations: [
+          { caseNumber: 1, subtaskId: 1, guidance: 'server allocation' },
+          { caseNumber: 2, subtaskId: 1, guidance: 'server allocation' },
+        ],
+      },
+      1,
+    ],
+    [
+      'strips model-authored subtask ids when tiered allocation is disabled',
+      { enabled: false, allocations: [] },
+      0,
+    ],
+  ])('%s', async (_label, tieredDecision, expectedActual) => {
+    const fixture = makeTrustedTieredDslFixture();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('trusted generator must not execute')),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+
+    const response = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'observe',
+        pipelineContext: fixture.pipelineContext,
+        tieredDecision,
+      } as never,
+    });
+
+    expect(response.verification?.coverage.matrix.find(
+      row => row.targetKey === 'subtask-membership',
+    )?.actual).toBe(expectedActual);
+  });
+
+  it('uses server-swapped membership when evaluating scoped coverage rows', async () => {
+    const fixture = makeTrustedTieredDslFixture();
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('trusted generator must not execute')),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    };
+
+    const response = await materializeSandboxBlueprint({
+      problemType: 'traditional',
+      generatorCode: fixture.artifacts.generatorCode,
+      generatorPlan: fixture.artifacts.generatorPlan,
+      oracleCode: 'print(input())',
+    }, tradOpts, '', runner as never, undefined, false, undefined, [], false, undefined, {
+      phase: 'generator',
+      reuse: {
+        formalInputs: false, stressInputs: false,
+        validationResults: false, oracleOutputs: false,
+      },
+      cache: {},
+      coverageProof: {
+        reliabilityMode: 'observe',
+        pipelineContext: fixture.pipelineContext,
+        tieredDecision: {
+          enabled: true,
+          allocations: [
+            { caseNumber: 1, subtaskId: 2, guidance: 'server allocation' },
+            { caseNumber: 2, subtaskId: 1, guidance: 'server allocation' },
+          ],
+        },
+      },
+    });
+
+    expect(response.verification?.coverage.matrix.find(row => (
+      row.targetKey === 'size-max' && row.fieldId === 'n' && row.subtaskId === 1
+    ))).toMatchObject({ actual: 0, status: 'fail' });
+  });
+});
+
+function makeTieredValidatorProof(statementMarkdown: string) {
+  const statement = createStatementSnapshot(statementMarkdown);
+  const subtasks = [
+    { id: 1, score: 30, constraints: 'n <= 10' },
+    { id: 2, score: 70, constraints: 'n <= 100' },
+  ];
+  const pipelineContext = createTestdataPipelineContext({
+    runId: 'task-6-legal-validator-partition',
+    promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+    statement,
+    spec: makeObservedProblemSpec(statementMarkdown, {
+      problemKind: 'traditional',
+      subtasks: [
+        { id: 1, score: 30, constraintIds: ['C_subtask_1'] },
+        { id: 2, score: 70, constraintIds: ['C_subtask_2'] },
+      ],
+      constraints: [
+        {
+          id: 'C_subtask_1', expression: 'n <= 10', machineCheckable: true,
+          scope: { subtaskId: 1 }, evidence: { quote: 'Subtask 1 requires n <= 10.' },
+        },
+        {
+          id: 'C_subtask_2', expression: 'n <= 100', machineCheckable: true,
+          scope: { subtaskId: 2 }, evidence: { quote: 'Subtask 2 requires n <= 100.' },
+        },
+      ],
+    }),
+    risk: {
+      tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+      requiresSpecConsensus: false, requiresIndependentModels: false,
+      allowsDirectFallback: false,
+    },
+    roleIdentities: {},
+  });
+  const tieredDecision = resolveTieredSubtaskGeneration({
+    caseCount: 2,
+    dataScale: 'auto',
+    subtasks,
+  });
+  return {
+    reliabilityMode: 'enforce' as const,
+    pipelineContext,
+    tieredDecision,
+  };
+}
+
+function materializeWithValidatorProof(
+  blueprint: Parameters<typeof materializeSandboxBlueprint>[0],
+  options: GenerateOptions,
+  statementMarkdown: string,
+  runner: Parameters<typeof materializeSandboxBlueprint>[3],
+  validatorProof: ValidatorProofContext,
+  signal?: AbortSignal,
+  cache: MaterializationCacheState = {},
+  changedArtifacts: string[] = ['GENERATOR'],
+) {
+  return materializeSandboxBlueprint(
+    blueprint,
+    options,
+    statementMarkdown,
+    runner,
+    signal,
+    false,
+    undefined,
+    [],
+    false,
+    undefined,
+    {
+      ...resolveMaterializationResume(changedArtifacts),
+      cache,
+      validatorProof,
+    } as never,
+  );
+}
+
+function makeValidatorCoverageProof(
+  statementMarkdown: string,
+  specOverrides: Partial<ProblemSpecV1> = {},
+  reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
+  riskTier: 'low' | 'medium' | 'high' | 'blocked' = 'medium',
+  tieredDecision: ValidatorProofContext['tieredDecision'] = { enabled: false, allocations: [] },
+): ValidatorProofContext {
+  const statement = createStatementSnapshot(statementMarkdown);
+  return {
+    reliabilityMode,
+    pipelineContext: createTestdataPipelineContext({
+      runId: 'task-7-validator-coverage',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, {
+        problemKind: 'traditional',
+        inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' }],
+        ...specOverrides,
+      }),
+      risk: {
+        tier: riskTier,
+        score: riskTier === 'low' ? 0 : riskTier === 'medium' ? 3 : 6,
+        reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: riskTier === 'high' || riskTier === 'blocked',
+        requiresIndependentModels: riskTier === 'high' || riskTier === 'blocked',
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    }),
+    tieredDecision,
+  };
+}
+
 describe('两阶段沙箱蓝图', () => {
+  it('qualified solution sections retain every selected language and expose Python compatibility alias', () => {
+    const blueprint = parseSolutionBlueprint([
+      '@@@META@@@', 'problemType: function',
+      '@@@ORACLE@@@', 'print(3)',
+      '@@@SOLUTION:py@@@', 'def add(a, b): return a + b',
+      '@@@SOLUTION:java@@@', 'class Solution { int add(int a,int b){ return a+b; } }',
+      '@@@SOLUTION:cc@@@', 'int add(int a,int b){ return a+b; }',
+    ].join('\n'), {
+      problemKind: 'function', caseCount: 3, languages: ['py', 'java', 'cc'],
+    });
+
+    expect(blueprint.solutions).toEqual(expect.objectContaining({
+      py: expect.any(String), java: expect.any(String), cc: expect.any(String),
+    }));
+    expect(blueprint.solutionCode).toBe(blueprint.solutions?.py);
+  });
+
+  it('legacy solution satisfies Python only and rejects a missing selected solution language', () => {
+    const legacyRaw = [
+      '@@@META@@@', 'problemType: function',
+      '@@@ORACLE@@@', 'print(3)',
+      '@@@SOLUTION@@@', 'def add(a, b): return a + b',
+    ].join('\n');
+    const legacy = parseSolutionBlueprint(legacyRaw, {
+      problemKind: 'function', caseCount: 1, languages: ['py'],
+    });
+    expect(legacy.solutions).toEqual({ py: legacy.solutionCode });
+
+    expect(() => parseSolutionBlueprint(legacyRaw, {
+      problemKind: 'function', caseCount: 1, languages: ['py', 'java', 'cc'],
+    })).toThrow(/java/);
+  });
+
   it('解析可选 ORACLE_LANG，缺失或非法回退 Python，函数题忽略 C++', () => {
     expect(parseOracleLanguage('=== ORACLE_LANG ===\npython', 'traditional')).toBe('python');
     expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'traditional')).toBe('cpp');
@@ -3494,6 +9522,111 @@ describe('两阶段沙箱蓝图', () => {
     expect(artifactsUser).not.toContain('@@@ORACLE@@@');
   });
 
+  it('eligible frozen grammar requests a finite GeneratorPlan and parses only server-materialized code', () => {
+    const statement = createStatementSnapshot('Input n and an array of n integers.');
+    const spec: ProblemSpecV1 = {
+      schemaVersion: 1,
+      statementHash: statement.statementHash,
+      problemKind: 'traditional',
+      testCaseMode: { kind: 'single' },
+      inputFields: [
+        { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+        {
+          id: 'a', name: 'a', type: 'array',
+          encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+        },
+      ],
+      constraints: [],
+      invariants: [],
+      outputPolicy: { kind: 'exact' },
+      subtasks: [],
+      uncertainties: [],
+    };
+    const context = createTestdataPipelineContext({
+      runId: 'trusted-generator-plan-prompt',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec,
+      risk: {
+        tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: true, requiresIndependentModels: true,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+    const params = {
+      problemTitle: 'Array',
+      statementMarkdown: statement.normalizedMarkdown,
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] } as GenerateOptions,
+    };
+    const solution = parseSolutionBlueprint(makeSolutionBlueprint('traditional'), params.options);
+    const generatorPlan = {
+      version: 1,
+      seed: 19,
+      cases: [
+        {
+          label: 'minimum',
+          fields: {
+            n: { kind: 'integer', value: 1 },
+            a: { kind: 'array', length: 1, min: 0, max: 0, pattern: 'all-equal' },
+          },
+        },
+        {
+          label: 'alternating',
+          fields: {
+            n: { kind: 'integer', value: 4 },
+            a: { kind: 'array', length: 4, min: 0, max: 1, pattern: 'alternating' },
+          },
+        },
+      ],
+    };
+    const raw = `@@@GENERATOR_PLAN@@@\n${JSON.stringify(generatorPlan)}`;
+    const parsed = parseGenerationArtifacts(raw, 'traditional', [], {
+      generatorDsl: { spec, expectedCaseCount: 2 },
+    });
+    const systemPrompt = buildGenerationArtifactsSystemPrompt(true, true);
+    const userPrompt = buildGenerationArtifactsUserPrompt(params, solution, undefined, context);
+
+    expect(systemPrompt).toContain('@@@GENERATOR_PLAN@@@');
+    expect(systemPrompt).toContain('不得输出 GENERATOR Python 代码');
+    expect(systemPrompt).not.toContain('完整 Python 3 输入生成器');
+    expect(userPrompt).toContain('GENERATOR_PLAN');
+    expect(userPrompt).toContain('服务端确定性物化');
+    expect(parsed.generatorPlan).toEqual(generatorPlan);
+    expect(parsed.generatorCode).toContain('Server-generated trusted GeneratorPlan artifact');
+    expect(parsed.generatorCode).not.toContain('model supplied code');
+  });
+
+  it('keeps legacy Python artifacts backward-compatible and marks them unverified', () => {
+    const artifacts = parseGenerationArtifacts(
+      makeGenerationArtifactsBlueprint('traditional'),
+      'traditional',
+      [],
+    );
+    const response = {
+      problemType: 'traditional' as const,
+      cases: [{ label: 'legacy max claim', input: '1\n', output: '1\n' }],
+      generatorCode: artifacts.generatorCode,
+      stdSolution: { code: 'print(input())' },
+      verification: {
+        mode: 'direct' as const,
+        oracleKind: 'ai-solution' as const,
+        verified: false,
+        wouldBlock: false,
+      },
+    };
+
+    const plan = assemblePlan(response, {
+      problemKind: 'traditional', caseCount: 1, languages: [],
+    }, { mode: 'direct' });
+
+    expect(artifacts.generatorPlan).toBeUndefined();
+    expect(plan.coverageMode).toBe('ai-generator-unverified');
+    expect(plan.verification?.coverage).toMatchObject({
+      mode: 'ai-generator-unverified', matrix: [],
+    });
+  });
+
   it('分层启用时外围制品 Prompt 用子任务分配替换 small/medium/large 覆盖行', () => {
     const options: GenerateOptions = {
       problemKind: 'traditional',
@@ -3529,6 +9662,11 @@ describe('两阶段沙箱蓝图', () => {
       'traditional',
       [],
     )).toThrow(/第二阶段.*禁止的 ORACLE/);
+    expect(() => parseGenerationArtifacts(
+      `${makeGenerationArtifactsBlueprint('function')}\n@@@SOLUTION:java@@@\nclass Solution { int solve() { return 2; } }`,
+      'function',
+      ['java'],
+    )).toThrow(/第二阶段.*禁止的 SOLUTION:java/);
   });
 
   it('函数题第一阶段逐一解析题面样例 stdin 转码', () => {
@@ -3713,7 +9851,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
 
   it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
-    expect(sp).toContain('@@@SOLUTION@@@');
+    expect(sp).toContain('@@@SOLUTION:py@@@');
     expect(sp).toContain('=== SUBTASKS ===');
     expect(sp).not.toContain('@@@BRUTE@@@');
     expect(sp).not.toContain('@@@VALIDATOR@@@');
@@ -3766,6 +9904,272 @@ describe('parseSandboxBlueprint v2 分节', () => {
       .toThrow(/STRESS_GENERATOR、VALIDATOR/);
   });
 
+  it('Frozen VALIDATOR_MANIFEST and VALIDATOR_PROBE_RECIPES protocol fixes section order', () => {
+    const system = buildIndependentVerifierSystemPrompt(TESTDATA_GEN_LIMITS.STRESS_CASES, true);
+    const strictSequence = [
+      '@@@VALIDATOR_MANIFEST@@@',
+      '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+      '@@@VALIDATOR_PROBE_RECIPES@@@',
+      '{"recipes":[]}',
+      '@@@VALIDATOR@@@',
+    ].join('\n');
+
+    expect(system).toContain(strictSequence);
+    expect(system.match(/@@@VALIDATOR_MANIFEST@@@/g)).toHaveLength(1);
+    expect(system.match(/@@@VALIDATOR_PROBE_RECIPES@@@/g)).toHaveLength(1);
+    expect(system).toContain('严格 JSON 对象');
+  });
+
+  it('Frozen VALIDATOR_MANIFEST prompt defines fail-closed subtask argv semantics', () => {
+    const system = buildIndependentVerifierSystemPrompt(TESTDATA_GEN_LIMITS.STRESS_CASES, true);
+
+    expect(system).toContain('无命令行参数时校验全部全局约束');
+    expect(system).toContain('--subtask <known-positive-integer>');
+    expect(system).toContain('全局约束与该子任务作用域约束');
+    for (const rejected of ['未知参数', '缺少值', '非整数', '重复参数', '多余参数']) {
+      expect(system).toContain(rejected);
+    }
+    expect(system).toContain('exit 非 0');
+    expect(system).toContain('禁止从 stdin 读取子任务标签');
+    expect(system).toContain('禁止接收任意原始 probe input');
+  });
+
+  it('Frozen probe recipe prompt publishes the complete closed optional schema', () => {
+    const system = buildIndependentVerifierSystemPrompt(TESTDATA_GEN_LIMITS.STRESS_CASES, true);
+
+    for (const key of ['targetId', 'constructionKind', 'fieldId', 'operationName']) {
+      expect(system).toContain(key);
+    }
+    for (const kind of VALIDATOR_PROBE_CONSTRUCTION_KINDS) {
+      expect(system).toContain(kind);
+    }
+    for (const forbidden of [
+      'input', 'subtaskId', 'subtask', 'seedIndex', 'seed', 'value', 'code',
+    ]) {
+      expect(system).toContain(`禁止字段 ${forbidden}`);
+    }
+    expect(system).toContain('recipes 最多 64 项');
+    expect(system).toContain('recipe 只是可选补充');
+    expect(system).toContain('服务器自行选择 seed、subtask、value、expression 与 input');
+  });
+
+  it('Frozen VALIDATOR_MANIFEST parser returns strict manifest and bounded recipes', () => {
+    expect(parseIndependentVerifierBlueprint(
+      makeStrictIndependentVerifierBlueprint(),
+      [],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    )).toEqual(expect.objectContaining({
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [],
+    }));
+  });
+
+  it.each([
+    [
+      'think content inside Manifest',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+        '<think>polluted manifest</think>\n'
+          + '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+      ),
+    ],
+    [
+      'think content inside recipes',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '{"recipes":[]}',
+        '<think>polluted recipes</think>\n{"recipes":[]}',
+      ),
+    ],
+    [
+      'duplicate Manifest hidden inside think',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_MANIFEST@@@',
+        [
+          '<think>',
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '</think>',
+          '@@@VALIDATOR_MANIFEST@@@',
+        ].join('\n'),
+      ),
+    ],
+  ])('Frozen raw strict parser rejects %s', (_name, raw) => {
+    expect(() => parseIndependentVerifierBlueprint(
+      raw,
+      [],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    )).toThrow();
+  });
+
+  it.each([
+    [
+      'recipes before Manifest',
+      makeStrictIndependentVerifierBlueprint().replace(
+        [
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+        ].join('\n'),
+        [
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+        ].join('\n'),
+      ),
+    ],
+    [
+      'Manifest after Validator',
+      makeStrictIndependentVerifierBlueprint().replace(
+        [
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+          '@@@VALIDATOR@@@',
+          'import sys',
+          'sys.exit(0)',
+        ].join('\n'),
+        [
+          '@@@VALIDATOR@@@',
+          'import sys',
+          'sys.exit(0)',
+          '@@@VALIDATOR_MANIFEST@@@',
+          '{"constraintIds":["C1"],"invariantIds":["I1"]}',
+          '@@@VALIDATOR_PROBE_RECIPES@@@',
+          '{"recipes":[]}',
+        ].join('\n'),
+      ),
+    ],
+    [
+      'other section inside strict sequence',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_PROBE_RECIPES@@@',
+        '@@@UNEXPECTED@@@\nnot allowed here\n@@@VALIDATOR_PROBE_RECIPES@@@',
+      ),
+    ],
+    [
+      'lowercase Manifest heading',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_MANIFEST@@@',
+        '@@@validator_manifest@@@',
+      ),
+    ],
+    [
+      'whitespace-normalized recipes marker',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR_PROBE_RECIPES@@@',
+        ' @@@VALIDATOR_PROBE_RECIPES@@@ ',
+      ),
+    ],
+    [
+      'qualified Validator heading inside strict sequence',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR:python@@@\nignored\n@@@VALIDATOR@@@',
+      ),
+    ],
+  ])('Frozen raw strict parser rejects invalid marker ordering: %s', (_name, raw) => {
+    expect(() => parseIndependentVerifierBlueprint(
+      raw,
+      [],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    )).toThrow();
+  });
+
+  it('Frozen raw strict parser allows BRUTE/STRESS before and SAMPLE_INPUTS after protocol', () => {
+    const raw = makeStrictIndependentVerifierBlueprint().replace(
+      'sys.exit(0)',
+      'sys.exit(0)\n@@@SAMPLE_INPUTS@@@\n{"samples":[{"id":"1","input":"1\\n"}]}',
+    );
+
+    expect(parseIndependentVerifierBlueprint(
+      raw,
+      [{ id: '1', input: '1', output: '1' }],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    ).functionSampleInputs).toEqual([{ id: '1', input: '1\n' }]);
+  });
+
+  it('Frozen VALIDATOR_MANIFEST repair prompt preserves the strict sections', () => {
+    const frozenStatement = createStatementSnapshot('Read one integer n.');
+    const context = createTestdataPipelineContext({
+      runId: 'strict-verifier-repair',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement: frozenStatement,
+      spec: {
+        schemaVersion: 1,
+        statementHash: frozenStatement.statementHash,
+        problemKind: 'traditional',
+        testCaseMode: { kind: 'single' },
+        inputFields: [{ id: 'n', name: 'n', type: 'integer', encoding: 'one integer' }],
+        constraints: [],
+        invariants: [],
+        outputPolicy: { kind: 'exact' },
+        subtasks: [],
+        uncertainties: [],
+      },
+      risk: {
+        tier: 'low', score: 0, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+
+    const prompt = buildIndependentVerifierRepairPrompt(new Error('missing manifest'), [], context);
+    expect(prompt).toContain('@@@VALIDATOR_MANIFEST@@@');
+    expect(prompt).toContain('@@@VALIDATOR_PROBE_RECIPES@@@');
+    expect(prompt).toContain('可选的 @@@VALIDATOR_PROBE_RECIPES@@@');
+    expect(prompt.indexOf('@@@VALIDATOR_MANIFEST@@@'))
+      .toBeLessThan(prompt.indexOf('@@@VALIDATOR@@@'));
+  });
+
+  it.each([
+    ['missing VALIDATOR_MANIFEST', makeIndependentVerifierBlueprint()],
+    [
+      'duplicate VALIDATOR_MANIFEST',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR_MANIFEST@@@\n{"constraintIds":["C1"],"invariantIds":["I1"]}\n@@@VALIDATOR@@@',
+      ),
+    ],
+    [
+      'qualified duplicate VALIDATOR_MANIFEST',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR_MANIFEST:extra@@@\n{}\n@@@VALIDATOR@@@',
+      ),
+    ],
+    [
+      'qualified duplicate VALIDATOR_PROBE_RECIPES',
+      makeStrictIndependentVerifierBlueprint().replace(
+        '@@@VALIDATOR@@@',
+        '@@@VALIDATOR_PROBE_RECIPES:extra@@@\n{"recipes":[]}\n@@@VALIDATOR@@@',
+      ),
+    ],
+    [
+      'invalid VALIDATOR_PROBE_RECIPES',
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: ['C1'], invariantIds: ['I1'] },
+        { recipes: [{ targetId: 'C1', constructionKind: 'duplicate-element', input: 'raw' }] },
+      ),
+    ],
+  ])('Frozen parser rejects %s', (_name, raw) => {
+    expect(() => parseIndependentVerifierBlueprint(
+      raw,
+      [],
+      { frozenSpec: makeStrictVerifierSpec(), requireValidatorManifest: true },
+    )).toThrow();
+  });
+
+  it('legacy prompt and parser omit VALIDATOR_MANIFEST compatibility fields', () => {
+    expect(buildIndependentVerifierSystemPrompt()).not.toContain('@@@VALIDATOR_MANIFEST@@@');
+    expect(parseIndependentVerifierBlueprint(makeStrictIndependentVerifierBlueprint()))
+      .toEqual(parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()));
+  });
+
   it('独立验证 User Prompt 不泄漏 ORACLE 源码', () => {
     const prompt = buildIndependentVerifierUserPrompt({
       problemTitle: '题目',
@@ -3810,6 +10214,1176 @@ describe('parseSandboxBlueprint v2 分节', () => {
   });
 });
 
+describe('Task 8 full manifest repair', () => {
+  const statementMarkdown = 'Read one integer n.';
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 1, languages: [],
+  };
+  const params = { problemTitle: 'manifest repair', statementMarkdown, options };
+
+  function contextForManifestRepair() {
+    const statement = createStatementSnapshot(statementMarkdown);
+    return createTestdataPipelineContext({
+      runId: 'task-8-manifest-repair',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, {
+        problemKind: 'traditional',
+        constraints: [{
+          id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+          evidence: { quote: 'one integer n' },
+        }],
+      }),
+      risk: {
+        tier: 'medium', score: 3, reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: false, requiresIndependentModels: false,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+  }
+
+  function contextForVerifierIdentityRepair(highRisk = false) {
+    const statement = createStatementSnapshot(statementMarkdown);
+    return createTestdataPipelineContext({
+      runId: highRisk ? 'task-8-high-risk-verifier-identity' : 'task-8-verifier-identity',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, { problemKind: 'traditional' }),
+      risk: {
+        tier: highRisk ? 'high' : 'medium', score: highRisk ? 6 : 3, reasons: [],
+        requiresSandbox: true,
+        requiresSpecConsensus: highRisk,
+        requiresIndependentModels: highRisk,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+  }
+
+  function strictRepairResponse(tag: string): string {
+    return [
+      '@@@BRUTE@@@', `print(input())  # ${tag}-brute`,
+      '@@@STRESS_GENERATOR@@@', `print('{"cases":[]}')  # ${tag}-stress`,
+      '@@@VALIDATOR_MANIFEST@@@', '{"constraintIds":["C1"],"invariantIds":[]}',
+      '@@@VALIDATOR_PROBE_RECIPES@@@', '{"recipes":[]}',
+      '@@@VALIDATOR@@@', `raise SystemExit(0)  # ${tag}-validator`,
+    ].join('\n');
+  }
+
+  it('manifest repair replaces every Independent Verifier section exactly once', async () => {
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-primary', 'verifier-model',
+      makeIndependentVerifierBlueprint(),
+      strictRepairResponse('repaired'),
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+    const results: any[] = [];
+
+    const state = await (service as any).generateIndependentVerifier(
+      params,
+      { problemType: 'traditional' },
+      {},
+      results,
+      1,
+      contextForManifestRepair(),
+    );
+
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    const repairPrompt = verifier.chat.mock.calls[1][0][2].content;
+    for (const section of [
+      '@@@BRUTE@@@', '@@@STRESS_GENERATOR@@@', '@@@VALIDATOR_MANIFEST@@@',
+      '@@@VALIDATOR_PROBE_RECIPES@@@', '@@@VALIDATOR@@@',
+    ]) expect(repairPrompt).toContain(section);
+    expect(state.sourceContent).toBe(strictRepairResponse('repaired'));
+    expect(state.verifier).toMatchObject({
+      bruteCode: expect.stringContaining('repaired-brute'),
+      stressGeneratorCode: expect.stringContaining('repaired-stress'),
+      validatorCode: expect.stringContaining('repaired-validator'),
+      validatorManifestStatus: 'valid',
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [],
+    });
+    expect(results).toHaveLength(2);
+  });
+
+  it('full verifier repair checkpoints the repaired model identity', async () => {
+    const initialModel = {
+      endpointId: 'initial-verifier', endpointName: 'initial-verifier', modelName: 'initial-model',
+    };
+    const repairModel = {
+      endpointId: 'repair-verifier', endpointName: 'repair-verifier', modelName: 'repair-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({
+        content: makeEmptyKillTargetsResponse(),
+        usedModel: { endpointId: 'kill', endpointName: 'kill', modelName: 'kill-model' },
+      })
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel: initialModel })
+      .mockResolvedValueOnce({
+        content: strictRepairResponse('checkpoint').replace(
+          '{"constraintIds":["C1"],"invariantIds":[]}',
+          '{"constraintIds":[],"invariantIds":[]}',
+        ),
+        usedModel: repairModel,
+      });
+    const oracle = makeRoleClient(
+      'oracle', 'full-repair-oracle', 'oracle-model', makeSolutionBlueprint('traditional'),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'full-repair-artifacts', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const updates: any[] = [];
+    const runner = {
+      ...makeCheckpointRunner(),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('checkpoint-stress')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: any[]) => {
+        if (code.includes('checkpoint-validator')) {
+          return Promise.resolve(inputs.map((input, index) => inputs.length <= 5
+            ? detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })
+            : detail({ stdout: typeof input === 'string' ? input : input.stdin })));
+        }
+        return Promise.resolve(inputs.map(input => detail({
+          stdout: typeof input === 'string' ? input : input.stdin,
+        })));
+      }),
+    };
+    const context = contextForVerifierIdentityRepair();
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never,
+      reliabilityMode: 'enforce', roleClients: { oracle, artifacts, verifier },
+    });
+
+    await (service as any).generateWithSandbox({
+      ...params,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, runner, 1, context.risk, context);
+
+    const repairedUpdate = updates.find(update =>
+      update?.verifier?.validatorCode?.includes('checkpoint-validator'));
+    expect(repairedUpdate?.roleDependencies?.verifier).toBe(
+      hashTestdataRoleIdentity('repair-verifier\0repair-model'),
+    );
+    expect(repairedUpdate?.roleDependencies?.verifier).not.toBe(
+      hashTestdataRoleIdentity('initial-verifier\0initial-model'),
+    );
+    expect((service as any).activeRoleIdentities.verifier).toEqual(repairModel);
+  });
+
+  it('invalid-manifest observe recovers bounded executable sections without fabricating proof', async () => {
+    const secondInvalid = makeIndependentVerifierBlueprint()
+      .replace('independent brute', 'observe-repaired-brute')
+      .replace('stress generator', 'observe-repaired-stress')
+      .replace('sys.exit(0)', 'sys.exit(0)  # observe-repaired-validator');
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-primary', 'verifier-model',
+      makeIndependentVerifierBlueprint(),
+      secondInvalid,
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { verifier },
+    });
+
+    const state = await (service as any).generateIndependentVerifier(
+      params,
+      { problemType: 'traditional' },
+      {},
+      [],
+      1,
+      contextForManifestRepair(),
+    );
+
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(state.sourceContent).toBe(secondInvalid);
+    expect(state.verifier).toMatchObject({
+      bruteCode: expect.stringContaining('observe-repaired-brute'),
+      stressGeneratorCode: expect.stringContaining('observe-repaired-stress'),
+      validatorCode: expect.stringContaining('observe-repaired-validator'),
+      validatorManifestStatus: 'invalid',
+    });
+    expect(state.verifier.validatorManifest).toBeUndefined();
+    expect(state.verifier.validatorProbeRecipes).toBeUndefined();
+  });
+
+  it('manifest repair failure remains verifier-owned and typed in enforce mode', async () => {
+    const sentinel = 'PRIVATE_INVALID_MANIFEST';
+    const verifier = makeRoleClient(
+      'verifier', 'verifier-primary', 'verifier-model',
+      `${makeIndependentVerifierBlueprint()}\n${sentinel}`,
+      `${makeIndependentVerifierBlueprint()}\n${sentinel}`,
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+
+    const failure = await (service as any).generateIndependentVerifier(
+      params,
+      { problemType: 'traditional' },
+      {},
+      [],
+      1,
+      contextForManifestRepair(),
+    ).catch((error: unknown) => error);
+
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      artifact: 'coverage',
+      retryPolicy: 'switch-model',
+      failedModelRole: 'verifier',
+    });
+    expect(failure.message).not.toContain(sentinel);
+    expect(JSON.stringify(failure.safeDetails)).not.toContain(sentinel);
+  });
+
+  it('full verifier repair parse failure never commits the repair identity', async () => {
+    const initialModel = {
+      endpointId: 'initial-parse', endpointName: 'initial-parse', modelName: 'initial-model',
+    };
+    const repairModel = {
+      endpointId: 'repair-parse', endpointName: 'repair-parse', modelName: 'repair-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel: initialModel })
+      .mockResolvedValueOnce({ content: '@@@BRUTE@@@\nstill incomplete', usedModel: repairModel });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+
+    await expect((service as any).generateIndependentVerifier(
+      params, { problemType: 'traditional' }, {}, [], 1, contextForManifestRepair(),
+    )).rejects.toMatchObject({ code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING' });
+    expect((service as any).activeRoleIdentities.verifier).toEqual(initialModel);
+    expect((service as any).activeRoleIdentities.verifier).not.toEqual(repairModel);
+  });
+
+  it('high-risk repaired verifier collision blocks before repaired checkpoint emission', async () => {
+    const collidingModel = {
+      endpointId: 'shared-high-risk', endpointName: 'shared-high-risk', modelName: 'shared-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({
+        content: makeEmptyKillTargetsResponse(),
+        usedModel: { endpointId: 'kill', endpointName: 'kill', modelName: 'kill-model' },
+      })
+      .mockResolvedValueOnce({
+        content: makeIndependentVerifierBlueprint(),
+        usedModel: {
+          endpointId: 'initial-independent', endpointName: 'initial-independent',
+          modelName: 'initial-independent-model',
+        },
+      })
+      .mockResolvedValueOnce({
+        content: strictRepairResponse('collision').replace(
+          '{"constraintIds":["C1"],"invariantIds":[]}',
+          '{"constraintIds":[],"invariantIds":[]}',
+        ),
+        usedModel: collidingModel,
+      });
+    const oracle = makeRoleClientWithActual(
+      'oracle', 'oracle-configured', 'oracle-configured-model',
+      collidingModel.endpointId, collidingModel.modelName,
+      makeSolutionBlueprint('traditional'),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'collision-artifacts', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const context = contextForVerifierIdentityRepair(true);
+    const updates: any[] = [];
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { oracle, artifacts, verifier },
+    });
+
+    const failure = await (service as any).generateWithSandbox({
+      ...params,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, makeCheckpointRunner(), 1, context.risk, context).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED' });
+    expect(updates.some(update =>
+      update?.verifier?.validatorCode?.includes('collision-validator'))).toBe(false);
+  });
+
+  it('legacy verifier parsing never enters manifest repair', async () => {
+    const baseClient = { chat: jest.fn().mockResolvedValue({
+      content: makeIndependentVerifierBlueprint(),
+      usedModel: {
+        endpointId: 'legacy-verifier', endpointName: 'legacy-verifier', modelName: 'legacy-model',
+      },
+    }) };
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode: 'legacy',
+    });
+
+    const state = await (service as any).generateIndependentVerifier(
+      params, { problemType: 'traditional' }, {}, [], 1, undefined,
+    );
+
+    expect(baseClient.chat).toHaveBeenCalledTimes(1);
+    expect(state.verifier.validatorManifestStatus).toBeUndefined();
+  });
+
+  it.each([
+    ['rejected call with Error reason', 'reject', new Error('full repair rejected cancellation')],
+    ['resolved call with object reason', 'resolve', { kind: 'full-repair-cancel-object' }],
+  ] as const)('full verifier repair cancellation boundary preserves identity for %s', async (
+    _name, outcome, cancellation,
+  ) => {
+    const controller = new AbortController();
+    const initialModel = {
+      endpointId: 'initial-verifier', endpointName: 'initial-verifier', modelName: 'initial-model',
+    };
+    const repairModel = {
+      endpointId: 'repair-verifier', endpointName: 'repair-verifier', modelName: 'repair-model',
+    };
+    const transport = new Error('full repair transport rejection');
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel: initialModel })
+      .mockImplementationOnce(() => {
+        controller.abort(cancellation);
+        return outcome === 'resolve'
+          ? Promise.resolve({ content: strictRepairResponse('late'), usedModel: repairModel })
+          : Promise.reject(transport);
+      });
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+    const results: unknown[] = [];
+
+    const failure = await (service as any).generateIndependentVerifier(
+      { ...params, signal: controller.signal },
+      { problemType: 'traditional' },
+      { signal: controller.signal },
+      results,
+      1,
+      contextForManifestRepair(),
+    ).then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toBe(cancellation);
+    expect(results).toHaveLength(1);
+    expect((service as any).activeRoleIdentities.verifier).toEqual(initialModel);
+  });
+});
+
+describe('Task 8 validator-only repair', () => {
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 2, languages: [],
+  };
+
+  function frozenRepairContext(highRisk = false) {
+    const statement = createStatementSnapshot('Every input satisfies 0 <= n <= 10.');
+    return createTestdataPipelineContext({
+      runId: 'task-8-validator-only-repair',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statement.normalizedMarkdown, {
+        problemKind: 'traditional',
+        constraints: [{
+          id: 'C1', expression: '0 <= n <= 10', machineCheckable: true, scope: 'global',
+          evidence: { quote: '0 <= n <= 10' },
+        }],
+        subtasks: [{ id: 1, score: 100, constraintIds: ['C1'] }],
+      }),
+      risk: {
+        tier: highRisk ? 'high' : 'medium', score: highRisk ? 6 : 3,
+        reasons: [], requiresSandbox: true,
+        requiresSpecConsensus: highRisk, requiresIndependentModels: highRisk,
+        allowsDirectFallback: false,
+      },
+      roleIdentities: {},
+    });
+  }
+
+  function validatorRepairRunner() {
+    return {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [
+            { label: 'formal-1', input: '1' }, { label: 'formal-2', input: '2' },
+          ] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: any[]) => {
+        if (code.includes('sys.exit(0)')) return Promise.resolve(inputs.map(() => detail()));
+        if (code.includes('repaired-validator-checkpoint')) {
+          return Promise.resolve(inputs.map(input => inputs.length <= 5
+            ? detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })
+            : detail({ stdout: typeof input === 'string' ? input : input.stdin })));
+        }
+        return Promise.resolve(inputs.map(input => detail({
+          stdout: typeof input === 'string' ? input : input.stdin,
+        })));
+      }),
+    };
+  }
+
+  it('validator-only repair checkpoints repaired identity, survives interruption, and resumes', async () => {
+    const context = frozenRepairContext();
+    const initialModel = {
+      endpointId: 'initial-validator', endpointName: 'initial-validator', modelName: 'initial-model',
+    };
+    const repairModel = {
+      endpointId: 'repair-validator', endpointName: 'repair-validator', modelName: 'repair-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({
+        content: makeEmptyKillTargetsResponse(),
+        usedModel: { endpointId: 'kill', endpointName: 'kill', modelName: 'kill-model' },
+      })
+      .mockResolvedValueOnce({
+        content: makeStrictIndependentVerifierBlueprint(
+          { constraintIds: ['C1'], invariantIds: [] },
+        ),
+        usedModel: initialModel,
+      })
+      .mockResolvedValueOnce({
+        content: '@@@VALIDATOR@@@\nraise SystemExit(0)  # repaired-validator-checkpoint',
+        usedModel: repairModel,
+      });
+    const oracle = makeRoleClient(
+      'oracle', 'validator-oracle', 'oracle-model', makeSolutionBlueprint('traditional'),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'validator-artifacts', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const runner = validatorRepairRunner();
+    const controller = new AbortController();
+    const interruption = { kind: 'after-repaired-validator-checkpoint' };
+    let repairedCheckpoint: any;
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      mode: 'sandbox', sandboxRunner: runner as never,
+      reliabilityMode: 'enforce', roleClients: { oracle, artifacts, verifier },
+    });
+
+    const failure = await (service as any).generateWithSandbox({
+      problemTitle: 'validator repair checkpoint',
+      statementMarkdown: context.statement.normalizedMarkdown,
+      options,
+      signal: controller.signal,
+      onCheckpoint: (update: any) => {
+        if (update?.verifier?.validatorCode?.includes('repaired-validator-checkpoint')) {
+          repairedCheckpoint = update;
+          controller.abort(interruption);
+        }
+      },
+    }, runner, 1, context.risk, context).catch((error: unknown) => error);
+
+    expect(failure).toBe(interruption);
+    expect(repairedCheckpoint.roleDependencies.verifier).toBe(
+      hashTestdataRoleIdentity('repair-validator\0repair-model'),
+    );
+    expect(repairedCheckpoint.roleDependencies.verifier).not.toBe(
+      hashTestdataRoleIdentity('initial-validator\0initial-model'),
+    );
+    const serialized = JSON.stringify(repairedCheckpoint);
+    for (const secret of [
+      'initial-validator', 'initial-model', 'repair-validator', 'repair-model',
+      'endpointId', 'endpointName', 'modelName',
+    ]) expect(serialized).not.toContain(secret);
+
+    const resumeClient = { chat: jest.fn() };
+    const resumeRunner = validatorRepairRunner();
+    const resumeService = new TestdataGenService(resumeClient as never, {
+      mode: 'sandbox', sandboxRunner: resumeRunner as never, reliabilityMode: 'enforce',
+    });
+    const plan = await (resumeService as any).generateWithSandbox({
+      problemTitle: 'validator repair checkpoint',
+      statementMarkdown: context.statement.normalizedMarkdown,
+      options,
+      checkpoint: { ...repairedCheckpoint, killTargets: [] },
+    }, resumeRunner, 1, context.risk, context);
+
+    expect(resumeClient.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === 'validator.py')?.content)
+      .toContain('repaired-validator-checkpoint');
+  });
+
+  it('high-risk validator repair collision blocks before repaired checkpoint emission', async () => {
+    const context = frozenRepairContext(true);
+    const collidingModel = {
+      endpointId: 'shared-validator', endpointName: 'shared-validator', modelName: 'shared-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    verifier.chat
+      .mockResolvedValueOnce({
+        content: makeEmptyKillTargetsResponse(),
+        usedModel: { endpointId: 'kill', endpointName: 'kill', modelName: 'kill-model' },
+      })
+      .mockResolvedValueOnce({
+        content: makeStrictIndependentVerifierBlueprint(
+          { constraintIds: ['C1'], invariantIds: [] },
+        ),
+        usedModel: {
+          endpointId: 'initial-validator-independent', endpointName: 'initial-validator-independent',
+          modelName: 'initial-model',
+        },
+      })
+      .mockResolvedValueOnce({
+        content: '@@@VALIDATOR@@@\nraise SystemExit(0)  # repaired-validator-checkpoint',
+        usedModel: collidingModel,
+      });
+    const oracle = makeRoleClientWithActual(
+      'oracle', 'oracle-configured', 'oracle-configured-model',
+      collidingModel.endpointId, collidingModel.modelName,
+      makeSolutionBlueprint('traditional'),
+    );
+    const artifacts = makeRoleClient(
+      'artifacts', 'validator-collision-artifacts', 'artifacts-model',
+      makeGenerationArtifactsBlueprint('traditional'),
+    );
+    const updates: any[] = [];
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { oracle, artifacts, verifier },
+    });
+
+    const failure = await (service as any).generateWithSandbox({
+      problemTitle: 'validator collision',
+      statementMarkdown: context.statement.normalizedMarkdown,
+      options,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, validatorRepairRunner(), 1, context.risk, context).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'SPEC_CONSENSUS_REQUIRED' });
+    expect(updates.some(update =>
+      update?.verifier?.validatorCode?.includes('repaired-validator-checkpoint'))).toBe(false);
+  });
+
+  it.each([
+    ['VALIDATOR_FALSE_ACCEPT repair', 'VALIDATOR_FALSE_ACCEPT'],
+    ['validator-only repair for scoped false accept', 'SUBTASK_CONSTRAINT_VIOLATION'],
+  ])('%s requests only Validator and freezes all proof declarations', (_name, code) => {
+    const failure = new TestdataPipelineError(
+      'validator accepted an illegal probe',
+      code as 'VALIDATOR_FALSE_ACCEPT' | 'SUBTASK_CONSTRAINT_VIOLATION',
+      'validator',
+      'validator',
+      'repair-artifact',
+      { invalidAccepted: 1 },
+    );
+    const prompt = buildSandboxRepairPrompt(
+      failure, options, 'validator', undefined, frozenRepairContext(),
+    );
+
+    expect(prompt.match(/@@@VALIDATOR@@@/g)).toHaveLength(1);
+    for (const forbidden of [
+      '@@@BRUTE@@@', '@@@STRESS_GENERATOR@@@', '@@@VALIDATOR_MANIFEST@@@',
+      '@@@VALIDATOR_PROBE_RECIPES@@@', '@@@GENERATOR@@@', '@@@ORACLE@@@',
+    ]) expect(prompt).not.toContain(forbidden);
+    expect(prompt).toContain('Manifest');
+    expect(prompt).toContain('recipes');
+    expect(prompt).toContain('frozen ProblemSpec');
+    expect(prompt).toContain('不得修改');
+  });
+
+  it('validator-only repair replaces only Validator and preserves all frozen material byte-for-byte', () => {
+    const original = {
+      ...parseSandboxBlueprint([
+        '@@@META@@@', 'problemType: traditional',
+        '@@@GENERATOR@@@', 'print(gen())  # frozen-generator',
+        '@@@ORACLE@@@', 'print(input())  # frozen-oracle',
+        '@@@BRUTE@@@', 'print(input())  # frozen-brute',
+        '@@@VALIDATOR@@@', 'raise SystemExit(0)  # old-validator',
+      ].join('\n'), options),
+      stressGeneratorCode: 'print(stress())  # frozen-stress\n',
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+      }],
+      functionSampleInputs: [{ id: 'sample-1', input: '1\n' }],
+      subtasks: [{ id: 1, score: 100, constraints: 'n >= 1' }],
+    };
+    const immutableBefore = JSON.stringify({
+      generatorCode: original.generatorCode,
+      oracleCode: original.oracleCode,
+      bruteCode: original.bruteCode,
+      stressGeneratorCode: original.stressGeneratorCode,
+      validatorManifestStatus: original.validatorManifestStatus,
+      validatorManifest: original.validatorManifest,
+      validatorProbeRecipes: original.validatorProbeRecipes,
+      functionSampleInputs: original.functionSampleInputs,
+      subtasks: original.subtasks,
+    });
+
+    const repaired = mergeSandboxBlueprintRepair(
+      original,
+      [
+        '@@@BRUTE@@@', 'print("malicious replacement")',
+        '@@@VALIDATOR_MANIFEST@@@', '{"constraintIds":[],"invariantIds":[]}',
+        '@@@VALIDATOR@@@', 'raise SystemExit(0)  # repaired-validator',
+      ].join('\n'),
+      'validator',
+    );
+
+    expect(repaired.validatorCode).toContain('repaired-validator');
+    expect(JSON.stringify({
+      generatorCode: repaired.generatorCode,
+      oracleCode: repaired.oracleCode,
+      bruteCode: repaired.bruteCode,
+      stressGeneratorCode: repaired.stressGeneratorCode,
+      validatorManifestStatus: repaired.validatorManifestStatus,
+      validatorManifest: repaired.validatorManifest,
+      validatorProbeRecipes: repaired.validatorProbeRecipes,
+      functionSampleInputs: repaired.functionSampleInputs,
+      subtasks: repaired.subtasks,
+    })).toBe(immutableBefore);
+    expect(resolveMaterializationResume(['VALIDATOR'])).toEqual({
+      phase: 'validator',
+      reuse: {
+        formalInputs: true, stressInputs: true,
+        validationResults: false, oracleOutputs: false,
+      },
+    });
+  });
+
+  it('full repair prohibition rejects a combined repair prompt on a Frozen path', () => {
+    expect(() => buildSandboxRepairPrompt(
+      new Error('unknown combined failure'),
+      options,
+      'full',
+      undefined,
+      frozenRepairContext(),
+    )).toThrow(expect.objectContaining({
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      retryPolicy: 'switch-model',
+    }));
+  });
+
+  it.each([
+    ['rejected call with object reason', 'reject', { kind: 'validator-reject-cancel-object' }],
+    ['resolved call with Error reason', 'resolve', new Error('validator repair resolved cancellation')],
+  ] as const)('validator-only repair cancellation boundary preserves identity for %s', async (
+    _name, outcome, cancellation,
+  ) => {
+    const context = frozenRepairContext();
+    const checkpointVerifier = parseIndependentVerifierBlueprint(
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: ['C1'], invariantIds: [] },
+        { recipes: [{
+          targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+        }] },
+      ),
+      [],
+      { frozenSpec: context.spec, requireValidatorManifest: true },
+    );
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('restored-oracle\0model'),
+        artifacts: hashTestdataRoleIdentity('restored-artifacts\0model'),
+        verifier: hashTestdataRoleIdentity('restored-verifier\0model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: checkpointVerifier,
+      killTargets: [],
+    };
+    const controller = new AbortController();
+    const transport = new Error('validator repair transport rejection');
+    const repairModel = {
+      endpointId: 'late-validator-repair', endpointName: 'late-validator-repair',
+      modelName: 'late-model',
+    };
+    const verifier = makeRoleClient('verifier', 'configured-verifier', 'configured-model');
+    const updates: unknown[] = [];
+    let updatesAtRepair = -1;
+    verifier.chat.mockImplementationOnce(() => {
+      updatesAtRepair = updates.length;
+      controller.abort(cancellation);
+      return outcome === 'resolve'
+        ? Promise.resolve({
+          content: '@@@VALIDATOR@@@\nraise SystemExit(1)  # late-validator-repair',
+          usedModel: repairModel,
+        })
+        : Promise.reject(transport);
+    });
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [
+            { label: 'formal-1', input: '1' },
+            { label: 'formal-2', input: '2' },
+          ] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: Array<string | { stdin: string }>, callOptions: any) => {
+          if (callOptions?.signal?.aborted) return Promise.reject(callOptions.signal.reason);
+          if (code === checkpointVerifier.validatorCode) {
+            return Promise.resolve(inputs.map(() => detail()));
+          }
+          return Promise.resolve(inputs.map(input => detail({
+            stdout: typeof input === 'string' ? input : input.stdin,
+          })));
+        },
+      ),
+    };
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'enforce', roleClients: { verifier },
+    });
+
+    const failure = await (service as any).generateWithSandbox({
+      problemTitle: 'validator-only repair cancellation',
+      statementMarkdown: context.statement.normalizedMarkdown,
+      options,
+      checkpoint,
+      signal: controller.signal,
+      onCheckpoint: (update: unknown) => { updates.push(update); },
+    }, runner, 1, context.risk, context).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBe(cancellation);
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(updatesAtRepair).toBeGreaterThanOrEqual(0);
+    expect(updates).toHaveLength(updatesAtRepair);
+    expect((service as any).activeRoleIdentities.verifier).toBeUndefined();
+  });
+});
+
+describe('Task 8 restored verifier checkpoint strictness', () => {
+  const statementMarkdown = 'Input one integer n with n >= 1.';
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 1, languages: [],
+  };
+  const risk = {
+    tier: 'low' as const, score: 0, reasons: [], requiresSandbox: true,
+    requiresSpecConsensus: false, requiresIndependentModels: false, allowsDirectFallback: false,
+  };
+
+  function frozenContext() {
+    const statement = createStatementSnapshot(statementMarkdown);
+    return createTestdataPipelineContext({
+      runId: 'task-8-restored-verifier-strictness',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statement,
+      spec: makeObservedProblemSpec(statementMarkdown, {
+        problemKind: 'traditional',
+        constraints: [{
+          id: 'C1', expression: 'n >= 1', machineCheckable: true, scope: 'global',
+          evidence: { quote: 'n >= 1' },
+        }],
+      }),
+      risk,
+      roleIdentities: {},
+    });
+  }
+
+  function validCheckpointVerifier(context: ReturnType<typeof frozenContext>) {
+    return parseIndependentVerifierBlueprint(
+      makeStrictIndependentVerifierBlueprint(
+        { constraintIds: ['C1'], invariantIds: [] },
+        { recipes: [{
+          targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+        }] },
+      ),
+      [],
+      { frozenSpec: context.spec, requireValidatorManifest: true },
+    );
+  }
+
+  async function generateFromVerifierCheckpoint(
+    mutate: (verifier: ReturnType<typeof validCheckpointVerifier>) => unknown,
+    reliabilityMode: 'observe' | 'enforce' = 'observe',
+  ) {
+    const context = frozenContext();
+    const checkpoint = {
+      checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
+      statementHash: context.statement.statementHash,
+      specHash: context.specHash,
+      roleDependencies: {
+        oracle: hashTestdataRoleIdentity('restored-oracle\0model'),
+        artifacts: hashTestdataRoleIdentity('restored-artifacts\0model'),
+        verifier: hashTestdataRoleIdentity('restored-verifier\0model'),
+      },
+      solution: parseSolutionBlueprint(makeSolutionBlueprint('traditional'), options, []),
+      artifacts: parseGenerationArtifacts(
+        makeGenerationArtifactsBlueprint('traditional'), 'traditional', [],
+      ),
+      verifier: mutate(validCheckpointVerifier(context)),
+      killTargets: [],
+    };
+    const freshVerifierResponse = makeStrictIndependentVerifierBlueprint(
+      { constraintIds: ['C1'], invariantIds: [] },
+      { recipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'n',
+      }] },
+    ).replace('sys.exit(0)', 'sys.exit(0)  # fresh-restored-proof');
+    const verifier = makeRoleClient(
+      'verifier', 'fresh-verifier', 'fresh-model', freshVerifierResponse,
+    );
+    const oracle = makeRoleClient('oracle', 'unused-oracle', 'unused-model');
+    const artifacts = makeRoleClient('artifacts', 'unused-artifacts', 'unused-model');
+    const baseClient = { chat: jest.fn() };
+    let validatorBatch = 0;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator')
+          ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, inputs: Array<string | { stdin: string }>) => {
+          if (code.includes('sys.exit(0)')) {
+            validatorBatch += 1;
+            return Promise.resolve(inputs.map(() => validatorBatch === 1
+              ? detail()
+              : detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 })));
+          }
+          return Promise.resolve(inputs.map(input => detail({
+            stdout: typeof input === 'string' ? input : input.stdin,
+          })));
+        },
+      ),
+    };
+    const service = new TestdataGenService(baseClient as never, {
+      reliabilityMode,
+      roleClients: { oracle, artifacts, verifier },
+    });
+
+    const plan = await (service as any).generateWithSandbox({
+      problemTitle: 'restored verifier strictness',
+      statementMarkdown,
+      options,
+      checkpoint,
+    }, runner, 1, risk, context);
+
+    return { plan, verifier, oracle, artifacts, baseClient };
+  }
+
+  it.each([
+    ['invalid observe status', (verifier: any) => ({
+      ...verifier, validatorManifestStatus: 'invalid', validatorManifest: undefined,
+    })],
+    ['missing manifest status', (verifier: any) => {
+      const { validatorManifestStatus: _removed, ...rest } = verifier;
+      return rest;
+    }],
+    ['unknown manifest id', (verifier: any) => ({
+      ...verifier,
+      validatorManifest: { constraintIds: ['UNKNOWN'], invariantIds: [] },
+    })],
+    ['duplicate manifest id', (verifier: any) => ({
+      ...verifier,
+      validatorManifest: { constraintIds: ['C1', 'C1'], invariantIds: [] },
+    })],
+    ['incomplete manifest', (verifier: any) => ({
+      ...verifier,
+      validatorManifest: { constraintIds: [], invariantIds: [] },
+    })],
+  ])('%s forces fresh full Independent Verifier generation while reusing safe roles', async (
+    _name, mutate,
+  ) => {
+    const { plan, verifier, oracle, artifacts, baseClient } =
+      await generateFromVerifierCheckpoint(mutate);
+
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat.mock.calls[0][0]).toHaveLength(1);
+    expect(oracle.chat).not.toHaveBeenCalled();
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect(baseClient.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === 'validator.py')?.content)
+      .toContain('fresh-restored-proof');
+  });
+
+  it.each([
+    ['unknown field', (verifier: any) => ({
+      ...verifier,
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min', fieldId: 'unknown-field',
+      }],
+    })],
+    ['unknown operation', (verifier: any) => ({
+      ...verifier,
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'add-existing-object', operationName: 'unknown-op',
+      }],
+    })],
+    ['unknown construction', (verifier: any) => ({
+      ...verifier,
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'model-chosen-executable-expression', fieldId: 'n',
+      }],
+    })],
+  ])('invalid restored recipe with %s forces fresh full Independent Verifier generation', async (
+    _name, mutate,
+  ) => {
+    const { verifier, oracle, artifacts } = await generateFromVerifierCheckpoint(mutate);
+
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat.mock.calls[0][0]).toHaveLength(1);
+    expect(oracle.chat).not.toHaveBeenCalled();
+    expect(artifacts.chat).not.toHaveBeenCalled();
+  });
+
+  it('observe-to-enforce reuse rejects an invalid observe verifier before materialization', async () => {
+    const { plan, verifier, oracle, artifacts } = await generateFromVerifierCheckpoint(
+      cached => ({
+        ...cached,
+        validatorManifestStatus: 'invalid',
+        validatorManifest: undefined,
+        validatorProbeRecipes: undefined,
+      }),
+      'enforce',
+    );
+
+    expect(verifier.chat).toHaveBeenCalledTimes(1);
+    expect(verifier.chat.mock.calls[0][0]).toHaveLength(1);
+    expect(oracle.chat).not.toHaveBeenCalled();
+    expect(artifacts.chat).not.toHaveBeenCalled();
+    expect(plan.files.find((file: { name: string }) => file.name === 'validator.py')?.content)
+      .toContain('fresh-restored-proof');
+  });
+});
+
+describe('Task 8 resume checkpoint provenance privacy and cancellation identity', () => {
+  const statementMarkdown = 'Every input satisfies 0 <= n <= 10.';
+  const options: GenerateOptions = {
+    problemKind: 'traditional', caseCount: 2, languages: [],
+  };
+
+  function proofContext() {
+    return makeValidatorCoverageProof(statementMarkdown, {
+      constraints: [{
+        id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
+        scope: 'global', evidence: { quote: '0 <= n <= 10' },
+      }],
+    });
+  }
+
+  function proofBlueprint(validatorCode: string) {
+    return {
+      problemType: 'traditional' as const,
+      generatorCode: 'generator-code',
+      oracleCode: 'oracle-code',
+      bruteCode: 'brute-code',
+      stressGeneratorCode: 'stress-code',
+      validatorCode,
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+      }],
+    };
+  }
+
+  it('resume invalidates cached validator proof and reconstructs identical request-local probes', async () => {
+    const cache: MaterializationCacheState = {};
+    const illegalInvocations: unknown[][] = [];
+    let activeValidator = 'validator-v1';
+    let validatorCall = 0;
+    let cachedValidationAtRepair: unknown = 'not-observed';
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code === 'stress-code' ? stressGeneratorStdout() : twoCaseGen(),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === activeValidator) {
+            validatorCall += 1;
+            if (activeValidator === 'validator-v2' && validatorCall === 1) {
+              cachedValidationAtRepair = cache.validation;
+            }
+            if (validatorCall % 2 === 1) {
+              return Promise.resolve(invocations.map(() => detail()));
+            }
+            illegalInvocations.push(JSON.parse(JSON.stringify(invocations)));
+            return Promise.resolve(invocations.map(() => detail({
+              status: 'Runtime Error', accepted: false, exitStatus: 1,
+            })));
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+
+    await materializeWithValidatorProof(
+      proofBlueprint(activeValidator), options, statementMarkdown,
+      runner as never, proofContext(), undefined, cache,
+    );
+    const serializedFirstCache = JSON.stringify(cache);
+    expect(cache.validation).toBeDefined();
+    expect(serializedFirstCache).not.toContain('-1\\n');
+    expect(serializedFirstCache).not.toContain('argv');
+    expect(serializedFirstCache).not.toContain('stdin');
+
+    activeValidator = 'validator-v2';
+    validatorCall = 0;
+    await materializeWithValidatorProof(
+      proofBlueprint(activeValidator), options, statementMarkdown,
+      runner as never, proofContext(), undefined, cache, ['VALIDATOR'],
+    );
+
+    expect(cachedValidationAtRepair).toBeUndefined();
+    expect(illegalInvocations).toHaveLength(2);
+    expect(illegalInvocations[1]).toEqual(illegalInvocations[0]);
+    expect(JSON.stringify(cache)).not.toContain('-1\\n');
+  });
+
+  it('cancellation identity at the probe construction boundary prevents the illegal batch', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('probe construction cancellation identity');
+    const base = proofBlueprint('validator-code');
+    const blueprint = { ...base } as typeof base;
+    Object.defineProperty(blueprint, 'validatorProbeRecipes', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        controller.abort(cancellation);
+        return base.validatorProbeRecipes;
+      },
+    });
+    let validatorCalls = 0;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code === 'stress-code' ? stressGeneratorStdout() : twoCaseGen(),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === blueprint.validatorCode) {
+            validatorCalls += 1;
+            return Promise.resolve(invocations.map(() => validatorCalls === 1
+              ? detail()
+              : detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 })));
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, options, statementMarkdown, runner as never,
+      proofContext(), controller.signal,
+    ).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(validatorCalls).toBe(1);
+  });
+
+  it('cancellation identity during the Independent Verifier repair call is never wrapped', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('verifier repair cancellation identity');
+    const transport = new Error('repair transport failure');
+    const usedModel = {
+      endpointId: 'verifier', endpointName: 'verifier', modelName: 'model',
+    };
+    const verifier = makeRoleClient('verifier', 'verifier', 'model');
+    verifier.chat
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+      .mockImplementationOnce(() => {
+        controller.abort(cancellation);
+        return Promise.reject(transport);
+      });
+    const context = proofContext().pipelineContext;
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { verifier },
+    });
+
+    const failure = await (service as any).generateIndependentVerifier(
+      {
+        problemTitle: 'repair cancellation', statementMarkdown, options,
+        signal: controller.signal,
+      },
+      { problemType: 'traditional' },
+      { signal: controller.signal },
+      [],
+      1,
+      context,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBe(cancellation);
+    expect(verifier.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('checkpoint null clears restored dependencies before the next provenance emission', async () => {
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe',
+    });
+    const context = proofContext().pipelineContext;
+    const restoredVerifier = 'a'.repeat(64);
+    (service as any).activePipelineContext = context;
+    (service as any).restoredRoleDependencies = { verifier: restoredVerifier };
+    const updates: unknown[] = [];
+    const params = { onCheckpoint: (update: unknown) => { updates.push(update); } };
+
+    await (service as any).emitCheckpoint(params, null);
+    await (service as any).emitCheckpoint(params, {
+      verifier: {
+        bruteCode: 'brute', validatorCode: 'validator', stressGeneratorCode: 'stress',
+      },
+    });
+
+    expect(updates[0]).toBeNull();
+    expect(JSON.stringify(updates[1])).not.toContain(restoredVerifier);
+    expect((updates[1] as any).roleDependencies?.verifier).toBeUndefined();
+  });
+
+  it('optional kill provenance never overwrites the Independent Verifier checkpoint dependency', async () => {
+    const optional = makeRoleClient(
+      'verifier', 'optional-kill', 'optional-model', makeEmptyKillTargetsResponse(),
+    );
+    const service = new TestdataGenService({ chat: jest.fn() } as never, {
+      reliabilityMode: 'observe', roleClients: { verifier: optional },
+    });
+    const independent = {
+      endpointId: 'independent-verifier', endpointName: 'independent', modelName: 'proof-model',
+    };
+    (service as any).activeRoleIdentities.verifier = independent;
+
+    await service.generateKillTargets({
+      statement: statementMarkdown, analysis: '', samples: [],
+      context: proofContext().pipelineContext,
+    });
+
+    expect((service as any).activeRoleIdentities.verifier).toBe(independent);
+    const serializedTelemetry = JSON.stringify((service as any).activeModelTelemetry || {});
+    for (const forbidden of ['probe', 'targetId', 'rawInput', '-1\\n']) {
+      expect(serializedTelemetry).not.toContain(forbidden);
+    }
+  });
+});
+
 describe('materializeSandboxBlueprint 双重验证', () => {
   function tradBlueprint(extra: string[] = []): ReturnType<typeof parseSandboxBlueprint> {
     return parseSandboxBlueprint([
@@ -3819,6 +11393,1339 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ...extra,
     ].join('\n'), tradOpts);
   }
+
+  function makeValidatorCoverageRunner(
+    blueprint: ReturnType<typeof tradBlueprint>,
+    invalidResults: ReturnType<typeof detail>[] | ((invocations: unknown[]) => unknown),
+    legalResults?: ReturnType<typeof detail>[],
+    formalInputs: string[] = ['5', '6'],
+  ) {
+    let validatorCalls = 0;
+    return {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: formalInputs.map((input, index) => ({
+          label: `formal-${index + 1}`, input,
+        })) }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === blueprint.validatorCode) {
+            validatorCalls += 1;
+            if (validatorCalls === 1) {
+              return Promise.resolve(legalResults || invocations.map(() => detail()));
+            }
+            return typeof invalidResults === 'function'
+              ? invalidResults(invocations)
+              : Promise.resolve(invalidResults);
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+  }
+
+  const globalConstraint = {
+    id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
+    scope: 'global' as const, evidence: { quote: '0 <= n <= 10' },
+  };
+  const boundedInvariant = {
+    id: 'I1', kind: 'custom' as const, expression: '0 <= n <= 10',
+    machineCheckable: true, evidence: { quote: '0 <= n <= 10' },
+  };
+  const belowMinRecipe = {
+    targetId: 'C1', constructionKind: 'integer-below-min' as const, fieldId: 'n',
+  };
+  const pairwiseInputFields: ProblemSpecV1['inputFields'] = [
+    { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+    {
+      id: 'a', name: 'a', type: 'array',
+      encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+    },
+  ];
+  const pairwiseInvariant = {
+    id: 'I_PAIRWISE', kind: 'custom' as const,
+    expression: 'all values must be pairwise different',
+    machineCheckable: true,
+    evidence: { quote: 'all values must be pairwise different' },
+  };
+  const pairwiseRecipe = {
+    targetId: 'I_PAIRWISE', constructionKind: 'duplicate-element' as const, fieldId: 'a',
+  };
+  const pairwiseStatement = 'Input has n values; all values must be pairwise different.';
+  const pairwiseFormalInputs = ['4\n10 20 30 40', '4\n50 60 70 80'];
+  const permutationInputFields: ProblemSpecV1['inputFields'] = [
+    { id: 'n', name: 'n', type: 'integer', encoding: 'line:1 token:1' },
+    {
+      id: 'p', name: 'p', type: 'permutation',
+      encoding: 'line:2 tokens:1..n', dependsOn: ['n'],
+    },
+  ];
+  const permutationInvariant = {
+    id: 'I_PERM', kind: 'custom' as const,
+    expression: 'each label must occur exactly once',
+    machineCheckable: true,
+    evidence: { quote: 'each label must occur exactly once' },
+  };
+  const permutationRecipe = {
+    targetId: 'I_PERM',
+    constructionKind: 'permutation-duplicate-or-missing' as const,
+    fieldId: 'p',
+  };
+  const permutationStatement = 'Input has n labels; each label must occur exactly once.';
+  const invalidPermutationFormalInputs = ['4\n1 1 3 4', '4\n1 2 3 4'];
+
+  function pairwiseProof(
+    reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
+    riskTier: 'low' | 'medium' | 'high' | 'blocked' = 'medium',
+  ): ValidatorProofContext {
+    return makeValidatorCoverageProof(pairwiseStatement, {
+      inputFields: pairwiseInputFields,
+      constraints: [],
+      invariants: [pairwiseInvariant],
+    }, reliabilityMode, riskTier);
+  }
+
+  function pairwiseBlueprint() {
+    return {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_pairwise()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: ['I_PAIRWISE'] },
+      validatorProbeRecipes: [pairwiseRecipe],
+    };
+  }
+
+  function permutationProof(
+    reliabilityMode: ValidatorProofContext['reliabilityMode'] = 'observe',
+    riskTier: 'low' | 'medium' | 'high' | 'blocked' = 'medium',
+  ): ValidatorProofContext {
+    return makeValidatorCoverageProof(permutationStatement, {
+      inputFields: permutationInputFields,
+      constraints: [],
+      invariants: [permutationInvariant],
+    }, reliabilityMode, riskTier);
+  }
+
+  function permutationBlueprint() {
+    return {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_permutation()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: ['I_PERM'] },
+      validatorProbeRecipes: [permutationRecipe],
+    };
+  }
+
+  function makeWeakPermutationValidatorRunner(
+    blueprint: ReturnType<typeof permutationBlueprint>,
+  ) {
+    const invalidInvocations: Array<{ stdin: string; argv: string[] }> = [];
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      invocations => {
+        const typed = invocations as Array<{ stdin: string; argv: string[] }>;
+        invalidInvocations.push(...typed);
+        return Promise.resolve(typed.map(invocation => {
+          const values = invocation.stdin.trim().split('\n')[1]?.trim().split(/\s+/) || [];
+          const rejects = values.length >= 2
+            && values[values.length - 1] === values[values.length - 2];
+          return rejects
+            ? detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })
+            : detail();
+        }));
+      },
+      undefined,
+      invalidPermutationFormalInputs,
+    );
+    return { runner, invalidInvocations };
+  }
+
+  it('assigned subtask argv forms the legal validator partition without changing stdin', async () => {
+    const statement = [
+      'Subtask 1 requires n <= 10.',
+      'Subtask 2 requires n <= 100.',
+      '```input1',
+      '1',
+      '```',
+      '```output1',
+      '1',
+      '```',
+    ].join('\n');
+    const proof = makeTieredValidatorProof(statement);
+    const stressInputs = Array.from(
+      { length: TESTDATA_GEN_LIMITS.STRESS_CASES },
+      (_, index) => `${index + 1}\n`,
+    );
+    const blueprint = {
+      ...tradBlueprint(),
+      ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: {
+        constraintIds: ['C_subtask_1', 'C_subtask_2'],
+        invariantIds: [],
+      },
+      validatorProbeRecipes: [],
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn()
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({ cases: [
+            { label: 'subtask-1', input: '5' },
+            { label: 'subtask-2', input: '50' },
+          ] }),
+          stderr: '',
+        })
+        .mockResolvedValueOnce({ stdout: stressGeneratorStdout(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockImplementationOnce((_code: string, invocations: unknown[]) => Promise.resolve(
+          invocations.map(() => detail()),
+        ))
+        .mockImplementationOnce((_code: string, invocations: unknown[]) => Promise.resolve(
+          invocations.map(() => detail({
+            status: 'Runtime Error', accepted: false, exitStatus: 1,
+          })),
+        ))
+        .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ))
+        .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        )),
+    };
+
+    const result = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      runner,
+      proof,
+    );
+    const validatorInputs = runner.runPythonBatchDetailed.mock.calls[0][1];
+
+    expect(validatorInputs).toEqual([
+      { stdin: '5\n', argv: ['--subtask', '1'] },
+      { stdin: '50\n', argv: ['--subtask', '2'] },
+      { stdin: '1\n', argv: [] },
+      ...stressInputs.map(stdin => ({ stdin, argv: [] })),
+    ]);
+    expect(validatorInputs.map((invocation: { stdin: string }) => invocation.stdin)).toEqual([
+      '5\n',
+      '50\n',
+      '1\n',
+      ...stressInputs,
+    ]);
+    expect(result.verification?.validator?.casesChecked)
+      .toBe(3 + TESTDATA_GEN_LIMITS.STRESS_CASES);
+  });
+
+  it('legal validator partition preserves string calls for legacy and non-tiered materialization', async () => {
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const makeRunner = () => ({
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        ),
+      ),
+    });
+    const legacyRunner = makeRunner();
+    await materializeSandboxBlueprint(blueprint, tradOpts, '', legacyRunner);
+    expect(legacyRunner.runPythonBatchDetailed.mock.calls[0][1]).toEqual(['1\n', '2\n']);
+
+    const statement = 'Subtask 1 requires n <= 10.\nSubtask 2 requires n <= 100.';
+    const nonTieredProof = {
+      ...makeTieredValidatorProof(statement),
+      tieredDecision: { enabled: false, allocations: [] },
+    } as ReturnType<typeof makeTieredValidatorProof>;
+    const nonTieredRunner = makeRunner();
+    nonTieredRunner.runPythonBatchDetailed
+      .mockReset()
+      .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+        inputs.map(input => detail({ stdout: input })),
+      ))
+      .mockImplementationOnce((_code: string, inputs: string[]) => Promise.resolve(
+        inputs.map(() => detail({
+          status: 'Runtime Error', accepted: false, exitStatus: 1,
+        })),
+      ))
+      .mockImplementation((_code: string, inputs: string[]) => Promise.resolve(
+        inputs.map(input => detail({ stdout: input })),
+      ));
+    const nonTieredBlueprint = {
+      ...blueprint,
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: {
+        constraintIds: ['C_subtask_1', 'C_subtask_2'],
+        invariantIds: [],
+      },
+      validatorProbeRecipes: [],
+    };
+    await materializeWithValidatorProof(
+      nonTieredBlueprint,
+      tradOpts,
+      statement,
+      nonTieredRunner,
+      nonTieredProof,
+    );
+    expect(nonTieredRunner.runPythonBatchDetailed.mock.calls[0][1]).toEqual(['1\n', '2\n']);
+  });
+
+  it('tiered formal rejection is a sanitized Generator-owned SUBTASK_CONSTRAINT_VIOLATION', async () => {
+    const statement = 'Subtask 1 requires n <= 10.\nSubtask 2 requires n <= 100.';
+    const proof = makeTieredValidatorProof(statement);
+    const privateInput = 'PRIVATE_FORMAL_INPUT';
+    const privateDiagnostic = `${privateInput} --subtask 1`;
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: 'private', input: privateInput },
+          { label: 'second', input: '50' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([
+        detail({
+          accepted: false,
+          status: 'Nonzero Exit Status',
+          exitStatus: 1,
+          stderr: privateDiagnostic,
+        }),
+        detail(),
+      ]),
+    };
+
+    const failure = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      runner,
+      proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 1, subtaskId: 1 },
+    });
+    expect(Object.keys(failure.safeDetails).sort()).toEqual(['caseIndex', 'subtaskId']);
+    expect(failure.message).not.toContain(privateInput);
+    expect(failure.message).not.toContain('--subtask');
+    expect(JSON.stringify(failure.safeDetails)).not.toContain(privateInput);
+    expect(JSON.stringify(failure.safeDetails)).not.toContain('--subtask');
+  });
+
+  it.each([
+    [
+      'timeout result',
+      jest.fn().mockResolvedValue([
+        detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+        detail(),
+      ]),
+      { caseIndex: 1, failureKind: 'timeout' },
+    ],
+    [
+      'transport failure',
+      jest.fn().mockRejectedValue(new Error('validator transport unavailable')),
+      { failureKind: 'infra' },
+    ],
+    [
+      'result-count mismatch',
+      jest.fn().mockResolvedValue([detail()]),
+      { actualCount: 1, expectedCount: 2, failureKind: 'protocol' },
+    ],
+  ])('legal validator partition classifies %s as SANDBOX_UNAVAILABLE', async (
+    _label,
+    runValidator,
+    safeDetails,
+  ) => {
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: runValidator,
+    };
+
+    const failure = await materializeSandboxBlueprint(blueprint, tradOpts, '', runner as never)
+      .catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'manual-review',
+      safeDetails,
+    });
+    expect(failure.code).not.toBe('GENERATOR_INVALID_INPUT');
+    expect(failure.code).not.toBe('VALIDATOR_FALSE_REJECT');
+  });
+
+  it.each([
+    ['missing fields', {}],
+    ['NaN exit', detail({
+      status: 'Nonzero Exit Status', accepted: false, exitStatus: Number.NaN,
+    })],
+    ['fractional exit', detail({
+      status: 'Nonzero Exit Status', accepted: false, exitStatus: 1.5,
+    })],
+    ['unsafe exit', detail({
+      status: 'Nonzero Exit Status', accepted: false,
+      exitStatus: Number.MAX_SAFE_INTEGER + 1,
+    })],
+    ['execution error on accepted status', detail({ error: 'runner error' })],
+    ['contradictory accepted flag', detail({ accepted: false })],
+    ['non-string stdout', detail({ stdout: 7 })],
+    ['non-string stderr', detail({ stderr: ['private'] })],
+  ])('legal Validator rejects malformed strict detail as SANDBOX_UNAVAILABLE: %s', async (
+    _label,
+    malformed,
+  ) => {
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([malformed, detail()])
+        .mockImplementation((_code: string, inputs: string[]) => Promise.resolve(
+          inputs.map(input => detail({ stdout: input })),
+        )),
+    };
+
+    const failure = await materializeSandboxBlueprint(
+      blueprint, tradOpts, '', runner as never,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE',
+      stage: 'validator',
+      artifact: 'validator',
+      safeDetails: { caseIndex: 1, failureKind: 'protocol' },
+    });
+    expect(failure.code).not.toBe('GENERATOR_INVALID_INPUT');
+  });
+
+  it('legal validator partition cancellation rethrows the exact ordinary signal reason', async () => {
+    const statement = 'Subtask 1 requires n <= 10.\nSubtask 2 requires n <= 100.';
+    const proof = makeTieredValidatorProof(statement);
+    const controller = new AbortController();
+    const cancellation = new Error('validator caller cancellation');
+    const blueprint = tradBlueprint(['@@@VALIDATOR@@@', 'check()']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementationOnce(async () => {
+        controller.abort(cancellation);
+        return [detail(), detail()];
+      }),
+    };
+
+    const failure = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      statement,
+      runner,
+      proof,
+      controller.signal,
+    ).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('validator coverage accepts a valid-only legal corpus with no required targets', async () => {
+    const statement = 'Read one integer n.';
+    const proof = makeValidatorCoverageProof(statement);
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: [], invariantIds: [] },
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual({
+      ran: true,
+      casesChecked: 2,
+      validAccepted: 2,
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: [],
+    });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+  });
+
+  it('observe invalid Manifest with empty required targets stays incomplete after finalization and cache restore', async () => {
+    const statement = 'Read one integer n.';
+    const proof = makeValidatorCoverageProof(statement);
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'invalid' as const,
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+    const cache: MaterializationCacheState = {};
+    const finalize = (response: Awaited<ReturnType<typeof materializeSandboxBlueprint>>) => {
+      delete response.verification!.discrimination;
+      response.verification!.stressCheck = {
+        generated: 1, uniqueInputs: 1, duplicateInputs: 0, compared: 1, agreed: 1,
+      };
+      const plan = assemblePlan(response, tradOpts, { mode: 'sandbox' });
+      return finalizePlanVerification(plan, [], false, 'observe');
+    };
+
+    const first = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, undefined, cache,
+    );
+    expect(first.verification).toMatchObject({ verified: false, wouldBlock: true });
+    expect(finalize(first).verification).toMatchObject({ verified: false, wouldBlock: true });
+
+    const resumed = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, undefined, cache, ['ORACLE'],
+    );
+    expect(resumed.verification).toMatchObject({ verified: false, wouldBlock: true });
+    expect(finalize(resumed).verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('validator coverage requires declaration, construction, and rejection for every target', async () => {
+    const statement = 'Every input satisfies n >= 0 and n <= 10.';
+    const minimumConstraint = {
+      ...globalConstraint, expression: 'n >= 0', evidence: { quote: 'n >= 0' },
+    };
+    const maximumInvariant = {
+      ...boundedInvariant, expression: 'n <= 10', evidence: { quote: 'n <= 10' },
+    };
+    const proof = makeValidatorCoverageProof(statement, {
+      constraints: [minimumConstraint],
+      invariants: [maximumInvariant],
+    });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [
+        belowMinRecipe,
+        { ...belowMinRecipe, targetId: 'I1' },
+      ],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 2 }),
+    ]);
+    const cache: MaterializationCacheState = {};
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, undefined, cache,
+    );
+
+    expect(result.verification?.validator).toEqual({
+      ran: true,
+      casesChecked: 2,
+      validAccepted: 2,
+      invalidRejected: 2,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['C1', 'I1'],
+      missingConstraintIds: [],
+    });
+    const evidence = (cache as unknown as {
+      validation?: { validatorTargetEvidence?: Array<Record<string, unknown>> };
+    }).validation?.validatorTargetEvidence;
+    expect(evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetId: 'I1', targetKind: 'invariant', execution: 'rejected' }),
+    ]));
+  });
+
+  it('covers a noncanonical custom recipe only after explicit Validator rejection', async () => {
+    const blueprint = pairwiseBlueprint();
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 7 });
+    const runner = makeValidatorCoverageRunner(
+      blueprint, [rejected], undefined, pairwiseFormalInputs,
+    );
+    const cache: MaterializationCacheState = {};
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof(), undefined, cache,
+    );
+
+    expect(runner.runPythonBatchDetailed.mock.calls[1][1]).toEqual([{
+      stdin: '4\n10 10 30 40\n', argv: [],
+    }]);
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 1,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['I_PAIRWISE'],
+      missingConstraintIds: [],
+    }));
+    const boundedState = JSON.stringify({
+      checkpoint: checkpointVerifierFromBlueprint(blueprint),
+      publicVerification: result.verification,
+      validation: cache.validation,
+    });
+    for (const forbidden of [
+      '4\\n10 20 30 40',
+      '4\\n10 10 30 40',
+      '"stdin"',
+      '"argv"',
+      '"source":"recipe"',
+    ]) expect(boundedState).not.toContain(forbidden);
+  });
+
+  it('does not materialize or credit a permutation probe from an already illegal source', async () => {
+    const blueprint = permutationBlueprint();
+    const { runner, invalidInvocations } = makeWeakPermutationValidatorRunner(blueprint);
+    const cache: MaterializationCacheState = {};
+
+    const result = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      permutationStatement,
+      runner as never,
+      permutationProof(),
+      undefined,
+      cache,
+    );
+
+    const validatorCalls = runner.runPythonBatchDetailed.mock.calls.filter(
+      call => call[0] === blueprint.validatorCode,
+    );
+    expect(validatorCalls).toHaveLength(1);
+    expect(invalidInvocations).toEqual([]);
+    expect((cache.validation as unknown as {
+      validatorTargetEvidence: Array<Record<string, unknown>>;
+    }).validatorTargetEvidence).toEqual([expect.objectContaining({
+      targetId: 'I_PERM', targetKind: 'invariant', declared: true,
+      constructed: false, execution: 'not-run',
+    })]);
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['I_PERM'],
+    }));
+    expect(result.verification).toMatchObject({ verified: false, wouldBlock: true });
+
+    const boundedState = JSON.stringify({
+      checkpoint: checkpointVerifierFromBlueprint(blueprint),
+      publicVerification: result.verification,
+      validation: cache.validation,
+    });
+    for (const forbidden of [
+      '4\\n1 1 3 4',
+      '4\\n1 1 3 3',
+      '"stdin"',
+      '"argv"',
+      '"source":"recipe"',
+    ]) expect(boundedState).not.toContain(forbidden);
+  });
+
+  it('keeps high-risk enforce on the coverage-missing gate for an illegal permutation source', async () => {
+    const blueprint = permutationBlueprint();
+    const { runner, invalidInvocations } = makeWeakPermutationValidatorRunner(blueprint);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint,
+      tradOpts,
+      permutationStatement,
+      runner as never,
+      permutationProof('enforce', 'high'),
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      stage: 'validator',
+      artifact: 'coverage',
+      safeDetails: { missingCount: 1 },
+    });
+    const validatorCalls = runner.runPythonBatchDetailed.mock.calls.filter(
+      call => call[0] === blueprint.validatorCode,
+    );
+    expect(validatorCalls).toHaveLength(1);
+    expect(invalidInvocations).toEqual([]);
+    expect(JSON.stringify(failure)).not.toContain('4\\n1 1 3 4');
+    expect(JSON.stringify(failure)).not.toContain('4\\n1 1 3 3');
+  });
+
+  it.each(['low', 'medium'] as const)(
+    'enforce %s treats an accepted custom recipe as a Validator false accept',
+    async riskTier => {
+      const blueprint = pairwiseBlueprint();
+      const runner = makeValidatorCoverageRunner(
+        blueprint, [detail({ stderr: 'PRIVATE_CUSTOM_PROBE_OUTPUT' })],
+        undefined, pairwiseFormalInputs,
+      );
+
+      const failure = await materializeWithValidatorProof(
+        blueprint, tradOpts, pairwiseStatement, runner as never,
+        pairwiseProof('enforce', riskTier),
+      ).catch(error => error);
+
+      expect(failure).toMatchObject({
+        code: 'VALIDATOR_FALSE_ACCEPT', stage: 'validator', artifact: 'validator',
+        retryPolicy: 'repair-artifact',
+        safeDetails: { invalidAccepted: 1, invalidRejected: 0 },
+      });
+      expect(JSON.stringify(failure)).not.toContain('PRIVATE_CUSTOM_PROBE_OUTPUT');
+      expect(JSON.stringify(failure)).not.toContain('4\\n10 10 30 40');
+    },
+  );
+
+  it.each([
+    ['timeout', detail({
+      status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1,
+    })],
+    ['malformed detail', {}],
+  ])('does not count a custom recipe %s as rejection proof', async (_label, invalidResult) => {
+    const blueprint = pairwiseBlueprint();
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      [invalidResult as ReturnType<typeof detail>],
+      undefined,
+      pairwiseFormalInputs,
+    );
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof(),
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['I_PAIRWISE'],
+    }));
+  });
+
+  it('does not turn a custom recipe transport error into rejection proof or leak it', async () => {
+    const blueprint = pairwiseBlueprint();
+    const sentinel = 'PRIVATE_CUSTOM_RECIPE_TRANSPORT';
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      () => Promise.reject(Object.assign(new Error(sentinel), {
+        request: { stdin: sentinel, argv: [sentinel] },
+      })),
+      undefined,
+      pairwiseFormalInputs,
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, pairwiseStatement, runner as never, pairwiseProof(),
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
+      safeDetails: { failureKind: 'infra' },
+    });
+    expect(JSON.stringify(failure)).not.toContain(sentinel);
+  });
+
+  it('blocks a scoped custom recipe accept while protocol probes reject', async () => {
+    const statement = 'Subtask 1: all values must be pairwise different.';
+    const scopedConstraint = {
+      id: 'C_PAIRWISE', expression: 'all values must be pairwise different',
+      machineCheckable: true, scope: { subtaskId: 1 },
+      evidence: { quote: 'all values must be pairwise different' },
+    };
+    const tieredDecision = {
+      enabled: true,
+      allocations: [
+        { caseNumber: 1, subtaskId: 1, guidance: 'pairwise' },
+        { caseNumber: 2, subtaskId: 1, guidance: 'pairwise' },
+      ],
+      subtasks: [{ id: 1, score: 100, constraints: 'pairwise different' }],
+    };
+    const proof = makeValidatorCoverageProof(statement, {
+      inputFields: pairwiseInputFields,
+      constraints: [scopedConstraint],
+      invariants: [],
+      subtasks: [{ id: 1, score: 100, constraintIds: ['C_PAIRWISE'] }],
+    }, 'enforce', 'medium', tieredDecision);
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_pairwise()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C_PAIRWISE'], invariantIds: [] },
+      validatorProbeRecipes: [{
+        targetId: 'C_PAIRWISE', constructionKind: 'duplicate-element' as const, fieldId: 'a',
+      }],
+    };
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+    const runner = makeValidatorCoverageRunner(
+      blueprint, [detail(), rejected, rejected], undefined, pairwiseFormalInputs,
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator', artifact: 'validator', retryPolicy: 'repair-artifact',
+      safeDetails: { invalidAccepted: 1, invalidRejected: 2 },
+    });
+    expect(runner.runPythonBatchDetailed.mock.calls[1][1][0]).toEqual({
+      stdin: '4\n10 10 30 40\n', argv: ['--subtask', '1'],
+    });
+  });
+
+  it('does not cover an operation range when a state-only Validator rejects the same mutation', async () => {
+    const statement = 'ADD requires an absent x; DEL requires a present x; 1 <= x <= 10.';
+    const range = {
+      id: 'C_RANGE', expression: '1 <= x <= 10', machineCheckable: true,
+      scope: 'global' as const, evidence: { quote: '1 <= x <= 10' },
+    };
+    const state = {
+      id: 'I_STATE', kind: 'stateful-precondition' as const,
+      expression: 'DEL requires present(x)', machineCheckable: true,
+      evidence: { quote: 'DEL requires a present x' },
+    };
+    const proof = makeValidatorCoverageProof(statement, {
+      inputFields: [
+        { id: 'q', name: 'q', type: 'integer', encoding: 'line:1 token:1' },
+        { id: 'x', name: 'x', type: 'integer', encoding: 'operation-argument:x' },
+        {
+          id: 'ops', name: 'ops', type: 'operations',
+          encoding: 'lines:2..q+1 operations', dependsOn: ['q'],
+        },
+      ],
+      constraints: [range],
+      invariants: [state],
+      operations: [
+        { name: 'ADD', arguments: ['x'], preconditions: ['absent(x)'], effects: ['add(x)'] },
+        { name: 'DEL', arguments: ['x'], preconditions: ['present(x)'], effects: ['delete(x)'] },
+      ],
+    });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check_state_only()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C_RANGE'], invariantIds: ['I_STATE'] },
+      validatorProbeRecipes: [{
+        targetId: 'C_RANGE', constructionKind: 'operation-argument-out-of-range' as const,
+        fieldId: 'x', operationName: 'ADD',
+      }],
+    };
+    let validatorCalls = 0;
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: 'formal-1', input: '2\nADD 1\nDEL 1' },
+          { label: 'formal-2', input: '2\nADD 2\nDEL 2' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(
+        (code: string, invocations: Array<string | { stdin: string }>) => {
+          if (code === blueprint.validatorCode) {
+            validatorCalls += 1;
+            if (validatorCalls === 1) return Promise.resolve(invocations.map(() => detail()));
+            return Promise.resolve(invocations.map(invocation => {
+              const stdin = typeof invocation === 'string' ? invocation : invocation.stdin;
+              const lines = stdin.trim().split('\n');
+              const added = Number(lines[1]?.split(/\s+/)[1]);
+              const deleted = Number(lines[2]?.split(/\s+/)[1]);
+              return added === deleted
+                ? detail()
+                : detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 });
+            }));
+          }
+          return Promise.resolve(invocations.map(invocation => detail({
+            stdout: typeof invocation === 'string' ? invocation : invocation.stdin,
+          })));
+        },
+      ),
+    };
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      coveredConstraintIds: ['I_STATE'],
+      missingConstraintIds: ['C_RANGE'],
+    }));
+  });
+
+  it('validator coverage counts every probe while one rejection covers a multiply-probed target', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [
+        belowMinRecipe,
+        { ...belowMinRecipe, constructionKind: 'integer-above-max' as const },
+      ],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      detail({ status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1 }),
+    ]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 1,
+      invalidAccepted: 0,
+      coveredConstraintIds: ['C1'],
+      missingConstraintIds: [],
+    }));
+  });
+
+  it('validator coverage unions several independently rejected target IDs', async () => {
+    const statement = 'Every input satisfies n >= 0 and n <= 10.';
+    const minimumConstraint = {
+      ...globalConstraint, expression: 'n >= 0', evidence: { quote: 'n >= 0' },
+    };
+    const maximumInvariant = {
+      ...boundedInvariant, expression: 'n <= 10', evidence: { quote: 'n <= 10' },
+    };
+    const proof = makeValidatorCoverageProof(statement, {
+      constraints: [minimumConstraint], invariants: [maximumInvariant],
+    });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
+      validatorProbeRecipes: [belowMinRecipe, { ...belowMinRecipe, targetId: 'I1' }],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+    ]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 2,
+      coveredConstraintIds: ['C1', 'I1'],
+      missingConstraintIds: [],
+    }));
+  });
+
+  it('validator coverage keeps a declared target missing when no probe is constructed', async () => {
+    const statement = 'Every input satisfies the custom n policy.';
+    const unsupportedConstraint = {
+      ...globalConstraint,
+      expression: 'n follows the custom policy',
+      evidence: { quote: 'the custom n policy' },
+    };
+    const proof = makeValidatorCoverageProof(statement, { constraints: [unsupportedConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C1'],
+    }));
+    expect(result.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('validator coverage treats a constructed probe timeout as a missing execution proof', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1 }),
+      detail({ status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1 }),
+    ]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 0,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C1'],
+    }));
+  });
+
+  it('validator coverage rejects an illegal result-count mismatch with safe counts only', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
+      safeDetails: { actualCount: 0, expectedCount: 2, failureKind: 'protocol' },
+    });
+    expect(Object.keys(failure.safeDetails).sort())
+      .toEqual(['actualCount', 'expectedCount', 'failureKind']);
+  });
+
+  it('invalid partition transport privacy removes the original error and request-shaped cause', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const sentinel = 'PRIVATE_INVALID_PROBE_SENTINEL';
+    const original = Object.assign(new Error(`transport ${sentinel}`), {
+      request: {
+        code: `validator ${sentinel}`,
+        inputs: [{ stdin: sentinel, argv: ['--subtask', sentinel] }],
+      },
+      cause: Object.assign(new Error(`nested ${sentinel}`), {
+        diagnostics: { stderr: sentinel, input: sentinel },
+      }),
+    });
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      () => Promise.reject(original),
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE', stage: 'validator', artifact: 'validator',
+      safeDetails: { failureKind: 'infra' },
+    });
+    expect(failure).not.toBe(original);
+    expect(failure.message).not.toContain(sentinel);
+    expect(JSON.stringify(failure.safeDetails)).not.toContain(sentinel);
+    expect(failure.cause).toBeUndefined();
+    expect(String(failure.stack)).not.toContain(sentinel);
+    expect(JSON.stringify(failure)).not.toContain(sentinel);
+    expect(JSON.stringify(Object.fromEntries(Object.entries(failure)))).not.toContain(sentinel);
+    expect([failure.cause, (failure.cause as { cause?: unknown } | undefined)?.cause])
+      .toEqual([undefined, undefined]);
+  });
+
+  it('invalid partition budget remains a sanitized no-retry budget failure', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const budgetError = Object.assign(new SandboxBudgetExceededError(), {
+      request: { stdin: 'PRIVATE_BUDGET_PROBE', argv: ['--subtask', 'PRIVATE_BUDGET_PROBE'] },
+    });
+    const runner = makeValidatorCoverageRunner(
+      blueprint,
+      () => Promise.reject(budgetError),
+    );
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED', stage: 'sandbox_budget',
+      artifact: 'pipeline', retryPolicy: 'no-retry', safeDetails: {},
+    });
+    expect(failure.cause).toBeUndefined();
+    expect(JSON.stringify(failure)).not.toContain('PRIVATE_BUDGET_PROBE');
+  });
+
+  it('invalid partition cancellation preserves the exact reason after the batch resolves', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const controller = new AbortController();
+    const cancellation = new Error('caller cancellation identity');
+    const runner = makeValidatorCoverageRunner(blueprint, () => {
+      controller.abort(cancellation);
+      return Promise.resolve([
+        detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 }),
+      ]);
+    });
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof, controller.signal,
+    ).catch(error => error);
+
+    expect(failure).toBe(cancellation);
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+  });
+
+  it('deterministic false accepts are counted without exposing probe input in observe mode', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(statement, { constraints: [globalConstraint] });
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [detail(), detail()]);
+
+    const result = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    expect(result.verification?.validator).toEqual(expect.objectContaining({
+      invalidRejected: 0,
+      invalidAccepted: 2,
+      coveredConstraintIds: [],
+      missingConstraintIds: ['C1'],
+    }));
+    expect(JSON.stringify(result)).not.toContain('-1\\n');
+    expect(result.verification).toMatchObject({ verified: false, wouldBlock: true });
+  });
+
+  it('protocol probe false accept blocks enforce after deterministic probes reject', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10. Subtask 1 is worth all points.';
+    const proof = makeValidatorCoverageProof(
+      statement,
+      {
+        constraints: [globalConstraint],
+        subtasks: [{ id: 1, score: 100, constraintIds: [] }],
+      },
+      'enforce',
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      rejected, rejected, detail(), rejected,
+    ]);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: expect.objectContaining({ protocolProbe: true, invalidAccepted: 1 }),
+    });
+    const illegalInvocations = runner.runPythonBatchDetailed.mock.calls[1][1];
+    expect(illegalInvocations).toEqual([
+      { stdin: '-1\n', argv: [] },
+      { stdin: '11\n', argv: [] },
+      { stdin: '5\n', argv: ['--subtask', '2'] },
+      { stdin: '5\n', argv: ['--subtask', 'malformed'] },
+    ]);
+    const oracleInputs = runner.runPythonBatchDetailed.mock.calls[2]?.[1] || [];
+    expect(oracleInputs).not.toContain('-1\n');
+  });
+
+  it.each([
+    ['legacy', 'low', 'legacy'],
+    ['legacy', 'medium', 'legacy'],
+    ['legacy', 'high', 'legacy'],
+    ['legacy', 'blocked', 'legacy'],
+    ['observe', 'low', 'continue'],
+    ['observe', 'medium', 'continue'],
+    ['observe', 'high', 'continue'],
+    ['observe', 'blocked', 'continue'],
+    ['enforce', 'low', 'continue'],
+    ['enforce', 'medium', 'continue'],
+    ['enforce', 'high', 'coverage-error'],
+    ['enforce', 'blocked', 'coverage-error'],
+  ] as const)('%s %s applies validator coverage missing policy as %s', async (
+    reliabilityMode,
+    riskTier,
+    expected,
+  ) => {
+    const statement = 'Every input satisfies the custom n policy.';
+    const unsupportedConstraint = {
+      ...globalConstraint,
+      expression: 'n follows the custom policy',
+      evidence: { quote: 'the custom n policy' },
+    };
+    const proof = makeValidatorCoverageProof(
+      statement, { constraints: [unsupportedConstraint] }, reliabilityMode, riskTier,
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, []);
+    const promise = materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    );
+
+    if (expected === 'coverage-error') {
+      await expect(promise).rejects.toMatchObject({
+        code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+        stage: 'validator',
+        artifact: 'coverage',
+      });
+      return;
+    }
+    const result = await promise;
+    if (expected === 'legacy') {
+      expect(result.verification?.validator).toEqual({ ran: true, casesChecked: 2 });
+      expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+    } else {
+      expect(result.verification?.validator).toEqual(expect.objectContaining({
+        missingConstraintIds: ['C1'],
+      }));
+      expect(result.verification).toMatchObject({
+        verified: false,
+        wouldBlock: reliabilityMode === 'observe',
+      });
+    }
+  });
+
+  it.each(['low', 'medium', 'high', 'blocked'] as const)(
+    'enforce %s rejects invalid Manifest as coverage missing before risk proportionality',
+    async riskTier => {
+      const statement = 'Every input satisfies 0 <= n <= 10.';
+      const proof = makeValidatorCoverageProof(
+        statement, { constraints: [globalConstraint] }, 'enforce', riskTier,
+      );
+      const blueprint = {
+        ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+        validatorManifestStatus: 'invalid' as const,
+        validatorProbeRecipes: [belowMinRecipe],
+      };
+      const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+      const runner = makeValidatorCoverageRunner(blueprint, [rejected, rejected]);
+
+      await expect(materializeWithValidatorProof(
+        blueprint, tradOpts, statement, runner as never, proof,
+      )).rejects.toMatchObject({
+        code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+        stage: 'validator',
+        artifact: 'coverage',
+      });
+    },
+  );
+
+  it('enforce derived false accept stays Validator-owned and sanitized', async () => {
+    const statement = 'Every input satisfies 0 <= n <= 10.';
+    const proof = makeValidatorCoverageProof(
+      statement, { constraints: [globalConstraint] }, 'enforce', 'medium',
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail({ stderr: 'PRIVATE_PROBE' }), detail(),
+    ]);
+
+    const failure = await materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    ).catch(error => error);
+
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_FALSE_ACCEPT', stage: 'validator', artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { invalidAccepted: 2, invalidRejected: 0 },
+    });
+    expect(failure.message).not.toContain('PRIVATE_PROBE');
+    expect(JSON.stringify(failure.safeDetails)).not.toContain('PRIVATE_PROBE');
+  });
+
+  it('enforce scoped false accept uses SUBTASK_CONSTRAINT_VIOLATION with Validator ownership', async () => {
+    const statement = 'Subtask 1 requires 0 <= n <= 10.';
+    const scopedConstraint = {
+      ...globalConstraint,
+      scope: { subtaskId: 1 },
+      evidence: { quote: '0 <= n <= 10' },
+    };
+    const tieredDecision = {
+      enabled: true,
+      allocations: [
+        { caseNumber: 1, subtaskId: 1, guidance: 'bounded' },
+        { caseNumber: 2, subtaskId: 1, guidance: 'bounded' },
+      ],
+      subtasks: [{ id: 1, score: 100, constraints: '0 <= n <= 10' }],
+    };
+    const proof = makeValidatorCoverageProof(
+      statement,
+      {
+        constraints: [scopedConstraint],
+        subtasks: [{ id: 1, score: 100, constraintIds: ['C1'] }],
+      },
+      'enforce',
+      'medium',
+      tieredDecision,
+    );
+    const blueprint = {
+      ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['C1'], invariantIds: [] },
+      validatorProbeRecipes: [belowMinRecipe],
+    };
+    const rejected = detail({ status: 'Runtime Error', accepted: false, exitStatus: 1 });
+    const runner = makeValidatorCoverageRunner(blueprint, [
+      detail(), rejected, rejected, rejected,
+    ]);
+
+    await expect(materializeWithValidatorProof(
+      blueprint, tradOpts, statement, runner as never, proof,
+    )).rejects.toMatchObject({
+      code: 'SUBTASK_CONSTRAINT_VIOLATION',
+      stage: 'validator', artifact: 'validator', retryPolicy: 'repair-artifact',
+      safeDetails: expect.objectContaining({ invalidAccepted: 1 }),
+    });
+  });
 
   it('修复轮复用阶段缓存并仅延续已消耗后的沙箱预算，AI 等待时间不计入', async () => {
     const broken = tradBlueprint([
@@ -3955,8 +12862,18 @@ describe('materializeSandboxBlueprint 双重验证', () => {
         detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1, stderr: '数值超出范围' }),
       ]),
     };
-    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner))
-      .rejects.toThrow(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    const failure = await materializeSandboxBlueprint(bp, tradOpts, '', runner)
+      .catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'GENERATOR_INVALID_INPUT',
+      stage: 'validator',
+      artifact: 'generator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 2 },
+    });
+    expect(failure.message).toMatch(/第 2 个 .in 未通过输入校验：数值超出范围/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('请只输出修复后的 @@@GENERATOR@@@');
     expect(runner.runPythonBatch).not.toHaveBeenCalled();
   });
 
@@ -3978,12 +12895,22 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ]),
     };
 
-    await expect(materializeSandboxBlueprint(
+    const failure = await materializeSandboxBlueprint(
       bp,
       tradOpts,
       '```input1\n3\n```\n```output1\n3\n```',
       runner,
-    )).rejects.toThrow(/题面样例 1 未通过输入校验：样例非法/);
+    ).catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'VALIDATOR_FALSE_REJECT',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { caseIndex: 3, sample: true },
+    });
+    expect(failure.message).toMatch(/题面样例 1 未通过输入校验：样例非法/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('只输出修复后的 @@@VALIDATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
@@ -4073,6 +13000,27 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     };
     const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner);
     expect(res.verification?.bruteCheck).toEqual({ compared: 2, agreed: 2, skippedTimeout: [], disagreed: [] });
+  });
+
+  it('自定义 checker 不可用时正式 BRUTE 未裁决记零比较且不误报分歧', async () => {
+    const bp = tradBlueprint(['@@@BRUTE@@@', 'print(input())']);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({ stdout: twoCaseGen(), stderr: '' }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: 'official-a\n' }), detail({ stdout: 'official-b\n' })])
+        .mockResolvedValueOnce([detail({ stdout: 'alternative-a\n' }), detail({ stdout: 'alternative-b\n' })]),
+    };
+
+    const res = await materializeSandboxBlueprint(bp, tradOpts, '', runner, undefined, true);
+
+    expect(res.verification?.bruteCheck).toEqual({
+      compared: 0,
+      agreed: 0,
+      skippedTimeout: [],
+      disagreed: [],
+    });
   });
 
   it('BRUTE 与 AI 标程不一致：硬失败并带证据摘录', async () => {
@@ -4296,9 +13244,17 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       ]),
     };
 
-    await expect(materializeSandboxBlueprint(bp, tradOpts, '', runner)).rejects.toThrow(
-      /第 1 个压力 \.in 未通过输入校验：invalid-1/,
-    );
+    const failure = await materializeSandboxBlueprint(bp, tradOpts, '', runner)
+      .catch(error => error);
+    expect(failure).toMatchObject({
+      code: 'STRESS_INSUFFICIENT_VALID_INPUTS',
+      stage: 'validator',
+      artifact: 'stress-generator',
+      retryPolicy: 'repair-artifact',
+    });
+    expect(failure.message).toMatch(/第 1 个压力 \.in 未通过输入校验：invalid-1/);
+    expect(buildSandboxRepairPrompt(failure, tradOpts))
+      .toContain('请只输出修复后的 @@@STRESS_GENERATOR@@@');
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
   });
 
@@ -4444,7 +13400,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       .rejects.toThrow(/压力对拍 BRUTE 在第 1 组小数据超时；压力阶段不允许跳过/);
   });
 
-  it('自定义 checker 题仍实跑独立 BRUTE，但不做纯文本压力比较', async () => {
+  it('自定义 checker 不可用时仍实跑独立 BRUTE，但未裁决对拍记零分', async () => {
     const bp = {
       ...tradBlueprint(),
       ...parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint()),
@@ -4474,9 +13430,8 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       duplicateInputs: 0,
       compared: 0,
       agreed: 0,
-      skippedReason: 'custom-checker',
     });
-    expect(res.notes).toContain('跳过纯文本压力对拍');
+    expect(res.notes).not.toContain('纯文本压力对拍');
   });
 
   it('可执行 checker 对 BRUTE 与 ORACLE 的不同文本做压力判定', async () => {
@@ -4506,6 +13461,12 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     const checkerExecutor = {
       status: 'ready' as const,
       runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: TESTDATA_GEN_LIMITS.STRESS_CASES,
+        passed: TESTDATA_GEN_LIMITS.STRESS_CASES,
+        infraFailures: 0,
+      },
       runBatch: jest.fn().mockResolvedValue(
         Array.from({ length: TESTDATA_GEN_LIMITS.STRESS_CASES }, () => 'accept'),
       ),
@@ -4542,7 +13503,7 @@ describe('materializeSandboxBlueprint 双重验证', () => {
     expect(res.notes).toContain('题目 checker');
   });
 
-  it('函数题 solution+template.py 组合实跑，一致则记 templateCheck.passed', async () => {
+  it('函数题 solution+template.py 组合实跑，一致则记 templateChecks.py', async () => {
     const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
     const bp = parseSandboxBlueprint([
       '@@@META@@@', 'problemType: function', 'functionName: f',
@@ -4558,12 +13519,324 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '5\n' })]),
     };
     const res = await materializeSandboxBlueprint(bp, fnOpts, '', runner);
-    expect(res.pyTemplateExecuted).toBe(true);
-    expect(res.verification?.templateCheck).toEqual({ lang: 'py', total: 1, passed: 1, skippedTimeout: [] });
+    expect(res).not.toHaveProperty('pyTemplateExecuted');
+    expect(res.verification?.templateChecks?.py).toEqual({
+      compiled: true, executed: true, total: 1, passed: 1,
+    });
     // 组合程序 = solution + '\n' + template.py
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
       expect.stringContaining('def f(a, b):'), ['2 3\n'], expect.anything(),
     );
+  });
+
+  it('selected languages execute every formal point and statement sample into templateChecks', async () => {
+    const fnOpts: GenerateOptions = {
+      problemKind: 'function', caseCount: 3, dataScale: 'auto', languages: ['py', 'java', 'cc'],
+    };
+    const statement = [
+      '## 样例',
+      '```input1', '4', '```', '```output1', '4', '```',
+      '```input2', '5', '```', '```output2', '5', '```',
+    ].join('\n');
+    const bp = {
+      ...parseSandboxBlueprint([
+        '@@@META@@@', 'problemType: function', 'functionName: echo',
+        '@@@GENERATOR@@@', 'print(gen())',
+        '@@@ORACLE@@@', 'print(input())',
+        '@@@SOLUTION:py@@@', 'def echo(value): return value',
+        '@@@SOLUTION:java@@@', 'class Solution { String echo(String value) { return value; } }',
+        '@@@SOLUTION:cc@@@', 'string echo(string value) { return value; }',
+        '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+        '@@@TEMPLATE:java@@@', 'public class Main { public static void main(String[] args) {} }',
+        '@@@TEMPLATE:cc@@@', '#include "foo.cc"', 'int main() { return 0; }',
+      ].join('\n'), fnOpts),
+      functionSampleInputs: [{ id: '1', input: '4\n' }, { id: '2', input: '5\n' }],
+    };
+    const allInputs = ['1\n', '2\n', '3\n', '4\n', '5\n'];
+    const accepted = allInputs.map(input => detail({ stdout: input }));
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [
+          { label: 'small', input: '1' },
+          { label: 'medium', input: '2' },
+          { label: 'large', input: '3' },
+        ] }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'template-cc-cache' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'template-java-cache' }),
+      runJavaBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await materializeSandboxBlueprint(bp, fnOpts, statement, runner);
+
+    expect(result.verification?.templateChecks).toEqual({
+      py: { compiled: true, executed: true, total: 5, passed: 5 },
+      java: { compiled: true, executed: true, total: 5, passed: 5 },
+      cc: { compiled: true, executed: true, total: 5, passed: 5 },
+    });
+    expect(result.cases.map(item => item.dataScale)).toEqual(['small', 'medium', 'large']);
+    expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
+      2, expect.stringContaining('def echo(value)'), allInputs, expect.anything(),
+    );
+    expect(runner.runCompiledBatchDetailed).toHaveBeenCalledWith(
+      'template-cc-cache', allInputs, expect.anything(),
+    );
+    expect(runner.runJavaBatchDetailed).toHaveBeenCalledWith(
+      'template-java-cache', allInputs, expect.anything(),
+    );
+  });
+
+  it.each([
+    {
+      label: 'C++ compile', language: 'cc' as const,
+      mutate: (runner: any) => runner.compileCpp.mockResolvedValue({
+        ok: false, kind: 'compile', error: 'bad C++ template',
+      }),
+      expected: {
+        code: 'TEMPLATE_COMPILE_FAILED', artifact: 'template-cc',
+        safeDetails: { failureKind: 'compile' },
+      },
+    },
+    {
+      label: 'Java runtime', language: 'java' as const,
+      mutate: (runner: any) => runner.runJavaBatchDetailed.mockResolvedValue([
+        detail({ accepted: false, status: 'Nonzero Exit Status', exitStatus: 1 }),
+      ]),
+      expected: {
+        code: 'TEMPLATE_RUNTIME_FAILED', artifact: 'template-java',
+        safeDetails: { caseIndex: 1, failureKind: 'runtime' },
+      },
+    },
+    {
+      label: 'Python mismatch', language: 'py' as const,
+      mutate: (runner: any) => runner.runPythonBatchDetailed
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockResolvedValueOnce([detail({ stdout: 'wrong\n' })]),
+      expected: {
+        code: 'TEMPLATE_OUTPUT_MISMATCH', artifact: 'template-py',
+        safeDetails: { caseIndex: 1, failureKind: 'mismatch' },
+      },
+    },
+  ])('maps $label failure to its typed template artifact', async ({ language, mutate, expected }) => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: [language] };
+    const solutions = {
+      py: ['@@@SOLUTION:py@@@', 'def echo(value): return value'],
+      java: ['@@@SOLUTION:java@@@', 'class Solution {}'],
+      cc: ['@@@SOLUTION:cc@@@', 'string echo(string value) { return value; }'],
+    }[language];
+    const templates = {
+      py: ['@@@TEMPLATE:py@@@', 'print(echo(input().strip()))'],
+      java: ['@@@TEMPLATE:java@@@', 'public class Main {}'],
+      cc: ['@@@TEMPLATE:cc@@@', '#include "foo.cc"', 'int main() { return 0; }'],
+    }[language];
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      ...solutions,
+      ...templates,
+    ].join('\n'), fnOpts);
+    const accepted = [detail({ stdout: '1\n' })];
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'cc-cache' }),
+      runCompiledBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      compileJava: jest.fn().mockResolvedValue({ ok: true, fileId: 'java-cache' }),
+      runJavaBatchDetailed: jest.fn().mockResolvedValue(accepted),
+      deleteCachedFile: jest.fn().mockResolvedValue(undefined),
+    };
+    mutate(runner);
+
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject(expected);
+  });
+
+  it('template TLE is a runtime failure and never reduces the selected-language total', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 3, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:py@@@', 'def echo(value): return value',
+      '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+    ].join('\n'), fnOpts);
+    const allInputs = ['1\n', '2\n', '3\n'];
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: allInputs.map((input, index) => ({
+          label: `formal-${index + 1}`, input,
+        })) }),
+        stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce(allInputs.map(input => detail({ stdout: input })))
+        .mockResolvedValueOnce([
+          detail({ stdout: '1\n' }),
+          detail({ accepted: false, timedOut: true, status: 'Time Limit Exceeded' }),
+          detail({ stdout: '3\n' }),
+        ]),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject({
+      code: 'TEMPLATE_RUNTIME_FAILED',
+      artifact: 'template-py',
+      safeDetails: { caseIndex: 2, failureKind: 'runtime' },
+    });
+    expect(runner.runPythonBatchDetailed).toHaveBeenNthCalledWith(
+      2, expect.any(String), allInputs, expect.anything(),
+    );
+  });
+
+  it('template budget exhaustion maps to the pipeline budget without skipping a language', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['java'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:java@@@', 'class Solution {}',
+      '@@@TEMPLATE:java@@@', 'public class Main {}',
+    ].join('\n'), fnOpts);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([detail({ stdout: '1\n' })]),
+      compileJava: jest.fn().mockRejectedValue(new SandboxBudgetExceededError()),
+      runJavaBatchDetailed: jest.fn(),
+    };
+
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject({
+      code: 'PIPELINE_BUDGET_EXHAUSTED',
+      artifact: 'pipeline',
+      safeDetails: { failureKind: 'budget' },
+    });
+    expect(runner.compileJava).toHaveBeenCalledTimes(1);
+  });
+
+  it('custom checker template adjudication keeps its independent budget outside the pipeline deadline', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:py@@@', 'def echo(value): return value',
+      '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+    ].join('\n'), fnOpts);
+    const startedAt = 10_000;
+    let now = startedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockImplementationOnce(async () => {
+          now = startedAt + SANDBOX_TOTAL_BUDGET_MS - 1_000;
+          return [detail({ stdout: '1\n' })];
+        }),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: 1, passed: 1, infraFailures: 0,
+      },
+      runBatch: jest.fn().mockImplementation(async () => {
+        now += 2_000;
+        return ['accept' as const];
+      }),
+      runChecker: jest.fn(),
+      dispose: jest.fn(),
+    };
+
+    try {
+      const result = await materializeSandboxBlueprint(
+        bp, fnOpts, '', runner, undefined, true, undefined, [], false, checkerExecutor,
+      );
+      expect(result.verification?.templateChecks?.py).toEqual({
+        compiled: true, executed: true, total: 1, passed: 1,
+      });
+      expect(checkerExecutor.runBatch).toHaveBeenCalledWith(
+        [{ input: '1\n', output: '1\n', answer: '1\n' }],
+        {
+          signal: undefined,
+          deadlineAt: startedAt + SANDBOX_TOTAL_BUDGET_MS + CHECKER_BUDGET_MS,
+        },
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('custom checker cannot extend template adjudication past the immutable hard deadline', async () => {
+    const fnOpts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
+    const bp = parseSandboxBlueprint([
+      '@@@META@@@', 'problemType: function', 'functionName: echo',
+      '@@@GENERATOR@@@', 'print(gen())',
+      '@@@ORACLE@@@', 'print(input())',
+      '@@@SOLUTION:py@@@', 'def echo(value): return value',
+      '@@@TEMPLATE:py@@@', 'print(echo(input().strip()))',
+    ].join('\n'), fnOpts);
+    const startedAt = 10_000;
+    let now = startedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockResolvedValue({
+        stdout: JSON.stringify({ cases: [{ label: 'formal', input: '1' }] }), stderr: '',
+      }),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn()
+        .mockResolvedValueOnce([detail({ stdout: '1\n' })])
+        .mockImplementationOnce(async () => {
+          now = startedAt + SANDBOX_TOTAL_BUDGET_MS - 1_000;
+          return [detail({ stdout: '1\n' })];
+        }),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 0,
+      check: {
+        configured: true, read: true, compiled: true, executed: true,
+        total: 1, passed: 1, infraFailures: 0,
+      },
+      runBatch: jest.fn().mockImplementation(async () => {
+        now += CHECKER_BUDGET_MS + 1_001;
+        return ['accept' as const];
+      }),
+      runChecker: jest.fn(),
+      dispose: jest.fn(),
+    };
+
+    try {
+      await expect(materializeSandboxBlueprint(
+        bp, fnOpts, '', runner, undefined, true, undefined, [], false, checkerExecutor,
+      )).rejects.toMatchObject({
+        code: 'PIPELINE_BUDGET_EXHAUSTED',
+        artifact: 'pipeline',
+        safeDetails: { failureKind: 'budget' },
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('函数题将题面展示样例独立转码后回归 ORACLE 与 template.py', async () => {
@@ -4611,8 +13884,8 @@ describe('materializeSandboxBlueprint 双重验证', () => {
 
     const res = await materializeSandboxBlueprint(bp, fnOpts, statement, runner);
     expect(res.verification?.sampleCheck).toEqual({ total: 1, passed: 1 });
-    expect(res.verification?.templateCheck).toEqual({
-      lang: 'py', total: 2, passed: 2, skippedTimeout: [],
+    expect(res.verification?.templateChecks?.py).toEqual({
+      compiled: true, executed: true, total: 2, passed: 2,
     });
     expect(res.verification?.validator?.casesChecked).toBe(2 + TESTDATA_GEN_LIMITS.STRESS_CASES);
     expect(runner.runPythonBatchDetailed.mock.calls[0][2]).toEqual(expect.objectContaining({
@@ -4648,8 +13921,11 @@ describe('materializeSandboxBlueprint 双重验证', () => {
         .mockResolvedValueOnce([detail({ stdout: '5\n' })]) // ORACLE
         .mockResolvedValueOnce([detail({ stdout: '6\n' })]), // solution+template 实跑
     };
-    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner))
-      .rejects.toThrow(/template\.py 与标程在第 1 个测试点不一致/);
+    await expect(materializeSandboxBlueprint(bp, fnOpts, '', runner)).rejects.toMatchObject({
+      code: 'TEMPLATE_OUTPUT_MISMATCH',
+      artifact: 'template-py',
+      safeDetails: { caseIndex: 1, failureKind: 'mismatch' },
+    });
   });
 
   it('超过总时长预算时在阶段间报错', async () => {
@@ -4721,6 +13997,48 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
     expect(plan.verification?.mode).toBe('sandbox');
   });
 
+  it('keeps a server-rendered GeneratorPlan artifact deterministic after coverage downgrade', () => {
+    const response = {
+      problemType: 'traditional',
+      cases: [{ input: '1\n', output: '1\n' }],
+      generatorCode: [
+        '# Server-generated trusted GeneratorPlan artifact. Do not edit.',
+        "print('{\"cases\":[{\"label\":\"c1\",\"input\":\"1\\\\n\"}]}')",
+      ].join('\n'),
+      generatorPlan: {
+        version: 1,
+        seed: 47,
+        cases: [{
+          label: 'c1',
+          fields: { n: { kind: 'integer', value: 1 } },
+        }],
+      },
+      coverageMode: 'ai-generator-unverified',
+      stdSolution: { language: 'python', code: 'print(input())' },
+      verification: {
+        mode: 'sandbox',
+        oracleKind: 'ai-solution',
+        coverage: {
+          mode: 'ai-generator-unverified',
+          matrix: [], totalTargets: 0, passedTargets: 0, criticalMissing: 0,
+          featureExtractionFailed: true,
+        },
+      },
+    } as never;
+    const opts: GenerateOptions = {
+      problemKind: 'traditional', caseCount: 1, languages: [],
+    };
+
+    const plan = assemblePlan(response, opts, { mode: 'sandbox' });
+
+    expect(plan.files.find(file => file.name === 'generator.py')).toMatchObject({
+      kind: 'generator',
+      origin: 'deterministic',
+    });
+    expect(plan.coverageMode).toBe('ai-generator-unverified');
+    expect(plan.verification?.coverage.mode).toBe('ai-generator-unverified');
+  });
+
   it('direct 模式：数据 ai-only，且不写 brute/validator', () => {
     const response = {
       problemType: 'traditional',
@@ -4745,7 +14063,12 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       solutionCode: 'def f():\n    return 5',
       oracleCode: 'print(5)',
       stdSolution: { language: 'python', code: 'print(5)' },
-      pyTemplateExecuted: true,
+      verification: {
+        mode: 'sandbox', oracleKind: 'ai-solution', verified: false, wouldBlock: false,
+        templateChecks: {
+          py: { compiled: true, executed: true, total: 1, passed: 1 },
+        },
+      },
       generatorCode: 'print(1)',
     } as never;
     const opts: GenerateOptions = { problemKind: 'function', caseCount: 1, languages: ['py'] };
@@ -4765,7 +14088,12 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       solutionCode: 'def f():\n    return 5',
       oracleCode: 'print(5)',
       stdSolution: { language: 'python', code: 'print(5)' },
-      pyTemplateExecuted: true,
+      verification: {
+        mode: 'sandbox', oracleKind: 'ai-solution', verified: false, wouldBlock: false,
+        templateChecks: {
+          py: { compiled: true, executed: true, total: 1, passed: 1 },
+        },
+      },
       generatorCode: 'print(1)',
       bruteCode: 'print(0)',
       validatorCode: 'import sys',
@@ -4811,10 +14139,20 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
         usedModel: { endpointId: 'e', endpointName: 'n', modelName: 'm' },
       }),
     };
-    const plan = await new TestdataGenService(mockClient as never).generate({
+    const plan = await new TestdataGenService(mockClient as never, {
+      reliabilityMode: 'observe',
+    }).generate({
+      runId: '11111111-1111-4111-8111-111111111111',
       problemTitle: 't', statementMarkdown: '题面',
       options: { problemKind: 'traditional', caseCount: 2, languages: [] },
     });
-    expect(plan.verification).toEqual({ mode: 'direct', oracleKind: 'ai-solution' });
+    expect(plan.verification).toEqual({
+      mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
+    });
+    expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
+    expect(plan.promptVersion).toBe('testdata-generation-v3');
+    expect(plan.originalFileHashes).toEqual(Object.fromEntries(
+      plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
+    ));
   });
 });

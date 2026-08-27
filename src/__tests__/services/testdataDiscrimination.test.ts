@@ -111,7 +111,7 @@ describe('evaluateDiscrimination', () => {
     expect(result.allKilled).toBe(false);
   });
 
-  it('自定义 checker 跳过错误解 WA 判定且不计入 allKilled', () => {
+  it('自定义 checker 未裁决时记录基础设施失败且不计入 allKilled', () => {
     const result = evaluateDiscrimination({
       targetRuns: [{
         kind: 'wrong-algorithm',
@@ -127,18 +127,51 @@ describe('evaluateDiscrimination', () => {
         kind: 'wrong-algorithm',
         description: '输出另一种合法表示',
         killed: false,
-        skippedReason: 'custom-checker',
+        skippedReason: 'checker-infra-error',
       }],
       allKilled: false,
     });
   });
 
+  it('一个已命中靶子不能掩盖另一个 checker 基础设施阻断', () => {
+    const result = evaluateDiscrimination({
+      targetRuns: [
+        {
+          kind: 'wrong-algorithm',
+          description: '已被拒绝的错误解',
+          perCase: [{ ...accepted('alternative\n'), checkerVerdict: 'reject' }],
+        },
+        {
+          kind: 'boundary',
+          description: '未裁决的错误解',
+          perCase: [{ ...accepted('unknown\n'), checkerVerdict: 'infra-error' }],
+        },
+      ],
+      oracleOutputs: ['official\n'],
+      customChecker: true,
+      checkerAvailable: true,
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({ killed: true, killedBy: 'wa' }),
+      expect.objectContaining({ killed: false, skippedReason: 'checker-infra-error' }),
+    ]);
+    expect(result.allKilled).toBe(false);
+  });
+
   it('运行崩溃视为 WA 命中并在描述中标记运行失败', () => {
+    const runtimeFailure = {
+      accepted: false,
+      timedOut: false,
+      stdout: '',
+      status: 'Nonzero Exit Status',
+      exitStatus: 1,
+    };
     const result = evaluateDiscrimination({
       targetRuns: [{
         kind: 'boundary',
         description: '空结构处理错误',
-        perCase: [{ accepted: false, timedOut: false, stdout: '' }],
+        perCase: [runtimeFailure],
       }],
       oracleOutputs: ['0\n'],
       customChecker: false,
@@ -152,6 +185,29 @@ describe('evaluateDiscrimination', () => {
       killedByCase: 1,
     });
     expect(result.allKilled).toBe(true);
+  });
+
+  it.each([
+    ['System Error', { status: 'System Error', accepted: false, timedOut: false, stdout: '' }],
+    ['missing result status', { status: '', accepted: false, timedOut: false, stdout: '' }],
+  ])('%s is infrastructure failure rather than a wrong answer', (_label, infraDetail) => {
+    const result = evaluateDiscrimination({
+      targetRuns: [{
+        kind: 'wrong-algorithm',
+        description: '错误解执行基础设施异常',
+        perCase: [infraDetail],
+      }],
+      oracleOutputs: ['0\n'],
+      customChecker: false,
+    });
+
+    expect(result.targets[0]).toEqual({
+      kind: 'wrong-algorithm',
+      description: '错误解执行基础设施异常',
+      killed: false,
+      skippedReason: 'checker-infra-error',
+    });
+    expect(result.allKilled).toBe(false);
   });
 
   it('brute-complexity 只以超时作为复杂度命中', () => {
@@ -348,6 +404,30 @@ describe('smokeTestKillTargets', () => {
       deadlineAt: Date.now() + 10_000,
     })).resolves.toEqual([target]);
   });
+
+  it('样例烟测在调用方取消后抛出原始原因而不是下游普通错误', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('smoke caller cancellation');
+    const transportError = new Error('smoke transport failed after caller cancellation');
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportError;
+      }),
+    };
+
+    await expect(smokeTestKillTargets({
+      killTargets: [{ kind: 'boundary', description: '取消边界', code: 'print(1)' }],
+      samples: [{ input: '1\n', output: '1\n' }],
+      runner,
+      signal: controller.signal,
+      customChecker: false,
+      deadlineAt: Date.now() + 10_000,
+    })).rejects.toBe(cancellation);
+  });
 });
 
 describe('runDiscriminationPhase', () => {
@@ -406,6 +486,15 @@ describe('runDiscriminationPhase', () => {
     const checkerExecutor = {
       status: 'ready' as const,
       runtimeSkipped: 0,
+      check: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        total: 1,
+        passed: 1,
+        infraFailures: 0,
+      },
       runBatch: jest.fn().mockResolvedValue(['reject']),
       runChecker: jest.fn().mockResolvedValue('reject'),
       dispose: jest.fn(),
@@ -435,6 +524,80 @@ describe('runDiscriminationPhase', () => {
     });
   });
 
+  it('区分度一个 checker 拒绝与一个基础设施失败混合时不得 allKilled', async () => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([accepted('alternative\n')]),
+    };
+    const checkerExecutor = {
+      status: 'ready' as const,
+      runtimeSkipped: 1,
+      check: {
+        configured: true,
+        read: true,
+        compiled: true,
+        executed: true,
+        total: 2,
+        passed: 1,
+        infraFailures: 1,
+        failureKind: 'infra' as const,
+      },
+      runBatch: jest.fn()
+        .mockResolvedValueOnce(['reject'])
+        .mockResolvedValueOnce(['infra-error']),
+      runChecker: jest.fn(),
+      dispose: jest.fn(),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [
+        { kind: 'wrong-algorithm', description: '已被拒绝', code: 'print(1)' },
+        { kind: 'boundary', description: '未裁决', code: 'print(2)' },
+      ],
+      cases: [{ input: '1\n', output: 'official\n' }],
+      runner,
+      customChecker: true,
+      checkerExecutor,
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({ killed: true, killedBy: 'wa' }),
+      expect.objectContaining({ killed: false, skippedReason: 'checker-infra-error' }),
+    ]);
+    expect(result.allKilled).toBe(false);
+  });
+
+  it.each([
+    ['System Error', { status: 'System Error', accepted: false, timedOut: false, stdout: '', stderr: '' }],
+    ['missing result status', { status: '', accepted: false, timedOut: false, stdout: '', stderr: '' }],
+  ])('区分度执行遇到 %s 时不把靶子标成 WA', async (_label, infraDetail) => {
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([infraDetail]),
+    };
+
+    const result = await runDiscriminationPhase({
+      killTargets: [{
+        kind: 'wrong-algorithm',
+        description: '基础设施异常靶子',
+        code: 'print(1)',
+      }],
+      cases: [{ input: '1\n', output: '1\n' }],
+      runner,
+      customChecker: false,
+    });
+
+    expect(result.targets[0]).toMatchObject({
+      killed: false,
+      skippedReason: 'checker-infra-error',
+    });
+    expect(result.allKilled).toBe(false);
+  });
+
   it('沙箱异常把当前及未运行靶子标为预算跳过而不抛错', async () => {
     const runner = {
       isAvailable: jest.fn(),
@@ -458,6 +621,32 @@ describe('runDiscriminationPhase', () => {
     expect(result.targets.every(target =>
       target.skippedReason === 'budget-exhausted' && !target.killed)).toBe(true);
     expect(result.allKilled).toBe(false);
+  });
+
+  it('区分度执行在调用方取消后抛出原始原因而不是合成预算耗尽', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('discrimination caller cancellation');
+    const transportCancellation = Object.assign(
+      new Error('discrimination transport cancellation'),
+      { name: 'CanceledError' },
+    );
+    const runner = {
+      isAvailable: jest.fn(),
+      runPython: jest.fn(),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation(async () => {
+        controller.abort(cancellation);
+        throw transportCancellation;
+      }),
+    };
+
+    await expect(runDiscriminationPhase({
+      killTargets: [{ kind: 'boundary', description: '取消边界', code: 'print(1)' }],
+      cases: [{ input: '1\n', output: '1\n' }],
+      runner,
+      signal: controller.signal,
+      customChecker: false,
+    })).rejects.toBe(cancellation);
   });
 
   it('无错误解靶子时记录 no-targets 并继续执行 BRUTE 复杂度检查', async () => {

@@ -1,6 +1,6 @@
 import type {
   Overview, InstancesResponse, ErrorsResponse, FeedbackItem, FeatureHealthResponse,
-  Alert, TelegramConfig, TelegramConfigInput,
+  Alert, TelegramConfig, TelegramConfigInput, TestdataQualityResponse,
 } from './types';
 
 let apiBase = '';
@@ -49,6 +49,9 @@ export const getFeedback = (limit = 50, offset = 0) =>
 
 export const getFeatureHealth = (usageDays = 30) =>
   fetchApi<FeatureHealthResponse>(`/api/dashboard/feature-health?days=${usageDays}`);
+
+export const getTestdataQuality = (days = 30): Promise<TestdataQualityResponse> =>
+  fetchApi<TestdataQualityResponse>(`/api/dashboard/testdata-quality?days=${days}`);
 
 export const getAlerts = (limit = 50) =>
   fetchApi<{ alerts: Alert[] }>(`/api/dashboard/alerts?limit=${limit}`);

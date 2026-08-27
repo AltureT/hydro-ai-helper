@@ -108,12 +108,16 @@ function validPlan(): GenerationPlan {
     { name: 'validator.py', content: 'pass\n', kind: 'validator', origin: 'executed' },
   );
   return {
+    runId: '11111111-1111-4111-8111-111111111111',
+    promptVersion: 'testdata-generation-v3',
     problemType: 'traditional',
     files,
     caseCount: 8,
     verification: {
       mode: 'sandbox',
       oracleKind: 'ai-solution',
+      verified: false,
+      wouldBlock: false,
       sampleCheck: { total: 1, passed: 1 },
       validator: { ran: true, casesChecked: 69 },
       stressCheck: {

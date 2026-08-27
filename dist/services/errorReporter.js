@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ErrorReporter = void 0;
 const crypto_1 = require("crypto");
 const telemetryService_1 = require("./telemetryService");
+const failures_1 = require("./testdata/failures");
 const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 const BUFFER_THRESHOLD = 50;
 const MAX_BUFFER_SIZE = 1000;
@@ -13,6 +14,20 @@ const STALE_ENTRY_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT = 8000;
 const MAX_STACK_FRAMES = 10;
 const MAX_FRAME_LENGTH = 200;
+const SAFE_FAILURE_CODES = new Set(failures_1.TESTDATA_FAILURE_CODES);
+const SAFE_AI_CATEGORIES = new Set([
+    'auth', 'rate_limit', 'server', 'client', 'timeout', 'network', 'aborted', 'unknown',
+]);
+const SAFE_TESTDATA_STAGES = new Set(failures_1.TESTDATA_FAILURE_STAGES);
+function isSafeTestdataStage(value) {
+    if (typeof value !== 'string')
+        return false;
+    if (SAFE_TESTDATA_STAGES.has(value))
+        return true;
+    const semanticFallbackPrefix = 'semantic_fallback:';
+    return value.startsWith(semanticFallbackPrefix)
+        && SAFE_TESTDATA_STAGES.has(value.slice(semanticFallbackPrefix.length));
+}
 class ErrorReporter {
     constructor(pluginInstallModel) {
         this.pluginInstallModel = pluginInstallModel;
@@ -58,9 +73,8 @@ class ErrorReporter {
     capture(errorType, category, message, httpStatus, stack, metadata) {
         // Check telemetry asynchronously — but capture is sync/fire-and-forget
         // We check lazily on flush instead of on every capture for performance
-        const discriminator = [metadata?.endpointId, metadata?.failureStage]
-            .filter((value) => typeof value === 'string' && value.length > 0)
-            .join(':') || undefined;
+        const sanitizedMetadata = metadata ? this.sanitizeMetadata(metadata) : undefined;
+        const discriminator = this.buildSafeDiscriminator(sanitizedMetadata);
         const fingerprint = this.computeFingerprint(errorType, category, stack, discriminator);
         const key = `${errorType}:${category}:${fingerprint}`;
         const now = new Date();
@@ -106,7 +120,7 @@ class ErrorReporter {
             stackFingerprint: fingerprint,
             // Store only the sanitized frames — never retain the raw stack in memory.
             stackFrames: this.sanitizeStack(stack),
-            metadata: metadata ? this.sanitizeMetadata(metadata) : undefined,
+            metadata: sanitizedMetadata,
             suppressedCount: 0,
         });
         if (this.buffer.size >= BUFFER_THRESHOLD) {
@@ -247,11 +261,35 @@ class ErrorReporter {
             .digest('hex')
             .substring(0, 16);
     }
+    buildSafeDiscriminator(metadata) {
+        if (!metadata)
+            return undefined;
+        const parts = [];
+        if (typeof metadata.failureCode === 'string' && SAFE_FAILURE_CODES.has(metadata.failureCode)) {
+            parts.push(`failureCode=${metadata.failureCode}`);
+        }
+        if (typeof metadata.aiCategory === 'string' && SAFE_AI_CATEGORIES.has(metadata.aiCategory)) {
+            parts.push(`aiCategory=${metadata.aiCategory}`);
+        }
+        for (const key of ['stage', 'failureStage']) {
+            const value = metadata[key];
+            if (isSafeTestdataStage(value))
+                parts.push(`${key}=${value}`);
+        }
+        return parts.join(':') || undefined;
+    }
     sanitizeMetadata(metadata) {
         const sanitized = {};
         const keys = Object.keys(metadata).slice(0, 10);
         for (const key of keys) {
             const val = metadata[key];
+            if (key === 'failureCode' && (typeof val !== 'string' || !SAFE_FAILURE_CODES.has(val)))
+                continue;
+            if (key === 'aiCategory' && (typeof val !== 'string' || !SAFE_AI_CATEGORIES.has(val)))
+                continue;
+            if ((key === 'stage' || key === 'failureStage')
+                && !isSafeTestdataStage(val))
+                continue;
             if (typeof val === 'string') {
                 sanitized[key] = val.substring(0, 200);
             }

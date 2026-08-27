@@ -122,6 +122,102 @@ export interface FeatureHealthResponse {
   snapshot_max_age_hours?: number;
 }
 
+export interface TestdataQualityRate {
+  count: number;
+  total: number;
+  rate: number | null;
+}
+
+export interface TestdataQualityDistributionItem {
+  key: string;
+  count: number;
+}
+
+export type TestdataSpecConsensusStatus = 'consensus' | 'adjudicated' | 'unresolved';
+
+export interface TestdataSpecConsensusDistributionItem extends TestdataQualityDistributionItem {
+  key: TestdataSpecConsensusStatus;
+}
+
+export type TestdataModelRole = 'primary' | 'fallback';
+
+export interface TestdataModelRoleMetrics {
+  runs: number;
+  completed: TestdataQualityRate;
+  verified: TestdataQualityRate;
+  failed: TestdataQualityRate;
+}
+
+export interface TestdataStageLatency {
+  stage: string;
+  runs: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+}
+
+export interface TestdataQualityResponse {
+  window_days: number;
+  total_runs: number;
+  metrics?: Partial<Record<
+    | 'pipeline_completion'
+    | 'verified'
+    | 'would_block'
+    | 'accepted_unchanged'
+    | 'accepted_edited'
+    | 'discarded'
+    | 'regenerated'
+    | 'model_escalation_rescue'
+    | 'verified_but_teacher_changed',
+    TestdataQualityRate
+  >>;
+  failure_codes?: TestdataQualityDistributionItem[];
+  failure_stages?: TestdataQualityDistributionItem[];
+  failure_artifacts?: TestdataQualityDistributionItem[];
+  risk_tiers?: TestdataQualityDistributionItem[];
+  stage_latency?: TestdataStageLatency[];
+  model_roles?: Record<TestdataModelRole, TestdataModelRoleMetrics>;
+  problem_spec?: {
+    extraction_succeeded: TestdataQualityRate;
+    constraint_count: number;
+    invariant_count: number;
+    uncertainty_count: number;
+    consensus_statuses: TestdataSpecConsensusDistributionItem[];
+  };
+  templates?: Partial<Record<'py' | 'java' | 'cc', {
+    requested: number;
+    verified: number;
+    rate: number | null;
+  }>>;
+  checker?: {
+    configured?: TestdataQualityRate;
+    read?: TestdataQualityRate;
+    compiled?: TestdataQualityRate;
+    executed?: TestdataQualityRate;
+    infra_failure?: TestdataQualityRate;
+    infra_failures?: number;
+  };
+  mutation?: {
+    runs: number;
+    generated: number;
+    historical: number;
+    viable: number;
+    killed: number;
+    survived: number;
+    average_score: number | null;
+  };
+  stress?: Partial<Record<
+    'generated' | 'valid' | 'dropped_invalid' | 'unique' | 'compared' | 'agreed',
+    number
+  >>;
+  version_trend?: Array<{
+    plugin_version: string;
+    runs: number;
+    pipeline_completed: number;
+    verified: number;
+    would_block: number;
+  }>;
+}
+
 export interface Alert {
   id: number;
   alert_key: string;
@@ -145,4 +241,4 @@ export interface TelegramConfigInput {
   token?: string; // omitted ⇒ keep existing token
 }
 
-export type Tab = 'overview' | 'instances' | 'errors' | 'feature-health' | 'alerts' | 'feedback';
+export type Tab = 'overview' | 'instances' | 'errors' | 'feature-health' | 'testdata-quality' | 'alerts' | 'feedback';
