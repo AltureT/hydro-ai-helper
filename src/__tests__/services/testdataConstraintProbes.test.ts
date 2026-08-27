@@ -643,6 +643,24 @@ describe('structural constructions', () => {
     expect(elapsedMs).toBeLessThan(2_000);
   }, 120_000);
 
+  it('handles a 20000-vertex adversarial tree without overflowing the call stack', () => {
+    const vertexCount = 20_000;
+    const legal = `${vertexCount}\n${[
+      ...Array.from(
+        { length: vertexCount - 2 },
+        (_unused, index) => `${index + 1} ${index + 2}`,
+      ),
+      `1 ${vertexCount}`,
+    ].join('\n')}\n`;
+
+    expect(Buffer.byteLength(legal, 'utf8')).toBeLessThanOrEqual(256 * 1024);
+    let result: ReturnType<typeof buildStructuralFixture> | undefined;
+    expect(() => {
+      result = buildStructuralFixture('tree-cycle', legal);
+    }).not.toThrow();
+    expect(result?.probes).toEqual([expect.objectContaining({ targetId: 'I1' })]);
+  });
+
   it('handles a 20000-edge DAG chain and detects its deep cyclic mutation without throwing', () => {
     const edgeCount = 20_000;
     const legal = `${edgeCount + 1} ${edgeCount}\n${Array.from(

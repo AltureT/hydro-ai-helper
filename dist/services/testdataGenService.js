@@ -3792,11 +3792,7 @@ async function runValidatorInvalidProof(input) {
         }
         executions = results.map(classifyValidatorInvalidResult);
     }
-    const proofExecutions = executions.map((execution, index) => (execution === 'false-accept'
-        && invalidInvocations[index]?.probe
-        && (0, constraintProbes_1.getConstraintProbeSource)(invalidInvocations[index].probe) === 'recipe'
-        ? 'not-proven'
-        : execution));
+    const proofExecutions = executions;
     const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, proofExecutions.slice(0, build.probes.length));
     const coveredIds = targetEvidence.filter(item => (item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const missingIds = targetEvidence.filter(item => !(item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);

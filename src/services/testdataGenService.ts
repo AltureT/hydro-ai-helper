@@ -70,7 +70,6 @@ import {
 } from './testdata/validatorManifest';
 import {
   buildConstraintProbes,
-  getConstraintProbeSource,
   type ConstraintProbe,
   type LegalConstraintProbeSeed,
 } from './testdata/constraintProbes';
@@ -5073,13 +5072,7 @@ async function runValidatorInvalidProof(input: {
     executions = results.map(classifyValidatorInvalidResult);
   }
 
-  const proofExecutions = executions.map((execution, index) => (
-    execution === 'false-accept'
-      && invalidInvocations[index]?.probe
-      && getConstraintProbeSource(invalidInvocations[index].probe as ConstraintProbe) === 'recipe'
-      ? 'not-proven' as const
-      : execution
-  ));
+  const proofExecutions = executions;
   const targetEvidence = createValidatorTargetEvidence(
     spec,
     input.blueprint.validatorManifestStatus,
