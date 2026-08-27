@@ -590,22 +590,34 @@ function isConnected(layout: EdgeListLayout): boolean {
 
 function hasUndirectedCycle(layout: EdgeListLayout): boolean {
   const parent = new Map<number, number>();
+  const size = new Map<number, number>();
   const find = (vertex: number): number => {
-    const current = parent.get(vertex);
-    if (current === undefined) {
+    if (!parent.has(vertex)) {
       parent.set(vertex, vertex);
+      size.set(vertex, 1);
       return vertex;
     }
-    if (current === vertex) return vertex;
-    const root = find(current);
-    parent.set(vertex, root);
+
+    let root = vertex;
+    while (parent.get(root) !== root) root = parent.get(root) as number;
+
+    let current = vertex;
+    while (current !== root) {
+      const next = parent.get(current) as number;
+      parent.set(current, root);
+      current = next;
+    }
     return root;
   };
   for (const [left, right] of layout.edges) {
-    const leftRoot = find(left);
-    const rightRoot = find(right);
+    let leftRoot = find(left);
+    let rightRoot = find(right);
     if (leftRoot === rightRoot) return true;
+    if ((size.get(leftRoot) || 1) > (size.get(rightRoot) || 1)) {
+      [leftRoot, rightRoot] = [rightRoot, leftRoot];
+    }
     parent.set(leftRoot, rightRoot);
+    size.set(rightRoot, (size.get(leftRoot) || 1) + (size.get(rightRoot) || 1));
   }
   return false;
 }
