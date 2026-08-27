@@ -54,7 +54,7 @@
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.0.0",
-    "hydrooj": "^4.0.0",
+    "hydrooj": "^5.0.2",
     "jest": "^30.2.0",
     "js-yaml": "^4.3.0",
     "ts-jest": "^29.4.6",
@@ -62,6 +62,6 @@
     "wrangler": "^4.79.0"
   },
   "peerDependencies": {
-    "hydrooj": "^4.0.0"
+    "hydrooj": "^5.0.2"
   }
 }
