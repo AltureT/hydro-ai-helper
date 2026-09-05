@@ -230,7 +230,7 @@ class OpenAIClient {
             const msgAny = message;
             const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning);
             const content = message?.content;
-            const aiMessage = reasoning
+            const aiMessage = reasoning && options?.contentMode !== 'raw'
                 ? `<think>(thinking...)</think>${content || ''}`
                 : content;
             if (!aiMessage) {
@@ -628,6 +628,7 @@ class MultiModelClient {
                             signal: totalAc.signal,
                             maxTokens: options?.maxTokens,
                             timeoutMs: options?.timeoutMs,
+                            contentMode: options?.contentMode,
                         });
                         const fallbackErrors = errors.length > 0 ? errors.map(e => ({
                             endpoint: e.endpointId, model: e.modelName,
