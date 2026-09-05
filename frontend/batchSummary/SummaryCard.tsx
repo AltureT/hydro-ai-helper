@@ -1,17 +1,9 @@
-/**
- * SummaryCard — displays a single student's AI-generated learning summary.
- * Supports failed state (with retry), completed state (with edit/publish),
- * and inline submission link rendering.
- */
-
+/** A learning summary with teacher review actions and an optional standalone heading. */
 import React, { useState } from 'react';
 import { i18n } from '../utils/i18n';
-import {
-  COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle,
-} from '../utils/styles';
-import { renderMarkdown } from '../utils/markdown';
-
-// ─── Props ────────────────────────────────────────────────────────────────────
+import { COLORS, SPACING, getButtonStyle } from '../utils/styles';
+import { renderReportMarkdown, reportMarkdownStyles } from '../utils/reportMarkdown';
+import { Icon } from '../components/Icon';
 
 export interface SummaryCardProps {
   userId: number;
@@ -22,247 +14,90 @@ export interface SummaryCardProps {
   error?: string;
   domainId: string;
   isTeacher: boolean;
-  onRetry?: () => void;
-  onPublish?: () => void;
-  onEdit?: (newSummary: string) => void;
+  embedded?: boolean;
+  actionsDisabled?: boolean;
+  onRetry?: () => void | Promise<void>;
+  onPublish?: () => void | Promise<void>;
+  onEdit?: (newSummary: string) => void | Promise<void>;
 }
 
-// ─── Submission Link Renderer ─────────────────────────────────────────────────
-
-/** Render markdown to sanitized HTML, then replace [提交 #rXXX] with clickable links */
 function renderSummaryHtml(summary: string, domainId: string): string {
-  let html = renderMarkdown(summary);
-  // Replace submission references with styled links
-  html = html.replace(
+  return renderReportMarkdown(summary).replace(
     /\[提交 #(r([a-f0-9]+))\]/g,
     (_match, display, objectId) =>
-      `<a href="/d/${domainId}/record/${objectId}" target="_blank" rel="noopener noreferrer" `
-      + `style="color:${COLORS.primary};background:#eff6ff;border-radius:4px;padding:1px 4px;text-decoration:none">`
-      + `[提交 #${display}]</a>`,
+      `<a href="/d/${encodeURIComponent(domainId)}/record/${objectId}" target="_blank" rel="noopener noreferrer">[提交 #${display}]</a>`,
   );
-  return html;
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 export const SummaryCard: React.FC<SummaryCardProps> = ({
-  userName,
-  status,
-  publishStatus,
-  summary,
-  error,
-  domainId,
-  isTeacher,
-  onRetry,
-  onPublish,
-  onEdit,
+  userName, status, publishStatus, summary, error, domainId, isTeacher,
+  embedded = false, actionsDisabled = false, onRetry, onPublish, onEdit,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  // ── Failed state ────────────────────────────────────────────────────────────
+  const runAction = async (action: () => void | Promise<void>, closeEditor = false) => {
+    if (busy || actionsDisabled) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await action();
+      if (closeEditor) setIsEditing(false);
+    } catch {
+      setActionError(i18n('ai_helper_batch_summary_action_failed'));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const actionStyle = (primary = false) => ({
+    ...getButtonStyle(primary ? 'primary' : 'secondary'), gap: '6px',
+    padding: '6px 12px', fontSize: '13px', opacity: busy ? 0.55 : 1,
+  });
 
-  if (status === 'failed') {
-    return (
-      <div style={{
-        backgroundColor: COLORS.errorBg,
-        border: `1px solid ${COLORS.errorBorder}`,
-        borderRadius: RADIUS.md,
-        padding: SPACING.base,
-        boxShadow: SHADOWS.sm,
-      }}>
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          gap: SPACING.sm,
-        }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 600, fontSize: '14px', color: COLORS.errorText, marginBottom: SPACING.xs }}>
-              {userName}
-            </div>
-            <div style={{ fontSize: '13px', color: COLORS.errorText }}>
-              {i18n('ai_helper_batch_summary_failed')}
-              {error && <span style={{ marginLeft: SPACING.xs }}>{error}</span>}
-            </div>
-          </div>
-          {isTeacher && onRetry && (
-            <button
-              onClick={onRetry}
-              style={{
-                ...getButtonStyle('danger'),
-                padding: `4px ${SPACING.sm}`,
-                fontSize: '13px',
-                flexShrink: 0,
-              }}
-            >
-              {i18n('ai_helper_batch_summary_retry')}
-            </button>
-          )}
+  return (
+    <div className="ai-report-content" aria-busy={busy}>
+      <style>{reportMarkdownStyles}</style>
+      {!embedded && <h3 style={{ margin: '0 0 16px', fontSize: '16px' }}>{userName} {i18n('ai_helper_batch_summary')}</h3>}
+      {status === 'failed' ? (
+        <div role="alert" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '12px', color: COLORS.errorText }}>
+          <Icon name="warning" />
+          <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{error || i18n('ai_helper_batch_summary_failed')}</span>
+          {isTeacher && onRetry && <button type="button" disabled={busy || actionsDisabled} style={actionStyle()} onClick={() => runAction(onRetry)}><Icon name="refresh" /> {i18n('ai_helper_batch_summary_retry')}</button>}
         </div>
-      </div>
-    );
-  }
-
-  // ── Completed state ─────────────────────────────────────────────────────────
-
-  if (status === 'completed' && summary !== null) {
-    const isDraft = publishStatus === 'draft';
-
-    const handleEditStart = () => {
-      setEditValue(summary);
-      setIsEditing(true);
-    };
-
-    const handleEditSave = () => {
-      onEdit?.(editValue);
-      setIsEditing(false);
-    };
-
-    const handleEditCancel = () => {
-      setIsEditing(false);
-      setEditValue('');
-    };
-
-    return (
-      <div style={{
-        backgroundColor: COLORS.bgCard,
-        borderRadius: RADIUS.md,
-        boxShadow: SHADOWS.sm,
-        borderLeft: `3px solid ${COLORS.primary}`,
-        overflow: 'hidden',
-      }}>
-        {/* Header */}
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          padding: `${SPACING.sm} ${SPACING.base}`,
-          borderBottom: `1px solid ${COLORS.border}`,
-          gap: SPACING.sm,
-          flexWrap: 'wrap',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, flex: 1, minWidth: 0 }}>
-            <span style={{ fontWeight: 600, fontSize: '14px', color: COLORS.textPrimary, whiteSpace: 'nowrap' }}>
-              {userName}
-            </span>
-            <span style={{ fontSize: '13px', color: COLORS.textSecondary }}>
-              {i18n('ai_helper_batch_summary')}
-            </span>
-            {isTeacher && isDraft && (
-              <span style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                padding: `2px ${SPACING.sm}`,
-                fontSize: '11px',
-                fontWeight: 500,
-                color: COLORS.warningText,
-                backgroundColor: COLORS.warningBg,
-                border: `1px solid ${COLORS.warningBorder}`,
-                borderRadius: RADIUS.full,
-                flexShrink: 0,
-              }}>
-                {i18n('ai_helper_batch_summary_draft')}
-              </span>
-            )}
-          </div>
-
-          {/* Teacher actions */}
-          {isTeacher && !isEditing && (
-            <div style={{ display: 'flex', gap: SPACING.xs, flexShrink: 0 }}>
-              {isDraft && onPublish && (
-                <button
-                  onClick={onPublish}
-                  style={{
-                    ...getButtonStyle('primary'),
-                    padding: `4px ${SPACING.sm}`,
-                    fontSize: '13px',
-                  }}
-                >
-                  {i18n('ai_helper_batch_summary_publish_one')}
-                </button>
-              )}
-              {onEdit && (
-                <button
-                  onClick={handleEditStart}
-                  style={{
-                    ...getButtonStyle('secondary'),
-                    padding: `4px ${SPACING.sm}`,
-                    fontSize: '13px',
-                  }}
-                >
-                  {i18n('ai_helper_batch_summary_edit')}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Body */}
-        <div style={{ padding: SPACING.base }}>
+      ) : status === 'completed' && summary !== null ? (
+        <>
           {isEditing ? (
             <div>
               <textarea
-                value={editValue}
-                onChange={(e) => setEditValue(e.target.value)}
-                style={{
-                  width: '100%',
-                  minHeight: '120px',
-                  padding: SPACING.sm,
-                  fontSize: '14px',
-                  color: COLORS.textPrimary,
-                  backgroundColor: COLORS.bgCard,
-                  border: `1px solid ${COLORS.borderFocus}`,
-                  borderRadius: RADIUS.md,
-                  resize: 'vertical',
-                  outline: 'none',
-                  boxSizing: 'border-box',
-                  fontFamily: 'inherit',
-                  lineHeight: 1.6,
-                }}
+                aria-label={i18n('ai_helper_batch_summary_edit')} value={editValue}
+                onChange={event => setEditValue(event.target.value)} disabled={busy}
+                style={{ width: '100%', minHeight: '240px', padding: SPACING.md,
+                  font: 'inherit', fontSize: '14px', lineHeight: 1.7, resize: 'vertical',
+                  border: `1px solid ${COLORS.borderFocus}`, borderRadius: '6px', boxSizing: 'border-box' }}
               />
-              <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.sm }}>
-                <button
-                  onClick={handleEditSave}
-                  style={{
-                    ...getButtonStyle('primary'),
-                    padding: `4px ${SPACING.sm}`,
-                    fontSize: '13px',
-                  }}
-                >
-                  {i18n('Save')}
-                </button>
-                <button
-                  onClick={handleEditCancel}
-                  style={{
-                    ...getButtonStyle('secondary'),
-                    padding: `4px ${SPACING.sm}`,
-                    fontSize: '13px',
-                  }}
-                >
-                  {i18n('ai_helper_batch_summary_cancel')}
-                </button>
+              <div className="summary-actions">
+                <button type="button" disabled={busy} style={actionStyle()} onClick={() => setIsEditing(false)}>{i18n('ai_helper_batch_summary_cancel')}</button>
+                <button type="button" disabled={busy} style={actionStyle(true)} onClick={() => onEdit && runAction(() => onEdit(editValue), true)}><Icon name="check" /> {i18n('Save')}</button>
               </div>
             </div>
           ) : (
-            <div
-              className="markdown-body"
-              dangerouslySetInnerHTML={{ __html: renderSummaryHtml(summary, domainId) }}
-              style={{
-                fontSize: '14px',
-                color: COLORS.textPrimary,
-                lineHeight: 1.6,
-                wordBreak: 'break-word',
-              }}
-            />
+            <>
+              <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderSummaryHtml(summary, domainId) }} />
+              {isTeacher && (onEdit || (onPublish && publishStatus === 'draft')) && (
+                <div className="summary-actions">
+                  {onEdit && <button type="button" disabled={busy} style={actionStyle()} onClick={() => { setEditValue(summary); setActionError(null); setIsEditing(true); }}><Icon name="edit" /> {i18n('ai_helper_batch_summary_edit')}</button>}
+                  {onPublish && publishStatus === 'draft' && <button type="button" disabled={busy} style={actionStyle(true)} onClick={() => runAction(onPublish)}><Icon name="upload" /> {i18n('ai_helper_batch_summary_publish_one')}</button>}
+                </div>
+              )}
+            </>
           )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Pending / generating (and null summary on completed) ────────────────────
-  return null;
+        </>
+      ) : <p style={{ color: COLORS.textSecondary }}>{i18n(status === 'generating' ? 'ai_helper_batch_summary_generating' : 'ai_helper_batch_summary_pending')}</p>}
+      {actionError && <p role="alert" style={{ color: COLORS.errorText, marginTop: '12px' }}>{actionError}</p>}
+    </div>
+  );
 };
 
 export default SummaryCard;

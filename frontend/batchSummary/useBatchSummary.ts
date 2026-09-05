@@ -67,8 +67,9 @@ export function useBatchSummary(domainId: string) {
   const [state, setState] = useState<BatchSummaryState>(initialState);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
 
-  const updateSummary = useCallback((userId: number, data: Partial<StudentSummaryData>) => {
+  const updateSummary = useCallback((userId: number, data: Partial<StudentSummaryData>, expectedJobId?: string) => {
     setState(prev => {
+      if (expectedJobId !== undefined && prev.jobId !== expectedJobId) return prev;
       const next = new Map(prev.summaries);
       const existing = next.get(userId) || {
         userId,
@@ -563,6 +564,7 @@ export function useBatchSummary(domainId: string) {
     loadExisting,
     publishAll,
     retryStudent,
+    updateSummary,
     cleanup,
   };
 }

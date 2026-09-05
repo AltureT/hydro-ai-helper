@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 /**
  * VersionBadge - 版本徽章组件
  *
@@ -580,7 +581,7 @@ export const VersionBadge: React.FC = () => {
                 alignItems: 'center',
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
-                  <span style={{ fontSize: '14px' }}>{'\u2713'}</span>
+                  <span style={{ fontSize: '14px' }}>{<Icon name="check" size={14} />}</span>
                   <span style={{ fontSize: '14px' }}>
                     {i18n('ai_helper_admin_version_up_to_date')}
                   </span>

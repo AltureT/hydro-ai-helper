@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React from 'react';
 import { i18n } from '../utils/i18n';
 import {
@@ -100,7 +101,7 @@ export const TestdataRoleModelSelector: React.FC<TestdataRoleModelSelectorProps>
         [moved[index], moved[target]] = [moved[target], moved[index]];
         onChange(role, moved);
       },
-    }, action === 'up' ? '↑' : action === 'down' ? '↓' : '×'))));
+    }, React.createElement(Icon, { name: action === 'up' ? 'arrowUp' : action === 'down' ? 'arrowDown' : 'close' })))));
     const optionElements = options.map(option => React.createElement('option', {
       key: `${role}-${option.endpointId}-${option.modelName}`,
       value: `${option.endpointId}${SEPARATOR}${option.modelName}`,
