@@ -78,8 +78,8 @@ function createContext(spec = validSpec()) {
 }
 
 describe('frozen test-data pipeline context', () => {
-  it('uses prompt v3 while preserving checkpoint schema v2', () => {
-    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v3');
+  it('uses prompt v4 while preserving checkpoint schema v2', () => {
+    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v6');
     expect(TESTDATA_CHECKPOINT_SCHEMA_VERSION).toBe(2);
   });
 
@@ -286,7 +286,7 @@ describe('frozen test-data pipeline context', () => {
     expect(prompt).toContain('不得修改');
   });
 
-  it('emits v3 checkpoint metadata with hashes only, never statement, Spec, or endpointId', async () => {
+  it('emits current checkpoint metadata with hashes only, never statement, Spec, or endpointId', async () => {
     const context = createContext();
     const onCheckpoint = jest.fn();
     const service = new TestdataGenService({ chat: jest.fn() } as never, {
@@ -308,7 +308,7 @@ describe('frozen test-data pipeline context', () => {
     const update = onCheckpoint.mock.calls[0][0];
     expect(update).toMatchObject({
       checkpointSchemaVersion: 2,
-      promptVersion: 'testdata-generation-v3',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       statementHash: statement.statementHash,
       specHash: context.specHash,
       roleDependencies: { oracle: expect.stringMatching(/^[a-f0-9]{64}$/) },

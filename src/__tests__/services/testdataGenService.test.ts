@@ -1483,8 +1483,8 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(system).toContain('默认每个文件固定 T=1');
     expect(system).toContain('GENERATOR 只生成 .in，不生成答案');
     expect(system).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
-    expect(system).toContain('每个 input 的 UTF-8 内容必须小于 256KB');
-    expect(system).toContain('全部 .in/.out 与辅助文件合计必须小于 1MB');
+    expect(system).toContain('每个 input 的 UTF-8 内容必须不超过 4 MiB');
+    expect(system).toContain('全部 .in/.out 与辅助文件合计必须不超过 8 MiB');
     const user = buildSandboxBlueprintUserPrompt({
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
@@ -5663,7 +5663,7 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
-  it('v3 checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
+  it('current checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
     const statementMarkdown = 'Input one integer and output it.';
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
     const checkpoint = makeFrozenV3Checkpoint(statementMarkdown, {
@@ -6245,6 +6245,36 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
+  it('generator repair budget conflicts stop without full repair or model fallback', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
+          + JSON.stringify({ scope: 'input', minimumBytes: 12_000_000 }), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('Output Limit Exceeded')),
+      runPythonBatch: jest.fn(), runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({ problemTitle: 'budget conflict', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'GENERATOR_OUTPUT_TOO_LARGE', retryPolicy: 'manual-review',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    expect(runner.runPython).toHaveBeenCalledTimes(1);
+  });
+
   it('STRESS_GENERATOR 自动修复请求失败时完整保留原失败契约', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const duplicatedStress = JSON.stringify({
@@ -6367,6 +6397,10 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
     const repairPrompt = mockClient.chat.mock.calls[4][0][2].content;
     const expectedMarker = scope === 'brute' ? '@@@BRUTE@@@' : '@@@STRESS_GENERATOR@@@';
+    const repairSystem = mockClient.chat.mock.calls[4][1];
+    expect(repairSystem.match(/^@@@[^\n]+@@@$/gm)).toEqual([expectedMarker]);
+    expect(repairSystem).not.toContain('只输出以下四个必需分节');
+    expect(mockClient.chat.mock.calls.every(call => call[2]?.contentMode === 'raw')).toBe(true);
     expect(repairPrompt.match(new RegExp(expectedMarker, 'g'))).toHaveLength(1);
     for (const marker of [
       '@@@VALIDATOR@@@', '@@@VALIDATOR_MANIFEST@@@', '@@@VALIDATOR_PROBE_RECIPES@@@',
@@ -6755,7 +6789,7 @@ describe('TestdataGenService.generate', () => {
     });
 
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    expect(mockClient.chat.mock.calls[1][1]).toContain('=== SUBTASKS ===');
+    expect(mockClient.chat.mock.calls[1][1]).toContain('@@@SUBTASKS@@@');
     expect(mockClient.chat.mock.calls[3][0][0].content).toContain('CASE 1: 子任务 1');
     expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
     const config = yaml.load(
@@ -6864,7 +6898,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 META');
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 @@@META@@@');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
 
@@ -9482,9 +9516,9 @@ describe('两阶段沙箱蓝图', () => {
   it('仅在编译能力可用时向模型提供 ORACLE_LANG C++ 契约', () => {
     expect(buildSolutionBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
     expect(buildSandboxBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
-    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('@@@ORACLE_LANG@@@');
     expect(buildSolutionBlueprintSystemPrompt(true)).toContain('C++17');
-    expect(buildSandboxBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+    expect(buildSandboxBlueprintSystemPrompt(true)).toContain('@@@ORACLE_LANG@@@');
   });
 
   it('第一阶段 Prompt 只要求解题，第二阶段只要求外围制品', () => {
@@ -9502,7 +9536,7 @@ describe('两阶段沙箱蓝图', () => {
     expect(solutionSystem).toContain('@@@ORACLE@@@');
     expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
     expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
-    expect(solutionSystem).toContain('=== SUBTASKS ===');
+    expect(solutionSystem).toContain('@@@SUBTASKS@@@');
     expect(solutionSystem).toContain('仅当题面明确给出子任务/分数表时输出该分节');
     expect(solutionSystem).toContain('约束摘要为该子任务的完整生效约束');
     expect(solutionSystem).toContain('NOTES 至多 2 句');
@@ -9852,7 +9886,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
   it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
     expect(sp).toContain('@@@SOLUTION:py@@@');
-    expect(sp).toContain('=== SUBTASKS ===');
+    expect(sp).toContain('@@@SUBTASKS@@@');
     expect(sp).not.toContain('@@@BRUTE@@@');
     expect(sp).not.toContain('@@@VALIDATOR@@@');
     expect(sp).toContain('独立调用中生成验证器');
@@ -9894,7 +9928,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(system).toContain('合法输入必须接受，非法输入必须拒绝');
     expect(system).toContain('不得添加题面没有的额外限制');
     expect(system).not.toContain('宁可过严拒绝');
-    expect(system).toContain('=== COMPLEXITY_GAP ===');
+    expect(system).toContain('@@@COMPLEXITY_GAP@@@');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
     expect(verifier.bruteCode).toContain('independent brute');
@@ -14150,7 +14184,7 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
     });
     expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
-    expect(plan.promptVersion).toBe('testdata-generation-v3');
+    expect(plan.promptVersion).toBe(TESTDATA_PIPELINE_PROMPT_VERSION);
     expect(plan.originalFileHashes).toEqual(Object.fromEntries(
       plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
     ));

@@ -1,0 +1,32 @@
+import { TestdataPipelineError } from './failures';
+
+export const TESTDATA_CODE_FILE_MAX_BYTES = 256 * 1024;
+export const TESTDATA_INPUT_MAX_BYTES = 4 * 1024 * 1024;
+export const TESTDATA_PLAN_MAX_BYTES = 8 * 1024 * 1024;
+export const GENERATOR_REPLAY_DATA_FILENAME = 'generator-data.b64';
+
+/** The larger allowance is for data, never for model-generated executable code. */
+export function testdataFileByteLimit(name: string): number {
+  return name.endsWith('.in') || name === GENERATOR_REPLAY_DATA_FILENAME
+    ? TESTDATA_INPUT_MAX_BYTES : TESTDATA_CODE_FILE_MAX_BYTES;
+}
+
+export function assertTestdataPlanBudget(plan: { files: ReadonlyArray<{ name: string; content: string }> }): void {
+  let total = 0;
+  for (const file of plan.files) {
+    const content = file.content.replace(/\r\n?/g, '\n');
+    const bytes = Buffer.byteLength(content, 'utf8') + (content.endsWith('\n') ? 0 : 1);
+    const maxBytes = testdataFileByteLimit(file.name);
+    if (bytes > maxBytes) {
+      throw new TestdataPipelineError('生成文件超过对应类型的大小上限',
+        'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'manual-review', { actualBytes: bytes, maxBytes });
+    }
+    total += bytes;
+  }
+  // Leave headroom under MongoDB's document limit for job/checkpoint metadata.
+  if (total > TESTDATA_PLAN_MAX_BYTES || Buffer.byteLength(JSON.stringify(plan), 'utf8') > 12 * 1024 * 1024) {
+    throw new TestdataPipelineError('生成计划超过总量或序列化大小上限，未缩减测试覆盖',
+      'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'manual-review',
+      { actualBytes: total, maxBytes: TESTDATA_PLAN_MAX_BYTES });
+  }
+}

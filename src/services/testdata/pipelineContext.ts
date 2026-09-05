@@ -11,7 +11,7 @@ import type { StatementSnapshot } from './statementSnapshot';
 import { TestdataPipelineError } from './failures';
 
 export const TESTDATA_CHECKPOINT_SCHEMA_VERSION = 2 as const;
-export const TESTDATA_PIPELINE_PROMPT_VERSION = 'testdata-generation-v3' as const;
+export const TESTDATA_PIPELINE_PROMPT_VERSION = 'testdata-generation-v6' as const;
 
 export interface TestdataPipelineContext {
   runId: string;

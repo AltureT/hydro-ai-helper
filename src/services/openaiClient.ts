@@ -147,6 +147,8 @@ export interface ChatAttemptEvent {
  */
 export interface ChatCallOptions {
   signal?: AbortSignal;
+  /** 非流式响应：默认 display 添加聊天展示标记；raw 原样保留最终 content 供机器解析。 */
+  contentMode?: 'display' | 'raw';
   /**
    * 覆盖本次请求的 max_tokens：
    * - 未设置：使用全局默认 API_DEFAULTS.MAX_COMPLETION_TOKENS
@@ -396,7 +398,7 @@ export class OpenAIClient {
       const msgAny = message as Record<string, unknown> | undefined;
       const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning) as string | undefined;
       const content = message?.content;
-      const aiMessage = reasoning
+      const aiMessage = reasoning && options?.contentMode !== 'raw'
         ? `<think>(thinking...)</think>${content || ''}`
         : content;
       if (!aiMessage) {
@@ -873,6 +875,7 @@ export class MultiModelClient {
               signal: totalAc.signal,
               maxTokens: options?.maxTokens,
               timeoutMs: options?.timeoutMs,
+              contentMode: options?.contentMode,
             });
             const fallbackErrors = errors.length > 0 ? errors.map(e => ({
               endpoint: e.endpointId, model: e.modelName,

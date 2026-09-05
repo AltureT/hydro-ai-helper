@@ -14,6 +14,8 @@
 import { ContestModel, Handler, PRIV, PERM, ProblemModel, StorageModel, SystemModel, STATUS, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
 import { createHash } from 'crypto';
+import { open as openFile } from 'fs/promises';
+import { testdataFileByteLimit } from '../services/testdata/fileBudget';
 import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import { createTestdataRoleClientsFromConfig } from '../services/testdata/modelRoles';
@@ -1746,9 +1748,10 @@ export class TestdataGenSkeletonHandler extends Handler {
 // ─── TestdataGenApplyHandler ──────────────────────────────────────────────────
 
 interface ApplyRequestBody {
+  payload?: string;
   problemId?: string;
   jobId?: string;
-  files?: Array<{ name?: string; content?: string }>;
+  files?: Array<{ name?: string; content?: string; fromJob?: boolean; uploadField?: string }>;
 }
 
 /**
@@ -1768,7 +1771,17 @@ export class TestdataGenApplyHandler extends Handler {
     try {
       if (rejectIfCsrfInvalid(this)) return;
       const domainId = getDomainId(this);
-      const body = (this.request.body || {}) as ApplyRequestBody;
+      let body = (this.request.body || {}) as ApplyRequestBody;
+      if (body.payload !== undefined) {
+        try {
+          if (typeof body.payload !== 'string' || Buffer.byteLength(body.payload, 'utf8') > 64 * 1024) throw new Error('manifest too large');
+          body = JSON.parse(body.payload);
+          if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('invalid manifest');
+        } catch {
+          sendError(this, 400, 'INVALID_CONTENT', 'ai_helper_testdata_err_invalid_content');
+          return;
+        }
+      }
 
       const problemId = String(body.problemId || '');
       if (!problemId) {
@@ -1827,17 +1840,47 @@ export class TestdataGenApplyHandler extends Handler {
         }
         if (seenNames.has(name)) continue; // 去重，保留首个
         seenNames.add(name);
-        if (typeof f.content !== 'string') {
+        const storedFile = f.fromJob === true && generationJob?.plan?.files.find(file => file.name === name);
+        let selectedContent = f.fromJob === true ? storedFile?.content : f.content;
+        if (f.uploadField !== undefined) {
+          const upload = typeof f.uploadField === 'string' && /^file-\d{1,2}$/.test(f.uploadField)
+            ? this.request.files?.[f.uploadField] : undefined;
+          if (f.fromJob !== undefined || f.content !== undefined || !upload || Array.isArray(upload)
+            || typeof upload.filepath !== 'string') {
+            sendError(this, 400, 'INVALID_CONTENT', 'ai_helper_testdata_err_invalid_content');
+            return;
+          }
+          const handle = await openFile(upload.filepath, 'r');
+          try {
+            const stat = await handle.stat();
+            if (!stat.isFile() || stat.size > testdataFileByteLimit(name)) {
+              sendError(this, 400, 'FILE_TOO_LARGE', 'ai_helper_testdata_err_file_too_large');
+              return;
+            }
+            const bytes = await handle.readFile();
+            selectedContent = bytes.toString('utf8');
+            if (!Buffer.from(selectedContent, 'utf8').equals(bytes)) {
+              sendError(this, 400, 'INVALID_CONTENT', 'ai_helper_testdata_err_invalid_content');
+              return;
+            }
+          } finally { await handle.close(); }
+        }
+        if ((f.fromJob !== undefined && (f.fromJob !== true || f.content !== undefined))
+          || typeof selectedContent !== 'string') {
           sendError(this, 400, 'INVALID_CONTENT', 'ai_helper_testdata_err_invalid_content');
           return;
         }
-        const content = normalizeFileContent(f.content);
+        const content = normalizeFileContent(selectedContent);
         const size = Buffer.byteLength(content, 'utf-8');
-        if (size > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
+        if (size > testdataFileByteLimit(name)) {
           sendError(this, 400, 'FILE_TOO_LARGE', 'ai_helper_testdata_err_file_too_large');
           return;
         }
         totalSize += size;
+        if (totalSize > TESTDATA_GEN_LIMITS.MAX_TOTAL_SIZE) {
+          sendError(this, 400, 'TOTAL_TOO_LARGE', 'ai_helper_testdata_err_total_too_large');
+          return;
+        }
         validated.push({ name, content });
       }
       if (totalSize > TESTDATA_GEN_LIMITS.MAX_TOTAL_SIZE) {

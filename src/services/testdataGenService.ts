@@ -54,6 +54,13 @@ import {
 } from './testdata/risk';
 import { getTestdataModelTimeoutMs } from './testdata/latency';
 import {
+  buildGeneratorBudgetPrompt,
+  GENERATOR_BYTE_LIMITS,
+  throwIfGeneratorBudgetConflict,
+} from './testdata/generatorBudget';
+import { GENERATOR_PLAN_CONTRACT } from './testdata/generatorPlanPrompts';
+import { assertTestdataPlanBudget, TESTDATA_CODE_FILE_MAX_BYTES, GENERATOR_REPLAY_DATA_FILENAME } from './testdata/fileBudget';
+import {
   extractStatementSamples,
   type StatementSample,
 } from './testdata/statementSamples';
@@ -113,7 +120,7 @@ import {
   assessGeneratorDslEligibility,
   materializeGeneratorPlan,
   parseGeneratorPlan,
-  renderGeneratorArtifact,
+  renderGeneratorArtifacts,
   type GeneratorPlanV1,
   type MaterializedGeneratorCase,
   type MaterializedGeneratorValue,
@@ -265,6 +272,8 @@ export interface GenerationResponse {
   generatorCode?: string;
   /** 受信 DSL 计划；仅服务端物化路径提供，兼容 Python 生成器时缺失。 */
   generatorPlan?: GeneratorPlanV1;
+  /** Server-generated data companion for large deterministic replays. */
+  generatorReplayData?: string;
   /** 语义覆盖证据来源；旧 Python 生成器始终为未验证。 */
   coverageMode?: CoverageMode;
   /** 沙箱生成模式下实际计算 .out 的可执行标程源码。 */
@@ -631,13 +640,14 @@ export const TESTDATA_GEN_LIMITS = {
   MAX_PROVIDED_STD: 10000,
   MAX_STATEMENT_LENGTH: STATEMENT_SNAPSHOT_HARD_LIMIT,
   /** apply 时单文件内容上限（字节） */
-  MAX_FILE_SIZE: 256 * 1024,
+  MAX_FILE_SIZE: TESTDATA_CODE_FILE_MAX_BYTES,
+  MAX_INPUT_FILE_SIZE: GENERATOR_BYTE_LIMITS.input,
   /** apply 时文件数量上限 */
   MAX_FILE_COUNT: 80,
   /** apply 时所有文件总大小上限（字节） */
-  MAX_TOTAL_SIZE: 1024 * 1024,
+  MAX_TOTAL_SIZE: GENERATOR_BYTE_LIMITS.plan,
   /** 沙箱生成器 stdout（JSON）上限。 */
-  MAX_GENERATOR_OUTPUT_SIZE: 1024 * 1024,
+  MAX_GENERATOR_OUTPUT_SIZE: GENERATOR_BYTE_LIMITS.stdout,
   /** 独立验证器必须生成的内部小数据数量；这些数据不会写入 Hydro。 */
   STRESS_CASES: 60,
   /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
@@ -1797,7 +1807,7 @@ export function buildSolutionBlueprintSystemPrompt(
     ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
     : '2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。';
   const oracleLanguageSection = cppOracleAvailable
-    ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
+    ? '@@@ORACLE_LANG@@@\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
     : '';
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（与 ORACLE_LANG 一致）'
@@ -1819,7 +1829,7 @@ ${oracleRule}
 
 输出格式：
 ${oracleLanguageSection}\
-=== SUBTASKS ===
+@@@SUBTASKS@@@
 可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
@@ -1943,6 +1953,9 @@ export function buildGenerationArtifactsSystemPrompt(
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项。
 
+${GENERATOR_PLAN_CONTRACT}
+预算冲突时遵循用户请求中的 GENERATOR_BUDGET_CONFLICT 协议，仅输出冲突分节，不输出计划或模板。
+
 输出格式：
 @@@GENERATOR_PLAN@@@
 严格 JSON GeneratorPlan v1
@@ -1963,7 +1976,7 @@ export function buildGenerationArtifactsSystemPrompt(
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
-4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
+4. 遵循用户请求中的逐 CASE 字节预算与打印前检查：每个正式 input 至多 4 MiB，GENERATOR JSON 经缓存文件传输、至多 8 MiB；不得静默缩减必要覆盖。确实无法同时满足必要覆盖与预算时仅输出 GENERATOR_BUDGET_CONFLICT 分节，交人工复核。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
@@ -2032,6 +2045,7 @@ export function buildGenerationArtifactsUserPrompt(
         : '- 只输出 GENERATOR 与函数题 TEMPLATE；不得输出或推断 ORACLE、SOLUTION、BRUTE、VALIDATOR。',
       '- 不得重新解释算法规范，不得改变 frozen Spec 的任何字段。',
       buildCoverageGuidanceBlock(coveragePlan),
+      buildGeneratorBudgetPrompt(params.options.caseCount, coveragePlan),
     ].filter(Boolean).join('\n');
   }
   const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
@@ -2044,6 +2058,7 @@ export function buildGenerationArtifactsUserPrompt(
   );
   return [
     base,
+    buildGeneratorBudgetPrompt(params.options.caseCount, coveragePlan),
     '',
     '【第一阶段已验证且必须保持不变的解题蓝图】',
     `problemType: ${solution.problemType}`,
@@ -2070,7 +2085,7 @@ export function buildSandboxBlueprintSystemPrompt(
     ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
     : '5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。';
   const oracleLanguageSection = cppOracleAvailable
-    ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
+    ? '@@@ORACLE_LANG@@@\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
     : '';
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（stdin → stdout，与 ORACLE_LANG 一致）'
@@ -2089,7 +2104,7 @@ ${frozenRule}\
 ${oracleRule}
 6. 函数题必须为用户选定的每一种语言输出 SOLUTION:语言 节：与该语言学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印）。Python 解会与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
 7. 数据必须严格遵守用户消息中的逐 CASE 覆盖计划，并根据题面真实约束交叉变化不同维度；所有生成过程必须确定性，固定随机种子。
-8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），stdout 总量必须小于 1MB。每个 input 的 UTF-8 内容必须小于 256KB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须小于 1MB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
+8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），正式 JSON 总量必须不超过 8 MiB（缓存文件传输）。每个 input 的 UTF-8 内容必须不超过 4 MiB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须不超过 8 MiB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
 10. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 11. 不要输出 BRUTE 或 VALIDATOR；系统会在一次全新的、看不到 ORACLE 实现的独立调用中生成验证器，降低两份算法共享同一错误的风险。
@@ -2098,7 +2113,7 @@ ${oracleRule}
 
 输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
 ${oracleLanguageSection}\
-=== SUBTASKS ===
+@@@SUBTASKS@@@
 可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
@@ -2157,7 +2172,7 @@ export function buildIndependentVerifierSystemPrompt(
 13. 禁止字段 input；禁止字段 subtaskId；禁止字段 subtask；禁止字段 seedIndex；禁止字段 seed；禁止字段 value；禁止字段 code；也禁止任何其他额外字段。服务器自行选择 seed、subtask、value、expression 与 input；recipe 不得提供原始输入、物化值、可执行表达式或调用 payload。Manifest 与 recipe 两节均禁止代码围栏或 JSON 前后缀。` : '';
   const sectionContract = frozenSpec
     ? `只输出以下分节，顺序不得改变；函数题存在题面样例时再在末尾输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
-=== COMPLEXITY_GAP ===
+@@@COMPLEXITY_GAP@@@
 exists 或 none
 @@@BRUTE@@@
 完整 Python 3 暴力解
@@ -2172,7 +2187,7 @@ exists 或 none
 @@@SAMPLE_INPUTS@@@
 函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`
     : `只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
-=== COMPLEXITY_GAP ===
+@@@COMPLEXITY_GAP@@@
 exists 或 none
 @@@BRUTE@@@
 完整 Python 3 暴力解
@@ -2256,6 +2271,8 @@ export function buildIndependentVerifierUserPrompt(
   ].filter(line => line !== '').join('\n');
 }
 
+const NO_KILL_TARGETS_RESPONSE = 'NO_KILL_TARGETS';
+
 /** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
 export function buildKillTargetsSystemPrompt(frozenSpec = false): string {
   const sourceContract = frozenSpec
@@ -2272,7 +2289,7 @@ export function buildKillTargetsSystemPrompt(frozenSpec = false): string {
 1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
 2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
 3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
-4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时保持响应为空，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时只输出 ${NO_KILL_TARGETS_RESPONSE}，禁止空响应，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
 === KILL_TARGET:<kind> ===
 DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\`python
@@ -2849,6 +2866,8 @@ export function parseKillTargetsResponse(
   let current: { kind: string; lines: string[] } | null = null;
   const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
 
+  if (text.trim() === NO_KILL_TARGETS_RESPONSE) return [];
+
   for (const line of text.split(/\r?\n/)) {
     const marker = line.match(markerRe);
     if (marker) {
@@ -2940,7 +2959,7 @@ export function mergeHackCases(
 }
 
 /**
- * ORACLE_LANG 使用独立的 === 分节，避免改变既有 @@@ 代码分节契约。
+ * ORACLE_LANG 使用统一的 @@@ 分节，同时保留旧 === 元数据的读取兼容。
  * 缺失、损坏或未知值一律回退 Python；函数题始终忽略 cpp 声明。
  */
 export function parseOracleLanguage(
@@ -2949,18 +2968,18 @@ export function parseOracleLanguage(
 ): OracleLanguage {
   if (problemType === 'function') return 'python';
   const match = raw.match(
-    /(?:^|\r?\n)[ \t]*===\s*ORACLE_LANG\s*===\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i,
+    /(?:^|\r?\n)[ \t]*(?:@@@ORACLE_LANG@@@|===\s*ORACLE_LANG\s*===)\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i,
   );
   return match?.[1].toLowerCase() === 'cpp' ? 'cpp' : 'python';
 }
 
 /**
- * SUBTASKS 使用独立的 === 分节，不改变既有 @@@ 代码分节契约。
+ * SUBTASKS 使用统一的 @@@ 分节，同时保留旧 === 元数据的读取兼容。
  * 任一行不满足严格格式时整体丢弃，后续即可无歧义地降级为扁平生成。
  */
 export function parseSubtasksSection(raw: string): SubtaskSpec[] {
   const match = raw.match(
-    /(?:^|\r?\n)[ \t]*===\s*SUBTASKS\s*===\s*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i,
+    /(?:^|\r?\n)[ \t]*(?:@@@SUBTASKS@@@|===\s*SUBTASKS\s*===)[ \t]*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i,
   );
   const content = match?.[1].trim();
   if (!content) return [];
@@ -3176,6 +3195,7 @@ export function parseGenerationArtifacts(
   parseOptions: ParseAiResponseOptions = {},
 ): SandboxGenerationArtifacts {
   const sections = splitDelimitedSections(raw);
+  throwIfGeneratorBudgetConflict(raw, sections);
   if (sections.length === 0) throw new Error('AI 未返回外围制品分节标记');
   const allowGeneratorPlan = !!parseOptions.generatorDsl;
   const forbidden = sections.find(section => {
@@ -3219,7 +3239,7 @@ export function parseGenerationArtifacts(
       generatorDsl.expectedCaseCount,
     );
     const materialized = materializeGeneratorPlan(generatorPlan, generatorDsl.spec);
-    generatorCode = renderGeneratorArtifact(generatorPlan, materialized);
+    generatorCode = renderGeneratorArtifacts(generatorPlan, materialized).code;
   }
   if (problemType === 'function' && !parseOptions.allowMissingTemplates) {
     const missing = languages.filter(lang => !templates[lang]?.trim());
@@ -3241,7 +3261,7 @@ export function parseIndependentVerifierBlueprint(
 ): IndependentVerifierBlueprint {
   const lines = raw.replace(/<think>[\s\S]*?<\/think>/g, '').split(/\r?\n/);
   const complexityGapMarker = lines.findIndex(line =>
-    /^[ \t]*===\s*COMPLEXITY_GAP\s*===\s*$/i.test(line));
+    /^[ \t]*(?:@@@COMPLEXITY_GAP@@@|===\s*COMPLEXITY_GAP\s*===)[ \t]*$/i.test(line));
   let complexityGap: IndependentVerifierBlueprint['complexityGap'];
   if (complexityGapMarker >= 0) {
     const nextLine = lines[complexityGapMarker + 1];
@@ -4009,15 +4029,17 @@ interface GeneratedInputCase {
 }
 
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
-export function parseGeneratorOutput(stdout: string, expectedCount: number): GeneratedInputCase[] {
-  if (Buffer.byteLength(stdout, 'utf8') > TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
-    throw toPipelineError(new Error('GENERATOR 输出超过 1MB 上限'), {
+export function parseGeneratorOutput(stdout: string, expectedCount: number, stress = false): GeneratedInputCase[] {
+  const outputLimit = stress ? 1024 * 1024 : TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE;
+  const inputLimit = stress ? TESTDATA_CODE_FILE_MAX_BYTES : TESTDATA_GEN_LIMITS.MAX_INPUT_FILE_SIZE;
+  if (Buffer.byteLength(stdout, 'utf8') > outputLimit) {
+    throw toPipelineError(new Error(`GENERATOR 输出超过 ${outputLimit} 字节上限`), {
       code: 'GENERATOR_OUTPUT_TOO_LARGE',
       stage: 'generator',
       artifact: 'generator',
       safeDetails: {
         actualBytes: Buffer.byteLength(stdout, 'utf8'),
-        maxBytes: TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE,
+        maxBytes: outputLimit,
       },
     });
   }
@@ -4064,15 +4086,15 @@ export function parseGeneratorOutput(stdout: string, expectedCount: number): Gen
       });
     }
     const input = normalizeFileContent((item as { input: string }).input);
-    if (Buffer.byteLength(input, 'utf8') > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-      throw toPipelineError(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 256KB 上限`), {
+    if (Buffer.byteLength(input, 'utf8') > inputLimit) {
+      throw toPipelineError(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 ${inputLimit} 字节上限`), {
         code: 'GENERATOR_OUTPUT_TOO_LARGE',
         stage: 'generator',
         artifact: 'generator',
         safeDetails: {
           caseIndex: index + 1,
           actualBytes: Buffer.byteLength(input, 'utf8'),
-          maxBytes: TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
+          maxBytes: inputLimit,
         },
       });
     }
@@ -4744,6 +4766,7 @@ interface CachedOracleState {
 }
 
 export interface MaterializationCacheState {
+  generatorReplay?: { code: string; data?: string };
   correctnessBudgetRemainingMs?: number;
   generatedInputs?: GeneratedInputCase[];
   stress?: CachedStressInputs;
@@ -5195,6 +5218,7 @@ export async function materializeSandboxBlueprint(
   }
   const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
   let effectiveGeneratorCode = blueprint.generatorCode;
+  let generatorReplayData: string | undefined;
   const checkBudget = () => {
     if (Date.now() >= sandboxDeadlineAt) {
       throw toPipelineError(new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'), {
@@ -5228,7 +5252,10 @@ export async function materializeSandboxBlueprint(
         blueprint.generatorPlan,
         materialization.coverageProof.pipelineContext.spec,
       );
-      effectiveGeneratorCode = renderGeneratorArtifact(blueprint.generatorPlan, materialized);
+      const replay = renderGeneratorArtifacts(blueprint.generatorPlan, materialized);
+      cache.generatorReplay = replay;
+      effectiveGeneratorCode = replay.code;
+      generatorReplayData = replay.data;
       const authoritativeAllocations = materialization.coverageProof.tieredDecision?.enabled
         ? materialization.coverageProof.tieredDecision.allocations
         : [];
@@ -5241,14 +5268,12 @@ export async function materializeSandboxBlueprint(
         structuredValues: item.values,
       }));
     } else {
+      delete cache.generatorReplay;
       let generatorResult: PythonRunResult;
       try {
-        generatorResult = await runner.runPython(
-          blueprint.generatorCode,
-          '',
-          signal,
-          sandboxDeadlineAt,
-        );
+        generatorResult = runner.runPythonGenerator
+          ? await runner.runPythonGenerator(blueprint.generatorCode, signal, sandboxDeadlineAt)
+          : await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
       } catch (err) {
         if (isCancellation(err)) throw err;
         throw toSandboxExecutionPipelineError(err, {
@@ -5268,6 +5293,10 @@ export async function materializeSandboxBlueprint(
     delete cache.templateChecks;
   } else {
     generatedInputs = cache.generatedInputs as GeneratedInputCase[];
+    if (cache.generatorReplay) {
+      effectiveGeneratorCode = cache.generatorReplay.code;
+      generatorReplayData = cache.generatorReplay.data;
+    }
   }
   const inputs = generatedInputs.map(item => item.input);
   const structuredCases: MaterializedGeneratorCase[] | undefined = generatedInputs.every(
@@ -5345,6 +5374,7 @@ export async function materializeSandboxBlueprint(
         stressGenerated = parseGeneratorOutput(
           stressGeneratorResult.stdout,
           TESTDATA_GEN_LIMITS.STRESS_CASES,
+          true,
         );
       } catch (err) {
         const code = err instanceof TestdataPipelineError
@@ -6243,6 +6273,7 @@ export async function materializeSandboxBlueprint(
     templates: blueprint.templates,
     stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
     generatorCode: effectiveGeneratorCode,
+    generatorReplayData,
     generatorPlan: blueprint.generatorPlan,
     coverageMode: coverage.mode,
     oracleCode: blueprint.oracleCode,
@@ -6484,6 +6515,10 @@ export function assemblePlan(
         : sandbox ? 'executed' : 'ai-only',
       response.generatorPlan ? FILE_PURPOSES.trustedGenerator : FILE_PURPOSES.generator,
     );
+  }
+  if (response.generatorPlan && response.generatorReplayData) {
+    files.push({ name: GENERATOR_REPLAY_DATA_FILENAME, content: response.generatorReplayData,
+      kind: 'generator', origin: 'deterministic' });
   }
   if (sandbox && response.bruteCode?.trim()) {
     pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
@@ -7122,6 +7157,51 @@ function repairScopeForPipelineFailure(error: TestdataPipelineError): SandboxRep
   }
 }
 
+/** 定向修复与初始生成采用不同输出契约，历史完整制品只作为修复上下文。 */
+export function buildSandboxRepairSystemPrompt(scope: SandboxRepairScope, frozenSpec = false): string {
+  const contracts: Partial<Record<SandboxRepairScope, { header: string; rule: string }>> = {
+    generator: {
+      header: 'GENERATOR',
+      rule: '输出自包含 Python 3 输入生成器，按本轮请求中的正式点数量、覆盖计划和字节预算生成紧凑 JSON；固定随机种子，禁止日志或无界循环。预算确实冲突时改为只输出请求约定的 GENERATOR_BUDGET_CONFLICT 分节，不得同时输出代码。',
+    },
+    'stress-generator': {
+      header: 'STRESS_GENERATOR',
+      rule: `输出自包含 Python 3 小数据生成器；固定随机种子，恰好 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法输入，至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组不同。stdout 为紧凑 JSON 且小于 1MB，每个 input 小于 256KB，所有数据须让既有 BRUTE 在 5 秒内完成。`,
+    },
+    'function-samples': {
+      header: 'SAMPLE_INPUTS',
+      rule: '输出严格 JSON {"samples":[{"id":"1","input":"原始 stdin"}]}；只转换题面样例输入，保留全部原始样例 id，不得增加或改写期望输出。',
+    },
+    validator: {
+      header: 'VALIDATOR',
+      rule: '输出自包含 Python 3 输入校验器；合法输入静默 exit 0，非法输入向 stderr 说明并 exit 1。完整校验题面约束，不得增加额外限制或无条件成功。'
+        + (frozenSpec ? ' 无参数时校验全局约束；仅允许恰好 --subtask <known-positive-integer> 校验全局与已知子任务约束；未知、缺少、非整数、重复或多余参数均须拒绝，不得从 stdin 读取子任务标签或接收 probe input。既有 Manifest 与 probe recipes 保持不变。' : ''),
+    },
+    oracle: {
+      header: 'ORACLE',
+      rule: '输出完整可执行标程，语言遵循本轮修复请求，保留已确定的输入输出协议和标准答案权威约定；不得硬编码样例或答案表，独立 BRUTE 由另一调用验证。',
+    },
+    brute: {
+      header: 'BRUTE',
+      rule: '输出自包含 Python 3 朴素正确解，读取既定 stdin 并输出完整答案；独立枚举或模拟，不得复制 ORACLE 实现、删除求解逻辑或硬编码答案。',
+    },
+    ...Object.fromEntries((['py', 'java', 'cc'] as const).map(language => [`template-${language}`, {
+      header: `TEMPLATE:${language}`,
+      rule: `只修复 ${LANG_DISPLAY[language]} 调用模板，保留既有学生解、接口和 stdin 编码，按既有拼接/编译约定解析输入、调用接口并打印结果。`,
+    }])),
+  };
+  const contract = contracts[scope];
+  if (!contract) throw new Error(`不支持定向修复范围：${scope}`);
+  return `你负责单一制品的定向修复。本次只输出 ${contract.header}，历史完整回答仅作为定位错误的上下文，不代表本轮输出要求。禁止重发其他制品、代码围栏或解释文字。
+${isVerifierRepairScope(scope) ? '验证制品只依据题面与已确定的 stdin 编码独立实现；不得要求或依赖 ORACLE 源码来推断题意。' : '遵循本轮请求中已确定的题意、接口和标准答案权威约定。'}
+${frozenSpec ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；题型、testCaseMode、stdin encoding、outputPolicy、subtasks 及约束引用必须保持不变。' : '保持已确定的输入输出协议与所有题面约束不变。'}
+${contract.rule}
+
+输出格式（只能有下面这一个分节，标记必须独占一行且逐字一致）：
+@@@${contract.header}@@@
+修复后的正文原文`;
+}
+
 export function buildSandboxRepairPrompt(
   error: unknown,
   options: GenerateOptions,
@@ -7164,9 +7244,11 @@ export function buildSandboxRepairPrompt(
 ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
-请只输出修复后的 @@@GENERATOR@@@。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
+${buildGeneratorBudgetPrompt(options.caseCount, coveragePlan)}
+
+预算可行时，请只输出修复后的 @@@GENERATOR@@@；预算确实冲突时只返回上述冲突分节。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
 1. stdout 只能是包含恰好 ${options.caseCount} 个 cases 的紧凑 JSON，使用 json.dumps(..., ensure_ascii=False, separators=(',', ':'))。
-2. stdout 必须小于 1MB，每个 input 的 UTF-8 内容必须小于 256KB，且全部 .in/.out 与辅助文件合计必须小于 1MB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
+2. 正式 GENERATOR JSON 经缓存文件传输，至多 8 MiB，每个 input 的 UTF-8 内容至多 4 MiB，且全部 .in/.out 与辅助文件合计必须不超过 8 MiB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
 3. 每个 input 必须合法且符合逐 CASE 覆盖计划；若临界数据过大，使用能保留边界/复杂度特征的可解析构造。
 4. 只使用请求的分节标记和源码原文，不要代码围栏。`;
   }
@@ -7226,7 +7308,7 @@ ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
 请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
-1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
+1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容至多 4 MiB，正式 JSON 及全部 .in/.out 与辅助文件分别至多 8 MiB。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
 3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含每个已选语言的学生解 ${options.languages.map(lang => `@@@SOLUTION:${lang}@@@`).join('、')} 与全部模板：${templates}。
@@ -7243,8 +7325,8 @@ export function buildIndependentVerifierRepairPrompt(
   if (context) {
     const strictRepair = buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples)
       .replace(
-        '请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@',
-        '请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
+        '请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@',
+        '请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
           + '@@@VALIDATOR_MANIFEST@@@、可选的 @@@VALIDATOR_PROBE_RECIPES@@@、@@@VALIDATOR@@@',
       );
     return [
@@ -7264,7 +7346,7 @@ export function buildIndependentVerifierRepairPrompt(
   return `独立验证制品未通过解析或 Hydro 沙箱验证：
 ${detail}
 
-请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
+请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
 1. BRUTE 必须是与 ORACLE 隔离的朴素正确实现，不能通过删除逻辑或硬编码答案绕过对拍。
 2. STRESS_GENERATOR 必须恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；固定随机种子，所有数据均能让 BRUTE 在 5 秒内完成。
 3. VALIDATOR 必须严格检查题面格式与约束，不得无条件成功。
@@ -7313,6 +7395,7 @@ export function mergeSandboxBlueprintRepair(
   const sections = singleHeader
     ? parseStrictSingleRepairSection(raw, singleHeader)
     : splitDelimitedSections(raw);
+  if (scope === 'generator') throwIfGeneratorBudgetConflict(raw, sections);
   if (sections.length === 0) throw new Error('AI 定向修复未返回分节标记');
   const solutions = normalizeTemplateSolutions(original);
   const merged: SandboxGenerationBlueprint = {
@@ -7977,6 +8060,7 @@ export class TestdataGenService {
   }
 
   private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
+    assertTestdataPlanBudget(plan);
     plan.runId = params.runId || plan.runId || createTestdataRunId();
     plan.promptVersion = TESTDATA_PIPELINE_PROMPT_VERSION;
     plan.modelCallCount = this.modelCallBudget.callCount;
@@ -8348,6 +8432,7 @@ export class TestdataGenService {
   ): ChatCallOptions {
     return {
       signal: params.signal,
+      contentMode: 'raw',
       maxTokens: null,
       // 保留完整输出预算，只给单次模型调用设置宽松且可配置的墙钟上限。
       timeoutMs: getTestdataModelTimeoutMs(),
@@ -8751,6 +8836,13 @@ export class TestdataGenService {
       };
     } catch (parseError) {
       if (isCancellation(parseError)) throw parseError;
+      if (parseError instanceof TestdataPipelineError && parseError.retryPolicy === 'manual-review') {
+        throw new TestdataGenerationError(parseError.message, 'artifacts_parse', results, false,
+          undefined, undefined, {
+            code: parseError.code, artifact: parseError.artifact, retryPolicy: parseError.retryPolicy,
+            safeDetails: parseError.safeDetails, failedModelRole: 'artifacts',
+          });
+      }
       const repairResult = await artifactsClient.chat(
         [
           { role: 'user', content: userPrompt },
@@ -8776,6 +8868,14 @@ export class TestdataGenService {
           sourceContent: repairResult.content,
         };
       } catch (repairParseError) {
+        if (repairParseError instanceof TestdataPipelineError && repairParseError.retryPolicy === 'manual-review') {
+          throw new TestdataGenerationError(repairParseError.message, 'artifacts_parse', results, false,
+            undefined, undefined, {
+              code: repairParseError.code, artifact: repairParseError.artifact,
+              retryPolicy: repairParseError.retryPolicy, safeDetails: repairParseError.safeDetails,
+              failedModelRole: 'artifacts',
+            });
+        }
         throw new TestdataGenerationError(
           `AI 自动修复外围制品后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`,
           'artifacts_parse',
@@ -9408,7 +9508,7 @@ export class TestdataGenService {
               + (cppInfraFailure
                 ? 'C++ 编译基础设施暂时不可用，请把 ORACLE 改写为 Python 3。'
                 : '')
-              + '请重新完整输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
+              + '请重新完整输出 @@@META@@@、@@@ANALYSIS@@@、@@@ORACLE@@@，以及函数题需要的 SOLUTION/SAMPLE_INPUTS 分节；标记必须独占一行且逐字一致。禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
           },
         ],
         solutionSystemPrompt,
@@ -9423,7 +9523,7 @@ export class TestdataGenService {
           expectedFunctionSamples,
         );
         if (
-          !/^[ \t]*===\s*SUBTASKS\s*===\s*$/im.test(repairResult.content)
+          !/^[ \t]*(?:@@@SUBTASKS@@@|===\s*SUBTASKS\s*===)[ \t]*$/im.test(repairResult.content)
           && originalParsedSubtasks?.length
         ) {
           repairedSolution.subtasks = originalParsedSubtasks;
@@ -9815,7 +9915,7 @@ export class TestdataGenService {
                 ),
               },
             ],
-            verifierState.systemPrompt,
+            buildSandboxRepairSystemPrompt(repairScope, !!context),
             callOptions,
           );
         } else if (repairScope === 'full') {
@@ -9861,11 +9961,7 @@ export class TestdataGenService {
                 ),
               },
             ],
-            repairScope === 'oracle'
-              ? solutionSystemPrompt
-              : repairScope === 'generator'
-                ? buildGenerationArtifactsSystemPrompt(!!context, false)
-                : artifactsSystemPrompt,
+            buildSandboxRepairSystemPrompt(repairScope, !!context),
             callOptions,
           );
           if (repairScope === 'oracle') {
@@ -9929,6 +10025,8 @@ export class TestdataGenService {
             );
           }
         } catch (targetedParseError) {
+          if (targetedParseError instanceof TestdataPipelineError
+            && targetedParseError.retryPolicy === 'manual-review') throw targetedParseError;
           if (repairScope === 'full' || isVerifierRepairScope(repairScope)) throw targetedParseError;
           usedFullRepair = true;
           failedModelRole = context ? undefined : 'oracle';
