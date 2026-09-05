@@ -268,7 +268,7 @@ describe('TestdataGenerationJobModel', () => {
     expect(JSON.stringify(checkpoint.roleDependencies)).not.toContain('endpointId');
   });
 
-  it('v3 prompt invalidates v2 verifier checkpoints and restores safe v3 metadata', () => {
+  it('current prompt invalidates old verifier checkpoints and restores safe current metadata', () => {
     const verifier = {
       bruteCode: 'print(input())',
       validatorCode: 'import sys\nsys.exit(0)',
@@ -296,7 +296,7 @@ describe('TestdataGenerationJobModel', () => {
       problemId: createParams.problemId,
       createdBy: createParams.createdBy,
       checkpointSchemaVersion: TESTDATA_CHECKPOINT_SCHEMA_VERSION,
-      promptVersion: 'testdata-generation-v3',
+      promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION,
       optionsHash: 'options',
       statementHash: 'statement',
       specHash: 'a'.repeat(64),
@@ -306,20 +306,24 @@ describe('TestdataGenerationJobModel', () => {
       status: 'interrupted' as const,
       checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v2' },
     };
-    const v3Job = {
+    const currentJob = {
       ...createParams,
       status: 'interrupted' as const,
-      checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v3' },
+      checkpoint: { ...checkpointBase, promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION },
     };
 
-    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v3');
+    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v5');
+    const v4Job = { ...currentJob, checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v4' } };
+    expect(selectTestdataResumeCheckpoint(v4Job, expected)).toBeUndefined();
+    const v3Job = { ...currentJob, checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v3' } };
+    expect(selectTestdataResumeCheckpoint(v3Job, expected)).toBeUndefined();
     expect(selectTestdataResumeCheckpoint(v2Job, expected)).toBeUndefined();
-    expect(selectTestdataResumeCheckpoint(v3Job, expected)?.verifier)
+    expect(selectTestdataResumeCheckpoint(currentJob, expected)?.verifier)
       .toEqual(expect.objectContaining({
         validatorManifestStatus: 'valid',
         validatorManifest: { constraintIds: ['C1'], invariantIds: ['I1'] },
       }));
-    const serialized = JSON.stringify(selectTestdataResumeCheckpoint(v3Job, expected)?.verifier);
+    const serialized = JSON.stringify(selectTestdataResumeCheckpoint(currentJob, expected)?.verifier);
     for (const forbidden of [
       'materializedProbeInputs', 'legalSeedArray', 'effectiveInput', 'subtaskInvocationPayload',
     ]) {

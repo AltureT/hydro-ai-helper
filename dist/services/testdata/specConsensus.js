@@ -441,9 +441,10 @@ function safeSummary(status, conflicts, unresolvedConflictCount, rolesUsed, spec
 }
 async function runProblemSpecConsensus(input) {
     const prompt = (0, problemSpecPrompts_1.buildProblemSpecPrompt)(input);
+    const callOptions = { ...input.callOptions, contentMode: 'raw' };
     const extract = async (source) => {
         try {
-            const result = await source.client.chat([{ role: 'user', content: prompt.userPrompt }], prompt.systemPrompt, input.callOptions);
+            const result = await source.client.chat([{ role: 'user', content: prompt.userPrompt }], prompt.systemPrompt, callOptions);
             return { result, spec: validateExtractedSpec(result.content, input) };
         }
         catch (error) {
@@ -534,7 +535,7 @@ async function runProblemSpecConsensus(input) {
     rolesUsed.push('adjudicator');
     let adjudicatorResult;
     try {
-        adjudicatorResult = await input.adjudicator.client.chat([{ role: 'user', content: adjudicatorPrompt.userPrompt }], adjudicatorPrompt.systemPrompt, input.callOptions);
+        adjudicatorResult = await input.adjudicator.client.chat([{ role: 'user', content: adjudicatorPrompt.userPrompt }], adjudicatorPrompt.systemPrompt, callOptions);
         results.push(adjudicatorResult);
         roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };
         const adjudication = parseAdjudication(adjudicatorResult.content, conflicts, primary.spec, critic.spec, input);
