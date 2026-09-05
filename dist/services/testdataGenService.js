@@ -106,6 +106,8 @@ const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
 const latency_1 = require("./testdata/latency");
+const generatorBudget_1 = require("./testdata/generatorBudget");
+const generatorPlanPrompts_1 = require("./testdata/generatorPlanPrompts");
 const statementSamples_1 = require("./testdata/statementSamples");
 const validatorManifest_1 = require("./testdata/validatorManifest");
 const constraintProbes_1 = require("./testdata/constraintProbes");
@@ -189,13 +191,13 @@ exports.TESTDATA_GEN_LIMITS = {
     MAX_PROVIDED_STD: 10000,
     MAX_STATEMENT_LENGTH: statementSnapshot_1.STATEMENT_SNAPSHOT_HARD_LIMIT,
     /** apply 时单文件内容上限（字节） */
-    MAX_FILE_SIZE: 256 * 1024,
+    MAX_FILE_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.input,
     /** apply 时文件数量上限 */
     MAX_FILE_COUNT: 80,
     /** apply 时所有文件总大小上限（字节） */
-    MAX_TOTAL_SIZE: 1024 * 1024,
+    MAX_TOTAL_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.plan,
     /** 沙箱生成器 stdout（JSON）上限。 */
-    MAX_GENERATOR_OUTPUT_SIZE: 1024 * 1024,
+    MAX_GENERATOR_OUTPUT_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout,
     /** 独立验证器必须生成的内部小数据数量；这些数据不会写入 Hydro。 */
     STRESS_CASES: 60,
     /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
@@ -1285,6 +1287,9 @@ function buildGenerationArtifactsSystemPrompt(frozenSpec = false, trustedGenerat
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项。
 
+${generatorPlanPrompts_1.GENERATOR_PLAN_CONTRACT}
+预算冲突时遵循用户请求中的 GENERATOR_BUDGET_CONFLICT 协议，仅输出冲突分节，不输出计划或模板。
+
 输出格式：
 @@@GENERATOR_PLAN@@@
 严格 JSON GeneratorPlan v1
@@ -1305,7 +1310,7 @@ function buildGenerationArtifactsSystemPrompt(frozenSpec = false, trustedGenerat
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
-4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
+4. 遵循用户请求中的逐 CASE 字节预算与打印前检查：每个 input 至多 256KB，GENERATOR stdout 至多 1MB；不得静默缩减必要覆盖。确实无法同时满足必要覆盖与预算时仅输出 GENERATOR_BUDGET_CONFLICT 分节，交人工复核。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
@@ -1366,12 +1371,14 @@ function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, 
                 : '- 只输出 GENERATOR 与函数题 TEMPLATE；不得输出或推断 ORACLE、SOLUTION、BRUTE、VALIDATOR。',
             '- 不得重新解释算法规范，不得改变 frozen Spec 的任何字段。',
             buildCoverageGuidanceBlock(coveragePlan),
+            (0, generatorBudget_1.buildGeneratorBudgetPrompt)(params.options.caseCount, coveragePlan),
         ].filter(Boolean).join('\n');
     }
     const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
     const base = buildTestdataUserPrompt(params, coveragePlan).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '这是第二阶段：只输出 GENERATOR 与函数题所需 TEMPLATE，不要重复 ORACLE、SOLUTION、BRUTE、VALIDATOR 或 CASE。');
     return [
         base,
+        (0, generatorBudget_1.buildGeneratorBudgetPrompt)(params.options.caseCount, coveragePlan),
         '',
         '【第一阶段已验证且必须保持不变的解题蓝图】',
         `problemType: ${solution.problemType}`,
@@ -2354,6 +2361,7 @@ function parseSolutionBlueprint(raw, options, expectedFunctionSamples = []) {
 }
 function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}) {
     const sections = splitDelimitedSections(raw);
+    (0, generatorBudget_1.throwIfGeneratorBudgetConflict)(raw, sections);
     if (sections.length === 0)
         throw new Error('AI 未返回外围制品分节标记');
     const allowGeneratorPlan = !!parseOptions.generatorDsl;
@@ -5554,7 +5562,7 @@ function buildSandboxRepairSystemPrompt(scope, frozenSpec = false) {
     const contracts = {
         generator: {
             header: 'GENERATOR',
-            rule: '输出自包含 Python 3 输入生成器，按本轮请求中的正式点数量、覆盖计划和字节预算生成紧凑 JSON；固定随机种子，禁止日志或无界循环。',
+            rule: '输出自包含 Python 3 输入生成器，按本轮请求中的正式点数量、覆盖计划和字节预算生成紧凑 JSON；固定随机种子，禁止日志或无界循环。预算确实冲突时改为只输出请求约定的 GENERATOR_BUDGET_CONFLICT 分节，不得同时输出代码。',
         },
         'stress-generator': {
             header: 'STRESS_GENERATOR',
@@ -5623,7 +5631,9 @@ function buildSandboxRepairPrompt(error, options, scope = error instanceof failu
 ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
-请只输出修复后的 @@@GENERATOR@@@。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
+${(0, generatorBudget_1.buildGeneratorBudgetPrompt)(options.caseCount, coveragePlan)}
+
+预算可行时，请只输出修复后的 @@@GENERATOR@@@；预算确实冲突时只返回上述冲突分节。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
 1. stdout 只能是包含恰好 ${options.caseCount} 个 cases 的紧凑 JSON，使用 json.dumps(..., ensure_ascii=False, separators=(',', ':'))。
 2. stdout 必须小于 1MB，每个 input 的 UTF-8 内容必须小于 256KB，且全部 .in/.out 与辅助文件合计必须小于 1MB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
 3. 每个 input 必须合法且符合逐 CASE 覆盖计划；若临界数据过大，使用能保留边界/复杂度特征的可解析构造。
@@ -5753,6 +5763,8 @@ function mergeSandboxBlueprintRepair(original, raw, scope, expectedFunctionSampl
     const sections = singleHeader
         ? parseStrictSingleRepairSection(raw, singleHeader)
         : splitDelimitedSections(raw);
+    if (scope === 'generator')
+        (0, generatorBudget_1.throwIfGeneratorBudgetConflict)(raw, sections);
     if (sections.length === 0)
         throw new Error('AI 定向修复未返回分节标记');
     const solutions = normalizeTemplateSolutions(original);
@@ -6800,6 +6812,12 @@ class TestdataGenService {
         catch (parseError) {
             if (isCancellation(parseError))
                 throw parseError;
+            if (parseError instanceof failures_1.TestdataPipelineError && parseError.retryPolicy === 'manual-review') {
+                throw new TestdataGenerationError(parseError.message, 'artifacts_parse', results, false, undefined, undefined, {
+                    code: parseError.code, artifact: parseError.artifact, retryPolicy: parseError.retryPolicy,
+                    safeDetails: parseError.safeDetails, failedModelRole: 'artifacts',
+                });
+            }
             const repairResult = await artifactsClient.chat([
                 { role: 'user', content: userPrompt },
                 { role: 'assistant', content: initialResult.content },
@@ -6817,6 +6835,13 @@ class TestdataGenService {
                 };
             }
             catch (repairParseError) {
+                if (repairParseError instanceof failures_1.TestdataPipelineError && repairParseError.retryPolicy === 'manual-review') {
+                    throw new TestdataGenerationError(repairParseError.message, 'artifacts_parse', results, false, undefined, undefined, {
+                        code: repairParseError.code, artifact: repairParseError.artifact,
+                        retryPolicy: repairParseError.retryPolicy, safeDetails: repairParseError.safeDetails,
+                        failedModelRole: 'artifacts',
+                    });
+                }
                 throw new TestdataGenerationError(`AI 自动修复外围制品后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'artifacts_parse', results, true, undefined, undefined, {
                     code: 'GENERATOR_INVALID_JSON',
                     artifact: 'generator',
@@ -7656,6 +7681,9 @@ class TestdataGenService {
                         }
                     }
                     catch (targetedParseError) {
+                        if (targetedParseError instanceof failures_1.TestdataPipelineError
+                            && targetedParseError.retryPolicy === 'manual-review')
+                            throw targetedParseError;
                         if (repairScope === 'full' || isVerifierRepairScope(repairScope))
                             throw targetedParseError;
                         usedFullRepair = true;

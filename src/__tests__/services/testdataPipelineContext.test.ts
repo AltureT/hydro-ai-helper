@@ -79,7 +79,7 @@ function createContext(spec = validSpec()) {
 
 describe('frozen test-data pipeline context', () => {
   it('uses prompt v4 while preserving checkpoint schema v2', () => {
-    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v4');
+    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v5');
     expect(TESTDATA_CHECKPOINT_SCHEMA_VERSION).toBe(2);
   });
 

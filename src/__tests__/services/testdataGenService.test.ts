@@ -6245,6 +6245,36 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
+  it('generator repair budget conflicts stop without full repair or model fallback', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
+          + JSON.stringify({ scope: 'input', minimumBytes: 1_200_000 }), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('Output Limit Exceeded')),
+      runPythonBatch: jest.fn(), runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({ problemTitle: 'budget conflict', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'GENERATOR_OUTPUT_TOO_LARGE', retryPolicy: 'manual-review',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    expect(runner.runPython).toHaveBeenCalledTimes(1);
+  });
+
   it('STRESS_GENERATOR 自动修复请求失败时完整保留原失败契约', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const duplicatedStress = JSON.stringify({

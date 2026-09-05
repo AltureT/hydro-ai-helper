@@ -1,4 +1,7 @@
 import type { ProblemSpecV1 } from './problemSpec';
+import { deflateSync } from 'zlib';
+import { assertGeneratorStdoutBudget, GENERATOR_BYTE_LIMITS } from './generatorBudget';
+import { TestdataPipelineError } from './failures';
 import {
   parseNumericBoundExpression,
   safeNumberFromIntegerLiteral,
@@ -9,7 +12,7 @@ const MAX_CASES = 30;
 const MAX_LABEL_LENGTH = 256;
 const MAX_SEQUENCE_LENGTH = 100_000;
 const MAX_DENSE_GRAPH_VERTICES = 500;
-const MAX_INPUT_BYTES = 256 * 1024;
+const MAX_INPUT_BYTES = GENERATOR_BYTE_LIMITS.input;
 const MAX_TOTAL_GENERATOR_WORK = 1_000_000;
 const UINT32_MAX = 0xffff_ffff;
 const INT64_MIN = -9_223_372_036_854_775_808n;
@@ -1035,7 +1038,7 @@ function materializeValidatedPlan(
 ): MaterializedGeneratorCase[] {
   const layouts = resolveLayouts(spec);
   if (!layouts) throw generatorPlanFailure();
-  return plan.cases.map((casePlan, caseIndex) => {
+  const cases = plan.cases.map((casePlan, caseIndex) => {
     const random = new DeterministicRandom((plan.seed + Math.imul(caseIndex + 1, 0x9e3779b1)) >>> 0);
     const values = Object.fromEntries(spec.inputFields.map(field => [
       field.id,
@@ -1049,6 +1052,8 @@ function materializeValidatedPlan(
       values,
     };
   });
+  assertGeneratorStdoutBudget(cases.map(({ label, input }) => ({ label, input })));
+  return cases;
 }
 
 export function materializeGeneratorPlan(
@@ -1063,7 +1068,28 @@ export function renderGeneratorArtifact(
   cases: readonly MaterializedGeneratorCase[],
 ): string {
   const publicCases = cases.map(item => ({ label: item.label, input: item.input }));
+  assertGeneratorStdoutBudget(publicCases);
   const casesJson = JSON.stringify(publicCases);
+  // Large literal replays duplicate every input in a single file. Compress only
+  // server-materialized bytes; Python decodes data, never model-supplied code.
+  if (Buffer.byteLength(casesJson, 'utf8') > 64 * 1024) {
+    const encoded = deflateSync(Buffer.from(JSON.stringify({ cases: publicCases }), 'utf8')).toString('base64');
+    const artifact = [
+      '# Server-generated trusted GeneratorPlan artifact. Do not edit generated cases by hand.',
+      `# GeneratorPlan v${plan.version}; seed=${plan.seed}`,
+      'import base64, sys, zlib',
+      `sys.stdout.buffer.write(zlib.decompress(base64.b64decode('${encoded}')))`,
+      '',
+    ].join('\n');
+    if (Buffer.byteLength(artifact, 'utf8') > GENERATOR_BYTE_LIMITS.input) {
+      throw new TestdataPipelineError(
+        'GeneratorPlan 无损压缩后的回放脚本仍超过单文件上限',
+        'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact',
+        { actualBytes: Buffer.byteLength(artifact, 'utf8'), maxBytes: GENERATOR_BYTE_LIMITS.input },
+      );
+    }
+    return artifact;
+  }
   return [
     '# Server-generated trusted GeneratorPlan artifact. Do not edit generated cases by hand.',
     `# GeneratorPlan v${plan.version}; seed=${plan.seed}`,
