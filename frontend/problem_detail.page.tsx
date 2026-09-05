@@ -1,3 +1,4 @@
+import { Icon } from './components/Icon';
 /**
  * 题目详情页面集成
  * 在 Scratchpad 模式下显示 AI 助手触发图标
@@ -198,21 +199,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
           title={i18n('ai_helper_student_open_panel')}
         >
           {/* AI 图标 */}
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            style={{
-              transition: 'transform 0.3s ease',
-              transform: isHovered ? 'scale(1.1)' : 'scale(1)'
-            }}
-          >
-            <path
-              d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
-              fill="white"
-            />
-          </svg>
+          <Icon name="message" size={20} style={{ color: 'white' }} />
           {/* 文字标签 */}
           <span
             style={{
@@ -227,21 +214,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             AI
           </span>
           {/* 展开箭头 */}
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            style={{
-              transition: 'transform 0.3s ease',
-              transform: isHovered ? 'translateX(-2px)' : 'translateX(0)'
-            }}
-          >
-            <path
-              d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"
-              fill="white"
-            />
-          </svg>
+          <Icon name="chevronLeft" size={14} style={{ color: 'white' }} />
         </div>
       )}
 
@@ -311,12 +284,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                <path
-                  d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
-                  fill="#2563eb"
-                />
-              </svg>
+              <Icon name="message" size={18} style={{ color: '#2563eb' }} />
               <span style={{ fontWeight: 600, fontSize: '14px', color: '#1f2937' }}>{i18n('ai_helper_student_panel_title')}</span>
             </div>
             <button
@@ -335,9 +303,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
               }}
               title={i18n('ai_helper_student_collapse_panel')}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z" fill="#4b5563"/>
-              </svg>
+              <Icon name="chevronRight" size={14} />
               {i18n('ai_helper_student_collapse')}
             </button>
           </div>

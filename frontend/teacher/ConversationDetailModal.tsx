@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 /**
  * 对话详情弹窗组件
  * 支持在对话列表页面内快速查看对话详情，支持前后导航和键盘快捷键
@@ -236,10 +237,10 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
             <button onClick={navigatePrev} disabled={!hasPrev} style={navBtnStyle(!hasPrev)}>
-              ← {i18n('ai_helper_teacher_prev_item')}
+              <Icon name="arrowLeft" /> {i18n('ai_helper_teacher_prev_item')}
             </button>
             <button onClick={navigateNext} disabled={!hasNext} style={navBtnStyle(!hasNext)}>
-              {i18n('ai_helper_teacher_next_item')} →
+              {i18n('ai_helper_teacher_next_item')} <Icon name="arrowRight" />
             </button>
             <button
               onClick={onClose}
@@ -256,7 +257,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
               }}
               title={`${i18n('ai_helper_teacher_close')} (Esc)`}
             >
-              ✕
+              <Icon name="close" />
             </button>
           </div>
         </div>

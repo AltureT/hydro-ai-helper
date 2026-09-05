@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React, { useEffect, useCallback } from 'react';
 import { i18n } from '../utils/i18n';
 import 'highlight.js/styles/github.css';
@@ -211,7 +212,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
         justifyContent: 'center', height: '100%', padding: SPACING.xl,
         textAlign: 'center', background: COLORS.bgCard,
       }}>
-        <div style={{ fontSize: '40px', marginBottom: SPACING.base }}>🔒</div>
+        <div style={{ fontSize: '40px', marginBottom: SPACING.base }}><Icon name="lock" size={32} /></div>
         <div style={{ fontSize: '16px', fontWeight: '600', color: COLORS.textPrimary, marginBottom: SPACING.sm }}>{i18n('ai_helper_student_contest_title')}</div>
         <div style={{ fontSize: '13px', color: COLORS.textSecondary, lineHeight: '1.6' }}>
           {i18n('ai_helper_student_contest_desc_line1')}<br />{i18n('ai_helper_student_contest_desc_line2')}
