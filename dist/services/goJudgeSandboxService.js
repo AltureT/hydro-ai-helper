@@ -14,6 +14,7 @@ exports.scheduleSandboxChunks = scheduleSandboxChunks;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
 const textTruncate_1 = require("../lib/textTruncate");
+const generatorBudget_1 = require("./testdata/generatorBudget");
 const CPU_LIMIT_NS = 5000000000;
 const CLOCK_LIMIT_NS = 10000000000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -429,6 +430,54 @@ class GoJudgeSandboxRunner {
     async runPython(code, stdin = '', signal, deadlineAt) {
         const [result] = await this.runPythonBatch(code, [stdin], signal, deadlineAt);
         return result;
+    }
+    /** Download raw cached JSON instead of embedding large stdout in /run JSON. */
+    async runPythonGenerator(code, signal, deadlineAt) {
+        const deadline = deadlineAt ?? Date.now() + 55000;
+        const remaining = () => {
+            if (signal?.aborted)
+                throw signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            if (Date.now() >= deadline)
+                throw new SandboxBudgetExceededError();
+            return Math.max(1, Math.min(55000, deadline - Date.now()));
+        };
+        const command = buildPythonCommand(code, { stdin: '' });
+        command.files[1] = { name: 'stdout', max: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout };
+        let fileIds = [];
+        try {
+            const response = await this.http.post(`${this.host}/run`, { cmd: [{
+                        ...command, copyOut: ['stderr'], copyOutCached: ['stdout'],
+                        copyOutMax: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout, copyOutTruncate: false,
+                    }] }, { timeout: remaining(), signal, maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES, proxy: false });
+            fileIds = collectReturnedFileIds(response.data);
+            remaining();
+            const results = unwrapResults(response.data);
+            if (results.length !== 1)
+                throw new Error('GENERATOR 沙箱返回数量错误');
+            const result = results[0];
+            const detail = toRunDetail(result);
+            const fileId = result.fileIds?.stdout;
+            if (!detail.accepted || detail.error || typeof fileId !== 'string' || !fileId) {
+                throw new Error(`GENERATOR 实跑失败（${detail.status}）：${(0, textTruncate_1.excerptTail)(detail.stderr || detail.error || '缺少缓存输出', 1000)}`);
+            }
+            const output = await this.http.get(`${this.host}/file/${encodeURIComponent(fileId)}`, {
+                timeout: remaining(), signal, responseType: 'text', transformResponse: data => data,
+                maxContentLength: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout, proxy: false,
+            });
+            remaining();
+            if (typeof output.data !== 'string' || Buffer.byteLength(output.data, 'utf8') > generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout) {
+                throw new Error('GENERATOR 缓存输出超过大小上限或格式无效');
+            }
+            return { stdout: output.data, stderr: detail.stderr };
+        }
+        catch (error) {
+            if (!signal?.aborted && Date.now() >= deadline)
+                throw new SandboxBudgetExceededError();
+            throw error;
+        }
+        finally {
+            await Promise.all(fileIds.map(fileId => this.deleteCachedFile(fileId)));
+        }
     }
     /**
      * 严格版：任一条未 Accepted 即抛出可读中文错误（保留原有报错文案，向后兼容）。
