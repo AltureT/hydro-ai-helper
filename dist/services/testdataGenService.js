@@ -108,6 +108,7 @@ const risk_1 = require("./testdata/risk");
 const latency_1 = require("./testdata/latency");
 const generatorBudget_1 = require("./testdata/generatorBudget");
 const generatorPlanPrompts_1 = require("./testdata/generatorPlanPrompts");
+const fileBudget_1 = require("./testdata/fileBudget");
 const statementSamples_1 = require("./testdata/statementSamples");
 const validatorManifest_1 = require("./testdata/validatorManifest");
 const constraintProbes_1 = require("./testdata/constraintProbes");
@@ -191,7 +192,8 @@ exports.TESTDATA_GEN_LIMITS = {
     MAX_PROVIDED_STD: 10000,
     MAX_STATEMENT_LENGTH: statementSnapshot_1.STATEMENT_SNAPSHOT_HARD_LIMIT,
     /** apply 时单文件内容上限（字节） */
-    MAX_FILE_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.input,
+    MAX_FILE_SIZE: fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES,
+    MAX_INPUT_FILE_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.input,
     /** apply 时文件数量上限 */
     MAX_FILE_COUNT: 80,
     /** apply 时所有文件总大小上限（字节） */
@@ -1310,7 +1312,7 @@ ${generatorPlanPrompts_1.GENERATOR_PLAN_CONTRACT}
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
-4. 遵循用户请求中的逐 CASE 字节预算与打印前检查：每个 input 至多 256KB，GENERATOR stdout 至多 1MB；不得静默缩减必要覆盖。确实无法同时满足必要覆盖与预算时仅输出 GENERATOR_BUDGET_CONFLICT 分节，交人工复核。
+4. 遵循用户请求中的逐 CASE 字节预算与打印前检查：每个正式 input 至多 4 MiB，GENERATOR JSON 经缓存文件传输、至多 8 MiB；不得静默缩减必要覆盖。确实无法同时满足必要覆盖与预算时仅输出 GENERATOR_BUDGET_CONFLICT 分节，交人工复核。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
@@ -1418,7 +1420,7 @@ ${frozenRule}\
 ${oracleRule}
 6. 函数题必须为用户选定的每一种语言输出 SOLUTION:语言 节：与该语言学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印）。Python 解会与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
 7. 数据必须严格遵守用户消息中的逐 CASE 覆盖计划，并根据题面真实约束交叉变化不同维度；所有生成过程必须确定性，固定随机种子。
-8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），stdout 总量必须小于 1MB。每个 input 的 UTF-8 内容必须小于 256KB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须小于 1MB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
+8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），正式 JSON 总量必须不超过 8 MiB（缓存文件传输）。每个 input 的 UTF-8 内容必须不超过 4 MiB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须不超过 8 MiB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
 10. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 11. 不要输出 BRUTE 或 VALIDATOR；系统会在一次全新的、看不到 ORACLE 实现的独立调用中生成验证器，降低两份算法共享同一错误的风险。
@@ -2406,7 +2408,7 @@ function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}
             throw new Error('当前 frozen Spec 不支持 GENERATOR_PLAN');
         generatorPlan = (0, generatorDsl_1.parseGeneratorPlan)(generatorPlanRaw, generatorDsl.spec, generatorDsl.expectedCaseCount);
         const materialized = (0, generatorDsl_1.materializeGeneratorPlan)(generatorPlan, generatorDsl.spec);
-        generatorCode = (0, generatorDsl_1.renderGeneratorArtifact)(generatorPlan, materialized);
+        generatorCode = (0, generatorDsl_1.renderGeneratorArtifacts)(generatorPlan, materialized).code;
     }
     if (problemType === 'function' && !parseOptions.allowMissingTemplates) {
         const missing = languages.filter(lang => !templates[lang]?.trim());
@@ -3034,15 +3036,17 @@ function buildDiscriminationNotes(discrimination, initialCaseCount, allocatedCas
     return notes;
 }
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
-function parseGeneratorOutput(stdout, expectedCount) {
-    if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
-        throw (0, failures_1.toPipelineError)(new Error('GENERATOR 输出超过 1MB 上限'), {
+function parseGeneratorOutput(stdout, expectedCount, stress = false) {
+    const outputLimit = stress ? 1024 * 1024 : exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE;
+    const inputLimit = stress ? fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES : exports.TESTDATA_GEN_LIMITS.MAX_INPUT_FILE_SIZE;
+    if (Buffer.byteLength(stdout, 'utf8') > outputLimit) {
+        throw (0, failures_1.toPipelineError)(new Error(`GENERATOR 输出超过 ${outputLimit} 字节上限`), {
             code: 'GENERATOR_OUTPUT_TOO_LARGE',
             stage: 'generator',
             artifact: 'generator',
             safeDetails: {
                 actualBytes: Buffer.byteLength(stdout, 'utf8'),
-                maxBytes: exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE,
+                maxBytes: outputLimit,
             },
         });
     }
@@ -3086,15 +3090,15 @@ function parseGeneratorOutput(stdout, expectedCount) {
             });
         }
         const input = normalizeFileContent(item.input);
-        if (Buffer.byteLength(input, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-            throw (0, failures_1.toPipelineError)(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 256KB 上限`), {
+        if (Buffer.byteLength(input, 'utf8') > inputLimit) {
+            throw (0, failures_1.toPipelineError)(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 ${inputLimit} 字节上限`), {
                 code: 'GENERATOR_OUTPUT_TOO_LARGE',
                 stage: 'generator',
                 artifact: 'generator',
                 safeDetails: {
                     caseIndex: index + 1,
                     actualBytes: Buffer.byteLength(input, 'utf8'),
-                    maxBytes: exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
+                    maxBytes: inputLimit,
                 },
             });
         }
@@ -3896,6 +3900,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     }
     const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
     let effectiveGeneratorCode = blueprint.generatorCode;
+    let generatorReplayData;
     const checkBudget = () => {
         if (Date.now() >= sandboxDeadlineAt) {
             throw (0, failures_1.toPipelineError)(new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'), {
@@ -3922,7 +3927,10 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             reportProgress('generating_inputs', 56);
             if (blueprint.generatorPlan && materialization?.coverageProof) {
                 const materialized = (0, generatorDsl_1.materializeGeneratorPlan)(blueprint.generatorPlan, materialization.coverageProof.pipelineContext.spec);
-                effectiveGeneratorCode = (0, generatorDsl_1.renderGeneratorArtifact)(blueprint.generatorPlan, materialized);
+                const replay = (0, generatorDsl_1.renderGeneratorArtifacts)(blueprint.generatorPlan, materialized);
+                cache.generatorReplay = replay;
+                effectiveGeneratorCode = replay.code;
+                generatorReplayData = replay.data;
                 const authoritativeAllocations = materialization.coverageProof.tieredDecision?.enabled
                     ? materialization.coverageProof.tieredDecision.allocations
                     : [];
@@ -3936,9 +3944,12 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 }));
             }
             else {
+                delete cache.generatorReplay;
                 let generatorResult;
                 try {
-                    generatorResult = await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
+                    generatorResult = runner.runPythonGenerator
+                        ? await runner.runPythonGenerator(blueprint.generatorCode, signal, sandboxDeadlineAt)
+                        : await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
                 }
                 catch (err) {
                     if (isCancellation(err))
@@ -3961,6 +3972,10 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         else {
             generatedInputs = cache.generatedInputs;
+            if (cache.generatorReplay) {
+                effectiveGeneratorCode = cache.generatorReplay.code;
+                generatorReplayData = cache.generatorReplay.data;
+            }
         }
         const inputs = generatedInputs.map(item => item.input);
         const structuredCases = generatedInputs.every(item => item.structuredValues !== undefined) ? generatedInputs.map(item => ({
@@ -4024,7 +4039,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     });
                 }
                 try {
-                    stressGenerated = parseGeneratorOutput(stressGeneratorResult.stdout, exports.TESTDATA_GEN_LIMITS.STRESS_CASES);
+                    stressGenerated = parseGeneratorOutput(stressGeneratorResult.stdout, exports.TESTDATA_GEN_LIMITS.STRESS_CASES, true);
                 }
                 catch (err) {
                     const code = err instanceof failures_1.TestdataPipelineError
@@ -4815,6 +4830,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             templates: blueprint.templates,
             stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
             generatorCode: effectiveGeneratorCode,
+            generatorReplayData,
             generatorPlan: blueprint.generatorPlan,
             coverageMode: coverage.mode,
             oracleCode: blueprint.oracleCode,
@@ -5022,6 +5038,10 @@ function assemblePlan(response, options, context = {}) {
         pushCode('generator.py', response.generatorCode, 'generator', response.generatorPlan
             ? 'deterministic'
             : sandbox ? 'executed' : 'ai-only', response.generatorPlan ? FILE_PURPOSES.trustedGenerator : FILE_PURPOSES.generator);
+    }
+    if (response.generatorPlan && response.generatorReplayData) {
+        files.push({ name: fileBudget_1.GENERATOR_REPLAY_DATA_FILENAME, content: response.generatorReplayData,
+            kind: 'generator', origin: 'deterministic' });
     }
     if (sandbox && response.bruteCode?.trim()) {
         pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
@@ -5635,7 +5655,7 @@ ${(0, generatorBudget_1.buildGeneratorBudgetPrompt)(options.caseCount, coverageP
 
 预算可行时，请只输出修复后的 @@@GENERATOR@@@；预算确实冲突时只返回上述冲突分节。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
 1. stdout 只能是包含恰好 ${options.caseCount} 个 cases 的紧凑 JSON，使用 json.dumps(..., ensure_ascii=False, separators=(',', ':'))。
-2. stdout 必须小于 1MB，每个 input 的 UTF-8 内容必须小于 256KB，且全部 .in/.out 与辅助文件合计必须小于 1MB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
+2. 正式 GENERATOR JSON 经缓存文件传输，至多 8 MiB，每个 input 的 UTF-8 内容至多 4 MiB，且全部 .in/.out 与辅助文件合计必须不超过 8 MiB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
 3. 每个 input 必须合法且符合逐 CASE 覆盖计划；若临界数据过大，使用能保留边界/复杂度特征的可解析构造。
 4. 只使用请求的分节标记和源码原文，不要代码围栏。`;
     }
@@ -5695,7 +5715,7 @@ ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
 请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
-1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
+1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容至多 4 MiB，正式 JSON 及全部 .in/.out 与辅助文件分别至多 8 MiB。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
 3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含每个已选语言的学生解 ${options.languages.map(lang => `@@@SOLUTION:${lang}@@@`).join('、')} 与全部模板：${templates}。
@@ -6205,6 +6225,7 @@ class TestdataGenService {
         }
     }
     attachRunMetadata(plan, params) {
+        (0, fileBudget_1.assertTestdataPlanBudget)(plan);
         plan.runId = params.runId || plan.runId || (0, runTelemetry_1.createTestdataRunId)();
         plan.promptVersion = pipelineContext_1.TESTDATA_PIPELINE_PROMPT_VERSION;
         plan.modelCallCount = this.modelCallBudget.callCount;

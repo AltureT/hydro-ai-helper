@@ -1483,8 +1483,8 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(system).toContain('默认每个文件固定 T=1');
     expect(system).toContain('GENERATOR 只生成 .in，不生成答案');
     expect(system).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
-    expect(system).toContain('每个 input 的 UTF-8 内容必须小于 256KB');
-    expect(system).toContain('全部 .in/.out 与辅助文件合计必须小于 1MB');
+    expect(system).toContain('每个 input 的 UTF-8 内容必须不超过 4 MiB');
+    expect(system).toContain('全部 .in/.out 与辅助文件合计必须不超过 8 MiB');
     const user = buildSandboxBlueprintUserPrompt({
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
@@ -6254,7 +6254,7 @@ describe('TestdataGenService.generate', () => {
         .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
         .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
         .mockResolvedValueOnce({ content: '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
-          + JSON.stringify({ scope: 'input', minimumBytes: 1_200_000 }), usedModel }),
+          + JSON.stringify({ scope: 'input', minimumBytes: 12_000_000 }), usedModel }),
       createClientStartingAfter: jest.fn(),
     };
     const runner = {

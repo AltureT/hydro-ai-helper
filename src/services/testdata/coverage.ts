@@ -322,7 +322,8 @@ function sequenceCharacteristics(values: readonly number[]): {
   if (values.length === 0) throw new Error('empty sequence');
   const frequencies = new Map<number, number>();
   for (const value of values) frequencies.set(value, (frequencies.get(value) || 0) + 1);
-  const maxFrequency = Math.max(...frequencies.values());
+  let maxFrequency = 0;
+  for (const count of frequencies.values()) maxFrequency = Math.max(maxFrequency, count);
   const ordered = values.every((value, index) => index === 0 || values[index - 1] <= value);
   const reversed = values.every((value, index) => index === 0 || values[index - 1] >= value);
   const allEqual = frequencies.size === 1;
@@ -669,7 +670,7 @@ export function computeCoverageFeatures(
       } else if (value.kind === 'array' || value.kind === 'permutation') {
         appendNumericValues(features.numericValuesByField, fieldId, value.values);
         appendIntegerLiterals(features.numericLiteralsByField, fieldId, value.values);
-        allNumericValues.push(...value.values);
+        for (const number of value.values) allNumericValues.push(number);
         features.sizes.push(value.values.length);
         const sequence = sequenceCharacteristics(value.values);
         features.maxRepeatRatio = Math.max(features.maxRepeatRatio, sequence.repeatRatio);
@@ -684,7 +685,7 @@ export function computeCoverageFeatures(
         const flat = value.values.flat();
         appendNumericValues(features.numericValuesByField, fieldId, flat);
         appendIntegerLiterals(features.numericLiteralsByField, fieldId, flat);
-        allNumericValues.push(...flat);
+        for (const number of flat) allNumericValues.push(number);
         features.sizes.push(value.values.length, value.values[0].length);
         const sequence = sequenceCharacteristics(flat);
         features.maxRepeatRatio = Math.max(features.maxRepeatRatio, sequence.repeatRatio);
@@ -753,7 +754,7 @@ export function computeCoverageFeatures(
             operationArgumentFieldId,
             serializedArguments,
           );
-          allNumericValues.push(...serializedArguments);
+          for (const number of serializedArguments) allNumericValues.push(number);
         }
         features.sizes.push(value.operations.length);
         const operation = operationFeatures(value.operations);
@@ -763,7 +764,7 @@ export function computeCoverageFeatures(
         for (const [transition, count] of Object.entries(operation.transitions)) {
           increment(features.operationTransitionCounts, transition, count);
         }
-        features.queryBeforeUpdateCounts.push(...operation.queryBeforeUpdates);
+        for (const count of operation.queryBeforeUpdates) features.queryBeforeUpdateCounts.push(count);
         for (const [pattern, present] of Object.entries(operation.patterns)) {
           if (present) increment(features.operationPatternCounts, pattern);
         }

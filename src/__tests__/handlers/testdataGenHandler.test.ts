@@ -4,6 +4,9 @@
  */
 
 import { Readable } from 'stream';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { ContestModel, db, PERM, PRIV, ProblemModel, STATUS, StorageModel } from 'hydrooj';
 import {
   TestdataGenContextHandler,
@@ -2459,15 +2462,111 @@ describe('TestdataGenApplyHandler', () => {
     expect(ProblemModel.addTestdata).not.toHaveBeenCalled();
   });
 
-  it('超大文件返回 400', async () => {
+  it('normalization rejects an input one byte above the 4 MiB limit', async () => {
     mockFindOne(PROBLEM_DOC);
     const handler = setupHandler(TestdataGenApplyHandler, {
       own: true,
-      body: { problemId: 'D3102', files: [{ name: '1.in', content: 'x'.repeat(257 * 1024) }] },
+      body: { problemId: 'D3102', files: [{ name: '1.in', content: 'x'.repeat(4 * 1024 * 1024) }] },
     });
     await handler.post();
     expect(handler.response.status).toBe(400);
     expect(handler.response.body.code).toBe('FILE_TOO_LARGE');
+  });
+
+  it('accepts a complete large input while retaining code/output limits', async () => {
+    mockFindOne(PROBLEM_DOC);
+    (ProblemModel.addTestdata as jest.Mock).mockResolvedValue(undefined);
+    const content = '200000\n' + '0 '.repeat(199999) + '0\n';
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true, body: { problemId: 'D3102', files: [{ name: '1.in', content }] },
+    });
+    await handler.post();
+    expect(handler.response.body.failed).toEqual([]);
+    expect((ProblemModel.addTestdata as jest.Mock).mock.calls[0][3].toString()).toBe(content);
+  });
+
+  it.each(['std.py', '1.out'])('retains the 256 KiB limit for %s', async name => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true, body: { problemId: 'D3102', files: [{ name, content: 'x'.repeat(256 * 1024) }] },
+    });
+    await handler.post();
+    expect(handler.response.body.code).toBe('FILE_TOO_LARGE');
+    expect(ProblemModel.addTestdata).not.toHaveBeenCalled();
+  });
+
+  it('rejects combined file size above 8 MiB before any write', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true, body: { problemId: 'D3102', files: Array.from({ length: 3 }, (_, i) => ({
+        name: `${i}.in`, content: 'x'.repeat(3 * 1024 * 1024),
+      })) },
+    });
+    await handler.post();
+    expect(handler.response.body.code).toBe('TOTAL_TOO_LARGE');
+    expect(ProblemModel.addTestdata).not.toHaveBeenCalled();
+  });
+
+  it('requires an authorized job before resolving a file reference', async () => {
+    mockFindOne(PROBLEM_DOC);
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true, body: { problemId: 'D3102', files: [{ name: '1.in', fromJob: true }] },
+    });
+    await handler.post();
+    expect(handler.response.body.code).toBe('INVALID_CONTENT');
+    expect(ProblemModel.addTestdata).not.toHaveBeenCalled();
+  });
+
+  it.each(['valid', 'invalid-utf8', 'normalized-overflow', 'missing-upload', 'ambiguous'])
+  ('validates raw multipart teacher edits before writing: %s', async scenario => {
+    mockFindOne(PROBLEM_DOC);
+    (ProblemModel.addTestdata as jest.Mock).mockResolvedValue(undefined);
+    const directory = mkdtempSync(join(tmpdir(), 'hydro-large-input-test-'));
+    const filepath = join(directory, 'input.txt');
+    const content = scenario === 'normalized-overflow'
+      ? '0'.repeat(4 * 1024 * 1024) : '0\n'.repeat(2000000);
+    writeFileSync(filepath, scenario === 'invalid-utf8' ? Buffer.from([0xff]) : content);
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true, body: { payload: JSON.stringify({ problemId: 'D3102', files: [{
+        name: '1.in', uploadField: 'file-0', ...(scenario === 'ambiguous' ? { content: 'edited' } : {}),
+      }] }) },
+    });
+    handler.request.files = scenario === 'missing-upload' ? {} : { 'file-0': { filepath } };
+    try {
+      await handler.post();
+      if (scenario === 'valid') {
+        expect(handler.response.body.failed).toEqual([]);
+        expect((ProblemModel.addTestdata as jest.Mock).mock.calls[0][3].toString()).toBe(content);
+      } else {
+        expect(handler.response.status).toBe(400);
+        expect(ProblemModel.addTestdata).not.toHaveBeenCalled();
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(['other-user', 'other-problem', 'missing-file', 'ambiguous-content', 'oversized-stored-file'])
+  ('rejects invalid job file references: %s', async scenario => {
+    mockFindOne(PROBLEM_DOC);
+    const job = makeGenerationJob({
+      status: 'completed', active: false,
+      ...(scenario === 'other-user' ? { createdBy: 99 } : {}),
+      ...(scenario === 'other-problem' ? { problemDocId: 999999 } : {}),
+      plan: { problemType: 'traditional', caseCount: 1, files: [{
+        name: '1.in', kind: 'case-in',
+        content: scenario === 'oversized-stored-file' ? 'x'.repeat(4 * 1024 * 1024) : '1\n',
+      }] },
+    });
+    const handler = setupHandler(TestdataGenApplyHandler, {
+      own: true, body: { problemId: 'D3102', jobId: String(job._id), files: [{
+        name: scenario === 'missing-file' ? '2.in' : '1.in', fromJob: true,
+        ...(scenario === 'ambiguous-content' ? { content: '2\n' } : {}),
+      }] },
+    });
+    handler.ctx.get = jest.fn(name => name === 'testdataGenerationJobModel'
+      ? { findById: jest.fn().mockResolvedValue(job) } : undefined);
+    await handler.post();
+    expect(handler.response.status).toBeGreaterThanOrEqual(400);
+    expect(ProblemModel.addTestdata).not.toHaveBeenCalled();
   });
 
   it('写入成功：config.yaml 最后写入，内容规范化，docId/操作者正确', async () => {
@@ -2501,10 +2600,10 @@ describe('TestdataGenApplyHandler', () => {
     expect(calls[0][4]).toBe(2);
   });
 
-  it('后台任务结果全部写入成功后标记为已处理，不再自动恢复', async () => {
+  it.each([false, true])('applies the authorized stored plan and records unchanged outcome, reference=%s', async fromJob => {
     mockFindOne(PROBLEM_DOC);
     (ProblemModel.addTestdata as jest.Mock).mockResolvedValue(undefined);
-    const originalFiles = [{ name: '1.in', content: '1\n', kind: 'case-in' as const }];
+    const originalFiles = [{ name: '1.in', content: '200000\n' + '0 '.repeat(199999) + '0\n', kind: 'case-in' as const }];
     const job = makeGenerationJob({
       runId: '11111111-1111-4111-8111-111111111111',
       status: 'completed',
@@ -2539,7 +2638,7 @@ describe('TestdataGenApplyHandler', () => {
       body: {
         problemId: 'D3102',
         jobId: String(job._id),
-        files: [{ name: '1.in', content: '1\n' }],
+        files: fromJob ? [{ name: '1.in', fromJob: true }] : originalFiles,
       },
     });
     handler.ctx.get = jest.fn((name: string) => {
@@ -2550,6 +2649,7 @@ describe('TestdataGenApplyHandler', () => {
 
     await handler.post();
     expect(handler.response.body.failed).toEqual([]);
+    expect((ProblemModel.addTestdata as jest.Mock).mock.calls[0][3].toString()).toBe(originalFiles[0].content);
     expect(jobModel.markApplied).toHaveBeenCalledWith(job._id, expect.any(String));
     expect(jobModel.recordTeacherOutcome).toHaveBeenCalledWith(
       job._id,

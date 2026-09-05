@@ -5,11 +5,12 @@ exports.buildGeneratorBudgetPrompt = buildGeneratorBudgetPrompt;
 exports.throwIfGeneratorBudgetConflict = throwIfGeneratorBudgetConflict;
 exports.assertGeneratorStdoutBudget = assertGeneratorStdoutBudget;
 const failures_1 = require("./failures");
-/** Existing apply and sandbox limits, shared by planning and materialization. */
+const fileBudget_1 = require("./fileBudget");
+/** Bounded formal data transport; ordinary execution and stress limits are separate. */
 exports.GENERATOR_BYTE_LIMITS = {
-    input: 256 * 1024,
-    stdout: 1024 * 1024,
-    plan: 1024 * 1024,
+    input: fileBudget_1.TESTDATA_INPUT_MAX_BYTES,
+    stdout: 8 * 1024 * 1024,
+    plan: fileBudget_1.TESTDATA_PLAN_MAX_BYTES,
 };
 exports.GENERATOR_BUDGET_CONFLICT_MARKER = '@@@GENERATOR_BUDGET_CONFLICT@@@';
 function buildGeneratorBudgetPrompt(caseCount, slots = []) {
@@ -26,7 +27,7 @@ GENERATOR_BUDGET: ${JSON.stringify({
         maxPlanBytes: exports.GENERATOR_BYTE_LIMITS.plan,
         suggestedInputBytesByCase: targets,
     })}
-逐 CASE 建立规模与字节估算，再编写生成器。建议预算可在 CASE 间调配，不是新硬限制；为 .out、生成器、标程与模板预留总文件预算。字节数按 UTF-8 计算，不按字符数；JSON 中换行、反斜杠和引号的转义也占空间。
+逐 CASE 建立规模与字节估算，再编写生成器。建议预算可在 CASE 间调配，不是新硬限制；为 .out、生成器、标程与模板预留总文件预算。正式 GENERATOR 的 JSON 由沙箱缓存文件传输，上限 8 MiB；每个 .in 上限 4 MiB，.out 和代码仍各限 256 KiB。压力生成器仍为小数据，沿用每个输入 256 KiB、整批 stdout 1 MiB，不可套用正式大数据额度。字节数按 UTF-8 计算，不按字符数；JSON 中换行、反斜杠和引号的转义也占空间。
 large 不等于把所有维度同时拉满：依据覆盖计划分别构造大 n 小 q、小 n 多操作等合法数据；保留要求的边界和复杂度特征，label 只描述实际达到的覆盖。不得截断 input、删测试点或把降低必要覆盖宣称为完成。
 Python 生成器必须在 5 秒内完成：循环必须有界；去重前检查可用候选容量，优先直接构造或无放回采样，禁止无限拒绝采样。动态集合随机删除使用列表加位置索引和尾元素交换，避免每轮 list(set) 或重建全部边；不能通过省略合法性检查来提速。
 在打印前执行以下字节检查（cases 是已经构造好的完整列表；不要打印中间结果）：
@@ -42,7 +43,7 @@ payload = json.dumps({'cases': cases}, ensure_ascii=False, separators=(',', ':')
 payload_bytes = len(payload.encode('utf-8'))
 assert payload_bytes <= ${exports.GENERATOR_BYTE_LIMITS.stdout}, f'GENERATOR_STDOUT_BYTES actualBytes={payload_bytes} maxBytes=${exports.GENERATOR_BYTE_LIMITS.stdout}'
 print(payload, end='')
-若估算必要覆盖的最小输入或输出仍超硬上限，停止生成，仅返回 ${exports.GENERATOR_BUDGET_CONFLICT_MARKER} 后跟严格 JSON {"scope":"input","minimumBytes":1200000}。scope 仅 input（单个 .in）、stdout（整批 JSON）或 plan（全部文件）；minimumBytes 必须为超过对应硬上限的整数。服务端会将模型估算交给人工复核，不视为已经执行验证的事实。不得混入 GENERATOR、GENERATOR_PLAN、TEMPLATE 或其他分节。`;
+若估算必要覆盖的最小输入或输出仍超硬上限，停止生成，仅返回 ${exports.GENERATOR_BUDGET_CONFLICT_MARKER} 后跟严格 JSON {"scope":"input","minimumBytes":12000000}。scope 仅 input（单个 .in）、stdout（整批 JSON）或 plan（全部文件）；minimumBytes 必须为超过对应硬上限的整数。服务端会将模型估算交给人工复核，不视为已经执行验证的事实。不得混入 GENERATOR、GENERATOR_PLAN、TEMPLATE 或其他分节。`;
 }
 /** A model estimate is a review request, never evidence that data has been checked. */
 function throwIfGeneratorBudgetConflict(raw, sections) {

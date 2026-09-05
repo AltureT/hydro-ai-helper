@@ -1,6 +1,7 @@
 import type { ProblemSpecV1 } from './problemSpec';
 import { deflateSync } from 'zlib';
 import { assertGeneratorStdoutBudget, GENERATOR_BYTE_LIMITS } from './generatorBudget';
+import { TESTDATA_CODE_FILE_MAX_BYTES, GENERATOR_REPLAY_DATA_FILENAME } from './fileBudget';
 import { TestdataPipelineError } from './failures';
 import {
   parseNumericBoundExpression,
@@ -10,7 +11,7 @@ import {
 const MAX_PLAN_LENGTH = 512 * 1024;
 const MAX_CASES = 30;
 const MAX_LABEL_LENGTH = 256;
-const MAX_SEQUENCE_LENGTH = 100_000;
+const MAX_SEQUENCE_LENGTH = 200_000;
 const MAX_DENSE_GRAPH_VERTICES = 500;
 const MAX_INPUT_BYTES = GENERATOR_BYTE_LIMITS.input;
 const MAX_TOTAL_GENERATOR_WORK = 1_000_000;
@@ -1020,7 +1021,8 @@ function serializeValues(
     }
   }
 
-  const maxLine = Math.max(0, ...lines.keys());
+  let maxLine = 0;
+  for (const lineNumber of lines.keys()) maxLine = Math.max(maxLine, lineNumber);
   const serialized = Array.from({ length: maxLine }, (_, index) => {
     const tokens = lines.get(index + 1);
     if (!tokens || tokens.length === 0 || tokens.some(token => token === undefined)) {
@@ -1081,11 +1083,11 @@ export function renderGeneratorArtifact(
       `sys.stdout.buffer.write(zlib.decompress(base64.b64decode('${encoded}')))`,
       '',
     ].join('\n');
-    if (Buffer.byteLength(artifact, 'utf8') > GENERATOR_BYTE_LIMITS.input) {
+    if (Buffer.byteLength(artifact, 'utf8') > TESTDATA_CODE_FILE_MAX_BYTES) {
       throw new TestdataPipelineError(
         'GeneratorPlan 无损压缩后的回放脚本仍超过单文件上限',
         'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact',
-        { actualBytes: Buffer.byteLength(artifact, 'utf8'), maxBytes: GENERATOR_BYTE_LIMITS.input },
+        { actualBytes: Buffer.byteLength(artifact, 'utf8'), maxBytes: TESTDATA_CODE_FILE_MAX_BYTES },
       );
     }
     return artifact;
@@ -1099,4 +1101,30 @@ export function renderGeneratorArtifact(
     "print(json.dumps({'cases': CASES}, ensure_ascii=False, separators=(',', ':')))",
     '',
   ].join('\n');
+}
+
+/** Keep executable code small; incompressible replay data has its own bounded file. */
+export function renderGeneratorArtifacts(
+  plan: GeneratorPlanV1, cases: readonly MaterializedGeneratorCase[],
+): { code: string; data?: string } {
+  try {
+    return { code: renderGeneratorArtifact(plan, cases) };
+  } catch (error) {
+    if (!(error instanceof TestdataPipelineError) || error.code !== 'GENERATOR_OUTPUT_TOO_LARGE') throw error;
+    assertGeneratorStdoutBudget(cases.map(({ label, input }) => ({ label, input })));
+    const data = deflateSync(Buffer.from(JSON.stringify({
+      cases: cases.map(({ label, input }) => ({ label, input })),
+    }), 'utf8')).toString('base64') + '\n';
+    if (Buffer.byteLength(data, 'utf8') > GENERATOR_BYTE_LIMITS.input) throw error;
+    return {
+      code: [
+        '# Server-generated replay; keep the companion data file beside this script.',
+        'import base64, pathlib, sys, zlib',
+        `data = pathlib.Path(__file__).with_name('${GENERATOR_REPLAY_DATA_FILENAME}').read_bytes()`,
+        'sys.stdout.buffer.write(zlib.decompress(base64.b64decode(data)))',
+        '',
+      ].join('\n'),
+      data,
+    };
+  }
 }

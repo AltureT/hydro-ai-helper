@@ -28,7 +28,7 @@ const spec: ProblemSpecV1 = {
 const options = { problemKind: 'traditional' as const, caseCount: 8, languages: [] };
 const solution = { problemType: 'traditional' as const, oracleCode: 'print(input())', analysis: 'Read stdin.' };
 const conflict = '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
-  + JSON.stringify({ scope: 'input', minimumBytes: 1_200_000 });
+  + JSON.stringify({ scope: 'input', minimumBytes: 12_000_000 });
 
 function repeatedPlan(count: number, length: number, alphabet: string): GeneratorPlanV1 {
   return { version: 1, seed: 1, cases: Array.from({ length: count }, (_, i) => ({
@@ -37,12 +37,10 @@ function repeatedPlan(count: number, length: number, alphabet: string): Generato
 }
 
 describe('generator budget regressions', () => {
-  it('rejects combined DSL stdout above the sandbox limit even when each input fits', () => {
+  it('accepts combined DSL data beyond the former 1 MiB limit', () => {
     const plan = repeatedPlan(20, 22_000, '界');
     expect(22_001 * 3).toBeLessThan(TESTDATA_GEN_LIMITS.MAX_FILE_SIZE);
-    expect(() => materializeGeneratorPlan(plan, spec)).toThrow(expect.objectContaining({
-      code: 'GENERATOR_OUTPUT_TOO_LARGE', artifact: 'generator',
-    }));
+    expect(materializeGeneratorPlan(plan, spec)).toHaveLength(20);
   });
 
   it('keeps a large replay artifact within the existing file limit without dropping data', () => {
@@ -65,9 +63,9 @@ describe('generator budget regressions', () => {
   it.each([
     { scope: 'input', minimumBytes: 100 },
     { scope: 'input', minimumBytes: '1200000' },
-    { scope: 'input', minimumBytes: 1_200_000, code: 'anything' },
-    { scope: 'unknown', minimumBytes: 1_200_000 },
-    { scope: ['input'], minimumBytes: 1_200_000 },
+    { scope: 'input', minimumBytes: 12_000_000, code: 'anything' },
+    { scope: 'unknown', minimumBytes: 12_000_000 },
+    { scope: ['input'], minimumBytes: 12_000_000 },
   ])('does not mistake malformed or in-budget claims for a confirmed conflict: %p', value => {
     try {
       parseGenerationArtifacts('@@@GENERATOR_BUDGET_CONFLICT@@@\n' + JSON.stringify(value), 'traditional', []);

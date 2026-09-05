@@ -4,14 +4,16 @@ exports.assessGeneratorDslEligibility = assessGeneratorDslEligibility;
 exports.parseGeneratorPlan = parseGeneratorPlan;
 exports.materializeGeneratorPlan = materializeGeneratorPlan;
 exports.renderGeneratorArtifact = renderGeneratorArtifact;
+exports.renderGeneratorArtifacts = renderGeneratorArtifacts;
 const zlib_1 = require("zlib");
 const generatorBudget_1 = require("./generatorBudget");
+const fileBudget_1 = require("./fileBudget");
 const failures_1 = require("./failures");
 const numericBounds_1 = require("./numericBounds");
 const MAX_PLAN_LENGTH = 512 * 1024;
 const MAX_CASES = 30;
 const MAX_LABEL_LENGTH = 256;
-const MAX_SEQUENCE_LENGTH = 100000;
+const MAX_SEQUENCE_LENGTH = 200000;
 const MAX_DENSE_GRAPH_VERTICES = 500;
 const MAX_INPUT_BYTES = generatorBudget_1.GENERATOR_BYTE_LIMITS.input;
 const MAX_TOTAL_GENERATOR_WORK = 1000000;
@@ -789,7 +791,9 @@ function serializeValues(spec, values, layouts) {
             });
         }
     }
-    const maxLine = Math.max(0, ...lines.keys());
+    let maxLine = 0;
+    for (const lineNumber of lines.keys())
+        maxLine = Math.max(maxLine, lineNumber);
     const serialized = Array.from({ length: maxLine }, (_, index) => {
         const tokens = lines.get(index + 1);
         if (!tokens || tokens.length === 0 || tokens.some(token => token === undefined)) {
@@ -840,8 +844,8 @@ function renderGeneratorArtifact(plan, cases) {
             `sys.stdout.buffer.write(zlib.decompress(base64.b64decode('${encoded}')))`,
             '',
         ].join('\n');
-        if (Buffer.byteLength(artifact, 'utf8') > generatorBudget_1.GENERATOR_BYTE_LIMITS.input) {
-            throw new failures_1.TestdataPipelineError('GeneratorPlan 无损压缩后的回放脚本仍超过单文件上限', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { actualBytes: Buffer.byteLength(artifact, 'utf8'), maxBytes: generatorBudget_1.GENERATOR_BYTE_LIMITS.input });
+        if (Buffer.byteLength(artifact, 'utf8') > fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES) {
+            throw new failures_1.TestdataPipelineError('GeneratorPlan 无损压缩后的回放脚本仍超过单文件上限', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { actualBytes: Buffer.byteLength(artifact, 'utf8'), maxBytes: fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES });
         }
         return artifact;
     }
@@ -854,5 +858,31 @@ function renderGeneratorArtifact(plan, cases) {
         "print(json.dumps({'cases': CASES}, ensure_ascii=False, separators=(',', ':')))",
         '',
     ].join('\n');
+}
+/** Keep executable code small; incompressible replay data has its own bounded file. */
+function renderGeneratorArtifacts(plan, cases) {
+    try {
+        return { code: renderGeneratorArtifact(plan, cases) };
+    }
+    catch (error) {
+        if (!(error instanceof failures_1.TestdataPipelineError) || error.code !== 'GENERATOR_OUTPUT_TOO_LARGE')
+            throw error;
+        (0, generatorBudget_1.assertGeneratorStdoutBudget)(cases.map(({ label, input }) => ({ label, input })));
+        const data = (0, zlib_1.deflateSync)(Buffer.from(JSON.stringify({
+            cases: cases.map(({ label, input }) => ({ label, input })),
+        }), 'utf8')).toString('base64') + '\n';
+        if (Buffer.byteLength(data, 'utf8') > generatorBudget_1.GENERATOR_BYTE_LIMITS.input)
+            throw error;
+        return {
+            code: [
+                '# Server-generated replay; keep the companion data file beside this script.',
+                'import base64, pathlib, sys, zlib',
+                `data = pathlib.Path(__file__).with_name('${fileBudget_1.GENERATOR_REPLAY_DATA_FILENAME}').read_bytes()`,
+                'sys.stdout.buffer.write(zlib.decompress(base64.b64decode(data)))',
+                '',
+            ].join('\n'),
+            data,
+        };
+    }
 }
 //# sourceMappingURL=generatorDsl.js.map
