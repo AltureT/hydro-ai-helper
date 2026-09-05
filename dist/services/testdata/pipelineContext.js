@@ -10,7 +10,7 @@ const crypto_1 = require("crypto");
 const problemSpec_1 = require("./problemSpec");
 const failures_1 = require("./failures");
 exports.TESTDATA_CHECKPOINT_SCHEMA_VERSION = 2;
-exports.TESTDATA_PIPELINE_PROMPT_VERSION = 'testdata-generation-v6';
+exports.TESTDATA_PIPELINE_PROMPT_VERSION = 'testdata-generation-v7';
 function cloneJsonValue(value) {
     if (Array.isArray(value))
         return value.map(item => cloneJsonValue(item));

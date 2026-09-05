@@ -150,7 +150,8 @@ describe('single-artifact repair system contracts', () => {
   ] as Array<[SandboxRepairScope, string]>)('requests only %s while freezing the other artifacts', (scope, header) => {
     for (const frozen of [false, true]) {
       const prompt = buildSandboxRepairSystemPrompt(scope, frozen);
-      expect(prompt.match(/^@@@[^\n]+@@@$/gm)).toEqual([`@@@${header}@@@`]);
+      expect(prompt.match(/^@@@[^\n]+@@@$/gm)).toEqual(scope === 'oracle'
+        ? ['@@@ORACLE_LANG@@@', '@@@ORACLE@@@'] : [`@@@${header}@@@`]);
       expect(prompt).toContain('历史完整回答仅作为定位错误的上下文');
       if (frozen) expect(prompt).toContain('FROZEN_PROBLEM_SPEC 是唯一机器题意契约');
     }

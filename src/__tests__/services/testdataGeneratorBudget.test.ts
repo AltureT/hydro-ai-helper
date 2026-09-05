@@ -17,6 +17,7 @@ import {
 } from '../../services/testdata/generatorDsl';
 import { buildProblemSpecPrompt } from '../../services/testdata/problemSpecPrompts';
 import { createStatementSnapshot } from '../../services/testdata/statementSnapshot';
+import { assertGeneratedDataBudget, parseGeneratorBudgetFailure, GENERATOR_BYTE_LIMITS } from '../../services/testdata/generatorBudget';
 import type { ProblemSpecV1 } from '../../services/testdata/problemSpec';
 
 const spec: ProblemSpecV1 = {
@@ -37,6 +38,50 @@ function repeatedPlan(count: number, length: number, alphabet: string): Generato
 }
 
 describe('generator budget regressions', () => {
+  it('can report a necessary output that exceeds 256 KiB without shrinking required coverage', () => {
+    const outputConflict = '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
+      + JSON.stringify({ scope: 'output', minimumBytes: 300000 });
+    expect(() => parseGenerationArtifacts(outputConflict, 'traditional', [])).toThrow(expect.objectContaining({
+      code: 'GENERATOR_OUTPUT_TOO_LARGE', artifact: 'generator', retryPolicy: 'manual-review',
+      safeDetails: expect.objectContaining({ failureKind: 'model-budget-estimate', maxBytes: 262144 }),
+    }));
+  });
+
+  it('turns the observed oversized JSON assertion into an actionable generator repair', () => {
+    const error = parseGeneratorBudgetFailure(new Error('AssertionError: GENERATOR_STDOUT_BYTES actualBytes=9159299 maxBytes=8388608 inputBytesByCase=[12, 24, 2900000, 3000000, 3259224]'));
+    expect(error).toMatchObject({ code: 'GENERATOR_OUTPUT_TOO_LARGE', artifact: 'generator', retryPolicy: 'repair-artifact',
+      safeDetails: { actualBytes: 9159299, maxBytes: 8388608, indexes: ['1:12', '2:24', '3:2900000', '4:3000000', '5:3259224'] } });
+    expect(buildSandboxRepairPrompt(error, options)).toContain('GENERATOR');
+  });
+
+  it.each([
+    'GENERATOR_STDOUT_BYTES actualBytes=100 maxBytes=8388608',
+    'GENERATOR_STDOUT_BYTES actualBytes=9159299 maxBytes=1048576',
+    'GENERATOR_INPUT_BYTES actualBytes=4194305 maxBytes=4194304',
+    'GENERATOR_INPUT_BYTES case=31 actualBytes=4194305 maxBytes=4194304',
+    'SyntaxError: invalid syntax',
+  ])('does not reinterpret unrelated or invalid diagnostics as budget failures: %s', message => {
+    expect(parseGeneratorBudgetFailure(new Error(message))).toBeUndefined();
+  });
+
+  it('checks the aggregate input/output budget without dropping or rewriting cases', () => {
+    const input = 'a'.repeat(GENERATOR_BYTE_LIMITS.input - 1) + '\n';
+    const cases = [{ input, output: '1\n' }, { input, output: '2\n' }];
+    expect(() => assertGeneratedDataBudget(cases)).toThrow(expect.objectContaining({
+      artifact: 'generator', retryPolicy: 'repair-artifact',
+      safeDetails: expect.objectContaining({ actualBytes: 8388612, failureKind: 'plan-budget' }),
+    }));
+    expect(cases).toEqual([{ input, output: '1\n' }, { input, output: '2\n' }]);
+    expect(() => assertGeneratedDataBudget([{ input: input.slice(4), output: '1\n' }, cases[1]])).not.toThrow();
+  });
+
+  it('budgets normalized UTF-8 and the newline added when applying files', () => {
+    const max = GENERATOR_BYTE_LIMITS.plan;
+    const input = '界'.repeat(Math.floor((max - 2) / 3));
+    expect(() => assertGeneratedDataBudget([{ input, output: '\r\n' }])).not.toThrow();
+    expect(() => assertGeneratedDataBudget([{ input: `${input}界`, output: '\r\n' }])).toThrow();
+  });
+
   it('accepts combined DSL data beyond the former 1 MiB limit', () => {
     const plan = repeatedPlan(20, 22_000, '界');
     expect(22_001 * 3).toBeLessThan(TESTDATA_GEN_LIMITS.MAX_FILE_SIZE);

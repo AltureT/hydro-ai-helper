@@ -8202,6 +8202,44 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.some(file => file.name === 'std.cc')).toBe(false);
   });
 
+  it('Python 标程定向修复为 C++ 后更新执行器和文件名，并复用已生成输入', async () => {
+    const usedModel = { endpointId: 'fixture', endpointName: 'fixture', modelName: 'fixture' };
+    const cpp = '#include <iostream>\nusing namespace std;\nint main(){int n;cin>>n;cout<<n;}';
+    const mockClient = { chat: jest.fn()
+      .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional').replace('print(input())', '# original oracle\nprint(input())'), usedModel })
+      .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+      .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+      .mockResolvedValueOnce({ content: `@@@ORACLE@@@\n${cpp}`, usedModel }) };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({ stdout: code.includes('stress generator')
+        ? stressGeneratorStdout() : JSON.stringify({ cases: [{ input: '1' }] }), stderr: '' })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: string[]) => {
+        if (code.includes('using namespace std')) throw new Error('C++ must never run as Python');
+        return Promise.resolve(inputs.map(input => detail({ stdout: input,
+          ...(code.includes('# original oracle') ? { accepted: false, status: 'Nonzero Exit Status', stderr: 'fixture runtime failure' } : {}) })));
+      }),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'compiled-oracle' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_id: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn(),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox', cppOracleAvailable: true,
+    }).generate({ problemTitle: 'Language repair regression', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] } });
+    expect(plan.files.find(file => file.name === 'std.cc')?.content).toContain(cpp);
+    expect(plan.files.some(file => file.name === 'std.py')).toBe(false);
+    expect(runner.compileCpp).toHaveBeenCalledWith(`${cpp}\n`, expect.anything());
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('compiled-oracle');
+    const repairPrompt = mockClient.chat.mock.calls[4][0][2].content;
+    expect(repairPrompt).toContain('当前 ORACLE 语言为 Python 3');
+    expect(repairPrompt).toContain('允许在 Python 3 与 C++17 之间切换');
+  });
+
   it('历史 AC 候选解在沙箱不可达时拒绝降级直出', async () => {
     const mockClient = { chat: jest.fn() };
     const runner = {
@@ -9494,12 +9532,12 @@ describe('两阶段沙箱蓝图', () => {
     })).toThrow(/java/);
   });
 
-  it('解析可选 ORACLE_LANG，缺失或非法回退 Python，函数题忽略 C++', () => {
+  it('解析可选 ORACLE_LANG，旧 Python 缺省兼容但拒绝非法与函数题 C++ 声明', () => {
     expect(parseOracleLanguage('=== ORACLE_LANG ===\npython', 'traditional')).toBe('python');
     expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'traditional')).toBe('cpp');
     expect(parseOracleLanguage('@@@META@@@\nproblemType: traditional', 'traditional')).toBe('python');
-    expect(parseOracleLanguage('=== ORACLE_LANG ===\nrust', 'traditional')).toBe('python');
-    expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'function')).toBe('python');
+    expect(() => parseOracleLanguage('=== ORACLE_LANG ===\nrust', 'traditional')).toThrow(/ORACLE_LANG/);
+    expect(() => parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'function')).toThrow(/Python/);
 
     const cppSolution = parseSolutionBlueprint(
       `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`,
@@ -9513,9 +9551,9 @@ describe('两阶段沙箱蓝图', () => {
     expect(cppFull.oracleLanguage).toBe('cpp');
   });
 
-  it('仅在编译能力可用时向模型提供 ORACLE_LANG C++ 契约', () => {
-    expect(buildSolutionBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
-    expect(buildSandboxBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
+  it('始终声明 ORACLE_LANG，仅在编译能力可用时提供 C++ 契约', () => {
+    expect(buildSolutionBlueprintSystemPrompt()).toContain('@@@ORACLE_LANG@@@\npython（');
+    expect(buildSandboxBlueprintSystemPrompt()).toContain('@@@ORACLE_LANG@@@\npython（');
     expect(buildSolutionBlueprintSystemPrompt(true)).toContain('@@@ORACLE_LANG@@@');
     expect(buildSolutionBlueprintSystemPrompt(true)).toContain('C++17');
     expect(buildSandboxBlueprintSystemPrompt(true)).toContain('@@@ORACLE_LANG@@@');

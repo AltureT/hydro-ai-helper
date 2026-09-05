@@ -55,11 +55,14 @@ import {
 import { getTestdataModelTimeoutMs } from './testdata/latency';
 import {
   buildGeneratorBudgetPrompt,
+  assertGeneratedDataBudget,
   GENERATOR_BYTE_LIMITS,
+  parseGeneratorBudgetFailure,
   throwIfGeneratorBudgetConflict,
 } from './testdata/generatorBudget';
 import { GENERATOR_PLAN_CONTRACT } from './testdata/generatorPlanPrompts';
 import { assertTestdataPlanBudget, TESTDATA_CODE_FILE_MAX_BYTES, GENERATOR_REPLAY_DATA_FILENAME } from './testdata/fileBudget';
+import { parseOracleLanguage, type OracleLanguage } from './testdata/oracleLanguage';
 import {
   extractStatementSamples,
   type StatementSample,
@@ -169,9 +172,7 @@ export type DataScale = 'auto' | 'small' | 'medium' | 'large';
 
 /** 单个测试点最终采用的规模档位。 */
 export type CaseDataScale = Exclude<DataScale, 'auto'>;
-
-export type OracleLanguage = 'python' | 'cpp';
-
+export { parseOracleLanguage, type OracleLanguage } from './testdata/oracleLanguage';
 export interface CoverageSlot {
   /** 本次生成内的测试点序号（从 1 开始，不等同于最终文件编号）。 */
   caseNumber: number;
@@ -1804,11 +1805,11 @@ export function buildSolutionBlueprintSystemPrompt(
   frozenSpec = false,
 ): string {
   const oracleRule = cppOracleAvailable
-    ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+    ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，不接受 C++ 标程。'
     : '2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。';
   const oracleLanguageSection = cppOracleAvailable
-    ? '@@@ORACLE_LANG@@@\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
-    : '';
+    ? '@@@ORACLE_LANG@@@\npython 或 cpp（必须声明并与源码一致；函数题必须为 python）\n'
+    : '@@@ORACLE_LANG@@@\npython（必须声明并与源码一致）\n';
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（与 ORACLE_LANG 一致）'
     : '完整 Python 3 标程';
@@ -2082,11 +2083,11 @@ export function buildSandboxBlueprintSystemPrompt(
   frozenSpec = false,
 ): string {
   const oracleRule = cppOracleAvailable
-    ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+    ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，不接受 C++ 标程。'
     : '5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。';
   const oracleLanguageSection = cppOracleAvailable
-    ? '@@@ORACLE_LANG@@@\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
-    : '';
+    ? '@@@ORACLE_LANG@@@\npython 或 cpp（必须声明并与源码一致；函数题必须为 python）\n'
+    : '@@@ORACLE_LANG@@@\npython（必须声明并与源码一致）\n';
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（stdin → stdout，与 ORACLE_LANG 一致）'
     : '完整 Python 3 标程（stdin → stdout，正解算法）';
@@ -2959,21 +2960,6 @@ export function mergeHackCases(
 }
 
 /**
- * ORACLE_LANG 使用统一的 @@@ 分节，同时保留旧 === 元数据的读取兼容。
- * 缺失、损坏或未知值一律回退 Python；函数题始终忽略 cpp 声明。
- */
-export function parseOracleLanguage(
-  raw: string,
-  problemType: SandboxGenerationBlueprint['problemType'],
-): OracleLanguage {
-  if (problemType === 'function') return 'python';
-  const match = raw.match(
-    /(?:^|\r?\n)[ \t]*(?:@@@ORACLE_LANG@@@|===\s*ORACLE_LANG\s*===)\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i,
-  );
-  return match?.[1].toLowerCase() === 'cpp' ? 'cpp' : 'python';
-}
-
-/**
  * SUBTASKS 使用统一的 @@@ 分节，同时保留旧 === 元数据的读取兼容。
  * 任一行不满足严格格式时整体丢弃，后续即可无歧义地降级为扁平生成。
  */
@@ -3077,7 +3063,7 @@ export function parseSandboxBlueprint(
     templates: problemType === 'function' ? templates : undefined,
     generatorCode: normalizeExecutableContent(generatorCode),
     oracleCode: normalizeExecutableContent(oracleCode),
-    oracleLanguage: parseOracleLanguage(raw, problemType),
+    oracleLanguage: parseOracleLanguage(raw, problemType, normalizeExecutableContent(oracleCode)),
     solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
     solutionCode: solutions.py,
     bruteCode: bruteCode.trim() ? normalizeExecutableContent(bruteCode) : undefined,
@@ -3178,7 +3164,7 @@ export function parseSolutionBlueprint(
     subtasks: parseSubtasksSection(raw),
     functionName: meta.functionName || undefined,
     oracleCode: normalizeExecutableContent(oracleCode),
-    oracleLanguage: parseOracleLanguage(raw, problemType),
+    oracleLanguage: parseOracleLanguage(raw, problemType, normalizeExecutableContent(oracleCode)),
     solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
     solutionCode: solutions.py,
     functionSampleInputs: problemType === 'function'
@@ -4272,6 +4258,9 @@ async function createOracleExecutor(input: {
     ? normalizeExecutableContent(input.options.providedStd as string)
     : input.blueprint.oracleCode;
 
+  // Also validate restored checkpoints and callers that already hold parsed blueprints.
+  parseOracleLanguage(`@@@ORACLE_LANG@@@\n${language}`, input.blueprint.problemType, source);
+
   if (language === 'python') {
     return {
       language,
@@ -4411,6 +4400,7 @@ export async function verifySolutionBlueprintSamples(
     }));
   }
   let executor: OracleExecutor | undefined;
+  let oracleLanguage: OracleLanguage = solution.oracleLanguage || 'python';
   let results: PythonRunDetail[];
   try {
     executor = await createOracleExecutor({
@@ -4420,6 +4410,7 @@ export async function verifySolutionBlueprintSamples(
       cppOracleAvailable,
       signal,
     });
+    oracleLanguage = executor.language;
     results = await executor.runBatchDetailed(
       samples.map(sample => sample.input),
       { signal },
@@ -4431,6 +4422,7 @@ export async function verifySolutionBlueprintSamples(
       code: 'ORACLE_RUNTIME_FAILED',
       stage: 'solution_verification',
       artifact: 'oracle',
+      safeDetails: { oracleLanguage },
       message: `ORACLE 样例预验证执行失败：${err instanceof Error ? err.message : String(err)}`,
     });
   } finally {
@@ -4443,7 +4435,7 @@ export async function verifySolutionBlueprintSamples(
         code: 'ORACLE_RUNTIME_FAILED',
         stage: 'solution_verification',
         artifact: 'oracle',
-        safeDetails: { actualCount: results.length, expectedCount: samples.length },
+        safeDetails: { oracleLanguage, actualCount: results.length, expectedCount: samples.length },
       },
     );
   }
@@ -4462,7 +4454,7 @@ export async function verifySolutionBlueprintSamples(
         code: 'ORACLE_RUNTIME_FAILED',
         stage: 'solution_verification',
         artifact: 'oracle',
-        safeDetails: { caseIndex: i + 1, candidate: acceptedRecord },
+        safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: acceptedRecord },
       },
     );
   }
@@ -4483,7 +4475,7 @@ export async function verifySolutionBlueprintSamples(
           code: 'ORACLE_SAMPLE_MISMATCH',
           stage: 'solution_verification',
           artifact: 'oracle',
-          safeDetails: { caseIndex: i + 1, checkerUsed: true, candidate: acceptedRecord },
+          safeDetails: { oracleLanguage, caseIndex: i + 1, checkerUsed: true, candidate: acceptedRecord },
         },
       );
     }
@@ -4501,7 +4493,7 @@ export async function verifySolutionBlueprintSamples(
           code: 'ORACLE_SAMPLE_MISMATCH',
           stage: 'solution_verification',
           artifact: 'oracle',
-          safeDetails: { caseIndex: i + 1, checkerUsed: false, candidate: acceptedRecord },
+          safeDetails: { oracleLanguage, caseIndex: i + 1, checkerUsed: false, candidate: acceptedRecord },
         },
       );
     }
@@ -5276,6 +5268,8 @@ export async function materializeSandboxBlueprint(
           : await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
       } catch (err) {
         if (isCancellation(err)) throw err;
+        const budgetFailure = parseGeneratorBudgetFailure(err);
+        if (budgetFailure) throw budgetFailure;
         throw toSandboxExecutionPipelineError(err, {
           code: 'UNKNOWN',
           stage: 'generator',
@@ -5697,7 +5691,7 @@ export async function materializeSandboxBlueprint(
 
   // e. ORACLE：一次批量跑正式输入、题面样例和内部压力输入。
   const allInputs = [...inputs, ...sampleInputs, ...stressInputs];
-  let oracleLanguage: OracleLanguage;
+  let oracleLanguage: OracleLanguage = blueprint.oracleLanguage || 'python';
   let oracleResults: PythonRunDetail[];
   let cases: GeneratedCase[];
   let sampleCheckerVerdicts: CheckerExecutionVerdict[] | undefined;
@@ -5725,6 +5719,7 @@ export async function materializeSandboxBlueprint(
         code: 'ORACLE_RUNTIME_FAILED',
         stage: 'oracle',
         artifact: 'oracle',
+        safeDetails: { oracleLanguage },
         message: `ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`,
       });
     }
@@ -5735,7 +5730,7 @@ export async function materializeSandboxBlueprint(
           code: 'ORACLE_RUNTIME_FAILED',
           stage: 'oracle',
           artifact: 'oracle',
-          safeDetails: { actualCount: oracleResults.length, expectedCount: allInputs.length },
+          safeDetails: { oracleLanguage, actualCount: oracleResults.length, expectedCount: allInputs.length },
         },
       );
     }
@@ -5758,7 +5753,7 @@ export async function materializeSandboxBlueprint(
           code: 'ORACLE_RUNTIME_FAILED',
           stage: 'oracle',
           artifact: 'oracle',
-          safeDetails: { caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
+          safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
         },
       );
     }
@@ -5766,11 +5761,12 @@ export async function materializeSandboxBlueprint(
     cases = generatedInputs.map((item, index) => {
       const output = normalizeFileContent(oracleResults[index].stdout);
       if (Buffer.byteLength(output, 'utf8') > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-        throw toPipelineError(new Error(`ORACLE 为第 ${index + 1} 个测试点生成的 .out 超过 256KB 上限`), {
-          code: 'ORACLE_RUNTIME_FAILED',
-          stage: 'oracle',
-          artifact: 'oracle',
+        throw toPipelineError(new Error(`第 ${index + 1} 个测试点执行后的 .out 为 ${Buffer.byteLength(output, 'utf8')} 字节，超过 ${TESTDATA_GEN_LIMITS.MAX_FILE_SIZE} 字节上限；请修复该测试点的输入构造并保留必要覆盖，不得改写标程或截断答案来绕过预算`), {
+          code: 'GENERATOR_OUTPUT_TOO_LARGE',
+          stage: 'generator',
+          artifact: 'generator',
           safeDetails: {
+            failureKind: 'output-budget',
             caseIndex: index + 1,
             actualBytes: Buffer.byteLength(output, 'utf8'),
             maxBytes: TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
@@ -5779,6 +5775,7 @@ export async function materializeSandboxBlueprint(
       }
       return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
     });
+    assertGeneratedDataBudget(cases);
     sampleCheckerVerdicts = customChecker && samples.length > 0
       && checkerExecutor?.status === 'ready'
       ? await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(
@@ -5810,6 +5807,7 @@ export async function materializeSandboxBlueprint(
             stage: 'oracle',
             artifact: 'oracle',
             safeDetails: {
+              oracleLanguage,
               caseIndex: i + 1,
               checkerUsed: checkerRejected,
               candidate: usingAcceptedRecordCandidate,
@@ -7192,13 +7190,14 @@ export function buildSandboxRepairSystemPrompt(scope: SandboxRepairScope, frozen
   };
   const contract = contracts[scope];
   if (!contract) throw new Error(`不支持定向修复范围：${scope}`);
-  return `你负责单一制品的定向修复。本次只输出 ${contract.header}，历史完整回答仅作为定位错误的上下文，不代表本轮输出要求。禁止重发其他制品、代码围栏或解释文字。
+  const headers = scope === 'oracle' ? 'ORACLE_LANG 与 ORACLE' : contract.header;
+  return `你负责单一制品的定向修复。本次只输出 ${headers}，历史完整回答仅作为定位错误的上下文，不代表本轮输出要求。禁止重发其他制品、代码围栏或解释文字。
 ${isVerifierRepairScope(scope) ? '验证制品只依据题面与已确定的 stdin 编码独立实现；不得要求或依赖 ORACLE 源码来推断题意。' : '遵循本轮请求中已确定的题意、接口和标准答案权威约定。'}
 ${frozenSpec ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；题型、testCaseMode、stdin encoding、outputPolicy、subtasks 及约束引用必须保持不变。' : '保持已确定的输入输出协议与所有题面约束不变。'}
 ${contract.rule}
 
-输出格式（只能有下面这一个分节，标记必须独占一行且逐字一致）：
-@@@${contract.header}@@@
+输出格式（只能有下面列出的分节，标记必须独占一行且逐字一致）：
+${scope === 'oracle' ? '@@@ORACLE_LANG@@@\npython 或 cpp（与源码及本轮允许的语言一致）\n' : ''}@@@${contract.header}@@@
 修复后的正文原文`;
 }
 
@@ -7210,6 +7209,7 @@ export function buildSandboxRepairPrompt(
     : 'full',
   coveragePlan?: Array<CoverageSlot | SubtaskCaseAllocation>,
   context?: TestdataPipelineContext,
+  oracleContext?: { language: OracleLanguage; cppAvailable: boolean },
 ): string {
   if (context) {
     if (scope === 'full') {
@@ -7233,7 +7233,7 @@ export function buildSandboxRepairPrompt(
       '- problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 与约束/不变量引用关系必须保持不变。',
       '- 如果失败只能通过修改 Spec 解决，停止输出制品并报告需要回到 Spec 共识阶段。',
       '',
-      buildSandboxRepairPrompt(error, options, scope, coveragePlan),
+      buildSandboxRepairPrompt(error, options, scope, coveragePlan, undefined, oracleContext),
     ].join('\n');
   }
   const templates = options.languages.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、') || '（传统题无需模板）';
@@ -7274,17 +7274,21 @@ ${detail}
     const typedOracleFailure = error instanceof TestdataPipelineError && error.artifact === 'oracle'
       ? error.safeDetails
       : {};
-    const oracleLanguage = typedOracleFailure.oracleLanguage === 'cpp' ? 'C++17' : 'Python 3';
+    const oracleLanguage = (oracleContext?.language || typedOracleFailure.oracleLanguage) === 'cpp' ? 'C++17' : 'Python 3';
     if (typedOracleFailure.failureKind === 'infra' && typedOracleFailure.oracleLanguage === 'cpp') {
       return `你上一条蓝图选择的 C++ ORACLE 因沙箱编译基础设施暂时不可用而无法验证：
 ${detail}
 
-请只输出改用 Python 3 的 @@@ORACLE@@@，不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+请只输出改用 Python 3 的 @@@ORACLE@@@，并在前面输出 @@@ORACLE_LANG@@@ 与 python。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
     }
     return `你上一条蓝图的标程阶段未通过 Hydro 沙箱验证：
 ${detail}
 
-当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的编译错误。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，并在前面输出 @@@ORACLE_LANG@@@ 与实际语言。
+${oracleContext?.cppAvailable && options.problemKind !== 'function'
+    ? '传统题允许在 Python 3 与 C++17 之间切换，但必须同步声明 python 或 cpp；函数题仍只能用 Python 3。'
+    : '保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的错误。'}
+不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
   }
   if (scope === 'brute') {
     return `你上一条蓝图的暴力对拍阶段未通过验证：
@@ -7313,7 +7317,7 @@ ${coverage ? `\n${coverage}\n` : ''}
 3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含每个已选语言的学生解 ${options.languages.map(lang => `@@@SOLUTION:${lang}@@@`).join('、')} 与全部模板：${templates}。
 5. 不要输出 BRUTE、STRESS_GENERATOR 或 VALIDATOR；它们由隔离的独立验证调用生成。
-6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
+6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE_LANG@@@（必须与源码一致）、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
 7. 若输出 @@@NOTES@@@，NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。`;
 }
 
@@ -7416,6 +7420,7 @@ export function mergeSandboxBlueprintRepair(
     const oracleCode = repairSectionContent(sections, 'ORACLE');
     if (!oracleCode) throw new Error('AI 定向修复未返回 ORACLE');
     merged.oracleCode = oracleCode;
+    merged.oracleLanguage = parseOracleLanguage(raw, original.problemType, oracleCode, original.oracleLanguage);
   } else if (scope === 'brute') {
     const bruteCode = repairSectionContent(sections, 'BRUTE');
     if (!bruteCode) throw new Error('AI 定向修复未返回 BRUTE');
@@ -9508,7 +9513,7 @@ export class TestdataGenService {
               + (cppInfraFailure
                 ? 'C++ 编译基础设施暂时不可用，请把 ORACLE 改写为 Python 3。'
                 : '')
-              + '请重新完整输出 @@@META@@@、@@@ANALYSIS@@@、@@@ORACLE@@@，以及函数题需要的 SOLUTION/SAMPLE_INPUTS 分节；标记必须独占一行且逐字一致。禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
+              + '请重新完整输出 @@@META@@@、@@@ANALYSIS@@@、@@@ORACLE_LANG@@@（python 或 cpp，与源码一致）、@@@ORACLE@@@，以及函数题需要的 SOLUTION/SAMPLE_INPUTS 分节；标记必须独占一行且逐字一致。禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
           },
         ],
         solutionSystemPrompt,
@@ -9958,6 +9963,10 @@ export class TestdataGenService {
                   repairScope,
                   generationCoverage,
                   context,
+                  {
+                    language: blueprint.oracleLanguage || 'python',
+                    cppAvailable: cppOracleAvailableForAttempt && blueprint.problemType === 'traditional',
+                  },
                 ),
               },
             ],
