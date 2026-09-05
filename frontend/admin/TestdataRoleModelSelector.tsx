@@ -30,6 +30,16 @@ const LABEL_SUFFIX: Record<TestdataModelRole, string> = {
 
 const SEPARATOR = '::';
 
+// Display-only examples: never use these chains to initialize or save configuration.
+const EXAMPLE_MODELS: Record<TestdataModelRole, string[]> = {
+  specPrimary: ['deepseek-v4-pro'],
+  specCritic: ['deepseek-v4-flash'],
+  oracle: ['deepseek-v4-pro'],
+  artifacts: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  verifier: ['deepseek-v4-flash'],
+  adjudicator: ['deepseek-v4-pro'],
+};
+
 const roleStyles = `
   .testdata-model-roles { margin-top: 20px; border-top: 1px solid ${COLORS.border}; padding-top: 16px; }
   .testdata-model-roles summary { cursor: pointer; }
@@ -46,6 +56,16 @@ const roleStyles = `
   .testdata-model-role .role-model-edit { color: ${COLORS.primary}; font-size: 12px; white-space: nowrap; }
   .testdata-model-role[open] .role-model-edit { color: ${COLORS.textSecondary}; }
   .testdata-model-role .role-model-editor { padding: 4px 4px 16px 148px; max-width: 720px; }
+  .testdata-model-roles .role-model-example { margin-bottom: 16px; padding: 12px; background: ${COLORS.bgPage};
+    border: 1px solid ${COLORS.border}; border-radius: 6px; font-size: 13px; color: ${COLORS.textSecondary}; }
+  .role-model-example > summary { font-weight: 600; color: ${COLORS.textPrimary}; }
+  .role-model-example p { margin: 10px 0; line-height: 1.6; }
+  .role-model-example table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  .role-model-example th, .role-model-example td { padding: 10px 8px; border-bottom: 1px solid ${COLORS.border};
+    text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+  .role-model-example th, .role-model-example .role-example-name { font-weight: 600; color: ${COLORS.textPrimary}; }
+  .role-model-example .role-example-purpose { margin: 4px 0 0; }
+  .role-model-example code { font-size: 12px; white-space: normal; }
   @media (max-width: 600px) {
     .testdata-model-role > summary { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
     .testdata-model-role .role-model-summary { grid-row: 2; }
@@ -122,6 +142,8 @@ export const TestdataRoleModelSelector: React.FC<TestdataRoleModelSelectorProps>
         : i18n('ai_helper_admin_scenario_custom'))),
       React.createElement('span', { className: 'role-model-edit' }, i18n('ai_helper_admin_testdata_role_configure'))),
     React.createElement('div', { className: 'role-model-editor' },
+    React.createElement('p', { style: { margin: '4px 0 8px', fontSize: '13px', color: COLORS.textSecondary } },
+      i18n(`ai_helper_admin_testdata_role_${LABEL_SUFFIX[role]}_purpose`)),
     !inherited ? React.createElement('button', {
       type: 'button',
       onClick: () => onChange(role, []),
@@ -156,5 +178,23 @@ export const TestdataRoleModelSelector: React.FC<TestdataRoleModelSelectorProps>
     }, i18n('ai_helper_admin_testdata_roles_title')),
     React.createElement('p', { style: { fontSize: '13px', color: COLORS.textSecondary, margin: '8px 0 16px' } },
       i18n('ai_helper_admin_testdata_roles_desc')),
+    React.createElement('details', { className: 'role-model-example' },
+      React.createElement('summary', null, i18n('ai_helper_admin_testdata_example_title')),
+      React.createElement('p', null, i18n('ai_helper_admin_testdata_example_intro')),
+      React.createElement('table', { 'aria-label': i18n('ai_helper_admin_testdata_example_title') },
+        React.createElement('thead', null, React.createElement('tr', null,
+          React.createElement('th', { scope: 'col' }, i18n('ai_helper_admin_testdata_example_stage')),
+          React.createElement('th', { scope: 'col' }, i18n('ai_helper_admin_testdata_example_models')))),
+        React.createElement('tbody', null, ...TESTDATA_MODEL_ROLES.map(role => React.createElement('tr', { key: role },
+          React.createElement('th', { scope: 'row', style: { fontWeight: 400 } },
+            React.createElement('span', { className: 'role-example-name' },
+              i18n(`ai_helper_admin_testdata_role_${LABEL_SUFFIX[role]}`)),
+            React.createElement('p', { className: 'role-example-purpose', style: { color: COLORS.textSecondary } },
+              i18n(`ai_helper_admin_testdata_role_${LABEL_SUFFIX[role]}_purpose`))),
+          React.createElement('td', null, ...EXAMPLE_MODELS[role].map((model, index) => React.createElement('span', {
+            key: model,
+          }, index > 0 ? ' → ' : null, React.createElement('code', null, model)))))))),
+      React.createElement('p', null, i18n('ai_helper_admin_testdata_example_setup')),
+      React.createElement('p', null, i18n('ai_helper_admin_testdata_example_independence'))),
     React.createElement('div', null, ...roleElements));
 };
