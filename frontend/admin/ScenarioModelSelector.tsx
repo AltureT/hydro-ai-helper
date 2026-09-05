@@ -2,7 +2,7 @@ import React from 'react';
 import { i18n } from '../utils/i18n';
 import {
   COLORS, SPACING, RADIUS,
-  getInputStyle, getButtonStyle, getBadgeStyle, getAlertStyle,
+  getInputStyle, getButtonStyle,
 } from '../utils/styles';
 import type {
   Endpoint, SelectedModel, AIScenarioKey, ScenarioModelsState,
@@ -117,16 +117,14 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                 borderRadius: RADIUS.md, border: `1px solid ${COLORS.border}`,
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.xs, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: '16px' }}>{meta.icon}</span>
-                <span style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n(meta.labelKey)}</span>
-                {isDefault ? (
-                  <span style={getBadgeStyle('info')}>{i18n('ai_helper_admin_scenario_follow_global')}</span>
-                ) : (
-                  <span style={getBadgeStyle('success')}>{i18n('ai_helper_admin_scenario_custom')}</span>
-                )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '15px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n(meta.labelKey)}</span>
+                <span style={{ fontSize: '12px', color: COLORS.textSecondary }}>
+                  {i18n(isDefault ? 'ai_helper_admin_scenario_follow_global' : 'ai_helper_admin_scenario_custom')}
+                </span>
                 {!isDefault && (
                   <button
+                    type="button"
                     onClick={() => onChange(scenario, [])}
                     disabled={disabled}
                     style={{
@@ -139,12 +137,13 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                   </button>
                 )}
               </div>
-              <p style={{ fontSize: '12px', color: COLORS.textMuted, margin: `0 0 ${SPACING.sm}` }}>
+              <p style={{ fontSize: '13px', lineHeight: 1.6, color: COLORS.textSecondary, margin: `0 0 ${SPACING.md}`, maxWidth: '76ch' }}>
                 {i18n(meta.descKey)}
               </p>
 
               {meta.warnKey && (
-                <div style={{ ...getAlertStyle('warning'), fontSize: '12px', fontWeight: 600, marginBottom: SPACING.sm }}>
+                <div style={{ backgroundColor: COLORS.bgPage, color: COLORS.textSecondary, padding: SPACING.md,
+                  borderRadius: RADIUS.sm, fontSize: '13px', lineHeight: 1.6, marginBottom: SPACING.md }}>
                   {i18n(meta.warnKey)}
                 </div>
               )}
@@ -171,19 +170,21 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                       }}
                     >
                       <span style={{
-                        width: '20px', height: '20px', borderRadius: '50%',
-                        backgroundColor: COLORS.primaryLight, color: COLORS.primary,
+                        width: '20px', height: '20px',
+                        color: COLORS.textSecondary,
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         fontSize: '11px', fontWeight: 600, marginRight: SPACING.sm, flexShrink: 0,
                       }}>
                         {index + 1}
                       </span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ fontSize: '13px', fontWeight: 500, color: COLORS.textPrimary }}>{sm.modelName}</span>
-                        <span style={{ fontSize: '12px', color: COLORS.textMuted, marginLeft: SPACING.sm }}>{endpointName(sm.endpointId)}</span>
+                        <span style={{ fontSize: '13px', fontWeight: 500, color: COLORS.textPrimary, overflowWrap: 'anywhere' }}>{sm.modelName}</span>
+                        <span style={{ fontSize: '12px', color: COLORS.textSecondary, marginLeft: SPACING.sm }}>{endpointName(sm.endpointId)}</span>
                       </div>
                       <div style={{ display: 'flex', gap: '4px' }}>
                         <button
+                          type="button"
+                          aria-label={`${i18n('ai_helper_admin_model_up')} ${sm.modelName}`}
                           onClick={() => moveModel(scenario, index, 'up')}
                           disabled={disabled || index === 0}
                           style={{
@@ -195,6 +196,8 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                           ↑
                         </button>
                         <button
+                          type="button"
+                          aria-label={`${i18n('ai_helper_admin_model_down')} ${sm.modelName}`}
                           onClick={() => moveModel(scenario, index, 'down')}
                           disabled={disabled || index === chain.length - 1}
                           style={{
@@ -206,10 +209,12 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                           ↓
                         </button>
                         <button
+                          type="button"
+                          aria-label={`${i18n('ai_helper_admin_model_remove')} ${sm.modelName}`}
                           onClick={() => removeModel(scenario, index)}
                           disabled={disabled}
                           style={{
-                            ...getButtonStyle('danger'), padding: '2px 6px', fontSize: '12px',
+                            ...getButtonStyle('ghost'), padding: '2px 6px', fontSize: '12px',
                             cursor: disabled ? 'not-allowed' : 'pointer',
                           }}
                         >
@@ -223,6 +228,7 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
 
               {modelOptions.length > 0 ? (
                 <select
+                  aria-label={`${i18n(meta.labelKey)}: ${i18n('ai_helper_admin_scenario_add_model')}`}
                   value=""
                   onChange={(e) => addModel(scenario, e.target.value)}
                   disabled={disabled}
