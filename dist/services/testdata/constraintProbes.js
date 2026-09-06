@@ -1405,6 +1405,9 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
 }
 /** Preconditions are input rules even when there is no duplicate constraints entry. */
 function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
+    // Function specs may also describe calls in operations; this parser owns input operation rows only.
+    if (!spec.inputFields.some(field => field.type === 'operations'))
+        return true;
     let unknown = false;
     for (const operation of spec.operations || []) {
         // The existing stateful ADD/DEL path evaluates its own target-specific presence semantics.
