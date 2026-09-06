@@ -108,6 +108,7 @@ describe('bounded constraint compatibility and seed selection', () => {
     spec.constraints = [constraint('UNIQUE', 'allDistinct(a)')];
     const result = build(spec, ['2\n1 1\n', '2\n1 2\n']);
     expect(result.probes).toEqual([]);
+    expect(build(spec, ['2\n1 2\n', '2\n1 1\n']).probes).toEqual([]);
     expect(result.gaps).toContainEqual(expect.objectContaining({ targetId: 'UNIQUE', reasonCode: 'MUTATION_NOT_ISOLATED' }));
   });
 

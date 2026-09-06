@@ -3,7 +3,7 @@ import type { ProblemSpecV1 } from './problemSpec';
 import { specForConstraintProbes } from './probeExpressions';
 import {
   RANGE_PROBE_KINDS, constructRangeMutation, operationLayout, preserveTextOperationCounts,
-  rangeDescriptor, rangeIsValid, replaceScalar, scalarSnapshot, stringAlphabet,
+  rangeDescriptor, rangeIsValid, rangeSnapshot, replaceScalar, scalarSnapshot, stringAlphabet,
   stringCharacterSnapshot, stringCountField, stringLengthIsValid,
 } from './textOperationProbes';
 import { TESTDATA_INPUT_MAX_BYTES, TESTDATA_PLAN_MAX_BYTES } from './fileBudget';
@@ -1601,11 +1601,10 @@ function evaluateRecognizedSemantic(
   return undefined;
 }
 
-function applicableRecognizableSemantics(
+function applicableTargets(
   spec: ProblemSpecV1,
   namedTarget: Target,
-  namedRequest: InternalProbeRequest,
-): Array<{ target: Target; request: InternalProbeRequest }> {
+): Target[] {
   const constraints: Target[] = spec.constraints.flatMap(constraint => {
     const applicable = constraint.scope === 'global'
       || (namedTarget.subtaskId !== undefined
@@ -1622,13 +1621,43 @@ function applicableRecognizableSemantics(
     kind: 'invariant' as const,
     expression: invariant.expression,
   }));
-  return [...constraints, ...invariants].flatMap(target => {
+  return [...constraints, ...invariants];
+}
+
+function applicableRecognizableSemantics(
+  spec: ProblemSpecV1,
+  namedTarget: Target,
+  namedRequest: InternalProbeRequest,
+): Array<{ target: Target; request: InternalProbeRequest }> {
+  return applicableTargets(spec, namedTarget).flatMap(target => {
     if (target.id === namedTarget.id && target.kind === namedTarget.kind) {
       return [{ target, request: namedRequest }];
     }
     const request = deriveConstructionRequests(spec, target)[0];
     return request ? [{ target, request: { ...request, source: 'derived' } }] : [];
   });
+}
+
+/** Preconditions are input rules even when there is no duplicate constraints entry. */
+function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignoredRangeExpression?: string): boolean | undefined {
+  let unknown = false;
+  for (const operation of spec.operations || []) {
+    // The existing stateful ADD/DEL path evaluates its own target-specific presence semantics.
+    if ((operation.name === 'ADD' || operation.name === 'DEL') && operation.arguments.some(fieldId => (
+      operationSupportsSetPresence(spec, operation.name as 'ADD' | 'DEL', fieldId)
+    ))) continue;
+    for (const predicate of operation.preconditions) {
+      const expression = `for every operation, ${predicate}`;
+      const descriptor = spec.inputFields.map(field => rangeDescriptor(spec, expression, field.id)).find(Boolean);
+      if (!descriptor) { unknown = true; continue; }
+      if (expression === ignoredRangeExpression) continue;
+      const snapshot = rangeSnapshot(input, spec, descriptor);
+      if (!snapshot) { unknown = true; continue; }
+      if (snapshot.operations.some(item => item.name === operation.name
+        && !(descriptor.lower <= item.left && item.left <= item.right && item.right <= snapshot.upper))) return false;
+    }
+  }
+  return unknown ? undefined : true;
 }
 
 function mutationIsTargetIsolated(
@@ -1638,12 +1667,9 @@ function mutationIsTargetIsolated(
   target: Target,
   request: InternalProbeRequest,
 ): boolean {
-  // Unknown operation preconditions may read strings or scalar metadata as well as endpoints.
-  // Keep every mutation unproven when a recognized range layout has such an extra condition.
-  if ((spec.operations || []).some(operation => operation.preconditions.length !== 1)
-    && [...spec.constraints, ...spec.invariants].some(item => spec.inputFields.some(field => (
-      field.type === 'operations' && rangeDescriptor(spec, item.expression, field.id)
-    )))) return false;
+  if (operationPreconditionsValid(sourceInput, spec) !== true
+    || operationPreconditionsValid(mutatedInput, spec,
+      RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true) return false;
   const semantics = applicableRecognizableSemantics(spec, target, request);
   if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
     return false;
@@ -1846,10 +1872,31 @@ export function buildConstraintProbes(
     return [{ target, request: { ...resolved, source: 'recipe' as const } }];
   });
 
+  // Audit the bounded applicable seed set once per scope, before choosing any successful seed.
+  // A later validator-accepted but provably illegal seed must not be hidden by an earlier witness.
+  const invalidSeedByScope = new Map<string, boolean>();
   for (const { target, request } of [...deterministicRequests, ...customRequests]) {
     const candidates = selectSeeds(seeds, target);
     if (candidates.length === 0) {
       gaps.push(gap(target, 'NO_MATCHING_LEGAL_SEED'));
+      continue;
+    }
+    const scopeKey = target.subtaskId === undefined ? 'global' : `subtask:${target.subtaskId}`;
+    if (!invalidSeedByScope.has(scopeKey)) {
+      const semantics = applicableTargets(input.spec, target).flatMap(item => {
+        const derived = deriveConstructionRequests(input.spec, item)[0];
+        return derived ? [{ target: item, request: derived }] : [];
+      });
+      invalidSeedByScope.set(scopeKey, candidates.some(seed => {
+        const normalized = normalizeInput(seed.input);
+        if (!normalized || Buffer.byteLength(normalized, 'utf8') > MAX_PROBE_INPUT_BYTES) return false;
+        return operationPreconditionsValid(normalized, input.spec) === false || semantics.some(item => (
+          evaluateRecognizedSemantic(normalized, input.spec, item.target, item.request) === false
+        ));
+      }));
+    }
+    if (invalidSeedByScope.get(scopeKey)) {
+      gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
       continue;
     }
     let lastGap: ConstraintProbeGap['reasonCode'] = 'MUTATION_NOT_ISOLATED';
@@ -1864,7 +1911,8 @@ export function buildConstraintProbes(
       lastGap = 'MUTATION_NOT_ISOLATED';
       continue;
     }
-    if (applicableRecognizableSemantics(input.spec, target, request).some(item => (
+    if (operationPreconditionsValid(normalizedInput, input.spec) === false
+      || applicableRecognizableSemantics(input.spec, target, request).some(item => (
       evaluateRecognizedSemantic(normalizedInput, input.spec, item.target, item.request) === false
     ))) {
       // A validator-accepted seed that is provably illegal is a proof defect, not a seed to skip.

@@ -99,6 +99,22 @@ describe('range and binary string rejection proofs', () => {
     const result = build(spec);
     expect(result.probes).toEqual([]);
     expect(result.gaps.map(gap => gap.targetId).sort()).toEqual(['BINARY', 'LEN', 'N', 'Q', 'RANGE']);
+    spec.constraints = spec.constraints.filter(item => item.id !== 'RANGE');
+    expect(build(spec).probes).toEqual([]);
+    spec.operations![0].preconditions = ["s[r] == '0'"];
+    spec.operations![1].preconditions = [];
+    expect(build(spec).probes).toEqual([]);
+  });
+
+  it('enforces operation preconditions without duplicate range constraints and never skips a known invalid seed', () => {
+    const spec = rangeStringFixture(); spec.constraints = spec.constraints.filter(item => item.id !== 'RANGE');
+    const result = build(spec);
+    expect(result.gaps).toContainEqual(expect.objectContaining({ targetId: 'N' }));
+    expect(result.probes.find(p => p.targetId === 'N')?.input.startsWith('9 ')).toBe(true);
+    expect(result.probes.filter(p => p.targetId === 'Q')).toHaveLength(2);
+    for (const probe of result.probes) expect(violations(probe.input)).toEqual([probe.targetId]);
+    expect(build(spec, [legal.replace('FLIP 1 3', 'FLIP 0 3'), legal]).probes).toEqual([]);
+    expect(build(spec, [legal, legal.replace('FLIP 1 3', 'FLIP 0 3')]).probes).toEqual([]);
   });
 
   it('requires declared string count dependency and preserves unsupported natural language', () => {
@@ -156,6 +172,7 @@ describe('range and binary string rejection proofs', () => {
 
   it('keeps an operation cardinality gap when safe reconstruction is unavailable', () => {
     const spec = rangeStringFixture(); spec.constraints = [constraint('Q', '1 <= q <= 8')];
+    delete spec.operations;
     expect(build(spec).probes).toEqual([]);
     expect(build(spec).gaps).toContainEqual(expect.objectContaining({ targetId: 'Q', reasonCode: 'MUTATION_NOT_ISOLATED' }));
     spec.inputFields[3].dependsOn = [];

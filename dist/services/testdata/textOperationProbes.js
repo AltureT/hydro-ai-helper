@@ -134,11 +134,9 @@ function rangeDescriptor(spec, expression, fieldId) {
     }))
         return undefined;
     const definitions = spec.operations || [];
-    const predicate = expression.slice('for every operation, '.length);
     if (!definitions.length || new Set(definitions.map(item => item.name)).size !== definitions.length
         || definitions.some(item => !/^[A-Za-z][A-Za-z0-9_]*$/.test(item.name)
-            || item.arguments.length !== 2 || item.arguments[0] !== match[2] || item.arguments[1] !== match[3]
-            || !item.preconditions.includes(predicate)))
+            || item.arguments.length !== 2 || item.arguments[0] !== match[2] || item.arguments[1] !== match[3]))
         return undefined;
     return { field, lower: Number(match[1]), left: match[2], right: match[3], upperField };
 }
@@ -189,7 +187,7 @@ function constructRangeMutation(input, spec, descriptor, kind, operationName) {
     const snapshot = rangeSnapshot(input, spec, descriptor);
     if (!snapshot || rangeIsValid(input, spec, descriptor) !== true)
         return 'MUTATION_NOT_ISOLATED';
-    if ((spec.operations || []).some(operation => operation.preconditions.length !== 1))
+    if ((spec.operations || []).some(operation => operation.preconditions.length > 1))
         return 'UNSUPPORTED_TARGET';
     const op = snapshot.operations.find(item => item.name === operationName);
     if (!op)
@@ -240,9 +238,10 @@ function preserveTextOperationCounts(original, input, spec, expressions, countId
         const encodedCount = /^lines:[1-9]\d*\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63})\+/.exec(field.encoding)?.[1];
         if (encodedCount ? encodedCount !== countId : !field.dependsOn?.includes(countId))
             continue;
-        const descriptor = expressions.map(expression => rangeDescriptor(spec, expression, field.id)).find(Boolean);
+        const predicates = [...expressions, ...(spec.operations || []).flatMap(operation => (operation.preconditions.map(predicate => `for every operation, ${predicate}`)))];
+        const descriptor = predicates.map(expression => rangeDescriptor(spec, expression, field.id)).find(Boolean);
         if (!descriptor || operationLayout(field)?.countId !== countId
-            || (spec.operations || []).some(operation => operation.preconditions.length !== 1))
+            || (spec.operations || []).some(operation => operation.preconditions.length > 1))
             return { gap: 'MUTATION_NOT_ISOLATED' };
         const snapshot = rangeSnapshot(original, spec, descriptor);
         if (!snapshot || count < 0)

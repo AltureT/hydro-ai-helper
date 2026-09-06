@@ -11303,7 +11303,8 @@ describe('Task 8 restored verifier checkpoint strictness', () => {
 });
 
 describe('Task 8 resume checkpoint provenance privacy and cancellation identity', () => {
-  const statementMarkdown = 'Every input satisfies 0 <= n <= 10.';
+  // The shared stress generator emits 1..60; all accepted seeds must satisfy this fixture spec.
+  const statementMarkdown = 'Every input satisfies 0 <= n <= 100.';
   const options: GenerateOptions = {
     problemKind: 'traditional', caseCount: 2, languages: [],
   };
@@ -11311,8 +11312,8 @@ describe('Task 8 resume checkpoint provenance privacy and cancellation identity'
   function proofContext() {
     return makeValidatorCoverageProof(statementMarkdown, {
       constraints: [{
-        id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
-        scope: 'global', evidence: { quote: '0 <= n <= 10' },
+        id: 'C1', expression: '0 <= n <= 100', machineCheckable: true,
+        scope: 'global', evidence: { quote: '0 <= n <= 100' },
       }],
     });
   }

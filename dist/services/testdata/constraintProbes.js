@@ -1375,7 +1375,7 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
     }
     return undefined;
 }
-function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
+function applicableTargets(spec, namedTarget) {
     const constraints = spec.constraints.flatMap(constraint => {
         const applicable = constraint.scope === 'global'
             || (namedTarget.subtaskId !== undefined
@@ -1392,7 +1392,10 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
         kind: 'invariant',
         expression: invariant.expression,
     }));
-    return [...constraints, ...invariants].flatMap(target => {
+    return [...constraints, ...invariants];
+}
+function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
+    return applicableTargets(spec, namedTarget).flatMap(target => {
         if (target.id === namedTarget.id && target.kind === namedTarget.kind) {
             return [{ target, request: namedRequest }];
         }
@@ -1400,11 +1403,37 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
         return request ? [{ target, request: { ...request, source: 'derived' } }] : [];
     });
 }
+/** Preconditions are input rules even when there is no duplicate constraints entry. */
+function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
+    let unknown = false;
+    for (const operation of spec.operations || []) {
+        // The existing stateful ADD/DEL path evaluates its own target-specific presence semantics.
+        if ((operation.name === 'ADD' || operation.name === 'DEL') && operation.arguments.some(fieldId => (operationSupportsSetPresence(spec, operation.name, fieldId))))
+            continue;
+        for (const predicate of operation.preconditions) {
+            const expression = `for every operation, ${predicate}`;
+            const descriptor = spec.inputFields.map(field => (0, textOperationProbes_1.rangeDescriptor)(spec, expression, field.id)).find(Boolean);
+            if (!descriptor) {
+                unknown = true;
+                continue;
+            }
+            if (expression === ignoredRangeExpression)
+                continue;
+            const snapshot = (0, textOperationProbes_1.rangeSnapshot)(input, spec, descriptor);
+            if (!snapshot) {
+                unknown = true;
+                continue;
+            }
+            if (snapshot.operations.some(item => item.name === operation.name
+                && !(descriptor.lower <= item.left && item.left <= item.right && item.right <= snapshot.upper)))
+                return false;
+        }
+    }
+    return unknown ? undefined : true;
+}
 function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, request) {
-    // Unknown operation preconditions may read strings or scalar metadata as well as endpoints.
-    // Keep every mutation unproven when a recognized range layout has such an extra condition.
-    if ((spec.operations || []).some(operation => operation.preconditions.length !== 1)
-        && [...spec.constraints, ...spec.invariants].some(item => spec.inputFields.some(field => (field.type === 'operations' && (0, textOperationProbes_1.rangeDescriptor)(spec, item.expression, field.id)))))
+    if (operationPreconditionsValid(sourceInput, spec) !== true
+        || operationPreconditionsValid(mutatedInput, spec, textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true)
         return false;
     const semantics = applicableRecognizableSemantics(spec, target, request);
     if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
@@ -1572,10 +1601,30 @@ function buildConstraintProbes(input) {
         }
         return [{ target, request: { ...resolved, source: 'recipe' } }];
     });
+    // Audit the bounded applicable seed set once per scope, before choosing any successful seed.
+    // A later validator-accepted but provably illegal seed must not be hidden by an earlier witness.
+    const invalidSeedByScope = new Map();
     for (const { target, request } of [...deterministicRequests, ...customRequests]) {
         const candidates = selectSeeds(seeds, target);
         if (candidates.length === 0) {
             gaps.push(gap(target, 'NO_MATCHING_LEGAL_SEED'));
+            continue;
+        }
+        const scopeKey = target.subtaskId === undefined ? 'global' : `subtask:${target.subtaskId}`;
+        if (!invalidSeedByScope.has(scopeKey)) {
+            const semantics = applicableTargets(input.spec, target).flatMap(item => {
+                const derived = deriveConstructionRequests(input.spec, item)[0];
+                return derived ? [{ target: item, request: derived }] : [];
+            });
+            invalidSeedByScope.set(scopeKey, candidates.some(seed => {
+                const normalized = normalizeInput(seed.input);
+                if (!normalized || Buffer.byteLength(normalized, 'utf8') > MAX_PROBE_INPUT_BYTES)
+                    return false;
+                return operationPreconditionsValid(normalized, input.spec) === false || semantics.some(item => (evaluateRecognizedSemantic(normalized, input.spec, item.target, item.request) === false));
+            }));
+        }
+        if (invalidSeedByScope.get(scopeKey)) {
+            gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
             continue;
         }
         let lastGap = 'MUTATION_NOT_ISOLATED';
@@ -1590,7 +1639,8 @@ function buildConstraintProbes(input) {
                 lastGap = 'MUTATION_NOT_ISOLATED';
                 continue;
             }
-            if (applicableRecognizableSemantics(input.spec, target, request).some(item => (evaluateRecognizedSemantic(normalizedInput, input.spec, item.target, item.request) === false))) {
+            if (operationPreconditionsValid(normalizedInput, input.spec) === false
+                || applicableRecognizableSemantics(input.spec, target, request).some(item => (evaluateRecognizedSemantic(normalizedInput, input.spec, item.target, item.request) === false))) {
                 // A validator-accepted seed that is provably illegal is a proof defect, not a seed to skip.
                 lastGap = 'MUTATION_NOT_ISOLATED';
                 break;
