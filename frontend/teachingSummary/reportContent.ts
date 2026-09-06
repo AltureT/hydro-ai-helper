@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import { normalizeHomeworkMarkdown } from '../../src/utils/reportMarkdown';
 
 // Parse structure without rendering HTML. Fenced code is never treated as a heading.
 const parser = new MarkdownIt({ html: false });
@@ -63,7 +64,7 @@ export interface StudentHomework {
  */
 export function prepareStudentHomework(markdown: string): StudentHomework {
   const unavailable = { studentMarkdown: null, questionCount: 0 };
-  const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
+  const lines = normalizeHomeworkMarkdown(markdown).replace(/\r\n?/g, '\n').split('\n');
   const normalized = lines.join('\n');
   const environment: { references?: Record<string, unknown> } = {};
   const tokens = parser.parse(normalized, environment);

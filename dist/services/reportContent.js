@@ -1,15 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.reportContent = reportContent;
-/** Remove the provider's leading reasoning wrapper, preserving report code/text. */
+const reportMarkdown_1 = require("../utils/reportMarkdown");
+/** Remove provider metadata and normalize report headings before persistence. */
 function reportContent(content) {
-    let result = content;
-    while (/^\s*<think>/i.test(result)) {
-        const end = result.search(/<\/think>/i);
-        if (end < 0)
-            throw new Error('Model returned an incomplete reasoning block without a report');
-        result = result.slice(end + '</think>'.length).trimStart();
-    }
+    const result = (0, reportMarkdown_1.normalizeReportMarkdown)(content);
     if (!result.trim())
         throw new Error('Model returned an empty report');
     return result;

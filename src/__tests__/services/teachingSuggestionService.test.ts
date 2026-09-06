@@ -419,6 +419,17 @@ describe('TeachingSuggestionService', () => {
     expect(systemPrompt).toContain('建议挖空点说明');
     expect(result.text).toContain('课后巩固');
   });
+
+  it('normalizes provider formatting and Python placeholders before returning homework', async () => {
+    const aiClient = makeAiClient(String.raw`\<think>(thinking…)\</think>###&#x20;课后巩固作业` + '\n```\nfor i in range(/* [空1] _____ (提示：次数) */):\n    pass\n```');
+    const service = new TeachingSuggestionService(aiClient);
+    const result = await service.generateFillInExercise({ candidates: [{
+      pid: 1, title: 'Loop', lang: 'py.py3', code: 'for i in range(3):\n    pass', isFillInProblem: false,
+    }], relatedFindings: [] });
+    expect(result.text).toContain('### 课后巩固作业');
+    expect(result.text).toContain('for i in range(__BLANK_1__):');
+    expect(result.text).not.toMatch(/thinking|\/\*/);
+  });
 });
 
 // ─── buildFillInPrompt ──────────────────────────────────
