@@ -20,6 +20,10 @@ export const VALIDATOR_PROBE_CONSTRUCTION_KINDS = [
   'delete-missing-object',
   'operation-argument-out-of-range',
   'subtask-upper-bound',
+  'string-length-mismatch',
+  'operation-range-below-min',
+  'operation-range-reversed',
+  'operation-range-above-max',
 ] as const;
 
 export type ValidatorProbeConstructionKind =

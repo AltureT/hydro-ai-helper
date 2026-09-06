@@ -32,6 +32,8 @@ JSON 必须满足 ProblemSpecV1：
 - 整数边界：1 <= n <= 200000，或 n >= 1、n <= 200000。
 - 数组元素边界：-1000000000 <= nums[i] <= 1000000000；分开写时可用 nums[i] >= -1000000000、nums[i] <= 1000000000。
 - 数组长度：length(nums) = n；元素不重复：allDistinct(nums)。
+- 无空白 ASCII 字符串长度：length(s) = n，字符串字段 dependsOn:["n"]；二进制字符集：characters(s) in [01]，小写字母字符集：characters(s) in [a-z]。
+- 每条操作的区间边界：for every operation, 1 <= l <= r <= n；operations 中保留按输入顺序排列的 arguments:["l","r"]，preconditions 使用 1 <= l <= r <= n。其他前置条件和 effects 按题意完整保留。
 上述只是表示约定，不得改写题面含义、删掉无法表示的约束或把未支持的语义标为已验证；其他约束继续准确表达并保留证据。
 
 inputFields.encoding 的机器编码约定（位置从 1 开始，引用使用字段 id）：
@@ -41,6 +43,7 @@ inputFields.encoding 的机器编码约定（位置从 1 开始，引用使用�
 - n 个顶点的树边从第二行开始：lines:2..n tokens:1,2，dependsOn:["n"]。
 - m 条图边从第二行开始：lines:2..m+1 tokens:1,2，dependsOn 同时引用顶点数和边数。
 - q 个操作从第二行开始：lines:2..q+1 operations，dependsOn:["q"]；操作参数 x 的独立字段可用 operation-argument:x，operations.arguments 引用参数字段 id。
+- q 个操作从第三行开始：lines:3..q+2 operations，dependsOn:["q"]；计数字段可以位于前两行的明确 token 位置。每条操作占一行，首 token 为操作名，其余为按 arguments 顺序排列的参数。
 只有题面实际布局与上述形式精确一致时才使用机器编码。加权边、变长/嵌套布局、带空格字符串、多参数状态操作等不能无损表达时，保留准确的文字编码与完整类型/语义，服务端会判断支持范围；禁止为了适配 DSL 丢掉权重、操作参数或状态前置条件。函数题未明确标准输入编码时不得凭空添加长度前缀或改写原调用形式。`;
     const chunks = input.snapshot.chunks.flatMap(chunk => [
         `--- STATEMENT CHUNK ${chunk.index + 1}/${input.snapshot.chunks.length} [${chunk.start},${chunk.end}) ---`,

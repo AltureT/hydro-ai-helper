@@ -1,6 +1,11 @@
 import { createHash } from 'crypto';
 import type { ProblemSpecV1 } from './problemSpec';
 import { specForConstraintProbes } from './probeExpressions';
+import {
+  RANGE_PROBE_KINDS, constructRangeMutation, operationLayout, preserveTextOperationCounts,
+  rangeDescriptor, rangeIsValid, replaceScalar, scalarSnapshot, stringAlphabet,
+  stringCharacterSnapshot, stringCountField, stringLengthIsValid,
+} from './textOperationProbes';
 import { TESTDATA_INPUT_MAX_BYTES, TESTDATA_PLAN_MAX_BYTES } from './fileBudget';
 import type {
   ValidatorProbeConstructionKind,
@@ -219,6 +224,8 @@ function scalarLocationIsUnambiguous(
     if (otherLocation) {
       return otherLocation.line === location.line && otherLocation.token === location.token;
     }
+    const operations = operationLayout(field);
+    if (operations && location.line >= operations.start) return true;
     const otherRange = parseTokenRange(field.encoding);
     return otherRange?.line === location.line && location.token >= otherRange.startToken;
   });
@@ -357,7 +364,8 @@ function preserveDependentArrayLengths(
     input = lines.join('\n');
     if (Buffer.byteLength(input, 'utf8') > MAX_PROBE_INPUT_BYTES) return 'PROBE_TOO_LARGE';
   }
-  return { ...mutation, input };
+  const preserved = preserveTextOperationCounts(original, input, spec, expressions, countFieldId, count);
+  return typeof preserved === 'string' ? { ...mutation, input: preserved } : preserved.gap;
 }
 
 function resolveSequenceLayout(
@@ -1265,15 +1273,18 @@ function constructStringMutation(
   const location = parseLocation(encoding);
   if (!location) return 'UNPARSEABLE_ENCODING';
   if (!scalarLocationIsUnambiguous(spec, fieldId, location)) return 'UNPARSEABLE_ENCODING';
-  const escapedField = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (source === 'derived'
-    && !new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-    .test(target.expression)) return 'UNSUPPORTED_TARGET';
-  const lineTokens = tokenValuesAtLine(input, location.line);
-  const value = lineTokens?.[location.token - 1];
-  if (!value || !/^[a-z]+$/.test(value)) return 'MUTATION_NOT_ISOLATED';
-  return replaceToken(input, location, `${value.slice(0, -1)}#`)
-    || 'MUTATION_NOT_ISOLATED';
+  const alphabet = stringAlphabet(target.expression, fieldId);
+  if (source === 'derived' && !alphabet) return 'UNSUPPORTED_TARGET';
+  const field = spec.inputFields.find(item => item.id === fieldId);
+  const checked = field && stringCharacterSnapshot(input, spec, field, target.expression);
+  if (alphabet) {
+    if (!checked?.valid || checked.checkedLength === 0) return 'MUTATION_NOT_ISOLATED';
+    const index = checked.checkedLength - 1;
+    return replaceScalar(input, checked.at, checked.value.slice(0, index) + '#' + checked.value.slice(index + 1)) || 'MUTATION_NOT_ISOLATED';
+  }
+  const value = field && scalarSnapshot(input, spec, field)?.value;
+  if (!value || !(alphabet || /^[a-z]+$/).test(value)) return 'MUTATION_NOT_ISOLATED';
+  return replaceToken(input, location, value.slice(0, -1) + '#') || 'MUTATION_NOT_ISOLATED';
 }
 
 function compatibleFieldsForConstruction(
@@ -1296,7 +1307,10 @@ function compatibleFieldsForConstruction(
   if (kind === 'permutation-duplicate-or-missing') {
     return spec.inputFields.filter(field => field.type === 'permutation');
   }
-  if (kind === 'illegal-string-character') {
+  if (RANGE_PROBE_KINDS.some(item => item === kind)) {
+    return spec.inputFields.filter(field => field.type === 'operations');
+  }
+  if (kind === 'illegal-string-character' || kind === 'string-length-mismatch') {
     return spec.inputFields.filter(field => field.type === 'string');
   }
   if (kind === 'tree-missing-edge' || kind === 'tree-cycle') {
@@ -1400,13 +1414,17 @@ function deriveConstructionRequests(
       }
     }
     if (field.type === 'string') {
-      const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      if (new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-        .test(target.expression)) {
-        requests.push({
-          targetId: target.id,
-          constructionKind: 'illegal-string-character',
-          fieldId: field.id,
+      if (stringAlphabet(target.expression, field.id)) requests.push({
+        targetId: target.id, constructionKind: 'illegal-string-character', fieldId: field.id,
+      });
+      if (stringCountField(spec, field, target.expression)) requests.push({
+        targetId: target.id, constructionKind: 'string-length-mismatch', fieldId: field.id,
+      });
+    }
+    if (field.type === 'operations' && rangeDescriptor(spec, target.expression, field.id)) {
+      for (const operation of spec.operations || []) {
+        for (const constructionKind of RANGE_PROBE_KINDS) requests.push({
+          targetId: target.id, constructionKind, fieldId: field.id, operationName: operation.name,
         });
       }
     }
@@ -1497,6 +1515,13 @@ function evaluateRecognizedSemantic(
   if (!fieldId) return undefined;
   const field = spec.inputFields.find(item => item.id === fieldId);
   if (!field) return undefined;
+  if (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+    const descriptor = rangeDescriptor(spec, target.expression, fieldId);
+    return descriptor ? rangeIsValid(input, spec, descriptor) : undefined;
+  }
+  if (request.constructionKind === 'string-length-mismatch') {
+    return stringLengthIsValid(input, spec, field, target.expression);
+  }
   if (request.constructionKind === 'array-element-below-min'
     || request.constructionKind === 'array-element-above-max') {
     const snapshot = sequenceSnapshot(input, spec, fieldId);
@@ -1539,9 +1564,11 @@ function evaluateRecognizedSemantic(
     return isOneBasedPermutation(snapshot.values, snapshot.count);
   }
   if (request.constructionKind === 'illegal-string-character') {
-    const location = parseLocation(field.encoding);
-    const value = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
-    return value === undefined ? undefined : /^[a-z]+$/.test(value);
+    if (stringAlphabet(target.expression, fieldId)) {
+      return stringCharacterSnapshot(input, spec, field, target.expression)?.valid;
+    }
+    const value = scalarSnapshot(input, spec, field)?.value;
+    return value === undefined ? undefined : (stringAlphabet(target.expression, fieldId) || /^[a-z]+$/).test(value);
   }
   if (request.constructionKind === 'graph-self-loop'
     || request.constructionKind === 'graph-duplicate-edge'
@@ -1635,6 +1662,19 @@ function constructMutationForRequest(
     ? spec.inputFields.find(item => item.id === request.fieldId)
     : undefined;
   if (!field) return 'INVALID_RECIPE';
+  if (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+    const descriptor = rangeDescriptor(spec, target.expression, field.id);
+    return descriptor ? constructRangeMutation(input, spec, descriptor, request.constructionKind, request.operationName)
+      : 'UNSUPPORTED_TARGET';
+  }
+  if (request.constructionKind === 'string-length-mismatch') {
+    const snapshot = scalarSnapshot(input, spec, field);
+    if (!snapshot || stringLengthIsValid(input, spec, field, target.expression) !== true) return 'MUTATION_NOT_ISOLATED';
+    // Append an existing character so indexed alphabet constraints stay true too.
+    if (!snapshot.value.length) return 'MUTATION_NOT_ISOLATED';
+    if (Buffer.byteLength(input, 'utf8') + 1 > MAX_PROBE_INPUT_BYTES) return 'PROBE_TOO_LARGE';
+    return replaceScalar(input, snapshot.at, snapshot.value + snapshot.value.slice(-1)) || 'MUTATION_NOT_ISOLATED';
+  }
   if (request.constructionKind === 'array-element-below-min'
     || request.constructionKind === 'array-element-above-max') {
     return field.type === 'array'
@@ -1863,6 +1903,8 @@ export function buildConstraintProbes(
       constructionKind: request.constructionKind,
       effectiveSeed,
       mutationPosition: mutation.position,
+      ...(RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+        ? { operationName: request.operationName, mutationHash: sha256(mutation.input) } : {}),
     })).slice(0, 32);
     const probe: ConstraintProbe = {
       id,

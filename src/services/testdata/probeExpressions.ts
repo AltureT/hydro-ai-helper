@@ -29,9 +29,13 @@ function canonicalExpression(spec: ProblemSpecV1, expression: string): string {
         const normalized = bounds(trimmed, symbol, field.id);
         if (normalized) return normalized;
       }
-      if (field.type !== 'array') continue;
+      if (field.type === 'string') {
+        const alphabet = new RegExp(`^characters\\(\\s*${escapePattern(symbol)}\\s*\\) in (\\[a-z\\]|\\[01\\])$`).exec(trimmed);
+        if (alphabet) return `characters(${field.id}) in ${alphabet[1]}`;
+      }
+      if (field.type !== 'array' && field.type !== 'string') continue;
       const quantified = /^forall\s+([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(trimmed);
-      const normalized = bounds(quantified?.[2] ?? trimmed,
+      const normalized = field.type === 'array' && bounds(quantified?.[2] ?? trimmed,
         `${symbol}[${quantified?.[1] ?? 'i'}]`, `${field.id}[i]`);
       if (normalized) return normalized;
       for (const dependency of field.dependsOn || []) {
@@ -40,6 +44,9 @@ function canonicalExpression(spec: ProblemSpecV1, expression: string): string {
         for (const countSymbol of symbols(spec, count)) {
           if (new RegExp(`^(?:len|length)\\(\\s*${escapePattern(symbol)}\\s*\\)\\s*={1,2}\\s*${escapePattern(countSymbol)}$`)
             .test(trimmed)) return `length(${field.id}) = ${count.id}`;
+          if (field.type === 'string' && trimmed === `${symbol}[i] == '0' or ${symbol}[i] == '1' for 1 <= i <= ${countSymbol}`) {
+            return `characters(${field.id}[1..${count.id}]) in [01]`;
+          }
         }
       }
     }
