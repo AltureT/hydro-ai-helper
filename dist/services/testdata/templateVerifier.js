@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TemplateVerificationError = void 0;
 exports.verifySelectedTemplates = verifySelectedTemplates;
 const goJudgeSandboxService_1 = require("../goJudgeSandboxService");
+const fileBudget_1 = require("./fileBudget");
+const templateInterface_1 = require("./templateInterface");
 class TemplateVerificationError extends Error {
     constructor(language, kind, check, caseIndex) {
         super(`模板 ${language} 验证${kind}失败`);
@@ -80,13 +82,14 @@ async function runLanguage(input, language) {
     const options = {
         signal: input.signal,
         deadlineAt: earliestVerifierDeadline(input),
+        outputLimitBytes: fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES,
     };
     const baseCheck = {
         compiled: language === 'py', executed: false, total: inputs.length, passed: 0,
     };
     if (language === 'py') {
         try {
-            return await input.runner.runPythonBatchDetailed(`${solution}\n${template}`, inputs, options);
+            return await input.runner.runPythonBatchDetailed((0, templateInterface_1.buildPythonTemplateExecution)(solution, template), inputs, options);
         }
         catch (error) {
             return throwExecutionError(input, language, baseCheck, error);
@@ -149,6 +152,8 @@ async function adjudicate(input, language, results) {
     if (!check.executed)
         fail(language, 'runtime', check);
     const badExecution = results.findIndex(result => !result.accepted);
+    if (language === 'py' && badExecution !== -1)
+        (0, templateInterface_1.assertPythonTemplateExecutionDiagnostic)(results[badExecution].stderr);
     if (badExecution !== -1)
         fail(language, 'runtime', check, badExecution);
     if (!input.adjudicator.customChecker) {

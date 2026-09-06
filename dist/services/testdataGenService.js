@@ -18,7 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TestdataGenService = exports.TestdataGenerationError = exports.CPP_ORACLE_INFRA_FAILURE_KEY = exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY = exports.CPP_ORACLE_UNAVAILABLE_KEY = exports.TESTDATA_CONFIG_UNPARSABLE_KEY = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = exports.extractStatementSamples = void 0;
+exports.TestdataGenService = exports.TestdataGenerationError = exports.CPP_ORACLE_INFRA_FAILURE_KEY = exports.CPP_PROVIDED_STD_COMPILE_FAILED_KEY = exports.CPP_ORACLE_UNAVAILABLE_KEY = exports.TESTDATA_CONFIG_UNPARSABLE_KEY = exports.TEMPLATE_FILENAMES = exports.TESTDATA_GEN_LIMITS = exports.SUPPORTED_TEMPLATE_LANGS = exports.parseOracleLanguage = exports.extractStatementSamples = void 0;
 exports.applyMutationGate = applyMutationGate;
 exports.partitionStressValidation = partitionStressValidation;
 exports.isSafeTestdataFilename = isSafeTestdataFilename;
@@ -61,7 +61,6 @@ exports.buildFunctionInterfaceContract = buildFunctionInterfaceContract;
 exports.parseKillTargetsResponse = parseKillTargetsResponse;
 exports.parseHackCasesResponse = parseHackCasesResponse;
 exports.mergeHackCases = mergeHackCases;
-exports.parseOracleLanguage = parseOracleLanguage;
 exports.parseSubtasksSection = parseSubtasksSection;
 exports.parseSandboxBlueprint = parseSandboxBlueprint;
 exports.parseSolutionBlueprint = parseSolutionBlueprint;
@@ -94,6 +93,7 @@ exports.extractTestdataUserMessageKey = extractTestdataUserMessageKey;
 exports.extractTestdataUserMessageDetail = extractTestdataUserMessageDetail;
 exports.shouldRecommendDeeperReasoning = shouldRecommendDeeperReasoning;
 exports.classifySandboxRepairScope = classifySandboxRepairScope;
+exports.buildSandboxRepairSystemPrompt = buildSandboxRepairSystemPrompt;
 exports.buildSandboxRepairPrompt = buildSandboxRepairPrompt;
 exports.buildIndependentVerifierRepairPrompt = buildIndependentVerifierRepairPrompt;
 exports.mergeSandboxBlueprintRepair = mergeSandboxBlueprintRepair;
@@ -105,6 +105,11 @@ const textTruncate_1 = require("../lib/textTruncate");
 const failures_1 = require("./testdata/failures");
 const risk_1 = require("./testdata/risk");
 const latency_1 = require("./testdata/latency");
+const generatorBudget_1 = require("./testdata/generatorBudget");
+const generatorPlanPrompts_1 = require("./testdata/generatorPlanPrompts");
+const fileBudget_1 = require("./testdata/fileBudget");
+const oracleLanguage_1 = require("./testdata/oracleLanguage");
+const templateInterface_1 = require("./testdata/templateInterface");
 const statementSamples_1 = require("./testdata/statementSamples");
 const validatorManifest_1 = require("./testdata/validatorManifest");
 const constraintProbes_1 = require("./testdata/constraintProbes");
@@ -130,6 +135,8 @@ function comparableFileContent(content) {
         .join('\n')
         .trimEnd();
 }
+var oracleLanguage_2 = require("./testdata/oracleLanguage");
+Object.defineProperty(exports, "parseOracleLanguage", { enumerable: true, get: function () { return oracleLanguage_2.parseOracleLanguage; } });
 exports.SUPPORTED_TEMPLATE_LANGS = ['py', 'java', 'cc'];
 const MAX_KILL_TARGETS = 2;
 function mutationGateError(summary, code, failureKind) {
@@ -188,13 +195,14 @@ exports.TESTDATA_GEN_LIMITS = {
     MAX_PROVIDED_STD: 10000,
     MAX_STATEMENT_LENGTH: statementSnapshot_1.STATEMENT_SNAPSHOT_HARD_LIMIT,
     /** apply 时单文件内容上限（字节） */
-    MAX_FILE_SIZE: 256 * 1024,
+    MAX_FILE_SIZE: fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES,
+    MAX_INPUT_FILE_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.input,
     /** apply 时文件数量上限 */
     MAX_FILE_COUNT: 80,
     /** apply 时所有文件总大小上限（字节） */
-    MAX_TOTAL_SIZE: 1024 * 1024,
+    MAX_TOTAL_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.plan,
     /** 沙箱生成器 stdout（JSON）上限。 */
-    MAX_GENERATOR_OUTPUT_SIZE: 1024 * 1024,
+    MAX_GENERATOR_OUTPUT_SIZE: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout,
     /** 独立验证器必须生成的内部小数据数量；这些数据不会写入 Hydro。 */
     STRESS_CASES: 60,
     /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
@@ -1158,11 +1166,11 @@ function buildTestdataUserPrompt(params, coverageOverride, context) {
 /** 第一阶段：把模型注意力集中在题意、stdin 编码和正确算法上。 */
 function buildSolutionBlueprintSystemPrompt(cppOracleAvailable = false, frozenSpec = false) {
     const oracleRule = cppOracleAvailable
-        ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+        ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，不接受 C++ 标程。'
         : '2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。';
     const oracleLanguageSection = cppOracleAvailable
-        ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
-        : '';
+        ? '@@@ORACLE_LANG@@@\npython 或 cpp（必须声明并与源码一致；函数题必须为 python）\n'
+        : '@@@ORACLE_LANG@@@\npython（必须声明并与源码一致）\n';
     const oracleDescription = cppOracleAvailable
         ? '完整 Python 3 或 C++17 标程（与 ORACLE_LANG 一致）'
         : '完整 Python 3 标程';
@@ -1183,7 +1191,7 @@ ${oracleRule}
 
 输出格式：
 ${oracleLanguageSection}\
-=== SUBTASKS ===
+@@@SUBTASKS@@@
 可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
@@ -1281,8 +1289,11 @@ function buildGenerationArtifactsSystemPrompt(frozenSpec = false, trustedGenerat
 3. 仅使用 integer/string/array/matrix/permutation/tree/graph/operation-sequence 的封闭 DSL；tree shape 为 chain/star/balanced/broom/random，graph shape 为 sparse/near-tree/dense/bridge/cycle，操作模式为 add-delete-repeat/nested-lifetime/query-between-updates。
 4. 严格执行逐 CASE 覆盖计划；所有规模、值域、长度和派生计数字段必须符合 frozen Spec 与 stdin encoding。
 5. 函数题输出用户要求的全部 TEMPLATE；模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。
-6. 只读 SOLUTION 接口源码不得修改、复述或输出；响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
+6. 只读 SOLUTION 接口源码不得修改、复述或输出；模板禁止重定义 class Solution、同名函数/方法、占位实现或覆盖接口的赋值/导入。Python 模板会拼接在 SOLUTION 后执行，只调用既定入口。响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项。
+
+${generatorPlanPrompts_1.GENERATOR_PLAN_CONTRACT}
+预算冲突时遵循用户请求中的 GENERATOR_BUDGET_CONFLICT 协议，仅输出冲突分节，不输出计划或模板。
 
 输出格式：
 @@@GENERATOR_PLAN@@@
@@ -1304,7 +1315,7 @@ function buildGenerationArtifactsSystemPrompt(frozenSpec = false, trustedGenerat
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
-4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
+4. 遵循用户请求中的逐 CASE 字节预算与打印前检查：每个正式 input 至多 4 MiB，GENERATOR JSON 经缓存文件传输、至多 8 MiB；不得静默缩减必要覆盖。确实无法同时满足必要覆盖与预算时仅输出 GENERATOR_BUDGET_CONFLICT 分节，交人工复核。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
@@ -1365,12 +1376,14 @@ function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, 
                 : '- 只输出 GENERATOR 与函数题 TEMPLATE；不得输出或推断 ORACLE、SOLUTION、BRUTE、VALIDATOR。',
             '- 不得重新解释算法规范，不得改变 frozen Spec 的任何字段。',
             buildCoverageGuidanceBlock(coveragePlan),
+            (0, generatorBudget_1.buildGeneratorBudgetPrompt)(params.options.caseCount, coveragePlan),
         ].filter(Boolean).join('\n');
     }
     const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
     const base = buildTestdataUserPrompt(params, coveragePlan).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '这是第二阶段：只输出 GENERATOR 与函数题所需 TEMPLATE，不要重复 ORACLE、SOLUTION、BRUTE、VALIDATOR 或 CASE。');
     return [
         base,
+        (0, generatorBudget_1.buildGeneratorBudgetPrompt)(params.options.caseCount, coveragePlan),
         '',
         '【第一阶段已验证且必须保持不变的解题蓝图】',
         `problemType: ${solution.problemType}`,
@@ -1388,11 +1401,11 @@ function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, 
  */
 function buildSandboxBlueprintSystemPrompt(cppOracleAvailable = false, frozenSpec = false) {
     const oracleRule = cppOracleAvailable
-        ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+        ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，不接受 C++ 标程。'
         : '5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。';
     const oracleLanguageSection = cppOracleAvailable
-        ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
-        : '';
+        ? '@@@ORACLE_LANG@@@\npython 或 cpp（必须声明并与源码一致；函数题必须为 python）\n'
+        : '@@@ORACLE_LANG@@@\npython（必须声明并与源码一致）\n';
     const oracleDescription = cppOracleAvailable
         ? '完整 Python 3 或 C++17 标程（stdin → stdout，与 ORACLE_LANG 一致）'
         : '完整 Python 3 标程（stdin → stdout，正解算法）';
@@ -1410,7 +1423,7 @@ ${frozenRule}\
 ${oracleRule}
 6. 函数题必须为用户选定的每一种语言输出 SOLUTION:语言 节：与该语言学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印）。Python 解会与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
 7. 数据必须严格遵守用户消息中的逐 CASE 覆盖计划，并根据题面真实约束交叉变化不同维度；所有生成过程必须确定性，固定随机种子。
-8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），stdout 总量必须小于 1MB。每个 input 的 UTF-8 内容必须小于 256KB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须小于 1MB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
+8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），正式 JSON 总量必须不超过 8 MiB（缓存文件传输）。每个 input 的 UTF-8 内容必须不超过 4 MiB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须不超过 8 MiB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
 10. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 11. 不要输出 BRUTE 或 VALIDATOR；系统会在一次全新的、看不到 ORACLE 实现的独立调用中生成验证器，降低两份算法共享同一错误的风险。
@@ -1419,7 +1432,7 @@ ${oracleRule}
 
 输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
 ${oracleLanguageSection}\
-=== SUBTASKS ===
+@@@SUBTASKS@@@
 可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
@@ -1467,7 +1480,7 @@ function buildIndependentVerifierSystemPrompt(stressCaseCount = exports.TESTDATA
 13. 禁止字段 input；禁止字段 subtaskId；禁止字段 subtask；禁止字段 seedIndex；禁止字段 seed；禁止字段 value；禁止字段 code；也禁止任何其他额外字段。服务器自行选择 seed、subtask、value、expression 与 input；recipe 不得提供原始输入、物化值、可执行表达式或调用 payload。Manifest 与 recipe 两节均禁止代码围栏或 JSON 前后缀。` : '';
     const sectionContract = frozenSpec
         ? `只输出以下分节，顺序不得改变；函数题存在题面样例时再在末尾输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
-=== COMPLEXITY_GAP ===
+@@@COMPLEXITY_GAP@@@
 exists 或 none
 @@@BRUTE@@@
 完整 Python 3 暴力解
@@ -1482,7 +1495,7 @@ exists 或 none
 @@@SAMPLE_INPUTS@@@
 函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`
         : `只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
-=== COMPLEXITY_GAP ===
+@@@COMPLEXITY_GAP@@@
 exists 或 none
 @@@BRUTE@@@
 完整 Python 3 暴力解
@@ -1560,6 +1573,7 @@ function buildIndependentVerifierUserPrompt(params, blueprint, context) {
         `请生成恰好 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组内部小数据，并严格按要求输出验证分节。`,
     ].filter(line => line !== '').join('\n');
 }
+const NO_KILL_TARGETS_RESPONSE = 'NO_KILL_TARGETS';
 /** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
 function buildKillTargetsSystemPrompt(frozenSpec = false) {
     const sourceContract = frozenSpec
@@ -1576,7 +1590,7 @@ function buildKillTargetsSystemPrompt(frozenSpec = false) {
 1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
 2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
 3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
-4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时保持响应为空，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时只输出 ${NO_KILL_TARGETS_RESPONSE}，禁止空响应，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
 === KILL_TARGET:<kind> ===
 DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\`python
@@ -2035,6 +2049,8 @@ function parseKillTargetsResponse(raw, notesStructured) {
     const sections = [];
     let current = null;
     const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    if (text.trim() === NO_KILL_TARGETS_RESPONSE)
+        return [];
     for (const line of text.split(/\r?\n/)) {
         const marker = line.match(markerRe);
         if (marker) {
@@ -2121,21 +2137,11 @@ function mergeHackCases(existing, hacks, maxCases) {
     return [...existing, ...appended];
 }
 /**
- * ORACLE_LANG 使用独立的 === 分节，避免改变既有 @@@ 代码分节契约。
- * 缺失、损坏或未知值一律回退 Python；函数题始终忽略 cpp 声明。
- */
-function parseOracleLanguage(raw, problemType) {
-    if (problemType === 'function')
-        return 'python';
-    const match = raw.match(/(?:^|\r?\n)[ \t]*===\s*ORACLE_LANG\s*===\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i);
-    return match?.[1].toLowerCase() === 'cpp' ? 'cpp' : 'python';
-}
-/**
- * SUBTASKS 使用独立的 === 分节，不改变既有 @@@ 代码分节契约。
+ * SUBTASKS 使用统一的 @@@ 分节，同时保留旧 === 元数据的读取兼容。
  * 任一行不满足严格格式时整体丢弃，后续即可无歧义地降级为扁平生成。
  */
 function parseSubtasksSection(raw) {
-    const match = raw.match(/(?:^|\r?\n)[ \t]*===\s*SUBTASKS\s*===\s*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i);
+    const match = raw.match(/(?:^|\r?\n)[ \t]*(?:@@@SUBTASKS@@@|===\s*SUBTASKS\s*===)[ \t]*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i);
     const content = match?.[1].trim();
     if (!content)
         return [];
@@ -2233,7 +2239,7 @@ function parseSandboxBlueprint(raw, options, parseOptions = {}) {
         templates: problemType === 'function' ? templates : undefined,
         generatorCode: normalizeExecutableContent(generatorCode),
         oracleCode: normalizeExecutableContent(oracleCode),
-        oracleLanguage: parseOracleLanguage(raw, problemType),
+        oracleLanguage: (0, oracleLanguage_1.parseOracleLanguage)(raw, problemType, normalizeExecutableContent(oracleCode)),
         solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
         solutionCode: solutions.py,
         bruteCode: bruteCode.trim() ? normalizeExecutableContent(bruteCode) : undefined,
@@ -2339,7 +2345,7 @@ function parseSolutionBlueprint(raw, options, expectedFunctionSamples = []) {
         subtasks: parseSubtasksSection(raw),
         functionName: meta.functionName || undefined,
         oracleCode: normalizeExecutableContent(oracleCode),
-        oracleLanguage: parseOracleLanguage(raw, problemType),
+        oracleLanguage: (0, oracleLanguage_1.parseOracleLanguage)(raw, problemType, normalizeExecutableContent(oracleCode)),
         solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
         solutionCode: solutions.py,
         functionSampleInputs: problemType === 'function'
@@ -2350,6 +2356,7 @@ function parseSolutionBlueprint(raw, options, expectedFunctionSamples = []) {
 }
 function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}) {
     const sections = splitDelimitedSections(raw);
+    (0, generatorBudget_1.throwIfGeneratorBudgetConflict)(raw, sections);
     if (sections.length === 0)
         throw new Error('AI 未返回外围制品分节标记');
     const allowGeneratorPlan = !!parseOptions.generatorDsl;
@@ -2394,7 +2401,7 @@ function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}
             throw new Error('当前 frozen Spec 不支持 GENERATOR_PLAN');
         generatorPlan = (0, generatorDsl_1.parseGeneratorPlan)(generatorPlanRaw, generatorDsl.spec, generatorDsl.expectedCaseCount);
         const materialized = (0, generatorDsl_1.materializeGeneratorPlan)(generatorPlan, generatorDsl.spec);
-        generatorCode = (0, generatorDsl_1.renderGeneratorArtifact)(generatorPlan, materialized);
+        generatorCode = (0, generatorDsl_1.renderGeneratorArtifacts)(generatorPlan, materialized).code;
     }
     if (problemType === 'function' && !parseOptions.allowMissingTemplates) {
         const missing = languages.filter(lang => !templates[lang]?.trim());
@@ -2411,7 +2418,7 @@ function parseGenerationArtifacts(raw, problemType, languages, parseOptions = {}
 /** 解析独立验证调用的三个强制分节，以及函数题样例的 stdin 转码。 */
 function parseIndependentVerifierBlueprint(raw, expectedFunctionSamples = [], options = {}) {
     const lines = raw.replace(/<think>[\s\S]*?<\/think>/g, '').split(/\r?\n/);
-    const complexityGapMarker = lines.findIndex(line => /^[ \t]*===\s*COMPLEXITY_GAP\s*===\s*$/i.test(line));
+    const complexityGapMarker = lines.findIndex(line => /^[ \t]*(?:@@@COMPLEXITY_GAP@@@|===\s*COMPLEXITY_GAP\s*===)[ \t]*$/i.test(line));
     let complexityGap;
     if (complexityGapMarker >= 0) {
         const nextLine = lines[complexityGapMarker + 1];
@@ -3022,15 +3029,17 @@ function buildDiscriminationNotes(discrimination, initialCaseCount, allocatedCas
     return notes;
 }
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
-function parseGeneratorOutput(stdout, expectedCount) {
-    if (Buffer.byteLength(stdout, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
-        throw (0, failures_1.toPipelineError)(new Error('GENERATOR 输出超过 1MB 上限'), {
+function parseGeneratorOutput(stdout, expectedCount, stress = false) {
+    const outputLimit = stress ? 1024 * 1024 : exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE;
+    const inputLimit = stress ? fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES : exports.TESTDATA_GEN_LIMITS.MAX_INPUT_FILE_SIZE;
+    if (Buffer.byteLength(stdout, 'utf8') > outputLimit) {
+        throw (0, failures_1.toPipelineError)(new Error(`GENERATOR 输出超过 ${outputLimit} 字节上限`), {
             code: 'GENERATOR_OUTPUT_TOO_LARGE',
             stage: 'generator',
             artifact: 'generator',
             safeDetails: {
                 actualBytes: Buffer.byteLength(stdout, 'utf8'),
-                maxBytes: exports.TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE,
+                maxBytes: outputLimit,
             },
         });
     }
@@ -3074,15 +3083,15 @@ function parseGeneratorOutput(stdout, expectedCount) {
             });
         }
         const input = normalizeFileContent(item.input);
-        if (Buffer.byteLength(input, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-            throw (0, failures_1.toPipelineError)(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 256KB 上限`), {
+        if (Buffer.byteLength(input, 'utf8') > inputLimit) {
+            throw (0, failures_1.toPipelineError)(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 ${inputLimit} 字节上限`), {
                 code: 'GENERATOR_OUTPUT_TOO_LARGE',
                 stage: 'generator',
                 artifact: 'generator',
                 safeDetails: {
                     caseIndex: index + 1,
                     actualBytes: Buffer.byteLength(input, 'utf8'),
-                    maxBytes: exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
+                    maxBytes: inputLimit,
                 },
             });
         }
@@ -3215,6 +3224,8 @@ async function createOracleExecutor(input) {
     const source = providedCpp
         ? normalizeExecutableContent(input.options.providedStd)
         : input.blueprint.oracleCode;
+    // Also validate restored checkpoints and callers that already hold parsed blueprints.
+    (0, oracleLanguage_1.parseOracleLanguage)(`@@@ORACLE_LANG@@@\n${language}`, input.blueprint.problemType, source);
     if (language === 'python') {
         return {
             language,
@@ -3313,6 +3324,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
         }));
     }
     let executor;
+    let oracleLanguage = solution.oracleLanguage || 'python';
     let results;
     try {
         executor = await createOracleExecutor({
@@ -3322,6 +3334,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
             cppOracleAvailable,
             signal,
         });
+        oracleLanguage = executor.language;
         results = await executor.runBatchDetailed(samples.map(sample => sample.input), { signal });
     }
     catch (err) {
@@ -3333,6 +3346,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
             code: 'ORACLE_RUNTIME_FAILED',
             stage: 'solution_verification',
             artifact: 'oracle',
+            safeDetails: { oracleLanguage },
             message: `ORACLE 样例预验证执行失败：${err instanceof Error ? err.message : String(err)}`,
         });
     }
@@ -3344,7 +3358,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
             code: 'ORACLE_RUNTIME_FAILED',
             stage: 'solution_verification',
             artifact: 'oracle',
-            safeDetails: { actualCount: results.length, expectedCount: samples.length },
+            safeDetails: { oracleLanguage, actualCount: results.length, expectedCount: samples.length },
         });
     }
     const acceptedRecord = options.providedStdSource === 'accepted-record';
@@ -3359,7 +3373,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
             code: 'ORACLE_RUNTIME_FAILED',
             stage: 'solution_verification',
             artifact: 'oracle',
-            safeDetails: { caseIndex: i + 1, candidate: acceptedRecord },
+            safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: acceptedRecord },
         });
     }
     const checkerVerdicts = customChecker && checkerExecutor?.status === 'ready'
@@ -3377,7 +3391,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
                 code: 'ORACLE_SAMPLE_MISMATCH',
                 stage: 'solution_verification',
                 artifact: 'oracle',
-                safeDetails: { caseIndex: i + 1, checkerUsed: true, candidate: acceptedRecord },
+                safeDetails: { oracleLanguage, caseIndex: i + 1, checkerUsed: true, candidate: acceptedRecord },
             });
         }
         if (!customChecker
@@ -3388,7 +3402,7 @@ async function verifySolutionBlueprintSamples(solution, options, statementMarkdo
                 code: 'ORACLE_SAMPLE_MISMATCH',
                 stage: 'solution_verification',
                 artifact: 'oracle',
-                safeDetails: { caseIndex: i + 1, checkerUsed: false, candidate: acceptedRecord },
+                safeDetails: { oracleLanguage, caseIndex: i + 1, checkerUsed: false, candidate: acceptedRecord },
             });
         }
     }
@@ -3679,7 +3693,7 @@ function applyValidatorProofPolicy(input) {
     }
     return { complete };
 }
-function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, executions) {
+function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, executions, constructionGaps = []) {
     const declaredConstraints = manifestStatus === 'valid'
         ? new Set(manifest?.constraintIds || []) : new Set();
     const declaredInvariants = manifestStatus === 'valid'
@@ -3721,6 +3735,11 @@ function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, e
         if (priority[execution] > priority[evidence.execution])
             evidence.execution = execution;
     });
+    for (const gap of constructionGaps) {
+        const evidence = evidenceByTarget.get(validatorEvidenceKey(gap.targetKind, gap.targetId));
+        if (evidence)
+            evidence.constructed = false;
+    }
     return targets;
 }
 async function runValidatorInvalidProof(input) {
@@ -3742,7 +3761,7 @@ async function runValidatorInvalidProof(input) {
         invocation: validatorInvocation(probe.input, probe.subtaskId),
         probe,
     }));
-    const firstLegalSeed = input.seeds[0];
+    const firstLegalSeed = input.seeds.reduce((best, seed) => (!best || Buffer.byteLength(seed.input, 'utf8') < Buffer.byteLength(best.input, 'utf8') ? seed : best), undefined);
     if (spec.subtasks.length > 0 && firstLegalSeed) {
         const unknownSubtaskId = firstUnknownSubtaskId(spec.subtasks.map(subtask => subtask.id));
         invalidInvocations.push({
@@ -3755,6 +3774,11 @@ async function runValidatorInvalidProof(input) {
             },
             protocolProbe: true,
         });
+    }
+    const invalidBytes = invalidInvocations.map(item => Buffer.byteLength(item.invocation.stdin, 'utf8'));
+    const totalInvalidBytes = invalidBytes.reduce((sum, bytes) => sum + bytes, 0);
+    if (invalidBytes.some(bytes => bytes > fileBudget_1.TESTDATA_INPUT_MAX_BYTES) || totalInvalidBytes > fileBudget_1.TESTDATA_PLAN_MAX_BYTES) {
+        throw new failures_1.TestdataPipelineError('VALIDATOR 非法输入及子任务协议探针超出有界验证预算，未省略检查。', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'validator', 'coverage', 'manual-review', { failureKind: 'probe-budget', actualBytes: totalInvalidBytes, maxBytes: fileBudget_1.TESTDATA_PLAN_MAX_BYTES });
     }
     let executions = [];
     if (invalidInvocations.length > 0 && input.blueprint.validatorCode) {
@@ -3793,7 +3817,7 @@ async function runValidatorInvalidProof(input) {
         executions = results.map(classifyValidatorInvalidResult);
     }
     const proofExecutions = executions;
-    const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, proofExecutions.slice(0, build.probes.length));
+    const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, proofExecutions.slice(0, build.probes.length), build.gaps);
     const coveredIds = targetEvidence.filter(item => (item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const missingIds = targetEvidence.filter(item => !(item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const summary = {
@@ -3884,6 +3908,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     }
     const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
     let effectiveGeneratorCode = blueprint.generatorCode;
+    let generatorReplayData;
     const checkBudget = () => {
         if (Date.now() >= sandboxDeadlineAt) {
             throw (0, failures_1.toPipelineError)(new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'), {
@@ -3904,13 +3929,33 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     };
     let oracleExecutor;
     try {
+        if (blueprint.problemType === 'function' && options.languages.includes('py') && runner.inspectPythonTemplate) {
+            checkBudget();
+            try {
+                const inspection = await runner.inspectPythonTemplate(blueprint.solutions?.py || blueprint.solutionCode || '', blueprint.templates?.py || '', { signal, deadlineAt: sandboxDeadlineAt });
+                if (signal?.aborted)
+                    throw signal.reason;
+                checkBudget();
+                (0, templateInterface_1.assertPythonTemplateInterface)(inspection);
+            }
+            catch (error) {
+                if (signal?.aborted)
+                    throw signal.reason;
+                if (isCancellation(error) || error instanceof failures_1.TestdataPipelineError)
+                    throw error;
+                throw toSandboxExecutionPipelineError(error, { code: 'TEMPLATE_RUNTIME_FAILED', stage: 'template', artifact: 'template-py' });
+            }
+        }
         // a. GENERATOR 实跑 → 解析出全部 .in
         let generatedInputs;
         if (startsAtOrBefore('generator')) {
             reportProgress('generating_inputs', 56);
             if (blueprint.generatorPlan && materialization?.coverageProof) {
                 const materialized = (0, generatorDsl_1.materializeGeneratorPlan)(blueprint.generatorPlan, materialization.coverageProof.pipelineContext.spec);
-                effectiveGeneratorCode = (0, generatorDsl_1.renderGeneratorArtifact)(blueprint.generatorPlan, materialized);
+                const replay = (0, generatorDsl_1.renderGeneratorArtifacts)(blueprint.generatorPlan, materialized);
+                cache.generatorReplay = replay;
+                effectiveGeneratorCode = replay.code;
+                generatorReplayData = replay.data;
                 const authoritativeAllocations = materialization.coverageProof.tieredDecision?.enabled
                     ? materialization.coverageProof.tieredDecision.allocations
                     : [];
@@ -3924,13 +3969,19 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 }));
             }
             else {
+                delete cache.generatorReplay;
                 let generatorResult;
                 try {
-                    generatorResult = await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
+                    generatorResult = runner.runPythonGenerator
+                        ? await runner.runPythonGenerator(blueprint.generatorCode, signal, sandboxDeadlineAt)
+                        : await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
                 }
                 catch (err) {
                     if (isCancellation(err))
                         throw err;
+                    const budgetFailure = (0, generatorBudget_1.parseGeneratorBudgetFailure)(err);
+                    if (budgetFailure)
+                        throw budgetFailure;
                     throw toSandboxExecutionPipelineError(err, {
                         code: 'UNKNOWN',
                         stage: 'generator',
@@ -3949,6 +4000,10 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         else {
             generatedInputs = cache.generatedInputs;
+            if (cache.generatorReplay) {
+                effectiveGeneratorCode = cache.generatorReplay.code;
+                generatorReplayData = cache.generatorReplay.data;
+            }
         }
         const inputs = generatedInputs.map(item => item.input);
         const structuredCases = generatedInputs.every(item => item.structuredValues !== undefined) ? generatedInputs.map(item => ({
@@ -4012,7 +4067,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     });
                 }
                 try {
-                    stressGenerated = parseGeneratorOutput(stressGeneratorResult.stdout, exports.TESTDATA_GEN_LIMITS.STRESS_CASES);
+                    stressGenerated = parseGeneratorOutput(stressGeneratorResult.stdout, exports.TESTDATA_GEN_LIMITS.STRESS_CASES, true);
                 }
                 catch (err) {
                     const code = err instanceof failures_1.TestdataPipelineError
@@ -4296,7 +4351,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
         }
         // e. ORACLE：一次批量跑正式输入、题面样例和内部压力输入。
         const allInputs = [...inputs, ...sampleInputs, ...stressInputs];
-        let oracleLanguage;
+        let oracleLanguage = blueprint.oracleLanguage || 'python';
         let oracleResults;
         let cases;
         let sampleCheckerVerdicts;
@@ -4313,17 +4368,21 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     deadlineAt: sandboxDeadlineAt,
                 });
                 oracleLanguage = oracleExecutor.language;
-                oracleResults = await oracleExecutor.runBatchDetailed(allInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 });
+                oracleResults = await oracleExecutor.runBatchDetailed(allInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3, outputLimitBytes: fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES });
             }
             catch (err) {
                 if (isCancellation(err))
                     throw err;
                 if (err instanceof TestdataGenerationError && err.userMessageKey)
                     throw err;
+                if (err instanceof goJudgeSandboxService_1.SandboxOutputBudgetExceededError) {
+                    throw new failures_1.TestdataPipelineError('标准答案实际输出超过数据传输预算；请联合规划输入和输出，保留必要覆盖，不得截断答案。', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { failureKind: 'output-budget', ...(err.actualBytes === undefined ? {} : { actualBytes: err.actualBytes }), maxBytes: err.maxBytes });
+                }
                 throw toSandboxExecutionPipelineError(err, {
                     code: 'ORACLE_RUNTIME_FAILED',
                     stage: 'oracle',
                     artifact: 'oracle',
+                    safeDetails: { oracleLanguage },
                     message: `ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`,
                 });
             }
@@ -4332,13 +4391,16 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     code: 'ORACLE_RUNTIME_FAILED',
                     stage: 'oracle',
                     artifact: 'oracle',
-                    safeDetails: { actualCount: oracleResults.length, expectedCount: allInputs.length },
+                    safeDetails: { oracleLanguage, actualCount: oracleResults.length, expectedCount: allInputs.length },
                 });
             }
             for (let i = 0; i < oracleResults.length; i++) {
                 const detail = oracleResults[i];
                 if (detail.accepted)
                     continue;
+                if (i < inputs.length && detail.status === 'Output Limit Exceeded') {
+                    throw new failures_1.TestdataPipelineError('标准答案输出超过单个数据文件的 4 MiB 上限；请联合规划输入输出预算，不得截断答案。', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { failureKind: 'output-budget', caseIndex: i + 1, maxBytes: fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES });
+                }
                 // 直接点名失败位置，附输入与 traceback 尾部，供修复回路与教师定位。
                 const target = i < inputs.length
                     ? `第 ${i + 1} 个测试点`
@@ -4351,25 +4413,13 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     code: 'ORACLE_RUNTIME_FAILED',
                     stage: 'oracle',
                     artifact: 'oracle',
-                    safeDetails: { caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
+                    safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
                 });
             }
-            cases = generatedInputs.map((item, index) => {
-                const output = normalizeFileContent(oracleResults[index].stdout);
-                if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-                    throw (0, failures_1.toPipelineError)(new Error(`ORACLE 为第 ${index + 1} 个测试点生成的 .out 超过 256KB 上限`), {
-                        code: 'ORACLE_RUNTIME_FAILED',
-                        stage: 'oracle',
-                        artifact: 'oracle',
-                        safeDetails: {
-                            caseIndex: index + 1,
-                            actualBytes: Buffer.byteLength(output, 'utf8'),
-                            maxBytes: exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
-                        },
-                    });
-                }
-                return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
-            });
+            cases = generatedInputs.map((item, index) => ({ ...item,
+                output: normalizeFileContent(oracleResults[index].stdout), dataScale: coveragePlan[index]?.dataScale,
+            }));
+            (0, generatorBudget_1.assertGeneratedDataBudget)(cases);
             sampleCheckerVerdicts = customChecker && samples.length > 0
                 && checkerExecutor?.status === 'ready'
                 ? await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(samples.map((sample, index) => ({
@@ -4394,6 +4444,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                         stage: 'oracle',
                         artifact: 'oracle',
                         safeDetails: {
+                            oracleLanguage,
                             caseIndex: i + 1,
                             checkerUsed: checkerRejected,
                             candidate: usingAcceptedRecordCandidate,
@@ -4803,6 +4854,7 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             templates: blueprint.templates,
             stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
             generatorCode: effectiveGeneratorCode,
+            generatorReplayData,
             generatorPlan: blueprint.generatorPlan,
             coverageMode: coverage.mode,
             oracleCode: blueprint.oracleCode,
@@ -5010,6 +5062,10 @@ function assemblePlan(response, options, context = {}) {
         pushCode('generator.py', response.generatorCode, 'generator', response.generatorPlan
             ? 'deterministic'
             : sandbox ? 'executed' : 'ai-only', response.generatorPlan ? FILE_PURPOSES.trustedGenerator : FILE_PURPOSES.generator);
+    }
+    if (response.generatorPlan && response.generatorReplayData) {
+        files.push({ name: fileBudget_1.GENERATOR_REPLAY_DATA_FILENAME, content: response.generatorReplayData,
+            kind: 'generator', origin: 'deterministic' });
     }
     if (sandbox && response.bruteCode?.trim()) {
         pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
@@ -5545,9 +5601,55 @@ function repairScopeForPipelineFailure(error) {
         default: return 'full';
     }
 }
+/** 定向修复与初始生成采用不同输出契约，历史完整制品只作为修复上下文。 */
+function buildSandboxRepairSystemPrompt(scope, frozenSpec = false) {
+    const contracts = {
+        generator: {
+            header: 'GENERATOR',
+            rule: '输出自包含 Python 3 输入生成器，按本轮请求中的正式点数量、覆盖计划和字节预算生成紧凑 JSON；固定随机种子，禁止日志或无界循环。预算确实冲突时改为只输出请求约定的 GENERATOR_BUDGET_CONFLICT 分节，不得同时输出代码。',
+        },
+        'stress-generator': {
+            header: 'STRESS_GENERATOR',
+            rule: `输出自包含 Python 3 小数据生成器；固定随机种子，恰好 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法输入，至少 ${Math.ceil(exports.TESTDATA_GEN_LIMITS.STRESS_CASES * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组不同。stdout 为紧凑 JSON 且小于 1MB，每个 input 小于 256KB，所有数据须让既有 BRUTE 在 5 秒内完成。`,
+        },
+        'function-samples': {
+            header: 'SAMPLE_INPUTS',
+            rule: '输出严格 JSON {"samples":[{"id":"1","input":"原始 stdin"}]}；只转换题面样例输入，保留全部原始样例 id，不得增加或改写期望输出。',
+        },
+        validator: {
+            header: 'VALIDATOR',
+            rule: '输出自包含 Python 3 输入校验器；合法输入静默 exit 0，非法输入向 stderr 说明并 exit 1。完整校验题面约束，不得增加额外限制或无条件成功。'
+                + (frozenSpec ? ' 无参数时校验全局约束；仅允许恰好 --subtask <known-positive-integer> 校验全局与已知子任务约束；未知、缺少、非整数、重复或多余参数均须拒绝，不得从 stdin 读取子任务标签或接收 probe input。既有 Manifest 与 probe recipes 保持不变。' : ''),
+        },
+        oracle: {
+            header: 'ORACLE',
+            rule: '输出完整可执行标程，语言遵循本轮修复请求，保留已确定的输入输出协议和标准答案权威约定；不得硬编码样例或答案表，独立 BRUTE 由另一调用验证。',
+        },
+        brute: {
+            header: 'BRUTE',
+            rule: '输出自包含 Python 3 朴素正确解，读取既定 stdin 并输出完整答案；独立枚举或模拟，不得复制 ORACLE 实现、删除求解逻辑或硬编码答案。',
+        },
+        ...Object.fromEntries(['py', 'java', 'cc'].map(language => [`template-${language}`, {
+                header: `TEMPLATE:${language}`,
+                rule: `只修复 ${LANG_DISPLAY[language]} 调用模板，保留既有学生解、接口和 stdin 编码，按既有拼接/编译约定解析输入、调用接口并打印结果。`,
+            }])),
+    };
+    const contract = contracts[scope];
+    if (!contract)
+        throw new Error(`不支持定向修复范围：${scope}`);
+    const headers = scope === 'oracle' ? 'ORACLE_LANG 与 ORACLE' : contract.header;
+    return `你负责单一制品的定向修复。本次只输出 ${headers}，历史完整回答仅作为定位错误的上下文，不代表本轮输出要求。禁止重发其他制品、代码围栏或解释文字。
+${isVerifierRepairScope(scope) ? '验证制品只依据题面与已确定的 stdin 编码独立实现；不得要求或依赖 ORACLE 源码来推断题意。' : '遵循本轮请求中已确定的题意、接口和标准答案权威约定。'}
+${frozenSpec ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；题型、testCaseMode、stdin encoding、outputPolicy、subtasks 及约束引用必须保持不变。' : '保持已确定的输入输出协议与所有题面约束不变。'}
+${contract.rule}
+
+输出格式（只能有下面列出的分节，标记必须独占一行且逐字一致）：
+${scope === 'oracle' ? '@@@ORACLE_LANG@@@\npython 或 cpp（与源码及本轮允许的语言一致）\n' : ''}@@@${contract.header}@@@
+修复后的正文原文`;
+}
 function buildSandboxRepairPrompt(error, options, scope = error instanceof failures_1.TestdataPipelineError
     ? repairScopeForPipelineFailure(error)
-    : 'full', coveragePlan, context) {
+    : 'full', coveragePlan, context, oracleContext) {
     if (context) {
         if (scope === 'full') {
             const typed = error instanceof failures_1.TestdataPipelineError ? error : undefined;
@@ -5563,7 +5665,7 @@ function buildSandboxRepairPrompt(error, options, scope = error instanceof failu
             '- problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 与约束/不变量引用关系必须保持不变。',
             '- 如果失败只能通过修改 Spec 解决，停止输出制品并报告需要回到 Spec 共识阶段。',
             '',
-            buildSandboxRepairPrompt(error, options, scope, coveragePlan),
+            buildSandboxRepairPrompt(error, options, scope, coveragePlan, undefined, oracleContext),
         ].join('\n');
     }
     const templates = options.languages.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、') || '（传统题无需模板）';
@@ -5574,9 +5676,11 @@ function buildSandboxRepairPrompt(error, options, scope = error instanceof failu
 ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
-请只输出修复后的 @@@GENERATOR@@@。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
+${(0, generatorBudget_1.buildGeneratorBudgetPrompt)(options.caseCount, coveragePlan)}
+
+预算可行时，请只输出修复后的 @@@GENERATOR@@@；预算确实冲突时只返回上述冲突分节。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
 1. stdout 只能是包含恰好 ${options.caseCount} 个 cases 的紧凑 JSON，使用 json.dumps(..., ensure_ascii=False, separators=(',', ':'))。
-2. stdout 必须小于 1MB，每个 input 的 UTF-8 内容必须小于 256KB，且全部 .in/.out 与辅助文件合计必须小于 1MB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
+2. 正式 GENERATOR JSON 经缓存文件传输，至多 8 MiB，每个 input 的 UTF-8 内容至多 4 MiB，且全部 .in/.out 与辅助文件合计必须不超过 8 MiB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
 3. 每个 input 必须合法且符合逐 CASE 覆盖计划；若临界数据过大，使用能保留边界/复杂度特征的可解析构造。
 4. 只使用请求的分节标记和源码原文，不要代码围栏。`;
     }
@@ -5602,17 +5706,21 @@ ${detail}
         const typedOracleFailure = error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle'
             ? error.safeDetails
             : {};
-        const oracleLanguage = typedOracleFailure.oracleLanguage === 'cpp' ? 'C++17' : 'Python 3';
+        const oracleLanguage = (oracleContext?.language || typedOracleFailure.oracleLanguage) === 'cpp' ? 'C++17' : 'Python 3';
         if (typedOracleFailure.failureKind === 'infra' && typedOracleFailure.oracleLanguage === 'cpp') {
             return `你上一条蓝图选择的 C++ ORACLE 因沙箱编译基础设施暂时不可用而无法验证：
 ${detail}
 
-请只输出改用 Python 3 的 @@@ORACLE@@@，不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+请只输出改用 Python 3 的 @@@ORACLE@@@，并在前面输出 @@@ORACLE_LANG@@@ 与 python。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
         }
         return `你上一条蓝图的标程阶段未通过 Hydro 沙箱验证：
 ${detail}
 
-当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的编译错误。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，并在前面输出 @@@ORACLE_LANG@@@ 与实际语言。
+${oracleContext?.cppAvailable && options.problemKind !== 'function'
+            ? '传统题允许在 Python 3 与 C++17 之间切换，但必须同步声明 python 或 cpp；函数题仍只能用 Python 3。'
+            : '保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的错误。'}
+不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
     }
     if (scope === 'brute') {
         return `你上一条蓝图的暴力对拍阶段未通过验证：
@@ -5636,18 +5744,18 @@ ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
 请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
-1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
+1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容至多 4 MiB，正式 JSON 及全部 .in/.out 与辅助文件分别至多 8 MiB。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
 3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含每个已选语言的学生解 ${options.languages.map(lang => `@@@SOLUTION:${lang}@@@`).join('、')} 与全部模板：${templates}。
 5. 不要输出 BRUTE、STRESS_GENERATOR 或 VALIDATOR；它们由隔离的独立验证调用生成。
-6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
+6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE_LANG@@@（必须与源码一致）、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
 7. 若输出 @@@NOTES@@@，NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。`;
 }
 function buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples = [], context) {
     if (context) {
         const strictRepair = buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples)
-            .replace('请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@', '请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
+            .replace('请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@', '请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
             + '@@@VALIDATOR_MANIFEST@@@、可选的 @@@VALIDATOR_PROBE_RECIPES@@@、@@@VALIDATOR@@@');
         return [
             (0, pipelinePrompts_1.buildFrozenProblemSpecBlock)(context),
@@ -5666,7 +5774,7 @@ function buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples = [
     return `独立验证制品未通过解析或 Hydro 沙箱验证：
 ${detail}
 
-请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
+请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
 1. BRUTE 必须是与 ORACLE 隔离的朴素正确实现，不能通过删除逻辑或硬编码答案绕过对拍。
 2. STRESS_GENERATOR 必须恰好生成 ${exports.TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，至少 ${Math.ceil(exports.TESTDATA_GEN_LIMITS.STRESS_CASES * exports.TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；固定随机种子，所有数据均能让 BRUTE 在 5 秒内完成。
 3. VALIDATOR 必须严格检查题面格式与约束，不得无条件成功。
@@ -5704,6 +5812,8 @@ function mergeSandboxBlueprintRepair(original, raw, scope, expectedFunctionSampl
     const sections = singleHeader
         ? parseStrictSingleRepairSection(raw, singleHeader)
         : splitDelimitedSections(raw);
+    if (scope === 'generator')
+        (0, generatorBudget_1.throwIfGeneratorBudgetConflict)(raw, sections);
     if (sections.length === 0)
         throw new Error('AI 定向修复未返回分节标记');
     const solutions = normalizeTemplateSolutions(original);
@@ -5730,6 +5840,7 @@ function mergeSandboxBlueprintRepair(original, raw, scope, expectedFunctionSampl
         if (!oracleCode)
             throw new Error('AI 定向修复未返回 ORACLE');
         merged.oracleCode = oracleCode;
+        merged.oracleLanguage = (0, oracleLanguage_1.parseOracleLanguage)(raw, original.problemType, oracleCode, original.oracleLanguage);
     }
     else if (scope === 'brute') {
         const bruteCode = repairSectionContent(sections, 'BRUTE');
@@ -5905,6 +6016,26 @@ function checkpointVerifierFromBlueprint(blueprint) {
             })
             : undefined,
     };
+}
+function currentVerifierRepairSource(blueprint) {
+    const verifier = checkpointVerifierFromBlueprint(blueprint);
+    return [
+        ...(verifier.complexityGap ? ['@@@COMPLEXITY_GAP@@@', verifier.complexityGap] : []),
+        '@@@BRUTE@@@', verifier.bruteCode,
+        '@@@STRESS_GENERATOR@@@', verifier.stressGeneratorCode,
+        '@@@VALIDATOR@@@', verifier.validatorCode,
+        ...(verifier.validatorManifest
+            ? ['@@@VALIDATOR_MANIFEST@@@', JSON.stringify(verifier.validatorManifest)] : []),
+        ...(verifier.validatorProbeRecipes
+            ? ['@@@VALIDATOR_PROBE_RECIPES@@@', JSON.stringify({ recipes: verifier.validatorProbeRecipes })] : []),
+        ...(verifier.functionSampleInputs?.length
+            ? ['@@@SAMPLE_INPUTS@@@', JSON.stringify({ samples: verifier.functionSampleInputs })] : []),
+    ].join('\n');
+}
+function modelRoleForSandboxFailure(error) {
+    const scope = repairScopeForPipelineFailure(error);
+    return isVerifierRepairScope(scope) ? 'verifier'
+        : scope === 'oracle' ? 'oracle' : scope === 'full' ? undefined : 'artifacts';
 }
 class TestdataGenService {
     constructor(aiClient, serviceOptions = {}) {
@@ -6144,6 +6275,7 @@ class TestdataGenService {
         }
     }
     attachRunMetadata(plan, params) {
+        (0, fileBudget_1.assertTestdataPlanBudget)(plan);
         plan.runId = params.runId || plan.runId || (0, runTelemetry_1.createTestdataRunId)();
         plan.promptVersion = pipelineContext_1.TESTDATA_PIPELINE_PROMPT_VERSION;
         plan.modelCallCount = this.modelCallBudget.callCount;
@@ -6423,6 +6555,7 @@ class TestdataGenService {
     getCallOptions(params, attempt = 1) {
         return {
             signal: params.signal,
+            contentMode: 'raw',
             maxTokens: null,
             // 保留完整输出预算，只给单次模型调用设置宽松且可配置的墙钟上限。
             timeoutMs: (0, latency_1.getTestdataModelTimeoutMs)(),
@@ -6739,17 +6872,65 @@ class TestdataGenService {
             : undefined;
         const systemPrompt = buildGenerationArtifactsSystemPrompt(!!context, !!generatorDsl);
         const userPrompt = buildGenerationArtifactsUserPrompt(params, solution, coveragePlan, context);
+        const parseAndInspect = async (raw, allowDsl) => {
+            let artifacts;
+            let failure;
+            try {
+                artifacts = parseGenerationArtifacts(raw, solution.problemType, params.options.languages, { allowMissingTemplates: true, ...(allowDsl && generatorDsl ? { generatorDsl } : {}) });
+            }
+            catch (error) {
+                failure = error;
+            }
+            if (solution.problemType === 'function' && params.options.languages.includes('py')
+                && this.sandboxRunner?.inspectPythonTemplate) {
+                const template = artifacts?.templates?.py || parseTemplateSections(raw).py;
+                if (template) {
+                    const inspection = await this.sandboxRunner.inspectPythonTemplate(solution.solutions?.py || solution.solutionCode || '', template, { signal: params.signal, deadlineAt: Date.now() + 10000 });
+                    if (params.signal?.aborted)
+                        throw params.signal.reason;
+                    try {
+                        (0, templateInterface_1.assertPythonTemplateInterface)(inspection);
+                    }
+                    catch (error) {
+                        if (!failure || (error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle'))
+                            throw error;
+                        if (failure instanceof Error && error instanceof Error)
+                            failure.message += '\n' + error.message;
+                    }
+                }
+            }
+            if (failure)
+                throw failure;
+            return artifacts;
+        };
+        const rejectNonArtifactFailure = (error) => {
+            if ((0, goJudgeSandboxService_1.isSandboxBudgetExceededError)(error)) {
+                throw new TestdataGenerationError('模板接口预检达到沙箱时限，已停止后续模型修复。', 'sandbox_budget', results, false, undefined, undefined, { code: 'PIPELINE_BUDGET_EXHAUSTED', artifact: 'pipeline', retryPolicy: 'no-retry' });
+            }
+            if (error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle') {
+                throw new TestdataGenerationError(error.message, error.stage, results, true, undefined, undefined, { code: error.code, artifact: 'oracle', retryPolicy: error.retryPolicy, safeDetails: error.safeDetails, failedModelRole: 'oracle' });
+            }
+        };
         const initialResult = await artifactsClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         results.push(initialResult);
         try {
             return {
-                artifacts: parseGenerationArtifacts(initialResult.content, solution.problemType, params.options.languages, { allowMissingTemplates: true, ...(generatorDsl ? { generatorDsl } : {}) }),
+                artifacts: await parseAndInspect(initialResult.content, true),
                 sourceContent: initialResult.content,
             };
         }
         catch (parseError) {
+            if (params.signal?.aborted)
+                throw params.signal.reason;
             if (isCancellation(parseError))
                 throw parseError;
+            rejectNonArtifactFailure(parseError);
+            if (parseError instanceof failures_1.TestdataPipelineError && parseError.retryPolicy === 'manual-review') {
+                throw new TestdataGenerationError(parseError.message, 'artifacts_parse', results, false, undefined, undefined, {
+                    code: parseError.code, artifact: parseError.artifact, retryPolicy: parseError.retryPolicy,
+                    safeDetails: parseError.safeDetails, failedModelRole: 'artifacts',
+                });
+            }
             const repairResult = await artifactsClient.chat([
                 { role: 'user', content: userPrompt },
                 { role: 'assistant', content: initialResult.content },
@@ -6762,14 +6943,27 @@ class TestdataGenService {
             results.push(repairResult);
             try {
                 return {
-                    artifacts: parseGenerationArtifacts(repairResult.content, solution.problemType, params.options.languages, { allowMissingTemplates: true }),
+                    artifacts: await parseAndInspect(repairResult.content, false),
                     sourceContent: repairResult.content,
                 };
             }
             catch (repairParseError) {
+                if (params.signal?.aborted)
+                    throw params.signal.reason;
+                if (isCancellation(repairParseError))
+                    throw repairParseError;
+                rejectNonArtifactFailure(repairParseError);
+                if (repairParseError instanceof failures_1.TestdataPipelineError && repairParseError.retryPolicy === 'manual-review') {
+                    throw new TestdataGenerationError(repairParseError.message, 'artifacts_parse', results, false, undefined, undefined, {
+                        code: repairParseError.code, artifact: repairParseError.artifact,
+                        retryPolicy: repairParseError.retryPolicy, safeDetails: repairParseError.safeDetails,
+                        failedModelRole: 'artifacts',
+                    });
+                }
                 throw new TestdataGenerationError(`AI 自动修复外围制品后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'artifacts_parse', results, true, undefined, undefined, {
-                    code: 'GENERATOR_INVALID_JSON',
-                    artifact: 'generator',
+                    code: repairParseError instanceof failures_1.TestdataPipelineError ? repairParseError.code : 'GENERATOR_INVALID_JSON',
+                    artifact: repairParseError instanceof failures_1.TestdataPipelineError ? repairParseError.artifact : 'generator',
+                    safeDetails: repairParseError instanceof failures_1.TestdataPipelineError ? repairParseError.safeDetails : undefined,
                     retryPolicy: 'repair-artifact',
                     failedModelRole: 'artifacts',
                 });
@@ -7023,7 +7217,7 @@ class TestdataGenService {
                             if (!oracle[0].accepted)
                                 continue;
                             const output = normalizeFileContent(oracle[0].stdout);
-                            if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE)
+                            if (Buffer.byteLength(output, 'utf8') > fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES)
                                 continue;
                             const targetRun = await runner.runPythonBatchDetailed(target.code, [candidate.input], { signal: params.signal, deadlineAt });
                             if (targetRun.length !== 1)
@@ -7246,14 +7440,14 @@ class TestdataGenService {
                             + (cppInfraFailure
                                 ? 'C++ 编译基础设施暂时不可用，请把 ORACLE 改写为 Python 3。'
                                 : '')
-                            + '请重新完整输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
+                            + '请重新完整输出 @@@META@@@、@@@ANALYSIS@@@、@@@ORACLE_LANG@@@（python 或 cpp，与源码一致）、@@@ORACLE@@@，以及函数题需要的 SOLUTION/SAMPLE_INPUTS 分节；标记必须独占一行且逐字一致。禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
                     },
                 ], solutionSystemPrompt, callOptions);
                 results.push(repairResult);
                 solutionSourceContent = repairResult.content;
                 try {
                     const repairedSolution = parseSolutionBlueprint(repairResult.content, params.options, expectedFunctionSamples);
-                    if (!/^[ \t]*===\s*SUBTASKS\s*===\s*$/im.test(repairResult.content)
+                    if (!/^[ \t]*(?:@@@SUBTASKS@@@|===\s*SUBTASKS\s*===)[ \t]*$/im.test(repairResult.content)
                         && originalParsedSubtasks?.length) {
                         repairedSolution.subtasks = originalParsedSubtasks;
                     }
@@ -7444,270 +7638,299 @@ class TestdataGenService {
             const materializationCache = {};
             const initialMaterialization = resolveMaterializationResume(['GENERATOR']);
             let response;
-            try {
-                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, {
-                    ...initialMaterialization,
-                    cache: materializationCache,
-                    validatorProof,
-                    coverageProof,
-                });
-            }
-            catch (firstError) {
-                if (params.signal?.aborted)
-                    throw params.signal.reason ?? firstError;
-                if (isCancellation(firstError))
-                    throw firstError;
-                if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
-                    throw firstError;
-                }
-                const typedFirstError = firstError instanceof failures_1.TestdataPipelineError
-                    ? firstError
-                    : (0, failures_1.toPipelineError)(firstError, {
-                        code: 'UNKNOWN',
-                        stage: 'pipeline',
-                        artifact: 'pipeline',
-                        retryPolicy: 'repair-artifact',
-                    });
-                const blueprintBeforeRepair = blueprint;
-                const cppInfraFailure = typedFirstError.code === 'ORACLE_COMPILE_FAILED'
-                    && typedFirstError.safeDetails.failureKind === 'infra';
-                if (cppInfraFailure) {
-                    cppOracleAvailableForAttempt = false;
-                    systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
-                    blueprint = { ...blueprint, oracleLanguage: 'python' };
-                }
-                const isModelCallBudget = Object.prototype.hasOwnProperty.call(typedFirstError.safeDetails, 'callCount');
-                if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED' && !isModelCallBudget) {
-                    throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false, undefined, undefined, {
-                        code: 'PIPELINE_BUDGET_EXHAUSTED',
-                        artifact: 'pipeline',
-                        retryPolicy: 'no-retry',
-                    });
-                }
-                const repairPolicy = typedFirstError.retryPolicy;
-                if (params.options.providedStdSource === 'accepted-record'
-                    && typedFirstError.artifact === 'oracle') {
-                    throw wrapHistoricalCandidateFailure(typedFirstError, `所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, results);
-                }
-                if (repairPolicy === 'adjudicate' || repairPolicy === 'manual-review' || repairPolicy === 'no-retry') {
-                    throw new TestdataGenerationError(typedFirstError.message, typedFirstError.stage, results, false, undefined, undefined, {
-                        code: typedFirstError.code,
-                        artifact: typedFirstError.artifact,
-                        retryPolicy: repairPolicy,
-                        safeDetails: typedFirstError.safeDetails,
-                    });
-                }
-                const repairScope = repairScopeForPipelineFailure(typedFirstError);
-                let failedModelRole = isVerifierRepairScope(repairScope)
-                    ? 'verifier'
-                    : repairScope === 'oracle'
-                        ? 'oracle'
-                        : repairScope === 'full'
-                            ? undefined
-                            : 'artifacts';
-                let usedFullRepair = repairScope === 'full';
-                report(isVerifierRepairScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
-                const isolatedFullRegenerationError = (detail, role = failedModelRole || 'artifacts') => new TestdataGenerationError(`frozen ProblemSpec 流程不允许 combined full repair；必须在同一 Spec 下重跑隔离角色。${detail}`, 'pipeline_repair', results, true, undefined, undefined, {
-                    code: typedFirstError.code,
-                    artifact: typedFirstError.artifact,
-                    retryPolicy: 'switch-model',
-                    safeDetails: typedFirstError.safeDetails,
-                    failedModelRole: role,
-                    requiresIsolatedRegeneration: true,
-                });
-                if (context && repairScope === 'full') {
-                    (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                    throw isolatedFullRegenerationError('');
-                }
-                let repairResult;
+            const attemptedMaterializationRepairs = new Set();
+            let pendingMaterializationFailure;
+            // At most two different artifacts per attempt; retain the shared model and sandbox budgets.
+            for (;;) {
                 try {
-                    if (repairScope === 'validator' || isVerifierSubartifactRepairScope(repairScope)) {
-                        repairResult = await verifierRepairClient.chat([
-                            { role: 'user', content: verifierState.userPrompt },
-                            { role: 'assistant', content: verifierState.sourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
-                            },
-                        ], verifierState.systemPrompt, callOptions);
+                    if (pendingMaterializationFailure) {
+                        const pending = pendingMaterializationFailure;
+                        pendingMaterializationFailure = undefined;
+                        throw pending;
                     }
-                    else if (repairScope === 'full') {
-                        if (context)
-                            (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                        repairResult = await this.chatForCombinedRepair([
-                            { role: 'user', content: userPrompt },
-                            { role: 'assistant', content: blueprintSourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
-                            },
-                        ], systemPrompt, callOptions);
-                        finalOracleIdentity = { ...repairResult.usedModel };
-                    }
-                    else {
-                        const repairUserPrompt = repairScope === 'oracle' ? solutionUserPrompt : userPrompt;
-                        const repairSourceContent = repairScope === 'oracle'
-                            ? solutionRepairSourceContent
-                            : context
-                                ? artifactsState.sourceContent
-                                : blueprintSourceContent;
-                        repairResult = await (repairScope === 'oracle' ? oracleClient : artifactsClient).chat([
-                            { role: 'user', content: repairUserPrompt },
-                            { role: 'assistant', content: repairSourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
-                            },
-                        ], repairScope === 'oracle'
-                            ? solutionSystemPrompt
-                            : repairScope === 'generator'
-                                ? buildGenerationArtifactsSystemPrompt(!!context, false)
-                                : artifactsSystemPrompt, callOptions);
-                        if (repairScope === 'oracle') {
-                            finalOracleIdentity = { ...repairResult.usedModel };
-                        }
-                    }
-                }
-                catch (err) {
-                    if (params.signal?.aborted)
-                        throw params.signal.reason ?? err;
-                    if (isCancellation(err))
-                        throw err;
-                    throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, typedFirstError.stage, results, false, undefined, undefined, {
-                        code: typedFirstError.code,
-                        artifact: typedFirstError.artifact,
-                        retryPolicy: typedFirstError.retryPolicy,
-                        safeDetails: typedFirstError.safeDetails,
-                        failedModelRole,
-                    });
-                }
-                results.push(repairResult);
-                let pendingIsolatedFullRegeneration;
-                try {
-                    try {
-                        if (repairScope === 'validator') {
-                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, 'validator');
-                            verifierState = {
-                                ...verifierState,
-                                verifier: checkpointVerifierFromBlueprint(blueprint),
-                                sourceContent: repairResult.content,
-                            };
-                        }
-                        else if (isVerifierSubartifactRepairScope(repairScope)) {
-                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope, verifierState.expectedFunctionSamples);
-                            verifierState = {
-                                ...verifierState,
-                                verifier: checkpointVerifierFromBlueprint(blueprint),
-                            };
-                        }
-                        else if (repairScope === 'full') {
-                            const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
-                            blueprint = { ...repairedMain, ...verifierState.verifier };
-                            blueprintSourceContent = repairResult.content;
-                        }
-                        else {
-                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope);
-                        }
-                    }
-                    catch (targetedParseError) {
-                        if (repairScope === 'full' || isVerifierRepairScope(repairScope))
-                            throw targetedParseError;
-                        usedFullRepair = true;
-                        failedModelRole = context ? undefined : 'oracle';
-                        if (context) {
-                            (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                            pendingIsolatedFullRegeneration = isolatedFullRegenerationError(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`, repairScope === 'oracle' ? 'oracle' : 'artifacts');
-                            throw pendingIsolatedFullRegeneration;
-                        }
-                        const fullRepairMessages = [
-                            { role: 'user', content: userPrompt },
-                            { role: 'assistant', content: blueprintSourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full', generationCoverage, context),
-                            },
-                        ];
-                        const fullRepairResult = await oracleClient.chat(fullRepairMessages, systemPrompt, callOptions);
-                        finalOracleIdentity = { ...fullRepairResult.usedModel };
-                        results.push(fullRepairResult);
-                        blueprint = {
-                            ...parseSandboxBlueprint(fullRepairResult.content, params.options),
-                            ...verifierState.verifier,
-                        };
-                        blueprintSourceContent = fullRepairResult.content;
-                    }
-                    if (tieredDecision.enabled)
-                        blueprint.subtasks = tieredDecision.subtasks;
-                    blueprint = bindBlueprintToFrozenProblemSpec(this.useProvidedOracle(blueprint, params.options), context);
-                    if (context)
-                        (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                    if (params.signal?.aborted) {
-                        throw params.signal.reason
-                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
-                    }
-                    if (isVerifierRepairScope(repairScope)) {
-                        finalVerifierIdentity = { ...repairResult.usedModel };
-                        this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
-                        this.assertCheckpointRoleIndependence(risk, checkpoint);
-                        this.assertIndependentRoleIdentities(risk);
-                    }
-                    const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
-                    const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
-                    if (usedFullRepair) {
-                        // 完整修复的 NOTES 只归入解题蓝图，避免恢复后拼接两次。
-                        repairedArtifactsCheckpoint.notes = undefined;
-                    }
-                    else {
-                        // 定向修复不改 NOTES 契约，继续保留两个阶段原先各自的说明。
-                        repairedSolutionCheckpoint.notes = solution.notes;
-                        repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
-                    }
-                    await this.emitCheckpoint(params, {
-                        solution: repairedSolutionCheckpoint,
-                        artifacts: repairedArtifactsCheckpoint,
-                        verifier: checkpointVerifierFromBlueprint(blueprint),
-                    });
-                    if (params.signal?.aborted) {
-                        throw params.signal.reason
-                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
-                    }
-                    const changedArtifacts = usedFullRepair
-                        ? ['full']
-                        : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);
-                    const materializationResume = resolveMaterializationResume(changedArtifacts);
                     response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, {
-                        ...materializationResume,
+                        ...initialMaterialization,
                         cache: materializationCache,
                         validatorProof,
                         coverageProof,
                     });
                 }
-                catch (err) {
+                catch (firstError) {
                     if (params.signal?.aborted)
-                        throw params.signal.reason ?? err;
-                    if (isCancellation(err))
-                        throw err;
-                    if (err === pendingIsolatedFullRegeneration)
-                        throw err;
-                    if (err instanceof TestdataGenerationError && err.userMessageKey)
-                        throw err;
-                    const typedRepairError = err instanceof failures_1.TestdataPipelineError
-                        ? err
-                        : (0, failures_1.toPipelineError)(err, {
+                        throw params.signal.reason ?? firstError;
+                    if (isCancellation(firstError))
+                        throw firstError;
+                    if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
+                        throw firstError;
+                    }
+                    const typedFirstError = firstError instanceof failures_1.TestdataPipelineError
+                        ? firstError
+                        : (0, failures_1.toPipelineError)(firstError, {
                             code: 'UNKNOWN',
-                            stage: 'pipeline_repair',
+                            stage: 'pipeline',
                             artifact: 'pipeline',
-                            retryPolicy: 'switch-model',
+                            retryPolicy: 'repair-artifact',
                         });
-                    const finalPolicy = typedRepairError.retryPolicy;
-                    throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, typedRepairError.stage, results, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
-                        code: typedRepairError.code,
-                        artifact: typedRepairError.artifact,
-                        retryPolicy: finalPolicy,
-                        safeDetails: typedRepairError.safeDetails,
-                        failedModelRole,
+                    const blueprintBeforeRepair = blueprint;
+                    const cppInfraFailure = typedFirstError.code === 'ORACLE_COMPILE_FAILED'
+                        && typedFirstError.safeDetails.failureKind === 'infra';
+                    if (cppInfraFailure) {
+                        cppOracleAvailableForAttempt = false;
+                        systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
+                        blueprint = { ...blueprint, oracleLanguage: 'python' };
+                    }
+                    const isModelCallBudget = Object.prototype.hasOwnProperty.call(typedFirstError.safeDetails, 'callCount');
+                    if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED' && !isModelCallBudget) {
+                        throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false, undefined, undefined, {
+                            code: 'PIPELINE_BUDGET_EXHAUSTED',
+                            artifact: 'pipeline',
+                            retryPolicy: 'no-retry',
+                        });
+                    }
+                    const repairPolicy = typedFirstError.retryPolicy;
+                    if (params.options.providedStdSource === 'accepted-record'
+                        && typedFirstError.artifact === 'oracle') {
+                        throw wrapHistoricalCandidateFailure(typedFirstError, `所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, results);
+                    }
+                    if (repairPolicy === 'adjudicate' || repairPolicy === 'manual-review' || repairPolicy === 'no-retry') {
+                        throw new TestdataGenerationError(typedFirstError.message, typedFirstError.stage, results, false, undefined, undefined, {
+                            code: typedFirstError.code,
+                            artifact: typedFirstError.artifact,
+                            retryPolicy: repairPolicy,
+                            safeDetails: typedFirstError.safeDetails,
+                            failedModelRole: modelRoleForSandboxFailure(typedFirstError),
+                        });
+                    }
+                    const repairScope = repairScopeForPipelineFailure(typedFirstError);
+                    attemptedMaterializationRepairs.add(repairScope);
+                    let failedModelRole = isVerifierRepairScope(repairScope)
+                        ? 'verifier'
+                        : repairScope === 'oracle'
+                            ? 'oracle'
+                            : repairScope === 'full'
+                                ? undefined
+                                : 'artifacts';
+                    let usedFullRepair = repairScope === 'full';
+                    report(isVerifierRepairScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
+                    const isolatedFullRegenerationError = (detail, role = failedModelRole || 'artifacts') => new TestdataGenerationError(`frozen ProblemSpec 流程不允许 combined full repair；必须在同一 Spec 下重跑隔离角色。${detail}`, 'pipeline_repair', results, true, undefined, undefined, {
+                        code: typedFirstError.code,
+                        artifact: typedFirstError.artifact,
+                        retryPolicy: 'switch-model',
+                        safeDetails: typedFirstError.safeDetails,
+                        failedModelRole: role,
+                        requiresIsolatedRegeneration: true,
                     });
+                    if (context && repairScope === 'full') {
+                        (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                        throw isolatedFullRegenerationError('');
+                    }
+                    let repairResult;
+                    try {
+                        if (repairScope === 'validator' || isVerifierSubartifactRepairScope(repairScope)) {
+                            repairResult = await verifierRepairClient.chat([
+                                { role: 'user', content: verifierState.userPrompt },
+                                { role: 'assistant', content: verifierState.sourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
+                                },
+                            ], buildSandboxRepairSystemPrompt(repairScope, !!context), callOptions);
+                        }
+                        else if (repairScope === 'full') {
+                            if (context)
+                                (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                            repairResult = await this.chatForCombinedRepair([
+                                { role: 'user', content: userPrompt },
+                                { role: 'assistant', content: blueprintSourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
+                                },
+                            ], systemPrompt, callOptions);
+                            finalOracleIdentity = { ...repairResult.usedModel };
+                        }
+                        else {
+                            const repairUserPrompt = repairScope === 'oracle' ? solutionUserPrompt : userPrompt;
+                            const repairSourceContent = repairScope === 'oracle'
+                                ? solutionRepairSourceContent
+                                : context
+                                    ? artifactsState.sourceContent
+                                    : blueprintSourceContent;
+                            repairResult = await (repairScope === 'oracle' ? oracleClient : artifactsClient).chat([
+                                { role: 'user', content: repairUserPrompt },
+                                { role: 'assistant', content: repairSourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context, {
+                                        language: blueprint.oracleLanguage || 'python',
+                                        cppAvailable: cppOracleAvailableForAttempt && blueprint.problemType === 'traditional',
+                                    }),
+                                },
+                            ], buildSandboxRepairSystemPrompt(repairScope, !!context), callOptions);
+                            if (repairScope === 'oracle') {
+                                finalOracleIdentity = { ...repairResult.usedModel };
+                            }
+                        }
+                    }
+                    catch (err) {
+                        if (params.signal?.aborted)
+                            throw params.signal.reason ?? err;
+                        if (isCancellation(err))
+                            throw err;
+                        throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, typedFirstError.stage, results, false, undefined, undefined, {
+                            code: typedFirstError.code,
+                            artifact: typedFirstError.artifact,
+                            retryPolicy: typedFirstError.retryPolicy,
+                            safeDetails: typedFirstError.safeDetails,
+                            failedModelRole,
+                        });
+                    }
+                    results.push(repairResult);
+                    let pendingIsolatedFullRegeneration;
+                    try {
+                        try {
+                            if (repairScope === 'validator') {
+                                blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, 'validator');
+                                verifierState = {
+                                    ...verifierState,
+                                    verifier: checkpointVerifierFromBlueprint(blueprint),
+                                    sourceContent: currentVerifierRepairSource(blueprint),
+                                };
+                            }
+                            else if (isVerifierSubartifactRepairScope(repairScope)) {
+                                blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope, verifierState.expectedFunctionSamples);
+                                verifierState = {
+                                    ...verifierState,
+                                    verifier: checkpointVerifierFromBlueprint(blueprint),
+                                    sourceContent: currentVerifierRepairSource(blueprint),
+                                };
+                            }
+                            else if (repairScope === 'full') {
+                                const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
+                                blueprint = { ...repairedMain, ...verifierState.verifier };
+                                blueprintSourceContent = repairResult.content;
+                            }
+                            else {
+                                blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope);
+                            }
+                        }
+                        catch (targetedParseError) {
+                            if (targetedParseError instanceof failures_1.TestdataPipelineError
+                                && targetedParseError.retryPolicy === 'manual-review')
+                                throw targetedParseError;
+                            if (repairScope === 'full' || isVerifierRepairScope(repairScope))
+                                throw targetedParseError;
+                            if (!context && (attemptedMaterializationRepairs.size >= 2
+                                || attemptedMaterializationRepairs.has('full')))
+                                throw targetedParseError;
+                            usedFullRepair = true;
+                            attemptedMaterializationRepairs.add('full');
+                            failedModelRole = context ? undefined : 'oracle';
+                            if (context) {
+                                (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                                pendingIsolatedFullRegeneration = isolatedFullRegenerationError(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`, repairScope === 'oracle' ? 'oracle' : 'artifacts');
+                                throw pendingIsolatedFullRegeneration;
+                            }
+                            const fullRepairMessages = [
+                                { role: 'user', content: userPrompt },
+                                { role: 'assistant', content: blueprintSourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full', generationCoverage, context),
+                                },
+                            ];
+                            const fullRepairResult = await oracleClient.chat(fullRepairMessages, systemPrompt, callOptions);
+                            finalOracleIdentity = { ...fullRepairResult.usedModel };
+                            results.push(fullRepairResult);
+                            blueprint = {
+                                ...parseSandboxBlueprint(fullRepairResult.content, params.options),
+                                ...verifierState.verifier,
+                            };
+                            blueprintSourceContent = fullRepairResult.content;
+                        }
+                        if (tieredDecision.enabled)
+                            blueprint.subtasks = tieredDecision.subtasks;
+                        blueprint = bindBlueprintToFrozenProblemSpec(this.useProvidedOracle(blueprint, params.options), context);
+                        if (context)
+                            (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                        if (params.signal?.aborted) {
+                            throw params.signal.reason
+                                ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                        }
+                        if (isVerifierRepairScope(repairScope)) {
+                            finalVerifierIdentity = { ...repairResult.usedModel };
+                            this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
+                            this.assertCheckpointRoleIndependence(risk, checkpoint);
+                            this.assertIndependentRoleIdentities(risk);
+                        }
+                        const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
+                        const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
+                        if (usedFullRepair) {
+                            // 完整修复的 NOTES 只归入解题蓝图，避免恢复后拼接两次。
+                            repairedArtifactsCheckpoint.notes = undefined;
+                        }
+                        else {
+                            // 定向修复不改 NOTES 契约，继续保留两个阶段原先各自的说明。
+                            repairedSolutionCheckpoint.notes = solution.notes;
+                            repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
+                        }
+                        await this.emitCheckpoint(params, {
+                            solution: repairedSolutionCheckpoint,
+                            artifacts: repairedArtifactsCheckpoint,
+                            verifier: checkpointVerifierFromBlueprint(blueprint),
+                        });
+                        if (params.signal?.aborted) {
+                            throw params.signal.reason
+                                ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                        }
+                        const changedArtifacts = usedFullRepair
+                            ? ['full']
+                            : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);
+                        const materializationResume = resolveMaterializationResume(changedArtifacts);
+                        response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, {
+                            ...materializationResume,
+                            cache: materializationCache,
+                            validatorProof,
+                            coverageProof,
+                        });
+                    }
+                    catch (err) {
+                        if (params.signal?.aborted)
+                            throw params.signal.reason ?? err;
+                        if (isCancellation(err))
+                            throw err;
+                        if (err === pendingIsolatedFullRegeneration)
+                            throw err;
+                        if (err instanceof TestdataGenerationError && err.userMessageKey)
+                            throw err;
+                        const typedRepairError = err instanceof failures_1.TestdataPipelineError
+                            ? err
+                            : (0, failures_1.toPipelineError)(err, {
+                                code: 'UNKNOWN',
+                                stage: 'pipeline_repair',
+                                artifact: 'pipeline',
+                                retryPolicy: 'switch-model',
+                            });
+                        const finalPolicy = typedRepairError.retryPolicy;
+                        const nextScope = repairScopeForPipelineFailure(typedRepairError);
+                        if (finalPolicy === 'repair-artifact'
+                            && attemptedMaterializationRepairs.size < 2
+                            && !attemptedMaterializationRepairs.has(nextScope)
+                            && nextScope !== 'full'
+                            && nextScope !== 'accepted-std') {
+                            pendingMaterializationFailure = typedRepairError;
+                            continue;
+                        }
+                        throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, typedRepairError.stage, results, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
+                            code: typedRepairError.code,
+                            artifact: typedRepairError.artifact,
+                            retryPolicy: finalPolicy,
+                            safeDetails: typedRepairError.safeDetails,
+                            failedModelRole: modelRoleForSandboxFailure(typedRepairError) ?? failedModelRole,
+                        });
+                    }
                 }
+                break;
             }
             const initialCaseCount = response.cases.length;
             response.discriminationInitialCaseCount = initialCaseCount;

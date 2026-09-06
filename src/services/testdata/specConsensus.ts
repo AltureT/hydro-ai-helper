@@ -622,12 +622,13 @@ export async function runProblemSpecConsensus(
   input: RunSpecConsensusInput,
 ): Promise<SpecConsensusResult> {
   const prompt = buildProblemSpecPrompt(input);
+  const callOptions: ChatCallOptions = { ...input.callOptions, contentMode: 'raw' };
   const extract = async (source: SpecConsensusClient) => {
     try {
       const result = await source.client.chat(
         [{ role: 'user', content: prompt.userPrompt }],
         prompt.systemPrompt,
-        input.callOptions,
+        callOptions,
       );
       return { result, spec: validateExtractedSpec(result.content, input) };
     } catch (error) {
@@ -722,7 +723,7 @@ export async function runProblemSpecConsensus(
     adjudicatorResult = await input.adjudicator.client.chat(
       [{ role: 'user', content: adjudicatorPrompt.userPrompt }],
       adjudicatorPrompt.systemPrompt,
-      input.callOptions,
+      callOptions,
     );
     results.push(adjudicatorResult);
     roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };

@@ -4,13 +4,18 @@ exports.assessGeneratorDslEligibility = assessGeneratorDslEligibility;
 exports.parseGeneratorPlan = parseGeneratorPlan;
 exports.materializeGeneratorPlan = materializeGeneratorPlan;
 exports.renderGeneratorArtifact = renderGeneratorArtifact;
+exports.renderGeneratorArtifacts = renderGeneratorArtifacts;
+const zlib_1 = require("zlib");
+const generatorBudget_1 = require("./generatorBudget");
+const fileBudget_1 = require("./fileBudget");
+const failures_1 = require("./failures");
 const numericBounds_1 = require("./numericBounds");
 const MAX_PLAN_LENGTH = 512 * 1024;
 const MAX_CASES = 30;
 const MAX_LABEL_LENGTH = 256;
-const MAX_SEQUENCE_LENGTH = 100000;
+const MAX_SEQUENCE_LENGTH = 200000;
 const MAX_DENSE_GRAPH_VERTICES = 500;
-const MAX_INPUT_BYTES = 256 * 1024;
+const MAX_INPUT_BYTES = generatorBudget_1.GENERATOR_BYTE_LIMITS.input;
 const MAX_TOTAL_GENERATOR_WORK = 1000000;
 const UINT32_MAX = 4294967295;
 const INT64_MIN = -9223372036854775808n;
@@ -786,7 +791,9 @@ function serializeValues(spec, values, layouts) {
             });
         }
     }
-    const maxLine = Math.max(0, ...lines.keys());
+    let maxLine = 0;
+    for (const lineNumber of lines.keys())
+        maxLine = Math.max(maxLine, lineNumber);
     const serialized = Array.from({ length: maxLine }, (_, index) => {
         const tokens = lines.get(index + 1);
         if (!tokens || tokens.length === 0 || tokens.some(token => token === undefined)) {
@@ -802,7 +809,7 @@ function materializeValidatedPlan(plan, spec) {
     const layouts = resolveLayouts(spec);
     if (!layouts)
         throw generatorPlanFailure();
-    return plan.cases.map((casePlan, caseIndex) => {
+    const cases = plan.cases.map((casePlan, caseIndex) => {
         const random = new DeterministicRandom((plan.seed + Math.imul(caseIndex + 1, 0x9e3779b1)) >>> 0);
         const values = Object.fromEntries(spec.inputFields.map(field => [
             field.id,
@@ -816,13 +823,32 @@ function materializeValidatedPlan(plan, spec) {
             values,
         };
     });
+    (0, generatorBudget_1.assertGeneratorStdoutBudget)(cases.map(({ label, input }) => ({ label, input })));
+    return cases;
 }
 function materializeGeneratorPlan(plan, spec) {
     return materializeValidatedPlan(validateGeneratorPlan(plan, spec), spec);
 }
 function renderGeneratorArtifact(plan, cases) {
     const publicCases = cases.map(item => ({ label: item.label, input: item.input }));
+    (0, generatorBudget_1.assertGeneratorStdoutBudget)(publicCases);
     const casesJson = JSON.stringify(publicCases);
+    // Large literal replays duplicate every input in a single file. Compress only
+    // server-materialized bytes; Python decodes data, never model-supplied code.
+    if (Buffer.byteLength(casesJson, 'utf8') > 64 * 1024) {
+        const encoded = (0, zlib_1.deflateSync)(Buffer.from(JSON.stringify({ cases: publicCases }), 'utf8')).toString('base64');
+        const artifact = [
+            '# Server-generated trusted GeneratorPlan artifact. Do not edit generated cases by hand.',
+            `# GeneratorPlan v${plan.version}; seed=${plan.seed}`,
+            'import base64, sys, zlib',
+            `sys.stdout.buffer.write(zlib.decompress(base64.b64decode('${encoded}')))`,
+            '',
+        ].join('\n');
+        if (Buffer.byteLength(artifact, 'utf8') > fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES) {
+            throw new failures_1.TestdataPipelineError('GeneratorPlan 无损压缩后的回放脚本仍超过单文件上限', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { actualBytes: Buffer.byteLength(artifact, 'utf8'), maxBytes: fileBudget_1.TESTDATA_CODE_FILE_MAX_BYTES });
+        }
+        return artifact;
+    }
     return [
         '# Server-generated trusted GeneratorPlan artifact. Do not edit generated cases by hand.',
         `# GeneratorPlan v${plan.version}; seed=${plan.seed}`,
@@ -832,5 +858,31 @@ function renderGeneratorArtifact(plan, cases) {
         "print(json.dumps({'cases': CASES}, ensure_ascii=False, separators=(',', ':')))",
         '',
     ].join('\n');
+}
+/** Keep executable code small; incompressible replay data has its own bounded file. */
+function renderGeneratorArtifacts(plan, cases) {
+    try {
+        return { code: renderGeneratorArtifact(plan, cases) };
+    }
+    catch (error) {
+        if (!(error instanceof failures_1.TestdataPipelineError) || error.code !== 'GENERATOR_OUTPUT_TOO_LARGE')
+            throw error;
+        (0, generatorBudget_1.assertGeneratorStdoutBudget)(cases.map(({ label, input }) => ({ label, input })));
+        const data = (0, zlib_1.deflateSync)(Buffer.from(JSON.stringify({
+            cases: cases.map(({ label, input }) => ({ label, input })),
+        }), 'utf8')).toString('base64') + '\n';
+        if (Buffer.byteLength(data, 'utf8') > generatorBudget_1.GENERATOR_BYTE_LIMITS.input)
+            throw error;
+        return {
+            code: [
+                '# Server-generated replay; keep the companion data file beside this script.',
+                'import base64, pathlib, sys, zlib',
+                `data = pathlib.Path(__file__).with_name('${fileBudget_1.GENERATOR_REPLAY_DATA_FILENAME}').read_bytes()`,
+                'sys.stdout.buffer.write(zlib.decompress(base64.b64decode(data)))',
+                '',
+            ].join('\n'),
+            data,
+        };
+    }
 }
 //# sourceMappingURL=generatorDsl.js.map

@@ -10,6 +10,7 @@ import { Icon } from '../components/Icon';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { i18n } from '../utils/i18n';
 import { buildApiUrl } from '../utils/domainUtils';
+import { buildTestdataApplyFiles, buildTestdataApplyRequest } from './applyFiles';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
@@ -733,6 +734,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         throw new Error((await parseErrorDetails(response)).message);
       }
       const data = await response.json() as { plan: GenerationPlan };
+      rememberJob(null);
       loadPlanIntoPreview(data.plan);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -740,7 +742,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     }
   }, [
     problemId, problemKind, caseCount, dataScale, languages,
-    providedStd, acceptedStdRecordId, loadPlanIntoPreview,
+    providedStd, acceptedStdRecordId, loadPlanIntoPreview, rememberJob,
   ]);
 
   // ─── 写入 ───────────────────────────────────────────────────────────────────
@@ -748,9 +750,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const handleApply = useCallback(async () => {
     if (!plan) return;
     setError(null);
-    const files = plan.files
-      .filter(f => selectedFiles[f.name])
-      .map(f => ({ name: f.name, content: fileContents[f.name] ?? f.content }));
+    const files = buildTestdataApplyFiles(plan.files, selectedFiles, fileContents, generationJobId);
     if (files.length === 0) {
       setError(i18n('ai_helper_testdata_err_none_selected'));
       return;
@@ -763,14 +763,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
     setPhase('applying');
     try {
+      const request = buildTestdataApplyRequest({ problemId, jobId: generationJobId || undefined, files });
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/apply'), {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          ...request.headers,
           'X-Requested-With': 'XMLHttpRequest',
         },
         credentials: 'include',
-        body: JSON.stringify({ problemId, jobId: generationJobId || undefined, files }),
+        body: request.body,
       });
       const payload = await response.clone().json().catch(() => undefined);
       if (!response.ok) {
