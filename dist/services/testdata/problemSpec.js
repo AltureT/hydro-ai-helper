@@ -34,8 +34,17 @@ const INVARIANT_KINDS = new Set([
 const OUTPUT_POLICY_KINDS = new Set([
     'exact', 'token', 'float', 'unordered', 'multiple-valid', 'custom-checker',
 ]);
-function parseFailure() {
-    return new failures_1.TestdataPipelineError('ProblemSpec v1 JSON 不符合严格契约。', 'SPEC_PARSE_FAILED', 'pipeline', 'spec', 'rerun-spec');
+function parseFailure(error) {
+    // Only server-owned field names and guidance may leave the strict parser.
+    // Never include JSON syntax excerpts, values, unknown keys, or evidence quotes.
+    const diagnostics = new Map([
+        ['tolerance', ['spec-output-tolerance', 'outputPolicy.tolerance', '非 float 输出省略 tolerance；float 必须提供大于 0 且不超过 1 的数值。']],
+        ['float tolerance', ['spec-output-tolerance', 'outputPolicy.tolerance', 'float 必须提供大于 0 且不超过 1 的 tolerance。']],
+        ['output policy', ['spec-output-policy', 'outputPolicy.kind', 'outputPolicy.kind 只能是 exact、token、float、unordered、multiple-valid 或 custom-checker。']],
+        ['evidence section', ['spec-evidence-section', 'evidence.section', '没有可定位的标题时省略 evidence.section；提供时必须是非空标题文本。']],
+    ]);
+    const detail = error instanceof TypeError ? diagnostics.get(error.message) : undefined;
+    return new failures_1.TestdataPipelineError('ProblemSpec v1 JSON 不符合严格契约。' + (detail ? `${detail[1]}：${detail[2]}` : ''), 'SPEC_PARSE_FAILED', 'pipeline', 'spec', 'rerun-spec', detail ? { failureKind: detail[0], indexes: [detail[1]] } : { failureKind: 'spec-shape' });
 }
 function evidenceFailure() {
     return new failures_1.TestdataPipelineError('ProblemSpec evidence 无法在完整规范化题面中唯一定位。', 'SPEC_EVIDENCE_NOT_FOUND', 'pipeline', 'spec', 'rerun-spec');
@@ -47,7 +56,7 @@ function withParseFailure(action) {
     catch (error) {
         if (error instanceof failures_1.TestdataPipelineError)
             throw error;
-        throw parseFailure();
+        throw parseFailure(error);
     }
 }
 function asObject(value) {
@@ -100,8 +109,11 @@ function validateEvidenceShape(value, allowOffsets) {
         : ['quote', 'section'];
     exactKeys(evidence, allowed, ['quote']);
     boundedString(evidence.quote, TEXT_MAX_LENGTH);
-    if (evidence.section !== undefined)
-        boundedString(evidence.section, EVIDENCE_SECTION_MAX_LENGTH);
+    if (evidence.section !== undefined) {
+        if (typeof evidence.section !== 'string' || !evidence.section.trim()
+            || evidence.section.length > EVIDENCE_SECTION_MAX_LENGTH)
+            throw new TypeError('evidence section');
+    }
     if (allowOffsets) {
         optionalOffset(evidence.startOffset);
         optionalOffset(evidence.endOffset);

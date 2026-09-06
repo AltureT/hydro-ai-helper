@@ -3,6 +3,7 @@ import type {
   ChatCallOptions,
   MultiModelChatResult,
   MultiModelClient,
+  TokenUsage,
 } from '../openaiClient';
 import type { TestdataFailureCode } from './failures';
 import { TestdataPipelineError } from './failures';
@@ -24,6 +25,14 @@ import type { TestdataModelRole } from '../../models/aiConfig';
 const ADJUDICATION_MAX_LENGTH = 768 * 1024;
 const RESOLUTION_REASON_MAX_LENGTH = 2048;
 const RESOLUTION_EVIDENCE_MAX_LENGTH = 4096;
+
+const FAILURE_TOKEN_USAGE = new WeakMap<object, TokenUsage>();
+
+export function getSpecConsensusFailureTokenUsage(error: unknown): TokenUsage | undefined {
+  const usage = error && (typeof error === 'object' || typeof error === 'function')
+    ? FAILURE_TOKEN_USAGE.get(error as object) : undefined;
+  return usage ? { ...usage } : undefined;
+}
 
 export interface SpecConflict {
   path: string;
@@ -621,26 +630,83 @@ function safeSummary(
 export async function runProblemSpecConsensus(
   input: RunSpecConsensusInput,
 ): Promise<SpecConsensusResult> {
+  const usages: TokenUsage[] = [];
+  try {
+    return await runConsensus(input, result => {
+      if (result.usage) usages.push({ ...result.usage });
+    });
+  } catch (error) {
+    // Keep only numeric accounting out of band; preserve the original abort or
+    // budget error and never attach model responses to it.
+    if (usages.length && error && (typeof error === 'object' || typeof error === 'function')) {
+      FAILURE_TOKEN_USAGE.set(error as object, usages.reduce((sum, usage) => ({
+        promptTokens: sum.promptTokens + usage.promptTokens,
+        completionTokens: sum.completionTokens + usage.completionTokens,
+        totalTokens: sum.totalTokens + usage.totalTokens,
+      }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 }));
+    }
+    throw error;
+  }
+}
+
+async function runConsensus(
+  input: RunSpecConsensusInput,
+  recordResponse: (result: MultiModelChatResult) => void,
+): Promise<SpecConsensusResult> {
   const prompt = buildProblemSpecPrompt(input);
   const callOptions: ChatCallOptions = { ...input.callOptions, contentMode: 'raw' };
   const extract = async (source: SpecConsensusClient) => {
-    try {
-      const result = await source.client.chat(
-        [{ role: 'user', content: prompt.userPrompt }],
-        prompt.systemPrompt,
-        callOptions,
-      );
-      return { result, spec: validateExtractedSpec(result.content, input) };
-    } catch (error) {
-      if (isCancellation(error) || isModelCallBudgetExhausted(error)) throw error;
-      return { error };
+    const attempts: MultiModelChatResult[] = [];
+    let repairHint = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (callOptions.signal?.aborted) throw callOptions.signal.reason
+        ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      let result: MultiModelChatResult;
+      try {
+        result = await source.client.chat(
+          [{ role: 'user', content: prompt.userPrompt + repairHint }],
+          prompt.systemPrompt,
+          callOptions,
+        );
+        attempts.push(result);
+        recordResponse(result);
+      } catch (error) {
+        if (isCancellation(error) || isModelCallBudgetExhausted(error)) throw error;
+        return { error, attempts };
+      }
+      if (callOptions.signal?.aborted) throw callOptions.signal.reason
+        ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      try {
+        return { result, spec: validateExtractedSpec(result.content, input), attempts };
+      } catch (error) {
+        if (callOptions.signal?.aborted) throw callOptions.signal.reason
+          ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        if (isCancellation(error) || isModelCallBudgetExhausted(error)) throw error;
+        if (attempt === 1 || !(error instanceof TestdataPipelineError) || error.code !== 'SPEC_PARSE_FAILED') {
+          return { error, attempts };
+        }
+        // Re-extract from the complete statement using only a server-owned hint.
+        // No invalid response or peer extraction crosses the role boundary.
+        repairHint = `\n\n=== STRICT FORMAT RETRY (ONCE) ===\n${error.message}\n`
+          + '请重新依据完整题面提取规范，保留全部语义与证据；不要猜测、删除约束或更改输出规则来通过格式检查。';
+      }
     }
+    throw new Error('Unreachable ProblemSpec extraction state');
   };
-  const [primary, critic] = await Promise.all([
+  const settled = await Promise.allSettled([
     extract(input.primary),
     ...(input.critic ? [extract(input.critic)] : []),
   ]);
-  const results = [primary.result, critic?.result].filter(Boolean) as MultiModelChatResult[];
+  // Drain both roles before exposing a terminal error, so a concurrent response
+  // is accounted for and no extraction keeps running after the caller exits.
+  for (const outcome of settled) {
+    if (outcome.status === 'rejected') throw outcome.reason;
+  }
+  const [primary, critic] = settled.map(outcome => {
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  });
+  const results = [...primary.attempts, ...(critic?.attempts ?? [])];
   const rolesUsed: SpecConsensusRole[] = input.critic
     ? ['specPrimary', 'specCritic']
     : ['specPrimary'];
@@ -726,6 +792,7 @@ export async function runProblemSpecConsensus(
       callOptions,
     );
     results.push(adjudicatorResult);
+    recordResponse(adjudicatorResult);
     roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };
     const adjudication = parseAdjudication(
       adjudicatorResult.content,

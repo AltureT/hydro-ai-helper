@@ -36,6 +36,7 @@ GENERATOR_BUDGET: ${JSON.stringify({
 先建立完整 case_specs 规模表，再分配或构造大数组，禁止每个 large CASE 都独立用满单文件额度。最大规模边界放在覆盖计划要求它的 CASE；其他 CASE 按自己的覆盖目标分配预算。整数数组按元素个数 ×（最长十进制位数 + 符号 + 分隔符）估算，并为 JSON 转义留余量；不要把数组长度当作字节数。
 每个 CASE 同时估算 outputBytes：例如查询题按会输出答案的查询数 ×（最长答案字节数 + 换行）计算，而不是按总操作数。如果输出会超 4 MiB，优先调整会产生输出的操作比例、值域等可调维度，保留必要的大规模和边界覆盖；不能仅更换标程语言或截断正确输出。全部输入 + 预计输出 + 辅助文件的字节数必须合计在 8 MiB 内。
 large 不等于把所有维度同时拉满：依据覆盖计划分别构造大 n 小 q、小 n 多操作等合法数据；保留要求的边界和复杂度特征，label 只描述实际达到的覆盖。不得截断 input、删测试点或把降低必要覆盖宣称为完成。
+可信 GeneratorPlan 的压缩回放脚本或 generator-data.b64 与 .in 同时保存，回放数据不是 .in 的替代品；随机大整数等难压缩输入要为这部分额外字节预留空间。修复反馈里的 auxiliary 字节是服务器实测辅助文件合计，重新规划时必须连同全部输入输出计入 8 MiB，不得删除回放文件绕过限制。
 Python 生成器必须在 5 秒内完成：循环必须有界；去重前检查可用候选容量，优先直接构造或无放回采样，禁止无限拒绝采样。动态集合随机删除使用列表加位置索引和尾元素交换，避免每轮 list(set) 或重建全部边；不能通过省略合法性检查来提速。
 在打印前执行以下字节检查（cases 是已经构造好的完整列表；不要打印中间结果）：
 assert len(cases) == ${count}, f'GENERATOR_CASE_COUNT actual={len(cases)} expected=${count}'
@@ -118,11 +119,12 @@ function assertGeneratorStdoutBudget(cases) {
     }
 }
 /** Reject an already impossible file plan before further verification and assembly work. */
-function assertGeneratedDataBudget(cases) {
-    const byCase = cases.map(item => [item.input, item.output].map(content => {
-        const normalized = content.replace(/\r\n?/g, '\n');
-        return Buffer.byteLength(normalized, 'utf8') + (normalized.endsWith('\n') ? 0 : 1);
-    }));
+function assertGeneratedDataBudget(cases, auxiliaryFiles = []) {
+    // Oversized code/config requires review of that artifact; shrinking inputs
+    // cannot fix its individual file limit. Companion data also keeps its limit.
+    (0, fileBudget_1.assertTestdataPlanBudget)({ files: auxiliaryFiles });
+    const auxiliaryBytes = auxiliaryFiles.reduce((total, file) => total + (0, fileBudget_1.normalizedTestdataFileBytes)(file.content), 0);
+    const byCase = cases.map(item => [item.input, item.output].map(fileBudget_1.normalizedTestdataFileBytes));
     const indexes = byCase.slice(0, 30).map(([input, output], index) => `${index + 1}:in:${input}:out:${output}`);
     const oversized = byCase.flatMap((sizes, index) => sizes.flatMap((bytes, side) => {
         const scope = side === 0 ? 'input' : 'output';
@@ -134,12 +136,13 @@ function assertGeneratedDataBudget(cases) {
             + `全部 CASE 输入与输出字节：${indexes.join('; ')}。单个数据文件最多 4 MiB；必须联合规划整批预算，保留必要覆盖，不得截断答案。`, 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { failureKind: `${first.scope}-budget`, caseIndex: first.index + 1, actualBytes: first.bytes, maxBytes: first.limit, indexes });
     }
     const sizes = byCase.map(([input, output]) => input + output);
-    const total = sizes.reduce((sum, bytes) => sum + bytes, 0);
+    const total = sizes.reduce((sum, bytes) => sum + bytes, auxiliaryBytes);
     if (total <= exports.GENERATOR_BYTE_LIMITS.plan)
         return;
-    throw new failures_1.TestdataPipelineError(`仅 .in/.out 已合计 ${total} 字节，超过整批 ${exports.GENERATOR_BYTE_LIMITS.plan} 字节上限。`
+    throw new failures_1.TestdataPipelineError(`.in/.out 与辅助文件已合计 ${total} 字节，超过整批 ${exports.GENERATOR_BYTE_LIMITS.plan} 字节上限。`
         + `各 CASE 输入与输出合计：${sizes.map((bytes, index) => `${index + 1}:${bytes}`).join(', ')}。`
+        + `辅助文件合计 ${auxiliaryBytes} 字节，必须与正式数据一起分配预算。`
         + '请重新分配输入构造规模，保留全部测试点及必要覆盖，并为辅助文件留出预算。', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { actualBytes: total, maxBytes: exports.GENERATOR_BYTE_LIMITS.plan, failureKind: 'plan-budget',
-        indexes });
+        indexes: [...indexes, ...(auxiliaryBytes ? [`auxiliary:${auxiliaryBytes}`] : [])] });
 }
 //# sourceMappingURL=generatorBudget.js.map

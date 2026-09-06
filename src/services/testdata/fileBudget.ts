@@ -6,6 +6,12 @@ export const TESTDATA_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 export const TESTDATA_PLAN_MAX_BYTES = 8 * 1024 * 1024;
 export const GENERATOR_REPLAY_DATA_FILENAME = 'generator-data.b64';
 
+/** Apply and download normalize newlines and add a final newline to every file. */
+export function normalizedTestdataFileBytes(content: string): number {
+  const normalized = content.replace(/\r\n?/g, '\n');
+  return Buffer.byteLength(normalized, 'utf8') + (normalized.endsWith('\n') ? 0 : 1);
+}
+
 /** The larger allowance is for data, never for model-generated executable code. */
 export function testdataFileByteLimit(name: string): number {
   if (name.endsWith('.out')) return TESTDATA_OUTPUT_MAX_BYTES;
@@ -16,8 +22,7 @@ export function testdataFileByteLimit(name: string): number {
 export function assertTestdataPlanBudget(plan: { files: ReadonlyArray<{ name: string; content: string }> }): void {
   let total = 0;
   for (const file of plan.files) {
-    const content = file.content.replace(/\r\n?/g, '\n');
-    const bytes = Buffer.byteLength(content, 'utf8') + (content.endsWith('\n') ? 0 : 1);
+    const bytes = normalizedTestdataFileBytes(file.content);
     const maxBytes = testdataFileByteLimit(file.name);
     if (bytes > maxBytes) {
       throw new TestdataPipelineError('生成文件超过对应类型的大小上限',

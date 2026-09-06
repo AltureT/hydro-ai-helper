@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.getSpecConsensusFailureTokenUsage = getSpecConsensusFailureTokenUsage;
 exports.diffProblemSpecs = diffProblemSpecs;
 exports.runProblemSpecConsensus = runProblemSpecConsensus;
 const util_1 = require("util");
@@ -9,6 +10,12 @@ const problemSpecPrompts_1 = require("./problemSpecPrompts");
 const ADJUDICATION_MAX_LENGTH = 768 * 1024;
 const RESOLUTION_REASON_MAX_LENGTH = 2048;
 const RESOLUTION_EVIDENCE_MAX_LENGTH = 4096;
+const FAILURE_TOKEN_USAGE = new WeakMap();
+function getSpecConsensusFailureTokenUsage(error) {
+    const usage = error && (typeof error === 'object' || typeof error === 'function')
+        ? FAILURE_TOKEN_USAGE.get(error) : undefined;
+    return usage ? { ...usage } : undefined;
+}
 function halfWidth(value) {
     return [...value].map(character => {
         const code = character.charCodeAt(0);
@@ -440,24 +447,86 @@ function safeSummary(status, conflicts, unresolvedConflictCount, rolesUsed, spec
     };
 }
 async function runProblemSpecConsensus(input) {
+    const usages = [];
+    try {
+        return await runConsensus(input, result => {
+            if (result.usage)
+                usages.push({ ...result.usage });
+        });
+    }
+    catch (error) {
+        // Keep only numeric accounting out of band; preserve the original abort or
+        // budget error and never attach model responses to it.
+        if (usages.length && error && (typeof error === 'object' || typeof error === 'function')) {
+            FAILURE_TOKEN_USAGE.set(error, usages.reduce((sum, usage) => ({
+                promptTokens: sum.promptTokens + usage.promptTokens,
+                completionTokens: sum.completionTokens + usage.completionTokens,
+                totalTokens: sum.totalTokens + usage.totalTokens,
+            }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 }));
+        }
+        throw error;
+    }
+}
+async function runConsensus(input, recordResponse) {
     const prompt = (0, problemSpecPrompts_1.buildProblemSpecPrompt)(input);
     const callOptions = { ...input.callOptions, contentMode: 'raw' };
     const extract = async (source) => {
-        try {
-            const result = await source.client.chat([{ role: 'user', content: prompt.userPrompt }], prompt.systemPrompt, callOptions);
-            return { result, spec: validateExtractedSpec(result.content, input) };
+        const attempts = [];
+        let repairHint = '';
+        for (let attempt = 0; attempt < 2; attempt++) {
+            if (callOptions.signal?.aborted)
+                throw callOptions.signal.reason
+                    ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            let result;
+            try {
+                result = await source.client.chat([{ role: 'user', content: prompt.userPrompt + repairHint }], prompt.systemPrompt, callOptions);
+                attempts.push(result);
+                recordResponse(result);
+            }
+            catch (error) {
+                if (isCancellation(error) || isModelCallBudgetExhausted(error))
+                    throw error;
+                return { error, attempts };
+            }
+            if (callOptions.signal?.aborted)
+                throw callOptions.signal.reason
+                    ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            try {
+                return { result, spec: validateExtractedSpec(result.content, input), attempts };
+            }
+            catch (error) {
+                if (callOptions.signal?.aborted)
+                    throw callOptions.signal.reason
+                        ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                if (isCancellation(error) || isModelCallBudgetExhausted(error))
+                    throw error;
+                if (attempt === 1 || !(error instanceof failures_1.TestdataPipelineError) || error.code !== 'SPEC_PARSE_FAILED') {
+                    return { error, attempts };
+                }
+                // Re-extract from the complete statement using only a server-owned hint.
+                // No invalid response or peer extraction crosses the role boundary.
+                repairHint = `\n\n=== STRICT FORMAT RETRY (ONCE) ===\n${error.message}\n`
+                    + '请重新依据完整题面提取规范，保留全部语义与证据；不要猜测、删除约束或更改输出规则来通过格式检查。';
+            }
         }
-        catch (error) {
-            if (isCancellation(error) || isModelCallBudgetExhausted(error))
-                throw error;
-            return { error };
-        }
+        throw new Error('Unreachable ProblemSpec extraction state');
     };
-    const [primary, critic] = await Promise.all([
+    const settled = await Promise.allSettled([
         extract(input.primary),
         ...(input.critic ? [extract(input.critic)] : []),
     ]);
-    const results = [primary.result, critic?.result].filter(Boolean);
+    // Drain both roles before exposing a terminal error, so a concurrent response
+    // is accounted for and no extraction keeps running after the caller exits.
+    for (const outcome of settled) {
+        if (outcome.status === 'rejected')
+            throw outcome.reason;
+    }
+    const [primary, critic] = settled.map(outcome => {
+        if (outcome.status === 'rejected')
+            throw outcome.reason;
+        return outcome.value;
+    });
+    const results = [...primary.attempts, ...(critic?.attempts ?? [])];
     const rolesUsed = input.critic
         ? ['specPrimary', 'specCritic']
         : ['specPrimary'];
@@ -537,6 +606,7 @@ async function runProblemSpecConsensus(input) {
     try {
         adjudicatorResult = await input.adjudicator.client.chat([{ role: 'user', content: adjudicatorPrompt.userPrompt }], adjudicatorPrompt.systemPrompt, callOptions);
         results.push(adjudicatorResult);
+        recordResponse(adjudicatorResult);
         roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };
         const adjudication = parseAdjudication(adjudicatorResult.content, conflicts, primary.spec, critic.spec, input);
         return {

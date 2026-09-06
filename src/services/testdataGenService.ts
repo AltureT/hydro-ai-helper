@@ -4787,6 +4787,11 @@ export interface MaterializationRunOptions extends MaterializationResume {
   cache: MaterializationCacheState;
   validatorProof?: ValidatorProofContext;
   coverageProof?: CoverageProofContext;
+  planContext?: {
+    existingFiles?: string[];
+    existingConfig?: string;
+    tieredDecision?: TieredSubtaskGenerationDecision;
+  };
 }
 
 function validatorInvocation(stdin: string, subtaskId?: number): PythonRunInvocation {
@@ -5329,6 +5334,10 @@ export async function materializeSandboxBlueprint(
       generatorReplayData = cache.generatorReplay.data;
     }
   }
+  // A companion is additional persisted data, not a replacement for .in files.
+  // Reject an already impossible lower bound before stress/validator/oracle work.
+  assertGeneratedDataBudget(generatedInputs.map(item => ({ input: item.input, output: '' })),
+    generatorReplayData ? [{ name: GENERATOR_REPLAY_DATA_FILENAME, content: generatorReplayData }] : []);
   const inputs = generatedInputs.map(item => item.input);
   const structuredCases: MaterializedGeneratorCase[] | undefined = generatedInputs.every(
     item => item.structuredValues !== undefined,
@@ -5864,6 +5873,12 @@ export async function materializeSandboxBlueprint(
     cases = cachedOracle.cases;
     sampleCheckerVerdicts = cachedOracle.sampleCheckerVerdicts;
   }
+
+  // Use the real assembly path so comments, templates, both solution forms,
+  // config numbering and the replay companion are included before later gates.
+  assertSandboxResponseBudget({ ...blueprint, cases, oracleLanguage,
+    stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
+    generatorCode: effectiveGeneratorCode, generatorReplayData }, options, materialization?.planContext);
 
   // f. 函数题：所有所选语言在每个正式点与题面样例上统一验证。
   let templateChecks: TemplateChecks | undefined;
@@ -6402,6 +6417,18 @@ const FILE_PURPOSES = {
   stdProgram: '参考标程（AI 生成）：读取 stdin 输出答案，用于人工复验与重造数据',
   template: '函数题评测模板（AI 生成）：读取 stdin、调用学生实现并输出结果，学生代码与本文件组合评测',
 } as const;
+
+function assertSandboxResponseBudget(
+  response: GenerationResponse,
+  options: GenerateOptions,
+  context: MaterializationRunOptions['planContext'] = {},
+): void {
+  const plan = assemblePlan(response, options, { ...context, mode: 'sandbox' });
+  const auxiliaryFiles = plan.files.filter(file => file.kind !== 'case-in' && file.kind !== 'case-out');
+  assertGeneratedDataBudget(response.cases, auxiliaryFiles);
+  // Retain the serialized-document ceiling as well as every individual limit.
+  assertTestdataPlanBudget(plan);
+}
 
 export function assemblePlan(
   response: GenerationResponse,
@@ -9379,11 +9406,23 @@ export class TestdataGenService {
               TESTDATA_GEN_LIMITS.MAX_CASES,
             );
             if (merged.length === cases.length) break targetLoop;
+            try {
+              assertSandboxResponseBudget({ ...response, cases: merged,
+                ...(prospectiveAllocation ? { tieredAllocations: prospectiveTieredAllocations } : {}) },
+              params.options, { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision });
+            } catch (error) {
+              if (!(error instanceof TestdataPipelineError) || error.code !== 'GENERATOR_OUTPUT_TOO_LARGE') throw error;
+              // Keep all admitted cases and the surviving target. An optional
+              // new witness cannot consume more than the remaining file budget.
+              targetResult.skippedReason = 'budget-exhausted';
+              continue;
+            }
             cases = merged;
             if (prospectiveAllocation) {
               committedTieredAllocations = prospectiveTieredAllocations;
             }
             targetResult.killed = true;
+            delete targetResult.skippedReason;
             targetResult.killedBy = killedBy;
             targetResult.killedByCase = cases.length;
             if (executionVerdict === 'runtime-failure') {
@@ -9399,6 +9438,7 @@ export class TestdataGenService {
             break targetLoop;
           }
         }
+        if (targetResult.skippedReason === 'budget-exhausted') continue targetLoop;
       }
     }
 
@@ -9894,6 +9934,7 @@ export class TestdataGenService {
           cache: materializationCache,
           validatorProof,
           coverageProof,
+          planContext: { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision },
         },
       );
     } catch (firstError) {
@@ -10227,6 +10268,7 @@ export class TestdataGenService {
             cache: materializationCache,
             validatorProof,
             coverageProof,
+            planContext: { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision },
           },
         );
       } catch (err) {
