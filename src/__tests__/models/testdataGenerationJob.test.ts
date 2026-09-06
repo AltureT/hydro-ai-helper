@@ -312,7 +312,7 @@ describe('TestdataGenerationJobModel', () => {
       checkpoint: { ...checkpointBase, promptVersion: TESTDATA_PIPELINE_PROMPT_VERSION },
     };
 
-    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v8');
+    expect(TESTDATA_PIPELINE_PROMPT_VERSION).toBe('testdata-generation-v9');
     const v7Job = { ...currentJob, checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v7' } };
     expect(selectTestdataResumeCheckpoint(v7Job, expected)).toBeUndefined();
     const v5Job = { ...currentJob, checkpoint: { ...checkpointBase, promptVersion: 'testdata-generation-v5' } };

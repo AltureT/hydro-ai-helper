@@ -3693,7 +3693,7 @@ function applyValidatorProofPolicy(input) {
     }
     return { complete };
 }
-function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, executions) {
+function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, executions, constructionGaps = []) {
     const declaredConstraints = manifestStatus === 'valid'
         ? new Set(manifest?.constraintIds || []) : new Set();
     const declaredInvariants = manifestStatus === 'valid'
@@ -3735,6 +3735,11 @@ function createValidatorTargetEvidence(spec, manifestStatus, manifest, probes, e
         if (priority[execution] > priority[evidence.execution])
             evidence.execution = execution;
     });
+    for (const gap of constructionGaps) {
+        const evidence = evidenceByTarget.get(validatorEvidenceKey(gap.targetKind, gap.targetId));
+        if (evidence)
+            evidence.constructed = false;
+    }
     return targets;
 }
 async function runValidatorInvalidProof(input) {
@@ -3756,7 +3761,7 @@ async function runValidatorInvalidProof(input) {
         invocation: validatorInvocation(probe.input, probe.subtaskId),
         probe,
     }));
-    const firstLegalSeed = input.seeds[0];
+    const firstLegalSeed = input.seeds.reduce((best, seed) => (!best || Buffer.byteLength(seed.input, 'utf8') < Buffer.byteLength(best.input, 'utf8') ? seed : best), undefined);
     if (spec.subtasks.length > 0 && firstLegalSeed) {
         const unknownSubtaskId = firstUnknownSubtaskId(spec.subtasks.map(subtask => subtask.id));
         invalidInvocations.push({
@@ -3769,6 +3774,11 @@ async function runValidatorInvalidProof(input) {
             },
             protocolProbe: true,
         });
+    }
+    const invalidBytes = invalidInvocations.map(item => Buffer.byteLength(item.invocation.stdin, 'utf8'));
+    const totalInvalidBytes = invalidBytes.reduce((sum, bytes) => sum + bytes, 0);
+    if (invalidBytes.some(bytes => bytes > fileBudget_1.TESTDATA_INPUT_MAX_BYTES) || totalInvalidBytes > fileBudget_1.TESTDATA_PLAN_MAX_BYTES) {
+        throw new failures_1.TestdataPipelineError('VALIDATOR 非法输入及子任务协议探针超出有界验证预算，未省略检查。', 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'validator', 'coverage', 'manual-review', { failureKind: 'probe-budget', actualBytes: totalInvalidBytes, maxBytes: fileBudget_1.TESTDATA_PLAN_MAX_BYTES });
     }
     let executions = [];
     if (invalidInvocations.length > 0 && input.blueprint.validatorCode) {
@@ -3807,7 +3817,7 @@ async function runValidatorInvalidProof(input) {
         executions = results.map(classifyValidatorInvalidResult);
     }
     const proofExecutions = executions;
-    const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, proofExecutions.slice(0, build.probes.length));
+    const targetEvidence = createValidatorTargetEvidence(spec, input.blueprint.validatorManifestStatus, input.blueprint.validatorManifest, build.probes, proofExecutions.slice(0, build.probes.length), build.gaps);
     const coveredIds = targetEvidence.filter(item => (item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const missingIds = targetEvidence.filter(item => !(item.declared && item.constructed && item.execution === 'rejected')).map(item => item.targetId);
     const summary = {
@@ -6007,6 +6017,26 @@ function checkpointVerifierFromBlueprint(blueprint) {
             : undefined,
     };
 }
+function currentVerifierRepairSource(blueprint) {
+    const verifier = checkpointVerifierFromBlueprint(blueprint);
+    return [
+        ...(verifier.complexityGap ? ['@@@COMPLEXITY_GAP@@@', verifier.complexityGap] : []),
+        '@@@BRUTE@@@', verifier.bruteCode,
+        '@@@STRESS_GENERATOR@@@', verifier.stressGeneratorCode,
+        '@@@VALIDATOR@@@', verifier.validatorCode,
+        ...(verifier.validatorManifest
+            ? ['@@@VALIDATOR_MANIFEST@@@', JSON.stringify(verifier.validatorManifest)] : []),
+        ...(verifier.validatorProbeRecipes
+            ? ['@@@VALIDATOR_PROBE_RECIPES@@@', JSON.stringify({ recipes: verifier.validatorProbeRecipes })] : []),
+        ...(verifier.functionSampleInputs?.length
+            ? ['@@@SAMPLE_INPUTS@@@', JSON.stringify({ samples: verifier.functionSampleInputs })] : []),
+    ].join('\n');
+}
+function modelRoleForSandboxFailure(error) {
+    const scope = repairScopeForPipelineFailure(error);
+    return isVerifierRepairScope(scope) ? 'verifier'
+        : scope === 'oracle' ? 'oracle' : scope === 'full' ? undefined : 'artifacts';
+}
 class TestdataGenService {
     constructor(aiClient, serviceOptions = {}) {
         this.aiClient = aiClient;
@@ -7608,272 +7638,299 @@ class TestdataGenService {
             const materializationCache = {};
             const initialMaterialization = resolveMaterializationResume(['GENERATOR']);
             let response;
-            try {
-                response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, {
-                    ...initialMaterialization,
-                    cache: materializationCache,
-                    validatorProof,
-                    coverageProof,
-                });
-            }
-            catch (firstError) {
-                if (params.signal?.aborted)
-                    throw params.signal.reason ?? firstError;
-                if (isCancellation(firstError))
-                    throw firstError;
-                if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
-                    throw firstError;
-                }
-                const typedFirstError = firstError instanceof failures_1.TestdataPipelineError
-                    ? firstError
-                    : (0, failures_1.toPipelineError)(firstError, {
-                        code: 'UNKNOWN',
-                        stage: 'pipeline',
-                        artifact: 'pipeline',
-                        retryPolicy: 'repair-artifact',
-                    });
-                const blueprintBeforeRepair = blueprint;
-                const cppInfraFailure = typedFirstError.code === 'ORACLE_COMPILE_FAILED'
-                    && typedFirstError.safeDetails.failureKind === 'infra';
-                if (cppInfraFailure) {
-                    cppOracleAvailableForAttempt = false;
-                    systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
-                    blueprint = { ...blueprint, oracleLanguage: 'python' };
-                }
-                const isModelCallBudget = Object.prototype.hasOwnProperty.call(typedFirstError.safeDetails, 'callCount');
-                if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED' && !isModelCallBudget) {
-                    throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false, undefined, undefined, {
-                        code: 'PIPELINE_BUDGET_EXHAUSTED',
-                        artifact: 'pipeline',
-                        retryPolicy: 'no-retry',
-                    });
-                }
-                const repairPolicy = typedFirstError.retryPolicy;
-                if (params.options.providedStdSource === 'accepted-record'
-                    && typedFirstError.artifact === 'oracle') {
-                    throw wrapHistoricalCandidateFailure(typedFirstError, `所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, results);
-                }
-                if (repairPolicy === 'adjudicate' || repairPolicy === 'manual-review' || repairPolicy === 'no-retry') {
-                    throw new TestdataGenerationError(typedFirstError.message, typedFirstError.stage, results, false, undefined, undefined, {
-                        code: typedFirstError.code,
-                        artifact: typedFirstError.artifact,
-                        retryPolicy: repairPolicy,
-                        safeDetails: typedFirstError.safeDetails,
-                    });
-                }
-                const repairScope = repairScopeForPipelineFailure(typedFirstError);
-                let failedModelRole = isVerifierRepairScope(repairScope)
-                    ? 'verifier'
-                    : repairScope === 'oracle'
-                        ? 'oracle'
-                        : repairScope === 'full'
-                            ? undefined
-                            : 'artifacts';
-                let usedFullRepair = repairScope === 'full';
-                report(isVerifierRepairScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
-                const isolatedFullRegenerationError = (detail, role = failedModelRole || 'artifacts') => new TestdataGenerationError(`frozen ProblemSpec 流程不允许 combined full repair；必须在同一 Spec 下重跑隔离角色。${detail}`, 'pipeline_repair', results, true, undefined, undefined, {
-                    code: typedFirstError.code,
-                    artifact: typedFirstError.artifact,
-                    retryPolicy: 'switch-model',
-                    safeDetails: typedFirstError.safeDetails,
-                    failedModelRole: role,
-                    requiresIsolatedRegeneration: true,
-                });
-                if (context && repairScope === 'full') {
-                    (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                    throw isolatedFullRegenerationError('');
-                }
-                let repairResult;
+            const attemptedMaterializationRepairs = new Set();
+            let pendingMaterializationFailure;
+            // At most two different artifacts per attempt; retain the shared model and sandbox budgets.
+            for (;;) {
                 try {
-                    if (repairScope === 'validator' || isVerifierSubartifactRepairScope(repairScope)) {
-                        repairResult = await verifierRepairClient.chat([
-                            { role: 'user', content: verifierState.userPrompt },
-                            { role: 'assistant', content: verifierState.sourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
-                            },
-                        ], buildSandboxRepairSystemPrompt(repairScope, !!context), callOptions);
+                    if (pendingMaterializationFailure) {
+                        const pending = pendingMaterializationFailure;
+                        pendingMaterializationFailure = undefined;
+                        throw pending;
                     }
-                    else if (repairScope === 'full') {
-                        if (context)
-                            (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                        repairResult = await this.chatForCombinedRepair([
-                            { role: 'user', content: userPrompt },
-                            { role: 'assistant', content: blueprintSourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
-                            },
-                        ], systemPrompt, callOptions);
-                        finalOracleIdentity = { ...repairResult.usedModel };
-                    }
-                    else {
-                        const repairUserPrompt = repairScope === 'oracle' ? solutionUserPrompt : userPrompt;
-                        const repairSourceContent = repairScope === 'oracle'
-                            ? solutionRepairSourceContent
-                            : context
-                                ? artifactsState.sourceContent
-                                : blueprintSourceContent;
-                        repairResult = await (repairScope === 'oracle' ? oracleClient : artifactsClient).chat([
-                            { role: 'user', content: repairUserPrompt },
-                            { role: 'assistant', content: repairSourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context, {
-                                    language: blueprint.oracleLanguage || 'python',
-                                    cppAvailable: cppOracleAvailableForAttempt && blueprint.problemType === 'traditional',
-                                }),
-                            },
-                        ], buildSandboxRepairSystemPrompt(repairScope, !!context), callOptions);
-                        if (repairScope === 'oracle') {
-                            finalOracleIdentity = { ...repairResult.usedModel };
-                        }
-                    }
-                }
-                catch (err) {
-                    if (params.signal?.aborted)
-                        throw params.signal.reason ?? err;
-                    if (isCancellation(err))
-                        throw err;
-                    throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, typedFirstError.stage, results, false, undefined, undefined, {
-                        code: typedFirstError.code,
-                        artifact: typedFirstError.artifact,
-                        retryPolicy: typedFirstError.retryPolicy,
-                        safeDetails: typedFirstError.safeDetails,
-                        failedModelRole,
-                    });
-                }
-                results.push(repairResult);
-                let pendingIsolatedFullRegeneration;
-                try {
-                    try {
-                        if (repairScope === 'validator') {
-                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, 'validator');
-                            verifierState = {
-                                ...verifierState,
-                                verifier: checkpointVerifierFromBlueprint(blueprint),
-                                sourceContent: repairResult.content,
-                            };
-                        }
-                        else if (isVerifierSubartifactRepairScope(repairScope)) {
-                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope, verifierState.expectedFunctionSamples);
-                            verifierState = {
-                                ...verifierState,
-                                verifier: checkpointVerifierFromBlueprint(blueprint),
-                            };
-                        }
-                        else if (repairScope === 'full') {
-                            const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
-                            blueprint = { ...repairedMain, ...verifierState.verifier };
-                            blueprintSourceContent = repairResult.content;
-                        }
-                        else {
-                            blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope);
-                        }
-                    }
-                    catch (targetedParseError) {
-                        if (targetedParseError instanceof failures_1.TestdataPipelineError
-                            && targetedParseError.retryPolicy === 'manual-review')
-                            throw targetedParseError;
-                        if (repairScope === 'full' || isVerifierRepairScope(repairScope))
-                            throw targetedParseError;
-                        usedFullRepair = true;
-                        failedModelRole = context ? undefined : 'oracle';
-                        if (context) {
-                            (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                            pendingIsolatedFullRegeneration = isolatedFullRegenerationError(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`, repairScope === 'oracle' ? 'oracle' : 'artifacts');
-                            throw pendingIsolatedFullRegeneration;
-                        }
-                        const fullRepairMessages = [
-                            { role: 'user', content: userPrompt },
-                            { role: 'assistant', content: blueprintSourceContent },
-                            {
-                                role: 'user',
-                                content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full', generationCoverage, context),
-                            },
-                        ];
-                        const fullRepairResult = await oracleClient.chat(fullRepairMessages, systemPrompt, callOptions);
-                        finalOracleIdentity = { ...fullRepairResult.usedModel };
-                        results.push(fullRepairResult);
-                        blueprint = {
-                            ...parseSandboxBlueprint(fullRepairResult.content, params.options),
-                            ...verifierState.verifier,
-                        };
-                        blueprintSourceContent = fullRepairResult.content;
-                    }
-                    if (tieredDecision.enabled)
-                        blueprint.subtasks = tieredDecision.subtasks;
-                    blueprint = bindBlueprintToFrozenProblemSpec(this.useProvidedOracle(blueprint, params.options), context);
-                    if (context)
-                        (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
-                    if (params.signal?.aborted) {
-                        throw params.signal.reason
-                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
-                    }
-                    if (isVerifierRepairScope(repairScope)) {
-                        finalVerifierIdentity = { ...repairResult.usedModel };
-                        this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
-                        this.assertCheckpointRoleIndependence(risk, checkpoint);
-                        this.assertIndependentRoleIdentities(risk);
-                    }
-                    const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
-                    const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
-                    if (usedFullRepair) {
-                        // 完整修复的 NOTES 只归入解题蓝图，避免恢复后拼接两次。
-                        repairedArtifactsCheckpoint.notes = undefined;
-                    }
-                    else {
-                        // 定向修复不改 NOTES 契约，继续保留两个阶段原先各自的说明。
-                        repairedSolutionCheckpoint.notes = solution.notes;
-                        repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
-                    }
-                    await this.emitCheckpoint(params, {
-                        solution: repairedSolutionCheckpoint,
-                        artifacts: repairedArtifactsCheckpoint,
-                        verifier: checkpointVerifierFromBlueprint(blueprint),
-                    });
-                    if (params.signal?.aborted) {
-                        throw params.signal.reason
-                            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
-                    }
-                    const changedArtifacts = usedFullRepair
-                        ? ['full']
-                        : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);
-                    const materializationResume = resolveMaterializationResume(changedArtifacts);
                     response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, {
-                        ...materializationResume,
+                        ...initialMaterialization,
                         cache: materializationCache,
                         validatorProof,
                         coverageProof,
                     });
                 }
-                catch (err) {
+                catch (firstError) {
                     if (params.signal?.aborted)
-                        throw params.signal.reason ?? err;
-                    if (isCancellation(err))
-                        throw err;
-                    if (err === pendingIsolatedFullRegeneration)
-                        throw err;
-                    if (err instanceof TestdataGenerationError && err.userMessageKey)
-                        throw err;
-                    const typedRepairError = err instanceof failures_1.TestdataPipelineError
-                        ? err
-                        : (0, failures_1.toPipelineError)(err, {
+                        throw params.signal.reason ?? firstError;
+                    if (isCancellation(firstError))
+                        throw firstError;
+                    if (firstError instanceof TestdataGenerationError && firstError.userMessageKey) {
+                        throw firstError;
+                    }
+                    const typedFirstError = firstError instanceof failures_1.TestdataPipelineError
+                        ? firstError
+                        : (0, failures_1.toPipelineError)(firstError, {
                             code: 'UNKNOWN',
-                            stage: 'pipeline_repair',
+                            stage: 'pipeline',
                             artifact: 'pipeline',
-                            retryPolicy: 'switch-model',
+                            retryPolicy: 'repair-artifact',
                         });
-                    const finalPolicy = typedRepairError.retryPolicy;
-                    throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, typedRepairError.stage, results, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
-                        code: typedRepairError.code,
-                        artifact: typedRepairError.artifact,
-                        retryPolicy: finalPolicy,
-                        safeDetails: typedRepairError.safeDetails,
-                        failedModelRole,
+                    const blueprintBeforeRepair = blueprint;
+                    const cppInfraFailure = typedFirstError.code === 'ORACLE_COMPILE_FAILED'
+                        && typedFirstError.safeDetails.failureKind === 'infra';
+                    if (cppInfraFailure) {
+                        cppOracleAvailableForAttempt = false;
+                        systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
+                        blueprint = { ...blueprint, oracleLanguage: 'python' };
+                    }
+                    const isModelCallBudget = Object.prototype.hasOwnProperty.call(typedFirstError.safeDetails, 'callCount');
+                    if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED' && !isModelCallBudget) {
+                        throw new TestdataGenerationError('沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。', 'sandbox_budget', results, false, undefined, undefined, {
+                            code: 'PIPELINE_BUDGET_EXHAUSTED',
+                            artifact: 'pipeline',
+                            retryPolicy: 'no-retry',
+                        });
+                    }
+                    const repairPolicy = typedFirstError.retryPolicy;
+                    if (params.options.providedStdSource === 'accepted-record'
+                        && typedFirstError.artifact === 'oracle') {
+                        throw wrapHistoricalCandidateFailure(typedFirstError, `所选历史 AC 候选解未通过独立机器验证，已拒绝使用。请改选其他 AC、粘贴教师审核后的标程，或留空让系统生成。技术细节：${firstError instanceof Error ? firstError.message : String(firstError)}`, results);
+                    }
+                    if (repairPolicy === 'adjudicate' || repairPolicy === 'manual-review' || repairPolicy === 'no-retry') {
+                        throw new TestdataGenerationError(typedFirstError.message, typedFirstError.stage, results, false, undefined, undefined, {
+                            code: typedFirstError.code,
+                            artifact: typedFirstError.artifact,
+                            retryPolicy: repairPolicy,
+                            safeDetails: typedFirstError.safeDetails,
+                            failedModelRole: modelRoleForSandboxFailure(typedFirstError),
+                        });
+                    }
+                    const repairScope = repairScopeForPipelineFailure(typedFirstError);
+                    attemptedMaterializationRepairs.add(repairScope);
+                    let failedModelRole = isVerifierRepairScope(repairScope)
+                        ? 'verifier'
+                        : repairScope === 'oracle'
+                            ? 'oracle'
+                            : repairScope === 'full'
+                                ? undefined
+                                : 'artifacts';
+                    let usedFullRepair = repairScope === 'full';
+                    report(isVerifierRepairScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
+                    const isolatedFullRegenerationError = (detail, role = failedModelRole || 'artifacts') => new TestdataGenerationError(`frozen ProblemSpec 流程不允许 combined full repair；必须在同一 Spec 下重跑隔离角色。${detail}`, 'pipeline_repair', results, true, undefined, undefined, {
+                        code: typedFirstError.code,
+                        artifact: typedFirstError.artifact,
+                        retryPolicy: 'switch-model',
+                        safeDetails: typedFirstError.safeDetails,
+                        failedModelRole: role,
+                        requiresIsolatedRegeneration: true,
                     });
+                    if (context && repairScope === 'full') {
+                        (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                        throw isolatedFullRegenerationError('');
+                    }
+                    let repairResult;
+                    try {
+                        if (repairScope === 'validator' || isVerifierSubartifactRepairScope(repairScope)) {
+                            repairResult = await verifierRepairClient.chat([
+                                { role: 'user', content: verifierState.userPrompt },
+                                { role: 'assistant', content: verifierState.sourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
+                                },
+                            ], buildSandboxRepairSystemPrompt(repairScope, !!context), callOptions);
+                        }
+                        else if (repairScope === 'full') {
+                            if (context)
+                                (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                            repairResult = await this.chatForCombinedRepair([
+                                { role: 'user', content: userPrompt },
+                                { role: 'assistant', content: blueprintSourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context),
+                                },
+                            ], systemPrompt, callOptions);
+                            finalOracleIdentity = { ...repairResult.usedModel };
+                        }
+                        else {
+                            const repairUserPrompt = repairScope === 'oracle' ? solutionUserPrompt : userPrompt;
+                            const repairSourceContent = repairScope === 'oracle'
+                                ? solutionRepairSourceContent
+                                : context
+                                    ? artifactsState.sourceContent
+                                    : blueprintSourceContent;
+                            repairResult = await (repairScope === 'oracle' ? oracleClient : artifactsClient).chat([
+                                { role: 'user', content: repairUserPrompt },
+                                { role: 'assistant', content: repairSourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(firstError, params.options, repairScope, generationCoverage, context, {
+                                        language: blueprint.oracleLanguage || 'python',
+                                        cppAvailable: cppOracleAvailableForAttempt && blueprint.problemType === 'traditional',
+                                    }),
+                                },
+                            ], buildSandboxRepairSystemPrompt(repairScope, !!context), callOptions);
+                            if (repairScope === 'oracle') {
+                                finalOracleIdentity = { ...repairResult.usedModel };
+                            }
+                        }
+                    }
+                    catch (err) {
+                        if (params.signal?.aborted)
+                            throw params.signal.reason ?? err;
+                        if (isCancellation(err))
+                            throw err;
+                        throw new TestdataGenerationError(`AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`, typedFirstError.stage, results, false, undefined, undefined, {
+                            code: typedFirstError.code,
+                            artifact: typedFirstError.artifact,
+                            retryPolicy: typedFirstError.retryPolicy,
+                            safeDetails: typedFirstError.safeDetails,
+                            failedModelRole,
+                        });
+                    }
+                    results.push(repairResult);
+                    let pendingIsolatedFullRegeneration;
+                    try {
+                        try {
+                            if (repairScope === 'validator') {
+                                blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, 'validator');
+                                verifierState = {
+                                    ...verifierState,
+                                    verifier: checkpointVerifierFromBlueprint(blueprint),
+                                    sourceContent: currentVerifierRepairSource(blueprint),
+                                };
+                            }
+                            else if (isVerifierSubartifactRepairScope(repairScope)) {
+                                blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope, verifierState.expectedFunctionSamples);
+                                verifierState = {
+                                    ...verifierState,
+                                    verifier: checkpointVerifierFromBlueprint(blueprint),
+                                    sourceContent: currentVerifierRepairSource(blueprint),
+                                };
+                            }
+                            else if (repairScope === 'full') {
+                                const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
+                                blueprint = { ...repairedMain, ...verifierState.verifier };
+                                blueprintSourceContent = repairResult.content;
+                            }
+                            else {
+                                blueprint = mergeSandboxBlueprintRepair(blueprint, repairResult.content, repairScope);
+                            }
+                        }
+                        catch (targetedParseError) {
+                            if (targetedParseError instanceof failures_1.TestdataPipelineError
+                                && targetedParseError.retryPolicy === 'manual-review')
+                                throw targetedParseError;
+                            if (repairScope === 'full' || isVerifierRepairScope(repairScope))
+                                throw targetedParseError;
+                            if (!context && (attemptedMaterializationRepairs.size >= 2
+                                || attemptedMaterializationRepairs.has('full')))
+                                throw targetedParseError;
+                            usedFullRepair = true;
+                            attemptedMaterializationRepairs.add('full');
+                            failedModelRole = context ? undefined : 'oracle';
+                            if (context) {
+                                (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                                pendingIsolatedFullRegeneration = isolatedFullRegenerationError(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`, repairScope === 'oracle' ? 'oracle' : 'artifacts');
+                                throw pendingIsolatedFullRegeneration;
+                            }
+                            const fullRepairMessages = [
+                                { role: 'user', content: userPrompt },
+                                { role: 'assistant', content: blueprintSourceContent },
+                                {
+                                    role: 'user',
+                                    content: buildSandboxRepairPrompt(new Error(`定向修复结果不可用：${targetedParseError instanceof Error ? targetedParseError.message : String(targetedParseError)}`), params.options, 'full', generationCoverage, context),
+                                },
+                            ];
+                            const fullRepairResult = await oracleClient.chat(fullRepairMessages, systemPrompt, callOptions);
+                            finalOracleIdentity = { ...fullRepairResult.usedModel };
+                            results.push(fullRepairResult);
+                            blueprint = {
+                                ...parseSandboxBlueprint(fullRepairResult.content, params.options),
+                                ...verifierState.verifier,
+                            };
+                            blueprintSourceContent = fullRepairResult.content;
+                        }
+                        if (tieredDecision.enabled)
+                            blueprint.subtasks = tieredDecision.subtasks;
+                        blueprint = bindBlueprintToFrozenProblemSpec(this.useProvidedOracle(blueprint, params.options), context);
+                        if (context)
+                            (0, pipelineContext_1.assertProblemSpecUnchanged)(context);
+                        if (params.signal?.aborted) {
+                            throw params.signal.reason
+                                ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                        }
+                        if (isVerifierRepairScope(repairScope)) {
+                            finalVerifierIdentity = { ...repairResult.usedModel };
+                            this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
+                            this.assertCheckpointRoleIndependence(risk, checkpoint);
+                            this.assertIndependentRoleIdentities(risk);
+                        }
+                        const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
+                        const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
+                        if (usedFullRepair) {
+                            // 完整修复的 NOTES 只归入解题蓝图，避免恢复后拼接两次。
+                            repairedArtifactsCheckpoint.notes = undefined;
+                        }
+                        else {
+                            // 定向修复不改 NOTES 契约，继续保留两个阶段原先各自的说明。
+                            repairedSolutionCheckpoint.notes = solution.notes;
+                            repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
+                        }
+                        await this.emitCheckpoint(params, {
+                            solution: repairedSolutionCheckpoint,
+                            artifacts: repairedArtifactsCheckpoint,
+                            verifier: checkpointVerifierFromBlueprint(blueprint),
+                        });
+                        if (params.signal?.aborted) {
+                            throw params.signal.reason
+                                ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+                        }
+                        const changedArtifacts = usedFullRepair
+                            ? ['full']
+                            : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);
+                        const materializationResume = resolveMaterializationResume(changedArtifacts);
+                        response = await materializeSandboxBlueprint(blueprint, params.options, params.statementMarkdown, runner, params.signal, customChecker, report, killTargets, cppOracleAvailableForAttempt, checkerExecutor, {
+                            ...materializationResume,
+                            cache: materializationCache,
+                            validatorProof,
+                            coverageProof,
+                        });
+                    }
+                    catch (err) {
+                        if (params.signal?.aborted)
+                            throw params.signal.reason ?? err;
+                        if (isCancellation(err))
+                            throw err;
+                        if (err === pendingIsolatedFullRegeneration)
+                            throw err;
+                        if (err instanceof TestdataGenerationError && err.userMessageKey)
+                            throw err;
+                        const typedRepairError = err instanceof failures_1.TestdataPipelineError
+                            ? err
+                            : (0, failures_1.toPipelineError)(err, {
+                                code: 'UNKNOWN',
+                                stage: 'pipeline_repair',
+                                artifact: 'pipeline',
+                                retryPolicy: 'switch-model',
+                            });
+                        const finalPolicy = typedRepairError.retryPolicy;
+                        const nextScope = repairScopeForPipelineFailure(typedRepairError);
+                        if (finalPolicy === 'repair-artifact'
+                            && attemptedMaterializationRepairs.size < 2
+                            && !attemptedMaterializationRepairs.has(nextScope)
+                            && nextScope !== 'full'
+                            && nextScope !== 'accepted-std') {
+                            pendingMaterializationFailure = typedRepairError;
+                            continue;
+                        }
+                        throw new TestdataGenerationError(`AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`, typedRepairError.stage, results, finalPolicy === 'repair-artifact' || finalPolicy === 'switch-model', undefined, undefined, {
+                            code: typedRepairError.code,
+                            artifact: typedRepairError.artifact,
+                            retryPolicy: finalPolicy,
+                            safeDetails: typedRepairError.safeDetails,
+                            failedModelRole: modelRoleForSandboxFailure(typedRepairError) ?? failedModelRole,
+                        });
+                    }
                 }
+                break;
             }
             const initialCaseCount = response.cases.length;
             response.discriminationInitialCaseCount = initialCaseCount;

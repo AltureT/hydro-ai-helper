@@ -6331,6 +6331,69 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
+  it.each(['pass', 'still-broken', 'terminal', 'malformed', 'full-budget'] as const)(
+    'repairs a newly exposed brute error after stress repair with a bounded chain: %s', async outcome => {
+      const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'model-test' };
+      const mockClient = {
+        chat: jest.fn()
+          .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+          .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+          .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+          .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+          .mockResolvedValueOnce({ content: '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")', usedModel })
+          .mockResolvedValueOnce({ content: outcome === 'malformed' || outcome === 'full-budget'
+            ? '@@@NOTES@@@\nmissing the requested artifact'
+            : '@@@BRUTE@@@\nprint(input()) # repaired-brute', usedModel }),
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true), runPythonBatch: jest.fn(),
+        runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+          stdout: code.includes('stress generator')
+            ? JSON.stringify({ cases: Array.from({ length: 60 }, () => ({ input: '1' })) })
+            : code.includes('repaired-stress') ? stressGeneratorStdout()
+              : JSON.stringify({ cases: [{ input: '1', label: 'formal' }] }),
+          stderr: '',
+        })),
+        runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: any[]) => {
+          const brute = code.includes('independent brute') || code.includes('repaired-brute');
+          if (outcome === 'full-budget' && code.includes('print(input())') && !brute) {
+            throw new TestdataPipelineError('oracle failed', 'ORACLE_RUNTIME_FAILED', 'oracle', 'oracle', 'repair-artifact');
+          }
+          if (brute && outcome === 'terminal') throw new TestdataPipelineError(
+            'stop here', 'BRUTE_RUNTIME_FAILED', 'stress_testing', 'brute', 'no-retry',
+          );
+          return Promise.resolve(inputs.map(input => brute
+            && (!code.includes('repaired-brute') || outcome === 'still-broken')
+            ? detail({ status: 'Runtime Error', accepted: false, exitStatus: 1, stderr: 'IndexError' })
+            : detail({ stdout: typeof input === 'string' ? input : input.stdin })));
+        }),
+      };
+      const promise = new TestdataGenService(mockClient as never, {
+        sandboxRunner: runner as never, mode: 'sandbox', reliabilityMode: 'legacy',
+      }).generate({ problemTitle: 'two independent failures', statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] } });
+      if (outcome === 'pass') {
+        const plan = await promise;
+        expect(plan.verification.stressCheck).toMatchObject({ compared: 60, agreed: 60 });
+        expect(plan.files.find(file => file.name === 'brute.py')?.content).toContain('repaired-brute');
+      } else {
+        await expect(promise).rejects.toMatchObject({
+          code: outcome === 'malformed' || outcome === 'full-budget' ? 'UNKNOWN' : 'BRUTE_RUNTIME_FAILED',
+          failedModelRole: outcome === 'full-budget' ? 'oracle' : 'verifier',
+          retryPolicy: outcome === 'terminal' ? 'no-retry'
+            : outcome === 'malformed' || outcome === 'full-budget' ? 'switch-model' : 'repair-artifact',
+        });
+      }
+      expect(mockClient.chat).toHaveBeenCalledTimes(outcome === 'terminal' ? 5 : 6);
+      if (outcome !== 'terminal' && outcome !== 'full-budget') {
+        expect(mockClient.chat.mock.calls[5][0][1].content).toContain('repaired-stress');
+        expect(mockClient.chat.mock.calls[5][0][1].content).not.toContain('@@@SOLUTION@@@');
+        expect(mockClient.chat.mock.calls[5][1]).toContain('@@@BRUTE@@@');
+      }
+      expect(runner.runPython.mock.calls.filter(([code]) => code.includes('repaired-stress'))).toHaveLength(1);
+    },
+  );
+
   it.each([
     ['stress-generator', '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")'],
     ['brute', '@@@BRUTE@@@\nprint(input())  # repaired-brute'],
@@ -12333,6 +12396,38 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       coveredConstraintIds: ['I_STATE'],
       missingConstraintIds: ['C_RANGE'],
     }));
+  });
+
+  it.each([false, true])('keeps probe construction and protocol batch budget gaps visible: protocol=%s', async protocol => {
+    const statement = 'a >= 1; 1 <= b <= 10. Subtask 1 is worth all points.';
+    const constraints = [
+      { ...globalConstraint, id: 'A', expression: 'a >= 1', evidence: { quote: 'a >= 1' } },
+      { ...globalConstraint, id: 'B', expression: protocol ? 'b >= 1' : '1 <= b <= 10', evidence: { quote: '1 <= b <= 10' } },
+    ];
+    const proof = makeValidatorCoverageProof(statement, {
+      inputFields: ['a', 'b'].map((id, index) => ({ id, name: id, type: 'integer', encoding: `line:1 token:${index + 1}` })),
+      constraints, invariants: [],
+      subtasks: protocol ? [{ id: 1, score: 100, constraintIds: [] }] : [],
+    });
+    const blueprint = { ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['A', 'B'], invariantIds: [] },
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, invocations => Promise.resolve(invocations.map(() =>
+      detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 }))),
+    undefined, [`1 2\n${' '.repeat(3 * 1024 * 1024)}\n`]);
+    const promise = materializeWithValidatorProof(blueprint, { ...tradOpts, caseCount: 1 }, statement, runner as never, proof);
+    if (protocol) {
+      await expect(promise).rejects.toMatchObject({
+        code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', retryPolicy: 'manual-review',
+        safeDetails: { failureKind: 'probe-budget', maxBytes: 8 * 1024 * 1024 },
+      });
+      expect(runner.runPythonBatchDetailed.mock.calls.filter(([code]) => code === blueprint.validatorCode)).toHaveLength(1);
+    } else {
+      const result = await promise;
+      expect(result.verification?.validator).toMatchObject({ invalidRejected: 2, coveredConstraintIds: ['A'], missingConstraintIds: ['B'] });
+      expect(result.verification?.verified).toBe(false);
+    }
   });
 
   it('validator coverage counts every probe while one rejection covers a multiply-probed target', async () => {

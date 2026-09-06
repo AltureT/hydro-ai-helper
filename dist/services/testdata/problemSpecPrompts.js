@@ -28,6 +28,12 @@ JSON 必须满足 ProblemSpecV1：
 6. outputPolicy 只能使用封闭枚举；只有题目当前配置了自定义 checker 时才使用 custom-checker。
 7. 不要输出 metadata 或任何契约外字段。
 
+可精确表达时，约束 expression 优先使用以下机器语法，引用字段 id（不要把 name 当作 id）：
+- 整数边界：1 <= n <= 200000，或 n >= 1、n <= 200000。
+- 数组元素边界：-1000000000 <= nums[i] <= 1000000000；分开写时可用 nums[i] >= -1000000000、nums[i] <= 1000000000。
+- 数组长度：length(nums) = n；元素不重复：allDistinct(nums)。
+上述只是表示约定，不得改写题面含义、删掉无法表示的约束或把未支持的语义标为已验证；其他约束继续准确表达并保留证据。
+
 inputFields.encoding 的机器编码约定（位置从 1 开始，引用使用字段 id）：
 - 整数或无空白字符串，例如第一行第一个值：line:1 token:1。
 - n 个数组/排列元素单独占第二行：line:2 tokens:1..n，并声明 dependsOn:["n"]；n 必须是已声明的整数计数字段。

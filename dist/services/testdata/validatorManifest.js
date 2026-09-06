@@ -8,6 +8,8 @@ const failures_1 = require("./failures");
 exports.VALIDATOR_PROBE_CONSTRUCTION_KINDS = [
     'integer-below-min',
     'integer-above-max',
+    'array-element-below-min',
+    'array-element-above-max',
     'array-length-mismatch',
     'duplicate-element',
     'permutation-duplicate-or-missing',

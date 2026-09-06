@@ -62,7 +62,7 @@ import {
   throwIfGeneratorBudgetConflict,
 } from './testdata/generatorBudget';
 import { GENERATOR_PLAN_CONTRACT } from './testdata/generatorPlanPrompts';
-import { assertTestdataPlanBudget, TESTDATA_CODE_FILE_MAX_BYTES, TESTDATA_OUTPUT_MAX_BYTES, GENERATOR_REPLAY_DATA_FILENAME } from './testdata/fileBudget';
+import { assertTestdataPlanBudget, TESTDATA_CODE_FILE_MAX_BYTES, TESTDATA_INPUT_MAX_BYTES, TESTDATA_OUTPUT_MAX_BYTES, TESTDATA_PLAN_MAX_BYTES, GENERATOR_REPLAY_DATA_FILENAME } from './testdata/fileBudget';
 import { parseOracleLanguage, type OracleLanguage } from './testdata/oracleLanguage';
 import { assertPythonTemplateInterface } from './testdata/templateInterface';
 import {
@@ -83,6 +83,7 @@ import {
 import {
   buildConstraintProbes,
   type ConstraintProbe,
+  type ConstraintProbeGap,
   type LegalConstraintProbeSeed,
 } from './testdata/constraintProbes';
 import {
@@ -4941,6 +4942,7 @@ function createValidatorTargetEvidence(
   manifest: ValidatorManifest | undefined,
   probes: readonly ConstraintProbe[],
   executions: readonly Exclude<ValidatorTargetEvidence['execution'], 'not-run'>[],
+  constructionGaps: readonly ConstraintProbeGap[] = [],
 ): ValidatorTargetEvidence[] {
   const declaredConstraints = manifestStatus === 'valid'
     ? new Set(manifest?.constraintIds || []) : new Set<string>();
@@ -4981,6 +4983,10 @@ function createValidatorTargetEvidence(
     const execution = executions[index] || 'not-run';
     if (priority[execution] > priority[evidence.execution]) evidence.execution = execution;
   });
+  for (const gap of constructionGaps) {
+    const evidence = evidenceByTarget.get(validatorEvidenceKey(gap.targetKind, gap.targetId));
+    if (evidence) evidence.constructed = false;
+  }
   return targets;
 }
 
@@ -5020,7 +5026,9 @@ async function runValidatorInvalidProof(input: {
     invocation: validatorInvocation(probe.input, probe.subtaskId),
     probe,
   }));
-  const firstLegalSeed = input.seeds[0];
+  const firstLegalSeed = input.seeds.reduce<LegalConstraintProbeSeed | undefined>((best, seed) => (
+    !best || Buffer.byteLength(seed.input, 'utf8') < Buffer.byteLength(best.input, 'utf8') ? seed : best
+  ), undefined);
   if (spec.subtasks.length > 0 && firstLegalSeed) {
     const unknownSubtaskId = firstUnknownSubtaskId(spec.subtasks.map(subtask => subtask.id));
     invalidInvocations.push(
@@ -5035,6 +5043,16 @@ async function runValidatorInvalidProof(input: {
         },
         protocolProbe: true,
       },
+    );
+  }
+
+  const invalidBytes = invalidInvocations.map(item => Buffer.byteLength(item.invocation.stdin, 'utf8'));
+  const totalInvalidBytes = invalidBytes.reduce((sum, bytes) => sum + bytes, 0);
+  if (invalidBytes.some(bytes => bytes > TESTDATA_INPUT_MAX_BYTES) || totalInvalidBytes > TESTDATA_PLAN_MAX_BYTES) {
+    throw new TestdataPipelineError(
+      'VALIDATOR 非法输入及子任务协议探针超出有界验证预算，未省略检查。',
+      'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'validator', 'coverage', 'manual-review',
+      { failureKind: 'probe-budget', actualBytes: totalInvalidBytes, maxBytes: TESTDATA_PLAN_MAX_BYTES },
     );
   }
 
@@ -5096,6 +5114,7 @@ async function runValidatorInvalidProof(input: {
     input.blueprint.validatorManifest,
     build.probes,
     proofExecutions.slice(0, build.probes.length),
+    build.gaps,
   );
   const coveredIds = targetEvidence.filter(item => (
     item.declared && item.constructed && item.execution === 'rejected'
@@ -7781,6 +7800,29 @@ export function checkpointVerifierFromBlueprint(
   };
 }
 
+function currentVerifierRepairSource(blueprint: SandboxGenerationBlueprint): string {
+  const verifier = checkpointVerifierFromBlueprint(blueprint);
+  return [
+    ...(verifier.complexityGap ? ['@@@COMPLEXITY_GAP@@@', verifier.complexityGap] : []),
+    '@@@BRUTE@@@', verifier.bruteCode,
+    '@@@STRESS_GENERATOR@@@', verifier.stressGeneratorCode,
+    '@@@VALIDATOR@@@', verifier.validatorCode,
+    ...(verifier.validatorManifest
+      ? ['@@@VALIDATOR_MANIFEST@@@', JSON.stringify(verifier.validatorManifest)] : []),
+    ...(verifier.validatorProbeRecipes
+      ? ['@@@VALIDATOR_PROBE_RECIPES@@@', JSON.stringify({ recipes: verifier.validatorProbeRecipes })] : []),
+    ...(verifier.functionSampleInputs?.length
+      ? ['@@@SAMPLE_INPUTS@@@', JSON.stringify({ samples: verifier.functionSampleInputs })] : []),
+  ].join('\n');
+}
+
+function modelRoleForSandboxFailure(error: TestdataPipelineError):
+Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'> | undefined {
+  const scope = repairScopeForPipelineFailure(error);
+  return isVerifierRepairScope(scope) ? 'verifier'
+    : scope === 'oracle' ? 'oracle' : scope === 'full' ? undefined : 'artifacts';
+}
+
 export class TestdataGenService {
   private readonly sandboxRunner?: TestdataSandboxRunner;
   private readonly mode: TestdataGenerationMode;
@@ -9830,7 +9872,16 @@ export class TestdataGenService {
     const materializationCache: MaterializationCacheState = {};
     const initialMaterialization = resolveMaterializationResume(['GENERATOR']);
     let response: GenerationResponse;
+    const attemptedMaterializationRepairs = new Set<SandboxRepairScope>();
+    let pendingMaterializationFailure: TestdataPipelineError | undefined;
+    // At most two different artifacts per attempt; retain the shared model and sandbox budgets.
+    for (;;) {
     try {
+      if (pendingMaterializationFailure) {
+        const pending = pendingMaterializationFailure;
+        pendingMaterializationFailure = undefined;
+        throw pending;
+      }
       response = await materializeSandboxBlueprint(
         blueprint, params.options, params.statementMarkdown, runner, params.signal,
         customChecker,
@@ -9910,10 +9961,12 @@ export class TestdataGenService {
             artifact: typedFirstError.artifact,
             retryPolicy: repairPolicy,
             safeDetails: typedFirstError.safeDetails,
+            failedModelRole: modelRoleForSandboxFailure(typedFirstError),
           },
         );
       }
       const repairScope = repairScopeForPipelineFailure(typedFirstError);
+      attemptedMaterializationRepairs.add(repairScope);
       let failedModelRole: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'> | undefined =
         isVerifierRepairScope(repairScope)
           ? 'verifier'
@@ -10054,7 +10107,7 @@ export class TestdataGenService {
             verifierState = {
               ...verifierState,
               verifier: checkpointVerifierFromBlueprint(blueprint),
-              sourceContent: repairResult.content,
+              sourceContent: currentVerifierRepairSource(blueprint),
             };
           } else if (isVerifierSubartifactRepairScope(repairScope)) {
             blueprint = mergeSandboxBlueprintRepair(
@@ -10066,6 +10119,7 @@ export class TestdataGenService {
             verifierState = {
               ...verifierState,
               verifier: checkpointVerifierFromBlueprint(blueprint),
+              sourceContent: currentVerifierRepairSource(blueprint),
             };
           } else if (repairScope === 'full') {
             const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
@@ -10082,7 +10136,10 @@ export class TestdataGenService {
           if (targetedParseError instanceof TestdataPipelineError
             && targetedParseError.retryPolicy === 'manual-review') throw targetedParseError;
           if (repairScope === 'full' || isVerifierRepairScope(repairScope)) throw targetedParseError;
+          if (!context && (attemptedMaterializationRepairs.size >= 2
+            || attemptedMaterializationRepairs.has('full'))) throw targetedParseError;
           usedFullRepair = true;
+          attemptedMaterializationRepairs.add('full');
           failedModelRole = context ? undefined : 'oracle';
           if (context) {
             assertProblemSpecUnchanged(context);
@@ -10186,6 +10243,15 @@ export class TestdataGenService {
             retryPolicy: 'switch-model',
           });
         const finalPolicy = typedRepairError.retryPolicy;
+        const nextScope = repairScopeForPipelineFailure(typedRepairError);
+        if (finalPolicy === 'repair-artifact'
+          && attemptedMaterializationRepairs.size < 2
+          && !attemptedMaterializationRepairs.has(nextScope)
+          && nextScope !== 'full'
+          && nextScope !== 'accepted-std') {
+          pendingMaterializationFailure = typedRepairError;
+          continue;
+        }
         throw new TestdataGenerationError(
           `AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`,
           typedRepairError.stage,
@@ -10198,10 +10264,12 @@ export class TestdataGenService {
             artifact: typedRepairError.artifact,
             retryPolicy: finalPolicy,
             safeDetails: typedRepairError.safeDetails,
-            failedModelRole,
+            failedModelRole: modelRoleForSandboxFailure(typedRepairError) ?? failedModelRole,
           },
         );
       }
+    }
+    break;
     }
 
     const initialCaseCount = response.cases.length;
