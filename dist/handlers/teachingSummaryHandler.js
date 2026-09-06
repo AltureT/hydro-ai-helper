@@ -1,11 +1,12 @@
 "use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.TeachingSummaryFeedbackHandler = exports.TeachingReviewHandler = exports.TeachingSummaryHandler = exports.TeachingSummaryHandlerPriv = void 0;
+const temporalPatternAnalyzer_1 = require("../services/analyzers/temporalPatternAnalyzer");
 /**
  * TeachingSummaryHandler - 教学总结 API 处理器
  *
  * 提供竞赛教学分析总结的生成、查询、列表和反馈功能
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.TeachingSummaryFeedbackHandler = exports.TeachingReviewHandler = exports.TeachingSummaryHandler = exports.TeachingSummaryHandlerPriv = void 0;
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -156,6 +157,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
     }
     async generateAsync(model, domainId, summaryId, contestObjId, tdoc, studentUids, teachingFocus) {
         const startTime = Date.now();
+        const dataSnapshotAt = new Date(Math.floor(startTime / 1000) * 1000);
         this.ctx.get('featureStatsModel')?.recordAttempt('teaching_summary').catch(() => { });
         try {
             await model.updateStatus(summaryId, 'generating');
@@ -170,10 +172,14 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 .find({ domainId, docType: 10, docId: { $in: pids } })
                 .toArray();
             const pidTitles = new Map();
+            const pidAliases = new Map();
             const problemContexts = problemDocs.map((doc) => {
                 const pid = doc.docId;
                 const title = (doc.title || String(doc.docId));
                 pidTitles.set(pid, title);
+                const alias = doc.pid;
+                if (typeof alias === 'string' && alias)
+                    pidAliases.set(pid, [alias]);
                 return { pid, title, content: (doc.content || '') };
             });
             // Layer 1: Analysis (with problem titles for human-readable findings)
@@ -185,6 +191,8 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 pids,
                 studentUids,
                 pidTitles,
+                pidAliases,
+                dataSnapshotAt,
                 contestStartTime: tdoc.beginAt ? new Date(tdoc.beginAt) : undefined,
                 contestEndTime: tdoc.endAt ? new Date(tdoc.endAt) : undefined,
             });
@@ -202,11 +210,11 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             });
             // Aggregate temporal profiles into behavior summary (count-only) for LLM
             const behaviorCounts = {};
-            for (const profile of (analysisResult.temporalProfiles || [])) {
-                if (!behaviorCounts[profile.pattern]) {
-                    behaviorCounts[profile.pattern] = new Set();
+            for (const [uid, pattern] of (0, temporalPatternAnalyzer_1.studentPatternGroups)(analysisResult.temporalProfiles || [])) {
+                if (!behaviorCounts[pattern]) {
+                    behaviorCounts[pattern] = new Set();
                 }
-                behaviorCounts[profile.pattern].add(profile.uid);
+                behaviorCounts[pattern].add(uid);
             }
             const counts = {
                 persistent_learner: behaviorCounts['persistent_learner']?.size ?? 0,
@@ -263,51 +271,10 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             const deepDiveResults = {};
             const problemDocMap = new Map(problemDocs.map((doc) => [doc.docId, doc]));
             const deepDiveFindings = analysisResult.findings.filter(f => f.needsDeepDive && !f.isSecondary);
-            // Batch-fetch code samples for all deep-dive findings (avoids N+1 queries)
+            // Samples already belong to the analyzer's exact evidence records.
+            // Never replace them with an unscoped student/problem code lookup.
             if (deepDiveFindings.length > 0) {
                 await model.updateProgress(summaryId, 'deep_diving');
-                const allSampleUids = new Set();
-                const allSamplePids = new Set();
-                for (const f of deepDiveFindings) {
-                    for (const uid of f.evidence.affectedStudents.slice(0, 5))
-                        allSampleUids.add(uid);
-                    for (const pid of f.evidence.affectedProblems)
-                        allSamplePids.add(pid);
-                }
-                const allSampleRecords = allSampleUids.size > 0 && allSamplePids.size > 0
-                    ? await this.ctx.db.collection('record').find({
-                        domainId,
-                        pid: { $in: Array.from(allSamplePids) },
-                        uid: { $in: Array.from(allSampleUids) },
-                        code: { $exists: true, $ne: '' },
-                    }).project({ pid: 1, uid: 1, code: 1 }).limit(50).toArray()
-                    : [];
-                // Index by pid:uid for O(1) lookup
-                const samplesByPidUid = new Map();
-                for (const r of allSampleRecords) {
-                    const key = `${r.pid}:${r.uid}`;
-                    if (!samplesByPidUid.has(key)) {
-                        samplesByPidUid.set(key, String(r.code).slice(0, 500));
-                    }
-                }
-                // Attach samples to findings
-                for (const finding of deepDiveFindings) {
-                    const codes = [];
-                    for (const uid of finding.evidence.affectedStudents.slice(0, 5)) {
-                        for (const pid of finding.evidence.affectedProblems) {
-                            const code = samplesByPidUid.get(`${pid}:${uid}`);
-                            if (code) {
-                                codes.push(code);
-                                break;
-                            }
-                        }
-                        if (codes.length >= 3)
-                            break;
-                    }
-                    if (codes.length > 0) {
-                        finding.evidence.samples = { code: codes };
-                    }
-                }
             }
             for (const finding of deepDiveFindings) {
                 const problemContent = finding.evidence.affectedProblems
@@ -329,6 +296,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             // suggestion so the UI can surface it as a first-class deliverable
             await model.updateProgress(summaryId, 'saving');
             await model.saveResults(summaryId, {
+                dataSnapshotAt,
                 stats: analysisResult.stats,
                 findings: analysisResult.findings,
                 overallSuggestion: overallResult.text,

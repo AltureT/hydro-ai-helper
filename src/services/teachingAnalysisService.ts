@@ -7,8 +7,11 @@
 
 import type { Db } from 'mongodb';
 import type { ObjectIdType } from '../utils/mongo';
+import { ensureObjectId } from '../utils/ensureObjectId';
 import { TeachingFinding, FindingDimension } from '../models/teachingSummary';
 import { analyzeErrorClusters } from './analyzers/errorClusterAnalyzer';
+import { ERROR_STATUSES, errorCodeSamples } from './analyzers/submissionEvidence';
+import { recordWindow } from './analyzers/recordWindow';
 import { analyzeTemporalPatterns } from './analyzers/temporalPatternAnalyzer';
 import { analyzeCorrelations } from './analyzers/correlationAnalyzer';
 import { consolidateFindings } from './analyzers/findingConsolidator';
@@ -57,6 +60,8 @@ export interface AnalyzeInput {
   contestStartTime?: Date;
   contestEndTime?: Date;
   pidTitles?: Map<number, string>;
+  pidAliases?: Map<number, string[]>;
+  dataSnapshotAt?: Date;
 }
 
 export interface AnalyzeResult {
@@ -83,6 +88,7 @@ interface RecordDoc {
   score?: number;
   judgeAt?: Date;
   code?: string;
+  lang?: string;
 }
 
 interface ConversationDoc {
@@ -128,29 +134,37 @@ export class TeachingAnalysisService {
    * 主入口：聚合数据并运行规则引擎
    */
   async analyze(input: AnalyzeInput): Promise<AnalyzeResult> {
+    input = { ...input, dataSnapshotAt: input.dataSnapshotAt ?? new Date() };
     console.log('[TeachingAnalysis] Starting analysis for domain=%s, pids=%j, students=%d',
       input.domainId, input.pids, input.studentUids.length);
 
     this.findingCounter = 0;
 
     // Layer 1: Data Aggregation (all independent queries in parallel)
-    const [records, conversations, jailbreakLogs, clusteringRecords] = await Promise.all([
+    const [records, candidateConversations, jailbreakLogs] = await Promise.all([
       this.fetchRecords(input),
       this.fetchConversations(input),
       this.fetchJailbreakLogs(input),
-      this.fetchRecordsForClustering(input),
     ]);
 
     // Fetch messages using conversation IDs from above (avoids duplicate query)
-    const convIds = conversations.map((c) => c._id);
+    const convIds = candidateConversations.map((c) => c._id);
     const messages = convIds.length > 0
       ? await this.db.collection('ai_messages').find({
           conversationId: { $in: convIds },
+          timestamp: {
+            ...(input.contestStartTime ? { $gte: input.contestStartTime } : {}),
+            $lt: recordWindow(input.dataSnapshotAt, undefined, input.contestEndTime).$lt.getTimestamp(),
+          },
         }).toArray() as MessageDoc[]
       : [];
+    // A conversation may span assignments. Only actual student messages in the
+    // observation window establish AI usage for this report.
+    const activeConversationIds = new Set(messages.filter(m => m.role === 'student').map(m => String(m.conversationId)));
+    const conversations = candidateConversations.filter(c => activeConversationIds.has(String(c._id)));
 
     console.log('[TeachingAnalysis] Aggregated: records=%d, conversations=%d, messages=%d, jailbreakLogs=%d, clusteringRecords=%d',
-      records.length, conversations.length, messages.length, jailbreakLogs.length, clusteringRecords.length);
+      records.length, conversations.length, messages.length, jailbreakLogs.length, records.length);
 
     // Build lookup structures
     const recordsByPidUid = this.groupRecordsByPidUid(records);
@@ -199,7 +213,7 @@ export class TeachingAnalysisService {
 
     // Error clustering dimension (uses separate query data)
     const errorClusterFindings = analyzeErrorClusters(
-      clusteringRecords as Parameters<typeof analyzeErrorClusters>[0],
+      records as Parameters<typeof analyzeErrorClusters>[0],
       input.pids,
       input.studentUids.length,
       input.pidTitles,
@@ -217,7 +231,7 @@ export class TeachingAnalysisService {
     // Temporal pattern analysis
     const temporalProfiles: StudentTemporalProfile[] = [];
     const temporalFindings = analyzeTemporalPatterns(
-      records as unknown as Parameters<typeof analyzeTemporalPatterns>[0], input.pids, input.studentUids,
+      records as Parameters<typeof analyzeTemporalPatterns>[0], input.pids, input.studentUids,
       conversationsByUserPid,
       input.contestStartTime, input.contestEndTime,
       temporalProfiles,
@@ -228,7 +242,7 @@ export class TeachingAnalysisService {
 
     // Cross-dimensional correlations
     const correlationFindings = analyzeCorrelations(
-      findings, temporalProfiles, input.studentUids.length,
+      findings.filter(f => !strategy.disabledDimensions.includes(f.dimension)), temporalProfiles, input.studentUids.length,
       aiUserUids, recordsByPidUid as unknown as Parameters<typeof analyzeCorrelations>[4],
     );
     for (const f of correlationFindings) {
@@ -273,18 +287,8 @@ export class TeachingAnalysisService {
       if (trigger) fillInPids.push(pid);
     }
 
-    // 保底：只要存在共性错误，至少为影响面最大的那道题生成课后强化训练，
-    // 避免教师在明明有共性问题时却拿不到任何作业素材
-    if (fillInPids.length === 0 && errorFindings.length > 0) {
-      const top = [...errorFindings].sort(
-        (a, b) => b.evidence.affectedStudents.length - a.evidence.affectedStudents.length,
-      )[0];
-      const topPid = top.evidence.affectedProblems[0];
-      if (topPid !== undefined) fillInPids.push(topPid);
-    }
-
     if (fillInPids.length > 0) {
-      const acRecords = await this.fetchACSubmissions(input, fillInPids);
+      const acRecords = records.filter(r => r.status === STATUS.AC && fillInPids.includes(r.pid));
       const acByPid = new Map<number, ACSubmission[]>();
       for (const r of acRecords) {
         if (!r.code) continue;
@@ -326,91 +330,42 @@ export class TeachingAnalysisService {
   // ─── Layer 1: Data Fetching ──────────────────────────────────────────────
 
   private async fetchRecords(input: AnalyzeInput): Promise<RecordDoc[]> {
-    const filter: Record<string, unknown> & { judgeAt?: Record<string, Date> } = {
+    // Hydro records explicitly carry contest membership; judgeAt is rejudge time.
+    return this.db.collection('record').find({
       domainId: input.domainId,
+      contest: ensureObjectId(input.contestId),
+      _id: recordWindow(input.dataSnapshotAt, input.contestStartTime, input.contestEndTime),
       pid: { $in: input.pids },
       uid: { $in: input.studentUids },
-    };
-    if (input.contestStartTime || input.contestEndTime) {
-      filter.judgeAt = {};
-      if (input.contestStartTime) filter.judgeAt.$gte = input.contestStartTime;
-      if (input.contestEndTime) filter.judgeAt.$lte = input.contestEndTime;
-    }
-    return this.db.collection('record').find(filter).sort({ judgeAt: 1 }).toArray() as Promise<RecordDoc[]>;
+    }).sort({ _id: 1 }).toArray() as Promise<RecordDoc[]>;
   }
 
   private async fetchConversations(input: AnalyzeInput): Promise<ConversationDoc[]> {
-    const pidStrings = input.pids.map(String);
+    const canonicalIds = new Map(input.pids.map(pid => [String(pid), String(pid)]));
+    for (const pid of input.pids) {
+      for (const alias of input.pidAliases?.get(pid) ?? []) {
+        if (!canonicalIds.has(alias)) canonicalIds.set(alias, String(pid));
+      }
+    }
     const filter: Record<string, unknown> = {
       domainId: input.domainId,
       userId: { $in: input.studentUids },
-      problemId: { $in: pidStrings },
+      problemId: { $in: [...canonicalIds.keys()] },
     };
-    return this.db.collection('ai_conversations').find(filter).toArray() as Promise<ConversationDoc[]>;
-  }
-
-  /**
-   * Fetch non-AC records with testCases and compilerTexts for error clustering.
-   * Separate query to avoid loading heavy fields for all dimensions.
-   * Records are sorted by judgeAt ascending (required by errorClusterAnalyzer).
-   */
-  private async fetchRecordsForClustering(input: AnalyzeInput): Promise<unknown[]> {
-    const matchStage: Record<string, unknown> & { judgeAt?: Record<string, Date> } = {
-      domainId: input.domainId,
-      pid: { $in: input.pids },
-      uid: { $in: input.studentUids },
-      status: { $ne: 1 },
-    };
-    if (input.contestStartTime || input.contestEndTime) {
-      matchStage.judgeAt = {};
-      if (input.contestStartTime) matchStage.judgeAt.$gte = input.contestStartTime;
-      if (input.contestEndTime) matchStage.judgeAt.$lte = input.contestEndTime;
-    }
-
-    return this.db.collection('record').aggregate([
-      { $match: matchStage },
-      { $project: {
-        pid: 1, uid: 1, status: 1, judgeAt: 1,
-        testCases: { $slice: ['$testCases', 80] },
-        compilerTexts: { $slice: ['$compilerTexts', -3] },
-        code: 1,
-      }},
-      { $sort: { judgeAt: 1 } },
-    ]).toArray() as Promise<Array<{ pid: number; uid: number; code?: string; lang?: string }>>;
-  }
-
-  private async fetchACSubmissions(input: AnalyzeInput, pids: number[]): Promise<Array<{ pid: number; uid: number; code?: string; lang?: string }>> {
-    if (pids.length === 0) return [];
-    const matchStage: Record<string, unknown> & { judgeAt?: Record<string, Date> } = {
-      domainId: input.domainId,
-      pid: { $in: pids },
-      uid: { $in: input.studentUids },
-      status: 1,
-    };
-    if (input.contestStartTime || input.contestEndTime) {
-      matchStage.judgeAt = {};
-      if (input.contestStartTime) matchStage.judgeAt.$gte = input.contestStartTime;
-      if (input.contestEndTime) matchStage.judgeAt.$lte = input.contestEndTime;
-    }
-    return this.db.collection('record').aggregate([
-      { $match: matchStage },
-      { $project: { pid: 1, uid: 1, code: 1, lang: 1 } },
-      { $sort: { judgeAt: -1 } },
-    ]).toArray() as unknown as Promise<Array<{ pid: number; uid: number; code?: string; lang?: string }>>;
+    const conversations = await this.db.collection('ai_conversations').find(filter).toArray() as ConversationDoc[];
+    return conversations.map(c => ({ ...c, problemId: canonicalIds.get(c.problemId) || c.problemId }));
   }
 
   private async fetchJailbreakLogs(input: AnalyzeInput): Promise<JailbreakDoc[]> {
-    const filter: Record<string, unknown> & { createdAt?: Record<string, Date> } = {
+    const bounds = recordWindow(input.dataSnapshotAt, input.contestStartTime, input.contestEndTime);
+    const filter: Record<string, unknown> = {
       domainId: input.domainId,
       userId: { $in: input.studentUids },
       category: { $in: ['prompt_injection', 'prompt_exfiltration', 'obfuscated_injection'] },
       reviewStatus: { $ne: 'false_positive' },
+      problemId: { $in: [...new Set(input.pids.flatMap(pid => [String(pid), ...(input.pidAliases?.get(pid) ?? [])]))] },
+      createdAt: { ...(bounds.$gte ? { $gte: bounds.$gte.getTimestamp() } : {}), $lt: bounds.$lt.getTimestamp() },
     };
-    if (input.contestStartTime || input.contestEndTime) {
-      filter.createdAt = {};
-      if (input.contestStartTime) filter.createdAt.$gte = input.contestStartTime;
-      if (input.contestEndTime) filter.createdAt.$lte = input.contestEndTime;
-    }
     return this.db.collection('ai_jailbreak_logs').find(filter).toArray() as Promise<JailbreakDoc[]>;
   }
 
@@ -487,23 +442,17 @@ export class TeachingAnalysisService {
     const findings: (TeachingFinding | null)[] = [];
 
     for (const pid of input.pids) {
-      // Count students by their most frequent non-AC status on this problem
       const statusStudents = new Map<number, Set<number>>();
-
+      const resolvedUids = new Set<number>();
+      const latestErrors = new Map<string, RecordDoc>();
       for (const uid of input.studentUids) {
-        const key = `${pid}:${uid}`;
-        const recs = recordsByPidUid.get(key) || [];
-        // Count non-AC statuses for this student on this problem
-        const statusCounts = new Map<number, number>();
+        const recs = recordsByPidUid.get(`${pid}:${uid}`) || [];
+        if (recs.some(r => r.status === STATUS.AC)) resolvedUids.add(uid);
         for (const r of recs) {
-          if (r.status !== STATUS.AC) {
-            statusCounts.set(r.status, (statusCounts.get(r.status) || 0) + 1);
-          }
-        }
-        // Record each non-AC status this student encountered
-        for (const status of statusCounts.keys()) {
-          if (!statusStudents.has(status)) statusStudents.set(status, new Set());
-          (statusStudents.get(status) as Set<number>).add(uid);
+          if (!ERROR_STATUSES.has(r.status)) continue;
+          if (!statusStudents.has(r.status)) statusStudents.set(r.status, new Set());
+          statusStudents.get(r.status).add(uid);
+          latestErrors.set(`${r.status}:${uid}`, r);
         }
       }
 
@@ -512,15 +461,26 @@ export class TeachingAnalysisService {
         if (uids.size >= threshold) {
           const label = STATUS_LABEL[status] || `Status_${status}`;
           const pct = Math.round((uids.size / input.studentUids.length) * 100);
+          const resolvedCount = [...uids].filter(uid => resolvedUids.has(uid)).length;
+          const unresolvedCount = [...uids].filter(uid => {
+            const recs = recordsByPidUid.get(`${pid}:${uid}`) || [];
+            return !resolvedUids.has(uid) && ERROR_STATUSES.has(recs[recs.length - 1]?.status);
+          }).length;
           const finding = this.makeFinding(
             'commonError',
-            uids.size >= input.studentUids.length * 0.5 ? 'high' : 'medium',
-            `${this.pidLabel(pid, input)}：${pct}% 学生遇到 ${label} 错误`,
+            unresolvedCount === 0 ? 'low' : unresolvedCount >= input.studentUids.length * 0.5 ? 'high' : 'medium',
+            `${this.pidLabel(pid, input)}：${pct}% 学生曾出现 ${label}（${resolvedCount} 人已通过，${unresolvedCount} 人仍未通过）`,
             Array.from(uids),
             [pid],
-            { affectedCount: uids.size, totalStudents: input.studentUids.length, percentage: pct },
+            { affectedCount: uids.size, totalStudents: input.studentUids.length, percentage: pct, resolvedCount, unresolvedCount, pendingCount: uids.size - resolvedCount - unresolvedCount },
             true,
           );
+          if (finding) {
+            finding.errorStatus = status;
+            finding.evidence.samples = errorCodeSamples(
+              [...uids].map(uid => latestErrors.get(`${status}:${uid}`)), resolvedUids,
+            );
+          }
           findings.push(finding);
         }
       }
@@ -609,7 +569,7 @@ export class TeachingAnalysisService {
       findings.push(this.makeFinding(
         'strategy',
         jailbreakStudents.length >= 10 ? 'high' : 'medium',
-        `${jailbreakStudents.length} 名学生尝试越狱（共 ${totalJailbreaks} 次，基于 ${aiUserUids.size} 名 AI 用户数据）`,
+        `${jailbreakStudents.length} 名学生触发疑似越狱规则（待复核，共 ${totalJailbreaks} 次，基于 ${aiUserUids.size} 名 AI 用户数据）`,
         jailbreakStudents,
         input.pids,
         { jailbreakStudentCount: jailbreakStudents.length, totalJailbreaks, aiUserCount: aiUserUids.size },
@@ -634,7 +594,7 @@ export class TeachingAnalysisService {
         findings.push(this.makeFinding(
           'strategy',
           'low',
-          `${heavyUsers.length} 名学生 AI 使用频率显著偏高（基于 ${aiUserUids.size} 名 AI 用户数据）`,
+          `${heavyUsers.length} 名学生本次 AI 对话数量处于较高分组（基于 ${aiUserUids.size} 名 AI 用户数据）`,
           heavyUsers,
           input.pids,
           { heavyUserCount: heavyUsers.length, threshold, aiUserCount: aiUserUids.size },
@@ -675,7 +635,7 @@ export class TeachingAnalysisService {
     const finding = this.makeFinding(
       'atRisk',
       atRiskStudents.length >= input.studentUids.length * 0.3 ? 'high' : 'medium',
-      `${atRiskStudents.length} 名学生在 ≥70% 的题目上未通过（占比 ${pct}%）`,
+      `${atRiskStudents.length} 名学生在 ≥70% 的题目上暂无通过记录（含未提交或待评测，占比 ${pct}%，需核实）`,
       atRiskStudents,
       input.pids,
       { atRiskCount: atRiskStudents.length, percentage: pct },
@@ -703,6 +663,7 @@ export class TeachingAnalysisService {
         const key = `${pid}:${uid}`;
         const recs = recordsByPidUid.get(key) || [];
         if (recs.length === 0) continue;
+        if (!recs.some(r => r.status === STATUS.AC) && !ERROR_STATUSES.has(recs[recs.length - 1].status)) continue;
 
         attemptedCount++;
         const hasAC = recs.some((r) => r.status === STATUS.AC);
@@ -792,7 +753,7 @@ export class TeachingAnalysisService {
         const recs = recordsByPidUid.get(key) || [];
         const hasAC = recs.some((r) => r.status === STATUS.AC);
 
-        if (recs.length >= 8 && !hasAC) {
+        if (recs.filter(r => ERROR_STATUSES.has(r.status)).length >= 8 && !hasAC && ERROR_STATUSES.has(recs[recs.length - 1]?.status)) {
           bruteForceStudents.add(uid);
           affectedProblems.add(pid);
         }
@@ -802,7 +763,7 @@ export class TeachingAnalysisService {
     const finding = this.makeFinding(
       'cognitivePath',
       bruteForceStudents.size >= 10 ? 'high' : 'medium',
-      `${bruteForceStudents.size} 名学生存在暴力猜测模式（大量提交但未通过且未使用 AI）`,
+      `${bruteForceStudents.size} 名学生多次提交仍未通过，且本次未记录 AI 对话（建议核实卡点）`,
       Array.from(bruteForceStudents),
       Array.from(affectedProblems),
       { bruteForceCount: bruteForceStudents.size },
@@ -839,6 +800,7 @@ export class TeachingAnalysisService {
         const key = `${pid}:${uid}`;
         const recs = recordsByPidUid.get(key) || [];
         if (recs.length === 0) continue;
+        if (!recs.some(r => r.status === STATUS.AC) && !ERROR_STATUSES.has(recs[recs.length - 1].status)) continue;
         userAttempted++;
         if (recs.some((r) => r.status === STATUS.AC)) userAc++;
       }
@@ -869,7 +831,7 @@ export class TeachingAnalysisService {
     const finding = this.makeFinding(
       'aiEffectiveness',
       severity,
-      `AI 用户通过率${direction}非 AI 用户 ${Math.abs(diff)} 个百分点（${Math.round(aiPassRate * 100)}% vs ${Math.round(nonAiPassRate * 100)}%）`,
+      `本次有 AI 对话的学生通过率${direction}其他学生 ${Math.abs(diff)} 个百分点（${Math.round(aiPassRate * 100)}% vs ${Math.round(nonAiPassRate * 100)}%）；仅为相关观察`,
       allStudents,
       input.pids,
       {

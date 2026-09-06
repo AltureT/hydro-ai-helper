@@ -28,7 +28,7 @@ export function getClassSizeStrategy(
   if (totalStudents < 10) {
     return {
       label: 'individual',
-      disabledDimensions: ['commonError', 'aiEffectiveness', 'difficulty'],
+      disabledDimensions: ['commonError', 'errorCluster', 'aiEffectiveness', 'difficulty'],
       minAffected: 3,
       ratioThreshold: 0.25,
     };

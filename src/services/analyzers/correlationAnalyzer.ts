@@ -11,6 +11,7 @@ import {
   TemporalPatternLabel,
   ConfidenceLevel,
 } from '../../models/teachingSummary';
+import { ERROR_STATUSES } from './submissionEvidence';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -18,11 +19,11 @@ const MIN_GROUP_SIZE = 5;
 const LOW_CONFIDENCE_THRESHOLD = 15;
 
 const PATTERN_LABELS_ZH: Record<TemporalPatternLabel, string> = {
-  strategic_solver: '高效解题',
-  disengaged: '未参与',
-  burst_then_quit: '受挫放弃',
-  stuck_silent: '沉默挣扎',
-  persistent_learner: '持续努力',
+  strategic_solver: '少量提交后通过',
+  disengaged: '少量提交后暂无新记录',
+  burst_then_quit: '密集提交后暂无新记录',
+  stuck_silent: '多次未通过且无 AI 对话记录',
+  persistent_learner: '跨时段继续尝试',
 };
 
 // Priority for "worst" aggregation (higher = worse)
@@ -64,6 +65,8 @@ export function correlateErrorAI(
   const withoutAI: number[] = [];
 
   for (const uid of affectedStudents) {
+    const records = recordsByPidUid.get(`${pid}:${uid}`) ?? [];
+    if (!records.some(r => r.status === 1) && !ERROR_STATUSES.has(records[records.length - 1]?.status)) continue;
     if (aiUserUids.has(uid)) {
       withAI.push(uid);
     } else {
@@ -93,18 +96,17 @@ export function correlateErrorAI(
   if (diff < 5) return null;
 
   // Extract status label from error finding title (e.g. "WA", "TLE", etc.)
-  const titleMatch = errorFinding.title.match(/\(([A-Z]+)\)/);
-  const statusLabel = titleMatch ? titleMatch[1] : '错误';
-
-  const groupSize = affectedStudents.length;
+  const statusLabels: Record<number, string> = { 2: 'WA', 3: 'TLE', 4: 'MLE', 5: 'OLE', 6: 'RE', 7: 'CE' };
+  const statusLabel = statusLabels[errorFinding.errorStatus] || errorFinding.errorSignature?.split(':')[0] || '错误';
 
   return {
     id: '', // placeholder, assigned by orchestrator
     dimension: 'crossCorrelation',
+    sourceFindingId: errorFinding.id,
     severity: diff >= 20 ? 'high' : diff >= 10 ? 'medium' : 'low',
-    title: `AI辅导对 ${statusLabel} 错误有效率${aiRate}% vs 未用AI仅${nonAiRate}%`,
+    title: `曾出现 ${statusLabel} 的学生中，有 AI 对话者 ${withAI.length} 人通过率 ${aiRate}%，其他学生 ${withoutAI.length} 人通过率 ${nonAiRate}%（仅为相关观察）`,
     evidence: {
-      affectedStudents: affectedStudents,
+      affectedStudents: [...withAI, ...withoutAI],
       affectedProblems: [pid],
       metrics: {
         aiRate,
@@ -116,7 +118,7 @@ export function correlateErrorAI(
       },
     },
     needsDeepDive: false,
-    confidence: confidenceFor(groupSize),
+    confidence: confidenceFor(Math.min(withAI.length, withoutAI.length)),
   };
 }
 
@@ -155,7 +157,7 @@ export function correlateAtRiskTemporal(
   }
 
   if (Object.keys(patternCounts).length === 0) {
-    // No temporal profiles found for at-risk students — still generate finding
+    return null;
   }
 
   // Build breakdown string sorted by count descending
@@ -175,7 +177,7 @@ export function correlateAtRiskTemporal(
     id: '', // placeholder, assigned by orchestrator
     dimension: 'crossCorrelation',
     severity: 'high',
-    title: `${count}名高危学生行为分布: ${breakdown}`,
+    title: `${count} 名待核实完成情况的学生中，可见提交记录分布：${breakdown}`,
     evidence: {
       affectedStudents: atRiskUids,
       affectedProblems: [],
@@ -240,8 +242,9 @@ export function correlateDifficultyError(
   return {
     id: '', // placeholder, assigned by orchestrator
     dimension: 'crossCorrelation',
+    sourceFindingId: difficultyFinding.id,
     severity: passRate <= 20 ? 'high' : 'medium',
-    title: `通过率${passRate}%的难题，${clusterPct}%失败集中在同一错误模式`,
+    title: `通过率 ${passRate}% 的题目，${clusterPct}% 尚未通过者的判题特征相同（原因待核实）`,
     evidence: {
       affectedStudents: allAffected,
       affectedProblems: [pid],
@@ -292,7 +295,7 @@ export function analyzeCorrelations(
       temporalProfiles,
       totalStudents,
     );
-    if (result) results.push(result);
+    if (result) results.push({ ...result, sourceFindingId: atRiskFinding.id });
   }
 
   // Pair 3: difficulty × errorCluster

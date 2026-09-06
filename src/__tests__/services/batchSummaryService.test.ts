@@ -78,6 +78,7 @@ describe('BatchSummaryService', () => {
 
   beforeEach(() => {
     mockRecordCollection = {
+      findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockReturnValue({
         sort: jest.fn().mockReturnValue({
           toArray: jest.fn().mockResolvedValue([makeRecord('1', 42, 1)]),
@@ -563,4 +564,42 @@ describe('BatchSummaryService', () => {
       expect(mockFeatureStats.recordSuccess).not.toHaveBeenCalled();
     });
   });
+  it('queries only this assignment and strips provider reasoning before saving', async () => {
+    mockAiClient.chat.mockResolvedValue({ content: '<think>(thinking...)</think>Verified report' });
+    const job = makeJob();
+    await service.execute(job, problems, () => {});
+    expect(mockRecordCollection.find).toHaveBeenCalledWith({
+      domainId: job.domainId, contest: job.contestId, uid: 42, pid: { $in: [1] }, _id: expect.objectContaining({ $lt: expect.anything() }),
+    });
+    expect(mockSummaryModel.completeSummary.mock.calls[0][1]).toBe('Verified report');
+  });
+
+  it('does not classify no submissions as giving up or fabricate prior effort', async () => {
+    mockRecordCollection.find.mockReturnValue({ sort: () => ({ toArray: async () => [] }) });
+    await service.execute(makeJob(), problems, () => {});
+    const [messages, system] = mockAiClient.chat.mock.calls[0];
+    expect(messages[0].content).toContain('本次没有提交记录');
+    expect(messages[0].content).not.toContain('情境 A');
+    expect(system).toContain('无提交不代表未思考');
+    expect(system).not.toContain('多次失败后放弃');
+  });
+
+  it('counts attempts only up to the first AC and does not reuse same-assignment or legacy history', async () => {
+    const history = { findRecent: jest.fn().mockResolvedValue([
+      { contestId: makeId(2), evidenceVersion: 2, createdAt: new Date(0), actionableAdvice: 'SAME_ASSIGNMENT' },
+      { contestId: makeId(3), createdAt: new Date(0), actionableAdvice: 'LEGACY_UNSCOPED' },
+    ]), create: jest.fn().mockResolvedValue(undefined) };
+    service = new BatchSummaryService(mockDb, mockJobModel, mockSummaryModel, mockAiClient, mockTokenUsageModel, history);
+    const records = [
+      { ...makeRecord(1, 42, 1), status: 2 },
+      makeRecord(1, 42, 2), makeRecord(1, 42, 3), makeRecord(1, 42, 4),
+    ];
+    mockRecordCollection.find.mockReturnValue({ sort: () => ({ toArray: async () => records }) });
+    await service.execute(makeJob(), problems, () => {});
+    expect(history.create).toHaveBeenCalledWith(expect.objectContaining({ avgAttemptsToAC: 2, evidenceVersion: 2 }));
+    const prompt = mockAiClient.chat.mock.calls[0][0][0].content;
+    expect(prompt).not.toContain('SAME_ASSIGNMENT');
+    expect(prompt).not.toContain('LEGACY_UNSCOPED');
+  });
+
 });

@@ -140,8 +140,8 @@ describe('buildMainPrompt', () => {
     const input = makeInput();
     const { system } = buildMainPrompt(input);
     expect(system).toContain('错误模式');
-    expect(system).toContain('持续努力型');
-    expect(system).toContain('受挫放弃型');
+    expect(system).toContain('跨时段继续尝试');
+    expect(system).toContain('密集提交后暂无新记录');
   });
 
   it('should not request the removed p0_action_plan section (deduplicated vs finding cards)', () => {
@@ -307,19 +307,19 @@ describe('buildDeepDivePrompt', () => {
     expect(user).not.toContain('AI对话样本');
   });
 
-  it('system prompt should contain "布卢姆"', () => {
+  it('system prompt requires evidence instead of inferring cognitive levels', () => {
     const finding = makeFinding();
     const { system } = buildDeepDivePrompt(finding, '题目描述');
 
-    expect(system).toContain('布卢姆');
+    expect(system).toContain('不推测学生内心、认知层级');
   });
 
   it('system prompt should contain scaffolding and edge case instructions', () => {
     const finding = makeFinding();
     const { system } = buildDeepDivePrompt(finding, '题目描述');
 
-    expect(system).toContain('Scaffolding');
-    expect(system).toContain('过度依赖');
+    expect(system).toContain('下一步课堂动作');
+    expect(system).toContain('不给学生贴标签');
   });
 });
 
@@ -362,7 +362,7 @@ describe('TeachingSuggestionService', () => {
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
     const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
     expect(messages[0].content).toContain('题目内容示例');
-    expect(systemPrompt).toContain('布卢姆');
+    expect(systemPrompt).toContain('不推测学生内心、认知层级');
     expect(result.text).toBe('### 认知障碍诊断\n应用层障碍。');
     expect(result.tokenUsage.promptTokens).toBe(100);
     expect(result.tokenUsage.completionTokens).toBe(50);
@@ -459,4 +459,13 @@ describe('buildFillInPrompt', () => {
     expect(user).not.toContain('相关错误模式');
     expect(user).toContain('求和');
   });
+});
+
+
+it('uses a practice objective rather than an invented misconception for signature-only exercise inputs', () => {
+  const prompt = buildFillInPrompt({ candidates: [{ pid: 1, title: 'Synthetic', lang: 'python', code: 'print(1)', isFillInProblem: false }],
+    relatedFindings: [{ title: 'Historical WA', errorSignature: 'WA:tests[1]', affectedCount: 6 }] });
+  expect(prompt.system).not.toContain('针对什么知识盲点');
+  expect(prompt.system).toContain('训练的代码操作或推理步骤');
+  expect(prompt.system).toContain('不推测学生错误');
 });

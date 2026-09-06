@@ -229,7 +229,7 @@ describe('analyzeTemporalPatterns', () => {
     );
     const nonNull = findings.filter(f => f !== null);
     expect(nonNull.length).toBeGreaterThanOrEqual(1);
-    const stuckFinding = nonNull.find(f => f!.title.includes('沉默挣扎'));
+    const stuckFinding = nonNull.find(f => f!.title.includes('多次未通过且无 AI 对话记录'));
     expect(stuckFinding).toBeDefined();
     expect(stuckFinding!.dimension).toBe('temporalPattern');
     expect(stuckFinding!.needsDeepDive).toBe(true);

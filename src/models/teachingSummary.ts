@@ -65,7 +65,20 @@ export interface TeachingFinding {
     affectedStudents: number[];
     affectedProblems: number[];
     metrics: Record<string, number>;
-    samples?: { code?: string[]; conversations?: string[] };
+    samples?: {
+      code?: string[];
+      conversations?: string[];
+      codeSources?: Array<{
+        recordId?: string;
+        uid: number;
+        pid: number;
+        status: number;
+        lang?: string;
+        submittedAt?: string;
+        truncated: boolean;
+        resolved: boolean;
+      }>;
+    };
   };
   needsDeepDive: boolean;
   aiSuggestion?: string;
@@ -74,6 +87,10 @@ export interface TeachingFinding {
   fillInExercise?: FillInExercise;
   /** 错误签名（来自 errorCluster 维度，合并后随主发现保留） */
   errorSignature?: string;
+  /** 判题状态码，用于匹配错误样本和聚类，不能从展示标题猜测。 */
+  errorStatus?: number;
+  /** 关联观察只能合并回其原始发现，避免把其他错误组的比例套给本组。 */
+  sourceFindingId?: string;
   /** 被折叠进本发现的关联洞察（如交叉关联、错误聚类的补充信息），展开时展示 */
   supplements?: string[];
   /** 次要发现：不单独成卡片，前端在"其他观察"中一行带过 */
@@ -264,6 +281,7 @@ export class TeachingSummaryModel {
   async saveResults(
     id: string | ObjectIdType,
     data: {
+      dataSnapshotAt?: Date;
       stats: TeachingSummary['stats'];
       findings: TeachingFinding[];
       overallSuggestion: string;
@@ -280,6 +298,7 @@ export class TeachingSummaryModel {
       {
         $set: {
           status: 'completed',
+          ...(data.dataSnapshotAt ? { dataSnapshotAt: data.dataSnapshotAt } : {}),
           stats: data.stats,
           findings: data.findings,
           overallSuggestion: data.overallSuggestion,

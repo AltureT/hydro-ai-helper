@@ -78,16 +78,14 @@ describe('SubmissionSampler', () => {
   // ─── hashDedup ───────────────────────────────────────────────────────────────
 
   describe('hashDedup', () => {
-    it('merges adjacent identical submissions (keep later one)', () => {
+    it('preserves judge-result transitions for identical code', () => {
       const subs: RawSubmission[] = [
         makeSubmission({ n: 1, code: 'int main(){}', status: 'WA' }),
         makeSubmission({ n: 2, code: 'int main(){}', status: 'AC' }),
       ];
       const result = sampler.hashDedup(subs, 'cpp');
-      expect(result).toHaveLength(1);
-      // Keep the later one
-      expect(result[0].recordId).toEqual(makeId(2));
-      expect(result[0].status).toBe('AC');
+      expect(result.map(r => r.status)).toEqual(['WA', 'AC']);
+      expect(result.map(r => r.recordId)).toEqual([makeId(1), makeId(2)]);
     });
 
     it('keeps non-adjacent identical submissions (revert scenario)', () => {
@@ -109,25 +107,24 @@ describe('SubmissionSampler', () => {
       expect(sampler.hashDedup(subs, 'cpp')).toHaveLength(1);
     });
 
-    it('merges a run of three adjacent identical submissions, keeping last', () => {
+    it('preserves the endpoints and a subsequent status transition', () => {
       const subs: RawSubmission[] = [
         makeSubmission({ n: 1, code: 'same code', status: 'CE' }),
         makeSubmission({ n: 2, code: 'same code', status: 'CE' }),
         makeSubmission({ n: 3, code: 'same code', status: 'WA' }),
       ];
       const result = sampler.hashDedup(subs, 'cpp');
-      expect(result).toHaveLength(1);
-      expect(result[0].recordId).toEqual(makeId(3));
+      expect(result.map(r => r.recordId)).toEqual([makeId(1), makeId(2), makeId(3)]);
     });
 
-    it('uses normalization for comparison but returns original code', () => {
-      // Same semantic code with different comments → should dedup
+    it('does not discard distinct source based on regex comment normalization', () => {
+      // Conservatively preserve changed source; comments cannot be safely stripped with regex.
       const sub1 = makeSubmission({ n: 1, code: 'int main(){} // comment A' });
       const sub2 = makeSubmission({ n: 2, code: 'int main(){} // comment B' });
       const result = sampler.hashDedup([sub1, sub2], 'cpp');
-      expect(result).toHaveLength(1);
-      // Original code (with comments) is preserved
-      expect(result[0].code).toBe('int main(){} // comment B');
+      expect(result).toHaveLength(2);
+      expect(result[0].code).toBe(sub1.code);
+      expect(result[1].code).toBe(sub2.code);
     });
   });
 
@@ -328,4 +325,20 @@ describe('SubmissionSampler', () => {
       expect(milestones).toContain('final');
     });
   });
+  it('keeps the failure-to-AC pair instead of spending the code budget on duplicate accepted source', () => {
+    const failed = makeSubmission({ n: 1, status: 'WA', code: 'failed' + 'x'.repeat(6500) });
+    const accepted = makeSubmission({ n: 2, status: 'AC', code: 'accepted' + 'y'.repeat(6500) });
+    const repeat = { ...accepted, recordId: makeId(3), timestamp: new Date(accepted.timestamp.getTime() + 60000) };
+    const result = sampler.sample([failed, accepted, repeat], 'cpp');
+    expect(result.sampledSubmissions.some(r => r.status === 'WA')).toBe(true);
+    expect(result.sampledSubmissions.some(r => r.recordId === accepted.recordId)).toBe(true);
+    expect(result.allStatuses).toHaveLength(3);
+  });
+
+  it('does not erase changes inside string literals by treating comment markers as comments', () => {
+    const before = makeSubmission({ n: 1, lang: 'python', code: 'print("# first")' });
+    const after = makeSubmission({ n: 2, lang: 'python', code: 'print("# second")' });
+    expect(sampler.hashDedup([before, after], 'python')).toHaveLength(2);
+  });
+
 });

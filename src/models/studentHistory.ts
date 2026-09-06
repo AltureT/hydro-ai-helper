@@ -20,7 +20,10 @@ export interface StudentHistoryRecord {
   jobId: ObjectIdType;
   errorDistribution: ErrorDistribution;
   avgAttemptsToAC: number;
+  /** Legacy name: number of unsolved problems with <= 2 submissions, not motivation. */
   gaveUpCount: number;
+  /** Version 2 restricts evidence to this assignment. Older history is not comparable. */
+  evidenceVersion?: 2;
   notAttemptedCount: number;
   totalProblems: number;
   solvedCount: number;

@@ -137,7 +137,7 @@ describe('consolidateFindings — crossCorrelation folding', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('finding_atRisk_1');
-    expect(result[0].supplements).toContain('7名高危学生行为分布: 2名未参与, 5名沉默挣扎');
+    expect(result[0].supplements).toContain('7名高危学生行为分布: 2名未参与, 5名沉默挣扎（数据有限，仅供参考）');
   });
 
   it('keeps a crossCorrelation standalone when no host covers its students', () => {
@@ -276,7 +276,7 @@ describe('consolidateFindings — ranking and capping', () => {
     expect(result[result.length - 1].dimension).toBe('progress');
 
     const atRisk = result.find(f => f.id === 'atrisk');
-    expect(atRisk?.supplements).toContain('7名高危学生行为分布: 2名未参与');
+    expect(atRisk?.supplements).toContain('7名高危学生行为分布: 2名未参与（数据有限，仅供参考）');
 
     const merged1138 = result.find(f => f.id === 'common_1138');
     expect(merged1138?.errorSignature).toBe('WA:tests[1,2]');

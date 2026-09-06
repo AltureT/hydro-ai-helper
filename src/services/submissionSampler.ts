@@ -66,8 +66,9 @@ export class SubmissionSampler {
   }
 
   private hashCode(code: string, lang: string): string {
-    const normalized = this.normalizeCode(code, lang);
-    return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+    // Regex comment/whitespace stripping can change string literals. Only
+    // byte-identical source in the same language is safe to deduplicate.
+    return createHash('sha256').update(`${lang}\0${code}`).digest('hex').slice(0, 16);
   }
 
   hashDedup(submissions: RawSubmission[], lang: string): RawSubmission[] {
@@ -77,16 +78,20 @@ export class SubmissionSampler {
     let i = 0;
 
     while (i < submissions.length) {
-      const currentHash = this.hashCode(submissions[i].code, lang);
+      const currentHash = this.hashCode(submissions[i].code, submissions[i].lang || lang);
       let j = i;
 
       // Advance j while adjacent hashes match
-      while (j + 1 < submissions.length && this.hashCode(submissions[j + 1].code, lang) === currentHash) {
+      while (j + 1 < submissions.length
+        && this.hashCode(submissions[j + 1].code, submissions[j + 1].lang || lang) === currentHash
+        && submissions[j + 1].status === submissions[i].status
+        && submissions[j + 1].score === submissions[i].score) {
         j++;
       }
 
-      // Keep the last one in the run
-      result.push(submissions[j]);
+      // Preserve the original first-AC timestamp as well as the final record.
+      result.push(submissions[i]);
+      if (j !== i) result.push(submissions[j]);
       i = j + 1;
     }
 
@@ -120,7 +125,7 @@ export class SubmissionSampler {
 
   // ── Step 3: Mark milestones ───────────────────────────────────────────────────
 
-  markMilestones(submissions: RawSubmission[]): MilestonedSubmission[] {
+  markMilestones(submissions: RawSubmission[], original = submissions): MilestonedSubmission[] {
     if (submissions.length === 0) return [];
 
     const result: MilestonedSubmission[] = submissions.map((s) => ({ ...s, milestones: [] as string[] }));
@@ -130,8 +135,8 @@ export class SubmissionSampler {
     for (let i = 0; i < result.length; i++) {
       const curr = result[i];
 
-      if (i === 0) curr.milestones.push('first');
-      if (i === result.length - 1) curr.milestones.push('final');
+      if (curr.recordId === original[0].recordId) curr.milestones.push('first');
+      if (curr.recordId === original[original.length - 1].recordId) curr.milestones.push('final');
 
       if (curr.status === 'AC' && !firstAcMarked) {
         curr.milestones.push('first_ac');
@@ -247,7 +252,7 @@ export class SubmissionSampler {
     const ceMerged = this.mergeCE(deduped);
 
     // Step 3: Mark milestones
-    const milestoned = this.markMilestones(ceMerged);
+    const milestoned = this.markMilestones(ceMerged, submissions);
 
     // Step 4: Priority sampling
     // Sort candidates by priority, fill budget
@@ -272,6 +277,17 @@ export class SubmissionSampler {
         if (selected.length >= MAX_SAMPLES) break;
         // Check if already selected
         if (selected.some((s) => s.sub.recordId === sub.recordId)) continue;
+        const duplicate = selected.find(s => s.sub.code === sub.code
+          && s.sub.lang === sub.lang && s.sub.status === sub.status && s.sub.score === sub.score);
+        if (duplicate) {
+          // Repeated accepted source does not need another code block. Keep the
+          // real first-AC record and leave all repetitions in the full timeline.
+          if (p === 'first_ac') {
+            duplicate.sub = sub;
+            duplicate.primary = p;
+          }
+          continue;
+        }
         const code = this.applyCodeConstraints(sub);
         const tokens = estimateTokens(code);
         if (tokenBudget - tokens < 0 && selected.length > 0) continue;
@@ -283,7 +299,9 @@ export class SubmissionSampler {
     // Evenly-spaced fallback: if still under MAX_SAMPLES and budget remains
     if (selected.length < MAX_SAMPLES && tokenBudget > 0) {
       const remaining = milestoned.filter(
-        (sub) => !selected.some((s) => s.sub.recordId === sub.recordId)
+        (sub) => !selected.some((s) => s.sub.recordId === sub.recordId
+          || (s.sub.code === sub.code && s.sub.lang === sub.lang
+            && s.sub.status === sub.status && s.sub.score === sub.score))
       );
       if (remaining.length > 0) {
         const slots = MAX_SAMPLES - selected.length;

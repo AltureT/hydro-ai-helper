@@ -119,6 +119,7 @@ class TeachingSummaryModel {
         await this.collection.updateOne({ _id }, {
             $set: {
                 status: 'completed',
+                ...(data.dataSnapshotAt ? { dataSnapshotAt: data.dataSnapshotAt } : {}),
                 stats: data.stats,
                 findings: data.findings,
                 overallSuggestion: data.overallSuggestion,

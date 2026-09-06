@@ -1,3 +1,4 @@
+import { ObjectId } from '../../utils/mongo';
 import { TeachingAnalysisService, AnalyzeInput } from '../../services/teachingAnalysisService';
 
 // ─── Mock helpers ────────────────────────────────────────────────────────────
@@ -11,7 +12,7 @@ function createMockDb(overrides: Record<string, any[]> = {}) {
   const collections: Record<string, any[]> = {
     record: [],
     ai_conversations: [],
-    ai_messages: [],
+    ai_messages: (overrides.ai_conversations || []).map(c => makeMessage(String(c._id), 'student', 'debug')),
     ai_jailbreak_logs: [],
     ...overrides,
   };
@@ -26,13 +27,19 @@ function createMockDb(overrides: Record<string, any[]> = {}) {
         if (filter) {
           data = data.filter((doc: any) => {
             for (const [key, val] of Object.entries(filter)) {
-              const docVal = doc[key];
+              const docVal = key === '_id' && typeof doc[key] === 'string' && doc.judgeAt
+                ? ObjectId.createFromTime(Math.floor(doc.judgeAt.getTime() / 1000)) : doc[key];
+              if ((val as any)?.toHexString) {
+                if (String(docVal) !== String(val)) return false;
+                continue;
+              }
               if (val && typeof val === 'object' && !Array.isArray(val)) {
                 const op = val as any;
                 if (op.$in && !op.$in.includes(docVal)) return false;
                 if (op.$ne !== undefined && docVal === op.$ne) return false;
                 if (op.$gte && docVal < op.$gte) return false;
                 if (op.$lte && docVal > op.$lte) return false;
+                if (op.$lt && docVal >= op.$lt) return false;
               } else {
                 if (docVal !== val) return false;
               }
@@ -58,11 +65,12 @@ function makeRecord(pid: number, uid: number, status: number, id?: string): any 
   return {
     _id: id || `rec_${pid}_${uid}_${status}_${Math.random().toString(36).slice(2, 6)}`,
     domainId: 'test',
+    contest: '0123456789abcdef01234567',
     pid,
     uid,
     status,
     score: status === STATUS_AC ? 100 : 0,
-    judgeAt: new Date(),
+    judgeAt: new Date(Date.now() - 2000),
   };
 }
 
@@ -83,7 +91,7 @@ function makeMessage(conversationId: string, role: string, questionType?: string
     role,
     questionType,
     content: 'test message',
-    timestamp: new Date(),
+    timestamp: new Date(Date.now() - 2000),
   };
 }
 
@@ -96,15 +104,16 @@ function makeJailbreak(
     _id: `jb_${userId}_${Math.random().toString(36).slice(2, 6)}`,
     domainId,
     userId,
+    problemId: '1',
     category,
-    createdAt: new Date(),
+    createdAt: new Date(Date.now() - 2000),
   };
 }
 
 function baseInput(overrides: Partial<AnalyzeInput> = {}): AnalyzeInput {
   return {
     domainId: 'test',
-    contestId: 'contest1',
+    contestId: '0123456789abcdef01234567',
     pids: [1, 2, 3],
     studentUids: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
     ...overrides,
@@ -128,7 +137,7 @@ describe('TeachingAnalysisService', () => {
       const db = createMockDb({
         record: records,
         ai_conversations: conversations,
-        ai_messages: [],
+        ai_messages: conversations.map(c => makeMessage(String(c._id), 'student', 'debug')),
       });
 
       const service = new TeachingAnalysisService(db);
@@ -468,4 +477,14 @@ describe('TeachingAnalysisService', () => {
       expect(atRisk.length).toBe(0);
     });
   });
+  it('resolves domain problem aliases for AI conversations and safety events', async () => {
+    const conversation = makeConversation(101, 'D3102');
+    const log = { ...makeJailbreak(101), problemId: 'D3102' };
+    const result = await new TeachingAnalysisService(createMockDb({
+      record: [makeRecord(1, 101, STATUS_WA)],
+      ai_conversations: [conversation], ai_jailbreak_logs: [log],
+    })).analyze(baseInput({ pidAliases: new Map([[1, ['D3102']]]) }));
+    expect(result.stats.aiUserCount).toBe(1);
+  });
+
 });

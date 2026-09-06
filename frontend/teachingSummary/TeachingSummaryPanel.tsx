@@ -1,3 +1,4 @@
+import { FindingCodeSample } from './FindingCodeSample';
 /**
  * TeachingSummaryPanel — teacher-facing UI for AI teaching summary generation.
  * Injects into homework/contest scoreboard pages for whole-class analysis.
@@ -52,7 +53,6 @@ const I18N_FALLBACK: Record<string, string> = {
   ai_helper_teaching_summary_feedback_helpful: '有帮助',
   ai_helper_teaching_summary_feedback_not_helpful: '没帮助',
   ai_helper_teaching_summary_feedback_thanks: '感谢反馈！',
-  ai_helper_teaching_summary_copy_warning: '共性错误代码示例：',
   ai_helper_teaching_summary_failed: '生成失败，请重试',
   ai_helper_teaching_summary_empty: '暂无教学总结，点击上方按钮生成',
   ai_helper_teaching_summary_generating_notice: '正在分析学生学习数据，请稍候...',
@@ -77,10 +77,10 @@ const DIMENSION_LABELS: Record<string, string> = {
   strategy: '学习策略',
   atRisk: '完成情况',
   difficulty: '题目通过情况',
-  progress: '进步趋势',
-  cognitivePath: '认知路径',
-  aiEffectiveness: 'AI 实效',
-  temporalPattern: '行为模式',
+  progress: '完成情况',
+  cognitivePath: '提交情况',
+  aiEffectiveness: 'AI 使用观察',
+  temporalPattern: '提交观察',
   crossCorrelation: '交叉关联',
 };
 
@@ -91,7 +91,7 @@ const METRIC_LABELS: Record<string, string> = {
   comprehensionPct: '理解类提问占比',
   aiUserCount: 'AI 使用人数',
   nonAiUserCount: '未使用 AI 人数',
-  bruteForceCount: '暴力尝试人数',
+  bruteForceCount: '多次未通过人数',
   heavyUserCount: '高频使用人数',
   jailbreakStudentCount: '越狱学生数',
   totalJailbreaks: '越狱总次数',
@@ -100,7 +100,10 @@ const METRIC_LABELS: Record<string, string> = {
   aiPassRate: 'AI 用户通过率',
   nonAiPassRate: '非 AI 通过率',
   diff: '差异',
-  sameSignatureCount: '同一错误位学生数',
+  sameSignatureCount: '相同判题特征且尚未通过人数',
+  resolvedCount: '后来已通过人数',
+  unresolvedCount: '仍未通过人数',
+  pendingCount: '待判题或状态待核实人数',
   aiGroupSize: 'AI组人数',
   nonAiGroupSize: '非AI组人数',
   aiACRate: 'AI组通过率',
@@ -250,12 +253,13 @@ const ReviewActions: React.FC<{ markdown: string }> = ({ markdown }) => {
 // ─── FindingCard subcomponent ─────────────────────────────────────────────────
 
 interface FindingCardProps {
+  domainId: string;
   finding: TeachingFinding;
   deepDiveText?: string;
   studentNames?: Record<string, string>;
 }
 
-const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studentNames }) => {
+const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studentNames, domainId }) => {
   const [expanded, setExpanded] = useState(false);
   const [showAllNames, setShowAllNames] = useState(false);
   const dimensionLabel = DIMENSION_LABELS[finding.dimension] || finding.dimension;
@@ -342,26 +346,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studen
             />
           )}
 
-          {/* 典型错误代码 */}
-          {codeSample && (
-            <div style={{ marginTop: SPACING.md }}>
-              <div style={{
-                fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary,
-                marginBottom: SPACING.sm, letterSpacing: '0.02em',
-              }}>
-                {t('ai_helper_teaching_summary_copy_warning')}
-              </div>
-              <pre style={{
-                margin: 0, fontSize: '13px', overflowX: 'auto',
-                backgroundColor: '#1e293b', borderRadius: RADIUS.md,
-                padding: SPACING.base, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                color: '#e2e8f0', lineHeight: 1.6,
-                fontFamily: "'SFMono-Regular', 'Menlo', 'Consolas', monospace",
-              }}>
-                {codeSample}
-              </pre>
-            </div>
-          )}
+          {codeSample && <FindingCodeSample finding={finding} domainId={domainId} />}
 
           {/* 涉及学生名单 — 教师可据此点名辅导 */}
           {names.length > 0 && (
@@ -816,6 +801,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
         ) : (
           primaryFindings.map(f => (
             <FindingCard
+                  domainId={domainId}
               key={f.id}
               finding={f}
               deepDiveText={summary.deepDiveResults?.[f.id]}
