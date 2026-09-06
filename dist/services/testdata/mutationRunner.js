@@ -83,7 +83,7 @@ function classifyExecutionDetails(details, expectedLength) {
     }
     // Inspect the complete batch before crediting a kill: a later infrastructure
     // failure must not disappear behind an earlier candidate failure.
-    return nonzero ? 'nonzero' : timedOut ? 'timeout' : killed ? 'killed' : 'accepted';
+    return nonzero ? 'nonzero' : killed ? 'killed' : timedOut ? 'timeout' : 'accepted';
 }
 const PYTHON_SYNTAX_PROBE = `import sys
 try:

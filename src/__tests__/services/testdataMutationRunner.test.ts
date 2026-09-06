@@ -526,6 +526,25 @@ describe('testdata mutation sandbox runner', () => {
     });
   });
 
+  it.each([
+    ['Runtime Error', false], ['Runtime Error', true],
+    ['Output Limit Exceeded', false], ['Output Limit Exceeded', true],
+  ])('does not spend a timeout retry after another case proves %s (reversed=%p)', async (status, reversed) => {
+    const runner = makeRunner();
+    const details = [
+      detail({ status: status as string, accepted: false, exitStatus: 1,
+        ...(status === 'Output Limit Exceeded' ? { error: 'output limit' } : {}) }),
+      detail({ status: 'Time Limit Exceeded', accepted: false, timedOut: true, exitStatus: 1 }),
+    ];
+    runner.runPythonBatchDetailed.mockResolvedValue(reversed ? details.reverse() : details);
+
+    const summary = await evaluateMutationCandidates({ ...baseInput(runner),
+      cases: [{ input: '1\n', answer: '1\n' }, { input: '2\n', answer: '2\n' }] });
+
+    expect(summary).toMatchObject({ status: 'completed', viable: 1, killed: 1, score: 1 });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
   it('aggregates viable and killed counts without returning candidate source', async () => {
     const runner = makeRunner();
     runner.runPythonBatchDetailed
