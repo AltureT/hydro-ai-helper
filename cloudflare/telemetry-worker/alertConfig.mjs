@@ -1,6 +1,6 @@
 // Telegram alert-channel config: encryption, validation, and safe rendering.
 //
-// Security model (see docs/superpowers/specs/2026-06-24-telegram-alert-config-design.md):
+// Alert configuration security model:
 // - Bot token + chat_id are encrypted together in one AES-GCM envelope, with a
 //   key derived via HKDF-SHA-256 from the dedicated `ALERT_CONFIG_KEY` secret.
 // - AAD binds `id|keyVersion` so the row's identity/version can't be swapped.
