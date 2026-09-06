@@ -23,19 +23,15 @@ import {
   type TestdataRetryGuidance,
 } from './retryPolicyHints';
 import {
-  VerificationSummaryView,
   type VerificationSummaryData,
 } from './VerificationSummaryView';
 import {
-  ProblemSpecSummaryView,
   type ProblemSpecSummaryData,
 } from './ProblemSpecSummaryView';
 import {
-  CoverageSummaryView,
   type CoverageSummaryData,
 } from './CoverageSummaryView';
 import {
-  TestdataRiskSummaryView,
   type TestdataRiskAssessment,
 } from './TestdataRiskSummaryView';
 import {
@@ -44,6 +40,8 @@ import {
   type TestdataApplyPresentation,
   type TestdataApplyResult,
 } from './applyResult';
+
+import { TestdataPreviewSummary } from './TestdataPreviewSummary';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -114,6 +112,8 @@ interface GenerationPlan {
   modelRolesUsed?: string[];
   problemType: 'function' | 'traditional';
   isFillIn?: boolean;
+  isSkeleton?: boolean;
+  requiresConfigReview?: boolean;
   analysis?: string;
   notes?: string;
   notesStructured?: {
@@ -224,11 +224,6 @@ const KIND_BADGE_KEYS: Record<string, string> = {
   validator: 'ai_helper_testdata_kind_generator',
 };
 
-const ORIGIN_BADGE_KEYS: Record<string, string> = {
-  executed: 'ai_helper_testdata_badge_executed',
-  'ai-only': 'ai_helper_testdata_badge_ai_only',
-  deterministic: 'ai_helper_testdata_badge_deterministic',
-};
 
 const GENERATION_STAGE_GROUPS: Array<{
   key: string;
@@ -260,17 +255,6 @@ function getGenerationStageGroupIndex(stage: GenerationProgressStage): number {
 
 const JOB_POLL_INTERVAL_MS = 2_000;
 
-// deterministic 用中性灰：getBadgeStyle 无 neutral 变体，借 info 外形覆盖配色
-const getOriginBadgeStyle = (origin: string): React.CSSProperties => {
-  if (origin === 'executed') return getBadgeStyle('success');
-  if (origin === 'ai-only') return getBadgeStyle('warning');
-  return {
-    ...getBadgeStyle('info'),
-    color: COLORS.textMuted,
-    backgroundColor: COLORS.bgHover,
-    border: `1px solid ${COLORS.border}`,
-  };
-};
 
 const MONO_FONT = "'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace";
 
@@ -375,9 +359,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [selectedFiles, setSelectedFiles] = useState<Record<string, boolean>>({});
   const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [hasWrittenFiles, setHasWrittenFiles] = useState(false);
   const [applyResult, setApplyResult] = useState<TestdataApplyResult | null>(null);
   const [applyPresentation, setApplyPresentation] = useState<TestdataApplyPresentation | null>(null);
-  const [discardReason, setDiscardReason] = useState<'' | 'wrong_answer' | 'invalid_input' | 'weak_coverage' | 'template_problem' | 'checker_problem' | 'other'>('');
   const [outcomeSubmitting, setOutcomeSubmitting] = useState(false);
 
   const rememberJob = useCallback((jobId: string | null) => {
@@ -401,8 +385,9 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setPlan(newPlan);
     setFileContents(contents);
     setSelectedFiles(selected);
-    setActiveFile(newPlan.files[0].name);
+    setActiveFile((newPlan.files.find(file => file.kind === 'case-in') || newPlan.files[0]).name);
     setApplyResult(null);
+    setHasWrittenFiles(false);
     setApplyPresentation(null);
     setPhase('preview');
   }, []);
@@ -778,6 +763,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         const actualResult = parseTestdataApplyResult(payload);
         if (actualResult) {
           setApplyResult(actualResult);
+          if (actualResult.written.length > 0) setHasWrittenFiles(true);
           setApplyPresentation(getTestdataApplyPresentation(false, actualResult));
           setError((await parseErrorDetails(response)).message);
           setPhase('applied');
@@ -788,6 +774,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
       const data = parseTestdataApplyResult(payload);
       if (!data) throw new Error(i18n('ai_helper_err_internal'));
       setApplyResult(data);
+      if (data.written.length > 0) setHasWrittenFiles(true);
       const presentation = getTestdataApplyPresentation(true, data);
       setApplyPresentation(presentation);
       if (presentation === 'success') rememberJob(null);
@@ -816,7 +803,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               'X-Requested-With': 'XMLHttpRequest',
             },
             credentials: 'include',
-            body: JSON.stringify({ reason: discardReason || undefined }),
+            body: JSON.stringify({}),
           },
         );
         if (!response.ok) throw new Error((await parseErrorDetails(response)).message);
@@ -831,11 +818,10 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     setFileContents({});
     setSelectedFiles({});
     setActiveFile(null);
-    setDiscardReason('');
     setError(null);
     setPhase('form');
     setOutcomeSubmitting(false);
-  }, [discardReason, generationJobId, rememberJob]);
+  }, [generationJobId, rememberJob]);
 
   const handleRegenerate = useCallback(() => {
     void handleGenerate(undefined, confirmDirectFallback, generationJobId || undefined);
@@ -1242,197 +1228,17 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     if (!plan) return null;
     const caseFiles = plan.files.filter(f => f.kind === 'case-in' || f.kind === 'case-out');
     const otherFiles = plan.files.filter(f => f.kind !== 'case-in' && f.kind !== 'case-out');
-    const orderedFiles = [...otherFiles, ...caseFiles];
+    const orderedFiles = [...caseFiles, ...otherFiles];
     const active = activeFile && plan.files.some(f => f.name === activeFile) ? activeFile : orderedFiles[0]?.name;
     const selectedCount = plan.files.filter(f => selectedFiles[f.name]).length;
-    const verification = plan.verification;
-    const risk = plan.risk;
-    const bruteSkipped = verification?.bruteCheck?.skippedTimeout ?? [];
-    const bruteDisagreed = verification?.bruteCheck?.disagreed ?? [];
-    const stressCheck = verification?.stressCheck;
-    const discrimination = verification?.mode === 'sandbox'
-      ? verification.discrimination
-      : undefined;
-    const discriminationCheckedTargets = discrimination?.targets.filter(
-      target => !target.skippedReason,
-    ) ?? [];
-    const discriminationKilled = discriminationCheckedTargets.filter(
-      target => target.killed,
-    ).length;
-    const discriminationAllKilled = !!discrimination
-      && discrimination.allKilled
-      && discriminationCheckedTargets.length > 0
-      && discriminationKilled === discriminationCheckedTargets.length;
     return (
       <div>
-        {risk && (
-          <TestdataRiskSummaryView
-            risk={risk}
-            reliabilityMode={plan.reliabilityMode || 'observe'}
-            translate={i18n}
-          />
-        )}
-        <ProblemSpecSummaryView
-          specSchemaVersion={plan.specSchemaVersion}
-          summary={plan.problemSpecSummary}
-          consensusStatus={plan.specConsensusStatus}
-          conflictCount={plan.specConflictCount}
-          unresolvedConflictCount={plan.unresolvedConflictCount}
-          rolesUsed={plan.modelRolesUsed}
-        />
-        {plan.notesStructured && plan.notesStructured.warnings.length > 0 && (
-          <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
-            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
-              {i18n('ai_helper_testdata_notes_warnings_title')}
-            </div>
-            <ul style={{ margin: 0, paddingLeft: SPACING.lg }}>
-              {plan.notesStructured.warnings.map((note, index) => (
-                <li key={`${index}-${note}`} style={{ fontSize: '13px' }}>{note}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
-          <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
-            {i18n(plan.problemType === 'function' ? 'ai_helper_testdata_type_function' : 'ai_helper_testdata_type_traditional')}
-            {plan.isFillIn ? ` · ${i18n('ai_helper_testdata_type_fill_in')}` : ''}
-            {' · '}
-            {i18n('ai_helper_testdata_case_count_result', plan.caseCount)}
-            {plan.totalCaseCount && plan.totalCaseCount !== plan.caseCount
-              ? ` · ${i18n('ai_helper_testdata_total_case_count', plan.totalCaseCount)}`
-              : ''}
-            {plan.usedModel ? ` · ${plan.usedModel}` : ''}
-          </div>
-          {plan.analysis && <div style={{ fontSize: '13px' }}>{plan.analysis}</div>}
-          {!plan.notesStructured && plan.notes && (
-            <div style={{ fontSize: '13px', marginTop: SPACING.xs }}>{plan.notes}</div>
-          )}
-        </div>
-        {plan.notesStructured && plan.notesStructured.system.length > 0 && (
-          <div style={{ marginBottom: SPACING.md }}>
-            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
-              {i18n('ai_helper_testdata_notes_system_title')}
-            </div>
-            <ul style={{ margin: 0, paddingLeft: SPACING.lg }}>
-              {plan.notesStructured.system.map((note, index) => (
-                <li key={`${index}-${note}`} style={{ fontSize: '13px' }}>{note}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {plan.notesStructured?.ai && (
-          <details style={{ marginBottom: SPACING.md, fontSize: '13px' }}>
-            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
-              {i18n('ai_helper_testdata_notes_ai_toggle')}
-            </summary>
-            <div style={{ marginTop: SPACING.xs, whiteSpace: 'pre-wrap' }}>
-              {plan.notesStructured.ai}
-            </div>
-          </details>
-        )}
-        {plan.caseCoverage && plan.caseCoverage.length > 0 && (
-          <div style={{ ...getAlertStyle('info'), marginBottom: SPACING.md }}>
-            <div style={{ fontWeight: 600, marginBottom: SPACING.sm }}>
-              {i18n('ai_helper_testdata_coverage_title')}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs }}>
-              {plan.caseCoverage.map(item => (
-                <div key={item.caseNumber} style={{ fontSize: '13px', display: 'flex', gap: SPACING.sm, alignItems: 'baseline' }}>
-                  <code>{item.fileNumber}.in/.out</code>
-                  <span style={getBadgeStyle('info')}>
-                    {item.subtaskId !== undefined
-                      ? i18n('ai_helper_testdata_subtask_label', item.subtaskId)
-                      : i18n(`ai_helper_testdata_scale_${item.dataScale}`)}
-                  </span>
-                  <span style={{ color: COLORS.textSecondary }}>{item.target}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {(verification?.coverage || plan.coverageMode) && (
-          <CoverageSummaryView
-            translate={i18n}
-            coverage={verification?.coverage || {
-              mode: plan.coverageMode || 'ai-generator-unverified',
-              matrix: [],
-              totalTargets: 0,
-              passedTargets: 0,
-              criticalMissing: 0,
-            }}
-          />
-        )}
-        {verification && (
-          <div style={{ ...getAlertStyle(verification.verified === true ? 'success' : 'warning'), marginBottom: SPACING.md }}>
-            <div style={{ fontWeight: 600, marginBottom: SPACING.xs }}>
-              {i18n('ai_helper_testdata_verify_title')}
-            </div>
-            <VerificationSummaryView verification={verification} translate={i18n} />
-            <div style={{ fontSize: '13px' }}>
-              {i18n(verification.mode === 'sandbox' ? 'ai_helper_testdata_verify_mode_sandbox' : 'ai_helper_testdata_verify_mode_direct')}
-            </div>
-            {verification.oracleKind === 'accepted-record' && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_ac_candidate')}
-              </div>
-            )}
-            {verification.modelEscalation && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n(
-                  'ai_helper_testdata_verify_model_escalation',
-                  verification.modelEscalation.fromModel,
-                  verification.modelEscalation.toModel,
-                )}
-              </div>
-            )}
-            {verification.sampleCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_samples')}: {verification.sampleCheck.passed}/{verification.sampleCheck.total}
-              </div>
-            )}
-            {verification.bruteCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_brute')}: {verification.bruteCheck.agreed}/{verification.bruteCheck.compared}
-                {bruteSkipped.length > 0 && ` · ${i18n('ai_helper_testdata_verify_brute_skipped')}: [${bruteSkipped.join(', ')}]`}
-                {bruteDisagreed.length > 0 && ` · ${i18n('ai_helper_testdata_verify_brute_disagreed')}: [${bruteDisagreed.join(', ')}]`}
-              </div>
-            )}
-            {stressCheck && (
-              <div style={{ fontSize: '13px' }}>
-                {i18n('ai_helper_testdata_verify_stress')}: {' '}
-                {stressCheck.skippedReason === 'custom-checker'
-                  ? i18n('ai_helper_testdata_verify_stress_custom_checker')
-                  : `${stressCheck.agreed}/${stressCheck.compared}`}
-                {` · ${i18n('ai_helper_testdata_verify_stress_generated')}: ${stressCheck.generated}`}
-                {stressCheck.uniqueInputs !== undefined
-                  && ` · ${i18n('ai_helper_testdata_verify_stress_unique')}: ${stressCheck.uniqueInputs}/${stressCheck.generated}`}
-              </div>
-            )}
-            {discrimination && (
-              <div style={{
-                ...getAlertStyle(discriminationAllKilled ? 'success' : 'warning'),
-                marginTop: SPACING.xs,
-                padding: `${SPACING.xs} ${SPACING.sm}`,
-                fontSize: '13px',
-              }}>
-                {i18n(
-                  'ai_helper_testdata_discrimination_summary',
-                  discriminationKilled,
-                  discriminationCheckedTargets.length,
-                )}
-                {!discriminationAllKilled
-                  && ` · ${i18n('ai_helper_testdata_discrimination_warning')}`}
-              </div>
-            )}
-          </div>
-        )}
-        <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.md }}>
-          {i18n('ai_helper_testdata_review_warning')}
-        </div>
+        <TestdataPreviewSummary plan={plan} hasWrittenFiles={hasWrittenFiles} />
+        <h3 style={{ fontSize: '14px', margin: '0 0 12px' }}>{i18n('ai_helper_testdata_files_title')}</h3>
         <div style={{ display: 'flex', gap: SPACING.base, alignItems: 'stretch', flexWrap: 'wrap' }}>
           {/* 文件列表 */}
           <div style={{
-            flex: '0 0 220px', maxHeight: '420px', overflowY: 'auto',
+            flex: '1 1 220px', minWidth: 0, maxHeight: '420px', overflowY: 'auto',
             border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
           }}>
             {orderedFiles.map(f => {
@@ -1441,7 +1247,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
               return (
                 <div
                   key={f.name}
-                  onClick={() => setActiveFile(f.name)}
                   style={{
                     display: 'flex', alignItems: 'center', gap: SPACING.xs,
                     padding: `6px ${SPACING.sm}`,
@@ -1453,18 +1258,21 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                 >
                   <input
                     type="checkbox"
+                    aria-label={i18n('ai_helper_testdata_select_file', f.name)}
                     checked={!!selectedFiles[f.name]}
                     onClick={e => e.stopPropagation()}
                     onChange={() => setSelectedFiles(prev => ({ ...prev, [f.name]: !prev[f.name] }))}
                   />
-                  <span style={{ fontFamily: MONO_FONT, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => setActiveFile(f.name)}
+                    aria-current={isActive ? 'true' : undefined}
+                    title={f.name}
+                    style={{ ...getButtonStyle('ghost'), fontFamily: MONO_FONT, flex: 1, minWidth: 0,
+                      padding: '2px 0', justifyContent: 'flex-start', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >
                     {f.name}
-                  </span>
-                  {f.origin && (
-                    <span style={getOriginBadgeStyle(f.origin)}>
-                      {i18n(ORIGIN_BADGE_KEYS[f.origin])}
-                    </span>
-                  )}
+                  </button>
                   {conflict && (
                     <span style={getBadgeStyle('warning')} title={i18n('ai_helper_testdata_overwrite_hint')}>
                       {i18n('ai_helper_testdata_overwrite_badge')}
@@ -1475,7 +1283,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
             })}
           </div>
           {/* 内容编辑区 */}
-          <div style={{ flex: '1 1 320px', minWidth: '280px' }}>
+          <div style={{ flex: '3 1 320px', minWidth: 0 }}>
             {active && (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.xs }}>
@@ -1485,6 +1293,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                   </span>
                 </div>
                 <textarea
+                  aria-label={i18n('ai_helper_testdata_edit_file', active)}
                   value={fileContents[active] ?? ''}
                   onChange={e => setFileContents(prev => ({ ...prev, [active]: e.target.value }))}
                   spellCheck={false}
@@ -1505,7 +1314,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>{error}</div>
         )}
         <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.base, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button style={getButtonStyle('primary')} onClick={handleApply}>
+          <button style={getButtonStyle('primary')} onClick={handleApply} disabled={outcomeSubmitting || selectedCount === 0}>
             {i18n('ai_helper_testdata_apply_btn', selectedCount)}
           </button>
           <button
@@ -1515,20 +1324,6 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
           >
             {i18n('ai_helper_testdata_regenerate_btn')}
           </button>
-          <label style={{ ...TYPOGRAPHY.xs, color: COLORS.textSecondary, marginLeft: 'auto' }}>
-            {i18n('ai_helper_testdata_discard_reason_label')}{' '}
-            <select
-              value={discardReason}
-              onChange={event => setDiscardReason(event.target.value as typeof discardReason)}
-              disabled={outcomeSubmitting}
-              style={{ ...getInputStyle(), width: 'auto', display: 'inline-block', padding: '6px 8px' }}
-            >
-              <option value="">{i18n('ai_helper_testdata_discard_reason_none')}</option>
-              {(['wrong_answer', 'invalid_input', 'weak_coverage', 'template_problem', 'checker_problem', 'other'] as const).map(reason => (
-                <option key={reason} value={reason}>{i18n(`ai_helper_testdata_discard_reason_${reason}`)}</option>
-              ))}
-            </select>
-          </label>
           <button
             style={getButtonStyle('secondary')}
             onClick={() => void handleDiscard()}
@@ -1594,18 +1389,20 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   // Hydro 只会为首屏已有的 .section 自动添加 visible；动态插入的面板需自行标记。
   return (
     <div style={sectionStyle} className="section visible">
-      <div style={headerStyle} onClick={() => setCollapsed(prev => !prev)}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
+      <button type="button" aria-expanded={!collapsed}
+        aria-label={i18n('ai_helper_testdata_panel_title')}
+        style={{ ...headerStyle, width: '100%', border: 0, background: 'transparent', font: 'inherit' }}
+        onClick={() => setCollapsed(prev => !prev)}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
           <span style={{ fontSize: '18px' }}><Icon name="flask" size={18} /></span>
           <span style={{ fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>
             {i18n('ai_helper_testdata_panel_title')}
           </span>
-          <span style={getBadgeStyle('info')}>AI</span>
-        </div>
+        </span>
         <span style={{ color: COLORS.textMuted, fontSize: '13px' }}>
           {collapsed ? i18n('ai_helper_testdata_expand') : i18n('ai_helper_testdata_collapse')} <Icon name={collapsed ? 'chevronDown' : 'chevronUp'} />
         </span>
-      </div>
+      </button>
       {!collapsed && (
         <div style={{ padding: `0 ${SPACING.base} ${SPACING.base}` }}>
           <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.base }}>

@@ -594,7 +594,10 @@ export interface GenerationPlan {
   isFillIn?: boolean;
   analysis?: string;
   notes?: string;
-  /** 结构化说明；缺失时前端回退显示 legacy notes。 */
+  /** Presentation facts for concise teacher guidance; never used to bypass verification. */
+  isSkeleton?: boolean;
+  requiresConfigReview?: boolean;
+  /** Structured diagnostic notes retained for local troubleshooting and older clients. */
   notesStructured?: StructuredGenerationNotes;
   files: PlannedFile[];
   caseCount: number;
@@ -6656,6 +6659,7 @@ export function assemblePlan(
     analysis: response.analysis,
     notes,
     notesStructured,
+    requiresConfigReview: tieredNotes.length > 0,
     files,
     caseCount,
     coverageMode: response.coverageMode || 'ai-generator-unverified',
@@ -6921,6 +6925,8 @@ export function buildSkeletonPlan(
       content: normalizeFileContent(file.content),
     }))),
     problemType,
+    isSkeleton: true,
+    requiresConfigReview: subtaskNotes.length > 0,
     analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
     notes: subtaskNotes.length > 0
       ? `${legacyNotes}\n${subtaskNotes.map(note => note.message).join('\n')}`
