@@ -1981,6 +1981,7 @@ describe('assemblePlan', () => {
     });
 
     const config = plan.files.find(file => file.name === 'config.yaml')?.content || '';
+    expect(plan.requiresConfigReview).toBe(true);
     expect(config).toContain('1 <= id && id <= 2');
     expect(config).not.toContain('input: 3.in');
     expect(config).not.toContain('input: 4.in');
@@ -14338,6 +14339,7 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
 
   it('骨架模式：所有文件 deterministic 且无 verification', () => {
     const plan = buildSkeletonPlan({ problemKind: 'function', caseCount: 1, languages: ['py'] });
+    expect(plan.isSkeleton).toBe(true);
     expect(plan.files.every(f => f.origin === 'deterministic')).toBe(true);
     expect(plan.verification).toBeUndefined();
   });

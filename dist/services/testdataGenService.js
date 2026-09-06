@@ -5145,6 +5145,7 @@ function assemblePlan(response, options, context = {}) {
         analysis: response.analysis,
         notes,
         notesStructured,
+        requiresConfigReview: tieredNotes.length > 0,
         files,
         caseCount,
         coverageMode: response.coverageMode || 'ai-generator-unverified',
@@ -5377,6 +5378,8 @@ function buildSkeletonPlan(options, statementMarkdown = '', existingFiles = [], 
             content: normalizeFileContent(file.content),
         }))),
         problemType,
+        isSkeleton: true,
+        requiresConfigReview: subtaskNotes.length > 0,
         analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
         notes: subtaskNotes.length > 0
             ? `${legacyNotes}\n${subtaskNotes.map(note => note.message).join('\n')}`
