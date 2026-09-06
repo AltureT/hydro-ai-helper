@@ -41,7 +41,7 @@ describe('errorSignature', () => {
         { subtaskId: 20, status: 2 },
       ],
     };
-    expect(errorSignature(record as any)).toBe('WA:tests[10,20]');
+    expect(errorSignature(record as any)).toMatch(/^WA:tests\[10,20\]#[a-f0-9]{16}$/);
   });
 
   it('should use ? when both id and subtaskId are undefined', () => {
@@ -58,7 +58,7 @@ describe('errorSignature', () => {
       testCases: Array.from({ length: 10 }, (_, i) => ({ id: i + 1, status: 2 })),
     };
     const sig = errorSignature(record as any);
-    expect(sig).toBe('WA:tests[1,2,3,4,5...+5]');
+    expect(sig).toMatch(/^WA:tests\[1,2,3,4,5\.\.\.\+5\]#[a-f0-9]{16}$/);
   });
 
   it('should handle TLE status', () => {

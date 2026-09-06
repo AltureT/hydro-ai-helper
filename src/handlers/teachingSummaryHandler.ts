@@ -1,3 +1,4 @@
+import { studentPatternGroups } from '../services/analyzers/temporalPatternAnalyzer';
 /**
  * TeachingSummaryHandler - 教学总结 API 处理器
  *
@@ -11,7 +12,7 @@ import { createMultiModelClientFromConfig, extractAiErrorMetadata } from '../ser
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
-import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
+import { isFillInBlankProblem, extractFillInTemplate } from '../services/analyzers/codeSelectionService';
 import { TelemetryService } from '../services/telemetryService';
 
 export const TeachingSummaryHandlerPriv = PRIV.PRIV_READ_RECORD_CODE;
@@ -195,6 +196,7 @@ export class TeachingSummaryHandler extends Handler {
     teachingFocus?: string,
   ): Promise<void> {
     const startTime = Date.now();
+    const dataSnapshotAt = new Date(Math.floor(startTime / 1000) * 1000);
     this.ctx.get('featureStatsModel')?.recordAttempt('teaching_summary').catch(() => { /* best-effort */ });
 
     try {
@@ -213,10 +215,13 @@ export class TeachingSummaryHandler extends Handler {
         .toArray();
 
       const pidTitles = new Map<number, string>();
+      const pidAliases = new Map<number, string[]>();
       const problemContexts = problemDocs.map((doc: { docId: number; title?: unknown; content?: unknown }) => {
         const pid = doc.docId as number;
         const title = (doc.title || String(doc.docId)) as string;
         pidTitles.set(pid, title);
+        const alias = (doc as { pid?: unknown }).pid;
+        if (typeof alias === 'string' && alias) pidAliases.set(pid, [alias]);
         return { pid, title, content: (doc.content || '') as string };
       });
 
@@ -229,6 +234,8 @@ export class TeachingSummaryHandler extends Handler {
         pids,
         studentUids,
         pidTitles,
+        pidAliases,
+        dataSnapshotAt,
         contestStartTime: tdoc.beginAt ? new Date(tdoc.beginAt as string) : undefined,
         contestEndTime: tdoc.endAt ? new Date(tdoc.endAt as string) : undefined,
       });
@@ -243,16 +250,17 @@ export class TeachingSummaryHandler extends Handler {
           lang: c.lang,
           code: c.code,
           isFillInProblem: isFillInBlankProblem(problemContent),
+          sourceTemplate: extractFillInTemplate(problemContent),
         };
-      });
+      }).filter(c => !c.isFillInProblem || c.sourceTemplate !== undefined);
 
       // Aggregate temporal profiles into behavior summary (count-only) for LLM
       const behaviorCounts: Record<string, Set<number>> = {};
-      for (const profile of (analysisResult.temporalProfiles || [])) {
-        if (!behaviorCounts[profile.pattern]) {
-          behaviorCounts[profile.pattern] = new Set();
+      for (const [uid, pattern] of studentPatternGroups(analysisResult.temporalProfiles || [])) {
+        if (!behaviorCounts[pattern]) {
+          behaviorCounts[pattern] = new Set();
         }
-        behaviorCounts[profile.pattern].add(profile.uid);
+        behaviorCounts[pattern].add(uid);
       }
       const counts: BehaviorSummary = {
         persistent_learner: behaviorCounts['persistent_learner']?.size ?? 0,
@@ -318,47 +326,10 @@ export class TeachingSummaryHandler extends Handler {
 
       const deepDiveFindings = analysisResult.findings.filter(f => f.needsDeepDive && !f.isSecondary);
 
-      // Batch-fetch code samples for all deep-dive findings (avoids N+1 queries)
+      // Samples already belong to the analyzer's exact evidence records.
+      // Never replace them with an unscoped student/problem code lookup.
       if (deepDiveFindings.length > 0) {
         await model.updateProgress(summaryId, 'deep_diving');
-        const allSampleUids = new Set<number>();
-        const allSamplePids = new Set<number>();
-        for (const f of deepDiveFindings) {
-          for (const uid of f.evidence.affectedStudents.slice(0, 5)) allSampleUids.add(uid);
-          for (const pid of f.evidence.affectedProblems) allSamplePids.add(pid);
-        }
-        const allSampleRecords = allSampleUids.size > 0 && allSamplePids.size > 0
-          ? await this.ctx.db.collection('record').find({
-              domainId,
-              pid: { $in: Array.from(allSamplePids) },
-              uid: { $in: Array.from(allSampleUids) },
-              code: { $exists: true, $ne: '' },
-            }).project({ pid: 1, uid: 1, code: 1 }).limit(50).toArray()
-          : [];
-
-        // Index by pid:uid for O(1) lookup
-        const samplesByPidUid = new Map<string, string>();
-        for (const r of allSampleRecords) {
-          const key = `${r.pid}:${r.uid}`;
-          if (!samplesByPidUid.has(key)) {
-            samplesByPidUid.set(key, String((r as unknown as { code?: unknown }).code).slice(0, 500));
-          }
-        }
-
-        // Attach samples to findings
-        for (const finding of deepDiveFindings) {
-          const codes: string[] = [];
-          for (const uid of finding.evidence.affectedStudents.slice(0, 5)) {
-            for (const pid of finding.evidence.affectedProblems) {
-              const code = samplesByPidUid.get(`${pid}:${uid}`);
-              if (code) { codes.push(code); break; }
-            }
-            if (codes.length >= 3) break;
-          }
-          if (codes.length > 0) {
-            finding.evidence.samples = { code: codes };
-          }
-        }
       }
 
       for (const finding of deepDiveFindings) {
@@ -384,6 +355,7 @@ export class TeachingSummaryHandler extends Handler {
       // suggestion so the UI can surface it as a first-class deliverable
       await model.updateProgress(summaryId, 'saving');
       await model.saveResults(summaryId, {
+        dataSnapshotAt,
         stats: analysisResult.stats,
         findings: analysisResult.findings,
         overallSuggestion: overallResult.text,

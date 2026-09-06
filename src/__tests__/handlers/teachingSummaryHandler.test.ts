@@ -46,6 +46,8 @@ import {
   TeachingSummaryHandlerPriv,
 } from '../../handlers/teachingSummaryHandler';
 import { db } from 'hydrooj';
+import { TeachingAnalysisService } from '../../services/teachingAnalysisService';
+import { TeachingSuggestionService } from '../../services/teachingSuggestionService';
 
 describe('TeachingSummaryHandler exports', () => {
   it('should export TeachingSummaryHandler', () => {
@@ -110,5 +112,32 @@ describe('TeachingSummaryHandler exports', () => {
       contestId: 'contest-1',
       contestRule: 'homework',
     });
+  });
+
+  it('passes exact failure evidence through deep-dive generation and persistence without fetching arbitrary code', async () => {
+    const samples = { code: ['failed-source'], codeSources: [{
+      recordId: '0123456789abcdef01234567', uid: 1, pid: 1, status: 2, resolved: true, truncated: false,
+    }] };
+    const finding = { id: 'failure', dimension: 'commonError', needsDeepDive: true,
+      evidence: { affectedStudents: [1], affectedProblems: [1], metrics: {}, samples } };
+    (TeachingAnalysisService as jest.Mock).mockImplementation(() => ({ analyze: jest.fn().mockResolvedValue({
+      findings: [finding], stats: {}, temporalProfiles: [], fillInCandidates: [],
+    }) }));
+    const suggestion = { text: 'observed facts', tokenUsage: { promptTokens: 1, completionTokens: 1 } };
+    const generateDeepDive = jest.fn().mockResolvedValue(suggestion);
+    (TeachingSuggestionService as jest.Mock).mockImplementation(() => ({
+      generateOverallSuggestion: jest.fn().mockResolvedValue(suggestion), generateDeepDive,
+    }));
+    (db.collection as jest.Mock).mockReturnValue({ find: () => ({ toArray: async () => [{ docId: 1, title: 'Synthetic problem' }] }) });
+    const model = { updateStatus: jest.fn(), updateProgress: jest.fn(), saveResults: jest.fn() };
+    const handler = Object.create(TeachingSummaryHandler.prototype) as any;
+    const collection = jest.fn(() => { throw new Error('Handler must not fetch unscoped record code'); });
+    handler.ctx = { get: () => undefined, db: { collection } };
+    handler.resolveStudentNames = jest.fn().mockResolvedValue({ 1: 'Synthetic student' });
+    await handler.generateAsync(model, 'test', 'summary', 'contest', { pids: [1] }, [1]);
+    expect(generateDeepDive).toHaveBeenCalledWith(finding, expect.stringContaining('Synthetic problem'));
+    expect(model.saveResults).toHaveBeenCalledWith('summary', expect.objectContaining({ findings: [finding] }));
+    expect(finding.evidence.samples).toBe(samples);
+    expect(collection).not.toHaveBeenCalled();
   });
 });

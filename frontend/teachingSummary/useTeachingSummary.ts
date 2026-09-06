@@ -4,6 +4,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import type { TeachingFinding as ServerFinding } from '../../src/models/teachingSummary';
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -12,18 +13,14 @@ export interface TeachingFinding {
   dimension: string;
   severity: 'high' | 'medium' | 'low';
   title: string;
-  evidence: {
-    affectedStudents: number[];
-    affectedProblems: number[];
-    metrics: Record<string, number>;
-    samples?: { code?: string[]; conversations?: string[] };
-  };
+  evidence: ServerFinding['evidence'];
   needsDeepDive: boolean;
   aiSuggestion?: string;
   aiAnalysis?: string;
   confidence?: 'high' | 'low' | 'insufficient_data';
   /** 错误签名（合并自错误聚类维度） */
   errorSignature?: string;
+  errorStatus?: number;
   /** 折叠进本发现的关联洞察，展开时展示 */
   supplements?: string[];
   /** 次要发现：不单独成卡片，在"其他观察"中一行带过 */

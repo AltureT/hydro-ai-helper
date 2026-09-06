@@ -42,6 +42,14 @@ export function isFillInBlankProblem(problemContent: string): boolean {
   return FILL_IN_PATTERNS.some(p => p.test(problemContent));
 }
 
+/** Require one explicit code template with a hole; ambiguous templates are skipped. */
+export function extractFillInTemplate(problemContent: string): string | undefined {
+  const templates = [...problemContent.matchAll(/```[^\n]*\n([\s\S]*?)```/g)]
+    .map(match => match[1])
+    .filter(code => FILL_IN_PATTERNS.slice(0, 4).some(pattern => pattern.test(code)));
+  return templates.length === 1 ? templates[0] : undefined;
+}
+
 // ─── Readability scoring ──────────────────────────────────────────────────────
 
 /**

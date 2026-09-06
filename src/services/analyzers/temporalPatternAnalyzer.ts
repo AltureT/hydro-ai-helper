@@ -11,6 +11,7 @@ import {
   TemporalPatternLabel,
   StudentTemporalProfile,
 } from '../../models/teachingSummary';
+import { ERROR_STATUSES, EvidenceRecord, submissionTime } from './submissionEvidence';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -23,11 +24,11 @@ const STUCK_SUBMISSION_THRESHOLD = 8;
 const DEFAULT_CONTEST_DURATION_MS = 24 * 60 * 60_000;
 
 const PATTERN_LABELS: Record<TemporalPatternLabel, string> = {
-  strategic_solver: '高效解题',
-  disengaged: '未充分参与',
-  burst_then_quit: '受挫放弃',
-  stuck_silent: '沉默挣扎',
-  persistent_learner: '持续努力',
+  strategic_solver: '少量提交后通过',
+  disengaged: '少量提交后暂无新记录',
+  burst_then_quit: '密集提交后暂无新记录',
+  stuck_silent: '多次未通过且无 AI 对话记录',
+  persistent_learner: '跨时段继续尝试',
 };
 
 // Priority for "worst" aggregation (higher = worse)
@@ -39,14 +40,21 @@ const PATTERN_PRIORITY: Record<TemporalPatternLabel, number> = {
   stuck_silent: 4,
 };
 
+/** Use the same per-student grouping for the report cards and prompt counts. */
+export function studentPatternGroups(profiles: StudentTemporalProfile[]): Map<number, TemporalPatternLabel> {
+  const groups = new Map<number, TemporalPatternLabel>();
+  for (const profile of profiles) {
+    const previous = groups.get(profile.uid);
+    if (previous === undefined || PATTERN_PRIORITY[profile.pattern] > PATTERN_PRIORITY[previous]) {
+      groups.set(profile.uid, profile.pattern);
+    }
+  }
+  return groups;
+}
+
 // ── Internal types ────────────────────────────────────────────────────────────
 
-interface TimedRecord {
-  pid: number;
-  uid: number;
-  status: number;
-  judgeAt: Date;
-}
+interface TimedRecord extends EvidenceRecord {}
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
@@ -68,6 +76,8 @@ export function extractTemporalFeatures(
   records: TimedRecord[],
   contestEndTime?: Date,
 ): TemporalFeatures {
+  // Queue/system states describe judge operation, not student error attempts.
+  records = records.filter(r => r.status === STATUS_AC || ERROR_STATUSES.has(r.status));
   const n = records.length;
 
   if (n === 0) {
@@ -82,16 +92,17 @@ export function extractTemporalFeatures(
     };
   }
 
-  const timestamps = records.map(r => r.judgeAt.getTime());
+  const timestamps = records.map(r => submissionTime(r)?.getTime());
+  const hasTiming = timestamps.every(t => t !== undefined);
 
   // totalActiveMinutes
-  const totalActiveMinutes = n > 1
+  const totalActiveMinutes = n > 1 && hasTiming
     ? (timestamps[n - 1] - timestamps[0]) / 60_000
     : 0;
 
   // inter-submission intervals (ms)
   const intervals: number[] = [];
-  for (let i = 1; i < n; i++) {
+  for (let i = 1; hasTiming && i < n; i++) {
     intervals.push(timestamps[i] - timestamps[i - 1]);
   }
 
@@ -121,8 +132,8 @@ export function extractTemporalFeatures(
   const firstACIndex = records.findIndex(r => r.status === STATUS_AC);
 
   // timeSinceLastSubmit
-  const timeSinceLastSubmit = contestEndTime != null
-    ? contestEndTime.getTime() - timestamps[n - 1]
+  const timeSinceLastSubmit = contestEndTime != null && hasTiming
+    ? Math.max(0, Math.min(contestEndTime.getTime(), Date.now()) - timestamps[n - 1])
     : null;
 
   return {
@@ -156,6 +167,7 @@ export function classifyPattern(
   disengagedThreshold = 2 * 60 * 60_000,
 ): TemporalPatternLabel | null {
   const hasAC = finalStatus === STATUS_AC || features.firstACIndex !== null;
+  if (!hasAC && !ERROR_STATUSES.has(finalStatus)) return null;
 
   // 1. strategic_solver
   if (features.firstACIndex !== null && features.firstACIndex <= 2) {
@@ -232,6 +244,7 @@ export function analyzeTemporalPatterns(
 
   // Classify each uid:pid pair, aggregate to student level
   const studentPatterns = new Map<number, TemporalPatternLabel>();
+  const profiles: StudentTemporalProfile[] = [];
 
   for (const uid of studentUids) {
     let worstPattern: TemporalPatternLabel | null = null;
@@ -244,10 +257,10 @@ export function analyzeTemporalPatterns(
 
       // Records must be sorted ascending
       const sorted = [...pidRecords].sort(
-        (a, b) => a.judgeAt.getTime() - b.judgeAt.getTime(),
+        (a, b) => (submissionTime(a)?.getTime() ?? 0) - (submissionTime(b)?.getTime() ?? 0),
       );
 
-      const features = extractTemporalFeatures(sorted, contestEndTime);
+      const features = extractTemporalFeatures(sorted, contestEndTime ?? new Date());
       const finalStatus = sorted[sorted.length - 1].status;
       const hasAIConversation = conversationsByUserPid.get(key) ?? false;
       const statusTransitions = countStatusTransitions(sorted);
@@ -261,10 +274,7 @@ export function analyzeTemporalPatterns(
       );
 
       if (pattern !== null) {
-        // Push profile if collector provided
-        if (outProfiles) {
-          outProfiles.push({ uid, pid, pattern, features, finalStatus });
-        }
+        profiles.push({ uid, pid, pattern, features, finalStatus });
 
         const priority = PATTERN_PRIORITY[pattern];
         if (priority > worstPriority) {
@@ -278,6 +288,8 @@ export function analyzeTemporalPatterns(
       studentPatterns.set(uid, worstPattern);
     }
   }
+
+  outProfiles?.push(...profiles);
 
   // Group students by pattern
   const patternStudents = new Map<TemporalPatternLabel, number[]>();
@@ -313,10 +325,10 @@ export function analyzeTemporalPatterns(
       id: `finding_temporalPattern_${counter}`,
       dimension: 'temporalPattern',
       severity,
-      title: `${affected.length} 名学生呈现"${label}"行为模式（${pct}%）`,
+      title: `${affected.length} 名学生在部分题目中有“${label}”记录（${pct}%，需核实）`,
       evidence: {
         affectedStudents: affected,
-        affectedProblems: pids,
+        affectedProblems: [...new Set(profiles.filter(p => affected.includes(p.uid) && p.pattern === pattern).map(p => p.pid))],
         metrics: {
           affectedCount: affected.length,
           totalStudents,
@@ -325,6 +337,7 @@ export function analyzeTemporalPatterns(
       },
       needsDeepDive,
       confidence,
+      supplements: ['仅描述本次作业的平台记录；提交间隔不等于实际用时，无 AI 对话不代表没有向教师或同伴求助，也不能据此判断动机或学习态度。'],
     });
   }
 

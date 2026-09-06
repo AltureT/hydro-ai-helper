@@ -78,6 +78,7 @@ describe('BatchSummaryService', () => {
 
   beforeEach(() => {
     mockRecordCollection = {
+      findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockReturnValue({
         sort: jest.fn().mockReturnValue({
           toArray: jest.fn().mockResolvedValue([makeRecord('1', 42, 1)]),
@@ -563,4 +564,95 @@ describe('BatchSummaryService', () => {
       expect(mockFeatureStats.recordSuccess).not.toHaveBeenCalled();
     });
   });
+  it('queries only this assignment and strips provider reasoning before saving', async () => {
+    mockAiClient.chat.mockResolvedValue({ content: '<think>(thinking...)</think>Verified report' });
+    const job = makeJob();
+    await service.execute(job, problems, () => {});
+    expect(mockRecordCollection.find).toHaveBeenCalledWith({
+      domainId: job.domainId, contest: job.contestId, uid: 42, pid: { $in: [1] }, _id: expect.objectContaining({ $lt: expect.anything() }),
+    });
+    expect(mockSummaryModel.completeSummary.mock.calls[0][1]).toBe('Verified report');
+  });
+
+  it('does not classify no submissions as giving up or fabricate prior effort', async () => {
+    mockRecordCollection.find.mockReturnValue({ sort: () => ({ toArray: async () => [] }) });
+    await service.execute(makeJob(), problems, () => {});
+    const [messages, system] = mockAiClient.chat.mock.calls[0];
+    expect(messages[0].content).toContain('本次没有提交记录');
+    expect(messages[0].content).not.toContain('情境 A');
+    expect(system).toContain('无提交不代表未思考');
+    expect(system).not.toContain('多次失败后放弃');
+  });
+
+  it('counts attempts only up to the first AC and does not reuse same-assignment or legacy history', async () => {
+    const history = { findRecent: jest.fn().mockResolvedValue([
+      { contestId: makeId(2), evidenceVersion: 2, createdAt: new Date(0), actionableAdvice: 'SAME_ASSIGNMENT' },
+      { contestId: makeId(3), createdAt: new Date(0), actionableAdvice: 'LEGACY_UNSCOPED' },
+    ]), create: jest.fn().mockResolvedValue(undefined) };
+    service = new BatchSummaryService(mockDb, mockJobModel, mockSummaryModel, mockAiClient, mockTokenUsageModel, history);
+    const records = [
+      { ...makeRecord(1, 42, 1), status: 2 },
+      makeRecord(1, 42, 2), makeRecord(1, 42, 3), makeRecord(1, 42, 4),
+    ];
+    mockRecordCollection.find.mockReturnValue({ sort: () => ({ toArray: async () => records }) });
+    await service.execute(makeJob(), problems, () => {});
+    expect(history.create).toHaveBeenCalledWith(expect.objectContaining({ avgAttemptsToAC: 2, evidenceVersion: 2 }));
+    const prompt = mockAiClient.chat.mock.calls[0][0][0].content;
+    expect(prompt).not.toContain('SAME_ASSIGNMENT');
+    expect(prompt).not.toContain('LEGACY_UNSCOPED');
+  });
+
+  it('sends each sampled language to the model when source text is unchanged', async () => {
+    const records = [
+      { ...makeRecord(1, 42, 1), code: 'print(5 / 2)', status: 2, lang: 'python3' },
+      { ...makeRecord(1, 42, 2), code: 'print(5 / 2)', status: 1, lang: 'python2' },
+    ];
+    mockRecordCollection.find.mockReturnValue({ sort: () => ({ toArray: async () => records }) });
+    await service.execute(makeJob(), problems, () => {});
+    const prompt = mockAiClient.chat.mock.calls[0][0][0].content;
+    expect(prompt).toContain('状态: WA | 语言: python3');
+    expect(prompt).toContain('状态: AC | 语言: python2');
+  });
+
+  it('orders earlier assignments by their observation window when regenerating an old report', async () => {
+    const earlier = (id: number, start: string, end: string, generated: string, advice: string) => ({
+      contestId: makeId(id), evidenceVersion: 2,
+      assignmentStartAt: new Date(start), dataSnapshotAt: new Date(end), createdAt: new Date(generated),
+      errorDistribution: { CE: 0, WA: 1, RE: 0, TLE: 0, MLE: 0, OLE: 9, AC: 0 },
+      solvedCount: 0, totalProblems: 1, actionableAdvice: advice,
+    });
+    const history = { findRecent: jest.fn().mockResolvedValue([
+      earlier(3, '2026-01-01', '2026-01-07', '2026-05-30', 'OLDER_ASSIGNMENT'),
+      earlier(4, '2026-05-01', '2026-05-07', '2026-05-20', 'FUTURE_ASSIGNMENT'),
+      earlier(5, '2026-02-01', '2026-02-07', '2026-05-10', 'LATEST_PRIOR_ADVICE'),
+      earlier(6, '2026-03-30', '2026-04-02', '2026-05-05', 'OVERLAPPING_EVIDENCE'),
+      { contestId: makeId(7), evidenceVersion: 2, createdAt: new Date(0), actionableAdvice: 'UNKNOWN_CHRONOLOGY' },
+    ]), create: jest.fn().mockResolvedValue(undefined) };
+    mockRecordCollection.findOne.mockResolvedValue({ beginAt: new Date('2026-04-01'), endAt: new Date('2026-04-07') });
+    service = new BatchSummaryService(mockDb, mockJobModel, mockSummaryModel, mockAiClient, mockTokenUsageModel, history);
+    await service.execute(makeJob({ createdAt: new Date('2026-06-01') }), problems, () => {});
+    const prompt = mockAiClient.chat.mock.calls[0][0][0].content;
+    expect(prompt).toContain('"assignments_tracked":2');
+    expect(prompt).toContain('"assignment_order":["2026-01-01T00:00:00.000Z","2026-02-01T00:00:00.000Z"]');
+    expect(prompt).toContain('LATEST_PRIOR_ADVICE');
+    expect(prompt).toContain('WA: 1/10→1/10');
+    for (const excluded of ['OLDER_ASSIGNMENT', 'FUTURE_ASSIGNMENT', 'OVERLAPPING_EVIDENCE', 'UNKNOWN_CHRONOLOGY']) {
+      expect(prompt).not.toContain(excluded);
+    }
+    expect(history.create).toHaveBeenCalledWith(expect.objectContaining({
+      assignmentStartAt: new Date('2026-04-01'), dataSnapshotAt: new Date('2026-04-07'),
+    }));
+  });
+
+  it('counts output-limit failures in the historical judge distribution', async () => {
+    const history = { findRecent: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue(undefined) };
+    service = new BatchSummaryService(mockDb, mockJobModel, mockSummaryModel, mockAiClient, mockTokenUsageModel, history);
+    const records = Array.from({ length: 10 }, (_, i) => ({ ...makeRecord(1, 42, i), status: i < 9 ? 5 : 2 }));
+    mockRecordCollection.find.mockReturnValue({ sort: () => ({ toArray: async () => records }) });
+    await service.execute(makeJob(), problems, () => {});
+    expect(history.create).toHaveBeenCalledWith(expect.objectContaining({
+      errorDistribution: { CE: 0, RE: 0, TLE: 0, MLE: 0, OLE: 9, WA: 1, AC: 0 },
+    }));
+  });
+
 });
