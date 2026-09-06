@@ -427,7 +427,7 @@ describe('TeachingSuggestionService', () => {
       pid: 1, title: 'Loop', lang: 'py.py3', code: 'for i in range(3):\n    pass', isFillInProblem: false,
     }], relatedFindings: [] });
     expect(result.text).toContain('### 课后巩固作业');
-    expect(result.text).toContain('for i in range(__BLANK_1__):');
+    expect(result.text).toContain('for i in range(________):');
     expect(result.text).not.toMatch(/thinking|\/\*/);
   });
 });
