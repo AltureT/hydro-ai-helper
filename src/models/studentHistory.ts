@@ -8,6 +8,7 @@ export interface ErrorDistribution {
   WA: number;
   TLE: number;
   MLE: number;
+  OLE?: number;
   AC: number;
 }
 
@@ -24,6 +25,9 @@ export interface StudentHistoryRecord {
   gaveUpCount: number;
   /** Version 2 restricts evidence to this assignment. Older history is not comparable. */
   evidenceVersion?: 2;
+  /** Assignment chronology and evidence cutoff, separate from report creation. */
+  assignmentStartAt?: Date;
+  dataSnapshotAt?: Date;
   notAttemptedCount: number;
   totalProblems: number;
   solvedCount: number;

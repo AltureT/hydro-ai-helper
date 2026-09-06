@@ -559,12 +559,16 @@ class TeachingAnalysisService {
         const allStudents = [...aiStudents, ...nonAiStudents];
         const severity = Math.abs(diff) >= 20 ? 'high' : Math.abs(diff) >= 10 ? 'medium' : 'low';
         const direction = diff > 0 ? '高于' : diff < 0 ? '低于' : '持平';
-        const finding = this.makeFinding('aiEffectiveness', severity, `本次有 AI 对话的学生通过率${direction}其他学生 ${Math.abs(diff)} 个百分点（${Math.round(aiPassRate * 100)}% vs ${Math.round(nonAiPassRate * 100)}%）；仅为相关观察`, allStudents, input.pids, {
+        const finding = this.makeFinding('aiEffectiveness', severity, `本次有 AI 对话组的已尝试题目通过率${direction}其他组 ${Math.abs(diff)} 个百分点（${aiAcTotal}/${aiAttemptTotal} 题次，${Math.round(aiPassRate * 100)}% vs ${nonAiAcTotal}/${nonAiAttemptTotal} 题次，${Math.round(nonAiPassRate * 100)}%）；仅为相关观察`, allStudents, input.pids, {
             aiPassRate: Math.round(aiPassRate * 100),
             nonAiPassRate: Math.round(nonAiPassRate * 100),
             diff,
             aiUserCount: aiStudents.length,
             nonAiUserCount: nonAiStudents.length,
+            aiAcceptedAttempts: aiAcTotal,
+            aiAttemptedPairs: aiAttemptTotal,
+            nonAiAcceptedAttempts: nonAiAcTotal,
+            nonAiAttemptedPairs: nonAiAttemptTotal,
         }, Math.abs(diff) >= 15);
         return [finding];
     }

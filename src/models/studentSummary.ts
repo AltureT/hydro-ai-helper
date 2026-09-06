@@ -4,6 +4,7 @@ import { type ObjectIdType } from '../utils/mongo';
 export interface SampledSubmission {
   recordId: ObjectIdType;
   status: string;
+  lang?: string;
   timestamp: Date;
   milestone: string;
 }

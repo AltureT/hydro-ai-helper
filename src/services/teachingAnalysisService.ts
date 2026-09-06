@@ -831,7 +831,7 @@ export class TeachingAnalysisService {
     const finding = this.makeFinding(
       'aiEffectiveness',
       severity,
-      `本次有 AI 对话的学生通过率${direction}其他学生 ${Math.abs(diff)} 个百分点（${Math.round(aiPassRate * 100)}% vs ${Math.round(nonAiPassRate * 100)}%）；仅为相关观察`,
+      `本次有 AI 对话组的已尝试题目通过率${direction}其他组 ${Math.abs(diff)} 个百分点（${aiAcTotal}/${aiAttemptTotal} 题次，${Math.round(aiPassRate * 100)}% vs ${nonAiAcTotal}/${nonAiAttemptTotal} 题次，${Math.round(nonAiPassRate * 100)}%）；仅为相关观察`,
       allStudents,
       input.pids,
       {
@@ -840,6 +840,10 @@ export class TeachingAnalysisService {
         diff,
         aiUserCount: aiStudents.length,
         nonAiUserCount: nonAiStudents.length,
+        aiAcceptedAttempts: aiAcTotal,
+        aiAttemptedPairs: aiAttemptTotal,
+        nonAiAcceptedAttempts: nonAiAcTotal,
+        nonAiAttemptedPairs: nonAiAttemptTotal,
       },
       Math.abs(diff) >= 15,
     );

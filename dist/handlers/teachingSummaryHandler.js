@@ -206,8 +206,9 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                     lang: c.lang,
                     code: c.code,
                     isFillInProblem: (0, codeSelectionService_1.isFillInBlankProblem)(problemContent),
+                    sourceTemplate: (0, codeSelectionService_1.extractFillInTemplate)(problemContent),
                 };
-            });
+            }).filter(c => !c.isFillInProblem || c.sourceTemplate !== undefined);
             // Aggregate temporal profiles into behavior summary (count-only) for LLM
             const behaviorCounts = {};
             for (const [uid, pattern] of (0, temporalPatternAnalyzer_1.studentPatternGroups)(analysisResult.temporalProfiles || [])) {

@@ -450,12 +450,21 @@ describe('buildFillInPrompt', () => {
       candidates: [{
         pid: 102, title: '填空题', lang: 'python',
         code: 'x = ___', isFillInProblem: true,
+        sourceTemplate: 'x = ___\nprint(x)',
       }],
       relatedFindings: [],
     };
     const { user } = buildFillInPrompt(input);
 
     expect(user).toContain('是（避开模板代码）');
+    expect(user).toContain('原题模板（仅明确空位对应的补全区域允许挖空）');
+    expect(user).toContain('x = ___\nprint(x)');
+  });
+
+  it('rejects fill-in candidates without a verifiable original template', () => {
+    expect(() => buildFillInPrompt({ candidates: [{
+      pid: 1, title: 'Ambiguous', lang: 'python', code: 'print(1)', isFillInProblem: true,
+    }], relatedFindings: [] })).toThrow('explicit source template');
   });
 
   it('should handle empty relatedFindings', () => {

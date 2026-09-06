@@ -16,6 +16,7 @@ export interface SampledSubmission {
   recordId: ObjectIdType;
   code: string; // original code with comments (may be truncated)
   status: string;
+  lang?: string; // optional for stored samples created before language provenance
   timestamp: Date;
   milestone: string; // primary milestone tag
 }
@@ -191,8 +192,9 @@ export class SubmissionSampler {
     const maxChars = Math.floor(maxTokens * CHARS_PER_TOKEN);
     if (code.length <= maxChars) return code;
 
-    const half = Math.floor(maxChars / 2);
-    return code.slice(0, half) + '\n[...truncated...]\n' + code.slice(code.length - half);
+    const marker = '\n[...truncated...]\n';
+    const half = Math.floor((maxChars - marker.length) / 2);
+    return code.slice(0, half) + marker + code.slice(code.length - half);
   }
 
   private applyCodeConstraints(sub: RawSubmission): string {
@@ -202,7 +204,8 @@ export class SubmissionSampler {
       // CE cap: 500 tokens
       const maxChars = Math.floor(CE_TOKEN_CAP * CHARS_PER_TOKEN);
       if (code.length > maxChars) {
-        code = code.slice(0, maxChars) + '\n[...truncated...]';
+        const marker = '\n[...truncated...]';
+        code = code.slice(0, maxChars - marker.length) + marker;
       }
       return code;
     }
@@ -236,6 +239,7 @@ export class SubmissionSampler {
             recordId: sub.recordId,
             code,
             status: sub.status,
+            lang: sub.lang,
             timestamp: sub.timestamp,
             milestone: 'first+final',
           },
@@ -326,6 +330,7 @@ export class SubmissionSampler {
       recordId: sub.recordId,
       code: this.applyCodeConstraints(sub),
       status: sub.status,
+      lang: sub.lang,
       timestamp: sub.timestamp,
       milestone: primary,
     }));

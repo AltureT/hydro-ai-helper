@@ -325,14 +325,24 @@ describe('SubmissionSampler', () => {
       expect(milestones).toContain('final');
     });
   });
-  it('keeps the failure-to-AC pair instead of spending the code budget on duplicate accepted source', () => {
-    const failed = makeSubmission({ n: 1, status: 'WA', code: 'failed' + 'x'.repeat(6500) });
-    const accepted = makeSubmission({ n: 2, status: 'AC', code: 'accepted' + 'y'.repeat(6500) });
+  it.each([6500, 8000])('keeps the failure-to-AC pair with %i-character source and duplicate acceptance', (length) => {
+    const failed = makeSubmission({ n: 1, status: 'WA', code: 'failed' + 'x'.repeat(length) });
+    const accepted = makeSubmission({ n: 2, status: 'AC', code: 'accepted' + 'y'.repeat(length) });
     const repeat = { ...accepted, recordId: makeId(3), timestamp: new Date(accepted.timestamp.getTime() + 60000) };
     const result = sampler.sample([failed, accepted, repeat], 'cpp');
     expect(result.sampledSubmissions.some(r => r.status === 'WA')).toBe(true);
     expect(result.sampledSubmissions.some(r => r.recordId === accepted.recordId)).toBe(true);
     expect(result.allStatuses).toHaveLength(3);
+    expect(result.sampledSubmissions.reduce((total, s) => total + Math.ceil(s.code.length / 3.5), 0)).toBeLessThanOrEqual(4000);
+  });
+
+  it('preserves the language when identical text changes judge outcome', () => {
+    const subs = [
+      makeSubmission({ n: 1, code: 'print(5 / 2)', status: 'WA', lang: 'python3' }),
+      makeSubmission({ n: 2, code: 'print(5 / 2)', status: 'AC', lang: 'python2' }),
+    ];
+    expect(sampler.sample(subs, 'python3').sampledSubmissions.map(s => s.lang)).toEqual(['python3', 'python2']);
+    expect(sampler.sample([subs[0]], 'python3').sampledSubmissions[0].lang).toBe('python3');
   });
 
   it('does not erase changes inside string literals by treating comment markers as comments', () => {

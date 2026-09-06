@@ -26,6 +26,26 @@ function database(records: any[], conversations: any[] = [], messages: any[] = [
 }
 
 describe('analysis evidence provenance and current outcomes', () => {
+  it('exposes attempted student-problem denominators when groups attempt different numbers of problems', async () => {
+    const pids = Array.from({ length: 10 }, (_, i) => i + 1);
+    const records = students.flatMap(uid => (uid <= 5 ? [1] : pids).map(pid => ({
+      ...record(uid, uid * 100 + pid, pid === 1 ? 1 : 2), pid,
+    })));
+    const conversations = students.slice(0, 5).map(uid => ({ _id: String(uid), userId: uid, problemId: '1' }));
+    const messages = conversations.map(c => ({ conversationId: c._id, role: 'student' }));
+    const result = await new TeachingAnalysisService(database(records, conversations, messages) as any).analyze({
+      domainId: 'test', contestId: contest, studentUids: students, pids,
+    });
+    const finding = result.findings.find(f => f.dimension === 'aiEffectiveness')!;
+    expect(finding.title).toContain('已尝试题目通过率');
+    expect(finding.title).toContain('5/5 题次');
+    expect(finding.title).toContain('5/50 题次');
+    expect(finding.evidence.metrics).toMatchObject({
+      aiPassRate: 100, nonAiPassRate: 10,
+      aiAcceptedAttempts: 5, aiAttemptedPairs: 5, nonAiAcceptedAttempts: 5, nonAiAttemptedPairs: 50,
+    });
+  });
+
   it('keeps historical WA samples, counts later AC, and excludes unrelated assignments/domains', async () => {
     const failed = students.map(uid => record(uid, 100 + uid, 2, `failed-${uid}`));
     const passed = students.map(uid => record(uid, 200 + uid, 1, `accepted-${uid}`));

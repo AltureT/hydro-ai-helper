@@ -12,7 +12,7 @@ import { createMultiModelClientFromConfig, extractAiErrorMetadata } from '../ser
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
-import { isFillInBlankProblem } from '../services/analyzers/codeSelectionService';
+import { isFillInBlankProblem, extractFillInTemplate } from '../services/analyzers/codeSelectionService';
 import { TelemetryService } from '../services/telemetryService';
 
 export const TeachingSummaryHandlerPriv = PRIV.PRIV_READ_RECORD_CODE;
@@ -250,8 +250,9 @@ export class TeachingSummaryHandler extends Handler {
           lang: c.lang,
           code: c.code,
           isFillInProblem: isFillInBlankProblem(problemContent),
+          sourceTemplate: extractFillInTemplate(problemContent),
         };
-      });
+      }).filter(c => !c.isFillInProblem || c.sourceTemplate !== undefined);
 
       // Aggregate temporal profiles into behavior summary (count-only) for LLM
       const behaviorCounts: Record<string, Set<number>> = {};

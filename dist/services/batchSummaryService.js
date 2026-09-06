@@ -67,7 +67,7 @@ function buildSystemPrompt(locale, contestTitle, domainId) {
 - 情境 A [多次提交后有 AC]：描述可见的代码改动；提交次数本身不证明努力程度。
 - 情境 B [全部/大部分首次提交 AC]：肯定完成情况；仅在代码有明确优化空间时提出进阶建议，不推断实际用时或掌握程度。
 - 情境 C [本次提交尚未 AC]：先核实题目、判题和代码，不推断放弃；给一个可执行的小步骤。
-- 情境 D [历史数据对比有明显进步]：结合"历史背景"用数据点出纵向成长（如"WA 占比明显下降"）。
+- 情境 D [有可比的历史记录]：按作业先后描述完成情况；不把跨题错误比例变化当作能力进步。
 （注意：学生可能同时符合多个情境，请综合判断。）`;
     }
     return `You are a passionate, senior programming teacher deeply versed in educational psychology, particularly "Growth Mindset". Your task is to write a learning summary the student will actually read: first a per-problem review, then an encouraging overall evaluation, based on their submissions for this homework and historical data on an Online Judge (OJ) platform.
@@ -106,7 +106,7 @@ Analyze the student data and identify which scenario applies:
 - Scenario A [Repeated submissions then AC]: Describe observed changes; counts alone do not prove effort.
 - Scenario B [Most/All first-try AC]: Acknowledge completion; do not infer time spent or mastery.
 - Scenario C [Submissions without AC]: Verify code and judge evidence, then suggest a small check; do not infer giving up.
-- Scenario D [Clear improvement from historical data]: Emphasize longitudinal growth using historical context.`;
+- Scenario D [Comparable prior assignments]: Describe completion in assignment order; do not equate changing error percentages across problems with skill improvement.`;
 }
 const CONTENT_TOKEN_BUDGET = 2000;
 const CHARS_PER_TOKEN = 3.5;
@@ -138,7 +138,7 @@ function extractActionableAdvice(text) {
     return text.slice(-200).trim();
 }
 function computeStudentStats(snapshots) {
-    const dist = { CE: 0, RE: 0, WA: 0, TLE: 0, MLE: 0, AC: 0 };
+    const dist = { CE: 0, RE: 0, WA: 0, TLE: 0, MLE: 0, OLE: 0, AC: 0 };
     let acAttempts = 0;
     let acCount = 0;
     let gaveUp = 0;
@@ -177,13 +177,14 @@ function buildHistoricalContext(records) {
         return null;
     const latest = records[0];
     const oldest = records[records.length - 1];
-    const latestTotal = Object.values(latest.errorDistribution).reduce((a, b) => a + b, 0) || 1;
-    const oldestTotal = Object.values(oldest.errorDistribution).reduce((a, b) => a + b, 0) || 1;
-    const ceShift = `CE: ${Math.round((oldest.errorDistribution.CE / oldestTotal) * 100)}%→${Math.round((latest.errorDistribution.CE / latestTotal) * 100)}%`;
-    const waShift = `WA: ${Math.round((oldest.errorDistribution.WA / oldestTotal) * 100)}%→${Math.round((latest.errorDistribution.WA / latestTotal) * 100)}%`;
+    const latestTotal = Object.values(latest.errorDistribution).reduce((a, b) => a + b, 0);
+    const oldestTotal = Object.values(oldest.errorDistribution).reduce((a, b) => a + b, 0);
+    const ceShift = `CE: ${oldest.errorDistribution.CE}/${oldestTotal}→${latest.errorDistribution.CE}/${latestTotal}`;
+    const waShift = `WA: ${oldest.errorDistribution.WA}/${oldestTotal}→${latest.errorDistribution.WA}/${latestTotal}`;
     const solvedTrend = records.slice().reverse().map((r) => `${r.solvedCount}/${r.totalProblems}`).join(' → ');
     const ctx = {
         assignments_tracked: records.length,
+        assignment_order: records.slice().reverse().map(r => r.assignmentStartAt?.toISOString()),
         error_shift: `${ceShift}, ${waShift}`,
         solved_rate_trend: solvedTrend,
         last_advice: latest.actionableAdvice || '',
@@ -213,7 +214,7 @@ function buildUserPrompt(problems, sampleResults) {
         if (result.sampledSubmissions.length > 0) {
             parts.push('\n### 代码样本');
             for (const sub of result.sampledSubmissions) {
-                parts.push(`#### [提交 #r${sub.recordId}] 里程碑: ${sub.milestone} | 状态: ${sub.status} | 时间: ${sub.timestamp.toISOString()}`);
+                parts.push(`#### [提交 #r${sub.recordId}] 里程碑: ${sub.milestone} | 状态: ${sub.status} | 语言: ${sub.lang || '未记录'} | 时间: ${sub.timestamp.toISOString()}`);
                 parts.push('```\n' + sub.code + '\n```');
             }
         }
@@ -363,7 +364,7 @@ class BatchSummaryService {
                     code: r.code ?? '',
                     status: STATUS_MAP[r.status] ?? String(r.status),
                     score: r.score ?? 0,
-                    lang: r.lang ?? 'cpp',
+                    lang: r.lang ?? 'unknown',
                     timestamp: (0, submissionEvidence_1.submissionTime)(r) ?? (() => { throw new Error('Submission time unavailable'); })(),
                     runtime: r.time ?? 0,
                     memory: r.memory ?? 0,
@@ -386,10 +387,16 @@ class BatchSummaryService {
             if (this.historyModel) {
                 try {
                     const historyRecords = await this.historyModel.findRecent(job.domainId, summary.userId, 20);
+                    const assignmentStartAt = recordBounds?.$gte?.getTimestamp();
                     const seenContests = new Set([String(job.contestId)]);
-                    const distinctHistory = historyRecords.filter(record => {
+                    const distinctHistory = historyRecords.filter(record => record.evidenceVersion === 2 && record.createdAt < job.createdAt
+                        && assignmentStartAt && record.assignmentStartAt instanceof Date
+                        && record.dataSnapshotAt instanceof Date
+                        && record.assignmentStartAt < assignmentStartAt
+                        && record.dataSnapshotAt <= assignmentStartAt).sort((a, b) => b.assignmentStartAt.getTime() - a.assignmentStartAt.getTime()
+                        || b.createdAt.getTime() - a.createdAt.getTime()).filter(record => {
                         const contest = String(record.contestId);
-                        if (record.evidenceVersion !== 2 || record.createdAt >= job.createdAt || seenContests.has(contest))
+                        if (seenContests.has(contest))
                             return false;
                         seenContests.add(contest);
                         return true;
@@ -433,6 +440,8 @@ class BatchSummaryService {
                     jobId: job._id,
                     ...stats,
                     evidenceVersion: 2,
+                    assignmentStartAt: recordBounds?.$gte?.getTimestamp(),
+                    dataSnapshotAt: recordBounds?.$lt.getTimestamp(),
                     actionableAdvice: advice,
                     createdAt: new Date(),
                 }).catch((histErr) => {

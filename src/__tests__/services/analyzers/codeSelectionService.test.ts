@@ -1,4 +1,4 @@
-import { shouldGenerateFillIn, scoreReadability, selectACCode, isFillInBlankProblem } from '../../../services/analyzers/codeSelectionService';
+import { shouldGenerateFillIn, scoreReadability, selectACCode, isFillInBlankProblem, extractFillInTemplate } from '../../../services/analyzers/codeSelectionService';
 
 describe('shouldGenerateFillIn', () => {
   it('returns true when all trigger conditions are met', () => {
@@ -39,6 +39,15 @@ describe('isFillInBlankProblem', () => {
     expect(isFillInBlankProblem('请补全代码中的 ___ 部分')).toBe(true);
     expect(isFillInBlankProblem('请补全 /* your code here */ 的内容')).toBe(true);
     expect(isFillInBlankProblem('写一个函数计算阶乘')).toBe(false);
+  });
+
+  it('requires a unique fenced template with explicit holes before reusing a fill-in problem', () => {
+    const template = 'total = 1\nfor i in range(1, 4):\n    ___\nprint(total)\n';
+    const statement = '请补全乘法语句\n```python\n' + template + '```\n';
+    expect(extractFillInTemplate(statement)).toBe(template);
+    expect(extractFillInTemplate('请补全代码，但模板缺失')).toBeUndefined();
+    expect(extractFillInTemplate(statement + '```python\nx = ___\n```')).toBeUndefined();
+    expect(extractFillInTemplate('```python\nprint(1)\n```')).toBeUndefined();
   });
 });
 
