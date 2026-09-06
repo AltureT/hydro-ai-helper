@@ -348,6 +348,9 @@ function preserveDependentArrayLengths(
   for (const field of spec.inputFields) {
     if (field.type !== 'array' || (parseTokenRange(field.encoding)?.countFieldId !== countFieldId
       && !expressions.includes(`length(${field.id}) = ${countFieldId}`))) continue;
+    const lengthPrefix = `length(${field.id}) = `;
+    if (expressions.some(expression => expression.startsWith(lengthPrefix)
+      && expression !== `${lengthPrefix}${countFieldId}`)) return 'MUTATION_NOT_ISOLATED';
     if (count < 0) return 'MUTATION_NOT_ISOLATED';
     const layout = resolveSequenceLayout(original, spec, field.id);
     if (typeof layout === 'string') return layout;

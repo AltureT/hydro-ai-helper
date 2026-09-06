@@ -39,6 +39,29 @@ describe('bounded constraint compatibility and seed selection', () => {
     expect(missing.gaps).toContainEqual(expect.objectContaining({ targetId: 'N', reasonCode: 'DEPENDENCY_NOT_RESOLVED' }));
   });
 
+  it.each(['global', 'same-subtask', 'other-subtask'])(
+    'preserves an explicit second array length rule in the %s scope', scope => {
+      const spec = fixture();
+      spec.inputFields.push({ id: 'm', name: 'm', type: 'integer', encoding: 'line:1 token:2' });
+      spec.inputFields[1].dependsOn = ['n', 'm'];
+      const bound = constraint('N', 'n <= 8');
+      const length = constraint('OTHER_LENGTH', 'length(a) = m');
+      if (scope !== 'global') {
+        bound.scope = { subtaskId: 1 };
+        length.scope = { subtaskId: scope === 'same-subtask' ? 1 : 2 };
+      }
+      spec.constraints = [bound, length];
+      const result = buildConstraintProbes({ spec, statementHash: spec.statementHash, specHash: '2'.repeat(64),
+        seeds: [{ source: 'formal', index: 0, input: '3 3\n1 2 3\n', subtaskId: 1 }] });
+      if (scope === 'other-subtask') {
+        expect(result.probes.filter(p => p.targetId === 'N')).toHaveLength(1);
+      } else {
+        expect(result.probes.filter(p => p.targetId === 'N')).toEqual([]);
+        expect(result.gaps).toContainEqual(expect.objectContaining({ targetId: 'N', reasonCode: 'MUTATION_NOT_ISOLATED' }));
+      }
+    },
+  );
+
   it('does not treat function-call metadata as an input operation sequence', () => {
     const spec = fixture(); spec.problemKind = 'function';
     spec.constraints = [constraint('N', '1 <= n <= 10'), constraint('LEN', 'length(a) = n')];

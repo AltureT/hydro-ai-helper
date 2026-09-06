@@ -212,6 +212,10 @@ function preserveDependentArrayLengths(original, mutation, spec, target, countFi
         if (field.type !== 'array' || (parseTokenRange(field.encoding)?.countFieldId !== countFieldId
             && !expressions.includes(`length(${field.id}) = ${countFieldId}`)))
             continue;
+        const lengthPrefix = `length(${field.id}) = `;
+        if (expressions.some(expression => expression.startsWith(lengthPrefix)
+            && expression !== `${lengthPrefix}${countFieldId}`))
+            return 'MUTATION_NOT_ISOLATED';
         if (count < 0)
             return 'MUTATION_NOT_ISOLATED';
         const layout = resolveSequenceLayout(original, spec, field.id);
