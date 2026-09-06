@@ -25,6 +25,13 @@ function build(spec: ProblemSpecV1, inputs: string[]) {
 }
 
 describe('bounded constraint compatibility and seed selection', () => {
+  it('does not treat function-call metadata as an input operation sequence', () => {
+    const spec = fixture(); spec.problemKind = 'function';
+    spec.constraints = [constraint('N', '1 <= n <= 10'), constraint('LEN', 'length(a) = n')];
+    const baseline = build(spec, ['3\n1 2 3\n']);
+    spec.operations = [{ name: 'lengthOfLIS', arguments: ['a'], preconditions: ['a is an integer array'], effects: ['return LIS length'] }];
+    expect(build(spec, ['3\n1 2 3\n'])).toEqual(baseline);
+  });
   it('checks unique field names without changing the frozen spec or confusing ids', () => {
     const spec = fixture();
     spec.inputFields = [
@@ -108,6 +115,7 @@ describe('bounded constraint compatibility and seed selection', () => {
     spec.constraints = [constraint('UNIQUE', 'allDistinct(a)')];
     const result = build(spec, ['2\n1 1\n', '2\n1 2\n']);
     expect(result.probes).toEqual([]);
+    expect(build(spec, ['2\n1 2\n', '2\n1 1\n']).probes).toEqual([]);
     expect(result.gaps).toContainEqual(expect.objectContaining({ targetId: 'UNIQUE', reasonCode: 'MUTATION_NOT_ISOLATED' }));
   });
 

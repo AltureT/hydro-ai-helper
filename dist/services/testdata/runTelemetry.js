@@ -10,6 +10,7 @@ const crypto_1 = require("crypto");
 const telemetryService_1 = require("../telemetryService");
 const failures_1 = require("./failures");
 const mutation_1 = require("./mutation");
+const specConsensus_1 = require("./specConsensus");
 exports.TESTDATA_PROMPT_VERSION = 'testdata-generation-v1';
 exports.TESTDATA_QUALITY_SCHEMA_VERSION = 1;
 exports.TESTDATA_TEACHER_OUTCOME_SEQUENCE = 1000000;
@@ -715,6 +716,7 @@ class TestdataRunTelemetrySession {
             }
             await this.service.emit(this.event('run_completed', {
                 pipelineCompleted: false,
+                tokenCount: (0, specConsensus_1.getSpecConsensusFailureTokenUsage)(error)?.totalTokens,
                 verified: false,
                 wouldBlock: false,
                 modelEscalated: (this.currentStage?.attempt || 1) > 1,

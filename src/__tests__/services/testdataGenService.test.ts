@@ -3126,21 +3126,15 @@ describe('TestdataGenService.generate', () => {
   ])('continues the old success path when observe extraction records %s', async (failureCode, specResponse) => {
     process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = '## Constraints\nn >= 1';
-    const mockClient = {
-      chat: jest.fn()
-        .mockResolvedValueOnce({
-          content: specResponse,
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
-        })
-        .mockResolvedValueOnce({
-          content: specResponse,
-          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
-        })
-        .mockResolvedValueOnce({
-          content: makeAiJson(),
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
-        }),
-    };
+    const mockClient = { chat: jest.fn() };
+    for (let attempt = 0; attempt < (failureCode === 'SPEC_PARSE_FAILED' ? 2 : 1); attempt++) {
+      mockClient.chat.mockResolvedValueOnce({ content: specResponse,
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' } });
+      mockClient.chat.mockResolvedValueOnce({ content: specResponse,
+        usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' } });
+    }
+    mockClient.chat.mockResolvedValueOnce({ content: makeAiJson(),
+      usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' } });
     const onProblemSpecObservation = jest.fn();
 
     const plan = await new TestdataGenService(mockClient as never, {
@@ -5028,6 +5022,54 @@ describe('TestdataGenService.generate', () => {
       },
     });
     expect(plan.verification?.checkerCheck).not.toHaveProperty('failureKind');
+  });
+
+  it.each([false, true])('补刀新点超限后检查同批较小候选（存在可容纳候选：%s）', async (hasSmallerCandidate) => {
+    const usedModel = { endpointId: 'fixture', endpointName: 'fixture', modelName: 'fixture' };
+    const inputA = `1${'0'.repeat(4 * 1024 * 1024 - 4097)}`;
+    const inputB = `3${'0'.repeat(4 * 1024 * 1024 - 4097)}`;
+    const candidate = '2';
+    const mockClient = { chat: jest.fn()
+      .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+      .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+      .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+      .mockResolvedValueOnce({ content: makeHackCaseResponse()
+        + (hasSmallerCandidate ? `\n${makeHackCaseResponse().replace('\n2\n', '\n4\n')}` : ''), usedModel }) };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator') ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'first', input: inputA }, { label: 'second', input: inputB }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+        if (code.includes('sys.exit(0)')) return detail();
+        if (input.trim() === '4') return detail({ stdout: code.includes('surviving wrong solution') ? 'wrong\n' : '1\n' });
+        return detail({ stdout: input.trim() === candidate
+          ? code.includes('surviving wrong solution') ? 'wrong\n' : `${'1'.repeat(16384)}\n`
+          : '1\n' });
+      }))),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox', reliabilityMode: 'legacy',
+    }).generate({ problemTitle: 'file budget fixture', statementMarkdown: 'Read the input.',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] } });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    if (hasSmallerCandidate) {
+      expect(plan.caseCount).toBe(3);
+      expect(plan.files.find(file => file.name === '3.in')?.content.trim()).toBe('4');
+      expect(plan.verification?.discrimination?.targets[0]).toMatchObject({ killed: true, killedByCase: 3 });
+      expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('skippedReason');
+      return;
+    }
+    expect(plan.caseCount).toBe(2);
+    expect(plan.files.filter(file => file.kind === 'case-in').map(file => file.content.trim())).toEqual([inputA, inputB]);
+    expect(plan.files.some(file => file.name === '3.in')).toBe(false);
+    expect(plan.verification?.discrimination).toMatchObject({ allKilled: false,
+      targets: expect.arrayContaining([expect.objectContaining({ kind: 'wrong-algorithm', killed: false, skippedReason: 'budget-exhausted' })]) });
+    expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedByCase');
   });
 
   it('补刀候选触发 System Error 时不追加 hack case 且不设置 killed', async () => {
@@ -11303,7 +11345,8 @@ describe('Task 8 restored verifier checkpoint strictness', () => {
 });
 
 describe('Task 8 resume checkpoint provenance privacy and cancellation identity', () => {
-  const statementMarkdown = 'Every input satisfies 0 <= n <= 10.';
+  // The shared stress generator emits 1..60; all accepted seeds must satisfy this fixture spec.
+  const statementMarkdown = 'Every input satisfies 0 <= n <= 100.';
   const options: GenerateOptions = {
     problemKind: 'traditional', caseCount: 2, languages: [],
   };
@@ -11311,8 +11354,8 @@ describe('Task 8 resume checkpoint provenance privacy and cancellation identity'
   function proofContext() {
     return makeValidatorCoverageProof(statementMarkdown, {
       constraints: [{
-        id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
-        scope: 'global', evidence: { quote: '0 <= n <= 10' },
+        id: 'C1', expression: '0 <= n <= 100', machineCheckable: true,
+        scope: 'global', evidence: { quote: '0 <= n <= 100' },
       }],
     });
   }

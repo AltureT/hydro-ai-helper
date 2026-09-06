@@ -8,6 +8,8 @@ import {
   type TestdataQualityEvent,
 } from '../../services/testdata/runTelemetry';
 import { TestdataPipelineError } from '../../services/testdata/failures';
+import { runProblemSpecConsensus } from '../../services/testdata/specConsensus';
+import { createStatementSnapshot } from '../../services/testdata/statementSnapshot';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const EVENT_ID = '22222222-2222-4222-8222-222222222222';
@@ -862,8 +864,17 @@ describe('TestdataRunTelemetryService', () => {
       'private cancellation details', 'CANCELLED', 'canceled', 'pipeline', 'no-retry',
     );
     cancellation.name = 'AbortError';
+    const chat = jest.fn().mockResolvedValueOnce({ content: 'private malformed response',
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+      usedModel: { endpointId: 'fixture', endpointName: 'fixture', modelName: 'fixture' } })
+      .mockRejectedValueOnce(cancellation);
+    await expect(runProblemSpecConsensus({
+      snapshot: createStatementSnapshot('private statement'), requestedProblemKind: 'traditional',
+      hasCustomChecker: false, primary: { role: 'specPrimary', client: { chat } },
+    })).rejects.toBe(cancellation);
     await canceled.fail(cancellation);
     expect(events.map(event => event.eventType)).toEqual(['run_completed']);
-    expect(events[0]).toEqual(expect.objectContaining({ pipelineCompleted: false, verified: false }));
+    expect(events[0]).toEqual(expect.objectContaining({ pipelineCompleted: false, verified: false, tokenCount: 20 }));
+    expect(JSON.stringify(events)).not.toContain('private');
   });
 });

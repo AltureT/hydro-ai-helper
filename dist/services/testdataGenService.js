@@ -4005,6 +4005,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 generatorReplayData = cache.generatorReplay.data;
             }
         }
+        // A companion is additional persisted data, not a replacement for .in files.
+        // Reject an already impossible lower bound before stress/validator/oracle work.
+        (0, generatorBudget_1.assertGeneratedDataBudget)(generatedInputs.map(item => ({ input: item.input, output: '' })), generatorReplayData ? [{ name: fileBudget_1.GENERATOR_REPLAY_DATA_FILENAME, content: generatorReplayData }] : []);
         const inputs = generatedInputs.map(item => item.input);
         const structuredCases = generatedInputs.every(item => item.structuredValues !== undefined) ? generatedInputs.map(item => ({
             label: item.label || '',
@@ -4468,6 +4471,11 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             cases = cachedOracle.cases;
             sampleCheckerVerdicts = cachedOracle.sampleCheckerVerdicts;
         }
+        // Use the real assembly path so comments, templates, both solution forms,
+        // config numbering and the replay companion are included before later gates.
+        assertSandboxResponseBudget({ ...blueprint, cases, oracleLanguage,
+            stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
+            generatorCode: effectiveGeneratorCode, generatorReplayData }, options, materialization?.planContext);
         // f. 函数题：所有所选语言在每个正式点与题面样例上统一验证。
         let templateChecks;
         if (startsAtOrBefore('template')) {
@@ -4951,6 +4959,13 @@ const FILE_PURPOSES = {
     stdProgram: '参考标程（AI 生成）：读取 stdin 输出答案，用于人工复验与重造数据',
     template: '函数题评测模板（AI 生成）：读取 stdin、调用学生实现并输出结果，学生代码与本文件组合评测',
 };
+function assertSandboxResponseBudget(response, options, context = {}) {
+    const plan = assemblePlan(response, options, { ...context, mode: 'sandbox' });
+    const auxiliaryFiles = plan.files.filter(file => file.kind !== 'case-in' && file.kind !== 'case-out');
+    (0, generatorBudget_1.assertGeneratedDataBudget)(response.cases, auxiliaryFiles);
+    // Retain the serialized-document ceiling as well as every individual limit.
+    (0, fileBudget_1.assertTestdataPlanBudget)(plan);
+}
 function assemblePlan(response, options, context = {}) {
     const sandbox = context.mode === 'sandbox';
     const dataOrigin = sandbox ? 'executed' : 'ai-only';
@@ -7254,11 +7269,24 @@ class TestdataGenService {
                             const merged = mergeHackCases(cases, [{ input: candidate.input, output }], exports.TESTDATA_GEN_LIMITS.MAX_CASES);
                             if (merged.length === cases.length)
                                 break targetLoop;
+                            try {
+                                assertSandboxResponseBudget({ ...response, cases: merged,
+                                    ...(prospectiveAllocation ? { tieredAllocations: prospectiveTieredAllocations } : {}) }, params.options, { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision });
+                            }
+                            catch (error) {
+                                if (!(error instanceof failures_1.TestdataPipelineError) || error.code !== 'GENERATOR_OUTPUT_TOO_LARGE')
+                                    throw error;
+                                // Keep all admitted cases and the surviving target. An optional
+                                // new witness cannot consume more than the remaining file budget.
+                                targetResult.skippedReason = 'budget-exhausted';
+                                continue;
+                            }
                             cases = merged;
                             if (prospectiveAllocation) {
                                 committedTieredAllocations = prospectiveTieredAllocations;
                             }
                             targetResult.killed = true;
+                            delete targetResult.skippedReason;
                             targetResult.killedBy = killedBy;
                             targetResult.killedByCase = cases.length;
                             if (executionVerdict === 'runtime-failure') {
@@ -7278,6 +7306,8 @@ class TestdataGenService {
                             break targetLoop;
                         }
                     }
+                    if (targetResult.skippedReason === 'budget-exhausted')
+                        continue targetLoop;
                 }
             }
             // 一个靶子的定向反例也可能顺带卡掉其他错误模式；只复跑本轮新追加的点，
@@ -7653,6 +7683,7 @@ class TestdataGenService {
                         cache: materializationCache,
                         validatorProof,
                         coverageProof,
+                        planContext: { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision },
                     });
                 }
                 catch (firstError) {
@@ -7892,6 +7923,7 @@ class TestdataGenService {
                             cache: materializationCache,
                             validatorProof,
                             coverageProof,
+                            planContext: { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision },
                         });
                     }
                     catch (err) {

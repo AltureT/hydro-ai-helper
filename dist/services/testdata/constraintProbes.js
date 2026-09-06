@@ -4,6 +4,7 @@ exports.getConstraintProbeSource = getConstraintProbeSource;
 exports.buildConstraintProbes = buildConstraintProbes;
 const crypto_1 = require("crypto");
 const probeExpressions_1 = require("./probeExpressions");
+const textOperationProbes_1 = require("./textOperationProbes");
 const fileBudget_1 = require("./fileBudget");
 const MAX_PROBE_INPUT_BYTES = fileBudget_1.TESTDATA_INPUT_MAX_BYTES;
 const MAX_PROBE_RECIPES = 64;
@@ -102,6 +103,9 @@ function scalarLocationIsUnambiguous(spec, fieldId, location) {
         if (otherLocation) {
             return otherLocation.line === location.line && otherLocation.token === location.token;
         }
+        const operations = (0, textOperationProbes_1.operationLayout)(field);
+        if (operations && location.line >= operations.start)
+            return true;
         const otherRange = parseTokenRange(field.encoding);
         return otherRange?.line === location.line && location.token >= otherRange.startToken;
     });
@@ -230,7 +234,8 @@ function preserveDependentArrayLengths(original, mutation, spec, target, countFi
         if (Buffer.byteLength(input, 'utf8') > MAX_PROBE_INPUT_BYTES)
             return 'PROBE_TOO_LARGE';
     }
-    return { ...mutation, input };
+    const preserved = (0, textOperationProbes_1.preserveTextOperationCounts)(original, input, spec, expressions, countFieldId, count);
+    return typeof preserved === 'string' ? { ...mutation, input: preserved } : preserved.gap;
 }
 function resolveSequenceLayout(input, spec, fieldId) {
     const field = spec.inputFields.find(item => item.id === fieldId);
@@ -1052,17 +1057,21 @@ function constructStringMutation(input, spec, target, fieldId, encoding, source)
         return 'UNPARSEABLE_ENCODING';
     if (!scalarLocationIsUnambiguous(spec, fieldId, location))
         return 'UNPARSEABLE_ENCODING';
-    const escapedField = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (source === 'derived'
-        && !new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-            .test(target.expression))
+    const alphabet = (0, textOperationProbes_1.stringAlphabet)(target.expression, fieldId);
+    if (source === 'derived' && !alphabet)
         return 'UNSUPPORTED_TARGET';
-    const lineTokens = tokenValuesAtLine(input, location.line);
-    const value = lineTokens?.[location.token - 1];
-    if (!value || !/^[a-z]+$/.test(value))
+    const field = spec.inputFields.find(item => item.id === fieldId);
+    const checked = field && (0, textOperationProbes_1.stringCharacterSnapshot)(input, spec, field, target.expression);
+    if (alphabet) {
+        if (!checked?.valid || checked.checkedLength === 0)
+            return 'MUTATION_NOT_ISOLATED';
+        const index = checked.checkedLength - 1;
+        return (0, textOperationProbes_1.replaceScalar)(input, checked.at, checked.value.slice(0, index) + '#' + checked.value.slice(index + 1)) || 'MUTATION_NOT_ISOLATED';
+    }
+    const value = field && (0, textOperationProbes_1.scalarSnapshot)(input, spec, field)?.value;
+    if (!value || !(alphabet || /^[a-z]+$/).test(value))
         return 'MUTATION_NOT_ISOLATED';
-    return replaceToken(input, location, `${value.slice(0, -1)}#`)
-        || 'MUTATION_NOT_ISOLATED';
+    return replaceToken(input, location, value.slice(0, -1) + '#') || 'MUTATION_NOT_ISOLATED';
 }
 function compatibleFieldsForConstruction(spec, kind) {
     if (kind === 'integer-below-min' || kind === 'integer-above-max'
@@ -1081,7 +1090,10 @@ function compatibleFieldsForConstruction(spec, kind) {
     if (kind === 'permutation-duplicate-or-missing') {
         return spec.inputFields.filter(field => field.type === 'permutation');
     }
-    if (kind === 'illegal-string-character') {
+    if (textOperationProbes_1.RANGE_PROBE_KINDS.some(item => item === kind)) {
+        return spec.inputFields.filter(field => field.type === 'operations');
+    }
+    if (kind === 'illegal-string-character' || kind === 'string-length-mismatch') {
         return spec.inputFields.filter(field => field.type === 'string');
     }
     if (kind === 'tree-missing-edge' || kind === 'tree-cycle') {
@@ -1184,14 +1196,21 @@ function deriveConstructionRequests(spec, target) {
             }
         }
         if (field.type === 'string') {
-            const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            if (new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-                .test(target.expression)) {
+            if ((0, textOperationProbes_1.stringAlphabet)(target.expression, field.id))
                 requests.push({
-                    targetId: target.id,
-                    constructionKind: 'illegal-string-character',
-                    fieldId: field.id,
+                    targetId: target.id, constructionKind: 'illegal-string-character', fieldId: field.id,
                 });
+            if ((0, textOperationProbes_1.stringCountField)(spec, field, target.expression))
+                requests.push({
+                    targetId: target.id, constructionKind: 'string-length-mismatch', fieldId: field.id,
+                });
+        }
+        if (field.type === 'operations' && (0, textOperationProbes_1.rangeDescriptor)(spec, target.expression, field.id)) {
+            for (const operation of spec.operations || []) {
+                for (const constructionKind of textOperationProbes_1.RANGE_PROBE_KINDS)
+                    requests.push({
+                        targetId: target.id, constructionKind, fieldId: field.id, operationName: operation.name,
+                    });
             }
         }
         if (field.type === 'graph' || field.type === 'tree') {
@@ -1262,6 +1281,13 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
     const field = spec.inputFields.find(item => item.id === fieldId);
     if (!field)
         return undefined;
+    if (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+        const descriptor = (0, textOperationProbes_1.rangeDescriptor)(spec, target.expression, fieldId);
+        return descriptor ? (0, textOperationProbes_1.rangeIsValid)(input, spec, descriptor) : undefined;
+    }
+    if (request.constructionKind === 'string-length-mismatch') {
+        return (0, textOperationProbes_1.stringLengthIsValid)(input, spec, field, target.expression);
+    }
     if (request.constructionKind === 'array-element-below-min'
         || request.constructionKind === 'array-element-above-max') {
         const snapshot = sequenceSnapshot(input, spec, fieldId);
@@ -1308,9 +1334,11 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
         return isOneBasedPermutation(snapshot.values, snapshot.count);
     }
     if (request.constructionKind === 'illegal-string-character') {
-        const location = parseLocation(field.encoding);
-        const value = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
-        return value === undefined ? undefined : /^[a-z]+$/.test(value);
+        if ((0, textOperationProbes_1.stringAlphabet)(target.expression, fieldId)) {
+            return (0, textOperationProbes_1.stringCharacterSnapshot)(input, spec, field, target.expression)?.valid;
+        }
+        const value = (0, textOperationProbes_1.scalarSnapshot)(input, spec, field)?.value;
+        return value === undefined ? undefined : ((0, textOperationProbes_1.stringAlphabet)(target.expression, fieldId) || /^[a-z]+$/).test(value);
     }
     if (request.constructionKind === 'graph-self-loop'
         || request.constructionKind === 'graph-duplicate-edge'
@@ -1347,7 +1375,7 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
     }
     return undefined;
 }
-function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
+function applicableTargets(spec, namedTarget) {
     const constraints = spec.constraints.flatMap(constraint => {
         const applicable = constraint.scope === 'global'
             || (namedTarget.subtaskId !== undefined
@@ -1364,7 +1392,10 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
         kind: 'invariant',
         expression: invariant.expression,
     }));
-    return [...constraints, ...invariants].flatMap(target => {
+    return [...constraints, ...invariants];
+}
+function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
+    return applicableTargets(spec, namedTarget).flatMap(target => {
         if (target.id === namedTarget.id && target.kind === namedTarget.kind) {
             return [{ target, request: namedRequest }];
         }
@@ -1372,7 +1403,41 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
         return request ? [{ target, request: { ...request, source: 'derived' } }] : [];
     });
 }
+/** Preconditions are input rules even when there is no duplicate constraints entry. */
+function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
+    // Function specs may also describe calls in operations; this parser owns input operation rows only.
+    if (!spec.inputFields.some(field => field.type === 'operations'))
+        return true;
+    let unknown = false;
+    for (const operation of spec.operations || []) {
+        // The existing stateful ADD/DEL path evaluates its own target-specific presence semantics.
+        if ((operation.name === 'ADD' || operation.name === 'DEL') && operation.arguments.some(fieldId => (operationSupportsSetPresence(spec, operation.name, fieldId))))
+            continue;
+        for (const predicate of operation.preconditions) {
+            const expression = `for every operation, ${predicate}`;
+            const descriptor = spec.inputFields.map(field => (0, textOperationProbes_1.rangeDescriptor)(spec, expression, field.id)).find(Boolean);
+            if (!descriptor) {
+                unknown = true;
+                continue;
+            }
+            if (expression === ignoredRangeExpression)
+                continue;
+            const snapshot = (0, textOperationProbes_1.rangeSnapshot)(input, spec, descriptor);
+            if (!snapshot) {
+                unknown = true;
+                continue;
+            }
+            if (snapshot.operations.some(item => item.name === operation.name
+                && !(descriptor.lower <= item.left && item.left <= item.right && item.right <= snapshot.upper)))
+                return false;
+        }
+    }
+    return unknown ? undefined : true;
+}
 function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, request) {
+    if (operationPreconditionsValid(sourceInput, spec) !== true
+        || operationPreconditionsValid(mutatedInput, spec, textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true)
+        return false;
     const semantics = applicableRecognizableSemantics(spec, target, request);
     if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
         return false;
@@ -1394,6 +1459,22 @@ function constructMutationForRequest(input, spec, target, request) {
         : undefined;
     if (!field)
         return 'INVALID_RECIPE';
+    if (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+        const descriptor = (0, textOperationProbes_1.rangeDescriptor)(spec, target.expression, field.id);
+        return descriptor ? (0, textOperationProbes_1.constructRangeMutation)(input, spec, descriptor, request.constructionKind, request.operationName)
+            : 'UNSUPPORTED_TARGET';
+    }
+    if (request.constructionKind === 'string-length-mismatch') {
+        const snapshot = (0, textOperationProbes_1.scalarSnapshot)(input, spec, field);
+        if (!snapshot || (0, textOperationProbes_1.stringLengthIsValid)(input, spec, field, target.expression) !== true)
+            return 'MUTATION_NOT_ISOLATED';
+        // Append an existing character so indexed alphabet constraints stay true too.
+        if (!snapshot.value.length)
+            return 'MUTATION_NOT_ISOLATED';
+        if (Buffer.byteLength(input, 'utf8') + 1 > MAX_PROBE_INPUT_BYTES)
+            return 'PROBE_TOO_LARGE';
+        return (0, textOperationProbes_1.replaceScalar)(input, snapshot.at, snapshot.value + snapshot.value.slice(-1)) || 'MUTATION_NOT_ISOLATED';
+    }
     if (request.constructionKind === 'array-element-below-min'
         || request.constructionKind === 'array-element-above-max') {
         return field.type === 'array'
@@ -1523,10 +1604,30 @@ function buildConstraintProbes(input) {
         }
         return [{ target, request: { ...resolved, source: 'recipe' } }];
     });
+    // Audit the bounded applicable seed set once per scope, before choosing any successful seed.
+    // A later validator-accepted but provably illegal seed must not be hidden by an earlier witness.
+    const invalidSeedByScope = new Map();
     for (const { target, request } of [...deterministicRequests, ...customRequests]) {
         const candidates = selectSeeds(seeds, target);
         if (candidates.length === 0) {
             gaps.push(gap(target, 'NO_MATCHING_LEGAL_SEED'));
+            continue;
+        }
+        const scopeKey = target.subtaskId === undefined ? 'global' : `subtask:${target.subtaskId}`;
+        if (!invalidSeedByScope.has(scopeKey)) {
+            const semantics = applicableTargets(input.spec, target).flatMap(item => {
+                const derived = deriveConstructionRequests(input.spec, item)[0];
+                return derived ? [{ target: item, request: derived }] : [];
+            });
+            invalidSeedByScope.set(scopeKey, candidates.some(seed => {
+                const normalized = normalizeInput(seed.input);
+                if (!normalized || Buffer.byteLength(normalized, 'utf8') > MAX_PROBE_INPUT_BYTES)
+                    return false;
+                return operationPreconditionsValid(normalized, input.spec) === false || semantics.some(item => (evaluateRecognizedSemantic(normalized, input.spec, item.target, item.request) === false));
+            }));
+        }
+        if (invalidSeedByScope.get(scopeKey)) {
+            gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
             continue;
         }
         let lastGap = 'MUTATION_NOT_ISOLATED';
@@ -1541,7 +1642,8 @@ function buildConstraintProbes(input) {
                 lastGap = 'MUTATION_NOT_ISOLATED';
                 continue;
             }
-            if (applicableRecognizableSemantics(input.spec, target, request).some(item => (evaluateRecognizedSemantic(normalizedInput, input.spec, item.target, item.request) === false))) {
+            if (operationPreconditionsValid(normalizedInput, input.spec) === false
+                || applicableRecognizableSemantics(input.spec, target, request).some(item => (evaluateRecognizedSemantic(normalizedInput, input.spec, item.target, item.request) === false))) {
                 // A validator-accepted seed that is provably illegal is a proof defect, not a seed to skip.
                 lastGap = 'MUTATION_NOT_ISOLATED';
                 break;
@@ -1573,6 +1675,8 @@ function buildConstraintProbes(input) {
                 constructionKind: request.constructionKind,
                 effectiveSeed,
                 mutationPosition: mutation.position,
+                ...(textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+                    ? { operationName: request.operationName, mutationHash: sha256(mutation.input) } : {}),
             })).slice(0, 32);
             const probe = {
                 id,
