@@ -200,7 +200,7 @@ function constructIntegerMutation(input, spec, target, fieldId, encoding, kind, 
         return 'MUTATION_NOT_ISOLATED';
     return preserveDependentArrayLengths(input, mutation, spec, target, fieldId, replacement);
 }
-/** Keep recognized array-length relations true when probing their scalar count boundary. */
+/** Preserve both encoded cardinality and explicit length rules when probing a scalar count. */
 function preserveDependentArrayLengths(original, mutation, spec, target, countFieldId, count) {
     let input = mutation.input;
     const expressions = [
@@ -209,8 +209,13 @@ function preserveDependentArrayLengths(original, mutation, spec, target, countFi
         ...spec.invariants,
     ].map(item => item.expression);
     for (const field of spec.inputFields) {
-        if (field.type !== 'array' || !expressions.includes(`length(${field.id}) = ${countFieldId}`))
+        if (field.type !== 'array' || (parseTokenRange(field.encoding)?.countFieldId !== countFieldId
+            && !expressions.includes(`length(${field.id}) = ${countFieldId}`)))
             continue;
+        const lengthPrefix = `length(${field.id}) = `;
+        if (expressions.some(expression => expression.startsWith(lengthPrefix)
+            && expression !== `${lengthPrefix}${countFieldId}`))
+            return 'MUTATION_NOT_ISOLATED';
         if (count < 0)
             return 'MUTATION_NOT_ISOLATED';
         const layout = resolveSequenceLayout(original, spec, field.id);
@@ -1450,7 +1455,16 @@ function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, reque
         if (sourceValid !== true)
             return false;
         const mutatedValid = evaluateRecognizedSemantic(mutatedInput, spec, item.target, item.request);
-        return named ? mutatedValid === false : mutatedValid === true;
+        // Repeated closed alphabet/range declarations share one predicate. Preserve its field and
+        // exact canonical domain; neither opaque recipes nor other families gain equivalence.
+        const sameFamily = (request.constructionKind === 'illegal-string-character'
+            && item.request.constructionKind === 'illegal-string-character')
+            || (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+                && textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => item.request.constructionKind === kind));
+        const samePredicate = request.source === 'derived' && item.request.source === 'derived'
+            && sameFamily
+            && item.target.expression === target.expression && item.request.fieldId === request.fieldId;
+        return named || samePredicate ? mutatedValid === false : mutatedValid === true;
     });
 }
 function constructMutationForRequest(input, spec, target, request) {

@@ -1158,7 +1158,7 @@ describe('target-isolated proof construction', () => {
     ]);
   });
 
-  it.each(everyFamily)(
+  it.each(everyFamily.filter(([kind]) => kind !== 'illegal-string-character'))(
     '%s refuses proof when an applicable recognizable target has the same predicate',
     (_kind, makeFixture) => {
       const { spec, recipe, legal } = makeFixture();
