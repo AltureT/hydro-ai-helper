@@ -2,11 +2,13 @@ import { TestdataPipelineError } from './failures';
 
 export const TESTDATA_CODE_FILE_MAX_BYTES = 256 * 1024;
 export const TESTDATA_INPUT_MAX_BYTES = 4 * 1024 * 1024;
+export const TESTDATA_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 export const TESTDATA_PLAN_MAX_BYTES = 8 * 1024 * 1024;
 export const GENERATOR_REPLAY_DATA_FILENAME = 'generator-data.b64';
 
 /** The larger allowance is for data, never for model-generated executable code. */
 export function testdataFileByteLimit(name: string): number {
+  if (name.endsWith('.out')) return TESTDATA_OUTPUT_MAX_BYTES;
   return name.endsWith('.in') || name === GENERATOR_REPLAY_DATA_FILENAME
     ? TESTDATA_INPUT_MAX_BYTES : TESTDATA_CODE_FILE_MAX_BYTES;
 }

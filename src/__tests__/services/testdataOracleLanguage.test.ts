@@ -90,11 +90,11 @@ describe('oracle language consistency', () => {
   it('repairs the input construction when measured output exceeds its file budget', async () => {
     const runner = {
       runPython: jest.fn().mockResolvedValue({ stdout: '{"cases":[{"input":"1"}]}', stderr: '' }),
-      runPythonBatchDetailed: jest.fn().mockResolvedValue([{ accepted: true, stdout: 'x'.repeat(325000), status: 'Accepted' }]),
+      runPythonBatchDetailed: jest.fn().mockResolvedValue([{ accepted: true, stdout: 'x'.repeat(4 * 1024 * 1024), status: 'Accepted' }]),
     };
     await expect(materializeSandboxBlueprint(blueprint, options, '', runner as never)).rejects.toMatchObject({
       code: 'GENERATOR_OUTPUT_TOO_LARGE', artifact: 'generator', stage: 'generator', retryPolicy: 'repair-artifact',
-      safeDetails: { failureKind: 'output-budget', caseIndex: 1, actualBytes: 325001, maxBytes: TESTDATA_GEN_LIMITS.MAX_FILE_SIZE },
+      safeDetails: { failureKind: 'output-budget', caseIndex: 1, actualBytes: 4194305, maxBytes: 4194304 },
     });
   });
 });

@@ -38,12 +38,12 @@ function repeatedPlan(count: number, length: number, alphabet: string): Generato
 }
 
 describe('generator budget regressions', () => {
-  it('can report a necessary output that exceeds 256 KiB without shrinking required coverage', () => {
+  it('can report a necessary output that exceeds 4 MiB without shrinking required coverage', () => {
     const outputConflict = '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
-      + JSON.stringify({ scope: 'output', minimumBytes: 300000 });
+      + JSON.stringify({ scope: 'output', minimumBytes: 5000000 });
     expect(() => parseGenerationArtifacts(outputConflict, 'traditional', [])).toThrow(expect.objectContaining({
       code: 'GENERATOR_OUTPUT_TOO_LARGE', artifact: 'generator', retryPolicy: 'manual-review',
-      safeDetails: expect.objectContaining({ failureKind: 'model-budget-estimate', maxBytes: 262144 }),
+      safeDetails: expect.objectContaining({ failureKind: 'model-budget-estimate', maxBytes: 4194304 }),
     }));
   });
 
@@ -76,10 +76,10 @@ describe('generator budget regressions', () => {
   });
 
   it('budgets normalized UTF-8 and the newline added when applying files', () => {
-    const max = GENERATOR_BYTE_LIMITS.plan;
+    const max = GENERATOR_BYTE_LIMITS.input;
     const input = '界'.repeat(Math.floor((max - 2) / 3));
     expect(() => assertGeneratedDataBudget([{ input, output: '\r\n' }])).not.toThrow();
-    expect(() => assertGeneratedDataBudget([{ input: `${input}界`, output: '\r\n' }])).toThrow();
+    expect(() => assertGeneratedDataBudget([{ input: `${input}界界`, output: '\r\n' }])).toThrow();
   });
 
   it('accepts combined DSL data beyond the former 1 MiB limit', () => {

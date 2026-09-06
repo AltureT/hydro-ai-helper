@@ -5,8 +5,11 @@
  */
 
 import axios, { AxiosRequestConfig } from 'axios';
+import { TextDecoder } from 'util';
 import { excerpt, excerptTail } from '../lib/textTruncate';
 import { GENERATOR_BYTE_LIMITS } from './testdata/generatorBudget';
+import { TESTDATA_OUTPUT_MAX_BYTES, TESTDATA_PLAN_MAX_BYTES } from './testdata/fileBudget';
+import { buildPythonTemplateInspection, parsePythonTemplateInterfaceReport, PythonTemplateInterfaceReport } from './testdata/templateInterface';
 
 export type TestdataGenerationMode = 'auto' | 'sandbox' | 'direct';
 
@@ -40,6 +43,8 @@ export interface PythonBatchOptions {
   deadlineAt?: number;
   /** 同时在途的分块数；默认 1 保持原有串行与 TLE 负载语义。 */
   chunkConcurrency?: number;
+  /** Explicit data-output allowance; ordinary programs retain the 1 MiB transport. */
+  outputLimitBytes?: number;
 }
 
 export interface CppCompileOptions {
@@ -68,6 +73,8 @@ export interface CheckerRunCase {
 }
 
 export interface TestdataSandboxRunner {
+  /** Optional early optimization; final template execution still checks the interface. */
+  inspectPythonTemplate?(solution: string, template: string, opts?: Pick<PythonBatchOptions, 'signal' | 'deadlineAt'>): Promise<PythonTemplateInterfaceReport>;
   isAvailable(signal?: AbortSignal): Promise<boolean>;
   runPython(code: string, stdin?: string, signal?: AbortSignal, deadlineAt?: number): Promise<PythonRunResult>;
   /** Formal generator only: bounded cached output; implementations without it retain the legacy limit. */
@@ -134,6 +141,14 @@ export class SandboxBudgetExceededError extends Error {
   constructor() {
     super(SANDBOX_BUDGET_ERROR);
     this.name = 'SandboxBudgetExceededError';
+  }
+}
+
+export class SandboxOutputBudgetExceededError extends Error {
+  readonly code = 'SANDBOX_OUTPUT_BUDGET_EXCEEDED';
+  constructor(readonly actualBytes: number | undefined, readonly maxBytes: number) {
+    super(`Sandbox answer ${actualBytes === undefined ? 'transport' : `${actualBytes} bytes`} exceeds ${maxBytes}`);
+    this.name = 'SandboxOutputBudgetExceededError';
   }
 }
 
@@ -455,6 +470,10 @@ function collectReturnedFileIds(data: unknown): string[] {
 }
 
 export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
+  async inspectPythonTemplate(solution: string, template: string, opts: Pick<PythonBatchOptions, 'signal' | 'deadlineAt'> = {}): Promise<PythonTemplateInterfaceReport> {
+    const result = await this.runPython(buildPythonTemplateInspection(solution, template), '', opts.signal, opts.deadlineAt);
+    return parsePythonTemplateInterfaceReport(result.stdout);
+  }
   private readonly host: string;
 
   constructor(host: string, private readonly http: HttpClient = axios) {
@@ -729,6 +748,12 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
     ) => unknown,
   ): Promise<PythonRunDetail[]> {
     if (inputs.length === 0) return [];
+    const outputLimit = opts.outputLimitBytes;
+    if (outputLimit !== undefined && (!Number.isSafeInteger(outputLimit)
+      || outputLimit < 1 || outputLimit > TESTDATA_OUTPUT_MAX_BYTES)) {
+      throw new TypeError('Invalid sandbox output allowance');
+    }
+    let totalOutputBytes = 0;
     const cpuSeconds = opts.cpuSeconds ?? 5;
     const cpuLimit = cpuSeconds * 1_000_000_000;
     const clockLimit = cpuSeconds * 2 * 1_000_000_000;
@@ -751,7 +776,14 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
         try {
           response = await this.http.post(
             `${this.host}/run`,
-            { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) },
+            { cmd: chunk.map(input => {
+              const command = buildCommand(input, { cpuLimit, clockLimit });
+              if (outputLimit === undefined) return command;
+              const configured = command as { files: Array<{ name?: string; max?: number }> };
+              return { ...configured,
+                files: configured.files.map(file => file.name === 'stdout' ? { ...file, max: outputLimit } : file),
+                copyOut: ['stderr'], copyOutCached: ['stdout'], copyOutMax: outputLimit, copyOutTruncate: false };
+            }) },
             {
               timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
               signal: chunkSignal,
@@ -765,14 +797,55 @@ export class GoJudgeSandboxRunner implements TestdataSandboxRunner {
           }
           throw err;
         }
-        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-          throw new SandboxBudgetExceededError();
+        const fileIds = outputLimit === undefined ? [] : collectReturnedFileIds(response.data);
+        try {
+          if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) throw new SandboxBudgetExceededError();
+          const results = unwrapResults(response.data);
+          if (results.length !== chunk.length) {
+            throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
+          }
+          if (outputLimit !== undefined) {
+            // Download sequentially inside a chunk: at most one large response per worker.
+            for (const result of results) {
+              // OLE processes may leave a cache larger than their limit. Keep the failure
+              // status and clean that cache without downloading a partial/invalid answer.
+              if (result.status !== 'Accepted' || result.exitStatus !== 0) continue;
+              const fileId = result.fileIds?.stdout;
+              if (!fileId) {
+                if (result.status === 'Accepted' && result.exitStatus === 0) throw new Error('Missing cached answer output');
+                continue;
+              }
+              const remaining = opts.deadlineAt === undefined ? chunkTimeout : opts.deadlineAt - Date.now();
+              if (remaining <= 0) throw new SandboxBudgetExceededError();
+              const downloaded = await this.http.get<ArrayBuffer | string>(`${this.host}/file/${encodeURIComponent(fileId)}`, {
+                timeout: Math.max(1, Math.min(chunkTimeout, remaining)), signal: chunkSignal,
+                responseType: 'arraybuffer', transformResponse: data => data, maxContentLength: outputLimit, proxy: false,
+              });
+              if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) throw new SandboxBudgetExceededError();
+              const content = typeof downloaded.data === 'string' ? downloaded.data
+                : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(downloaded.data);
+              const bytes = Buffer.byteLength(content, 'utf8');
+              if (bytes > outputLimit) throw new SandboxOutputBudgetExceededError(bytes, outputLimit);
+              totalOutputBytes += bytes;
+              if (totalOutputBytes > TESTDATA_PLAN_MAX_BYTES) {
+                throw new SandboxOutputBudgetExceededError(totalOutputBytes, TESTDATA_PLAN_MAX_BYTES);
+              }
+              if (result.fileError?.some(error => error.name === 'stdout')) throw new Error('Sandbox answer copy failed');
+              result.files = { ...result.files, stdout: content };
+            }
+          }
+          return results.map(result => toRunDetail(result));
+        } catch (error) {
+          if (opts.signal?.aborted) throw opts.signal.reason ?? error;
+          if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) throw new SandboxBudgetExceededError();
+          if (outputLimit !== undefined && error instanceof Error
+            && error.message === `maxContentLength size of ${outputLimit} exceeded`) {
+            throw new SandboxOutputBudgetExceededError(undefined, outputLimit);
+          }
+          throw error;
+        } finally {
+          await Promise.all(fileIds.map(fileId => this.deleteCachedFile(fileId)));
         }
-        const results = unwrapResults(response.data);
-        if (results.length !== chunk.length) {
-          throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
-        }
-        return results.map(result => toRunDetail(result));
       },
       opts.signal,
     );

@@ -62,9 +62,15 @@ describe('large testdata transport', () => {
     ] })).not.toThrow();
   });
 
-  it('keeps code/output limits and counts the entire normalized plan', () => {
+  it('allows bounded answer data, keeps code small, and counts the entire normalized plan', () => {
     expect(() => assertTestdataPlanBudget({ files: [{ name: 'std.py', content: largeInput }] })).toThrow();
-    expect(() => assertTestdataPlanBudget({ files: [{ name: '1.out', content: largeInput }] })).toThrow();
+    expect(() => assertTestdataPlanBudget({ files: [{ name: '1.out', content: largeInput }] })).not.toThrow();
+    expect(() => assertTestdataPlanBudget({ files: [{ name: '1.out', content: 'x'.repeat(4 * 1024 * 1024) }] })).toThrow();
+    expect(() => assertTestdataPlanBudget({ files: [
+      { name: '1.in', content: 'x'.repeat(3 * 1024 * 1024) },
+      { name: '1.out', content: 'x'.repeat(3 * 1024 * 1024) },
+      { name: '2.out', content: 'x'.repeat(3 * 1024 * 1024) },
+    ] })).toThrow();
     expect(() => assertTestdataPlanBudget({ files: Array.from({ length: 3 }, (_, i) => ({
       name: `${i}.in`, content: 'x'.repeat(3 * 1024 * 1024),
     })) })).toThrow();

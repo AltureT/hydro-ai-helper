@@ -1,15 +1,18 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GENERATOR_REPLAY_DATA_FILENAME = exports.TESTDATA_PLAN_MAX_BYTES = exports.TESTDATA_INPUT_MAX_BYTES = exports.TESTDATA_CODE_FILE_MAX_BYTES = void 0;
+exports.GENERATOR_REPLAY_DATA_FILENAME = exports.TESTDATA_PLAN_MAX_BYTES = exports.TESTDATA_OUTPUT_MAX_BYTES = exports.TESTDATA_INPUT_MAX_BYTES = exports.TESTDATA_CODE_FILE_MAX_BYTES = void 0;
 exports.testdataFileByteLimit = testdataFileByteLimit;
 exports.assertTestdataPlanBudget = assertTestdataPlanBudget;
 const failures_1 = require("./failures");
 exports.TESTDATA_CODE_FILE_MAX_BYTES = 256 * 1024;
 exports.TESTDATA_INPUT_MAX_BYTES = 4 * 1024 * 1024;
+exports.TESTDATA_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 exports.TESTDATA_PLAN_MAX_BYTES = 8 * 1024 * 1024;
 exports.GENERATOR_REPLAY_DATA_FILENAME = 'generator-data.b64';
 /** The larger allowance is for data, never for model-generated executable code. */
 function testdataFileByteLimit(name) {
+    if (name.endsWith('.out'))
+        return exports.TESTDATA_OUTPUT_MAX_BYTES;
     return name.endsWith('.in') || name === exports.GENERATOR_REPLAY_DATA_FILENAME
         ? exports.TESTDATA_INPUT_MAX_BYTES : exports.TESTDATA_CODE_FILE_MAX_BYTES;
 }

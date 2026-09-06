@@ -109,6 +109,7 @@ const generatorBudget_1 = require("./testdata/generatorBudget");
 const generatorPlanPrompts_1 = require("./testdata/generatorPlanPrompts");
 const fileBudget_1 = require("./testdata/fileBudget");
 const oracleLanguage_1 = require("./testdata/oracleLanguage");
+const templateInterface_1 = require("./testdata/templateInterface");
 const statementSamples_1 = require("./testdata/statementSamples");
 const validatorManifest_1 = require("./testdata/validatorManifest");
 const constraintProbes_1 = require("./testdata/constraintProbes");
@@ -1288,7 +1289,7 @@ function buildGenerationArtifactsSystemPrompt(frozenSpec = false, trustedGenerat
 3. 仅使用 integer/string/array/matrix/permutation/tree/graph/operation-sequence 的封闭 DSL；tree shape 为 chain/star/balanced/broom/random，graph shape 为 sparse/near-tree/dense/bridge/cycle，操作模式为 add-delete-repeat/nested-lifetime/query-between-updates。
 4. 严格执行逐 CASE 覆盖计划；所有规模、值域、长度和派生计数字段必须符合 frozen Spec 与 stdin encoding。
 5. 函数题输出用户要求的全部 TEMPLATE；模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。
-6. 只读 SOLUTION 接口源码不得修改、复述或输出；响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
+6. 只读 SOLUTION 接口源码不得修改、复述或输出；模板禁止重定义 class Solution、同名函数/方法、占位实现或覆盖接口的赋值/导入。Python 模板会拼接在 SOLUTION 后执行，只调用既定入口。响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项。
 
 ${generatorPlanPrompts_1.GENERATOR_PLAN_CONTRACT}
@@ -3918,6 +3919,23 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
     };
     let oracleExecutor;
     try {
+        if (blueprint.problemType === 'function' && options.languages.includes('py') && runner.inspectPythonTemplate) {
+            checkBudget();
+            try {
+                const inspection = await runner.inspectPythonTemplate(blueprint.solutions?.py || blueprint.solutionCode || '', blueprint.templates?.py || '', { signal, deadlineAt: sandboxDeadlineAt });
+                if (signal?.aborted)
+                    throw signal.reason;
+                checkBudget();
+                (0, templateInterface_1.assertPythonTemplateInterface)(inspection);
+            }
+            catch (error) {
+                if (signal?.aborted)
+                    throw signal.reason;
+                if (isCancellation(error) || error instanceof failures_1.TestdataPipelineError)
+                    throw error;
+                throw toSandboxExecutionPipelineError(error, { code: 'TEMPLATE_RUNTIME_FAILED', stage: 'template', artifact: 'template-py' });
+            }
+        }
         // a. GENERATOR 实跑 → 解析出全部 .in
         let generatedInputs;
         if (startsAtOrBefore('generator')) {
@@ -4340,13 +4358,16 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     deadlineAt: sandboxDeadlineAt,
                 });
                 oracleLanguage = oracleExecutor.language;
-                oracleResults = await oracleExecutor.runBatchDetailed(allInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 });
+                oracleResults = await oracleExecutor.runBatchDetailed(allInputs, { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3, outputLimitBytes: fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES });
             }
             catch (err) {
                 if (isCancellation(err))
                     throw err;
                 if (err instanceof TestdataGenerationError && err.userMessageKey)
                     throw err;
+                if (err instanceof goJudgeSandboxService_1.SandboxOutputBudgetExceededError) {
+                    throw new failures_1.TestdataPipelineError('标准答案实际输出超过数据传输预算；请联合规划输入和输出，保留必要覆盖，不得截断答案。', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { failureKind: 'output-budget', ...(err.actualBytes === undefined ? {} : { actualBytes: err.actualBytes }), maxBytes: err.maxBytes });
+                }
                 throw toSandboxExecutionPipelineError(err, {
                     code: 'ORACLE_RUNTIME_FAILED',
                     stage: 'oracle',
@@ -4367,6 +4388,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                 const detail = oracleResults[i];
                 if (detail.accepted)
                     continue;
+                if (i < inputs.length && detail.status === 'Output Limit Exceeded') {
+                    throw new failures_1.TestdataPipelineError('标准答案输出超过单个数据文件的 4 MiB 上限；请联合规划输入输出预算，不得截断答案。', 'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact', { failureKind: 'output-budget', caseIndex: i + 1, maxBytes: fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES });
+                }
                 // 直接点名失败位置，附输入与 traceback 尾部，供修复回路与教师定位。
                 const target = i < inputs.length
                     ? `第 ${i + 1} 个测试点`
@@ -4382,23 +4406,9 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
                     safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
                 });
             }
-            cases = generatedInputs.map((item, index) => {
-                const output = normalizeFileContent(oracleResults[index].stdout);
-                if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-                    throw (0, failures_1.toPipelineError)(new Error(`第 ${index + 1} 个测试点执行后的 .out 为 ${Buffer.byteLength(output, 'utf8')} 字节，超过 ${exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE} 字节上限；请修复该测试点的输入构造并保留必要覆盖，不得改写标程或截断答案来绕过预算`), {
-                        code: 'GENERATOR_OUTPUT_TOO_LARGE',
-                        stage: 'generator',
-                        artifact: 'generator',
-                        safeDetails: {
-                            failureKind: 'output-budget',
-                            caseIndex: index + 1,
-                            actualBytes: Buffer.byteLength(output, 'utf8'),
-                            maxBytes: exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
-                        },
-                    });
-                }
-                return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
-            });
+            cases = generatedInputs.map((item, index) => ({ ...item,
+                output: normalizeFileContent(oracleResults[index].stdout), dataScale: coveragePlan[index]?.dataScale,
+            }));
             (0, generatorBudget_1.assertGeneratedDataBudget)(cases);
             sampleCheckerVerdicts = customChecker && samples.length > 0
                 && checkerExecutor?.status === 'ready'
@@ -6832,17 +6842,59 @@ class TestdataGenService {
             : undefined;
         const systemPrompt = buildGenerationArtifactsSystemPrompt(!!context, !!generatorDsl);
         const userPrompt = buildGenerationArtifactsUserPrompt(params, solution, coveragePlan, context);
+        const parseAndInspect = async (raw, allowDsl) => {
+            let artifacts;
+            let failure;
+            try {
+                artifacts = parseGenerationArtifacts(raw, solution.problemType, params.options.languages, { allowMissingTemplates: true, ...(allowDsl && generatorDsl ? { generatorDsl } : {}) });
+            }
+            catch (error) {
+                failure = error;
+            }
+            if (solution.problemType === 'function' && params.options.languages.includes('py')
+                && this.sandboxRunner?.inspectPythonTemplate) {
+                const template = artifacts?.templates?.py || parseTemplateSections(raw).py;
+                if (template) {
+                    const inspection = await this.sandboxRunner.inspectPythonTemplate(solution.solutions?.py || solution.solutionCode || '', template, { signal: params.signal, deadlineAt: Date.now() + 10000 });
+                    if (params.signal?.aborted)
+                        throw params.signal.reason;
+                    try {
+                        (0, templateInterface_1.assertPythonTemplateInterface)(inspection);
+                    }
+                    catch (error) {
+                        if (!failure || (error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle'))
+                            throw error;
+                        if (failure instanceof Error && error instanceof Error)
+                            failure.message += '\n' + error.message;
+                    }
+                }
+            }
+            if (failure)
+                throw failure;
+            return artifacts;
+        };
+        const rejectNonArtifactFailure = (error) => {
+            if ((0, goJudgeSandboxService_1.isSandboxBudgetExceededError)(error)) {
+                throw new TestdataGenerationError('模板接口预检达到沙箱时限，已停止后续模型修复。', 'sandbox_budget', results, false, undefined, undefined, { code: 'PIPELINE_BUDGET_EXHAUSTED', artifact: 'pipeline', retryPolicy: 'no-retry' });
+            }
+            if (error instanceof failures_1.TestdataPipelineError && error.artifact === 'oracle') {
+                throw new TestdataGenerationError(error.message, error.stage, results, true, undefined, undefined, { code: error.code, artifact: 'oracle', retryPolicy: error.retryPolicy, safeDetails: error.safeDetails, failedModelRole: 'oracle' });
+            }
+        };
         const initialResult = await artifactsClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, callOptions);
         results.push(initialResult);
         try {
             return {
-                artifacts: parseGenerationArtifacts(initialResult.content, solution.problemType, params.options.languages, { allowMissingTemplates: true, ...(generatorDsl ? { generatorDsl } : {}) }),
+                artifacts: await parseAndInspect(initialResult.content, true),
                 sourceContent: initialResult.content,
             };
         }
         catch (parseError) {
+            if (params.signal?.aborted)
+                throw params.signal.reason;
             if (isCancellation(parseError))
                 throw parseError;
+            rejectNonArtifactFailure(parseError);
             if (parseError instanceof failures_1.TestdataPipelineError && parseError.retryPolicy === 'manual-review') {
                 throw new TestdataGenerationError(parseError.message, 'artifacts_parse', results, false, undefined, undefined, {
                     code: parseError.code, artifact: parseError.artifact, retryPolicy: parseError.retryPolicy,
@@ -6861,11 +6913,16 @@ class TestdataGenService {
             results.push(repairResult);
             try {
                 return {
-                    artifacts: parseGenerationArtifacts(repairResult.content, solution.problemType, params.options.languages, { allowMissingTemplates: true }),
+                    artifacts: await parseAndInspect(repairResult.content, false),
                     sourceContent: repairResult.content,
                 };
             }
             catch (repairParseError) {
+                if (params.signal?.aborted)
+                    throw params.signal.reason;
+                if (isCancellation(repairParseError))
+                    throw repairParseError;
+                rejectNonArtifactFailure(repairParseError);
                 if (repairParseError instanceof failures_1.TestdataPipelineError && repairParseError.retryPolicy === 'manual-review') {
                     throw new TestdataGenerationError(repairParseError.message, 'artifacts_parse', results, false, undefined, undefined, {
                         code: repairParseError.code, artifact: repairParseError.artifact,
@@ -6874,8 +6931,9 @@ class TestdataGenService {
                     });
                 }
                 throw new TestdataGenerationError(`AI 自动修复外围制品后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`, 'artifacts_parse', results, true, undefined, undefined, {
-                    code: 'GENERATOR_INVALID_JSON',
-                    artifact: 'generator',
+                    code: repairParseError instanceof failures_1.TestdataPipelineError ? repairParseError.code : 'GENERATOR_INVALID_JSON',
+                    artifact: repairParseError instanceof failures_1.TestdataPipelineError ? repairParseError.artifact : 'generator',
+                    safeDetails: repairParseError instanceof failures_1.TestdataPipelineError ? repairParseError.safeDetails : undefined,
                     retryPolicy: 'repair-artifact',
                     failedModelRole: 'artifacts',
                 });
@@ -7129,7 +7187,7 @@ class TestdataGenService {
                             if (!oracle[0].accepted)
                                 continue;
                             const output = normalizeFileContent(oracle[0].stdout);
-                            if (Buffer.byteLength(output, 'utf8') > exports.TESTDATA_GEN_LIMITS.MAX_FILE_SIZE)
+                            if (Buffer.byteLength(output, 'utf8') > fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES)
                                 continue;
                             const targetRun = await runner.runPythonBatchDetailed(target.code, [candidate.input], { signal: params.signal, deadlineAt });
                             if (targetRun.length !== 1)

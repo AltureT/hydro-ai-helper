@@ -2473,19 +2473,19 @@ describe('TestdataGenApplyHandler', () => {
     expect(handler.response.body.code).toBe('FILE_TOO_LARGE');
   });
 
-  it('accepts a complete large input while retaining code/output limits', async () => {
+  it.each(['1.in', '1.out'])('accepts complete large data for %s while retaining code limits', async name => {
     mockFindOne(PROBLEM_DOC);
     (ProblemModel.addTestdata as jest.Mock).mockResolvedValue(undefined);
     const content = '200000\n' + '0 '.repeat(199999) + '0\n';
     const handler = setupHandler(TestdataGenApplyHandler, {
-      own: true, body: { problemId: 'D3102', files: [{ name: '1.in', content }] },
+      own: true, body: { problemId: 'D3102', files: [{ name, content }] },
     });
     await handler.post();
     expect(handler.response.body.failed).toEqual([]);
     expect((ProblemModel.addTestdata as jest.Mock).mock.calls[0][3].toString()).toBe(content);
   });
 
-  it.each(['std.py', '1.out'])('retains the 256 KiB limit for %s', async name => {
+  it.each(['std.py', 'template.py'])('retains the 256 KiB limit for %s', async name => {
     mockFindOne(PROBLEM_DOC);
     const handler = setupHandler(TestdataGenApplyHandler, {
       own: true, body: { problemId: 'D3102', files: [{ name, content: 'x'.repeat(256 * 1024) }] },

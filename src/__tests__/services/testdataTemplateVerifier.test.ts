@@ -1,3 +1,4 @@
+import { buildPythonTemplateExecution } from '../../services/testdata/templateInterface';
 import { TestdataSandboxRunner } from '../../services/goJudgeSandboxService';
 import {
   TemplateVerificationError,
@@ -68,7 +69,7 @@ describe('verifySelectedTemplates', () => {
       cc: { compiled: true, executed: true, total: 4, passed: 4 },
     });
     expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
-      'PY_SOLUTION\nPY_TEMPLATE',
+      buildPythonTemplateExecution('PY_SOLUTION', 'PY_TEMPLATE'),
       cases.map(testcase => testcase.input),
       expect.any(Object),
     );
@@ -254,7 +255,7 @@ describe('verifySelectedTemplates', () => {
         allowCheckerInfraResult: false,
       })).rejects.toMatchObject({ language: 'py', kind: 'budget' });
       expect(runner.runPythonBatchDetailed).toHaveBeenCalledWith(
-        'PY_SOLUTION\nPY_TEMPLATE',
+        buildPythonTemplateExecution('PY_SOLUTION', 'PY_TEMPLATE'),
         cases.map(testcase => testcase.input),
         expect.objectContaining({ deadlineAt: 150 }),
       );
