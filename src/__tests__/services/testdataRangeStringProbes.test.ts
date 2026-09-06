@@ -179,6 +179,18 @@ describe('range and binary string rejection proofs', () => {
     expect(build(spec).probes.filter(p => p.targetId === 'RANGE')).toEqual([]);
   });
 
+  it('proves duplicate range predicates for each operation and rejects distinct domains', () => {
+    const spec = rangeStringFixture();
+    spec.constraints.push(constraint('RANGE_COPY', spec.constraints[4].expression));
+    const probes = build(spec).probes.filter(p => p.targetId.startsWith('RANGE'));
+    expect(probes).toHaveLength(12);
+    for (const probe of probes) expect(violations(probe.input)).toEqual(['RANGE']);
+    spec.constraints[5].expression = 'for every operation, 0 <= l <= r <= n';
+    // Reversed/above-max ranges violate both distinct domains and cannot prove either alone.
+    expect(build(spec).probes.filter(p => p.targetId.startsWith('RANGE'))
+      .every(p => p.constructionKind === 'operation-range-below-min')).toBe(true);
+  });
+
   it('does not borrow operation types from another subtask', () => {
     const spec = rangeStringFixture(); spec.constraints[4].scope = { subtaskId: 1 };
     const result = buildConstraintProbes({ spec, statementHash: spec.statementHash, specHash: '2'.repeat(64), seeds: [

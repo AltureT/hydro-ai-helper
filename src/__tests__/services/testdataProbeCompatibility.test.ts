@@ -25,6 +25,20 @@ function build(spec: ProblemSpecV1, inputs: string[]) {
 }
 
 describe('bounded constraint compatibility and seed selection', () => {
+  it('preserves encoded array cardinality without a separate length constraint', () => {
+    const spec = fixture(); spec.constraints = [constraint('N', '1 <= n <= 8')];
+    const probes = build(spec, ['3\n1 2 3\n']).probes;
+    expect(probes).toHaveLength(2);
+    for (const probe of probes) {
+      const [header, row] = probe.input.split('\n');
+      expect(row.trim().split(/\s+/).filter(Boolean)).toHaveLength(Number(header));
+    }
+    delete spec.inputFields[1].dependsOn;
+    const missing = build(spec, ['3\n1 2 3\n']);
+    expect(missing.probes).toEqual([]);
+    expect(missing.gaps).toContainEqual(expect.objectContaining({ targetId: 'N', reasonCode: 'DEPENDENCY_NOT_RESOLVED' }));
+  });
+
   it('does not treat function-call metadata as an input operation sequence', () => {
     const spec = fixture(); spec.problemKind = 'function';
     spec.constraints = [constraint('N', '1 <= n <= 10'), constraint('LEN', 'length(a) = n')];
