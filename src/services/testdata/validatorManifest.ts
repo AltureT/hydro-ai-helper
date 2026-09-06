@@ -24,6 +24,9 @@ export const VALIDATOR_PROBE_CONSTRUCTION_KINDS = [
   'operation-range-below-min',
   'operation-range-reversed',
   'operation-range-above-max',
+  'scalar-range-below-min',
+  'scalar-range-reversed',
+  'scalar-range-above-max',
 ] as const;
 
 export type ValidatorProbeConstructionKind =

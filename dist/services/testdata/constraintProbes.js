@@ -4,6 +4,7 @@ exports.getConstraintProbeSource = getConstraintProbeSource;
 exports.buildConstraintProbes = buildConstraintProbes;
 const crypto_1 = require("crypto");
 const probeExpressions_1 = require("./probeExpressions");
+const scalarRangeProbes_1 = require("./scalarRangeProbes");
 const textOperationProbes_1 = require("./textOperationProbes");
 const fileBudget_1 = require("./fileBudget");
 const MAX_PROBE_INPUT_BYTES = fileBudget_1.TESTDATA_INPUT_MAX_BYTES;
@@ -941,6 +942,19 @@ function presentBefore(spec, operations, beforeIndex, fieldId) {
     return present;
 }
 function constructOperationMutation(input, spec, target, fieldId, operationName, kind, source) {
+    // Range protocols have integer payloads too, but do not have ADD/DEL set semantics.
+    const range = inputRangeSnapshot(input, spec);
+    if (range && kind === 'operation-argument-out-of-range' && source === 'derived') {
+        const bounds = resolveArgumentBounds(spec, target, fieldId, source);
+        if (typeof bounds === 'string' || !bounds.target)
+            return 'UNSUPPORTED_TARGET';
+        const operation = range.operations.find(item => item.name === operationName);
+        const index = operationName && operationArgumentIndex(spec, operationName, fieldId);
+        const replacement = findTargetViolation(bounds.target, bounds.nonTarget);
+        if (!operation || typeof index !== 'number' || replacement === undefined)
+            return 'MUTATION_NOT_ISOLATED';
+        return replaceToken(input, { line: operation.line, token: index + 2 }, String(replacement)) || 'MUTATION_NOT_ISOLATED';
+    }
     const operations = parseOperations(input, spec);
     if (typeof operations === 'string')
         return operations;
@@ -1079,6 +1093,9 @@ function constructStringMutation(input, spec, target, fieldId, encoding, source)
     return replaceToken(input, location, value.slice(0, -1) + '#') || 'MUTATION_NOT_ISOLATED';
 }
 function compatibleFieldsForConstruction(spec, kind) {
+    if (scalarRangeProbes_1.SCALAR_RANGE_PROBE_KINDS.some(item => item === kind)) {
+        return spec.inputFields.filter(field => field.type === 'integer' && !!parseLocation(field.encoding));
+    }
     if (kind === 'integer-below-min' || kind === 'integer-above-max'
         || kind === 'subtask-upper-bound' || kind === 'operation-argument-out-of-range'
         || kind === 'add-existing-object' || kind === 'delete-missing-object') {
@@ -1123,6 +1140,11 @@ function deduplicateRequests(requests) {
 /** Closed server-owned recognizers. This maps Frozen expressions to fixed constructors only. */
 function deriveConstructionRequests(spec, target) {
     const requests = [];
+    const scalarRange = (0, scalarRangeProbes_1.scalarRangeDescriptor)(spec, target.expression);
+    if (scalarRange) {
+        return scalarRangeProbes_1.SCALAR_RANGE_PROBE_KINDS.map(constructionKind => ({ targetId: target.id,
+            constructionKind, fieldId: scalarRange.left.id }));
+    }
     for (const field of spec.inputFields) {
         if (field.type === 'integer') {
             const bounds = integerBounds(target.expression, field.id);
@@ -1279,6 +1301,18 @@ function sequenceSnapshot(input, spec, fieldId) {
         return undefined;
     return { count, values: tokens.slice(range.startToken - 1) };
 }
+function inputRangeSnapshot(input, spec) {
+    const predicates = [...spec.constraints, ...spec.invariants].map(item => item.expression);
+    predicates.push(...(spec.operations || []).flatMap(op => op.preconditions.map(p => `for every operation, ${p}`)));
+    for (const field of spec.inputFields.filter(item => item.type === 'operations')) {
+        for (const predicate of predicates) {
+            const descriptor = (0, textOperationProbes_1.rangeDescriptor)(spec, predicate, field.id);
+            if (descriptor)
+                return (0, textOperationProbes_1.rangeSnapshot)(input, spec, descriptor);
+        }
+    }
+    return undefined;
+}
 function evaluateRecognizedSemantic(input, spec, target, request) {
     const fieldId = request.fieldId;
     if (!fieldId)
@@ -1286,6 +1320,9 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
     const field = spec.inputFields.find(item => item.id === fieldId);
     if (!field)
         return undefined;
+    if (scalarRangeProbes_1.SCALAR_RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+        return (0, scalarRangeProbes_1.scalarRangeValid)(input, spec, target.expression);
+    }
     if (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
         const descriptor = (0, textOperationProbes_1.rangeDescriptor)(spec, target.expression, fieldId);
         return descriptor ? (0, textOperationProbes_1.rangeIsValid)(input, spec, descriptor) : undefined;
@@ -1310,14 +1347,15 @@ function evaluateRecognizedSemantic(input, spec, target, request) {
         if (bounds.min === undefined && bounds.max === undefined)
             return undefined;
         if (field.encoding === `operation-argument:${fieldId}`) {
-            const operations = parseOperations(input, spec);
+            const range = inputRangeSnapshot(input, spec);
+            const operations = range?.operations ?? parseOperations(input, spec);
             if (typeof operations === 'string')
                 return undefined;
             const relevant = operations.flatMap(operation => {
                 const index = operationArgumentIndex(spec, operation.name, fieldId);
                 return index === undefined ? [] : [operation.arguments[index]];
             });
-            return relevant.length > 0 && relevant.every(value => valueSatisfiesBounds(value, bounds));
+            return (range !== undefined || relevant.length > 0) && relevant.every(value => valueSatisfiesBounds(value, bounds));
         }
         const location = parseLocation(field.encoding);
         const raw = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
@@ -1409,7 +1447,7 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
     });
 }
 /** Preconditions are input rules even when there is no duplicate constraints entry. */
-function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
+function operationPreconditionsValid(input, spec, ignoredExpression) {
     // Function specs may also describe calls in operations; this parser owns input operation rows only.
     if (!spec.inputFields.some(field => field.type === 'operations'))
         return true;
@@ -1419,13 +1457,27 @@ function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
         if ((operation.name === 'ADD' || operation.name === 'DEL') && operation.arguments.some(fieldId => (operationSupportsSetPresence(spec, operation.name, fieldId))))
             continue;
         for (const predicate of operation.preconditions) {
+            const bounds = (0, textOperationProbes_1.operationArgumentBounds)(spec, operation, predicate);
+            if (bounds) {
+                const snapshot = inputRangeSnapshot(input, spec);
+                if (!snapshot) {
+                    unknown = true;
+                    continue;
+                }
+                if (predicate === ignoredExpression)
+                    continue;
+                if (snapshot.operations.some(item => item.name === operation.name
+                    && !(bounds.min <= item.arguments[bounds.index] && item.arguments[bounds.index] <= bounds.max)))
+                    return false;
+                continue;
+            }
             const expression = `for every operation, ${predicate}`;
             const descriptor = spec.inputFields.map(field => (0, textOperationProbes_1.rangeDescriptor)(spec, expression, field.id)).find(Boolean);
             if (!descriptor) {
                 unknown = true;
                 continue;
             }
-            if (expression === ignoredRangeExpression)
+            if (expression === ignoredExpression)
                 continue;
             const snapshot = (0, textOperationProbes_1.rangeSnapshot)(input, spec, descriptor);
             if (!snapshot) {
@@ -1441,9 +1493,28 @@ function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
 }
 function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, request) {
     if (operationPreconditionsValid(sourceInput, spec) !== true
-        || operationPreconditionsValid(mutatedInput, spec, textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true)
+        || operationPreconditionsValid(mutatedInput, spec, (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+            || request.source === 'derived' && request.constructionKind === 'operation-argument-out-of-range')
+            ? target.expression : undefined) !== true)
         return false;
     const semantics = applicableRecognizableSemantics(spec, target, request);
+    const extendedRange = inputRangeSnapshot(sourceInput, spec)
+        && (spec.inputFields.some(field => field.type === 'array')
+            || (spec.operations || []).some(op => /^\d+$/.test(op.name) || op.arguments.length > 2));
+    if ((extendedRange || scalarRangeProbes_1.SCALAR_RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind))
+        && applicableTargets(spec, target).some(item => {
+            if (deriveConstructionRequests(spec, item).length > 0)
+                return false;
+            // Parsing both snapshots already preserves this exact closed opcode domain. It still
+            // gets its own UNSUPPORTED_TARGET gap: this is not an illegal-opcode rejection proof.
+            const opcodes = /^for every operation, opcode in \[(\d+(?:, ?\d+)*)\]$/.exec(item.expression);
+            const declared = opcodes?.[1].split(/, ?/).sort();
+            const definitions = (spec.operations || []).map(op => op.name).sort();
+            return !extendedRange || !declared || declared.length !== definitions.length
+                || declared.some((name, index) => name !== definitions[index])
+                || !inputRangeSnapshot(mutatedInput, spec);
+        }))
+        return false;
     if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
         return false;
     }
@@ -1473,6 +1544,9 @@ function constructMutationForRequest(input, spec, target, request) {
         : undefined;
     if (!field)
         return 'INVALID_RECIPE';
+    if (scalarRangeProbes_1.SCALAR_RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+        return (0, scalarRangeProbes_1.constructScalarRangeMutation)(input, spec, target.expression, request.constructionKind) || 'MUTATION_NOT_ISOLATED';
+    }
     if (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
         const descriptor = (0, textOperationProbes_1.rangeDescriptor)(spec, target.expression, field.id);
         return descriptor ? (0, textOperationProbes_1.constructRangeMutation)(input, spec, descriptor, request.constructionKind, request.operationName)

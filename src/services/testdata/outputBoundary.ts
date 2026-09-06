@@ -1,0 +1,52 @@
+import { TestdataPipelineError } from './failures';
+
+export function answerBoundaryRequired(statement: string, outputKind = 'exact', scale = 'auto'): boolean {
+  if (!['exact', 'token'].includes(outputKind) || !['auto', 'large'].includes(scale)) return false;
+  // Only explicit answer claims in prose: input widths, generic type advice and code are not evidence.
+  const prose = statement.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1/g, '').replace(/\*\*/g, '');
+  return /(?:^|[。！？；，\n])\s*(?:注意[：:]\s*)?答案可能超过\s*32\s*位(?:有符号整数)?/.test(prose)
+    || /(?:^|[.!?\n])\s*(?:the )?answer may exceed (?:a )?(?:signed )?32[- ]bit integer\b/i.test(prose);
+}
+
+function exceedsInt32(token: string): boolean {
+  const negative = token.startsWith('-');
+  const digits = token.replace(/^[+-]/, '').replace(/^0+/, '') || '0';
+  const limit = negative ? '2147483648' : '2147483647';
+  return digits.length > limit.length || (digits.length === limit.length && digits > limit);
+}
+
+function plainIntegerAnswerFormat(statement: string): 'single' | 'per-query' | undefined {
+  const prose = statement.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1/g, '').replace(/\*\*/g, '');
+  // A deliberately closed output protocol: a single answer integer per line. Other
+  // formats need an explicit answer-field schema before their tokens can be evidence.
+  const section = /(?:^|\n)#{1,6}\s*(?:输出格式|Output(?: Format)?)\s*\n([\s\S]*?)(?=\n#{1,6}\s|$)/i.exec(prose)?.[1]?.trim();
+  if (section) {
+    if (/^一行一个整数(?:[，,](?:表示|为|即)[^。；;\n]*)?[。.]?$/.test(section)
+      || /^Output (?:one|a single) integer[.]?$/i.test(section)) return 'single';
+    if (/^对(?:每个查询|每条操作 2)[，,]?\s*按顺序输出一行(?:整数|区间和)[。.]?(?:\s*没有查询时输出为空[。.]?)?$/.test(section)) return 'per-query';
+    return undefined;
+  }
+  // Function adapters print exactly one return value per invocation. Cardinality is
+  // checked below as well, so an auxiliary integer cannot stand in for that value.
+  return /模板[^\n。]*调用[^\n。]*输出返回值一行/.test(prose)
+    || /函数返回整数/.test(prose) && /输出返回值一行/.test(prose) ? 'single' : undefined;
+}
+
+export function assertAnswerBoundaryCoverage(statement: string, formalOutputs: readonly string[], outputKind = 'exact', scale = 'auto'): void {
+  if (!answerBoundaryRequired(statement, outputKind, scale)) return;
+  const format = plainIntegerAnswerFormat(statement);
+  const cases = formalOutputs.map(output => output.trim() ? output.trim().split(/\r?\n/).map(line => line.trim()) : []);
+  const lines = cases.flat();
+  if (!format || (format === 'single' && cases.some(values => values.length !== 1))
+    || lines.some(line => !/^[+-]?\d+$/.test(line))) {
+    throw new TestdataPipelineError('题面提示答案可能超过 32 位，但当前输出协议无法确定每行的答案整数。答案边界尚未证明，请人工复核输出格式与边界数据。',
+      'COVERAGE_REQUIREMENT_MISSING', 'generator', 'coverage', 'manual-review');
+  }
+  const witness = lines.some(exceedsInt32);
+  if (!witness) {
+    throw new TestdataPipelineError(
+      '题面明确提示答案可能超过 32 位整数，但正式测试点的实际 ORACLE 输出均未证明该边界。请只修复 GENERATOR，保留既定点数和字节预算，构造至少一个答案超出 [-2147483648, 2147483647] 的合法正式输入；不能用最大 n、输入值大小或压力样例代替答案证据。',
+      'COVERAGE_REQUIREMENT_MISSING', 'generator', 'generator', 'repair-artifact',
+    );
+  }
+}

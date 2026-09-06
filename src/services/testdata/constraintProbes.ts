@@ -1,8 +1,9 @@
 import { createHash } from 'crypto';
 import type { ProblemSpecV1 } from './problemSpec';
 import { specForConstraintProbes } from './probeExpressions';
+import { SCALAR_RANGE_PROBE_KINDS, constructScalarRangeMutation, scalarRangeDescriptor, scalarRangeValid } from './scalarRangeProbes';
 import {
-  RANGE_PROBE_KINDS, constructRangeMutation, operationLayout, preserveTextOperationCounts,
+  RANGE_PROBE_KINDS, constructRangeMutation, operationArgumentBounds, operationLayout, preserveTextOperationCounts,
   rangeDescriptor, rangeIsValid, rangeSnapshot, replaceScalar, scalarSnapshot, stringAlphabet,
   stringCharacterSnapshot, stringCountField, stringLengthIsValid,
 } from './textOperationProbes';
@@ -1146,6 +1147,17 @@ function constructOperationMutation(
   kind: OperationConstructionKind,
   source: InternalProbeRequest['source'],
 ): Mutation | ConstraintProbeGap['reasonCode'] {
+  // Range protocols have integer payloads too, but do not have ADD/DEL set semantics.
+  const range = inputRangeSnapshot(input, spec);
+  if (range && kind === 'operation-argument-out-of-range' && source === 'derived') {
+    const bounds = resolveArgumentBounds(spec, target, fieldId, source);
+    if (typeof bounds === 'string' || !bounds.target) return 'UNSUPPORTED_TARGET';
+    const operation = range.operations.find(item => item.name === operationName);
+    const index = operationName && operationArgumentIndex(spec, operationName, fieldId);
+    const replacement = findTargetViolation(bounds.target, bounds.nonTarget);
+    if (!operation || typeof index !== 'number' || replacement === undefined) return 'MUTATION_NOT_ISOLATED';
+    return replaceToken(input, { line: operation.line, token: index + 2 }, String(replacement)) || 'MUTATION_NOT_ISOLATED';
+  }
   const operations = parseOperations(input, spec);
   if (typeof operations === 'string') return operations;
   const selectedName = operationName
@@ -1295,6 +1307,9 @@ function compatibleFieldsForConstruction(
   spec: ProblemSpecV1,
   kind: ValidatorProbeConstructionKind,
 ): ProblemSpecV1['inputFields'] {
+  if (SCALAR_RANGE_PROBE_KINDS.some(item => item === kind)) {
+    return spec.inputFields.filter(field => field.type === 'integer' && !!parseLocation(field.encoding));
+  }
   if (kind === 'integer-below-min' || kind === 'integer-above-max'
     || kind === 'subtask-upper-bound' || kind === 'operation-argument-out-of-range'
     || kind === 'add-existing-object' || kind === 'delete-missing-object') {
@@ -1343,6 +1358,11 @@ function deriveConstructionRequests(
   target: Target,
 ): ValidatorProbeRecipe[] {
   const requests: ValidatorProbeRecipe[] = [];
+  const scalarRange = scalarRangeDescriptor(spec, target.expression);
+  if (scalarRange) {
+    return SCALAR_RANGE_PROBE_KINDS.map(constructionKind => ({ targetId: target.id,
+      constructionKind, fieldId: scalarRange.left.id }));
+  }
   for (const field of spec.inputFields) {
     if (field.type === 'integer') {
       const bounds = integerBounds(target.expression, field.id);
@@ -1509,6 +1529,18 @@ function sequenceSnapshot(
   return { count, values: tokens.slice(range.startToken - 1) };
 }
 
+function inputRangeSnapshot(input: string, spec: ProblemSpecV1) {
+  const predicates = [...spec.constraints, ...spec.invariants].map(item => item.expression);
+  predicates.push(...(spec.operations || []).flatMap(op => op.preconditions.map(p => `for every operation, ${p}`)));
+  for (const field of spec.inputFields.filter(item => item.type === 'operations')) {
+    for (const predicate of predicates) {
+      const descriptor = rangeDescriptor(spec, predicate, field.id);
+      if (descriptor) return rangeSnapshot(input, spec, descriptor);
+    }
+  }
+  return undefined;
+}
+
 function evaluateRecognizedSemantic(
   input: string,
   spec: ProblemSpecV1,
@@ -1519,6 +1551,9 @@ function evaluateRecognizedSemantic(
   if (!fieldId) return undefined;
   const field = spec.inputFields.find(item => item.id === fieldId);
   if (!field) return undefined;
+  if (SCALAR_RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+    return scalarRangeValid(input, spec, target.expression);
+  }
   if (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
     const descriptor = rangeDescriptor(spec, target.expression, fieldId);
     return descriptor ? rangeIsValid(input, spec, descriptor) : undefined;
@@ -1541,13 +1576,14 @@ function evaluateRecognizedSemantic(
     const bounds = integerBounds(target.expression, fieldId);
     if (bounds.min === undefined && bounds.max === undefined) return undefined;
     if (field.encoding === `operation-argument:${fieldId}`) {
-      const operations = parseOperations(input, spec);
+      const range = inputRangeSnapshot(input, spec);
+      const operations = range?.operations ?? parseOperations(input, spec);
       if (typeof operations === 'string') return undefined;
       const relevant = operations.flatMap(operation => {
         const index = operationArgumentIndex(spec, operation.name, fieldId);
         return index === undefined ? [] : [operation.arguments[index]];
       });
-      return relevant.length > 0 && relevant.every(value => valueSatisfiesBounds(value, bounds));
+      return (range !== undefined || relevant.length > 0) && relevant.every(value => valueSatisfiesBounds(value, bounds));
     }
     const location = parseLocation(field.encoding);
     const raw = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
@@ -1643,7 +1679,7 @@ function applicableRecognizableSemantics(
 }
 
 /** Preconditions are input rules even when there is no duplicate constraints entry. */
-function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignoredRangeExpression?: string): boolean | undefined {
+function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignoredExpression?: string): boolean | undefined {
   // Function specs may also describe calls in operations; this parser owns input operation rows only.
   if (!spec.inputFields.some(field => field.type === 'operations')) return true;
   let unknown = false;
@@ -1653,10 +1689,19 @@ function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignored
       operationSupportsSetPresence(spec, operation.name as 'ADD' | 'DEL', fieldId)
     ))) continue;
     for (const predicate of operation.preconditions) {
+      const bounds = operationArgumentBounds(spec, operation, predicate);
+      if (bounds) {
+        const snapshot = inputRangeSnapshot(input, spec);
+        if (!snapshot) { unknown = true; continue; }
+        if (predicate === ignoredExpression) continue;
+        if (snapshot.operations.some(item => item.name === operation.name
+          && !(bounds.min <= item.arguments[bounds.index] && item.arguments[bounds.index] <= bounds.max))) return false;
+        continue;
+      }
       const expression = `for every operation, ${predicate}`;
       const descriptor = spec.inputFields.map(field => rangeDescriptor(spec, expression, field.id)).find(Boolean);
       if (!descriptor) { unknown = true; continue; }
-      if (expression === ignoredRangeExpression) continue;
+      if (expression === ignoredExpression) continue;
       const snapshot = rangeSnapshot(input, spec, descriptor);
       if (!snapshot) { unknown = true; continue; }
       if (snapshot.operations.some(item => item.name === operation.name
@@ -1675,8 +1720,25 @@ function mutationIsTargetIsolated(
 ): boolean {
   if (operationPreconditionsValid(sourceInput, spec) !== true
     || operationPreconditionsValid(mutatedInput, spec,
-      RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true) return false;
+      (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+        || request.source === 'derived' && request.constructionKind === 'operation-argument-out-of-range')
+        ? target.expression : undefined) !== true) return false;
   const semantics = applicableRecognizableSemantics(spec, target, request);
+  const extendedRange = inputRangeSnapshot(sourceInput, spec)
+    && (spec.inputFields.some(field => field.type === 'array')
+      || (spec.operations || []).some(op => /^\d+$/.test(op.name) || op.arguments.length > 2));
+  if ((extendedRange || SCALAR_RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind))
+    && applicableTargets(spec, target).some(item => {
+      if (deriveConstructionRequests(spec, item).length > 0) return false;
+      // Parsing both snapshots already preserves this exact closed opcode domain. It still
+      // gets its own UNSUPPORTED_TARGET gap: this is not an illegal-opcode rejection proof.
+      const opcodes = /^for every operation, opcode in \[(\d+(?:, ?\d+)*)\]$/.exec(item.expression);
+      const declared = opcodes?.[1].split(/, ?/).sort();
+      const definitions = (spec.operations || []).map(op => op.name).sort();
+      return !extendedRange || !declared || declared.length !== definitions.length
+        || declared.some((name, index) => name !== definitions[index])
+        || !inputRangeSnapshot(mutatedInput, spec);
+    })) return false;
   if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
     return false;
   }
@@ -1709,6 +1771,9 @@ function constructMutationForRequest(
     ? spec.inputFields.find(item => item.id === request.fieldId)
     : undefined;
   if (!field) return 'INVALID_RECIPE';
+  if (SCALAR_RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+    return constructScalarRangeMutation(input, spec, target.expression, request.constructionKind) || 'MUTATION_NOT_ISOLATED';
+  }
   if (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
     const descriptor = rangeDescriptor(spec, target.expression, field.id);
     return descriptor ? constructRangeMutation(input, spec, descriptor, request.constructionKind, request.operationName)

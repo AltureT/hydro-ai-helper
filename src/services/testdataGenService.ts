@@ -151,6 +151,7 @@ import {
 } from './testdata/mutationRunner';
 
 export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
+import { answerBoundaryRequired, assertAnswerBoundaryCoverage } from './testdata/outputBoundary';
 
 function comparableFileContent(content: string): string {
   return content
@@ -2006,6 +2007,9 @@ export function buildGenerationArtifactsUserPrompt(
   coverageOverride?: Array<CoverageSlot | SubtaskCaseAllocation>,
   context?: TestdataPipelineContext,
 ): string {
+  const outputBoundaryGuidance = answerBoundaryRequired(context?.statement.normalizedMarkdown ?? params.statementMarkdown,
+    context?.spec.outputPolicy.kind, params.options.dataScale)
+    ? '- 题面明确提示答案可能超过 32 位：至少一个正式输入必须使实际答案超出 [-2147483648, 2147483647]；只有最大输入规模不能证明这一点。保留正式点数量和字节预算。' : '';
   const coveragePlan = coverageOverride ?? (() => {
     const tiered = resolveTieredSubtaskGeneration({
       caseCount: params.options.caseCount,
@@ -2042,6 +2046,7 @@ export function buildGenerationArtifactsUserPrompt(
       ] : []),
       '',
       '【生成要求】',
+      outputBoundaryGuidance,
       `- 恰好生成 ${params.options.caseCount} 个独立测试点。`,
       `- 数据规模策略：${DATA_SCALE_TEXT[params.options.dataScale || 'auto']}`,
       trustedGeneratorDsl
@@ -2062,6 +2067,7 @@ export function buildGenerationArtifactsUserPrompt(
   );
   return [
     base,
+    outputBoundaryGuidance,
     buildGeneratorBudgetPrompt(params.options.caseCount, coveragePlan),
     '',
     '【第一阶段已验证且必须保持不变的解题蓝图】',
@@ -6212,6 +6218,11 @@ export async function materializeSandboxBlueprint(
     }
     bruteCheck = { compared, agreed, skippedTimeout, disagreed };
   }
+
+  // Attribute missing answer coverage only after independent correctness checks.
+  assertAnswerBoundaryCoverage(statementMarkdown, cases.map(item => item.output),
+    customChecker ? 'custom-checker' : materialization?.coverageProof?.pipelineContext.spec.outputPolicy.kind,
+    options.dataScale);
 
   reportProgress('discrimination_testing', 90);
   const discriminationDeadlineAt = Date.now() + DISCRIMINATION_BUDGET_MS;
