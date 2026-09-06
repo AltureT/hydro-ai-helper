@@ -1,3 +1,4 @@
+import { Icon } from './Icon';
 import React from 'react';
 import { i18n } from '../utils/i18n';
 import { COLORS } from '../utils/styles';
@@ -37,7 +38,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
           textAlign: 'center',
           fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         }}>
-          <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#x26A0;&#xFE0F;</div>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}><Icon name="warning" size={32} /></div>
           <h2 style={{ fontSize: '18px', fontWeight: 600, color: '#1f2937', marginBottom: '8px' }}>
             {i18n('ai_helper_student_render_error')}
           </h2>

@@ -1,3 +1,4 @@
+import { Icon, IconName } from '../components/Icon';
 import React from 'react';
 import { i18n } from '../utils/i18n';
 import {
@@ -29,26 +30,26 @@ function summarizeChain(chain: SelectedModel[]): string {
   return names.length > 3 ? `${shown} → +${names.length - 3}` : shown;
 }
 
-const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; icon: string; warnKey?: string }> = {
+const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; icon: IconName; warnKey?: string }> = {
   studentChat: {
     labelKey: 'ai_helper_admin_scenario_student_chat',
     descKey: 'ai_helper_admin_scenario_student_chat_desc',
-    icon: '💬',
+    icon: 'message',
   },
   learningSummary: {
     labelKey: 'ai_helper_admin_scenario_learning_summary',
     descKey: 'ai_helper_admin_scenario_learning_summary_desc',
-    icon: '📝',
+    icon: 'document',
   },
   teachingAnalysis: {
     labelKey: 'ai_helper_admin_scenario_teaching_analysis',
     descKey: 'ai_helper_admin_scenario_teaching_analysis_desc',
-    icon: '📊',
+    icon: 'chart',
   },
   testdataGeneration: {
     labelKey: 'ai_helper_admin_scenario_testdata_generation',
     descKey: 'ai_helper_admin_scenario_testdata_generation_desc',
-    icon: '🧪',
+    icon: 'flask',
     warnKey: 'ai_helper_admin_scenario_testdata_strong_model_warning',
   },
 };
@@ -118,7 +119,7 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: '15px', fontWeight: 600, color: COLORS.textPrimary }}>{i18n(meta.labelKey)}</span>
+                <span style={{ fontSize: '15px', fontWeight: 600, color: COLORS.textPrimary }}><Icon name={meta.icon} size={18} /> {i18n(meta.labelKey)}</span>
                 <span style={{ fontSize: '12px', color: COLORS.textSecondary }}>
                   {i18n(isDefault ? 'ai_helper_admin_scenario_follow_global' : 'ai_helper_admin_scenario_custom')}
                 </span>
@@ -193,7 +194,7 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                             opacity: (disabled || index === 0) ? 0.5 : 1,
                           }}
                         >
-                          ↑
+                          <Icon name="arrowUp" />
                         </button>
                         <button
                           type="button"
@@ -206,7 +207,7 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                             opacity: (disabled || index === chain.length - 1) ? 0.5 : 1,
                           }}
                         >
-                          ↓
+                          <Icon name="arrowDown" />
                         </button>
                         <button
                           type="button"
@@ -218,7 +219,7 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                             cursor: disabled ? 'not-allowed' : 'pointer',
                           }}
                         >
-                          ×
+                          <Icon name="close" />
                         </button>
                       </div>
                     </div>

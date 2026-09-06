@@ -1,3 +1,4 @@
+import { rangeStringFixture } from '../fixtures/rangeStringSpec';
 import {
   buildConstraintProbes,
   type LegalConstraintProbeSeed,
@@ -11,6 +12,8 @@ import {
 type ScalarSequenceConstructionKind =
   | 'integer-below-min'
   | 'integer-above-max'
+  | 'array-element-below-min'
+  | 'array-element-above-max'
   | 'array-length-mismatch'
   | 'duplicate-element'
   | 'permutation-duplicate-or-missing'
@@ -221,6 +224,8 @@ function sequenceSpec(constructionKind: ScalarSequenceConstructionKind): {
   const fieldId = isString ? 's' : isPermutation ? 'p' : 'a';
   const targetExpression = constructionKind === 'array-length-mismatch'
     ? 'length(a) = n'
+    : constructionKind === 'array-element-below-min' || constructionKind === 'array-element-above-max'
+      ? '-10 <= a[i] <= 10'
     : constructionKind === 'duplicate-element'
       ? 'allDistinct(a)'
       : isPermutation
@@ -1264,6 +1269,8 @@ describe('construction coverage deduplication and gaps', () => {
     const scalarInputs: Array<[ScalarSequenceConstructionKind, string]> = [
       ['integer-below-min', '5\n'],
       ['integer-above-max', '5\n'],
+      ['array-element-below-min', '3\n1 2 3\n'],
+      ['array-element-above-max', '3\n1 2 3\n'],
       ['array-length-mismatch', '3\n1 2 3\n'],
       ['duplicate-element', '4\n1 2 3 4\n'],
       ['permutation-duplicate-or-missing', '4\n1 2 3 4\n'],
@@ -1289,6 +1296,13 @@ describe('construction coverage deduplication and gaps', () => {
       buildScopedUpperBoundFixture(),
     ];
 
+    const rangeSpec = rangeStringFixture();
+    rangeSpec.constraints = rangeSpec.constraints.filter(c => c.id !== 'N' && c.id !== 'Q');
+    const rangeResult = buildConstraintProbes({ spec: rangeSpec, statementHash: '1'.repeat(64), specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 0, input: '3 2\n010\nFLIP 1 3\nQUERY 2 3\n' }] });
+    expect(rangeResult.gaps).toEqual([]);
+    expect([...new Set([...results, rangeResult].flatMap(result => result.probes.map(p => p.constructionKind)))].sort())
+      .toEqual([...VALIDATOR_PROBE_CONSTRUCTION_KINDS].sort());
     expect(results.every((result, index) => result.probes.some(probe => (
       probe.constructionKind === VALIDATOR_PROBE_CONSTRUCTION_KINDS[index]
     )))).toBe(true);
@@ -1580,7 +1594,7 @@ describe('constraint probe scope gaps bounds and privacy', () => {
       spec,
       statementHash: '1'.repeat(64),
       specHash: '2'.repeat(64),
-      seeds: [{ source: 'formal', index: 1, input: `${'a'.repeat(256 * 1024)}\n` }],
+      seeds: [{ source: 'formal', index: 1, input: `${'a'.repeat(4 * 1024 * 1024)}\n` }],
       recipes: [recipe],
     });
 

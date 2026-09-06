@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React, { useState, useEffect } from 'react';
 import { i18n } from '../utils/i18n';
 import { buildApiUrl } from '../utils/domainUtils';
@@ -184,7 +185,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
     if (!data || data.items.length === 0) {
       return (
         <div style={emptyStateStyle}>
-          <div style={{ fontSize: '48px', marginBottom: SPACING.base }}>&#x1F4CA;</div>
+          <div style={{ fontSize: '48px', marginBottom: SPACING.base }}><Icon name="chart" size={32} /></div>
           <div style={{ fontSize: '15px' }}>{i18n('ai_helper_teacher_analytics_no_data')}</div>
         </div>
       );
@@ -319,7 +320,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
           borderRadius: RADIUS.lg,
           border: `1px solid ${COLORS.border}`,
         }}>
-          <div style={{ fontSize: '24px', marginBottom: SPACING.md }}>&#x23F3;</div>
+          <div style={{ fontSize: '24px', marginBottom: SPACING.md }}><Icon name="clock" size={24} /></div>
           {i18n('ai_helper_teacher_analytics_loading')}
         </div>
       )}

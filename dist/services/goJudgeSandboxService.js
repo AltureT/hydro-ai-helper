@@ -8,12 +8,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GoJudgeSandboxRunner = exports.CHECKER_BUDGET_MS = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = exports.SandboxBudgetExceededError = void 0;
+exports.GoJudgeSandboxRunner = exports.CHECKER_BUDGET_MS = exports.DISCRIMINATION_BUDGET_MS = exports.SANDBOX_TOTAL_BUDGET_MS = exports.SANDBOX_RESPONSE_LIMIT_BYTES = exports.SANDBOX_CHUNK_SIZE = exports.SandboxOutputBudgetExceededError = exports.SandboxBudgetExceededError = void 0;
 exports.isSandboxBudgetExceededError = isSandboxBudgetExceededError;
 exports.scheduleSandboxChunks = scheduleSandboxChunks;
 exports.getTestdataGenerationMode = getTestdataGenerationMode;
 const axios_1 = __importDefault(require("axios"));
+const util_1 = require("util");
 const textTruncate_1 = require("../lib/textTruncate");
+const generatorBudget_1 = require("./testdata/generatorBudget");
+const fileBudget_1 = require("./testdata/fileBudget");
+const templateInterface_1 = require("./testdata/templateInterface");
 const CPU_LIMIT_NS = 5000000000;
 const CLOCK_LIMIT_NS = 10000000000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -35,6 +39,16 @@ class SandboxBudgetExceededError extends Error {
     }
 }
 exports.SandboxBudgetExceededError = SandboxBudgetExceededError;
+class SandboxOutputBudgetExceededError extends Error {
+    constructor(actualBytes, maxBytes) {
+        super(`Sandbox answer ${actualBytes === undefined ? 'transport' : `${actualBytes} bytes`} exceeds ${maxBytes}`);
+        this.actualBytes = actualBytes;
+        this.maxBytes = maxBytes;
+        this.code = 'SANDBOX_OUTPUT_BUDGET_EXCEEDED';
+        this.name = 'SandboxOutputBudgetExceededError';
+    }
+}
+exports.SandboxOutputBudgetExceededError = SandboxOutputBudgetExceededError;
 function isSandboxBudgetExceededError(error) {
     return error instanceof SandboxBudgetExceededError
         || (error instanceof Error
@@ -323,6 +337,10 @@ function collectReturnedFileIds(data) {
         }))];
 }
 class GoJudgeSandboxRunner {
+    async inspectPythonTemplate(solution, template, opts = {}) {
+        const result = await this.runPython((0, templateInterface_1.buildPythonTemplateInspection)(solution, template), '', opts.signal, opts.deadlineAt);
+        return (0, templateInterface_1.parsePythonTemplateInterfaceReport)(result.stdout);
+    }
     constructor(host, http = axios_1.default) {
         this.http = http;
         this.host = normalizeHost(host);
@@ -430,6 +448,54 @@ class GoJudgeSandboxRunner {
         const [result] = await this.runPythonBatch(code, [stdin], signal, deadlineAt);
         return result;
     }
+    /** Download raw cached JSON instead of embedding large stdout in /run JSON. */
+    async runPythonGenerator(code, signal, deadlineAt) {
+        const deadline = deadlineAt ?? Date.now() + 55000;
+        const remaining = () => {
+            if (signal?.aborted)
+                throw signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+            if (Date.now() >= deadline)
+                throw new SandboxBudgetExceededError();
+            return Math.max(1, Math.min(55000, deadline - Date.now()));
+        };
+        const command = buildPythonCommand(code, { stdin: '' });
+        command.files[1] = { name: 'stdout', max: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout };
+        let fileIds = [];
+        try {
+            const response = await this.http.post(`${this.host}/run`, { cmd: [{
+                        ...command, copyOut: ['stderr'], copyOutCached: ['stdout'],
+                        copyOutMax: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout, copyOutTruncate: false,
+                    }] }, { timeout: remaining(), signal, maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES, proxy: false });
+            fileIds = collectReturnedFileIds(response.data);
+            remaining();
+            const results = unwrapResults(response.data);
+            if (results.length !== 1)
+                throw new Error('GENERATOR 沙箱返回数量错误');
+            const result = results[0];
+            const detail = toRunDetail(result);
+            const fileId = result.fileIds?.stdout;
+            if (!detail.accepted || detail.error || typeof fileId !== 'string' || !fileId) {
+                throw new Error(`GENERATOR 实跑失败（${detail.status}）：${(0, textTruncate_1.excerptTail)(detail.stderr || detail.error || '缺少缓存输出', 1000)}`);
+            }
+            const output = await this.http.get(`${this.host}/file/${encodeURIComponent(fileId)}`, {
+                timeout: remaining(), signal, responseType: 'text', transformResponse: data => data,
+                maxContentLength: generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout, proxy: false,
+            });
+            remaining();
+            if (typeof output.data !== 'string' || Buffer.byteLength(output.data, 'utf8') > generatorBudget_1.GENERATOR_BYTE_LIMITS.stdout) {
+                throw new Error('GENERATOR 缓存输出超过大小上限或格式无效');
+            }
+            return { stdout: output.data, stderr: detail.stderr };
+        }
+        catch (error) {
+            if (!signal?.aborted && Date.now() >= deadline)
+                throw new SandboxBudgetExceededError();
+            throw error;
+        }
+        finally {
+            await Promise.all(fileIds.map(fileId => this.deleteCachedFile(fileId)));
+        }
+    }
     /**
      * 严格版：任一条未 Accepted 即抛出可读中文错误（保留原有报错文案，向后兼容）。
      * 基于宽容版实现，报错取该条 stderr / error / exitStatus。
@@ -468,6 +534,12 @@ class GoJudgeSandboxRunner {
     async runBatchDetailed(inputs, opts, buildCommand) {
         if (inputs.length === 0)
             return [];
+        const outputLimit = opts.outputLimitBytes;
+        if (outputLimit !== undefined && (!Number.isSafeInteger(outputLimit)
+            || outputLimit < 1 || outputLimit > fileBudget_1.TESTDATA_OUTPUT_MAX_BYTES)) {
+            throw new TypeError('Invalid sandbox output allowance');
+        }
+        let totalOutputBytes = 0;
         const cpuSeconds = opts.cpuSeconds ?? 5;
         const cpuLimit = cpuSeconds * 1000000000;
         const clockLimit = cpuSeconds * 2 * 1000000000;
@@ -485,7 +557,15 @@ class GoJudgeSandboxRunner {
                 throw new SandboxBudgetExceededError();
             let response;
             try {
-                response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => buildCommand(input, { cpuLimit, clockLimit })) }, {
+                response = await this.http.post(`${this.host}/run`, { cmd: chunk.map(input => {
+                        const command = buildCommand(input, { cpuLimit, clockLimit });
+                        if (outputLimit === undefined)
+                            return command;
+                        const configured = command;
+                        return { ...configured,
+                            files: configured.files.map(file => file.name === 'stdout' ? { ...file, max: outputLimit } : file),
+                            copyOut: ['stderr'], copyOutCached: ['stdout'], copyOutMax: outputLimit, copyOutTruncate: false };
+                    }) }, {
                     timeout: Math.max(1, Math.min(chunkTimeout, remainingBudgetMs)),
                     signal: chunkSignal,
                     maxContentLength: exports.SANDBOX_RESPONSE_LIMIT_BYTES,
@@ -498,14 +578,66 @@ class GoJudgeSandboxRunner {
                 }
                 throw err;
             }
-            if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
-                throw new SandboxBudgetExceededError();
+            const fileIds = outputLimit === undefined ? [] : collectReturnedFileIds(response.data);
+            try {
+                if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt)
+                    throw new SandboxBudgetExceededError();
+                const results = unwrapResults(response.data);
+                if (results.length !== chunk.length) {
+                    throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
+                }
+                if (outputLimit !== undefined) {
+                    // Download sequentially inside a chunk: at most one large response per worker.
+                    for (const result of results) {
+                        // OLE processes may leave a cache larger than their limit. Keep the failure
+                        // status and clean that cache without downloading a partial/invalid answer.
+                        if (result.status !== 'Accepted' || result.exitStatus !== 0)
+                            continue;
+                        const fileId = result.fileIds?.stdout;
+                        if (!fileId) {
+                            if (result.status === 'Accepted' && result.exitStatus === 0)
+                                throw new Error('Missing cached answer output');
+                            continue;
+                        }
+                        const remaining = opts.deadlineAt === undefined ? chunkTimeout : opts.deadlineAt - Date.now();
+                        if (remaining <= 0)
+                            throw new SandboxBudgetExceededError();
+                        const downloaded = await this.http.get(`${this.host}/file/${encodeURIComponent(fileId)}`, {
+                            timeout: Math.max(1, Math.min(chunkTimeout, remaining)), signal: chunkSignal,
+                            responseType: 'arraybuffer', transformResponse: data => data, maxContentLength: outputLimit, proxy: false,
+                        });
+                        if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt)
+                            throw new SandboxBudgetExceededError();
+                        const content = typeof downloaded.data === 'string' ? downloaded.data
+                            : new util_1.TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(downloaded.data);
+                        const bytes = Buffer.byteLength(content, 'utf8');
+                        if (bytes > outputLimit)
+                            throw new SandboxOutputBudgetExceededError(bytes, outputLimit);
+                        totalOutputBytes += bytes;
+                        if (totalOutputBytes > fileBudget_1.TESTDATA_PLAN_MAX_BYTES) {
+                            throw new SandboxOutputBudgetExceededError(totalOutputBytes, fileBudget_1.TESTDATA_PLAN_MAX_BYTES);
+                        }
+                        if (result.fileError?.some(error => error.name === 'stdout'))
+                            throw new Error('Sandbox answer copy failed');
+                        result.files = { ...result.files, stdout: content };
+                    }
+                }
+                return results.map(result => toRunDetail(result));
             }
-            const results = unwrapResults(response.data);
-            if (results.length !== chunk.length) {
-                throw new Error(`Hydro 沙箱返回 ${results.length} 个结果，期望 ${chunk.length} 个`);
+            catch (error) {
+                if (opts.signal?.aborted)
+                    throw opts.signal.reason ?? error;
+                if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt)
+                    throw new SandboxBudgetExceededError();
+                if (outputLimit !== undefined && error instanceof Error
+                    && error.message === `maxContentLength size of ${outputLimit} exceeded`) {
+                    throw new SandboxOutputBudgetExceededError(undefined, outputLimit);
+                }
+                throw error;
             }
-            return results.map(result => toRunDetail(result));
+            finally {
+                await Promise.all(fileIds.map(fileId => this.deleteCachedFile(fileId)));
+            }
         }, opts.signal);
         return chunkDetails.flat();
     }

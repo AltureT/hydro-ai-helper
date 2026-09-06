@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 /**
  * TestdataGenPanel - AI 生成测试数据面板
  *
@@ -9,6 +10,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { i18n } from '../utils/i18n';
 import { buildApiUrl } from '../utils/domainUtils';
+import { buildTestdataApplyFiles, buildTestdataApplyRequest } from './applyFiles';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
@@ -732,6 +734,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         throw new Error((await parseErrorDetails(response)).message);
       }
       const data = await response.json() as { plan: GenerationPlan };
+      rememberJob(null);
       loadPlanIntoPreview(data.plan);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -739,7 +742,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     }
   }, [
     problemId, problemKind, caseCount, dataScale, languages,
-    providedStd, acceptedStdRecordId, loadPlanIntoPreview,
+    providedStd, acceptedStdRecordId, loadPlanIntoPreview, rememberJob,
   ]);
 
   // ─── 写入 ───────────────────────────────────────────────────────────────────
@@ -747,9 +750,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const handleApply = useCallback(async () => {
     if (!plan) return;
     setError(null);
-    const files = plan.files
-      .filter(f => selectedFiles[f.name])
-      .map(f => ({ name: f.name, content: fileContents[f.name] ?? f.content }));
+    const files = buildTestdataApplyFiles(plan.files, selectedFiles, fileContents, generationJobId);
     if (files.length === 0) {
       setError(i18n('ai_helper_testdata_err_none_selected'));
       return;
@@ -762,14 +763,15 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
     setPhase('applying');
     try {
+      const request = buildTestdataApplyRequest({ problemId, jobId: generationJobId || undefined, files });
       const response = await fetch(buildApiUrl('/ai-helper/testdata-gen/apply'), {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          ...request.headers,
           'X-Requested-With': 'XMLHttpRequest',
         },
         credentials: 'include',
-        body: JSON.stringify({ problemId, jobId: generationJobId || undefined, files }),
+        body: request.body,
       });
       const payload = await response.clone().json().catch(() => undefined);
       if (!response.ok) {
@@ -855,7 +857,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
         padding: SPACING.base,
       }}>
         <div style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textPrimary, marginBottom: SPACING.xs }}>
-          🧪 {i18n('ai_helper_testdata_panel_title')}
+          <Icon name="flask" size={18} /> {i18n('ai_helper_testdata_panel_title')}
         </div>
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.sm }}>
           {i18n('ai_helper_testdata_context_error', contextError)}
@@ -900,7 +902,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
   const renderForm = () => (
     <div>
       <div style={{ ...getAlertStyle('warning'), fontWeight: 600, marginBottom: SPACING.base }}>
-        {i18n('ai_helper_testdata_strong_model_notice')}
+        <Icon name="info" /> {i18n('ai_helper_testdata_strong_model_notice')}
       </div>
       {!context.problem.hasStatement && (
         <div style={{ ...getAlertStyle('warning'), marginBottom: SPACING.base }}>
@@ -1173,7 +1175,7 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
                       : redo ? 'transparent' : COLORS.border,
                   fontSize: redo ? '13px' : '11px', fontWeight: 700,
                 }}>
-                  {completed ? '✓' : redo ? '↻' : index + 1}
+                  {completed ? <Icon name="check" size={14} /> : redo ? <Icon name="refresh" size={14} /> : index + 1}
                 </span>
                 <span>{i18n(`ai_helper_testdata_step_${group.key}`)}</span>
               </div>
@@ -1594,14 +1596,14 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
     <div style={sectionStyle} className="section visible">
       <div style={headerStyle} onClick={() => setCollapsed(prev => !prev)}>
         <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
-          <span style={{ fontSize: '18px' }}>🧪</span>
+          <span style={{ fontSize: '18px' }}><Icon name="flask" size={18} /></span>
           <span style={{ fontSize: '16px', fontWeight: 600, color: COLORS.textPrimary }}>
             {i18n('ai_helper_testdata_panel_title')}
           </span>
           <span style={getBadgeStyle('info')}>AI</span>
         </div>
         <span style={{ color: COLORS.textMuted, fontSize: '13px' }}>
-          {collapsed ? i18n('ai_helper_testdata_expand') : i18n('ai_helper_testdata_collapse')}
+          {collapsed ? i18n('ai_helper_testdata_expand') : i18n('ai_helper_testdata_collapse')} <Icon name={collapsed ? 'chevronDown' : 'chevronUp'} />
         </span>
       </div>
       {!collapsed && (

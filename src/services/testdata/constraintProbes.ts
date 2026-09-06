@@ -1,12 +1,20 @@
 import { createHash } from 'crypto';
 import type { ProblemSpecV1 } from './problemSpec';
+import { specForConstraintProbes } from './probeExpressions';
+import {
+  RANGE_PROBE_KINDS, constructRangeMutation, operationLayout, preserveTextOperationCounts,
+  rangeDescriptor, rangeIsValid, rangeSnapshot, replaceScalar, scalarSnapshot, stringAlphabet,
+  stringCharacterSnapshot, stringCountField, stringLengthIsValid,
+} from './textOperationProbes';
+import { TESTDATA_INPUT_MAX_BYTES, TESTDATA_PLAN_MAX_BYTES } from './fileBudget';
 import type {
   ValidatorProbeConstructionKind,
   ValidatorProbeRecipe,
 } from './validatorManifest';
 
-const MAX_PROBE_INPUT_BYTES = 256 * 1024;
+const MAX_PROBE_INPUT_BYTES = TESTDATA_INPUT_MAX_BYTES;
 const MAX_PROBE_RECIPES = 64;
+const MAX_PROBE_SEED_ATTEMPTS = 64;
 
 export type ConstraintProbeTargetKind = 'constraint' | 'invariant';
 export type ConstraintProbeSeedSource = 'formal' | 'sample' | 'stress';
@@ -37,7 +45,8 @@ export interface ConstraintProbeGap {
     | 'DEPENDENCY_NOT_RESOLVED'
     | 'MUTATION_NOT_ISOLATED'
     | 'INVALID_RECIPE'
-    | 'PROBE_TOO_LARGE';
+    | 'PROBE_TOO_LARGE'
+    | 'PROBE_BATCH_TOO_LARGE';
   subtaskId?: number;
 }
 
@@ -187,14 +196,15 @@ function findTarget(spec: ProblemSpecV1, targetId: string): Target | undefined {
   return undefined;
 }
 
-function selectSeed(
+function selectSeeds(
   seeds: readonly LegalConstraintProbeSeed[],
   target: Target,
-): LegalConstraintProbeSeed | undefined {
+): LegalConstraintProbeSeed[] {
   if (target.subtaskId !== undefined) {
-    return seeds.find(seed => seed.source === 'formal' && seed.subtaskId === target.subtaskId);
+    return seeds.filter(seed => seed.source === 'formal' && seed.subtaskId === target.subtaskId)
+      .slice(0, MAX_PROBE_SEED_ATTEMPTS);
   }
-  return seeds[0];
+  return seeds.slice(0, MAX_PROBE_SEED_ATTEMPTS);
 }
 
 function parseLocation(encoding: string): { line: number; token: number } | undefined {
@@ -214,6 +224,8 @@ function scalarLocationIsUnambiguous(
     if (otherLocation) {
       return otherLocation.line === location.line && otherLocation.token === location.token;
     }
+    const operations = operationLayout(field);
+    if (operations && location.line >= operations.start) return true;
     const otherRange = parseTokenRange(field.encoding);
     return otherRange?.line === location.line && location.token >= otherRange.startToken;
   });
@@ -313,7 +325,47 @@ function constructIntegerMutation(
       : (boundary as number) + 1;
   }
   if (!Number.isSafeInteger(replacement)) return 'UNSUPPORTED_TARGET';
-  return replaceToken(input, location, String(replacement)) || 'MUTATION_NOT_ISOLATED';
+  const mutation = replaceToken(input, location, String(replacement));
+  if (!mutation) return 'MUTATION_NOT_ISOLATED';
+  return preserveDependentArrayLengths(input, mutation, spec, target, fieldId, replacement);
+}
+
+/** Keep recognized array-length relations true when probing their scalar count boundary. */
+function preserveDependentArrayLengths(
+  original: string,
+  mutation: Mutation,
+  spec: ProblemSpecV1,
+  target: Target,
+  countFieldId: string,
+  count: number,
+): Mutation | ConstraintProbeGap['reasonCode'] {
+  let input = mutation.input;
+  const expressions = [
+    ...spec.constraints.filter(item => item.scope === 'global'
+      || (target.subtaskId !== undefined && item.scope.subtaskId === target.subtaskId)),
+    ...spec.invariants,
+  ].map(item => item.expression);
+  for (const field of spec.inputFields) {
+    if (field.type !== 'array' || !expressions.includes(`length(${field.id}) = ${countFieldId}`)) continue;
+    if (count < 0) return 'MUTATION_NOT_ISOLATED';
+    const layout = resolveSequenceLayout(original, spec, field.id);
+    if (typeof layout === 'string') return layout;
+    if (layout.countFieldId !== countFieldId) return 'DEPENDENCY_NOT_RESOLVED';
+    const fill = layout.values[layout.values.length - 1];
+    // Reject before allocating a model-specified count; each element needs at least one byte.
+    if (count > MAX_PROBE_INPUT_BYTES / (Buffer.byteLength(fill, 'utf8') + 1)) return 'PROBE_TOO_LARGE';
+    const values = count <= layout.values.length ? layout.values.slice(0, count)
+      : layout.values.concat(Array(count - layout.values.length).fill(fill));
+    const lines = input.split('\n');
+    const line = lines[layout.line - 1];
+    const start = [...line.matchAll(/\S+/g)][layout.startToken - 1]?.index;
+    if (start === undefined) return 'MUTATION_NOT_ISOLATED';
+    lines[layout.line - 1] = line.slice(0, start) + values.join(' ');
+    input = lines.join('\n');
+    if (Buffer.byteLength(input, 'utf8') > MAX_PROBE_INPUT_BYTES) return 'PROBE_TOO_LARGE';
+  }
+  const preserved = preserveTextOperationCounts(original, input, spec, expressions, countFieldId, count);
+  return typeof preserved === 'string' ? { ...mutation, input: preserved } : preserved.gap;
 }
 
 function resolveSequenceLayout(
@@ -384,6 +436,26 @@ function isOneBasedPermutation(values: readonly string[], count: number): boolea
     seen.add(value);
   }
   return seen.size === count;
+}
+
+function constructArrayElementMutation(
+  input: string,
+  spec: ProblemSpecV1,
+  target: Target,
+  request: InternalProbeRequest,
+): Mutation | ConstraintProbeGap['reasonCode'] {
+  if (!request.fieldId) return 'INVALID_RECIPE';
+  const layout = resolveSequenceLayout(input, spec, request.fieldId);
+  if (typeof layout === 'string') return layout;
+  const bounds = integerBounds(target.expression, `${request.fieldId}[i]`);
+  const below = request.constructionKind === 'array-element-below-min';
+  const boundary = below ? bounds.min : bounds.max;
+  // A recipe alone cannot establish the meaning of an array element bound.
+  if (!Number.isSafeInteger(boundary)) return 'UNSUPPORTED_TARGET';
+  const replacement = (boundary as number) + (below ? -1 : 1);
+  if (!Number.isSafeInteger(replacement)) return 'UNSUPPORTED_TARGET';
+  return replaceToken(input, { line: layout.line, token: layout.startToken }, String(replacement))
+    || 'MUTATION_NOT_ISOLATED';
 }
 
 function constructSequenceMutation(
@@ -1201,15 +1273,18 @@ function constructStringMutation(
   const location = parseLocation(encoding);
   if (!location) return 'UNPARSEABLE_ENCODING';
   if (!scalarLocationIsUnambiguous(spec, fieldId, location)) return 'UNPARSEABLE_ENCODING';
-  const escapedField = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (source === 'derived'
-    && !new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-    .test(target.expression)) return 'UNSUPPORTED_TARGET';
-  const lineTokens = tokenValuesAtLine(input, location.line);
-  const value = lineTokens?.[location.token - 1];
-  if (!value || !/^[a-z]+$/.test(value)) return 'MUTATION_NOT_ISOLATED';
-  return replaceToken(input, location, `${value.slice(0, -1)}#`)
-    || 'MUTATION_NOT_ISOLATED';
+  const alphabet = stringAlphabet(target.expression, fieldId);
+  if (source === 'derived' && !alphabet) return 'UNSUPPORTED_TARGET';
+  const field = spec.inputFields.find(item => item.id === fieldId);
+  const checked = field && stringCharacterSnapshot(input, spec, field, target.expression);
+  if (alphabet) {
+    if (!checked?.valid || checked.checkedLength === 0) return 'MUTATION_NOT_ISOLATED';
+    const index = checked.checkedLength - 1;
+    return replaceScalar(input, checked.at, checked.value.slice(0, index) + '#' + checked.value.slice(index + 1)) || 'MUTATION_NOT_ISOLATED';
+  }
+  const value = field && scalarSnapshot(input, spec, field)?.value;
+  if (!value || !(alphabet || /^[a-z]+$/).test(value)) return 'MUTATION_NOT_ISOLATED';
+  return replaceToken(input, location, value.slice(0, -1) + '#') || 'MUTATION_NOT_ISOLATED';
 }
 
 function compatibleFieldsForConstruction(
@@ -1225,13 +1300,17 @@ function compatibleFieldsForConstruction(
         ? !!parseLocation(field.encoding)
         : field.encoding === `operation-argument:${field.id}`));
   }
-  if (kind === 'array-length-mismatch' || kind === 'duplicate-element') {
+  if (kind === 'array-length-mismatch' || kind === 'duplicate-element'
+    || kind === 'array-element-below-min' || kind === 'array-element-above-max') {
     return spec.inputFields.filter(field => field.type === 'array');
   }
   if (kind === 'permutation-duplicate-or-missing') {
     return spec.inputFields.filter(field => field.type === 'permutation');
   }
-  if (kind === 'illegal-string-character') {
+  if (RANGE_PROBE_KINDS.some(item => item === kind)) {
+    return spec.inputFields.filter(field => field.type === 'operations');
+  }
+  if (kind === 'illegal-string-character' || kind === 'string-length-mismatch') {
     return spec.inputFields.filter(field => field.type === 'string');
   }
   if (kind === 'tree-missing-edge' || kind === 'tree-cycle') {
@@ -1295,6 +1374,13 @@ function deriveConstructionRequests(
       }
     }
     if (field.type === 'array') {
+      const bounds = integerBounds(target.expression, `${field.id}[i]`);
+      if (bounds.min !== undefined) requests.push({
+        targetId: target.id, constructionKind: 'array-element-below-min', fieldId: field.id,
+      });
+      if (bounds.max !== undefined) requests.push({
+        targetId: target.id, constructionKind: 'array-element-above-max', fieldId: field.id,
+      });
       const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const range = parseTokenRange(field.encoding);
       const escapedCount = range?.countFieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1328,13 +1414,17 @@ function deriveConstructionRequests(
       }
     }
     if (field.type === 'string') {
-      const escapedField = field.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      if (new RegExp(`^characters\\(${escapedField}\\) in \\[a-z\\]$`)
-        .test(target.expression)) {
-        requests.push({
-          targetId: target.id,
-          constructionKind: 'illegal-string-character',
-          fieldId: field.id,
+      if (stringAlphabet(target.expression, field.id)) requests.push({
+        targetId: target.id, constructionKind: 'illegal-string-character', fieldId: field.id,
+      });
+      if (stringCountField(spec, field, target.expression)) requests.push({
+        targetId: target.id, constructionKind: 'string-length-mismatch', fieldId: field.id,
+      });
+    }
+    if (field.type === 'operations' && rangeDescriptor(spec, target.expression, field.id)) {
+      for (const operation of spec.operations || []) {
+        for (const constructionKind of RANGE_PROBE_KINDS) requests.push({
+          targetId: target.id, constructionKind, fieldId: field.id, operationName: operation.name,
         });
       }
     }
@@ -1425,6 +1515,21 @@ function evaluateRecognizedSemantic(
   if (!fieldId) return undefined;
   const field = spec.inputFields.find(item => item.id === fieldId);
   if (!field) return undefined;
+  if (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+    const descriptor = rangeDescriptor(spec, target.expression, fieldId);
+    return descriptor ? rangeIsValid(input, spec, descriptor) : undefined;
+  }
+  if (request.constructionKind === 'string-length-mismatch') {
+    return stringLengthIsValid(input, spec, field, target.expression);
+  }
+  if (request.constructionKind === 'array-element-below-min'
+    || request.constructionKind === 'array-element-above-max') {
+    const snapshot = sequenceSnapshot(input, spec, fieldId);
+    const bounds = integerBounds(target.expression, `${fieldId}[i]`);
+    if (!snapshot || (bounds.min === undefined && bounds.max === undefined)) return undefined;
+    return snapshot.values.every(raw => /^-?(0|[1-9]\d*)$/.test(raw)
+      && Number.isSafeInteger(Number(raw)) && valueSatisfiesBounds(Number(raw), bounds));
+  }
   if (request.constructionKind === 'integer-below-min'
     || request.constructionKind === 'integer-above-max'
     || request.constructionKind === 'subtask-upper-bound'
@@ -1459,9 +1564,11 @@ function evaluateRecognizedSemantic(
     return isOneBasedPermutation(snapshot.values, snapshot.count);
   }
   if (request.constructionKind === 'illegal-string-character') {
-    const location = parseLocation(field.encoding);
-    const value = location && tokenValuesAtLine(input, location.line)?.[location.token - 1];
-    return value === undefined ? undefined : /^[a-z]+$/.test(value);
+    if (stringAlphabet(target.expression, fieldId)) {
+      return stringCharacterSnapshot(input, spec, field, target.expression)?.valid;
+    }
+    const value = scalarSnapshot(input, spec, field)?.value;
+    return value === undefined ? undefined : (stringAlphabet(target.expression, fieldId) || /^[a-z]+$/).test(value);
   }
   if (request.constructionKind === 'graph-self-loop'
     || request.constructionKind === 'graph-duplicate-edge'
@@ -1494,11 +1601,10 @@ function evaluateRecognizedSemantic(
   return undefined;
 }
 
-function applicableRecognizableSemantics(
+function applicableTargets(
   spec: ProblemSpecV1,
   namedTarget: Target,
-  namedRequest: InternalProbeRequest,
-): Array<{ target: Target; request: InternalProbeRequest }> {
+): Target[] {
   const constraints: Target[] = spec.constraints.flatMap(constraint => {
     const applicable = constraint.scope === 'global'
       || (namedTarget.subtaskId !== undefined
@@ -1515,13 +1621,45 @@ function applicableRecognizableSemantics(
     kind: 'invariant' as const,
     expression: invariant.expression,
   }));
-  return [...constraints, ...invariants].flatMap(target => {
+  return [...constraints, ...invariants];
+}
+
+function applicableRecognizableSemantics(
+  spec: ProblemSpecV1,
+  namedTarget: Target,
+  namedRequest: InternalProbeRequest,
+): Array<{ target: Target; request: InternalProbeRequest }> {
+  return applicableTargets(spec, namedTarget).flatMap(target => {
     if (target.id === namedTarget.id && target.kind === namedTarget.kind) {
       return [{ target, request: namedRequest }];
     }
     const request = deriveConstructionRequests(spec, target)[0];
     return request ? [{ target, request: { ...request, source: 'derived' } }] : [];
   });
+}
+
+/** Preconditions are input rules even when there is no duplicate constraints entry. */
+function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignoredRangeExpression?: string): boolean | undefined {
+  // Function specs may also describe calls in operations; this parser owns input operation rows only.
+  if (!spec.inputFields.some(field => field.type === 'operations')) return true;
+  let unknown = false;
+  for (const operation of spec.operations || []) {
+    // The existing stateful ADD/DEL path evaluates its own target-specific presence semantics.
+    if ((operation.name === 'ADD' || operation.name === 'DEL') && operation.arguments.some(fieldId => (
+      operationSupportsSetPresence(spec, operation.name as 'ADD' | 'DEL', fieldId)
+    ))) continue;
+    for (const predicate of operation.preconditions) {
+      const expression = `for every operation, ${predicate}`;
+      const descriptor = spec.inputFields.map(field => rangeDescriptor(spec, expression, field.id)).find(Boolean);
+      if (!descriptor) { unknown = true; continue; }
+      if (expression === ignoredRangeExpression) continue;
+      const snapshot = rangeSnapshot(input, spec, descriptor);
+      if (!snapshot) { unknown = true; continue; }
+      if (snapshot.operations.some(item => item.name === operation.name
+        && !(descriptor.lower <= item.left && item.left <= item.right && item.right <= snapshot.upper))) return false;
+    }
+  }
+  return unknown ? undefined : true;
 }
 
 function mutationIsTargetIsolated(
@@ -1531,6 +1669,9 @@ function mutationIsTargetIsolated(
   target: Target,
   request: InternalProbeRequest,
 ): boolean {
+  if (operationPreconditionsValid(sourceInput, spec) !== true
+    || operationPreconditionsValid(mutatedInput, spec,
+      RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true) return false;
   const semantics = applicableRecognizableSemantics(spec, target, request);
   if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
     return false;
@@ -1555,6 +1696,24 @@ function constructMutationForRequest(
     ? spec.inputFields.find(item => item.id === request.fieldId)
     : undefined;
   if (!field) return 'INVALID_RECIPE';
+  if (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)) {
+    const descriptor = rangeDescriptor(spec, target.expression, field.id);
+    return descriptor ? constructRangeMutation(input, spec, descriptor, request.constructionKind, request.operationName)
+      : 'UNSUPPORTED_TARGET';
+  }
+  if (request.constructionKind === 'string-length-mismatch') {
+    const snapshot = scalarSnapshot(input, spec, field);
+    if (!snapshot || stringLengthIsValid(input, spec, field, target.expression) !== true) return 'MUTATION_NOT_ISOLATED';
+    // Append an existing character so indexed alphabet constraints stay true too.
+    if (!snapshot.value.length) return 'MUTATION_NOT_ISOLATED';
+    if (Buffer.byteLength(input, 'utf8') + 1 > MAX_PROBE_INPUT_BYTES) return 'PROBE_TOO_LARGE';
+    return replaceScalar(input, snapshot.at, snapshot.value + snapshot.value.slice(-1)) || 'MUTATION_NOT_ISOLATED';
+  }
+  if (request.constructionKind === 'array-element-below-min'
+    || request.constructionKind === 'array-element-above-max') {
+    return field.type === 'array'
+      ? constructArrayElementMutation(input, spec, target, request) : 'INVALID_RECIPE';
+  }
   if (request.constructionKind === 'integer-below-min'
     || request.constructionKind === 'integer-above-max') {
     return field.type === 'integer'
@@ -1635,6 +1794,7 @@ function gap(target: Target, reasonCode: ConstraintProbeGap['reasonCode']): Cons
 export function buildConstraintProbes(
   input: BuildConstraintProbesInput,
 ): ConstraintProbeBuildResult {
+  input = { ...input, spec: specForConstraintProbes(input.spec) };
   const seeds = orderedSeeds(input.seeds);
   const legalSeedHash = sha256(canonicalJson(seeds.map(seed => ({
     source: seed.source,
@@ -1646,6 +1806,7 @@ export function buildConstraintProbes(
     `constraint-probes-v1\0${input.statementHash}\0${input.specHash}\0${legalSeedHash}`,
   );
   const probes: ConstraintProbe[] = [];
+  let probeBytes = 0;
   const gaps: ConstraintProbeGap[] = [];
   const recipes = input.recipes || [];
   const machineTargets: Target[] = [
@@ -1713,16 +1874,52 @@ export function buildConstraintProbes(
     return [{ target, request: { ...resolved, source: 'recipe' as const } }];
   });
 
+  // Audit the bounded applicable seed set once per scope, before choosing any successful seed.
+  // A later validator-accepted but provably illegal seed must not be hidden by an earlier witness.
+  const invalidSeedByScope = new Map<string, boolean>();
   for (const { target, request } of [...deterministicRequests, ...customRequests]) {
-    const seed = selectSeed(seeds, target);
-    if (!seed) {
+    const candidates = selectSeeds(seeds, target);
+    if (candidates.length === 0) {
       gaps.push(gap(target, 'NO_MATCHING_LEGAL_SEED'));
       continue;
     }
-    const normalizedInput = normalizeInput(seed.input);
-    if (normalizedInput.length === 0) {
+    const scopeKey = target.subtaskId === undefined ? 'global' : `subtask:${target.subtaskId}`;
+    if (!invalidSeedByScope.has(scopeKey)) {
+      const semantics = applicableTargets(input.spec, target).flatMap(item => {
+        const derived = deriveConstructionRequests(input.spec, item)[0];
+        return derived ? [{ target: item, request: derived }] : [];
+      });
+      invalidSeedByScope.set(scopeKey, candidates.some(seed => {
+        const normalized = normalizeInput(seed.input);
+        if (!normalized || Buffer.byteLength(normalized, 'utf8') > MAX_PROBE_INPUT_BYTES) return false;
+        return operationPreconditionsValid(normalized, input.spec) === false || semantics.some(item => (
+          evaluateRecognizedSemantic(normalized, input.spec, item.target, item.request) === false
+        ));
+      }));
+    }
+    if (invalidSeedByScope.get(scopeKey)) {
       gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
       continue;
+    }
+    let lastGap: ConstraintProbeGap['reasonCode'] = 'MUTATION_NOT_ISOLATED';
+    let constructed = false;
+    for (const seed of candidates) {
+    const normalizedInput = normalizeInput(seed.input);
+    if (Buffer.byteLength(normalizedInput, 'utf8') > MAX_PROBE_INPUT_BYTES) {
+      lastGap = 'PROBE_TOO_LARGE';
+      continue;
+    }
+    if (normalizedInput.length === 0) {
+      lastGap = 'MUTATION_NOT_ISOLATED';
+      continue;
+    }
+    if (operationPreconditionsValid(normalizedInput, input.spec) === false
+      || applicableRecognizableSemantics(input.spec, target, request).some(item => (
+      evaluateRecognizedSemantic(normalizedInput, input.spec, item.target, item.request) === false
+    ))) {
+      // A validator-accepted seed that is provably illegal is a proof defect, not a seed to skip.
+      lastGap = 'MUTATION_NOT_ISOLATED';
+      break;
     }
     const mutation = constructMutationForRequest(
       normalizedInput,
@@ -1731,7 +1928,7 @@ export function buildConstraintProbes(
       request,
     );
     if (typeof mutation === 'string') {
-      gaps.push(gap(target, mutation));
+      lastGap = mutation;
       continue;
     }
     if (!mutationIsTargetIsolated(
@@ -1741,11 +1938,16 @@ export function buildConstraintProbes(
       target,
       request,
     )) {
-      gaps.push(gap(target, 'MUTATION_NOT_ISOLATED'));
+      lastGap = 'MUTATION_NOT_ISOLATED';
       continue;
     }
     if (Buffer.byteLength(mutation.input, 'utf8') > MAX_PROBE_INPUT_BYTES) {
-      gaps.push(gap(target, 'PROBE_TOO_LARGE'));
+      lastGap = 'PROBE_TOO_LARGE';
+      continue;
+    }
+    const bytes = Buffer.byteLength(mutation.input, 'utf8');
+    if (probeBytes + bytes > TESTDATA_PLAN_MAX_BYTES) {
+      lastGap = 'PROBE_BATCH_TOO_LARGE';
       continue;
     }
     const id = sha256(canonicalJson({
@@ -1757,6 +1959,8 @@ export function buildConstraintProbes(
       constructionKind: request.constructionKind,
       effectiveSeed,
       mutationPosition: mutation.position,
+      ...(RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+        ? { operationName: request.operationName, mutationHash: sha256(mutation.input) } : {}),
     })).slice(0, 32);
     const probe: ConstraintProbe = {
       id,
@@ -1768,6 +1972,11 @@ export function buildConstraintProbes(
     };
     constraintProbeSources.set(probe, request.source);
     probes.push(probe);
+    probeBytes += bytes;
+    constructed = true;
+    break;
+    }
+    if (!constructed) gaps.push(gap(target, lastGap));
   }
 
   const seenProbeIds = new Set<string>();

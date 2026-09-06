@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 /**
  * 教师端对话列表组件
  * 显示所有学生的对话记录,支持筛选和分页
@@ -70,50 +71,6 @@ const signalPillStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
-/* ── Inline SVG signal icons (14×14, designed by Gemini) ──
- * Icon family: consistent stroke-2, round caps, geometric primitives.
- * MessageSquare (rect + tail) / Send (paper plane) / Check / X / Clock (circle)
- * Each has a unique silhouette for instant recognition at small sizes.
- */
-const IconMessage = ({ color }: { color: string }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color}
-    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-    style={{ flexShrink: 0 }}>
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-);
-const IconSubmit = ({ color }: { color: string }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color}
-    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-    style={{ flexShrink: 0 }}>
-    <path d="m22 2-7 20-4-9-9-4Z" />
-    <path d="M22 2 11 13" />
-  </svg>
-);
-const IconCheck = ({ color }: { color: string }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color}
-    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-    style={{ flexShrink: 0 }}>
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-const IconFail = ({ color }: { color: string }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color}
-    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-    style={{ flexShrink: 0 }}>
-    <path d="M18 6 6 18" />
-    <path d="m6 6 12 12" />
-  </svg>
-);
-const IconClock = ({ color }: { color: string }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color}
-    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-    style={{ flexShrink: 0 }}>
-    <circle cx="12" cy="12" r="10" />
-    <polyline points="12 6 12 12 16 14" />
-  </svg>
-);
-
 const MSG_ENGAGEMENT_HIGH = 6;
 const MSG_ENGAGEMENT_MEDIUM = 3;
 
@@ -136,12 +93,12 @@ function SignalPillGroup({ conv }: { conv: ConversationSummary }) {
   return (
     <span style={{ display: 'inline-flex', gap: SPACING.xs, flexWrap: 'wrap', justifyContent: 'center' }}>
       <span style={{ ...signalPillStyle, backgroundColor: `${msgColor}14`, color: msgColor }}>
-        <IconMessage color={msgColor} /> {m.studentMessageCount}
+        <Icon name="message" size={14} style={{ color: msgColor }} /> {m.studentMessageCount}
       </span>
       {status === 'pending' ? (
         <span style={{ ...signalPillStyle, backgroundColor: COLORS.bgHover, color: COLORS.textMuted }}
           title={i18n('ai_helper_teacher_signal_pending_tooltip')}>
-          <IconClock color={COLORS.textMuted} /> {i18n('ai_helper_teacher_signal_pending')}
+          <Icon name="clock" size={14} style={{ color: COLORS.textMuted }} /> {i18n('ai_helper_teacher_signal_pending')}
         </span>
       ) : m.submissionsAfter === null ? (
         <span style={{ ...signalPillStyle, backgroundColor: COLORS.bgHover, color: COLORS.textMuted }}>
@@ -150,15 +107,15 @@ function SignalPillGroup({ conv }: { conv: ConversationSummary }) {
       ) : (
         <>
           <span style={{ ...signalPillStyle, backgroundColor: m.submissionsAfter > 0 ? `${COLORS.info}14` : COLORS.bgHover, color: m.submissionsAfter > 0 ? COLORS.info : COLORS.textMuted }}>
-            <IconSubmit color={m.submissionsAfter > 0 ? COLORS.info : COLORS.textMuted} /> {m.submissionsAfter}
+            <Icon name="send" size={14} style={{ color: m.submissionsAfter > 0 ? COLORS.info : COLORS.textMuted }} /> {m.submissionsAfter}
           </span>
           {m.firstAcceptedIndex !== null ? (
             <span style={{ ...signalPillStyle, backgroundColor: `${COLORS.success}14`, color: COLORS.success }}>
-              <IconCheck color={COLORS.success} /> AC #{m.firstAcceptedIndex + 1}
+              <Icon name="check" size={14} style={{ color: COLORS.success }} /> AC #{m.firstAcceptedIndex + 1}
             </span>
           ) : m.submissionsAfter > 0 ? (
             <span style={{ ...signalPillStyle, backgroundColor: `${COLORS.error}14`, color: COLORS.error }}>
-              <IconFail color={COLORS.error} /> {i18n('ai_helper_teacher_signal_no_ac')}
+              <Icon name="close" size={14} style={{ color: COLORS.error }} /> {i18n('ai_helper_teacher_signal_no_ac')}
             </span>
           ) : null}
         </>

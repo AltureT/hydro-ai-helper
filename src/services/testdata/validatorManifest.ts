@@ -4,6 +4,8 @@ import type { ProblemSpecV1 } from './problemSpec';
 export const VALIDATOR_PROBE_CONSTRUCTION_KINDS = [
   'integer-below-min',
   'integer-above-max',
+  'array-element-below-min',
+  'array-element-above-max',
   'array-length-mismatch',
   'duplicate-element',
   'permutation-duplicate-or-missing',
@@ -18,6 +20,10 @@ export const VALIDATOR_PROBE_CONSTRUCTION_KINDS = [
   'delete-missing-object',
   'operation-argument-out-of-range',
   'subtask-upper-bound',
+  'string-length-mismatch',
+  'operation-range-below-min',
+  'operation-range-reversed',
+  'operation-range-above-max',
 ] as const;
 
 export type ValidatorProbeConstructionKind =

@@ -1483,8 +1483,8 @@ describe('Hydro 沙箱生成蓝图', () => {
     expect(system).toContain('默认每个文件固定 T=1');
     expect(system).toContain('GENERATOR 只生成 .in，不生成答案');
     expect(system).toContain('ORACLE 是自包含、可直接运行的 Python 3 完整程序');
-    expect(system).toContain('每个 input 的 UTF-8 内容必须小于 256KB');
-    expect(system).toContain('全部 .in/.out 与辅助文件合计必须小于 1MB');
+    expect(system).toContain('每个 input 的 UTF-8 内容必须不超过 4 MiB');
+    expect(system).toContain('全部 .in/.out 与辅助文件合计必须不超过 8 MiB');
     const user = buildSandboxBlueprintUserPrompt({
       problemTitle: '三枚硬币',
       statementMarkdown: groupedCoinStatement,
@@ -3126,21 +3126,15 @@ describe('TestdataGenService.generate', () => {
   ])('continues the old success path when observe extraction records %s', async (failureCode, specResponse) => {
     process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'always';
     const statement = '## Constraints\nn >= 1';
-    const mockClient = {
-      chat: jest.fn()
-        .mockResolvedValueOnce({
-          content: specResponse,
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' },
-        })
-        .mockResolvedValueOnce({
-          content: specResponse,
-          usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' },
-        })
-        .mockResolvedValueOnce({
-          content: makeAiJson(),
-          usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' },
-        }),
-    };
+    const mockClient = { chat: jest.fn() };
+    for (let attempt = 0; attempt < (failureCode === 'SPEC_PARSE_FAILED' ? 2 : 1); attempt++) {
+      mockClient.chat.mockResolvedValueOnce({ content: specResponse,
+        usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'spec-model' } });
+      mockClient.chat.mockResolvedValueOnce({ content: specResponse,
+        usedModel: { endpointId: 'ep2', endpointName: 'critic', modelName: 'critic-model' } });
+    }
+    mockClient.chat.mockResolvedValueOnce({ content: makeAiJson(),
+      usedModel: { endpointId: 'ep1', endpointName: 'main', modelName: 'generation-model' } });
     const onProblemSpecObservation = jest.fn();
 
     const plan = await new TestdataGenService(mockClient as never, {
@@ -5030,6 +5024,54 @@ describe('TestdataGenService.generate', () => {
     expect(plan.verification?.checkerCheck).not.toHaveProperty('failureKind');
   });
 
+  it.each([false, true])('补刀新点超限后检查同批较小候选（存在可容纳候选：%s）', async (hasSmallerCandidate) => {
+    const usedModel = { endpointId: 'fixture', endpointName: 'fixture', modelName: 'fixture' };
+    const inputA = `1${'0'.repeat(4 * 1024 * 1024 - 4097)}`;
+    const inputB = `3${'0'.repeat(4 * 1024 * 1024 - 4097)}`;
+    const candidate = '2';
+    const mockClient = { chat: jest.fn()
+      .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+      .mockResolvedValueOnce({ content: makeSurvivingKillTargetResponse(), usedModel })
+      .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+      .mockResolvedValueOnce({ content: makeHackCaseResponse()
+        + (hasSmallerCandidate ? `\n${makeHackCaseResponse().replace('\n2\n', '\n4\n')}` : ''), usedModel }) };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+        stdout: code.includes('stress generator') ? stressGeneratorStdout()
+          : JSON.stringify({ cases: [{ label: 'first', input: inputA }, { label: 'second', input: inputB }] }),
+        stderr: '',
+      })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: string[]) => Promise.resolve(inputs.map(input => {
+        if (code.includes('sys.exit(0)')) return detail();
+        if (input.trim() === '4') return detail({ stdout: code.includes('surviving wrong solution') ? 'wrong\n' : '1\n' });
+        return detail({ stdout: input.trim() === candidate
+          ? code.includes('surviving wrong solution') ? 'wrong\n' : `${'1'.repeat(16384)}\n`
+          : '1\n' });
+      }))),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox', reliabilityMode: 'legacy',
+    }).generate({ problemTitle: 'file budget fixture', statementMarkdown: 'Read the input.',
+      options: { problemKind: 'traditional', caseCount: 2, languages: [] } });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    if (hasSmallerCandidate) {
+      expect(plan.caseCount).toBe(3);
+      expect(plan.files.find(file => file.name === '3.in')?.content.trim()).toBe('4');
+      expect(plan.verification?.discrimination?.targets[0]).toMatchObject({ killed: true, killedByCase: 3 });
+      expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('skippedReason');
+      return;
+    }
+    expect(plan.caseCount).toBe(2);
+    expect(plan.files.filter(file => file.kind === 'case-in').map(file => file.content.trim())).toEqual([inputA, inputB]);
+    expect(plan.files.some(file => file.name === '3.in')).toBe(false);
+    expect(plan.verification?.discrimination).toMatchObject({ allKilled: false,
+      targets: expect.arrayContaining([expect.objectContaining({ kind: 'wrong-algorithm', killed: false, skippedReason: 'budget-exhausted' })]) });
+    expect(plan.verification?.discrimination?.targets[0]).not.toHaveProperty('killedByCase');
+  });
+
   it('补刀候选触发 System Error 时不追加 hack case 且不设置 killed', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const mockClient = {
@@ -5663,7 +5705,7 @@ describe('TestdataGenService.generate', () => {
     }
   });
 
-  it('v3 checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
+  it('current checkpoint 四项全命中后的 full 物化失败会清空断点并按原 frozen Spec 重跑', async () => {
     const statementMarkdown = 'Input one integer and output it.';
     const options: GenerateOptions = { problemKind: 'traditional', caseCount: 1, languages: [] };
     const checkpoint = makeFrozenV3Checkpoint(statementMarkdown, {
@@ -6245,6 +6287,36 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
 
+  it('generator repair budget conflicts stop without full repair or model fallback', async () => {
+    const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
+    const mockClient = {
+      chat: jest.fn()
+        .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+        .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+        .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+        .mockResolvedValueOnce({ content: '@@@GENERATOR_BUDGET_CONFLICT@@@\n'
+          + JSON.stringify({ scope: 'input', minimumBytes: 12_000_000 }), usedModel }),
+      createClientStartingAfter: jest.fn(),
+    };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockRejectedValue(new Error('Output Limit Exceeded')),
+      runPythonBatch: jest.fn(), runPythonBatchDetailed: jest.fn(),
+    };
+    await expect(new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox',
+    }).generate({ problemTitle: 'budget conflict', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] },
+    })).rejects.toMatchObject({
+      code: 'GENERATOR_OUTPUT_TOO_LARGE', retryPolicy: 'manual-review',
+      recommendDeeperReasoning: false,
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(5);
+    expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
+    expect(runner.runPython).toHaveBeenCalledTimes(1);
+  });
+
   it('STRESS_GENERATOR 自动修复请求失败时完整保留原失败契约', async () => {
     const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'gpt-test' };
     const duplicatedStress = JSON.stringify({
@@ -6300,6 +6372,69 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
     expect(mockClient.createClientStartingAfter).not.toHaveBeenCalled();
   });
+
+  it.each(['pass', 'still-broken', 'terminal', 'malformed', 'full-budget'] as const)(
+    'repairs a newly exposed brute error after stress repair with a bounded chain: %s', async outcome => {
+      const usedModel = { endpointId: 'ep1', endpointName: 'main', modelName: 'model-test' };
+      const mockClient = {
+        chat: jest.fn()
+          .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional'), usedModel })
+          .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+          .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+          .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+          .mockResolvedValueOnce({ content: '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")', usedModel })
+          .mockResolvedValueOnce({ content: outcome === 'malformed' || outcome === 'full-budget'
+            ? '@@@NOTES@@@\nmissing the requested artifact'
+            : '@@@BRUTE@@@\nprint(input()) # repaired-brute', usedModel }),
+      };
+      const runner = {
+        isAvailable: jest.fn().mockResolvedValue(true), runPythonBatch: jest.fn(),
+        runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({
+          stdout: code.includes('stress generator')
+            ? JSON.stringify({ cases: Array.from({ length: 60 }, () => ({ input: '1' })) })
+            : code.includes('repaired-stress') ? stressGeneratorStdout()
+              : JSON.stringify({ cases: [{ input: '1', label: 'formal' }] }),
+          stderr: '',
+        })),
+        runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: any[]) => {
+          const brute = code.includes('independent brute') || code.includes('repaired-brute');
+          if (outcome === 'full-budget' && code.includes('print(input())') && !brute) {
+            throw new TestdataPipelineError('oracle failed', 'ORACLE_RUNTIME_FAILED', 'oracle', 'oracle', 'repair-artifact');
+          }
+          if (brute && outcome === 'terminal') throw new TestdataPipelineError(
+            'stop here', 'BRUTE_RUNTIME_FAILED', 'stress_testing', 'brute', 'no-retry',
+          );
+          return Promise.resolve(inputs.map(input => brute
+            && (!code.includes('repaired-brute') || outcome === 'still-broken')
+            ? detail({ status: 'Runtime Error', accepted: false, exitStatus: 1, stderr: 'IndexError' })
+            : detail({ stdout: typeof input === 'string' ? input : input.stdin })));
+        }),
+      };
+      const promise = new TestdataGenService(mockClient as never, {
+        sandboxRunner: runner as never, mode: 'sandbox', reliabilityMode: 'legacy',
+      }).generate({ problemTitle: 'two independent failures', statementMarkdown: '题面',
+        options: { problemKind: 'traditional', caseCount: 1, languages: [] } });
+      if (outcome === 'pass') {
+        const plan = await promise;
+        expect(plan.verification.stressCheck).toMatchObject({ compared: 60, agreed: 60 });
+        expect(plan.files.find(file => file.name === 'brute.py')?.content).toContain('repaired-brute');
+      } else {
+        await expect(promise).rejects.toMatchObject({
+          code: outcome === 'malformed' || outcome === 'full-budget' ? 'UNKNOWN' : 'BRUTE_RUNTIME_FAILED',
+          failedModelRole: outcome === 'full-budget' ? 'oracle' : 'verifier',
+          retryPolicy: outcome === 'terminal' ? 'no-retry'
+            : outcome === 'malformed' || outcome === 'full-budget' ? 'switch-model' : 'repair-artifact',
+        });
+      }
+      expect(mockClient.chat).toHaveBeenCalledTimes(outcome === 'terminal' ? 5 : 6);
+      if (outcome !== 'terminal' && outcome !== 'full-budget') {
+        expect(mockClient.chat.mock.calls[5][0][1].content).toContain('repaired-stress');
+        expect(mockClient.chat.mock.calls[5][0][1].content).not.toContain('@@@SOLUTION@@@');
+        expect(mockClient.chat.mock.calls[5][1]).toContain('@@@BRUTE@@@');
+      }
+      expect(runner.runPython.mock.calls.filter(([code]) => code.includes('repaired-stress'))).toHaveLength(1);
+    },
+  );
 
   it.each([
     ['stress-generator', '@@@STRESS_GENERATOR@@@\nprint("repaired-stress")'],
@@ -6367,6 +6502,10 @@ describe('TestdataGenService.generate', () => {
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
     const repairPrompt = mockClient.chat.mock.calls[4][0][2].content;
     const expectedMarker = scope === 'brute' ? '@@@BRUTE@@@' : '@@@STRESS_GENERATOR@@@';
+    const repairSystem = mockClient.chat.mock.calls[4][1];
+    expect(repairSystem.match(/^@@@[^\n]+@@@$/gm)).toEqual([expectedMarker]);
+    expect(repairSystem).not.toContain('只输出以下四个必需分节');
+    expect(mockClient.chat.mock.calls.every(call => call[2]?.contentMode === 'raw')).toBe(true);
     expect(repairPrompt.match(new RegExp(expectedMarker, 'g'))).toHaveLength(1);
     for (const marker of [
       '@@@VALIDATOR@@@', '@@@VALIDATOR_MANIFEST@@@', '@@@VALIDATOR_PROBE_RECIPES@@@',
@@ -6755,7 +6894,7 @@ describe('TestdataGenService.generate', () => {
     });
 
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    expect(mockClient.chat.mock.calls[1][1]).toContain('=== SUBTASKS ===');
+    expect(mockClient.chat.mock.calls[1][1]).toContain('@@@SUBTASKS@@@');
     expect(mockClient.chat.mock.calls[3][0][0].content).toContain('CASE 1: 子任务 1');
     expect(plan.caseCoverage?.map(item => item.subtaskId)).toEqual([1, 2]);
     const config = yaml.load(
@@ -6864,7 +7003,7 @@ describe('TestdataGenService.generate', () => {
       options: { problemKind: 'traditional', caseCount: 1, languages: [] },
     });
     expect(mockClient.chat).toHaveBeenCalledTimes(5);
-    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 META');
+    expect(mockClient.chat.mock.calls[1][0][2].content).toContain('重新完整输出 @@@META@@@');
     expect(plan.files.find(file => file.name === '1.in')?.content).toBe('1\n');
   });
 
@@ -8168,6 +8307,44 @@ describe('TestdataGenService.generate', () => {
     expect(plan.files.some(file => file.name === 'std.cc')).toBe(false);
   });
 
+  it('Python 标程定向修复为 C++ 后更新执行器和文件名，并复用已生成输入', async () => {
+    const usedModel = { endpointId: 'fixture', endpointName: 'fixture', modelName: 'fixture' };
+    const cpp = '#include <iostream>\nusing namespace std;\nint main(){int n;cin>>n;cout<<n;}';
+    const mockClient = { chat: jest.fn()
+      .mockResolvedValueOnce({ content: makeSolutionBlueprint('traditional').replace('print(input())', '# original oracle\nprint(input())'), usedModel })
+      .mockResolvedValueOnce({ content: makeEmptyKillTargetsResponse(), usedModel })
+      .mockResolvedValueOnce({ content: makeGenerationArtifactsBlueprint('traditional'), usedModel })
+      .mockResolvedValueOnce({ content: makeIndependentVerifierBlueprint(), usedModel })
+      .mockResolvedValueOnce({ content: `@@@ORACLE@@@\n${cpp}`, usedModel }) };
+    const runner = {
+      isAvailable: jest.fn().mockResolvedValue(true),
+      runPython: jest.fn().mockImplementation((code: string) => Promise.resolve({ stdout: code.includes('stress generator')
+        ? stressGeneratorStdout() : JSON.stringify({ cases: [{ input: '1' }] }), stderr: '' })),
+      runPythonBatch: jest.fn(),
+      runPythonBatchDetailed: jest.fn().mockImplementation((code: string, inputs: string[]) => {
+        if (code.includes('using namespace std')) throw new Error('C++ must never run as Python');
+        return Promise.resolve(inputs.map(input => detail({ stdout: input,
+          ...(code.includes('# original oracle') ? { accepted: false, status: 'Nonzero Exit Status', stderr: 'fixture runtime failure' } : {}) })));
+      }),
+      compileCpp: jest.fn().mockResolvedValue({ ok: true, fileId: 'compiled-oracle' }),
+      runCompiledBatchDetailed: jest.fn().mockImplementation((_id: string, inputs: string[]) =>
+        Promise.resolve(inputs.map(input => detail({ stdout: input })))),
+      deleteCachedFile: jest.fn(),
+    };
+    const plan = await new TestdataGenService(mockClient as never, {
+      sandboxRunner: runner, mode: 'sandbox', cppOracleAvailable: true,
+    }).generate({ problemTitle: 'Language repair regression', statementMarkdown: '题面',
+      options: { problemKind: 'traditional', caseCount: 1, languages: [] } });
+    expect(plan.files.find(file => file.name === 'std.cc')?.content).toContain(cpp);
+    expect(plan.files.some(file => file.name === 'std.py')).toBe(false);
+    expect(runner.compileCpp).toHaveBeenCalledWith(`${cpp}\n`, expect.anything());
+    expect(runner.runPython).toHaveBeenCalledTimes(2);
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('compiled-oracle');
+    const repairPrompt = mockClient.chat.mock.calls[4][0][2].content;
+    expect(repairPrompt).toContain('当前 ORACLE 语言为 Python 3');
+    expect(repairPrompt).toContain('允许在 Python 3 与 C++17 之间切换');
+  });
+
   it('历史 AC 候选解在沙箱不可达时拒绝降级直出', async () => {
     const mockClient = { chat: jest.fn() };
     const runner = {
@@ -9460,12 +9637,12 @@ describe('两阶段沙箱蓝图', () => {
     })).toThrow(/java/);
   });
 
-  it('解析可选 ORACLE_LANG，缺失或非法回退 Python，函数题忽略 C++', () => {
+  it('解析可选 ORACLE_LANG，旧 Python 缺省兼容但拒绝非法与函数题 C++ 声明', () => {
     expect(parseOracleLanguage('=== ORACLE_LANG ===\npython', 'traditional')).toBe('python');
     expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'traditional')).toBe('cpp');
     expect(parseOracleLanguage('@@@META@@@\nproblemType: traditional', 'traditional')).toBe('python');
-    expect(parseOracleLanguage('=== ORACLE_LANG ===\nrust', 'traditional')).toBe('python');
-    expect(parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'function')).toBe('python');
+    expect(() => parseOracleLanguage('=== ORACLE_LANG ===\nrust', 'traditional')).toThrow(/ORACLE_LANG/);
+    expect(() => parseOracleLanguage('=== ORACLE_LANG ===\ncpp', 'function')).toThrow(/Python/);
 
     const cppSolution = parseSolutionBlueprint(
       `=== ORACLE_LANG ===\ncpp\n${makeSolutionBlueprint('traditional')}`,
@@ -9479,12 +9656,12 @@ describe('两阶段沙箱蓝图', () => {
     expect(cppFull.oracleLanguage).toBe('cpp');
   });
 
-  it('仅在编译能力可用时向模型提供 ORACLE_LANG C++ 契约', () => {
-    expect(buildSolutionBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
-    expect(buildSandboxBlueprintSystemPrompt()).not.toContain('ORACLE_LANG');
-    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+  it('始终声明 ORACLE_LANG，仅在编译能力可用时提供 C++ 契约', () => {
+    expect(buildSolutionBlueprintSystemPrompt()).toContain('@@@ORACLE_LANG@@@\npython（');
+    expect(buildSandboxBlueprintSystemPrompt()).toContain('@@@ORACLE_LANG@@@\npython（');
+    expect(buildSolutionBlueprintSystemPrompt(true)).toContain('@@@ORACLE_LANG@@@');
     expect(buildSolutionBlueprintSystemPrompt(true)).toContain('C++17');
-    expect(buildSandboxBlueprintSystemPrompt(true)).toContain('=== ORACLE_LANG ===');
+    expect(buildSandboxBlueprintSystemPrompt(true)).toContain('@@@ORACLE_LANG@@@');
   });
 
   it('第一阶段 Prompt 只要求解题，第二阶段只要求外围制品', () => {
@@ -9502,7 +9679,7 @@ describe('两阶段沙箱蓝图', () => {
     expect(solutionSystem).toContain('@@@ORACLE@@@');
     expect(solutionSystem).not.toContain('@@@GENERATOR@@@');
     expect(solutionSystem).not.toContain('@@@TEMPLATE:py@@@');
-    expect(solutionSystem).toContain('=== SUBTASKS ===');
+    expect(solutionSystem).toContain('@@@SUBTASKS@@@');
     expect(solutionSystem).toContain('仅当题面明确给出子任务/分数表时输出该分节');
     expect(solutionSystem).toContain('约束摘要为该子任务的完整生效约束');
     expect(solutionSystem).toContain('NOTES 至多 2 句');
@@ -9852,7 +10029,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
   it('主蓝图 Prompt 聚焦 ORACLE/SOLUTION，不再同时要求 BRUTE/VALIDATOR', () => {
     const sp = buildSandboxBlueprintSystemPrompt();
     expect(sp).toContain('@@@SOLUTION:py@@@');
-    expect(sp).toContain('=== SUBTASKS ===');
+    expect(sp).toContain('@@@SUBTASKS@@@');
     expect(sp).not.toContain('@@@BRUTE@@@');
     expect(sp).not.toContain('@@@VALIDATOR@@@');
     expect(sp).toContain('独立调用中生成验证器');
@@ -9894,7 +10071,7 @@ describe('parseSandboxBlueprint v2 分节', () => {
     expect(system).toContain('合法输入必须接受，非法输入必须拒绝');
     expect(system).toContain('不得添加题面没有的额外限制');
     expect(system).not.toContain('宁可过严拒绝');
-    expect(system).toContain('=== COMPLEXITY_GAP ===');
+    expect(system).toContain('@@@COMPLEXITY_GAP@@@');
     expect(system).not.toContain('@@@ORACLE@@@');
     const verifier = parseIndependentVerifierBlueprint(makeIndependentVerifierBlueprint());
     expect(verifier.bruteCode).toContain('independent brute');
@@ -11168,7 +11345,8 @@ describe('Task 8 restored verifier checkpoint strictness', () => {
 });
 
 describe('Task 8 resume checkpoint provenance privacy and cancellation identity', () => {
-  const statementMarkdown = 'Every input satisfies 0 <= n <= 10.';
+  // The shared stress generator emits 1..60; all accepted seeds must satisfy this fixture spec.
+  const statementMarkdown = 'Every input satisfies 0 <= n <= 100.';
   const options: GenerateOptions = {
     problemKind: 'traditional', caseCount: 2, languages: [],
   };
@@ -11176,8 +11354,8 @@ describe('Task 8 resume checkpoint provenance privacy and cancellation identity'
   function proofContext() {
     return makeValidatorCoverageProof(statementMarkdown, {
       constraints: [{
-        id: 'C1', expression: '0 <= n <= 10', machineCheckable: true,
-        scope: 'global', evidence: { quote: '0 <= n <= 10' },
+        id: 'C1', expression: '0 <= n <= 100', machineCheckable: true,
+        scope: 'global', evidence: { quote: '0 <= n <= 100' },
       }],
     });
   }
@@ -12261,6 +12439,38 @@ describe('materializeSandboxBlueprint 双重验证', () => {
       coveredConstraintIds: ['I_STATE'],
       missingConstraintIds: ['C_RANGE'],
     }));
+  });
+
+  it.each([false, true])('keeps probe construction and protocol batch budget gaps visible: protocol=%s', async protocol => {
+    const statement = 'a >= 1; 1 <= b <= 10. Subtask 1 is worth all points.';
+    const constraints = [
+      { ...globalConstraint, id: 'A', expression: 'a >= 1', evidence: { quote: 'a >= 1' } },
+      { ...globalConstraint, id: 'B', expression: protocol ? 'b >= 1' : '1 <= b <= 10', evidence: { quote: '1 <= b <= 10' } },
+    ];
+    const proof = makeValidatorCoverageProof(statement, {
+      inputFields: ['a', 'b'].map((id, index) => ({ id, name: id, type: 'integer', encoding: `line:1 token:${index + 1}` })),
+      constraints, invariants: [],
+      subtasks: protocol ? [{ id: 1, score: 100, constraintIds: [] }] : [],
+    });
+    const blueprint = { ...tradBlueprint(['@@@VALIDATOR@@@', 'check()']),
+      validatorManifestStatus: 'valid' as const,
+      validatorManifest: { constraintIds: ['A', 'B'], invariantIds: [] },
+    };
+    const runner = makeValidatorCoverageRunner(blueprint, invocations => Promise.resolve(invocations.map(() =>
+      detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 }))),
+    undefined, [`1 2\n${' '.repeat(3 * 1024 * 1024)}\n`]);
+    const promise = materializeWithValidatorProof(blueprint, { ...tradOpts, caseCount: 1 }, statement, runner as never, proof);
+    if (protocol) {
+      await expect(promise).rejects.toMatchObject({
+        code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', retryPolicy: 'manual-review',
+        safeDetails: { failureKind: 'probe-budget', maxBytes: 8 * 1024 * 1024 },
+      });
+      expect(runner.runPythonBatchDetailed.mock.calls.filter(([code]) => code === blueprint.validatorCode)).toHaveLength(1);
+    } else {
+      const result = await promise;
+      expect(result.verification?.validator).toMatchObject({ invalidRejected: 2, coveredConstraintIds: ['A'], missingConstraintIds: ['B'] });
+      expect(result.verification?.verified).toBe(false);
+    }
   });
 
   it('validator coverage counts every probe while one rejection covers a multiply-probed target', async () => {
@@ -14150,7 +14360,7 @@ describe('assemblePlan origin 矩阵与验证透传', () => {
       mode: 'direct', oracleKind: 'ai-solution', verified: false, wouldBlock: true,
     });
     expect(plan.runId).toBe('11111111-1111-4111-8111-111111111111');
-    expect(plan.promptVersion).toBe('testdata-generation-v3');
+    expect(plan.promptVersion).toBe(TESTDATA_PIPELINE_PROMPT_VERSION);
     expect(plan.originalFileHashes).toEqual(Object.fromEntries(
       plan.files.map(file => [file.name, expect.stringMatching(/^[a-f0-9]{64}$/)]),
     ));

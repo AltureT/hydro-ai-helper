@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React from 'react';
 import { i18n } from '../utils/i18n';
 import { buildPageUrl } from '../utils/domainUtils';
@@ -14,6 +15,9 @@ const SortableHeader: React.FC<SortableHeaderProps> = ({
   const isActive = sortField === field;
   return (
     <th
+      aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
+      tabIndex={0}
+      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSort(field); } }}
       onClick={() => onSort(field)}
       style={{
         ...getTableHeaderStyle(), textAlign: align, cursor: 'pointer',
@@ -23,7 +27,7 @@ const SortableHeader: React.FC<SortableHeaderProps> = ({
       }}
     >
       {label}
-      {isActive && <span style={{ marginLeft: '4px', color: COLORS.primary }}>{sortOrder === 'asc' ? '\u2191' : '\u2193'}</span>}
+      {isActive && <span style={{ marginLeft: '4px', color: COLORS.primary }}><Icon name={sortOrder === 'asc' ? 'arrowUp' : 'arrowDown'} size={14} /></span>}
     </th>
   );
 };

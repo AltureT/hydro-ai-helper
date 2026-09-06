@@ -13,7 +13,7 @@ import {
   COLORS, SPACING, RADIUS,
   getButtonStyle, cardStyle, markdownTheme, LAYOUT,
 } from '../utils/styles';
-import { renderMarkdown } from '../utils/markdown';
+import { renderReportMarkdown as renderMarkdown, reportMarkdownStyles } from '../utils/reportMarkdown';
 import { useTeachingSummary, TeachingFinding } from './useTeachingSummary';
 import { parseReviewActions, prepareStudentHomework } from './reportContent';
 import { teachingSummaryStyles } from './teachingSummaryStyles';
@@ -707,9 +707,9 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   );
 
   return (
-    <div className="ai-teaching-summary" style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
+    <div className="ai-teaching-summary ai-report-content" style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
       <style>{markdownTheme}</style>
-      <style>{teachingSummaryStyles}</style>
+      <style>{teachingSummaryStyles + reportMarkdownStyles}</style>
 
       {/* Panel header */}
       <div style={{

@@ -20,9 +20,10 @@ import {
   type MutationGateMode,
   type MutationOperatorId,
 } from './mutation';
-import type {
-  SpecConsensusRole,
-  SpecConsensusStatus,
+import {
+  getSpecConsensusFailureTokenUsage,
+  type SpecConsensusRole,
+  type SpecConsensusStatus,
 } from './specConsensus';
 
 export type TestdataSpecConsensusRole = SpecConsensusRole;
@@ -1028,6 +1029,7 @@ export class TestdataRunTelemetrySession {
       }
       await this.service.emit(this.event('run_completed', {
         pipelineCompleted: false,
+        tokenCount: getSpecConsensusFailureTokenUsage(error)?.totalTokens,
         verified: false,
         wouldBlock: false,
         modelEscalated: (this.currentStage?.attempt || 1) > 1,

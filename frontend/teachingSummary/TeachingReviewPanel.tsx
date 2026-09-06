@@ -1,3 +1,5 @@
+import { Icon } from '../components/Icon';
+import { teachingReviewStyles } from './teachingReviewStyles';
 /**
  * TeachingReviewPanel — compact HydroOJ-style list of teaching summaries.
  *
@@ -117,100 +119,38 @@ const SummaryRow: React.FC<{ summary: TeachingSummary }> = ({ summary }) => {
     ? COLORS.hydroGreenDark
     : summary.feedback?.rating === 'down'
       ? COLORS.errorText
-      : COLORS.textMuted;
+      : COLORS.textSecondary;
 
   return (
-    <a
-      href={buildReviewDetailUrl(summary)}
-      aria-label={`${summary.contestTitle || summary.contestId} - ${i18n('ai_helper_teaching_review_view')}`}
-      style={{
-        display: 'block',
-        padding: `${SPACING.base} ${SPACING.sm}`,
-        color: COLORS.nativeText,
-        textDecoration: 'none',
-        borderBottom: `1px solid ${COLORS.nativeBorder}`,
-        transition: 'background-color 150ms ease',
-      }}
-      onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = '#fafafa'; }}
-      onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }}
-    >
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'flex-start',
-        gap: SPACING.base,
-        flexWrap: 'wrap',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, minWidth: 0, flexWrap: 'wrap' }}>
-          <time dateTime={summary.createdAt} style={{ color: COLORS.textMuted, fontSize: '13px', whiteSpace: 'nowrap' }}>
-            {formatDate(summary.createdAt)}
-          </time>
-          <span style={{ fontSize: '15px', fontWeight: 600, overflowWrap: 'anywhere' }}>
-            {summary.contestTitle || String(summary.contestId)}
-          </span>
+    <a className="teaching-review-row" href={buildReviewDetailUrl(summary)}
+      aria-label={`${summary.contestTitle || summary.contestId} - ${i18n('ai_helper_teaching_review_view')}`}>
+      <div className="review-row-content">
+        <div className="review-row-title">
+          <span>{summary.contestTitle || String(summary.contestId)}</span>
           <StatusTag status={status} />
         </div>
-
-        <div style={{
-          display: 'flex',
-          gap: SPACING.base,
-          flexWrap: 'wrap',
-          color: COLORS.textSecondary,
-          fontSize: '12px',
-          lineHeight: 1.6,
-        }}>
+        <div className="review-row-meta">
+          <time dateTime={summary.createdAt}>{formatDate(summary.createdAt)}</time>
           <span>{i18n('ai_helper_teaching_review_participated')} {summary.stats?.participatedStudents ?? 0}</span>
           <span>{i18n('ai_helper_teaching_review_ai_users')} {summary.stats?.aiUserCount ?? 0}</span>
         </div>
+        <p className="review-row-finding">
+          <span className="review-finding-label">{i18n('ai_helper_teaching_review_primary_finding')}</span>
+          {primaryFinding?.title || (status === 'failed'
+            ? i18n('ai_helper_teaching_review_failed_hint')
+            : status === 'pending' || status === 'generating'
+              ? i18n(STATUS_LABEL[status]) : i18n('ai_helper_teaching_review_no_findings'))}
+        </p>
+        <div className="review-row-signals">
+          <SeverityMetric severity="high" count={counts.high} label={i18n('ai_helper_teaching_review_focus')} />
+          <SeverityMetric severity="medium" count={counts.medium} label={i18n('ai_helper_teaching_review_attention')} />
+          <SeverityMetric severity="low" count={counts.low} label={i18n('ai_helper_teaching_review_observation')} />
+        </div>
       </div>
-
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: SPACING.base,
-        flexWrap: 'wrap',
-        marginTop: SPACING.sm,
-        color: COLORS.textSecondary,
-        fontSize: '12px',
-      }}>
-        <SeverityMetric severity="high" count={counts.high} label={i18n('ai_helper_teaching_review_focus')} />
-        <SeverityMetric severity="medium" count={counts.medium} label={i18n('ai_helper_teaching_review_attention')} />
-        <SeverityMetric severity="low" count={counts.low} label={i18n('ai_helper_teaching_review_observation')} />
-      </div>
-
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        gap: SPACING.base,
-        flexWrap: 'wrap',
-        marginTop: SPACING.sm,
-        fontSize: '12px',
-      }}>
-        <span style={{
-          color: primaryFinding?.severity === 'high' ? COLORS.errorText : COLORS.textSecondary,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-          minWidth: 0,
-          flex: '1 1 320px',
-        }}>
-          {primaryFinding
-            ? `${i18n('ai_helper_teaching_review_primary_finding')}: ${primaryFinding.title}`
-            : status === 'failed'
-              ? i18n('ai_helper_teaching_review_failed_hint')
-              : status === 'pending' || status === 'generating'
-                ? i18n(STATUS_LABEL[status])
-                : i18n('ai_helper_teaching_review_no_findings')}
-        </span>
-
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: SPACING.base, whiteSpace: 'nowrap' }}>
-          <span style={{ color: feedbackColor }}>{feedbackLabel}</span>
-          <span style={{ color: COLORS.hydroGreenDark, fontWeight: 500 }}>
-            {i18n('ai_helper_teaching_review_view')} →
-          </span>
-        </span>
-      </div>
+      <span className="review-row-action">
+        <span style={{ color: feedbackColor }}>{feedbackLabel}</span>
+        <span className="review-open">{i18n('ai_helper_teaching_review_view')} <Icon name="chevronRight" size={15} /></span>
+      </span>
     </a>
   );
 };
@@ -245,10 +185,11 @@ const Pagination: React.FC<PaginationProps> = ({ page, total, onPageChange }) =>
       <button
         type="button"
         style={pageButtonStyle(false, page <= 1)}
+        aria-label={i18n('ai_helper_previous_page')}
         disabled={page <= 1}
         onClick={() => onPageChange(page - 1)}
       >
-        {'<'}
+        <Icon name="chevronLeft" />
       </button>
       {pages.map(current => (
         <button
@@ -264,10 +205,11 @@ const Pagination: React.FC<PaginationProps> = ({ page, total, onPageChange }) =>
       <button
         type="button"
         style={pageButtonStyle(false, page >= totalPages)}
+        aria-label={i18n('ai_helper_next_page')}
         disabled={page >= totalPages}
         onClick={() => onPageChange(page + 1)}
       >
-        {'>'}
+        <Icon name="chevronRight" />
       </button>
     </nav>
   );
@@ -320,13 +262,14 @@ export const TeachingReviewPanel: React.FC<TeachingReviewPanelProps> = ({ domain
 
   const handlePageChange = (targetPage: number) => {
     fetchList(targetPage);
-    document.getElementById('ai-teaching-review-heading')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('ai-teaching-review-heading')?.scrollIntoView({ behavior: 'auto', block: 'start' });
   };
 
   const initialLoading = loading && summaries.length === 0;
 
   return (
-    <section aria-labelledby="ai-teaching-review-heading" aria-busy={loading} style={{ padding: SPACING.lg }}>
+    <section className="ai-teaching-review" aria-labelledby="ai-teaching-review-heading" aria-busy={loading}>
+      <style>{teachingReviewStyles}</style>
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -359,7 +302,7 @@ export const TeachingReviewPanel: React.FC<TeachingReviewPanelProps> = ({ domain
             fontSize: '13px',
           }}
         >
-          {i18n('ai_helper_teaching_review_refresh')}
+          <Icon name="refresh" size={14} /> {i18n('ai_helper_teaching_review_refresh')}
         </button>
       </div>
 

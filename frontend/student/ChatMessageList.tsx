@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React, { useMemo } from 'react';
 import { i18n } from '../utils/i18n';
 import { renderMarkdown as renderMarkdownSafe, renderStreamingMarkdown } from '../utils/markdown';
@@ -91,7 +92,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
     if (problemInfoError) {
       return (
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 16px', background: '#fffbeb', borderBottom: '1px solid #fde68a' }}>
-          <span style={{ fontSize: '12px', color: '#92400e', whiteSpace: 'nowrap' }}>⚠ {i18n('ai_helper_student_cannot_get_problem')}</span>
+          <span style={{ fontSize: '12px', color: '#92400e', whiteSpace: 'nowrap' }}><Icon name="warning" size={14} /> {i18n('ai_helper_student_cannot_get_problem')}</span>
           <input
             type="text"
             placeholder={i18n('ai_helper_student_manual_title_placeholder')}
@@ -162,7 +163,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
           {/* Attached code (student) */}
           {isStudent && msg.code && (
             <div style={{ background: '#f8fafc', border: `1px solid ${A.border}`, borderRadius: '10px', padding: '8px', fontSize: '12px', maxWidth: '100%', overflow: 'hidden' }}>
-              <div style={{ fontSize: '11px', color: A.textMuted, marginBottom: '4px' }}>📝 {i18n('ai_helper_student_attached_code')}</div>
+              <div style={{ fontSize: '11px', color: A.textMuted, marginBottom: '4px' }}><Icon name="code" size={14} /> {i18n('ai_helper_student_attached_code')}</div>
               <div className="markdown-body" dangerouslySetInnerHTML={{
                 __html: renderMarkdownSafe(`\`\`\`\n${msg.code.length > 500 ? msg.code.substring(0, 500) + `\n// ... ${i18n('ai_helper_student_code_truncated')}` : msg.code}\n\`\`\``),
               }} />
@@ -257,7 +258,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
           onMouseDown={(e) => e.preventDefault()}
           onClick={onDontUnderstand}
         >
-          ❓ {i18n('ai_helper_student_dont_understand')}
+          <Icon name="help" size={14} /> {i18n('ai_helper_student_dont_understand')}
         </div>
       )}
 
