@@ -15,11 +15,12 @@ it('requires evidence for an explicit answer overflow warning only', () => {
 });
 
 it('compares exact signed integer answers and cannot mistake input scale for output coverage', () => {
-  expect(() => assertAnswerBoundaryCoverage(statement, ['0\n', '1000000\n', '2147483647\n-2147483648\n']))
+  expect(() => assertAnswerBoundaryCoverage(statement, ['0\n', '1000000\n', '2147483647\n', '-2147483648\n']))
     .toThrow(expect.objectContaining({ code: 'COVERAGE_REQUIREMENT_MISSING', artifact: 'generator', retryPolicy: 'repair-artifact' }));
-  for (const output of ['2147483648', '-2147483649', '10000000000000000000000000000000000000', '0\n10000000000\n']) {
+  for (const output of ['2147483648', '-2147483649', '10000000000000000000000000000000000000']) {
     expect(() => assertAnswerBoundaryCoverage(statement, [output])).not.toThrow();
   }
+  expect(() => assertAnswerBoundaryCoverage('答案可能超过 32 位。\n## 输出格式\n对每个查询按顺序输出一行整数。', ['0\n10000000000\n'])).not.toThrow();
   for (const output of ['', '2147483648.5', '2.5e9', 'answer=9999999999', '00000000000000001']) {
     expect(() => assertAnswerBoundaryCoverage(statement, [output])).toThrow();
   }
@@ -31,6 +32,8 @@ it('leaves labelled and multi-field output unproven without generator repair', (
       .toThrow(expect.objectContaining({ artifact: 'coverage', retryPolicy: 'manual-review' }));
   }
   expect(() => assertAnswerBoundaryCoverage('答案可能超过 32 位。', ['3000000000']))
+    .toThrow(expect.objectContaining({ retryPolicy: 'manual-review' }));
+  expect(() => assertAnswerBoundaryCoverage('答案可能超过 32 位。\n## 输出格式\n第一行一个整数，原样输出输入的时间戳；第二行一个整数，表示答案。', ['3000000000\n1\n']))
     .toThrow(expect.objectContaining({ retryPolicy: 'manual-review' }));
 });
 

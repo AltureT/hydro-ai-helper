@@ -15,21 +15,30 @@ function exceedsInt32(token: string): boolean {
   return digits.length > limit.length || (digits.length === limit.length && digits > limit);
 }
 
-function hasPlainIntegerAnswerFormat(statement: string): boolean {
+function plainIntegerAnswerFormat(statement: string): 'single' | 'per-query' | undefined {
   const prose = statement.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1/g, '').replace(/\*\*/g, '');
   // A deliberately closed output protocol: a single answer integer per line. Other
   // formats need an explicit answer-field schema before their tokens can be evidence.
   const section = /(?:^|\n)#{1,6}\s*(?:输出格式|Output(?: Format)?)\s*\n([\s\S]*?)(?=\n#{1,6}\s|$)/i.exec(prose)?.[1]?.trim();
-  if (section && !/编号|标签|前缀|Case\s*#|\b(?:ID|YES|NO)\b/i.test(section)
-    && /一行一个整数|输出一行整数|\boutput (?:one|a single) integer\b/i.test(section)) return true;
+  if (section) {
+    if (/^一行一个整数(?:[，,](?:表示|为|即)[^。；;\n]*)?[。.]?$/.test(section)
+      || /^Output (?:one|a single) integer[.]?$/i.test(section)) return 'single';
+    if (/^对(?:每个查询|每条操作 2)[，,]?\s*按顺序输出一行(?:整数|区间和)[。.]?(?:\s*没有查询时输出为空[。.]?)?$/.test(section)) return 'per-query';
+    return undefined;
+  }
+  // Function adapters print exactly one return value per invocation. Cardinality is
+  // checked below as well, so an auxiliary integer cannot stand in for that value.
   return /模板[^\n。]*调用[^\n。]*输出返回值一行/.test(prose)
-    || /函数返回整数/.test(prose) && /输出返回值一行/.test(prose);
+    || /函数返回整数/.test(prose) && /输出返回值一行/.test(prose) ? 'single' : undefined;
 }
 
 export function assertAnswerBoundaryCoverage(statement: string, formalOutputs: readonly string[], outputKind = 'exact', scale = 'auto'): void {
   if (!answerBoundaryRequired(statement, outputKind, scale)) return;
-  const lines = formalOutputs.flatMap(output => output.trim() ? output.trim().split(/\r?\n/).map(line => line.trim()) : []);
-  if (!hasPlainIntegerAnswerFormat(statement) || lines.some(line => !/^[+-]?\d+$/.test(line))) {
+  const format = plainIntegerAnswerFormat(statement);
+  const cases = formalOutputs.map(output => output.trim() ? output.trim().split(/\r?\n/).map(line => line.trim()) : []);
+  const lines = cases.flat();
+  if (!format || (format === 'single' && cases.some(values => values.length !== 1))
+    || lines.some(line => !/^[+-]?\d+$/.test(line))) {
     throw new TestdataPipelineError('题面提示答案可能超过 32 位，但当前输出协议无法确定每行的答案整数。答案边界尚未证明，请人工复核输出格式与边界数据。',
       'COVERAGE_REQUIREMENT_MISSING', 'generator', 'coverage', 'manual-review');
   }
