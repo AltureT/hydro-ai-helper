@@ -93,6 +93,14 @@ describe('range and binary string rejection proofs', () => {
     expect(build(collision, [legal.replace('3 2', '3 2 1')]).probes.filter(p => p.targetId === 'RANGE')).toEqual([]);
   });
 
+  it('does not credit string or scalar mutations that may break an additional operation precondition', () => {
+    const spec = rangeStringFixture();
+    spec.operations![0].preconditions.push("s[r] == '0'");
+    const result = build(spec);
+    expect(result.probes).toEqual([]);
+    expect(result.gaps.map(gap => gap.targetId).sort()).toEqual(['BINARY', 'LEN', 'N', 'Q', 'RANGE']);
+  });
+
   it('requires declared string count dependency and preserves unsupported natural language', () => {
     const spec = rangeStringFixture(); spec.inputFields[2].dependsOn = [];
     expect(build(spec).probes.filter(p => ['LEN', 'BINARY'].includes(p.targetId))).toEqual([]);

@@ -1638,6 +1638,12 @@ function mutationIsTargetIsolated(
   target: Target,
   request: InternalProbeRequest,
 ): boolean {
+  // Unknown operation preconditions may read strings or scalar metadata as well as endpoints.
+  // Keep every mutation unproven when a recognized range layout has such an extra condition.
+  if ((spec.operations || []).some(operation => operation.preconditions.length !== 1)
+    && [...spec.constraints, ...spec.invariants].some(item => spec.inputFields.some(field => (
+      field.type === 'operations' && rangeDescriptor(spec, item.expression, field.id)
+    )))) return false;
   const semantics = applicableRecognizableSemantics(spec, target, request);
   if (!semantics.some(item => item.target.id === target.id && item.target.kind === target.kind)) {
     return false;
