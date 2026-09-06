@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.specForConstraintProbes = specForConstraintProbes;
+const textOperationProbes_1 = require("./textOperationProbes");
 function escapePattern(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -22,6 +23,15 @@ function bounds(expression, symbol, canonical) {
 /** A closed spelling adapter, never an evaluator or a natural-language constraint interpreter. */
 function canonicalExpression(spec, expression) {
     const trimmed = expression.trim();
+    const quantifiedRange = `for every operation, ${trimmed}`;
+    for (const field of spec.inputFields) {
+        if (!(0, textOperationProbes_1.operationLayout)(field))
+            continue;
+        const range = (0, textOperationProbes_1.rangeDescriptor)(spec, quantifiedRange, field.id);
+        // Bare l/r bounds are quantified only when both symbols explicitly belong to operation rows.
+        if (range && [range.left, range.right].every(id => spec.inputFields.some(item => (item.id === id && item.type === 'integer' && item.encoding === `operation-argument:${id}`))))
+            return quantifiedRange;
+    }
     for (const field of spec.inputFields) {
         for (const symbol of symbols(spec, field)) {
             if (field.type === 'integer') {

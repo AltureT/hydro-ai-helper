@@ -79,6 +79,7 @@ inputFields.encoding 的机器编码约定（位置从 1 开始，引用使用�
 - m 条图边从第二行开始：lines:2..m+1 tokens:1,2，dependsOn 同时引用顶点数和边数。
 - q 个操作从第二行开始：lines:2..q+1 operations，dependsOn:["q"]；操作参数 x 的独立字段可用 operation-argument:x，operations.arguments 引用参数字段 id。
 - q 个操作从第三行开始：lines:3..q+2 operations，dependsOn:["q"]；计数字段可以位于前两行的明确 token 位置。每条操作占一行，首 token 为操作名，其余为按 arguments 顺序排列的参数。
+操作列表本身必须在 inputFields 中声明，不能只列出 l/r 等参数字段或顶层 operations。顶层 operations 只定义操作名、参数和语义，不能代替输入列表的位置与数量。例如题面明确第一行 n q、第二行字符串 s、随后 q 行 FLIP/QUERY l r 时，inputFields 应包含 {"id":"ops","name":"ops","type":"operations","encoding":"lines:3..q+2 operations","dependsOn":["q"]}，同时保留 n、q、s 及其实际依赖。只有题面明确该布局时使用此例；不要从参数名猜测操作行起点或计数。
 只有题面实际布局与上述形式精确一致时才使用机器编码。加权边、变长/嵌套布局、带空格字符串、多参数状态操作等不能无损表达时，保留准确的文字编码与完整类型/语义，服务端会判断支持范围；禁止为了适配 DSL 丢掉权重、操作参数或状态前置条件。函数题未明确标准输入编码时不得凭空添加长度前缀或改写原调用形式。`;
     const chunks = input.snapshot.chunks.flatMap(chunk => [
         `--- STATEMENT CHUNK ${chunk.index + 1}/${input.snapshot.chunks.length} [${chunk.start},${chunk.end}) ---`,

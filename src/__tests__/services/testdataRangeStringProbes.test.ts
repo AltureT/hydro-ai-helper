@@ -135,6 +135,50 @@ describe('range and binary string rejection proofs', () => {
     expect(specForConstraintProbes(spec).constraints[2].expression).toBe('len(bits) == n');
   });
 
+  it('proves duplicate canonical predicates while preserving every different rule', () => {
+    const spec = rangeStringFixture();
+    spec.inputFields[2].name = 'bits';
+    spec.constraints[3].expression = 'characters(bits) in [01]';
+    spec.invariants = [{ id: 'BINARY_COPY', kind: 'custom', expression: 'characters(s) in [01]',
+      machineCheckable: true, evidence: { quote: 'synthetic binary rule' } }];
+    const frozen = JSON.stringify(spec);
+    const result = build(spec);
+    const binaryProbes = result.probes.filter(p => ['BINARY', 'BINARY_COPY'].includes(p.targetId));
+    expect(binaryProbes.map(p => [p.targetId, p.targetKind])).toEqual([
+      ['BINARY', 'constraint'], ['BINARY_COPY', 'invariant'],
+    ]);
+    for (const probe of binaryProbes) expect(violations(probe.input)).toEqual(['BINARY']);
+    expect(result.gaps.filter(g => ['BINARY', 'BINARY_COPY'].includes(g.targetId))).toEqual([]);
+    expect(JSON.stringify(spec)).toBe(frozen);
+
+    // Similar predicates with different domains are not equivalent.
+    spec.invariants[0].expression = "s[i] == '0' or s[i] == '1' for 1 <= i <= n";
+    expect(build(spec).probes.filter(p => ['BINARY', 'BINARY_COPY'].includes(p.targetId))).toEqual([]);
+  });
+
+  it('normalizes bare range bounds only with explicit operation layout and argument ownership', () => {
+    const spec = rangeStringFixture();
+    spec.inputFields.push(...['l', 'r'].map(id => ({
+      id, name: id, type: 'integer' as const, encoding: `operation-argument:${id}`,
+    })));
+    spec.constraints[4].expression = '1 <= l <= r <= n';
+    expect(specForConstraintProbes(spec).constraints[4].expression).toBe('for every operation, 1 <= l <= r <= n');
+    const probes = build(spec).probes.filter(p => p.targetId === 'RANGE');
+    expect(probes).toHaveLength(6);
+    for (const probe of probes) expect(violations(probe.input)).toEqual(['RANGE']);
+    expect(spec.constraints[4].expression).toBe('1 <= l <= r <= n');
+    spec.inputFields = spec.inputFields.filter(f => f.id !== 'ops');
+    expect(build(spec).gaps).toContainEqual(expect.objectContaining({ targetId: 'RANGE', reasonCode: 'UNSUPPORTED_TARGET' }));
+    expect(specForConstraintProbes(spec).constraints[4].expression).toBe('1 <= l <= r <= n');
+  });
+
+  it('does not interpret undeclared or scalar endpoints as implicitly quantified operation arguments', () => {
+    const spec = rangeStringFixture(); spec.constraints[4].expression = '1 <= l <= r <= n';
+    expect(build(spec).probes.filter(p => p.targetId === 'RANGE')).toEqual([]);
+    spec.inputFields.push({ id: 'l', name: 'l', type: 'integer', encoding: 'line:1 token:3' });
+    expect(build(spec).probes.filter(p => p.targetId === 'RANGE')).toEqual([]);
+  });
+
   it('does not borrow operation types from another subtask', () => {
     const spec = rangeStringFixture(); spec.constraints[4].scope = { subtaskId: 1 };
     const result = buildConstraintProbes({ spec, statementHash: spec.statementHash, specHash: '2'.repeat(64), seeds: [

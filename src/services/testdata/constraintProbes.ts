@@ -1682,7 +1682,13 @@ function mutationIsTargetIsolated(
     const sourceValid = evaluateRecognizedSemantic(sourceInput, spec, item.target, item.request);
     if (sourceValid !== true) return false;
     const mutatedValid = evaluateRecognizedSemantic(mutatedInput, spec, item.target, item.request);
-    return named ? mutatedValid === false : mutatedValid === true;
+    // Repeated closed alphabet declarations share one predicate. Keep the same string, alphabet
+    // and indexed domain; neither opaque recipes nor other predicate families gain equivalence.
+    const samePredicate = request.source === 'derived' && item.request.source === 'derived'
+      && request.constructionKind === 'illegal-string-character'
+      && item.request.constructionKind === 'illegal-string-character'
+      && item.target.expression === target.expression && item.request.fieldId === request.fieldId;
+    return named || samePredicate ? mutatedValid === false : mutatedValid === true;
   });
 }
 
