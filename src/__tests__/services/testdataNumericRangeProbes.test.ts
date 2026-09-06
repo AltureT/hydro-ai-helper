@@ -76,3 +76,15 @@ it('retains opaque payload invariants while allowing an unchanged closed opcode 
   spec.invariants = [{ id: 'EVEN', kind: 'custom', expression: 'x must be even', machineCheckable: true, evidence: { quote: 'x must be even' } }];
   expect(build(spec).probes).toEqual([]);
 });
+
+it('proves a payload bound repeated as an explicit operation precondition', () => {
+  const spec = fixture();
+  spec.operations![0].preconditions.push('-10 <= x <= 10');
+  const result = build(spec);
+  expect(result.probes.filter(p => p.targetId === 'RANGE')).toHaveLength(6);
+  expect(result.probes.filter(p => p.targetId === 'X')).toHaveLength(1);
+  expect(result.gaps).toEqual([{ targetId: 'N', targetKind: 'constraint', reasonCode: 'MUTATION_NOT_ISOLATED' }]);
+  // A distinct stronger precondition must not be ignored when probing the global bound.
+  spec.operations![0].preconditions[1] = '-5 <= x <= 5';
+  expect(build(spec, legal.replace('1 1 3 10', '1 1 3 5')).probes.filter(p => p.targetId === 'X')).toEqual([]);
+});

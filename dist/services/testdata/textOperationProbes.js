@@ -8,6 +8,7 @@ exports.stringCharacterSnapshot = stringCharacterSnapshot;
 exports.stringCountField = stringCountField;
 exports.stringLengthIsValid = stringLengthIsValid;
 exports.replaceScalar = replaceScalar;
+exports.operationArgumentBounds = operationArgumentBounds;
 exports.rangeDescriptor = rangeDescriptor;
 exports.rangeSnapshot = rangeSnapshot;
 exports.rangeIsValid = rangeIsValid;
@@ -117,6 +118,19 @@ function replaceScalar(input, at, replacement) {
     lines[at.line - 1] = line.slice(0, start) + replacement + line.slice(start + (token?.[0].length ?? 0));
     return { input: lines.join('\n'), position: at };
 }
+function operationArgumentBounds(spec, operation, expression) {
+    const match = /^(-?\d+) <= ([A-Za-z][A-Za-z0-9_.:-]{0,63}) <= (-?\d+)$/.exec(expression);
+    if (!match)
+        return undefined;
+    const min = Number(match[1]);
+    const max = Number(match[3]);
+    const index = operation.arguments.indexOf(match[2]);
+    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min > max || index < 0
+        || !spec.inputFields.some(field => field.id === match[2] && field.type === 'integer'
+            && field.encoding === `operation-argument:${field.id}`))
+        return undefined;
+    return { min, max, index };
+}
 function rangeDescriptor(spec, expression, fieldId) {
     const fields = spec.inputFields.filter(field => field.type === 'operations');
     const field = fields.find(item => item.id === fieldId);
@@ -137,7 +151,7 @@ function rangeDescriptor(spec, expression, fieldId) {
     if (!definitions.length || new Set(definitions.map(item => item.name)).size !== definitions.length
         || definitions.some(item => !/^(?:[A-Za-z][A-Za-z0-9_]*|0|[1-9]\d*)$/.test(item.name)
             || item.arguments.length < 2 || item.arguments[0] !== match[2] || item.arguments[1] !== match[3]
-            || item.preconditions.some(predicate => ![0, 1].some(lower => (predicate === `${lower} <= ${match[2]} <= ${match[3]} <= ${match[4]}`)))
+            || item.preconditions.some(predicate => ![0, 1].some(lower => (predicate === `${lower} <= ${match[2]} <= ${match[3]} <= ${match[4]}`)) && !operationArgumentBounds(spec, item, predicate))
             || new Set(item.arguments).size !== item.arguments.length
             || item.arguments.slice(2).some(id => !spec.inputFields.some(argument => argument.id === id
                 && argument.type === 'integer' && argument.encoding === `operation-argument:${id}`))))
@@ -209,8 +223,6 @@ function constructRangeMutation(input, spec, descriptor, kind, operationName) {
     const snapshot = rangeSnapshot(input, spec, descriptor);
     if (!snapshot || rangeIsValid(input, spec, descriptor) !== true)
         return 'MUTATION_NOT_ISOLATED';
-    if ((spec.operations || []).some(operation => operation.preconditions.length > 1))
-        return 'UNSUPPORTED_TARGET';
     const op = snapshot.operations.find(item => item.name === operationName);
     if (!op)
         return 'NO_MATCHING_LEGAL_SEED';
@@ -262,8 +274,7 @@ function preserveTextOperationCounts(original, input, spec, expressions, countId
             continue;
         const predicates = [...expressions, ...(spec.operations || []).flatMap(operation => (operation.preconditions.map(predicate => `for every operation, ${predicate}`)))];
         const descriptor = predicates.map(expression => rangeDescriptor(spec, expression, field.id)).find(Boolean);
-        if (!descriptor || operationLayout(field)?.countId !== countId
-            || (spec.operations || []).some(operation => operation.preconditions.length > 1))
+        if (!descriptor || operationLayout(field)?.countId !== countId)
             return { gap: 'MUTATION_NOT_ISOLATED' };
         const snapshot = rangeSnapshot(original, spec, descriptor);
         if (!snapshot || count < 0)

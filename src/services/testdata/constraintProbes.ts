@@ -3,7 +3,7 @@ import type { ProblemSpecV1 } from './problemSpec';
 import { specForConstraintProbes } from './probeExpressions';
 import { SCALAR_RANGE_PROBE_KINDS, constructScalarRangeMutation, scalarRangeDescriptor, scalarRangeValid } from './scalarRangeProbes';
 import {
-  RANGE_PROBE_KINDS, constructRangeMutation, operationLayout, preserveTextOperationCounts,
+  RANGE_PROBE_KINDS, constructRangeMutation, operationArgumentBounds, operationLayout, preserveTextOperationCounts,
   rangeDescriptor, rangeIsValid, rangeSnapshot, replaceScalar, scalarSnapshot, stringAlphabet,
   stringCharacterSnapshot, stringCountField, stringLengthIsValid,
 } from './textOperationProbes';
@@ -1679,7 +1679,7 @@ function applicableRecognizableSemantics(
 }
 
 /** Preconditions are input rules even when there is no duplicate constraints entry. */
-function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignoredRangeExpression?: string): boolean | undefined {
+function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignoredExpression?: string): boolean | undefined {
   // Function specs may also describe calls in operations; this parser owns input operation rows only.
   if (!spec.inputFields.some(field => field.type === 'operations')) return true;
   let unknown = false;
@@ -1689,10 +1689,19 @@ function operationPreconditionsValid(input: string, spec: ProblemSpecV1, ignored
       operationSupportsSetPresence(spec, operation.name as 'ADD' | 'DEL', fieldId)
     ))) continue;
     for (const predicate of operation.preconditions) {
+      const bounds = operationArgumentBounds(spec, operation, predicate);
+      if (bounds) {
+        const snapshot = inputRangeSnapshot(input, spec);
+        if (!snapshot) { unknown = true; continue; }
+        if (predicate === ignoredExpression) continue;
+        if (snapshot.operations.some(item => item.name === operation.name
+          && !(bounds.min <= item.arguments[bounds.index] && item.arguments[bounds.index] <= bounds.max))) return false;
+        continue;
+      }
       const expression = `for every operation, ${predicate}`;
       const descriptor = spec.inputFields.map(field => rangeDescriptor(spec, expression, field.id)).find(Boolean);
       if (!descriptor) { unknown = true; continue; }
-      if (expression === ignoredRangeExpression) continue;
+      if (expression === ignoredExpression) continue;
       const snapshot = rangeSnapshot(input, spec, descriptor);
       if (!snapshot) { unknown = true; continue; }
       if (snapshot.operations.some(item => item.name === operation.name
@@ -1711,7 +1720,9 @@ function mutationIsTargetIsolated(
 ): boolean {
   if (operationPreconditionsValid(sourceInput, spec) !== true
     || operationPreconditionsValid(mutatedInput, spec,
-      RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true) return false;
+      (RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+        || request.source === 'derived' && request.constructionKind === 'operation-argument-out-of-range')
+        ? target.expression : undefined) !== true) return false;
   const semantics = applicableRecognizableSemantics(spec, target, request);
   const extendedRange = inputRangeSnapshot(sourceInput, spec)
     && (spec.inputFields.some(field => field.type === 'array')

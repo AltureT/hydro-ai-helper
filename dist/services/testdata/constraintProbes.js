@@ -1447,7 +1447,7 @@ function applicableRecognizableSemantics(spec, namedTarget, namedRequest) {
     });
 }
 /** Preconditions are input rules even when there is no duplicate constraints entry. */
-function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
+function operationPreconditionsValid(input, spec, ignoredExpression) {
     // Function specs may also describe calls in operations; this parser owns input operation rows only.
     if (!spec.inputFields.some(field => field.type === 'operations'))
         return true;
@@ -1457,13 +1457,27 @@ function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
         if ((operation.name === 'ADD' || operation.name === 'DEL') && operation.arguments.some(fieldId => (operationSupportsSetPresence(spec, operation.name, fieldId))))
             continue;
         for (const predicate of operation.preconditions) {
+            const bounds = (0, textOperationProbes_1.operationArgumentBounds)(spec, operation, predicate);
+            if (bounds) {
+                const snapshot = inputRangeSnapshot(input, spec);
+                if (!snapshot) {
+                    unknown = true;
+                    continue;
+                }
+                if (predicate === ignoredExpression)
+                    continue;
+                if (snapshot.operations.some(item => item.name === operation.name
+                    && !(bounds.min <= item.arguments[bounds.index] && item.arguments[bounds.index] <= bounds.max)))
+                    return false;
+                continue;
+            }
             const expression = `for every operation, ${predicate}`;
             const descriptor = spec.inputFields.map(field => (0, textOperationProbes_1.rangeDescriptor)(spec, expression, field.id)).find(Boolean);
             if (!descriptor) {
                 unknown = true;
                 continue;
             }
-            if (expression === ignoredRangeExpression)
+            if (expression === ignoredExpression)
                 continue;
             const snapshot = (0, textOperationProbes_1.rangeSnapshot)(input, spec, descriptor);
             if (!snapshot) {
@@ -1479,7 +1493,9 @@ function operationPreconditionsValid(input, spec, ignoredRangeExpression) {
 }
 function mutationIsTargetIsolated(sourceInput, mutatedInput, spec, target, request) {
     if (operationPreconditionsValid(sourceInput, spec) !== true
-        || operationPreconditionsValid(mutatedInput, spec, textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind) ? target.expression : undefined) !== true)
+        || operationPreconditionsValid(mutatedInput, spec, (textOperationProbes_1.RANGE_PROBE_KINDS.some(kind => request.constructionKind === kind)
+            || request.source === 'derived' && request.constructionKind === 'operation-argument-out-of-range')
+            ? target.expression : undefined) !== true)
         return false;
     const semantics = applicableRecognizableSemantics(spec, target, request);
     const extendedRange = inputRangeSnapshot(sourceInput, spec)
