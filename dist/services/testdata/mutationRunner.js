@@ -52,21 +52,76 @@ function throwIfCancelled(signal, error) {
 function classifyExecutionDetails(details, expectedLength) {
     if (details.length !== expectedLength)
         return 'infra';
+    let nonzero = false;
+    let timedOut = false;
+    let killed = false;
     for (const item of details) {
         if (!item || typeof item.status !== 'string')
             return 'infra';
-        if (item.timedOut)
-            return 'timeout';
-        if (EXPLICIT_KILLED_STATUSES.has(item.status))
-            return 'killed';
+        if (item.timedOut) {
+            if (item.status !== 'Time Limit Exceeded')
+                return 'infra';
+            timedOut = true;
+            continue;
+        }
+        if (EXPLICIT_KILLED_STATUSES.has(item.status)) {
+            killed = true;
+            continue;
+        }
+        // Resource-limit verdicts can carry diagnostics (for example OLE's
+        // "output limit"). Other verdicts cannot use incomplete copied-out files.
+        if (item.error)
+            return 'infra';
         if (item.status === 'Accepted' && item.accepted && (item.exitStatus ?? 0) === 0)
             continue;
-        if (item.status === 'Accepted' && Number.isInteger(item.exitStatus) && item.exitStatus !== 0) {
-            return 'killed';
+        if ((item.status === 'Nonzero Exit Status' || item.status === 'Accepted')
+            && Number.isInteger(item.exitStatus) && item.exitStatus !== 0) {
+            nonzero = true;
+            continue;
         }
         return 'infra';
     }
-    return 'accepted';
+    // Inspect the complete batch before crediting a kill: a later infrastructure
+    // failure must not disappear behind an earlier candidate failure.
+    return nonzero ? 'nonzero' : killed ? 'killed' : timedOut ? 'timeout' : 'accepted';
+}
+const PYTHON_SYNTAX_PROBE = `import sys
+try:
+    compile(sys.stdin.buffer.read(), '<mutation>', 'exec')
+except (SyntaxError, ValueError, OverflowError):
+    print('invalid')
+else:
+    print('valid')
+`;
+async function classifyPythonNonzeroExit(input) {
+    throwIfCancelled(input.signal);
+    if (Date.now() >= input.deadlineAt)
+        return 'budget-exhausted';
+    try {
+        // Compile only, inside the sandbox. The candidate is stdin, never executed
+        // by this probe. Bytes preserve main.py's BOM/encoding-cookie semantics.
+        // Candidate stderr cannot prove a syntax error: it is untrusted.
+        const details = await input.runner.runPythonBatchDetailed(PYTHON_SYNTAX_PROBE, [input.source], {
+            signal: input.signal,
+            deadlineAt: input.deadlineAt,
+        });
+        throwIfCancelled(input.signal);
+        if (details.length !== 1 || details[0]?.status !== 'Accepted'
+            || !details[0].accepted || details[0].timedOut
+            || details[0].exitStatus !== 0 || details[0].error) {
+            return 'sandbox-infra';
+        }
+        const verdict = details[0].stdout.trim();
+        if (verdict === 'invalid')
+            return 'non-viable';
+        return verdict === 'valid' ? 'killed' : 'sandbox-infra';
+    }
+    catch (error) {
+        throwIfCancelled(input.signal, error);
+        return (0, goJudgeSandboxService_1.isSandboxBudgetExceededError)(error) || Date.now() >= input.deadlineAt
+            ? 'budget-exhausted'
+            : 'sandbox-infra';
+    }
 }
 async function judgeAcceptedOutputs(input) {
     if (input.customChecker) {
@@ -108,6 +163,8 @@ async function runAcceptedCandidate(input) {
     const execution = classifyExecutionDetails(details, input.cases.length);
     if (execution === 'infra')
         return 'sandbox-infra';
+    if (execution === 'nonzero')
+        return input.classifyNonzeroExit?.() ?? 'killed';
     if (execution === 'timeout')
         return 'timeout-pending';
     if (execution === 'killed')
@@ -122,6 +179,12 @@ async function evaluateCandidate(input) {
     if (input.candidate.language === 'python') {
         return runAcceptedCandidate({
             ...input,
+            classifyNonzeroExit: () => classifyPythonNonzeroExit({
+                source: input.candidate.source,
+                runner: input.runner,
+                signal: input.signal,
+                deadlineAt: input.deadlineAt,
+            }),
             run: () => input.runner.runPythonBatchDetailed(input.candidate.source, inputs, { signal: input.signal, deadlineAt: input.deadlineAt }),
         });
     }
