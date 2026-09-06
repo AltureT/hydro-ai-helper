@@ -10,6 +10,7 @@ exports.buildMainPrompt = buildMainPrompt;
 exports.buildFillInPrompt = buildFillInPrompt;
 exports.buildDeepDivePrompt = buildDeepDivePrompt;
 const reportContent_1 = require("./reportContent");
+const reportMarkdown_1 = require("../utils/reportMarkdown");
 // ─── 提示词模板 ──────────────────────────────────────────
 const MAIN_SYSTEM_PROMPT = `你是一位教龄15年的编程课教师，同时负责教学教研。你将根据规则引擎提供的【判题统计、提交观察和题目信息】，为授课教师提炼一份【一分钟能读完、拿着就能上课】的教学参考。核心回答两个问题：这节课学生的主要问题是什么、下节课开头几分钟该怎么讲。
 
@@ -85,12 +86,14 @@ const FILL_IN_SYSTEM_PROMPT = `你是一位编程教学专家，擅长把学生�
 - 每题通常挖2-4个空，优先选择：错误高发位、关键逻辑判断位、边界条件位；允许修改区域不足时减少空数，不扩大范围
 - 避免挖空简单的 I/O 语句或变量声明
 - 如果题目是填空形式，仅原题模板明确空位对应的学生补全部分允许挖空，模板其他代码保持不变；无法把空位对应到 AC 代码时跳过该题并说明无法核实范围
-- 输出完整代码，在挖空位置用注释占位符替换，保持原始缩进
-- 占位符根据语言使用对应注释风格：C/C++/Java 用 /* [空n] _____ (提示: ...) */，Python 用 # [空n] _____ (提示: ...)
+- 输出完整练习代码，空位统一写为 __BLANK_1__、__BLANK_2__，保持原始缩进；这些标记供学生补全，不声称未填答案的练习可以直接运行
+- 提示放在代码前的独立注释行，Python 用 #，C/C++/Java/JavaScript 用 //。禁止在表达式、函数参数或循环条件中用注释代替空位
+- Python 示例：先写一行 # [空1] 提示：外层循环需要执行多少趟？，下一行写 for i in range(__BLANK_1__):。绝不能写 range(/* ... */) 或 range(# ...)
+- 代码围栏必须标明实际语言；Python 的 py.py3、python3 等判题语言统一标为 python。代码块内不要对星号、下划线或括号做 Markdown 转义
 - 必须基于给定数据说话，严禁捏造错误模式
 
 【注释要求】
-- 代码中每个关键行或逻辑块旁必须添加行尾注释，解释该行/块的作用
+- 关键逻辑块可添加独立注释行，解释作用；不在续行或尚未闭合的表达式中强行插入行尾注释
 - 注释应帮助学生理解代码整体逻辑，而非仅标注语法
 
 【输出格式】
@@ -287,8 +290,9 @@ class TeachingSuggestionService {
     async generateFillInExercise(input) {
         const { system, user } = buildFillInPrompt(input);
         const result = await this.aiClient.chat([{ role: 'user', content: user }], system);
+        const language = input.candidates.every(c => (0, reportMarkdown_1.isPythonLanguage)(c.lang)) ? 'python' : '';
         return {
-            text: (0, reportContent_1.reportContent)(result.content),
+            text: (0, reportMarkdown_1.normalizeHomeworkMarkdown)((0, reportContent_1.reportContent)(result.content), language),
             tokenUsage: {
                 promptTokens: result.usage?.promptTokens ?? result.usage?.prompt_tokens ?? 0,
                 completionTokens: result.usage?.completionTokens ?? result.usage?.completion_tokens ?? 0,

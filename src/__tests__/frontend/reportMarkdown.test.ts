@@ -1,9 +1,16 @@
 jest.mock('dompurify', () => ({ sanitize: (html: string) => html }));
 
-import { createReportMarkdownRenderer, getLearningSummaryPreview } from '../../../frontend/utils/reportMarkdown';
+import { createReportMarkdownRenderer, getLearningSummaryPreview, renderReportMarkdown } from '../../../frontend/utils/reportMarkdown';
 
 describe('report presentation', () => {
   const md = createReportMarkdownRenderer();
+
+  it('cleans stored escaped metadata and encoded heading whitespace without enabling HTML', () => {
+    const html = renderReportMarkdown(String.raw`\<think>(thinking…)\</think>###&#x20;一句话诊断` + '\n&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('<h3>一句话诊断</h3>');
+    expect(html).not.toContain('thinking');
+    expect(html).not.toContain('<script>');
+  });
 
   it('replaces known result markers while preserving their labels and table content', () => {
     const html = md.render('| 题目 | 完成情况 |\n|---|---|\n| 示例 | ✅ 一次通过 |\n| 另一题 | ⬜ 未提交 |');

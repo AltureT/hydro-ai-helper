@@ -21,6 +21,15 @@ function question(number: number): string {
 }
 
 describe('student homework export', () => {
+  it('exports normalized Python blanks from stored homework without leaking teacher answers', () => {
+    const old = String.raw`\<think>(thinking…)\</think>` + question(1)
+      .replace('#### 第', '####&#x20;第')
+      .replace('for i in range(3):', 'for i in range(/* [空1] _____ (提示：次数) */):');
+    const result = prepareStudentHomework(old);
+    expect(result.questionCount).toBe(1);
+    expect(result.studentMarkdown).toContain('for i in range(__BLANK_1__):');
+    expect(result.studentMarkdown).not.toMatch(/thinking|TEACHER_ONLY|\/\*/);
+  });
   it('exports every exercise and question while excluding teaching notes and reference answers', () => {
     const result = prepareStudentHomework([
       '### 📝 课后巩固作业（适用于全年段）',

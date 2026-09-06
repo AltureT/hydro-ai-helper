@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { createMarkdownRenderer, PURIFY_CONFIG } from './markdown';
 import { iconMarkup, IconName } from '../components/iconPaths';
+import { normalizeReportMarkdown } from '../../src/utils/reportMarkdown';
 
 const reportMarkers: Record<string, IconName> = {
   '✅': 'checkCircle', '🔶': 'warning', '⬜': 'circle', '💡': 'lightbulb',
@@ -39,7 +40,7 @@ export function createReportMarkdownRenderer() {
 const reportRenderer = createReportMarkdownRenderer();
 
 export function renderReportMarkdown(content: string): string {
-  return DOMPurify.sanitize(reportRenderer.render(content), {
+  return DOMPurify.sanitize(reportRenderer.render(normalizeReportMarkdown(content)), {
     ...PURIFY_CONFIG,
     ALLOWED_ATTR: [...PURIFY_CONFIG.ALLOWED_ATTR!, 'stroke-linecap', 'stroke-linejoin', 'focusable', 'tabindex'],
   });
@@ -47,7 +48,7 @@ export function renderReportMarkdown(content: string): string {
 
 export function getLearningSummaryPreview(content: string | null): string {
   if (!content) return '';
-  for (const token of reportRenderer.parse(content, {})) {
+  for (const token of reportRenderer.parse(normalizeReportMarkdown(content), {})) {
     if (token.type !== 'inline') continue;
     const text = (token.children || []).map(child => {
       if (['text', 'code_inline', 'math_inline'].includes(child.type)) return child.content;
