@@ -27,8 +27,10 @@ describe('student homework export', () => {
       .replace('for i in range(3):', 'for i in range(/* [空1] _____ (提示：次数) */):');
     const result = prepareStudentHomework(old);
     expect(result.questionCount).toBe(1);
-    expect(result.studentMarkdown).toContain('for i in range(__BLANK_1__):');
+    expect(result.studentMarkdown).toContain('for i in range(________):');
     expect(result.studentMarkdown).not.toMatch(/thinking|TEACHER_ONLY|\/\*/);
+    expect(prepareStudentHomework(old.replace('/* [空1] _____ (提示：次数) */', '__BLANK_1__')).studentMarkdown)
+      .toContain('for i in range(________):');
   });
   it('exports every exercise and question while excluding teaching notes and reference answers', () => {
     const result = prepareStudentHomework([
