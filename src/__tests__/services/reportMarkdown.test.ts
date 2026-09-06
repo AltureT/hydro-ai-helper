@@ -47,14 +47,15 @@ describe('Python worksheet placeholder normalization', () => {
 
   it.each(['python', 'python3', 'py.py3'])('moves hints out of range arguments for %s', lang => {
     const normalized = normalizeHomeworkMarkdown(fence(broken, lang));
-    expect(normalized).toContain('# [空1] _____ (提示：外层循环需要执行多少趟？)\nfor i in range(__BLANK_1__):\n    print(i)');
+    expect(normalized).toContain('# [空1] _____ (提示：外层循环需要执行多少趟？)\nfor i in range(________):\n    print(i)');
     expect(normalized).not.toContain('/*');
     expect(normalizeHomeworkMarkdown(normalized)).toBe(normalized);
+    expect(normalizeHomeworkMarkdown(normalized.replace('range(________)', 'range(__BLANK_1__)'))).toBe(normalized);
   });
 
   it('handles Markdown-escaped worksheet markers without globally unescaping code', () => {
     const code = String.raw`for i in range(/\* [空1] \_\_\_\_\_ (提示：次数) \*/):` + '\n    pass';
-    expect(normalizeHomeworkMarkdown(fence(code))).toContain('for i in range(__BLANK_1__):');
+    expect(normalizeHomeworkMarkdown(fence(code))).toContain('for i in range(________):');
   });
 
   it('preserves valid Python comments in multiline expressions and trailing hints', () => {
@@ -64,10 +65,22 @@ describe('Python worksheet placeholder normalization', () => {
 
   it('preserves string literals, documentation strings, comments and C++ source', () => {
     const marker = '/* [空1] _____ (提示：literal) */';
-    const literalCode = `text = "${marker}"\ndoc = '''\n${marker}\n'''\n# ${marker}\nprint(text)`;
+    const literalCode = `text = "${marker} __BLANK_1__"\ndoc = '''\n${marker}\n'''\n# ${marker} __BLANK_1__\nprint(text)\nprefix__BLANK_1__ = __BLANK_1__suffix`;
     expect(normalizeHomeworkMarkdown(fence(literalCode))).toBe(fence(literalCode));
     expect(normalizeHomeworkMarkdown(fence(broken, 'cpp'))).toBe(fence(broken, 'cpp'));
     expect(normalizeReportMarkdown(fence(broken))).toBe(fence(broken));
+  });
+
+  it('preserves non-BMP identifiers and nested string keys in f-strings', () => {
+    const code = '𐐀__BLANK_1__ = 7\ntext = f"{mapping["__BLANK_1__"]}"\nprint(𐐀__BLANK_1__)';
+    expect(normalizeHomeworkMarkdown(fence(code))).toBe(fence(code));
+  });
+
+  it('keeps the original hint mapping when legacy blanks are out of order', () => {
+    const normalized = normalizeHomeworkMarkdown(fence('# [空1] 次数\n# [空2] 变量\nfor __BLANK_2__ in range(__BLANK_1__):\n    pass'));
+    expect(normalized).toContain('# 空位顺序（从上到下，每行从左到右）：[空2]、[空1]');
+    expect(normalized).toContain('for ________ in range(________):');
+    expect(normalizeHomeworkMarkdown(normalized)).toBe(normalized);
   });
 
   it('preserves fence indentation and supports longer or tilde fences', () => {
@@ -75,13 +88,13 @@ describe('Python worksheet placeholder normalization', () => {
       const text = `  ${marker}python\n  ${broken.replace(/\n/g, '\n  ')}\n  ${marker}`;
       const result = normalizeHomeworkMarkdown(text);
       expect(result).toContain('  # [空1]');
-      expect(result).toContain('  for i in range(__BLANK_1__):\n      print(i)');
+      expect(result).toContain('  for i in range(________):\n      print(i)');
     }
   });
 
   it('uses fallback language only for unlabelled fences', () => {
-    expect(normalizeHomeworkMarkdown(fence(broken, ''), 'python')).toContain('__BLANK_1__');
-    expect(normalizeHomeworkMarkdown(fence(broken, 'cpp'), 'python')).not.toContain('__BLANK_1__');
+    expect(normalizeHomeworkMarkdown(fence(broken, ''), 'python')).toContain('________');
+    expect(normalizeHomeworkMarkdown(fence(broken, 'cpp'), 'python')).not.toContain('________');
   });
 
   it('leaves nested list fences unchanged instead of detaching their code', () => {
