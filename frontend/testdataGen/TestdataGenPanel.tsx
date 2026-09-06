@@ -13,7 +13,7 @@ import { buildApiUrl } from '../utils/domainUtils';
 import { buildTestdataApplyFiles, buildTestdataApplyRequest } from './applyFiles';
 import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
-  getButtonStyle, getInputStyle, getAlertStyle, getBadgeStyle,
+  getButtonStyle, getInputStyle, getAlertStyle,
 } from '../utils/styles';
 import {
   adaptBackgroundTestdataGenerationFailure,
@@ -42,6 +42,7 @@ import {
 } from './applyResult';
 
 import { TestdataPreviewSummary } from './TestdataPreviewSummary';
+import { TestdataFilePreview } from './TestdataFilePreview';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -211,19 +212,6 @@ const TEMPLATE_LANG_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'java', label: 'Java' },
   { value: 'cc', label: 'C++' },
 ];
-
-const KIND_BADGE_KEYS: Record<string, string> = {
-  'case-in': 'ai_helper_testdata_kind_case',
-  'case-out': 'ai_helper_testdata_kind_case',
-  template: 'ai_helper_testdata_kind_template',
-  compile: 'ai_helper_testdata_kind_compile',
-  config: 'ai_helper_testdata_kind_config',
-  std: 'ai_helper_testdata_kind_std',
-  generator: 'ai_helper_testdata_kind_generator',
-  brute: 'ai_helper_testdata_kind_generator',
-  validator: 'ai_helper_testdata_kind_generator',
-};
-
 
 const GENERATION_STAGE_GROUPS: Array<{
   key: string;
@@ -1226,90 +1214,21 @@ export const TestdataGenPanel: React.FC<TestdataGenPanelProps> = ({ problemId })
 
   const renderPreview = () => {
     if (!plan) return null;
-    const caseFiles = plan.files.filter(f => f.kind === 'case-in' || f.kind === 'case-out');
-    const otherFiles = plan.files.filter(f => f.kind !== 'case-in' && f.kind !== 'case-out');
-    const orderedFiles = [...caseFiles, ...otherFiles];
-    const active = activeFile && plan.files.some(f => f.name === activeFile) ? activeFile : orderedFiles[0]?.name;
     const selectedCount = plan.files.filter(f => selectedFiles[f.name]).length;
     return (
       <div>
         <TestdataPreviewSummary plan={plan} hasWrittenFiles={hasWrittenFiles} />
         <h3 style={{ fontSize: '14px', margin: '0 0 12px' }}>{i18n('ai_helper_testdata_files_title')}</h3>
-        <div style={{ display: 'flex', gap: SPACING.base, alignItems: 'stretch', flexWrap: 'wrap' }}>
-          {/* 文件列表 */}
-          <div style={{
-            flex: '1 1 220px', minWidth: 0, maxHeight: '420px', overflowY: 'auto',
-            border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
-          }}>
-            {orderedFiles.map(f => {
-              const isActive = f.name === active;
-              const conflict = existingFileSet.has(f.name);
-              return (
-                <div
-                  key={f.name}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: SPACING.xs,
-                    padding: `6px ${SPACING.sm}`,
-                    cursor: 'pointer',
-                    backgroundColor: isActive ? COLORS.primaryLight : 'transparent',
-                    borderBottom: `1px solid ${COLORS.border}`,
-                    fontSize: '13px',
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    aria-label={i18n('ai_helper_testdata_select_file', f.name)}
-                    checked={!!selectedFiles[f.name]}
-                    onClick={e => e.stopPropagation()}
-                    onChange={() => setSelectedFiles(prev => ({ ...prev, [f.name]: !prev[f.name] }))}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setActiveFile(f.name)}
-                    aria-current={isActive ? 'true' : undefined}
-                    title={f.name}
-                    style={{ ...getButtonStyle('ghost'), fontFamily: MONO_FONT, flex: 1, minWidth: 0,
-                      padding: '2px 0', justifyContent: 'flex-start', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  >
-                    {f.name}
-                  </button>
-                  {conflict && (
-                    <span style={getBadgeStyle('warning')} title={i18n('ai_helper_testdata_overwrite_hint')}>
-                      {i18n('ai_helper_testdata_overwrite_badge')}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {/* 内容编辑区 */}
-          <div style={{ flex: '3 1 320px', minWidth: 0 }}>
-            {active && (
-              <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.xs }}>
-                  <span style={{ fontFamily: MONO_FONT, fontSize: '13px', fontWeight: 600 }}>{active}</span>
-                  <span style={getBadgeStyle('info')}>
-                    {i18n(KIND_BADGE_KEYS[plan.files.find(f => f.name === active)?.kind || 'config'])}
-                  </span>
-                </div>
-                <textarea
-                  aria-label={i18n('ai_helper_testdata_edit_file', active)}
-                  value={fileContents[active] ?? ''}
-                  onChange={e => setFileContents(prev => ({ ...prev, [active]: e.target.value }))}
-                  spellCheck={false}
-                  style={{
-                    ...getInputStyle(),
-                    fontFamily: MONO_FONT,
-                    fontSize: '13px',
-                    minHeight: '380px',
-                    resize: 'vertical',
-                    whiteSpace: 'pre',
-                  }}
-                />
-              </>
-            )}
-          </div>
-        </div>
+        <TestdataFilePreview
+          files={plan.files}
+          activeFile={activeFile}
+          selectedFiles={selectedFiles}
+          fileContents={fileContents}
+          existingFiles={existingFileSet}
+          onOpen={setActiveFile}
+          onToggle={name => setSelectedFiles(prev => ({ ...prev, [name]: !prev[name] }))}
+          onEdit={(name, content) => setFileContents(prev => ({ ...prev, [name]: content }))}
+        />
         {error && (
           <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>{error}</div>
         )}

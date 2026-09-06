@@ -1124,6 +1124,8 @@ ai_helper_testdata_review_warning: "The input generator and reference solution a
 ai_helper_testdata_overwrite_badge: "overwrite"
 ai_helper_testdata_overwrite_hint: "A file with this name already exists and will be overwritten"
 ai_helper_testdata_kind_case: "test case"
+ai_helper_testdata_kind_input: "Test input"
+ai_helper_testdata_kind_output: "Expected output"
 ai_helper_testdata_kind_template: "judge template"
 ai_helper_testdata_kind_compile: "compile script"
 ai_helper_testdata_kind_config: "judge config"

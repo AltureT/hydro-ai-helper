@@ -28,8 +28,8 @@ function extractProblemId(): string | null {
 const CONTAINER_ID = 'ai-testdata-gen-root';
 
 /**
- * 将容器插入主列（测试数据/附加文件卡片所在列）的末尾；
- * 找不到预期结构时退回到 main 元素末尾。
+ * 在 Hydro 的文件、附件与侧栏所在行下方独占一行，避免受第一列宽度限制。
+ * 保留原有列结构；自定义主题没有 .main 时退回到 main 元素或 body。
  */
 function insertContainer(): HTMLDivElement | null {
   if (document.getElementById(CONTAINER_ID)) return null;
@@ -37,14 +37,15 @@ function insertContainer(): HTMLDivElement | null {
   const container = document.createElement('div');
   container.id = CONTAINER_ID;
 
-  const firstSection = document.querySelector('.main .section, .row .section');
-  const column = firstSection?.closest('[class*="columns"]') as HTMLElement | null;
-  if (column) {
-    column.appendChild(container);
-    return container;
-  }
-  const main = document.querySelector('.main') || document.body;
-  main.appendChild(container);
+  const row = document.createElement('div');
+  row.className = 'row ai-testdata-row';
+  row.style.clear = 'both';
+  container.className = 'columns';
+  container.style.width = '100%';
+  container.style.minWidth = '0';
+  row.appendChild(container);
+  const main = document.querySelector('.main, main') || document.body;
+  main.appendChild(row);
   return container;
 }
 

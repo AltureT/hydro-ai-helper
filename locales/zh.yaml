@@ -1124,6 +1124,8 @@ ai_helper_testdata_review_warning: "输入生成器和参考标程由 AI 编写�
 ai_helper_testdata_overwrite_badge: "覆盖"
 ai_helper_testdata_overwrite_hint: "题目中已存在同名文件，写入后将被覆盖"
 ai_helper_testdata_kind_case: "测试点"
+ai_helper_testdata_kind_input: "测试输入"
+ai_helper_testdata_kind_output: "预期输出"
 ai_helper_testdata_kind_template: "评测模板"
 ai_helper_testdata_kind_compile: "编译脚本"
 ai_helper_testdata_kind_config: "评测配置"
