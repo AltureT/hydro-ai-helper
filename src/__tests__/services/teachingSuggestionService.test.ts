@@ -200,6 +200,18 @@ describe('buildMainPrompt', () => {
     expect(user).not.toContain('## 题目内容');
   });
 
+  it('marks missing constraints when a problem statement is truncated', () => {
+    const { user } = buildMainPrompt(makeInput({
+      problemContexts: [
+        { pid: 101, title: 'Long statement', content: 'x'.repeat(500) + 'n >= 1' },
+        { pid: 102, title: 'Short statement', content: 'n >= 1' },
+      ],
+    }));
+    expect(user).toContain('x'.repeat(500) + '\n[题目内容已截断，未展示部分的约束不可假定]');
+    expect(user).toContain('### 102. Short statement\nn >= 1');
+    expect(user.match(/题目内容已截断/g)).toHaveLength(1);
+  });
+
   it('should include output_sections with p1_behavior_intervention when behaviorSummary has data', () => {
     const input = makeInput({
       behaviorSummary: {
