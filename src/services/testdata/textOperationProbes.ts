@@ -126,14 +126,20 @@ export function rangeDescriptor(spec: ProblemSpecV1, expression: string, fieldId
   })) return undefined;
   const definitions = spec.operations || [];
   if (!definitions.length || new Set(definitions.map(item => item.name)).size !== definitions.length
-    || definitions.some(item => !/^[A-Za-z][A-Za-z0-9_]*$/.test(item.name)
-      || item.arguments.length !== 2 || item.arguments[0] !== match[2] || item.arguments[1] !== match[3])) return undefined;
+    || definitions.some(item => !/^(?:[A-Za-z][A-Za-z0-9_]*|0|[1-9]\d*)$/.test(item.name)
+      || item.arguments.length < 2 || item.arguments[0] !== match[2] || item.arguments[1] !== match[3]
+      || item.preconditions.some(predicate => ![0, 1].some(lower => (
+        predicate === `${lower} <= ${match[2]} <= ${match[3]} <= ${match[4]}`
+      )))
+      || new Set(item.arguments).size !== item.arguments.length
+      || item.arguments.slice(2).some(id => !spec.inputFields.some(argument => argument.id === id
+        && argument.type === 'integer' && argument.encoding === `operation-argument:${id}`)))) return undefined;
   return { field, lower: Number(match[1]), left: match[2], right: match[3], upperField };
 }
 
 export function rangeSnapshot(input: string, spec: ProblemSpecV1, descriptor: RangeDescriptor): {
   upper: number; count: number; start: number; countId: string;
-  operations: Array<{ name: string; left: number; right: number; line: number }>;
+  operations: Array<{ name: string; left: number; right: number; arguments: number[]; line: number }>;
 } | undefined {
   const layout = operationLayout(descriptor.field);
   if (!layout) return undefined;
@@ -146,7 +152,22 @@ export function rangeSnapshot(input: string, spec: ProblemSpecV1, descriptor: Ra
   if (spec.inputFields.some(field => {
     if (field.id === descriptor.field.id) return false;
     if (field.encoding === `operation-argument:${field.id}`) {
-      return field.type !== 'integer' || ![descriptor.left, descriptor.right].includes(field.id);
+      return field.type !== 'integer' || !(spec.operations || []).some(op => op.arguments.includes(field.id));
+    }
+    if (field.type === 'array') {
+      const sequence = /^line:([1-9]\d*) tokens:1\.\.([A-Za-z][A-Za-z0-9_.:-]{0,63})$/.exec(field.encoding);
+      if (!sequence || !Number.isSafeInteger(Number(sequence[1])) || Number(sequence[1]) >= layout.start
+        || !field.dependsOn?.includes(sequence[2])) return true;
+      const lengthField = spec.inputFields.find(item => item.id === sequence[2] && item.type === 'integer');
+      const length = lengthField && scalarSnapshot(input, spec, lengthField);
+      if (!length || length.at.line >= Number(sequence[1]) || !/^(0|[1-9]\d*)$/.test(length.value)
+        || !Number.isSafeInteger(Number(length.value))) return true;
+      const values = input.split('\n')[Number(sequence[1]) - 1]?.match(/\S+/g) || [];
+      return values.length !== Number(length.value) || values.some(value => !/^-?(0|[1-9]\d*)$/.test(value)
+        || !Number.isSafeInteger(Number(value)))
+        || spec.inputFields.some(other => other.id !== field.id
+          && (location(other.encoding)?.line === Number(sequence[1])
+            || new RegExp(`^line:${sequence[1]} tokens:`).test(other.encoding)));
     }
     const at = location(field.encoding);
     return !at || at.line >= layout.start;
@@ -156,13 +177,14 @@ export function rangeSnapshot(input: string, spec: ProblemSpecV1, descriptor: Ra
   if (!Number.isSafeInteger(count) || !Number.isSafeInteger(upper)) return undefined;
   const lines = input.endsWith('\n') ? input.slice(0, -1).split('\n') : input.split('\n');
   if (lines.length !== layout.start - 1 + count) return undefined;
-  const names = new Set((spec.operations || []).map(item => item.name));
+  const definitions = new Map((spec.operations || []).map(item => [item.name, item]));
   const operations = [];
   for (let index = layout.start - 1; index < lines.length; index++) {
     const tokens = lines[index].match(/\S+/g) || [];
-    if (tokens.length !== 3 || !names.has(tokens[0]) || !tokens.slice(1).every(raw => /^-?(0|[1-9]\d*)$/.test(raw)
+    const definition = definitions.get(tokens[0]);
+    if (!definition || tokens.length !== definition.arguments.length + 1 || !tokens.slice(1).every(raw => /^-?(0|[1-9]\d*)$/.test(raw)
       && Number.isSafeInteger(Number(raw)))) return undefined;
-    operations.push({ name: tokens[0], left: Number(tokens[1]), right: Number(tokens[2]), line: index + 1 });
+    operations.push({ name: tokens[0], left: Number(tokens[1]), right: Number(tokens[2]), arguments: tokens.slice(1).map(Number), line: index + 1 });
   }
   return { upper, count, start: layout.start, countId: layout.countId, operations };
 }

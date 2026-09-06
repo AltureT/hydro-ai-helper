@@ -1301,7 +1301,15 @@ describe('construction coverage deduplication and gaps', () => {
     const rangeResult = buildConstraintProbes({ spec: rangeSpec, statementHash: '1'.repeat(64), specHash: '2'.repeat(64),
       seeds: [{ source: 'formal', index: 0, input: '3 2\n010\nFLIP 1 3\nQUERY 2 3\n' }] });
     expect(rangeResult.gaps).toEqual([]);
-    expect([...new Set([...results, rangeResult].flatMap(result => result.probes.map(p => p.constructionKind)))].sort())
+    const scalarRangeSpec = rangeStringFixture();
+    scalarRangeSpec.inputFields = ['L', 'R'].map((id, i) => ({ id, name: id, type: 'integer', encoding: `line:1 token:${i + 1}` }));
+    scalarRangeSpec.operations = [];
+    scalarRangeSpec.constraints = [{ id: 'LR', expression: '-10 <= L <= R <= 10', scope: 'global',
+      machineCheckable: true, evidence: { quote: '-10 <= L <= R <= 10' } }];
+    const scalarRangeResult = buildConstraintProbes({ spec: scalarRangeSpec, statementHash: '1'.repeat(64), specHash: '2'.repeat(64),
+      seeds: [{ source: 'formal', index: 0, input: '-3 5\n' }] });
+    expect(scalarRangeResult.gaps).toEqual([]);
+    expect([...new Set([...results, rangeResult, scalarRangeResult].flatMap(result => result.probes.map(p => p.constructionKind)))].sort())
       .toEqual([...VALIDATOR_PROBE_CONSTRUCTION_KINDS].sort());
     expect(results.every((result, index) => result.probes.some(probe => (
       probe.constructionKind === VALIDATOR_PROBE_CONSTRUCTION_KINDS[index]

@@ -126,6 +126,7 @@ const mutation_1 = require("./testdata/mutation");
 const mutationRunner_1 = require("./testdata/mutationRunner");
 var statementSamples_2 = require("./testdata/statementSamples");
 Object.defineProperty(exports, "extractStatementSamples", { enumerable: true, get: function () { return statementSamples_2.extractStatementSamples; } });
+const outputBoundary_1 = require("./testdata/outputBoundary");
 function comparableFileContent(content) {
     return content
         .replace(/\r\n/g, '\n')
@@ -1335,6 +1336,8 @@ ${generatorPlanPrompts_1.GENERATOR_PLAN_CONTRACT}
 各节使用原文分节，不要代码围栏、JSON 外壳或额外解释。`;
 }
 function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, context) {
+    const outputBoundaryGuidance = (0, outputBoundary_1.answerBoundaryRequired)(context?.statement.normalizedMarkdown ?? params.statementMarkdown, context?.spec.outputPolicy.kind, params.options.dataScale)
+        ? '- 题面明确提示答案可能超过 32 位：至少一个正式输入必须使实际答案超出 [-2147483648, 2147483647]；只有最大输入规模不能证明这一点。保留正式点数量和字节预算。' : '';
     const coveragePlan = coverageOverride ?? (() => {
         const tiered = resolveTieredSubtaskGeneration({
             caseCount: params.options.caseCount,
@@ -1369,6 +1372,7 @@ function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, 
             ] : []),
             '',
             '【生成要求】',
+            outputBoundaryGuidance,
             `- 恰好生成 ${params.options.caseCount} 个独立测试点。`,
             `- 数据规模策略：${DATA_SCALE_TEXT[params.options.dataScale || 'auto']}`,
             trustedGeneratorDsl
@@ -1383,6 +1387,7 @@ function buildGenerationArtifactsUserPrompt(params, solution, coverageOverride, 
     const base = buildTestdataUserPrompt(params, coveragePlan).replace('请严格按照 System 中约定的分节标记格式（@@@标记@@@）输出，不要输出 JSON。', '这是第二阶段：只输出 GENERATOR 与函数题所需 TEMPLATE，不要重复 ORACLE、SOLUTION、BRUTE、VALIDATOR 或 CASE。');
     return [
         base,
+        outputBoundaryGuidance,
         (0, generatorBudget_1.buildGeneratorBudgetPrompt)(params.options.caseCount, coveragePlan),
         '',
         '【第一阶段已验证且必须保持不变的解题蓝图】',
@@ -4766,6 +4771,8 @@ async function materializeSandboxBlueprint(blueprint, options, statementMarkdown
             }
             bruteCheck = { compared, agreed, skippedTimeout, disagreed };
         }
+        // Attribute missing answer coverage only after independent correctness checks.
+        (0, outputBoundary_1.assertAnswerBoundaryCoverage)(statementMarkdown, cases.map(item => item.output), customChecker ? 'custom-checker' : materialization?.coverageProof?.pipelineContext.spec.outputPolicy.kind, options.dataScale);
         reportProgress('discrimination_testing', 90);
         const discriminationDeadlineAt = Date.now() + goJudgeSandboxService_1.DISCRIMINATION_BUDGET_MS;
         const discriminationKillTargets = await smokeTestKillTargets({
