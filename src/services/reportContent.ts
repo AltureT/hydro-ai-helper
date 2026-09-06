@@ -1,11 +1,8 @@
-/** Remove the provider's leading reasoning wrapper, preserving report code/text. */
+import { normalizeReportMarkdown } from '../utils/reportMarkdown';
+
+/** Remove provider metadata and normalize report headings before persistence. */
 export function reportContent(content: string): string {
-  let result = content;
-  while (/^\s*<think>/i.test(result)) {
-    const end = result.search(/<\/think>/i);
-    if (end < 0) throw new Error('Model returned an incomplete reasoning block without a report');
-    result = result.slice(end + '</think>'.length).trimStart();
-  }
+  const result = normalizeReportMarkdown(content);
   if (!result.trim()) throw new Error('Model returned an empty report');
   return result;
 }

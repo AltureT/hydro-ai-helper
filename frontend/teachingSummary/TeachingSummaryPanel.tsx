@@ -18,6 +18,7 @@ import { renderReportMarkdown as renderMarkdown, reportMarkdownStyles } from '..
 import { useTeachingSummary, TeachingFinding } from './useTeachingSummary';
 import { parseReviewActions, prepareStudentHomework } from './reportContent';
 import { teachingSummaryStyles } from './teachingSummaryStyles';
+import { normalizeHomeworkMarkdown, normalizeReportMarkdown } from '../../src/utils/reportMarkdown';
 
 // ─── i18n with fallback ───────────────────────────────────────────────────────
 
@@ -142,6 +143,7 @@ export interface ParsedSuggestion {
 }
 
 export function parseSuggestionSections(md: string): ParsedSuggestion {
+  md = normalizeReportMarkdown(md);
   const result: ParsedSuggestion = { rest: [] };
   if (!md || !md.trim()) return result;
 
@@ -617,9 +619,9 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
   const parsed = parseSuggestionSections(summary.overallSuggestion || '');
   const parsedOk = Boolean(parsed.diagnosis || parsed.reviewList);
-  const homeworkMd = (summary.homeworkText && summary.homeworkText.trim())
+  const homeworkMd = normalizeHomeworkMarkdown((summary.homeworkText && summary.homeworkText.trim())
     ? summary.homeworkText
-    : parsed.homework;
+    : parsed.homework || '');
   const studentHomework = prepareStudentHomework(homeworkMd || '');
 
   const snapshotDate = summary.dataSnapshotAt

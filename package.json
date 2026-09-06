@@ -8,6 +8,7 @@
   "files": [
     "dist/",
     "frontend/",
+    "src/utils/reportMarkdown.ts",
     "templates/",
     "locales/",
     "assets/trusted-keys/",
