@@ -137,6 +137,131 @@ describe('testdata mutation sandbox runner', () => {
     expect(summary).toMatchObject({ viable: 1, killed: 1, survived: 0, score: 1 });
   });
 
+  it('retains an explicit output-limit kill when the adapter includes a diagnostic', async () => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed.mockResolvedValue([
+      detail({ status: 'Output Limit Exceeded', accepted: false, error: 'output limit' }),
+    ]);
+
+    const summary = await evaluateMutationCandidates(baseInput(runner));
+
+    expect(summary).toMatchObject({ status: 'completed', viable: 1, killed: 1, score: 1 });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['Nonzero Exit Status', 'Accepted'])('credits %s only after Python syntax is proven valid', async status => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed
+      .mockResolvedValueOnce([detail({ status, accepted: false, exitStatus: 1,
+        stderr: 'SyntaxError: forged by the candidate' })])
+      .mockResolvedValueOnce([detail({ stdout: 'valid\n' })]);
+    const candidate = pythonCandidate({ source: 'raise RuntimeError()' });
+
+    const summary = await evaluateMutationCandidates(baseInput(runner, [candidate]));
+
+    expect(summary).toMatchObject({ status: 'completed', viable: 1, killed: 1, score: 1 });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(2);
+    const [probe, inputs, options] = runner.runPythonBatchDetailed.mock.calls[1];
+    expect(probe).not.toContain(candidate.source);
+    expect(inputs).toEqual([candidate.source]);
+    expect(options.deadlineAt).toBe(runner.runPythonBatchDetailed.mock.calls[0][2].deadlineAt);
+    expect(JSON.stringify(summary)).not.toContain('forged');
+  });
+
+  it('excludes Python syntax failures from viable and killed counts', async () => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed
+      .mockResolvedValueOnce([detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })])
+      .mockResolvedValueOnce([detail({ stdout: 'invalid\n' })]);
+
+    const summary = await evaluateMutationCandidates(baseInput(runner, [pythonCandidate({ source: 'if :' })]));
+
+    expect(summary).toMatchObject({ status: 'skipped', viable: 0, killed: 0,
+      skippedReason: 'no-viable-candidates' });
+  });
+
+  it.each([
+    [],
+    [detail({ stdout: 'unexpected\n' })],
+    [detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1, stdout: 'invalid\n' })],
+    [detail({ stdout: 'valid\n', error: 'copyout failed' })],
+    [detail({ stdout: 'valid\n', timedOut: true })],
+  ].map(probeDetails => ({ probeDetails })))('preserves a gap when the syntax probe does not provide a trusted verdict', async ({ probeDetails }) => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed
+      .mockResolvedValueOnce([detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })])
+      .mockResolvedValueOnce(probeDetails);
+
+    const summary = await evaluateMutationCandidates(baseInput(runner));
+
+    expect(summary).toMatchObject({ status: 'partial', viable: 0, killed: 0, skippedReason: 'sandbox-infra' });
+  });
+
+  it('preserves a syntax-probe budget exhaustion without crediting the nonzero exit', async () => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed
+      .mockResolvedValueOnce([detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })])
+      .mockRejectedValueOnce(new SandboxBudgetExceededError());
+
+    const summary = await evaluateMutationCandidates(baseInput(runner));
+
+    expect(summary).toMatchObject({ status: 'partial', viable: 0, killed: 0, skippedReason: 'budget-exhausted' });
+  });
+
+  it('propagates cancellation during the syntax probe', async () => {
+    const runner = makeRunner();
+    const controller = new AbortController();
+    runner.runPythonBatchDetailed
+      .mockResolvedValueOnce([detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 })])
+      .mockImplementationOnce(async () => {
+        controller.abort(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+        return [detail({ stdout: 'valid\n' })];
+      });
+
+    await expect(evaluateMutationCandidates({ ...baseInput(runner), signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(runner.runPythonBatchDetailed.mock.calls[1][2].signal).toBe(controller.signal);
+  });
+
+  it('credits a compiled C++ nonzero exit without a Python syntax probe', async () => {
+    const runner = makeRunner();
+    runner.runCompiledBatchDetailed.mockResolvedValue([
+      detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus: 1 }),
+    ]);
+
+    const summary = await evaluateMutationCandidates(baseInput(runner, [cppCandidate()]));
+
+    expect(summary).toMatchObject({ status: 'completed', viable: 1, killed: 1 });
+    expect(runner.runPythonBatchDetailed).not.toHaveBeenCalled();
+    expect(runner.deleteCachedFile).toHaveBeenCalledWith('compiled-1');
+  });
+
+  it.each(['Nonzero Exit Status', 'Runtime Error', 'Time Limit Exceeded'])('does not hide a later infrastructure failure behind %s', async status => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed.mockResolvedValue([
+      detail({ status, accepted: false, exitStatus: 1, timedOut: status === 'Time Limit Exceeded' }),
+      detail({ status: 'Internal Error', accepted: false, error: 'worker lost' }),
+    ]);
+
+    const summary = await evaluateMutationCandidates({ ...baseInput(runner),
+      cases: [{ input: '1\n', answer: '1\n' }, { input: '2\n', answer: '2\n' }] });
+
+    expect(summary).toMatchObject({ status: 'partial', viable: 0, killed: 0, skippedReason: 'sandbox-infra' });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, 0, 1.5])('does not credit a nonzero status with inconsistent exit status %p', async exitStatus => {
+    const runner = makeRunner();
+    runner.runPythonBatchDetailed.mockResolvedValue([
+      detail({ status: 'Nonzero Exit Status', accepted: false, exitStatus }),
+    ]);
+
+    const summary = await evaluateMutationCandidates(baseInput(runner));
+
+    expect(summary).toMatchObject({ status: 'partial', viable: 0, killed: 0, skippedReason: 'sandbox-infra' });
+    expect(runner.runPythonBatchDetailed).toHaveBeenCalledTimes(1);
+  });
+
   it('counts accepted execution with equivalent line endings and trailing spaces as survived', async () => {
     const runner = makeRunner();
     runner.runPythonBatchDetailed.mockResolvedValue([detail({ stdout: '1  \r\n\r\n' })]);
@@ -148,6 +273,7 @@ describe('testdata mutation sandbox runner', () => {
 
   it.each([
     detail({ status: 'System Error', accepted: false, exitStatus: undefined, error: 'worker lost' }),
+    detail({ status: 'Internal Error', accepted: false, timedOut: true }),
     undefined,
   ])('does not credit malformed or infrastructure detail as killed', async returnedDetail => {
     const runner = makeRunner();
