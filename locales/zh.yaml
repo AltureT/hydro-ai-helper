@@ -1444,3 +1444,8 @@ ai_helper_testdata_result_partly_written: "已有文件写入，请核对后再�
 ai_helper_testdata_result_review_config: "请在评测配置（config.yaml）中核对所有测试点的子任务归属与分值；未纳入子任务的测试点不会参与评测。"
 ai_helper_testdata_result_review_skeleton: "请填写每个测试点的输入与答案，空白文件还不能用于评测。"
 ai_helper_testdata_result_review_skeleton_function: "请填写输入与答案，并补全评测模板中的 TODO 后再写入。"
+
+ai_helper_teaching_summary_failure_title: "本次教学分析未完成"
+ai_helper_teaching_summary_failure_hint: "未能取得完整的分析结果，请稍后重试。"
+ai_helper_teaching_summary_retry_hint: "可以再次尝试生成；若持续失败，请联系管理员检查 AI 服务。"
+ai_helper_teaching_summary_retry: "重试生成"

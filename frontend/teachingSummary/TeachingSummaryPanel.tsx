@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import { FindingCodeSample } from './FindingCodeSample';
 /**
  * TeachingSummaryPanel — teacher-facing UI for AI teaching summary generation.
@@ -476,12 +477,12 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   }, [summary?.findings?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleGenerate = useCallback(async (regenerate?: boolean) => {
-    if (regenerate) {
+    if (regenerate && summary?.status === 'completed') {
       const confirmed = window.confirm('将重新生成教学总结，旧数据将被覆盖。确认继续？');
       if (!confirmed) return;
     }
-    await generate(teachingFocus || undefined, regenerate);
-  }, [generate, teachingFocus]);
+    await generate(teachingFocus || summary?.teachingFocus || undefined, regenerate);
+  }, [generate, teachingFocus, summary?.status, summary?.teachingFocus]);
 
   const handleFeedback = useCallback(async (rating: 'up' | 'down') => {
     if (!summary) return;
@@ -528,7 +529,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             borderRadius: RADIUS.md, fontSize: '13px',
             marginBottom: SPACING.base,
           }}>
-            {error}
+            {t(error)}
           </div>
         )}
         <button
@@ -581,22 +582,23 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
   if (summary.status === 'failed') {
     return (
-      <div style={{ ...cardStyle, fontFamily: 'inherit' }}>
-        <style>{markdownTheme}</style>
-        <div style={{ marginBottom: SPACING.base, fontWeight: 600, fontSize: '16px', color: COLORS.textPrimary }}>
-          {t('ai_helper_teaching_summary_title')}
-        </div>
-        <div style={{
-          padding: `${SPACING.sm} ${SPACING.base}`,
-          backgroundColor: COLORS.errorBg, color: COLORS.errorText,
-          borderLeft: `4px solid ${COLORS.errorBorder}`,
-          borderRadius: RADIUS.md, fontSize: '13px', marginBottom: SPACING.base,
-        }}>
-          {t('ai_helper_teaching_summary_failed')}
-        </div>
-        <button onClick={() => handleGenerate(true)} style={getButtonStyle('primary')}>
-          {t('ai_helper_teaching_summary_regenerate')}
-        </button>
+      <div className="ai-teaching-summary ai-report-content" style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
+        <style>{teachingSummaryStyles}</style>
+        <div className="report-failure-header">{t('ai_helper_teaching_summary_title')}</div>
+        <section className="report-failure" aria-labelledby="teaching-report-failure-title" aria-busy={loading}>
+          <div className="report-failure-icon"><Icon name="document" size={24} /></div>
+          <div className="report-failure-body">
+            <h3 id="teaching-report-failure-title">{t('ai_helper_teaching_summary_failure_title')}</h3>
+            <p>{t(summary.errorMessageKey || 'ai_helper_teaching_summary_failure_hint')}</p>
+            <p className="report-note">{t('ai_helper_teaching_summary_retry_hint')}</p>
+            {error && <p role="alert" className="report-failure-error">{t(error)}</p>}
+            <button type="button" onClick={() => handleGenerate(true)} disabled={loading}
+              style={{ ...getButtonStyle('secondary'), display: 'inline-flex', alignItems: 'center', gap: '8px', opacity: loading ? 0.6 : 1 }}>
+              <Icon name="refresh" />
+              {t(loading ? 'ai_helper_teaching_summary_generating' : 'ai_helper_teaching_summary_retry')}
+            </button>
+          </div>
+        </section>
       </div>
     );
   }
@@ -736,7 +738,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
           borderLeft: `4px solid ${COLORS.errorBorder}`,
           borderRadius: RADIUS.md, fontSize: '13px', marginBottom: SPACING.base,
         }}>
-          {error}
+          {t(error)}
         </div>
       )}
 

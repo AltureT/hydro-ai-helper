@@ -40,6 +40,7 @@ export interface TeachingSummary {
   createdAt: string;
   dataSnapshotAt: string;
   status: 'pending' | 'generating' | 'completed' | 'failed';
+  errorMessageKey?: string;
   progressPhase?: 'collecting_data' | 'analyzing' | 'generating_suggestion' | 'deep_diving' | 'saving';
   stats: {
     totalStudents: number;

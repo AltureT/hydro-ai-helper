@@ -275,7 +275,7 @@ class TeachingSuggestionService {
      */
     async generateOverallSuggestion(input) {
         const { system, user } = buildMainPrompt(input);
-        const result = await this.aiClient.chat([{ role: 'user', content: user }], system);
+        const result = await this.aiClient.chat([{ role: 'user', content: user }], system, reportContent_1.REPORT_CHAT_OPTIONS);
         return {
             text: (0, reportContent_1.reportContent)(result.content),
             tokenUsage: {
@@ -289,7 +289,7 @@ class TeachingSuggestionService {
      */
     async generateFillInExercise(input) {
         const { system, user } = buildFillInPrompt(input);
-        const result = await this.aiClient.chat([{ role: 'user', content: user }], system);
+        const result = await this.aiClient.chat([{ role: 'user', content: user }], system, reportContent_1.REPORT_CHAT_OPTIONS);
         const language = input.candidates.every(c => (0, reportMarkdown_1.isPythonLanguage)(c.lang)) ? 'python' : '';
         return {
             text: (0, reportMarkdown_1.normalizeHomeworkMarkdown)((0, reportContent_1.reportContent)(result.content), language),
@@ -304,7 +304,7 @@ class TeachingSuggestionService {
      */
     async generateDeepDive(finding, problemContent) {
         const { system, user } = buildDeepDivePrompt(finding, problemContent);
-        const result = await this.aiClient.chat([{ role: 'user', content: user }], system);
+        const result = await this.aiClient.chat([{ role: 'user', content: user }], system, reportContent_1.REPORT_CHAT_OPTIONS);
         return {
             text: (0, reportContent_1.reportContent)(result.content),
             tokenUsage: {

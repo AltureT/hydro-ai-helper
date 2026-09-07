@@ -1444,3 +1444,8 @@ ai_helper_testdata_result_partly_written: "Some files are already written; revie
 ai_helper_testdata_result_review_config: "Check every case’s subtask assignment and score in config.yaml. Cases outside all subtasks will not be judged."
 ai_helper_testdata_result_review_skeleton: "Fill in each input and answer. Empty files are not ready for judging."
 ai_helper_testdata_result_review_skeleton_function: "Fill in inputs and answers, and complete template TODOs before writing."
+
+ai_helper_teaching_summary_failure_title: "Teaching analysis could not be completed"
+ai_helper_teaching_summary_failure_hint: "A complete analysis was not received. Please try again later."
+ai_helper_teaching_summary_retry_hint: "You can try generating again. If this keeps failing, ask an administrator to check the AI service."
+ai_helper_teaching_summary_retry: "Retry generation"

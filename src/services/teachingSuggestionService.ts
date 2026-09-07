@@ -5,7 +5,8 @@
  */
 
 import { TeachingFinding } from '../models/teachingSummary';
-import { reportContent } from './reportContent';
+import type { ChatCallOptions } from './openaiClient';
+import { reportContent, REPORT_CHAT_OPTIONS } from './reportContent';
 import { isPythonLanguage, normalizeHomeworkMarkdown } from '../utils/reportMarkdown';
 
 // ─── 提示词模板 ──────────────────────────────────────────
@@ -348,7 +349,7 @@ ${codeSamples}${conversationSamples}`;
 
 export class TeachingSuggestionService {
   private aiClient: {
-    chat: (messages: Array<{ role: string; content: string }>, system: string) => Promise<{
+    chat: (messages: Array<{ role: string; content: string }>, system: string, options?: ChatCallOptions) => Promise<{
       content: string;
       usage?: { promptTokens?: number; completionTokens?: number; prompt_tokens?: number; completion_tokens?: number };
     }>;
@@ -366,6 +367,7 @@ export class TeachingSuggestionService {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: user }],
       system,
+      REPORT_CHAT_OPTIONS,
     );
     return {
       text: reportContent(result.content),
@@ -384,6 +386,7 @@ export class TeachingSuggestionService {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: user }],
       system,
+      REPORT_CHAT_OPTIONS,
     );
     const language = input.candidates.every(c => isPythonLanguage(c.lang)) ? 'python' : '';
     return {
@@ -406,6 +409,7 @@ export class TeachingSuggestionService {
     const result = await this.aiClient.chat(
       [{ role: 'user', content: user }],
       system,
+      REPORT_CHAT_OPTIONS,
     );
     return {
       text: reportContent(result.content),

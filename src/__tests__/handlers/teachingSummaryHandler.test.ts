@@ -14,6 +14,7 @@ jest.mock('hydrooj', () => ({
 }));
 
 jest.mock('../../services/openaiClient', () => ({
+  ...jest.requireActual('../../services/openaiClient'),
   createMultiModelClientFromConfig: jest.fn(),
 }));
 
@@ -45,6 +46,7 @@ import {
   TeachingSummaryFeedbackHandler,
   TeachingSummaryHandlerPriv,
 } from '../../handlers/teachingSummaryHandler';
+import { AIServiceError } from '../../services/openaiClient';
 import { db } from 'hydrooj';
 import { TeachingAnalysisService } from '../../services/teachingAnalysisService';
 import { TeachingSuggestionService } from '../../services/teachingSuggestionService';
@@ -112,6 +114,28 @@ describe('TeachingSummaryHandler exports', () => {
       contestId: 'contest-1',
       contestRule: 'homework',
     });
+  });
+
+  it('does not return raw internal errors when retry cannot be started', async () => {
+    const handler = Object.create(TeachingSummaryHandler.prototype) as any;
+    handler.request = { params: { contestId: 'contest' }, body: { regenerate: true } };
+    handler.response = {};
+    handler.ctx = { get: () => ({ findByContest: jest.fn().mockRejectedValue(new Error('private database diagnostic')) }) };
+    await handler.post();
+    expect(handler.response).toMatchObject({ status: 500, body: { error: { message: 'ai_helper_err_ai_unknown' } } });
+  });
+
+  it('persists a safe failure category without the provider error text', async () => {
+    const error = new AIServiceError('private endpoint diagnostics', 'timeout');
+    (TeachingAnalysisService as jest.Mock).mockImplementation(() => ({ analyze: jest.fn().mockRejectedValue(error) }));
+    const capture = jest.fn();
+    const model = { updateStatus: jest.fn(), updateProgress: jest.fn(), saveResults: jest.fn() };
+    const handler = Object.create(TeachingSummaryHandler.prototype) as any;
+    handler.ctx = { get: (key: string) => key === 'errorReporter' ? { capture } : undefined };
+    await handler.generateAsync(model, 'test', 'summary', 'contest', { pids: [1] }, [1]);
+    expect(model.updateStatus).toHaveBeenLastCalledWith('summary', 'failed', 'ai_helper_err_ai_timeout');
+    expect(model.saveResults).not.toHaveBeenCalled();
+    expect(capture).toHaveBeenCalled();
   });
 
   it('passes exact failure evidence through deep-dive generation and persistence without fetching arbitrary code', async () => {

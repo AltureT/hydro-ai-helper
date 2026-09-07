@@ -416,10 +416,10 @@ class BatchSummaryService {
                 userPrompt += `\n\n历史背景:\n该学生在本课程的近期表现摘要如下，请参考以提供纵向对比和鼓励：\n${historyContext}\n\n特别注意：\n- 如果上次建议（last_advice）与本次表现有关联，请明确提及\n- 不同作业难度不可直接比较；CE 转为 WA/TLE 只描述判题变化，不是认知进步的证明\n- 上次建议不是本次已执行的事实，不能据此表扬或批评`;
             }
             // e. Call AI
-            const response = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt);
+            const response = await this.aiClient.chat([{ role: 'user', content: userPrompt }], systemPrompt, reportContent_1.REPORT_CHAT_OPTIONS);
             const summaryText = (0, reportContent_1.reportContent)(response.content);
-            const promptTokens = response.usage?.prompt_tokens ?? 0;
-            const completionTokens = response.usage?.completion_tokens ?? 0;
+            const promptTokens = response.usage?.promptTokens ?? response.usage?.prompt_tokens ?? 0;
+            const completionTokens = response.usage?.completionTokens ?? response.usage?.completion_tokens ?? 0;
             // f. Save summary
             await this.summaryModel.completeSummary(summary._id, summaryText, problemSnapshots, { prompt: promptTokens, completion: completionTokens });
             // g. Token counts are already persisted on the summary via completeSummary
@@ -460,12 +460,13 @@ class BatchSummaryService {
         }
         catch (err) {
             const errorMessage = err?.message ?? String(err);
-            await this.summaryModel.markFailed(summary._id, errorMessage);
+            const errorKey = openaiClient_1.USER_ERROR_MESSAGE_KEYS[err instanceof openaiClient_1.AIServiceError ? err.category : 'unknown'];
+            await this.summaryModel.markFailed(summary._id, errorKey);
             await this.jobModel.incrementFailed(job._id);
             onEvent({
                 type: 'student_failed',
                 userId: summary.userId,
-                error: errorMessage,
+                error: errorKey,
             });
             console.error(`[BatchSummaryService] Failed for userId=${summary.userId}:`, err);
             // Telemetry: per-student failures previously only reached Mongo + SSE, so

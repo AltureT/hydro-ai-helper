@@ -100,9 +100,12 @@ class TeachingSummaryModel {
     /**
      * 更新总结状态
      */
-    async updateStatus(id, status) {
+    async updateStatus(id, status, errorMessageKey) {
         const _id = (0, ensureObjectId_1.ensureObjectId)(id);
-        await this.collection.updateOne({ _id }, { $set: { status } });
+        await this.collection.updateOne({ _id }, {
+            $set: { status, ...(errorMessageKey ? { errorMessageKey } : {}) },
+            ...(!errorMessageKey ? { $unset: { errorMessageKey: '' } } : {}),
+        });
     }
     /**
      * 更新生成进度阶段

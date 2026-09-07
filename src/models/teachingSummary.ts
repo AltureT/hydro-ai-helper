@@ -109,6 +109,8 @@ export interface TeachingSummary {
   createdAt: Date;
   dataSnapshotAt: Date;
   status: 'pending' | 'generating' | 'completed' | 'failed';
+  /** Safe localized failure category; never persist provider diagnostics here. */
+  errorMessageKey?: string;
   progressPhase?: 'collecting_data' | 'analyzing' | 'generating_suggestion' | 'deep_diving' | 'saving';
   stats: {
     totalStudents: number;
@@ -259,9 +261,13 @@ export class TeachingSummaryModel {
   async updateStatus(
     id: string | ObjectIdType,
     status: TeachingSummary['status'],
+    errorMessageKey?: string,
   ): Promise<void> {
     const _id = ensureObjectId(id);
-    await this.collection.updateOne({ _id }, { $set: { status } });
+    await this.collection.updateOne({ _id }, {
+      $set: { status, ...(errorMessageKey ? { errorMessageKey } : {}) },
+      ...(!errorMessageKey ? { $unset: { errorMessageKey: '' } } : {}),
+    });
   }
 
   /**

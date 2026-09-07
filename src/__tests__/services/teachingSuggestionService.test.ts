@@ -355,7 +355,8 @@ describe('TeachingSuggestionService', () => {
     const result = await service.generateOverallSuggestion(input);
 
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    const [messages, systemPrompt, options] = aiClient.chat.mock.calls[0];
+    expect(options).toEqual({ contentMode: 'report', maxTokens: null });
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toContain('第一次周赛');
     expect(systemPrompt).toContain('P0');
@@ -372,7 +373,8 @@ describe('TeachingSuggestionService', () => {
     const result = await service.generateDeepDive(finding, '题目内容示例');
 
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    const [messages, systemPrompt, options] = aiClient.chat.mock.calls[0];
+    expect(options).toEqual({ contentMode: 'report', maxTokens: null });
     expect(messages[0].content).toContain('题目内容示例');
     expect(systemPrompt).toContain('不推测学生内心、认知层级');
     expect(result.text).toBe('### 认知障碍诊断\n应用层障碍。');
@@ -411,7 +413,8 @@ describe('TeachingSuggestionService', () => {
     const result = await service.generateFillInExercise(input);
 
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    const [messages, systemPrompt, options] = aiClient.chat.mock.calls[0];
+    expect(options).toEqual({ contentMode: 'report', maxTokens: null });
     expect(messages[0].content).toContain('数组求和');
     expect(messages[0].content).toContain('int main()');
     expect(messages[0].content).toContain('数组越界错误');

@@ -3,6 +3,15 @@ import { COLORS } from '../utils/styles';
 // Scoped to this report; other plugin pages retain their existing Markdown theme.
 export const teachingSummaryStyles = `
   .ai-teaching-summary { --report-muted: #64748b; }
+  .ai-teaching-summary .report-failure-header { font-size: 18px; font-weight: 700; padding-bottom: 16px; border-bottom: 1px solid ${COLORS.border}; }
+  .ai-teaching-summary .report-failure { display: flex; align-items: flex-start; gap: 16px; padding: 32px 0; }
+  .ai-teaching-summary .report-failure-icon { display: flex; padding: 12px; background: ${COLORS.bgPage}; color: ${COLORS.textSecondary}; border-radius: 8px; }
+  .ai-teaching-summary .report-failure-body { min-width: 0; }
+  .ai-teaching-summary .report-failure-body h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .ai-teaching-summary .report-failure-body p { margin: 0 0 12px; font-size: 14px; line-height: 1.7; color: ${COLORS.textSecondary}; overflow-wrap: anywhere; }
+  .ai-teaching-summary .report-failure-body .report-failure-error { color: ${COLORS.errorText}; }
+  @media (max-width: 480px) { .ai-teaching-summary .report-failure { gap: 12px; padding: 24px 0; }
+    .ai-teaching-summary .report-failure-icon { padding: 8px; } }
   .ai-teaching-summary button { font-family: inherit; }
   .ai-teaching-summary button:focus-visible, .ai-teaching-summary summary:focus-visible {
     outline: 2px solid ${COLORS.primary}; outline-offset: 3px;

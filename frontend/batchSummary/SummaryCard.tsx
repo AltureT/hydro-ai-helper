@@ -63,7 +63,8 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
       {status === 'failed' ? (
         <div role="alert" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '12px', color: COLORS.errorText }}>
           <Icon name="warning" />
-          <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{error || i18n('ai_helper_batch_summary_failed')}</span>
+          <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{i18n(error && /^ai_helper_err_ai_(auth|rate_limit|server|client|timeout|network|aborted|unknown)$/.test(error)
+            ? error : 'ai_helper_batch_summary_failed')}</span>
           {isTeacher && onRetry && <button type="button" disabled={busy || actionsDisabled} style={actionStyle()} onClick={() => runAction(onRetry)}><Icon name="refresh" /> {i18n('ai_helper_batch_summary_retry')}</button>}
         </div>
       ) : status === 'completed' && summary !== null ? (
