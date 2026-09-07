@@ -126,7 +126,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
         catch (err) {
             console.error('[TeachingSummaryHandler.post] error:', err);
             this.response.status = 500;
-            this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+            this.response.body = { error: { code: 'INTERNAL_ERROR', message: openaiClient_1.USER_ERROR_MESSAGE_KEYS[err instanceof openaiClient_1.AIServiceError ? err.category : 'unknown'] } };
             this.response.type = 'application/json';
         }
     }
@@ -314,7 +314,7 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
             console.error('[TeachingSummaryHandler] generateAsync failed for summaryId=%s:', summaryId, err);
             this.ctx.get('errorReporter')?.capture('background_job', 'teaching_summary', err instanceof Error ? err.message : String(err), undefined, err instanceof Error ? err.stack : undefined, { summaryId: String(summaryId), domainId, ...(0, openaiClient_1.extractAiErrorMetadata)(err) });
             try {
-                await model.updateStatus(summaryId, 'failed');
+                await model.updateStatus(summaryId, 'failed', openaiClient_1.USER_ERROR_MESSAGE_KEYS[err instanceof openaiClient_1.AIServiceError ? err.category : 'unknown']);
             }
             catch (updateErr) {
                 console.error('[TeachingSummaryHandler] Failed to set status=failed:', updateErr);

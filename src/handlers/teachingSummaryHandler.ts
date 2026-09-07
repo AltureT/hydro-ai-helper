@@ -8,7 +8,7 @@ import { studentPatternGroups } from '../services/analyzers/temporalPatternAnaly
 import { Handler, PRIV, db } from 'hydrooj';
 import { ObjectId, ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
-import { createMultiModelClientFromConfig, extractAiErrorMetadata } from '../services/openaiClient';
+import { AIServiceError, USER_ERROR_MESSAGE_KEYS, createMultiModelClientFromConfig, extractAiErrorMetadata } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
 import { TeachingSuggestionService, BehaviorSummary } from '../services/teachingSuggestionService';
@@ -155,7 +155,7 @@ export class TeachingSummaryHandler extends Handler {
     } catch (err) {
       console.error('[TeachingSummaryHandler.post] error:', err);
       this.response.status = 500;
-      this.response.body = { error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : 'Internal error' } };
+      this.response.body = { error: { code: 'INTERNAL_ERROR', message: USER_ERROR_MESSAGE_KEYS[err instanceof AIServiceError ? err.category : 'unknown'] } };
       this.response.type = 'application/json';
     }
   }
@@ -378,7 +378,8 @@ export class TeachingSummaryHandler extends Handler {
         { summaryId: String(summaryId), domainId, ...extractAiErrorMetadata(err) },
       );
       try {
-        await model.updateStatus(summaryId, 'failed');
+        await model.updateStatus(summaryId, 'failed',
+          USER_ERROR_MESSAGE_KEYS[err instanceof AIServiceError ? err.category : 'unknown']);
       } catch (updateErr) {
         console.error('[TeachingSummaryHandler] Failed to set status=failed:', updateErr);
       }

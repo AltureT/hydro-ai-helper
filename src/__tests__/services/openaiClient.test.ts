@@ -153,6 +153,52 @@ describe('OpenAIClient', () => {
       expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
     });
 
+    it.each(['', '   ', null, { text: 'unexpected' }])('rejects missing final content even with reasoning: %p', async content => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{
+        message: { content, reasoning_content: 'private reasoning' }, finish_reason: 'length',
+      }] } });
+      await expect(client.chat([], 'System')).rejects.toMatchObject({ category: 'server', isRetryable: true });
+    });
+
+    it.each(['ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET', 'ERR_BAD_RESPONSE'])('keeps HTTP 200 transport failures retryable: %s', async code => {
+      const error = createAxiosError(200);
+      error.code = code;
+      error.response.data = 'partial response';
+      mockedAxios.post.mockRejectedValueOnce(error);
+      await expect(client.chat([], 'System')).rejects.toMatchObject({
+        category: ['ECONNABORTED', 'ETIMEDOUT'].includes(code) ? 'timeout' : 'network',
+        httpStatus: 200, isRetryable: true,
+      });
+    });
+
+    it.each([
+      ['<think>private reasoning</think>', 'stop'],
+      ['&lt;think&gt;unfinished reasoning', 'stop'],
+      ['### Partial report', 'length'],
+    ])('rejects unusable reports inside the client: %s', async (content, finish_reason) => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{ message: { content }, finish_reason }] } });
+      await expect(client.chat([], 'System', { contentMode: 'report' }))
+        .rejects.toMatchObject({ category: 'server', isRetryable: true });
+    });
+
+    it('normalizes a complete report without changing literal code', async () => {
+      mockSuccessResponse('<think>metadata</think>###&#32;Report\n\n' + '\x60\x60\x60python\nx = "<think>literal</think>"\n\x60\x60\x60');
+      const result = await client.chat([], 'System', { contentMode: 'report' });
+      expect(result.content).toContain('### Report');
+      expect(result.content).toContain('x = "<think>literal</think>"');
+      expect(result.content).not.toContain('metadata');
+    });
+
+    it('preserves raw output and chat markers for valid answers', async () => {
+      for (const contentMode of ['raw', 'display'] as const) {
+        mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{ message: {
+          content: 'answer', reasoning_content: 'private reasoning',
+        }, finish_reason: 'stop' }] } });
+        const result = await client.chat([], 'System', { contentMode });
+        expect(result.content).toBe(contentMode === 'raw' ? 'answer' : '<think>(thinking...)</think>answer');
+      }
+    });
+
     it('should pass signal to axios', async () => {
       mockSuccessResponse();
       const ac = new AbortController();
@@ -309,6 +355,33 @@ describe('MultiModelClient', () => {
   });
 
   describe('retry behavior', () => {
+    it('retries empty and truncated reports before succeeding without the chat token cap', async () => {
+      const client = new MultiModelClient([makeResolvedConfig()]);
+      for (const content of ['', '### Partial']) mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{
+        message: { content, reasoning_content: 'metadata' }, finish_reason: 'length',
+      }] } });
+      mockSuccessResponse('### Complete report');
+      const pending = client.chat([], 'System', { contentMode: 'report', maxTokens: null });
+      await jest.runAllTimersAsync();
+      expect((await pending).content).toBe('### Complete report');
+      expect(mockedAxios.post).toHaveBeenCalledTimes(3);
+      for (const [, payload, config] of mockedAxios.post.mock.calls as any[]) {
+        expect(payload).not.toHaveProperty('max_tokens');
+        expect(config.timeout).toBe(30_000);
+      }
+    });
+
+    it('falls back after bounded report-validation failures', async () => {
+      const client = new MultiModelClient([makeResolvedConfig(), makeResolvedConfig({ modelName: 'fallback' })]);
+      for (let i = 0; i < 3; i++) mockSuccessResponse('<think>metadata only</think>');
+      mockSuccessResponse('Complete fallback report');
+      const pending = client.chat([], 'System', { contentMode: 'report' });
+      await jest.runAllTimersAsync();
+      const result = await pending;
+      expect(result.usedModel.modelName).toBe('fallback');
+      expect(result.fallbackErrors).toHaveLength(3);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(4);
+    });
     it('should skip same-model timeout retries when retryTimeouts=false', async () => {
       const client = new MultiModelClient([
         makeResolvedConfig({ endpointId: 'ep-1', modelName: 'model-a' }),

@@ -17,6 +17,7 @@ const http_1 = __importDefault(require("http"));
 const https_1 = __importDefault(require("https"));
 const axios_1 = __importDefault(require("axios"));
 const crypto_1 = require("../lib/crypto");
+const reportMarkdown_1 = require("../utils/reportMarkdown");
 const limits_1 = require("../constants/limits");
 // ─── HTTP 连接池 ───────────────────────────────────────
 const HTTP_AGENT = new http_1.default.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 5, timeout: 60000 });
@@ -230,11 +231,24 @@ class OpenAIClient {
             const msgAny = message;
             const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning);
             const content = message?.content;
-            const aiMessage = reasoning && options?.contentMode !== 'raw'
-                ? `<think>(thinking...)</think>${content || ''}`
-                : content;
-            if (!aiMessage) {
-                throw new AIServiceError('AI 返回内容为空', 'server');
+            // Provider reasoning is not a final answer. Validate before adding display markers
+            // so empty answers enter MultiModelClient's bounded retry/fallback chain.
+            if (typeof content !== 'string' || !content.trim()) {
+                const reason = response.data?.choices?.[0]?.finish_reason === 'length' ? ' (output limit reached)' : '';
+                throw new AIServiceError(`AI returned no final content${reason}`, 'server');
+            }
+            let aiMessage = content;
+            if (options?.contentMode === 'report') {
+                if (response.data?.choices?.[0]?.finish_reason === 'length') {
+                    throw new AIServiceError('AI report was truncated (output limit reached)', 'server');
+                }
+                aiMessage = (0, reportMarkdown_1.normalizeReportMarkdown)(content);
+                if (!aiMessage.trim()) {
+                    throw new AIServiceError('AI returned an empty report after removing provider metadata', 'server');
+                }
+            }
+            else if (reasoning && options?.contentMode !== 'raw') {
+                aiMessage = `<think>(thinking...)</think>${content}`;
             }
             // 提取 token 用量
             const rawUsage = response.data?.usage;
@@ -256,6 +270,15 @@ class OpenAIClient {
             // Axios 错误处理
             if (axios_1.default.isAxiosError(error)) {
                 const axiosError = error;
+                // A response object only proves headers arrived. A timeout, disconnect or
+                // invalid body after HTTP 200 must not become a non-retryable client error.
+                const receivedStatus = axiosError.response?.status;
+                if (receivedStatus !== undefined && receivedStatus >= 200 && receivedStatus < 300) {
+                    if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
+                        throw new AIServiceError('AI response timed out after receiving headers', 'timeout', receivedStatus);
+                    }
+                    throw new AIServiceError('AI response could not be fully received or decoded', 'network', receivedStatus);
+                }
                 if (axiosError.response) {
                     const status = axiosError.response.status;
                     const data = axiosError.response.data;

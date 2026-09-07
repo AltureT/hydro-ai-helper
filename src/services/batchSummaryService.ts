@@ -9,9 +9,10 @@ import { BatchSummaryJobModel, BatchSummaryJob } from '../models/batchSummaryJob
 import { StudentSummaryModel, StudentSummary, ProblemSnapshot } from '../models/studentSummary';
 import { StudentHistoryRecord, ErrorDistribution } from '../models/studentHistory';
 import { SubmissionSampler, RawSubmission, SampleResult } from './submissionSampler';
-import { extractAiErrorMetadata } from './openaiClient';
+import type { ChatCallOptions } from './openaiClient';
+import { AIServiceError, USER_ERROR_MESSAGE_KEYS, extractAiErrorMetadata } from './openaiClient';
 import { submissionTime } from './analyzers/submissionEvidence';
-import { reportContent } from './reportContent';
+import { reportContent, REPORT_CHAT_OPTIONS } from './reportContent';
 import { recordWindow } from './analyzers/recordWindow';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -268,7 +269,7 @@ export class BatchSummaryService {
   private db: Db;
   private jobModel: BatchSummaryJobModel;
   private summaryModel: StudentSummaryModel;
-  private aiClient: { chat: (messages: Array<{ role: string; content: string }>, system: string) => Promise<{ content: string; usage?: { prompt_tokens?: number; completion_tokens?: number } }> };
+  private aiClient: { chat: (messages: Array<{ role: string; content: string }>, system: string, options?: ChatCallOptions) => Promise<{ content: string; usage?: { promptTokens?: number; completionTokens?: number; prompt_tokens?: number; completion_tokens?: number } }> };
   private tokenUsageModel: unknown;
   private historyModel: { create: (record: unknown) => Promise<unknown>; findRecent: (domainId: string, userId: number, limit: number) => Promise<StudentHistoryRecord[]> } | null;
   private sampler: SubmissionSampler;
@@ -520,11 +521,12 @@ export class BatchSummaryService {
       const response = await this.aiClient.chat(
         [{ role: 'user', content: userPrompt }],
         systemPrompt,
+        REPORT_CHAT_OPTIONS,
       );
 
       const summaryText: string = reportContent(response.content);
-      const promptTokens: number = response.usage?.prompt_tokens ?? 0;
-      const completionTokens: number = response.usage?.completion_tokens ?? 0;
+      const promptTokens: number = response.usage?.promptTokens ?? response.usage?.prompt_tokens ?? 0;
+      const completionTokens: number = response.usage?.completionTokens ?? response.usage?.completion_tokens ?? 0;
 
       // f. Save summary
       await this.summaryModel.completeSummary(
@@ -576,13 +578,14 @@ export class BatchSummaryService {
     } catch (err: unknown) {
       const errorMessage = (err as { message?: string })?.message ?? String(err);
 
-      await this.summaryModel.markFailed(summary._id, errorMessage);
+      const errorKey = USER_ERROR_MESSAGE_KEYS[err instanceof AIServiceError ? err.category : 'unknown'];
+      await this.summaryModel.markFailed(summary._id, errorKey);
       await this.jobModel.incrementFailed(job._id);
 
       onEvent({
         type: 'student_failed',
         userId: summary.userId,
-        error: errorMessage,
+        error: errorKey,
       });
 
       console.error(`[BatchSummaryService] Failed for userId=${summary.userId}:`, err);

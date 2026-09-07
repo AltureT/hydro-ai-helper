@@ -1,3 +1,4 @@
+import { AIServiceError } from '../../services/openaiClient';
 import { BatchSummaryService, ProblemInfo, SSEEvent } from '../../services/batchSummaryService';
 
 // Use plain string IDs as ObjectIdType stand-ins
@@ -157,6 +158,7 @@ describe('BatchSummaryService', () => {
 
       // AI chat was called once
       expect(mockAiClient.chat).toHaveBeenCalledTimes(1);
+      expect(mockAiClient.chat.mock.calls[0][2]).toEqual({ contentMode: 'report', maxTokens: null });
 
       // completeSummary called with the summary content
       expect(mockSummaryModel.completeSummary).toHaveBeenCalledWith(
@@ -223,7 +225,7 @@ describe('BatchSummaryService', () => {
 
   describe('execute - failure path', () => {
     it('should handle AI call failure gracefully', async () => {
-      mockAiClient.chat.mockRejectedValue(new Error('API rate limit'));
+      mockAiClient.chat.mockRejectedValue(new AIServiceError('API rate limit', 'rate_limit'));
 
       const job = makeJob();
       const events: SSEEvent[] = [];
@@ -232,7 +234,7 @@ describe('BatchSummaryService', () => {
       // markFailed called for the student
       expect(mockSummaryModel.markFailed).toHaveBeenCalledWith(
         makeId(142),
-        expect.stringContaining('API rate limit'),
+        'ai_helper_err_ai_rate_limit',
       );
 
       // incrementFailed called
@@ -244,7 +246,7 @@ describe('BatchSummaryService', () => {
       expect(studentFailedEvent).toMatchObject({
         type: 'student_failed',
         userId: 42,
-        error: expect.stringContaining('API rate limit'),
+        error: 'ai_helper_err_ai_rate_limit',
       });
 
       // job should still complete (with failed count)
@@ -565,13 +567,14 @@ describe('BatchSummaryService', () => {
     });
   });
   it('queries only this assignment and strips provider reasoning before saving', async () => {
-    mockAiClient.chat.mockResolvedValue({ content: '<think>(thinking...)</think>Verified report' });
+    mockAiClient.chat.mockResolvedValue({ content: '<think>(thinking...)</think>Verified report', usage: { promptTokens: 20, completionTokens: 10 } });
     const job = makeJob();
     await service.execute(job, problems, () => {});
     expect(mockRecordCollection.find).toHaveBeenCalledWith({
       domainId: job.domainId, contest: job.contestId, uid: 42, pid: { $in: [1] }, _id: expect.objectContaining({ $lt: expect.anything() }),
     });
     expect(mockSummaryModel.completeSummary.mock.calls[0][1]).toBe('Verified report');
+    expect(mockSummaryModel.completeSummary.mock.calls[0][3]).toEqual({ prompt: 20, completion: 10 });
   });
 
   it('does not classify no submissions as giving up or fabricate prior effort', async () => {

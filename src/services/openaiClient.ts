@@ -10,6 +10,7 @@ import axios, { AxiosError } from 'axios';
 import type { Context } from 'hydrooj';
 import { AIConfigModel, AIConfig, AIScenario, SelectedModel } from '../models/aiConfig';
 import { decrypt } from '../lib/crypto';
+import { normalizeReportMarkdown } from '../utils/reportMarkdown';
 import { API_DEFAULTS } from '../constants/limits';
 
 // ─── HTTP 连接池 ───────────────────────────────────────
@@ -147,8 +148,8 @@ export interface ChatAttemptEvent {
  */
 export interface ChatCallOptions {
   signal?: AbortSignal;
-  /** 非流式响应：默认 display 添加聊天展示标记；raw 原样保留最终 content 供机器解析。 */
-  contentMode?: 'display' | 'raw';
+  /** display adds chat markers; raw preserves final content; report validates visible, complete Markdown inside retries. */
+  contentMode?: 'display' | 'raw' | 'report';
   /**
    * 覆盖本次请求的 max_tokens：
    * - 未设置：使用全局默认 API_DEFAULTS.MAX_COMPLETION_TOKENS
@@ -398,11 +399,23 @@ export class OpenAIClient {
       const msgAny = message as Record<string, unknown> | undefined;
       const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning) as string | undefined;
       const content = message?.content;
-      const aiMessage = reasoning && options?.contentMode !== 'raw'
-        ? `<think>(thinking...)</think>${content || ''}`
-        : content;
-      if (!aiMessage) {
-        throw new AIServiceError('AI 返回内容为空', 'server');
+      // Provider reasoning is not a final answer. Validate before adding display markers
+      // so empty answers enter MultiModelClient's bounded retry/fallback chain.
+      if (typeof content !== 'string' || !content.trim()) {
+        const reason = response.data?.choices?.[0]?.finish_reason === 'length' ? ' (output limit reached)' : '';
+        throw new AIServiceError(`AI returned no final content${reason}`, 'server');
+      }
+      let aiMessage = content;
+      if (options?.contentMode === 'report') {
+        if (response.data?.choices?.[0]?.finish_reason === 'length') {
+          throw new AIServiceError('AI report was truncated (output limit reached)', 'server');
+        }
+        aiMessage = normalizeReportMarkdown(content);
+        if (!aiMessage.trim()) {
+          throw new AIServiceError('AI returned an empty report after removing provider metadata', 'server');
+        }
+      } else if (reasoning && options?.contentMode !== 'raw') {
+        aiMessage = `<think>(thinking...)</think>${content}`;
       }
 
       // 提取 token 用量
@@ -427,6 +440,15 @@ export class OpenAIClient {
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError;
 
+        // A response object only proves headers arrived. A timeout, disconnect or
+        // invalid body after HTTP 200 must not become a non-retryable client error.
+        const receivedStatus = axiosError.response?.status;
+        if (receivedStatus !== undefined && receivedStatus >= 200 && receivedStatus < 300) {
+          if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
+            throw new AIServiceError('AI response timed out after receiving headers', 'timeout', receivedStatus);
+          }
+          throw new AIServiceError('AI response could not be fully received or decoded', 'network', receivedStatus);
+        }
         if (axiosError.response) {
           const status = axiosError.response.status;
           const data = axiosError.response.data as { error?: { message?: string } };
