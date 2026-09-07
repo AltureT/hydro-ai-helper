@@ -5,6 +5,10 @@
   "main": "dist/index.js",
   "author": "Alture",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AltureT/hydro-ai-helper.git"
+  },
   "files": [
     "dist/",
     "frontend/",
