@@ -479,7 +479,7 @@ describe('ChatHandler', () => {
     expect(handler.response.body.code).toBe('SAFETY_APPEAL_UNAVAILABLE');
   });
 
-  it('should buffer stream chunks until the complete output passes safety checks', async () => {
+  it('should defer unsafe content until the complete output passes safety checks', async () => {
     const handler = createMockHandler();
     handler.request.body.stream = true;
     jest.spyOn(console, 'log').mockImplementation();
@@ -524,6 +524,74 @@ describe('ChatHandler', () => {
     const chunkEvents = writeEvent.mock.calls.filter(([event]) => event === 'chunk');
     expect(chunkEvents).toEqual([['chunk', { content: '安全后的提示' }]]);
     expect(writeEvent).not.toHaveBeenCalledWith('chunk', { content: '未审核的完整答案' });
+  });
+
+  it('should send checked prose before model completion and keep the final stored answer identical', async () => {
+    const handler = createMockHandler();
+    handler.request.body.stream = true;
+    jest.spyOn(console, 'log').mockImplementation();
+    jest.spyOn(console, 'error').mockImplementation();
+    const writeEvent = jest.fn();
+    (createSSEWriter as jest.Mock).mockReturnValue({ writeEvent, writeComment: jest.fn(), end: jest.fn(), closed: false });
+    const { OutputSafetyService: RealSafetyService } = jest.requireActual('../../services/outputSafetyService');
+    (OutputSafetyService as jest.Mock).mockImplementationOnce(() => new RealSafetyService());
+    (handler as any).context = { req: { on: jest.fn(), removeListener: jest.fn() }, res: {}, respond: true };
+    const text = '先检查输入。再比较条件。最后检查输出';
+    (createMultiModelClientFromConfig as jest.Mock).mockResolvedValueOnce({
+      chatStream: async (_messages, _system, { callbacks }) => {
+        callbacks.onChunk('先检查');
+        expect(writeEvent.mock.calls.filter(([event]) => event === 'chunk')).toHaveLength(0);
+        callbacks.onChunk('输入。');
+        // This assertion happens before onDone, so a final-only response fails the test.
+        expect(writeEvent).toHaveBeenCalledWith('chunk', { content: '先检查输入。' });
+        callbacks.onChunk('再比较条件。最后检查输出');
+        expect(writeEvent).toHaveBeenCalledWith('chunk', { content: '再比较条件。' });
+        callbacks.onDone({ content: text });
+        return { usedModel: { endpointId: 'ep-1', endpointName: 'Test', modelName: 'test-model' } };
+      },
+    });
+    await handler.post();
+    expect(writeEvent.mock.calls.filter(([event]) => event === 'chunk').map(([, data]) => data.content).join('')).toBe(text);
+    expect(handler.ctx.get('messageModel').create).toHaveBeenCalledWith(expect.objectContaining({ role: 'ai', content: text }));
+  });
+
+  it.each(['fallback', 'unsafe-code'])('should reconcile the preview after %s without mixing or leaking raw output', async (scenario) => {
+    const handler = createMockHandler();
+    handler.request.body.stream = true;
+    jest.spyOn(console, 'log').mockImplementation();
+    jest.spyOn(console, 'error').mockImplementation();
+    const writeEvent = jest.fn();
+    (createSSEWriter as jest.Mock).mockReturnValue({ writeEvent, writeComment: jest.fn(), end: jest.fn(), closed: false });
+    const { OutputSafetyService: RealSafetyService } = jest.requireActual('../../services/outputSafetyService');
+    (OutputSafetyService as jest.Mock).mockImplementationOnce(() => new RealSafetyService());
+    (handler as any).context = { req: { on: jest.fn(), removeListener: jest.fn() }, res: {}, respond: true };
+    const unsafeCode = '\ndef solve():\n n = int(input())\n print(n)\n';
+    (createMultiModelClientFromConfig as jest.Mock).mockResolvedValueOnce({
+      chatStream: async (_messages, _system, { callbacks }) => {
+        callbacks.onChunk('先分析题意。');
+        if (scenario === 'fallback') {
+          callbacks.onReset();
+          callbacks.onChunk('备用模型的提示。');
+          callbacks.onDone({ content: '备用模型的提示。' });
+        } else {
+          for (const character of unsafeCode) callbacks.onChunk(character);
+          callbacks.onDone({ content: '先分析题意。' + unsafeCode });
+        }
+        return { usedModel: { endpointId: 'ep-1', endpointName: 'Test', modelName: 'test-model' } };
+      },
+    });
+    await handler.post();
+    let displayed = '';
+    for (const [event, data] of writeEvent.mock.calls) {
+      if (event === 'chunk') displayed += data.content;
+      if (event === 'replace') displayed = data.content;
+      expect(displayed).not.toContain('def solve');
+      expect(displayed).not.toContain('print(n)');
+    }
+    const expected = scenario === 'fallback' ? '备用模型的提示。' : 'ai_helper_safety_solution_blocked';
+    expect(displayed).toBe(expected);
+    expect(writeEvent).toHaveBeenCalledWith('replace', { content: scenario === 'fallback' ? '' : expected });
+    expect(handler.ctx.get('messageModel').create).toHaveBeenCalledWith(expect.objectContaining({ role: 'ai', content: expected }));
   });
 
   it('should remove unsafe legacy student messages before building model context', async () => {

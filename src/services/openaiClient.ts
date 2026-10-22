@@ -146,6 +146,7 @@ export interface ChatResult {
 }
 
 export interface StreamCallbacks {
+  onReset?: () => void;
   onChunk: (content: string) => void;
   onDone: (result: ChatResult) => void;
   onError: (error: AIServiceError) => void;
@@ -1036,6 +1037,7 @@ export class MultiModelClient {
       if (skippedEndpoints.has(config.endpointId)) continue;
 
       try {
+        if (errors.length > 0) options.callbacks.onReset?.();
         await client.chatStream(messages, systemPrompt, {
           signal: options.signal,
           callbacks: options.callbacks,

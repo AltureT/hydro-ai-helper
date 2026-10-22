@@ -16,6 +16,7 @@ const csrfHelper_1 = require("../lib/csrfHelper");
 const effectivenessService_1 = require("../services/effectivenessService");
 const safetyPenaltyService_1 = require("../services/safetyPenaltyService");
 const outputSafetyService_1 = require("../services/outputSafetyService");
+const safeOutputStream_1 = require("../services/safeOutputStream");
 const topicGuardService_1 = require("../services/topicGuardService");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
@@ -779,14 +780,47 @@ class ChatHandler extends hydrooj_1.Handler {
         let fullContent = '';
         let streamUsage;
         let usedModel;
+        const outputSafetyService = new outputSafetyService_1.OutputSafetyService();
+        const sanitize = (content) => {
+            const result = outputSafetyService.sanitize(content, {
+                questionType: p.questionType,
+                problemTitle: p.problemTitleStr,
+                problemContent: p.processedProblemContent,
+                offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
+                codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
+                solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked'),
+            });
+            return { ...result, content: result.replacementKey ? this.translate(result.replacementKey) : result.content };
+        };
+        const safeStream = new safeOutputStream_1.SafeOutputStream(sanitize);
+        let publishedContent = '';
+        const publish = (content) => {
+            if (content === publishedContent)
+                return;
+            if (content.startsWith(publishedContent)) {
+                sse.writeEvent('chunk', { content: content.slice(publishedContent.length) });
+            }
+            else {
+                sse.writeEvent('replace', { content });
+            }
+            publishedContent = content;
+        };
         try {
             const aiStart = Date.now();
             const streamResult = await p.multiModelClient.chatStream(p.messages, p.systemPrompt, {
                 signal: requestAc.signal,
                 callbacks: {
                     onChunk: (content) => {
-                        // 安全门禁：模型原始分片只在服务端缓冲，完整输出通过校验后才发送。
                         fullContent += content;
+                        const checked = safeStream.push(content);
+                        if (checked !== undefined)
+                            publish(checked);
+                    },
+                    onReset: () => {
+                        fullContent = '';
+                        streamUsage = undefined;
+                        safeStream.reset();
+                        publish('');
                     },
                     onDone: (result) => {
                         fullContent = result.content;
@@ -823,20 +857,10 @@ class ChatHandler extends hydrooj_1.Handler {
                 catch { /* non-critical */ }
             }
             // Safety filter on complete content
-            const outputSafetyService = new outputSafetyService_1.OutputSafetyService();
-            const safetyResult = outputSafetyService.sanitize(fullContent, {
-                questionType: p.questionType,
-                problemTitle: p.problemTitleStr,
-                problemContent: p.processedProblemContent,
-                offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
-                codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
-                solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked'),
-            });
-            fullContent = safetyResult.replacementKey
-                ? this.translate(safetyResult.replacementKey)
-                : safetyResult.content;
-            // 只有校验后的最终内容能够跨越服务端信任边界。
-            sse.writeEvent('chunk', { content: fullContent });
+            const safetyResult = sanitize(fullContent);
+            fullContent = safetyResult.content;
+            // Reconcile the checked preview with the authoritative full-response scan.
+            publish(fullContent);
             // Save AI message to DB
             const aiMessageTimestamp = new Date();
             const aiMessageMetadata = {};

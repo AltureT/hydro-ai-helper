@@ -823,6 +823,27 @@ describe('MultiModelClient', () => {
   // ─── chatStream ───────────────────────────────────
 
   describe('chatStream', () => {
+    it('should reset partial output before switching to a fallback model', async () => {
+      const events: string[] = [];
+      jest.spyOn(OpenAIClient.prototype, 'chatStream')
+        .mockImplementationOnce(async (_messages, _system, { callbacks }) => {
+          callbacks.onChunk('First attempt.');
+          throw new AIServiceError('Synthetic disconnect', 'network');
+        })
+        .mockImplementationOnce(async (_messages, _system, { callbacks }) => {
+          callbacks.onChunk('Fallback answer.');
+          callbacks.onDone({ content: 'Fallback answer.' });
+        });
+      const client = new MultiModelClient([
+        makeResolvedConfig(), makeResolvedConfig({ endpointId: 'ep-2', modelName: 'fallback' }),
+      ]);
+      await client.chatStream([], 'System', { callbacks: {
+        onChunk: text => events.push(text), onReset: () => events.push('RESET'),
+        onDone: jest.fn(), onError: jest.fn(),
+      } });
+      expect(events).toEqual(['First attempt.', 'RESET', 'Fallback answer.']);
+    });
+
     afterEach(() => {
       jest.restoreAllMocks();
     });

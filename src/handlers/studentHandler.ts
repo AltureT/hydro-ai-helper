@@ -14,6 +14,7 @@ import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { EffectivenessService } from '../services/effectivenessService';
 import { decideSafetyPenalty, decideSafetyPenaltyFromCount } from '../services/safetyPenaltyService';
 import { OutputSafetyService } from '../services/outputSafetyService';
+import { SafeOutputStream } from '../services/safeOutputStream';
 import { TopicGuardService } from '../services/topicGuardService';
 import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
@@ -954,6 +955,29 @@ export class ChatHandler extends Handler {
     let fullContent = '';
     let streamUsage: TokenUsage | undefined;
     let usedModel: MultiModelChatResult['usedModel'] | undefined;
+    const outputSafetyService = new OutputSafetyService();
+    const sanitize = (content: string) => {
+      const result = outputSafetyService.sanitize(content, {
+        questionType: p.questionType,
+        problemTitle: p.problemTitleStr,
+        problemContent: p.processedProblemContent,
+        offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
+        codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
+        solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked'),
+      });
+      return { ...result, content: result.replacementKey ? this.translate(result.replacementKey) : result.content };
+    };
+    const safeStream = new SafeOutputStream(sanitize);
+    let publishedContent = '';
+    const publish = (content: string) => {
+      if (content === publishedContent) return;
+      if (content.startsWith(publishedContent)) {
+        sse.writeEvent('chunk', { content: content.slice(publishedContent.length) });
+      } else {
+        sse.writeEvent('replace', { content });
+      }
+      publishedContent = content;
+    };
 
     try {
       const aiStart = Date.now();
@@ -961,8 +985,15 @@ export class ChatHandler extends Handler {
         signal: requestAc.signal,
         callbacks: {
           onChunk: (content: string) => {
-            // 安全门禁：模型原始分片只在服务端缓冲，完整输出通过校验后才发送。
             fullContent += content;
+            const checked = safeStream.push(content);
+            if (checked !== undefined) publish(checked);
+          },
+          onReset: () => {
+            fullContent = '';
+            streamUsage = undefined;
+            safeStream.reset();
+            publish('');
           },
           onDone: (result) => {
             fullContent = result.content;
@@ -1000,22 +1031,11 @@ export class ChatHandler extends Handler {
       }
 
       // Safety filter on complete content
-      const outputSafetyService = new OutputSafetyService();
-      const safetyResult = outputSafetyService.sanitize(fullContent, {
-        questionType: p.questionType,
-        problemTitle: p.problemTitleStr,
-        problemContent: p.processedProblemContent,
-        offTopicReplacement: this.translate('ai_helper_safety_off_topic_replacement'),
-        codeTruncatedComment: this.translate('ai_helper_safety_code_truncated'),
-        solutionBlockedMessage: this.translate('ai_helper_safety_solution_blocked'),
-      });
+      const safetyResult = sanitize(fullContent);
+      fullContent = safetyResult.content;
 
-      fullContent = safetyResult.replacementKey
-        ? this.translate(safetyResult.replacementKey)
-        : safetyResult.content;
-
-      // 只有校验后的最终内容能够跨越服务端信任边界。
-      sse.writeEvent('chunk', { content: fullContent });
+      // Reconcile the checked preview with the authoritative full-response scan.
+      publish(fullContent);
 
       // Save AI message to DB
       const aiMessageTimestamp = new Date();
