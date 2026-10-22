@@ -7,6 +7,22 @@ function createStream() {
 }
 
 describe('SafeOutputStream', () => {
+  it.each([false, true])('streams prose after the internal thinking marker (split tags: %s)', (split) => {
+    const stream = createStream();
+    const marker = '<think>(thinking...)</think>';
+    for (const chunk of split ? [...marker] : ['<think>(thinking...)', '</think>']) stream.push(chunk);
+    expect(stream.push('先检查输入。')).toBe(marker + '先检查输入。');
+    expect(stream.push('再比较条件。')).toBe(marker + '先检查输入。再比较条件。');
+    stream.push('```python\ndef solve():\n');
+    expect(stream.content).toBe(marker + '先检查输入。再比较条件。');
+  });
+
+  it('does not treat arbitrary thinking markup as trusted metadata', () => {
+    const stream = createStream();
+    expect(stream.push('<think>def solve():\n')).toBeUndefined();
+    expect(stream.push('</think>先检查输入。')).toBeUndefined();
+  });
+
   it('publishes completed prose sentences while the answer is still being generated', () => {
     const stream = createStream();
     expect(stream.push('先检查')).toBeUndefined();
