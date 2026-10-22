@@ -143,6 +143,51 @@ describe('BudgetService', () => {
   });
 
   describe('checkBudget — priority order', () => {
+    it.each(['daily', 'monthly'])('should enforce domain %s hard limits after a user warning', async (period) => {
+      const model = createMockTokenUsageModel({
+        getUserDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 850 }),
+        getDomainDailyUsage: jest.fn().mockResolvedValue({ totalTokens: period === 'daily' ? 2000 : 850 }),
+        getDomainMonthlyUsage: jest.fn().mockResolvedValue({ totalTokens: 2000 }),
+      });
+      const result = await new BudgetService(model).checkBudget('domain1', 1001, {
+        dailyTokenLimitPerUser: 1000,
+        dailyTokenLimitPerDomain: 1000,
+        monthlyTokenLimitPerDomain: 1000,
+      });
+      expect(result.allowed).toBe(false);
+      expect(result.reasonKey).toBe(`ai_helper_budget_domain_${period}_exceeded`);
+    });
+
+    it('should enforce the monthly hard limit after a domain daily warning', async () => {
+      const model = createMockTokenUsageModel({
+        getDomainDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 850 }),
+        getDomainMonthlyUsage: jest.fn().mockResolvedValue({ totalTokens: 2000 }),
+      });
+      const result = await new BudgetService(model).checkBudget('domain1', 1001, {
+        dailyTokenLimitPerDomain: 1000,
+        monthlyTokenLimitPerDomain: 1000,
+      });
+      expect(result.allowed).toBe(false);
+      expect(result.reasonKey).toBe('ai_helper_budget_domain_monthly_exceeded');
+    });
+
+    it('should retain the first warning after checking all configured limits', async () => {
+      const model = createMockTokenUsageModel({
+        getUserDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 850 }),
+        getDomainDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 900 }),
+        getDomainMonthlyUsage: jest.fn().mockResolvedValue({ totalTokens: 950 }),
+      });
+      const result = await new BudgetService(model).checkBudget('domain1', 1001, {
+        dailyTokenLimitPerUser: 1000,
+        dailyTokenLimitPerDomain: 1000,
+        monthlyTokenLimitPerDomain: 1000,
+      });
+      expect(result.allowed).toBe(true);
+      expect(result.warningKey).toBe('ai_helper_budget_user_daily_warning');
+      expect(model.getDomainDailyUsage).toHaveBeenCalledWith('domain1', expect.any(String));
+      expect(model.getDomainMonthlyUsage).toHaveBeenCalledWith('domain1', expect.any(String));
+    });
+
     it('should check user limit before domain limit', async () => {
       const model = createMockTokenUsageModel({
         getUserDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 10000 }),

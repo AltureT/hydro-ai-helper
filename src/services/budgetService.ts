@@ -26,6 +26,7 @@ export class BudgetService {
   async checkBudget(domainId: string, userId: number, budgetConfig: BudgetConfig): Promise<BudgetCheckResult> {
     const today = new Date().toISOString().slice(0, 10);
     const softPercent = budgetConfig.softLimitPercent ?? 80;
+    let warning: BudgetCheckResult | undefined;
 
     // 1. 检查用户日限额
     if (budgetConfig.dailyTokenLimitPerUser && budgetConfig.dailyTokenLimitPerUser > 0) {
@@ -46,7 +47,7 @@ export class BudgetService {
       const softThreshold = Math.floor(limit * softPercent / 100);
       if (used >= softThreshold) {
         const remaining = limit - used;
-        return {
+        warning = {
           allowed: true,
           warning: `AI 额度即将用尽（剩余约 ${remaining.toLocaleString()} tokens）`,
           warningKey: 'ai_helper_budget_user_daily_warning',
@@ -72,8 +73,8 @@ export class BudgetService {
       }
 
       const softThreshold = Math.floor(limit * softPercent / 100);
-      if (used >= softThreshold) {
-        return {
+      if (used >= softThreshold && !warning) {
+        warning = {
           allowed: true,
           warning: '全站 AI 额度即将用尽，请节约使用',
           warningKey: 'ai_helper_budget_domain_daily_warning',
@@ -98,8 +99,8 @@ export class BudgetService {
       }
 
       const softThreshold = Math.floor(limit * softPercent / 100);
-      if (used >= softThreshold) {
-        return {
+      if (used >= softThreshold && !warning) {
+        warning = {
           allowed: true,
           warning: '本月全站 AI 额度即将用尽',
           warningKey: 'ai_helper_budget_domain_monthly_warning',
@@ -107,6 +108,6 @@ export class BudgetService {
       }
     }
 
-    return { allowed: true };
+    return warning ?? { allowed: true };
   }
 }

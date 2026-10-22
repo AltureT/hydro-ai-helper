@@ -253,7 +253,18 @@ class ChatHandler extends hydrooj_1.Handler {
             }
         }
         catch (err) {
-            console.warn('[ChatHandler] 预算检查失败，放行请求:', err);
+            console.error('[ChatHandler] Budget check failed:', err);
+            const budget = aiConfig?.budgetConfig;
+            if (budget && (budget.dailyTokenLimitPerUser > 0
+                || budget.dailyTokenLimitPerDomain > 0 || budget.monthlyTokenLimitPerDomain > 0)) {
+                this.response.status = 503;
+                this.response.body = {
+                    error: this.translate('ai_helper_err_internal'),
+                    code: 'BUDGET_CHECK_UNAVAILABLE',
+                };
+                this.response.type = 'application/json';
+                return null;
+            }
         }
         // 获取数据库模型实例
         const conversationModel = this.ctx.get('conversationModel');

@@ -43,6 +43,7 @@ interface UpdateConfigRequest {
     apiBaseUrl: string;
     apiKey?: string;  // 明文 API Key，仅新建或更新时传入
     models?: string[];
+    modelChatSupport?: Record<string, boolean>;
     enabled?: boolean;
   }>;
   selectedModels?: SelectedModel[];
@@ -121,6 +122,7 @@ export class AdminConfigHandler extends Handler {
           name: ep.name,
           apiBaseUrl: ep.apiBaseUrl,
           models: ep.models || [],
+          modelChatSupport: ep.modelChatSupport,
           modelsLastFetched: ep.modelsLastFetched?.toISOString(),
           enabled: ep.enabled,
           apiKeyMasked,
@@ -224,6 +226,8 @@ export class AdminConfigHandler extends Handler {
             apiBaseUrl: ep.apiBaseUrl,
             apiKeyEncrypted,
             models: ep.models || existing?.models || [],
+            modelChatSupport: Object.fromEntries(Object.entries(ep.modelChatSupport || existing?.modelChatSupport || {})
+              .filter(([id, support]) => typeof support === 'boolean' && (ep.models || existing?.models || []).includes(id))),
             modelsLastFetched: existing?.modelsLastFetched,
             enabled: ep.enabled !== undefined ? ep.enabled : true,
           });
@@ -400,6 +404,7 @@ export class AdminConfigHandler extends Handler {
           name: ep.name,
           apiBaseUrl: ep.apiBaseUrl,
           models: ep.models || [],
+          modelChatSupport: ep.modelChatSupport,
           modelsLastFetched: ep.modelsLastFetched?.toISOString(),
           enabled: ep.enabled,
           apiKeyMasked,

@@ -47,6 +47,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
   const isUsingNewConfig = endpoints.length > 0;
   const hasLegacyData = Boolean(legacy.apiBaseUrl || legacy.hasApiKey);
   const [legacyExpanded, setLegacyExpanded] = useState(hasLegacyData);
+  const [manualModelIds, setManualModelIds] = useState<Record<string, string>>({});
 
   return (
     <>
@@ -339,6 +340,33 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                           </span>
                         )}
                       </div>
+                      <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.sm }}>
+                        <input
+                          type="text"
+                          aria-label={i18n('ai_helper_admin_endpoint_manual_model')}
+                          placeholder={i18n('ai_helper_admin_endpoint_manual_model')}
+                          value={manualModelIds[endpointKey] || ''}
+                          onChange={(event) => setManualModelIds(prev => ({ ...prev, [endpointKey]: event.target.value }))}
+                          disabled={disabled}
+                          style={{ ...getInputStyle(), flex: 1, minWidth: 0 }}
+                        />
+                        <button
+                          type="button"
+                          disabled={disabled || !manualModelIds[endpointKey]?.trim()}
+                          onClick={() => {
+                            const modelId = manualModelIds[endpointKey]?.trim();
+                            if (!modelId || disabled) return;
+                            onUpdateEndpoint(index, { models: [...new Set([...endpoint.models, modelId])] });
+                            setManualModelIds(prev => ({ ...prev, [endpointKey]: '' }));
+                          }}
+                          style={getButtonStyle('secondary')}
+                        >
+                          {i18n('ai_helper_admin_endpoint_manual_add')}
+                        </button>
+                      </div>
+                      <p style={{ margin: `${SPACING.sm} 0 0`, fontSize: '12px', color: COLORS.textMuted }}>
+                        {i18n('ai_helper_admin_endpoint_model_hint')}
+                      </p>
                     </div>
                   </div>
 
@@ -374,11 +402,15 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                               {endpoint.models.map((model) => {
                                 const isSelected = selectedModels.some(sm => sm.endpointId === endpoint.id && sm.modelName === model);
+                                const chatSupport = endpoint.modelChatSupport?.[model];
+                                const capabilityKey = chatSupport === true ? 'ai_helper_admin_endpoint_chat_supported'
+                                  : chatSupport === false ? 'ai_helper_admin_endpoint_chat_unsupported'
+                                    : 'ai_helper_admin_endpoint_chat_unknown';
                                 return (
                                   <button
                                     key={model}
                                     onClick={() => endpoint.id && onAddSelectedModel(endpoint.id, model)}
-                                    disabled={!endpoint.id}
+                                    disabled={disabled || !endpoint.id}
                                     style={{
                                       padding: '4px 8px',
                                       backgroundColor: isSelected ? COLORS.primaryLight : COLORS.bgCard,
@@ -391,6 +423,9 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                                     title={endpoint.id ? (isSelected ? i18n('ai_helper_admin_endpoint_model_selected') : i18n('ai_helper_admin_endpoint_model_click_add')) : i18n('ai_helper_admin_endpoint_save_first')}
                                   >
                                     {model}
+                                    <span style={{ marginLeft: SPACING.xs, color: COLORS.textMuted }}>
+                                      ({i18n(capabilityKey)})
+                                    </span>
                                   </button>
                                 );
                               })}

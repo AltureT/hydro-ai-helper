@@ -147,7 +147,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         body.endpoints = config.endpoints.map(ep => ({
           id: ep.id,
           name: ep.name, apiBaseUrl: ep.apiBaseUrl,
-          apiKey: ep.newApiKey || undefined, models: ep.models, enabled: ep.enabled,
+          apiKey: ep.newApiKey || undefined, models: ep.models, modelChatSupport: ep.modelChatSupport, enabled: ep.enabled,
         }));
         body.selectedModels = config.selectedModels;
         body.scenarioModels = config.scenarioModels;
@@ -224,9 +224,15 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       });
       const json = await res.json();
       if (json.success) {
-        const newEndpoints = [...config.endpoints];
-        newEndpoints[endpointIndex] = { ...newEndpoints[endpointIndex], models: json.models || [], modelsLastFetched: new Date().toISOString() };
-        setConfig({ ...config, endpoints: newEndpoints });
+        setConfig(prev => prev && ({
+          ...prev,
+          endpoints: prev.endpoints.map(ep => ep.id !== endpoint.id ? ep : ({
+            ...ep,
+            models: [...new Set([...ep.models, ...(json.models || [])])],
+            modelChatSupport: json.modelChatSupport,
+            modelsLastFetched: new Date().toISOString(),
+          })),
+        }));
         showToast(i18n('ai_helper_admin_endpoint_models_fetched', json.models?.length || 0), 'success');
       } else {
         showToast(json.error || i18n('ai_helper_admin_fetch_models_failed'), 'error');

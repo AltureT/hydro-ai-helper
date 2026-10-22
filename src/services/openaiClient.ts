@@ -122,6 +122,23 @@ export interface TokenUsage {
   totalTokens: number;
 }
 
+function normalizeTokenUsage(rawUsage?: {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}): TokenUsage | undefined {
+  if (!rawUsage) return undefined;
+  const tokenCount = (value: number | undefined): number =>
+    Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const promptTokens = tokenCount(rawUsage.prompt_tokens);
+  const completionTokens = tokenCount(rawUsage.completion_tokens);
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: Math.max(tokenCount(rawUsage.total_tokens), promptTokens + completionTokens),
+  };
+}
+
 export interface ChatResult {
   content: string;
   usage?: TokenUsage;
@@ -229,6 +246,7 @@ interface OpenAIModelsResponse {
 export interface FetchModelsResult {
   success: boolean;
   models?: string[];
+  modelChatSupport?: Record<string, boolean>;
   error?: string;
   errorKey?: string;
   errorParams?: (string | number)[];
@@ -273,36 +291,22 @@ export async function fetchAvailableModels(
       };
     }
 
-    // 过滤聊天类模型
-    // 优先根据 capabilities 判断，其次根据模型名称特征
-    const chatModels = response.data.data.filter(model => {
-      // 如果有 capabilities 字段，优先使用
-      if (model.capabilities?.chat === true) {
-        return true;
-      }
+    // Model names are opaque provider identifiers. Unknown capabilities stay selectable.
+    const validModels = response.data.data.filter(model =>
+      model && typeof model.id === 'string' && model.id.trim().length > 0);
+    if (response.data.data.length > 0 && validModels.length === 0) {
+      return {
+        success: false,
+        error: 'Invalid API response: no valid model IDs',
+        errorKey: 'ai_helper_admin_models_invalid_response',
+      };
+    }
+    const modelIds = [...new Set(validModels.map(model => model.id))].sort();
+    const modelChatSupport = Object.fromEntries(validModels
+      .filter(model => typeof model.capabilities?.chat === 'boolean')
+      .map(model => [model.id, model.capabilities.chat]));
 
-      // 根据模型 ID 特征过滤
-      const id = model.id.toLowerCase();
-
-      // 包含这些关键词的通常是聊天模型
-      // ep- 用于匹配火山引擎的 Endpoint ID 格式（如 ep-20241234567890-xxxxx）
-      const chatKeywords = ['gpt', 'chat', 'claude', 'gemini', 'llama', 'mistral', 'qwen', 'yi', 'deepseek', 'doubao', 'glm', 'kimi', 'ep-'];
-      const hasMatch = chatKeywords.some(keyword => id.includes(keyword));
-
-      // 排除明显的非聊天模型
-      const excludeKeywords = ['embedding', 'whisper', 'tts', 'dall-e', 'moderation', 'audio'];
-      const isExcluded = excludeKeywords.some(keyword => id.includes(keyword));
-
-      return hasMatch && !isExcluded;
-    });
-
-    // 按模型 ID 排序
-    const modelIds = chatModels.map(m => m.id).sort();
-
-    return {
-      success: true,
-      models: modelIds
-    };
+    return { success: true, models: modelIds, modelChatSupport };
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
@@ -404,12 +408,7 @@ export class OpenAIClient {
       }
 
       // 提取 token 用量
-      const rawUsage = response.data?.usage;
-      const usage: TokenUsage | undefined = rawUsage ? {
-        promptTokens: rawUsage.prompt_tokens ?? 0,
-        completionTokens: rawUsage.completion_tokens ?? 0,
-        totalTokens: rawUsage.total_tokens ?? 0,
-      } : undefined;
+      const usage = normalizeTokenUsage(response.data?.usage);
 
       return { content: aiMessage, usage };
     } catch (error) {
@@ -591,11 +590,7 @@ export class OpenAIClient {
             const parsed = JSON.parse(payload);
             // Extract usage from final chunk
             if (parsed.usage) {
-              usage = {
-                promptTokens: parsed.usage.prompt_tokens ?? 0,
-                completionTokens: parsed.usage.completion_tokens ?? 0,
-                totalTokens: parsed.usage.total_tokens ?? 0,
-              };
+              usage = normalizeTokenUsage(parsed.usage);
             }
             const choiceDelta = parsed.choices?.[0]?.delta;
             const reasoningDelta = (choiceDelta?.reasoning_content ?? choiceDelta?.reasoning) as string | undefined;

@@ -85,6 +85,7 @@ class AIConfigModel {
                 apiBaseUrl: endpoint.apiBaseUrl || legacy.apiBaseUrl || '',
                 apiKeyEncrypted: endpoint.apiKeyEncrypted || legacy.apiKeyEncrypted || '',
                 models: Array.isArray(endpoint.models) ? endpoint.models : [],
+                modelChatSupport: endpoint.modelChatSupport,
                 modelsLastFetched: endpoint.modelsLastFetched,
                 enabled: endpoint.enabled !== false,
             }));

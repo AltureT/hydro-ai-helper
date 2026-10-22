@@ -754,6 +754,26 @@ describe('ChatHandler', () => {
     expect(handler.response.body.code).toBe('BUDGET_EXCEEDED');
   });
 
+  it.each(['dailyTokenLimitPerUser', 'dailyTokenLimitPerDomain', 'monthlyTokenLimitPerDomain'])(
+    'should stop before AI calls when checking %s fails', async (limit) => {
+      const handler = createMockHandler();
+      jest.spyOn(console, 'error').mockImplementation();
+      const configModel = handler.ctx.get('aiConfigModel');
+      const config = await configModel.getConfig();
+      configModel.getConfig.mockResolvedValue({ ...config, budgetConfig: { [limit]: 1000 } });
+      (BudgetService as jest.Mock).mockImplementationOnce(() => ({
+        checkBudget: jest.fn().mockRejectedValue(new Error('Synthetic database failure')),
+      }));
+
+      await handler.post();
+
+      expect(handler.response.status).toBe(503);
+      expect(handler.response.body.code).toBe('BUDGET_CHECK_UNAVAILABLE');
+      expect(createMultiModelClientFromConfig).not.toHaveBeenCalled();
+      expect(handler.ctx.get('messageModel').create).not.toHaveBeenCalled();
+    },
+  );
+
   it('should include budget warning when near limit', async () => {
     const handler = createMockHandler();
     jest.spyOn(console, 'log').mockImplementation();
@@ -778,6 +798,25 @@ describe('ChatHandler', () => {
     await handler.post();
 
     expect(handler.response.body.budgetWarning).toContain('ai_helper_budget_user_daily_warning');
+  });
+
+  it('should allow requests when no budget limit is enabled even if the budget service fails', async () => {
+    const handler = createMockHandler();
+    jest.spyOn(console, 'error').mockImplementation();
+    const configModel = handler.ctx.get('aiConfigModel');
+    const config = await configModel.getConfig();
+    configModel.getConfig.mockResolvedValue({
+      ...config,
+      budgetConfig: { dailyTokenLimitPerUser: 0, dailyTokenLimitPerDomain: 0, monthlyTokenLimitPerDomain: 0 },
+    });
+    (BudgetService as jest.Mock).mockImplementationOnce(() => ({
+      checkBudget: jest.fn().mockRejectedValue(new Error('Synthetic service failure')),
+    }));
+
+    await handler.post();
+
+    expect(handler.response.body.code).toBeUndefined();
+    expect(createMultiModelClientFromConfig).toHaveBeenCalled();
   });
 
   it('should include tokenUsage in response', async () => {

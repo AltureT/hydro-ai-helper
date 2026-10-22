@@ -4,6 +4,7 @@ jest.mock('../../lib/crypto', () => ({
 }));
 
 import axios from 'axios';
+import { Readable } from 'stream';
 import {
   AIServiceError,
   OpenAIClient,
@@ -146,6 +147,40 @@ describe('OpenAIClient', () => {
   });
 
   describe('chat()', () => {
+    it.each([
+      [{ prompt_tokens: 10, completion_tokens: 5 }, 15],
+      [{ prompt_tokens: 10, completion_tokens: 5, total_tokens: 0 }, 15],
+      [{ prompt_tokens: 10, completion_tokens: 5, total_tokens: 20 }, 20],
+    ])('should normalize partial usage %j in JSON and streaming responses', async (usage, totalTokens) => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{ message: { content: 'Hello' } }], usage } });
+      const result = await client.chat([], 'System');
+      const expected = { promptTokens: 10, completionTokens: 5, totalTokens };
+      expect(result.usage).toEqual(expected);
+
+      const stream = Readable.from([
+        `data: ${JSON.stringify({ choices: [{ delta: { content: 'Hello' } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [], usage })}\n\n`,
+        'data: [DONE]\n\n',
+      ]);
+      mockedAxios.post.mockResolvedValueOnce({ headers: { 'content-type': 'text/event-stream' }, data: stream });
+      const onDone = jest.fn();
+      await client.chatStream([], 'System', { callbacks: { onChunk: jest.fn(), onDone, onError: jest.fn() } });
+      expect(onDone).toHaveBeenCalledWith({ content: 'Hello', usage: expected });
+    });
+
+    it('should leave usage absent when the provider does not report it', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{ message: { content: 'Hello' } }] } });
+      expect((await client.chat([], 'System')).usage).toBeUndefined();
+    });
+
+    it('should ignore invalid token counts without discarding valid counts', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: {
+        choices: [{ message: { content: 'Hello' } }],
+        usage: { prompt_tokens: -10, completion_tokens: 5, total_tokens: 'invalid' },
+      } });
+      expect((await client.chat([], 'System')).usage).toEqual({ promptTokens: 0, completionTokens: 5, totalTokens: 5 });
+    });
+
     it('should return AI response on success', async () => {
       mockSuccessResponse('Test response');
       const result = await client.chat([{ role: 'user', content: 'Hi' }], 'System');
@@ -812,7 +847,7 @@ describe('fetchAvailableModels', () => {
     mockedAxios.isAxiosError.mockImplementation((error: any) => !!error?.isAxiosError);
   });
 
-  it('should return filtered and sorted chat models', async () => {
+  it('should preserve all valid model names and sort them', async () => {
     mockedAxios.get.mockResolvedValueOnce({
       data: {
         data: [
@@ -827,7 +862,16 @@ describe('fetchAvailableModels', () => {
 
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
     expect(result.success).toBe(true);
-    expect(result.models).toEqual(['gpt-3.5-turbo', 'gpt-4o']);
+    expect(result.models).toEqual(['dall-e-3', 'gpt-3.5-turbo', 'gpt-4o', 'text-embedding-ada-002', 'whisper-1']);
+  });
+
+  it('should preserve MiMo IDs without guessing capabilities from names', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: { data: [
+      { id: 'mimo-v2-pro' }, { id: 'mimo-v2-flash' },
+      { id: 'mimo-v2.5-asr' }, { id: 'mimo-v2.5-tts' },
+    ] } });
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'synthetic-key');
+    expect(result).toEqual({ success: true, models: ['mimo-v2-flash', 'mimo-v2-pro', 'mimo-v2.5-asr', 'mimo-v2.5-tts'], modelChatSupport: {} });
   });
 
   it('should include models with chat capability', async () => {
@@ -841,10 +885,11 @@ describe('fetchAvailableModels', () => {
     });
 
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
-    expect(result.models).toEqual(['custom-model']);
+    expect(result.models).toEqual(['custom-embed', 'custom-model']);
+    expect(result.modelChatSupport).toEqual({ 'custom-model': true, 'custom-embed': false });
   });
 
-  it('should exclude embedding/whisper/tts/audio models', async () => {
+  it('should keep multimodal and embedding IDs when capability metadata is absent', async () => {
     mockedAxios.get.mockResolvedValueOnce({
       data: {
         data: [
@@ -856,10 +901,10 @@ describe('fetchAvailableModels', () => {
     });
 
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
-    expect(result.models).toEqual(['gpt-4o']);
+    expect(result.models).toEqual(['gpt-4o', 'gpt-4o-audio-preview', 'text-embedding-3-large']);
   });
 
-  it('should match ep- keyword for Volcengine endpoints', async () => {
+  it('should preserve arbitrary IDs alongside ep- keyword for Volcengine endpoints', async () => {
     mockedAxios.get.mockResolvedValueOnce({
       data: {
         data: [
@@ -870,7 +915,24 @@ describe('fetchAvailableModels', () => {
     });
 
     const result = await fetchAvailableModels('https://api.test.com/v1', 'key');
-    expect(result.models).toEqual(['ep-20241234567890-xxxxx']);
+    expect(result.models).toEqual(['ep-20241234567890-xxxxx', 'some-random-model']);
+  });
+
+  it('should ignore malformed rows and deduplicate IDs without changing their case', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: { data: [
+      null, {}, { id: 123 }, { id: '' }, { id: '   ' },
+      { id: 'Provider/Custom-V3', capabilities: { chat: 'yes' } },
+      { id: 'Provider/Custom-V3' },
+    ] } });
+    const result = await fetchAvailableModels('https://api.test.com/v1', 'synthetic-key');
+    expect(result).toEqual({ success: true, models: ['Provider/Custom-V3'], modelChatSupport: {} });
+  });
+
+  it('should reject a nonempty catalogue without any valid model IDs', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: { data: [null, { id: 123 }] } });
+    expect(await fetchAvailableModels('https://api.test.com/v1', 'synthetic-key')).toMatchObject({
+      success: false, errorKey: 'ai_helper_admin_models_invalid_response',
+    });
   });
 
   it('should strip trailing slashes from URL', async () => {
