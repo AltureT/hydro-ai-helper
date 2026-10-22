@@ -526,7 +526,7 @@ describe('ChatHandler', () => {
     expect(writeEvent).not.toHaveBeenCalledWith('chunk', { content: '未审核的完整答案' });
   });
 
-  it('should send checked prose before model completion and keep the final stored answer identical', async () => {
+  it.each(['', '<think>(thinking...)</think>'])('should send checked prose before model completion and preserve the stored answer with prefix %s', async (prefix) => {
     const handler = createMockHandler();
     handler.request.body.stream = true;
     jest.spyOn(console, 'log').mockImplementation();
@@ -536,11 +536,15 @@ describe('ChatHandler', () => {
     const { OutputSafetyService: RealSafetyService } = jest.requireActual('../../services/outputSafetyService');
     (OutputSafetyService as jest.Mock).mockImplementationOnce(() => new RealSafetyService());
     (handler as any).context = { req: { on: jest.fn(), removeListener: jest.fn() }, res: {}, respond: true };
-    const text = '先检查输入。再比较条件。最后检查输出';
+    const text = prefix + '先检查输入。再比较条件。最后检查输出';
     (createMultiModelClientFromConfig as jest.Mock).mockResolvedValueOnce({
       chatStream: async (_messages, _system, { callbacks }) => {
+        if (prefix) {
+          callbacks.onChunk('<think>(thinking...)');
+          callbacks.onChunk('</think>');
+        }
         callbacks.onChunk('先检查');
-        expect(writeEvent.mock.calls.filter(([event]) => event === 'chunk')).toHaveLength(0);
+        expect(writeEvent.mock.calls.filter(([event]) => event === 'chunk').map(([, data]) => data.content).join('')).toBe(prefix);
         callbacks.onChunk('输入。');
         // This assertion happens before onDone, so a final-only response fails the test.
         expect(writeEvent).toHaveBeenCalledWith('chunk', { content: '先检查输入。' });

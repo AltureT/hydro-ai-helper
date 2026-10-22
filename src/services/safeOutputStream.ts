@@ -22,6 +22,15 @@ export class SafeOutputStream {
     const boundaries = /[。！？\n]|[.!?](?=\s)/g;
     let match: RegExpExecArray | null;
     let changed = false;
+    // OpenAIClient adds this fixed placeholder for separate reasoning deltas.
+    // It is metadata, not executable markup; leave all other tags behind the gate.
+    const thinkingMarker = '<think>(thinking...)</think>';
+    if (!this.checkedSource && this.pending.startsWith(thinkingMarker)) {
+      this.checkedSource = thinkingMarker;
+      this.pending = this.pending.slice(thinkingMarker.length);
+      this.content = this.sanitize(this.checkedSource).content;
+      changed = true;
+    }
     while ((match = boundaries.exec(this.pending))) {
       const end = match.index + match[0].length;
       const sentence = this.pending.slice(0, end);
