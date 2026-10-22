@@ -400,18 +400,26 @@ class FetchModelsHandler extends hydrooj_1.Handler {
             }
             // 获取模型列表
             const result = await (0, openaiClient_1.fetchAvailableModels)(apiBaseUrl, apiKey);
+            if (result.success && body.endpointId) {
+                const aiConfigModel = this.ctx.get('aiConfigModel');
+                const endpoint = await aiConfigModel.getEndpointById(body.endpointId);
+                // Keep manually configured IDs when refreshing a provider's catalogue.
+                result.models = [...new Set([...(endpoint?.models || []), ...(result.models || [])])];
+            }
             if (result.success) {
                 // 如果是从端点获取的，更新端点的模型列表和时间戳
                 if (body.endpointId) {
                     const aiConfigModel = this.ctx.get('aiConfigModel');
                     await aiConfigModel.updateEndpoint(body.endpointId, {
                         models: result.models || [],
+                        modelChatSupport: result.modelChatSupport,
                         modelsLastFetched: new Date()
                     });
                 }
                 this.response.body = {
                     success: true,
-                    models: result.models
+                    models: result.models,
+                    modelChatSupport: result.modelChatSupport,
                 };
             }
             else {

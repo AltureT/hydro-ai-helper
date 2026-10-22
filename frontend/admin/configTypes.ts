@@ -6,6 +6,7 @@ export interface Endpoint {
   hasApiKey?: boolean;
   newApiKey?: string;
   models: string[];
+  modelChatSupport?: Record<string, boolean>;
   modelsLastFetched?: string;
   enabled: boolean;
   isNew?: boolean;

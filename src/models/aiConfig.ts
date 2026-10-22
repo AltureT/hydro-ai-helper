@@ -24,6 +24,7 @@ export interface APIEndpoint {
   apiBaseUrl: string;           // API Base URL
   apiKeyEncrypted: string;      // 加密后的 API Key
   models: string[];             // 可用模型列表
+  modelChatSupport?: Record<string, boolean>;
   modelsLastFetched?: Date;     // 模型列表最后获取时间
   enabled: boolean;             // 是否启用
 }
@@ -201,6 +202,7 @@ export class AIConfigModel {
         apiBaseUrl: endpoint.apiBaseUrl || legacy.apiBaseUrl || '',
         apiKeyEncrypted: endpoint.apiKeyEncrypted || legacy.apiKeyEncrypted || '',
         models: Array.isArray(endpoint.models) ? endpoint.models : [],
+        modelChatSupport: endpoint.modelChatSupport,
         modelsLastFetched: endpoint.modelsLastFetched,
         enabled: endpoint.enabled !== false,
       }));

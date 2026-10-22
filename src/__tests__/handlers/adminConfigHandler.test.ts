@@ -20,6 +20,39 @@ import {
 } from '../../handlers/adminConfigHandler';
 
 describe('AdminConfigHandler', () => {
+  it('saves and reloads manually configured models and their capability hints', async () => {
+    let config: any = { endpoints: [], selectedModels: [], updatedAt: new Date() };
+    const configModel = {
+      getConfig: jest.fn(async () => config),
+      updateConfig: jest.fn(async (partial) => { config = { ...config, ...partial }; }),
+    };
+    const handler = new AdminConfigHandler();
+    handler.request = {
+      headers: { 'x-requested-with': 'XMLHttpRequest' },
+      body: {
+        endpoints: [{ id: 'temp-1', name: 'Synthetic', apiBaseUrl: 'https://api.example.com/v1',
+          apiKey: 'synthetic-key', models: ['Manual/Custom-V3', 'known-model'], enabled: true,
+          modelChatSupport: { 'known-model': true, 'missing-model': false, 'Manual/Custom-V3': 'unknown' },
+        }],
+        selectedModels: [{ endpointId: 'temp-1', modelName: 'Manual/Custom-V3' }],
+      },
+    };
+    handler.response = {};
+    handler.translate = (key: string) => key;
+    handler.ctx = { Route: jest.fn(), get: () => configModel };
+    await handler.put();
+    const endpoint = config.endpoints[0];
+    expect(endpoint.models).toEqual(['Manual/Custom-V3', 'known-model']);
+    expect(endpoint.modelChatSupport).toEqual({ 'known-model': true });
+    expect(config.selectedModels).toEqual([{ endpointId: endpoint.id, modelName: 'Manual/Custom-V3' }]);
+
+    handler.request = { headers: { accept: 'application/json' }, query: {} };
+    await handler.get();
+    expect(handler.response.body.config.endpoints[0]).toMatchObject({
+      models: endpoint.models, modelChatSupport: { 'known-model': true },
+    });
+  });
+
   it('returns configuration metadata without eagerly querying safety logs', async () => {
     const handler = new AdminConfigHandler();
     const getConfig = jest.fn().mockResolvedValue(null);
