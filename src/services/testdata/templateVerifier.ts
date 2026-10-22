@@ -3,6 +3,8 @@ import {
   PythonRunDetail,
   TestdataSandboxRunner,
 } from '../goJudgeSandboxService';
+import { TESTDATA_OUTPUT_MAX_BYTES } from './fileBudget';
+import { buildPythonTemplateExecution, assertPythonTemplateExecutionDiagnostic } from './templateInterface';
 
 export type TemplateVerificationLanguage = 'py' | 'java' | 'cc';
 export type TemplateVerificationFailureKind =
@@ -141,6 +143,7 @@ async function runLanguage(input: VerificationInput, language: TemplateVerificat
   const options = {
     signal: input.signal,
     deadlineAt: earliestVerifierDeadline(input),
+    outputLimitBytes: TESTDATA_OUTPUT_MAX_BYTES,
   };
   const baseCheck: TemplateVerificationCheck = {
     compiled: language === 'py', executed: false, total: inputs.length, passed: 0,
@@ -148,7 +151,7 @@ async function runLanguage(input: VerificationInput, language: TemplateVerificat
 
   if (language === 'py') {
     try {
-      return await input.runner.runPythonBatchDetailed(`${solution}\n${template}`, inputs, options);
+      return await input.runner.runPythonBatchDetailed(buildPythonTemplateExecution(solution, template), inputs, options);
     } catch (error) {
       return throwExecutionError(input, language, baseCheck, error);
     }
@@ -209,6 +212,7 @@ async function adjudicate(
   if (!check.executed) fail(language, 'runtime', check);
 
   const badExecution = results.findIndex(result => !result.accepted);
+  if (language === 'py' && badExecution !== -1) assertPythonTemplateExecutionDiagnostic(results[badExecution].stderr);
   if (badExecution !== -1) fail(language, 'runtime', check, badExecution);
 
   if (!input.adjudicator.customChecker) {

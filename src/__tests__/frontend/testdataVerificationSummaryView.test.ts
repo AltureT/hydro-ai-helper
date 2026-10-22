@@ -26,6 +26,16 @@ type VerificationSummaryData = {
     infraFailures: number;
     failureKind?: string;
   };
+  validator?: {
+    ran: boolean;
+    casesChecked: number;
+    validAccepted?: number;
+    invalidRejected?: number;
+    invalidAccepted?: number;
+    coveredConstraintIds?: string[];
+    missingConstraintIds?: string[];
+  };
+  mutation?: unknown;
 };
 
 const { VerificationSummaryView } = require(
@@ -54,8 +64,36 @@ const translations: Record<string, string> = {
   ai_helper_testdata_verify_infra_failures: 'Infrastructure failures',
   ai_helper_testdata_verify_failure: 'Failure',
   ai_helper_testdata_verify_failure_infra: 'infra',
+  ai_helper_testdata_verify_validator: 'Input validation',
+  ai_helper_testdata_verify_validator_none: 'No validator provided',
+  ai_helper_testdata_verify_validator_legal: 'Legal inputs accepted',
+  ai_helper_testdata_verify_validator_invalid_rejected: 'Invalid inputs rejected',
+  ai_helper_testdata_verify_validator_invalid_accepted: 'Invalid inputs accepted',
+  ai_helper_testdata_verify_validator_coverage: 'Constraint coverage',
   ai_helper_testdata_verify_yes: 'Yes',
   ai_helper_testdata_verify_no: 'No',
+  ai_helper_testdata_mutation_title: 'Mutation evidence',
+  ai_helper_testdata_mutation_unavailable: 'Unavailable',
+  ai_helper_testdata_mutation_mode: 'Gate',
+  ai_helper_testdata_mutation_mode_off: 'Off',
+  ai_helper_testdata_mutation_mode_observe: 'Observe',
+  ai_helper_testdata_mutation_mode_enforce: 'Enforce',
+  ai_helper_testdata_mutation_status: 'Status',
+  ai_helper_testdata_mutation_status_completed: 'Completed',
+  ai_helper_testdata_mutation_status_partial: 'Partial',
+  ai_helper_testdata_mutation_status_skipped: 'Skipped',
+  ai_helper_testdata_mutation_generated: 'Generated',
+  ai_helper_testdata_mutation_historical: 'Historical',
+  ai_helper_testdata_mutation_viable: 'Viable',
+  ai_helper_testdata_mutation_killed: 'Killed',
+  ai_helper_testdata_mutation_survived: 'Survived',
+  ai_helper_testdata_mutation_skip_reason: 'Reason',
+  ai_helper_testdata_mutation_skip_gate_off: 'Gate disabled',
+  ai_helper_testdata_mutation_skip_budget_exhausted: 'Budget exhausted',
+  ai_helper_testdata_mutation_operators: 'Operators',
+  ai_helper_testdata_mutation_operator_comparison_boundary: 'Boundary comparison',
+  ai_helper_testdata_mutation_operator_constant_off_by_one: 'Constant off-by-one',
+  ai_helper_testdata_mutation_operator_historical_submission: 'Historical submission',
 };
 
 function translate(key: string, ...args: Array<string | number>): string {
@@ -71,6 +109,19 @@ function render(verification: VerificationSummaryData): string {
     verification,
     translate,
   }));
+}
+
+const expandedValidatorLabels = [
+  'Legal inputs accepted',
+  'Invalid inputs rejected',
+  'Invalid inputs accepted',
+  'Constraint coverage',
+];
+
+function expectNoExpandedValidatorEvidence(markup: string): void {
+  for (const label of expandedValidatorLabels) {
+    expect(markup).not.toContain(label);
+  }
 }
 
 describe('VerificationSummaryView', () => {
@@ -156,6 +207,17 @@ describe('VerificationSummaryView', () => {
     }
   });
 
+  it('renders unverified without a would-block label when no enforce-blocking event occurred', () => {
+    const markup = render({
+      verified: false,
+      wouldBlock: false,
+    });
+
+    expect(markup).toContain('Unverified');
+    expect(markup).not.toContain('Verified');
+    expect(markup).not.toContain('Would block');
+  });
+
   it('fails closed for legacy verification data without authoritative evidence', () => {
     const markup = render({ mode: 'sandbox' } as unknown as VerificationSummaryData);
 
@@ -180,5 +242,365 @@ describe('VerificationSummaryView', () => {
 
     expect(markup).toContain('Python');
     expect(markup).not.toContain('/private/checker/source.cc');
+  });
+
+  it('renders server-owned validator acceptance, rejection, and coverage', () => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      validator: {
+        ran: true,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 1,
+        coveredConstraintIds: ['C1', 'I1'],
+        missingConstraintIds: ['C2'],
+      },
+    });
+
+    expect(markup).toContain('12/12');
+    expect(markup).toContain('4');
+    expect(markup).toContain('1');
+    expect(markup).toContain('2/3');
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+    expect(markup).not.toContain('I1');
+  });
+
+  it.each([
+    ['covered', ['C1', 'C1'], ['C2']],
+    ['missing', ['C1'], ['C2', 'C2']],
+  ])('falls back to legacy evidence for duplicate IDs within %s', (
+    _label, coveredConstraintIds, missingConstraintIds,
+  ) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds,
+        missingConstraintIds,
+      },
+    });
+
+    expect(markup).toContain('2');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+  });
+
+  it('falls back to legacy evidence when covered and missing IDs overlap', () => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: ['C1', 'C2'],
+      },
+    });
+
+    expect(markup).toContain('2');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+  });
+
+  it.each([
+    ['covered', { coveredConstraintIds: Array.from({ length: 769 }, (_, index) => `C${index}`) }],
+    ['missing', { missingConstraintIds: Array.from({ length: 769 }, (_, index) => `I${index}`) }],
+  ])('falls back to legacy evidence for an over-limit %s ID array', (_label, oversized) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+        ...oversized,
+      },
+    });
+
+    expect(markup).toContain('2');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C768');
+    expect(markup).not.toContain('I768');
+  });
+
+  it('accepts the public 768-target protocol boundary', () => {
+    const coveredConstraintIds = Array.from({ length: 768 }, (_, index) => `T${index}`);
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 2,
+        validAccepted: 2,
+        invalidRejected: 1,
+        invalidAccepted: 0,
+        coveredConstraintIds,
+        missingConstraintIds: [],
+      },
+    });
+
+    expect(markup).toContain('768/768');
+    expect(markup).not.toContain('T767');
+  });
+
+  it('does not claim expanded evidence when the validator did not run', () => {
+    const markup = render({
+      validator: {
+        ran: false,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+      },
+    });
+
+    expect(markup).toContain('No validator provided');
+    expect(markup).not.toContain('12/12');
+    expectNoExpandedValidatorEvidence(markup);
+  });
+
+  describe.each([
+    'casesChecked',
+    'validAccepted',
+    'invalidRejected',
+    'invalidAccepted',
+  ] as const)('%s count validation', field => {
+    it.each([
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['fractional', 1.5],
+      ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+    ])('does not render %s evidence', (_label, invalidValue) => {
+      const markup = render({
+        validator: {
+          ran: true,
+          casesChecked: 12,
+          validAccepted: 12,
+          invalidRejected: 4,
+          invalidAccepted: 0,
+          coveredConstraintIds: ['C1'],
+          missingConstraintIds: [],
+          [field]: invalidValue,
+        },
+      });
+
+      expectNoExpandedValidatorEvidence(markup);
+      expect(markup).not.toContain(String(invalidValue));
+      if (field === 'casesChecked') {
+        expect(markup).toContain('No validator provided');
+      } else {
+        expect(markup).toContain('12');
+        expect(markup).not.toContain('No validator provided');
+      }
+    });
+  });
+
+  it.each([
+    ['covered is not an array', { coveredConstraintIds: null }],
+    ['missing is not an array', { missingConstraintIds: {} }],
+    ['covered contains a non-string', { coveredConstraintIds: [1] }],
+    ['missing contains a non-string', { missingConstraintIds: [false] }],
+    ['covered contains an empty ID', { coveredConstraintIds: [''] }],
+    ['missing contains an overlong ID', { missingConstraintIds: ['X'.repeat(65)] }],
+  ])('falls back without expanded labels when %s', (_label, malformed) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+        ...malformed,
+      } as unknown as NonNullable<VerificationSummaryData['validator']>,
+    });
+
+    expect(markup).toContain('12');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('X'.repeat(65));
+  });
+
+  it.each([
+    ['covered', (() => {
+      const ids = new Array<string>(2);
+      ids[1] = 'C1';
+      return { coveredConstraintIds: ids };
+    })()],
+    ['missing', (() => {
+      const ids = new Array<string>(2);
+      ids[1] = 'C2';
+      return { missingConstraintIds: ids };
+    })()],
+  ])('falls back to valid legacy evidence for a sparse %s array', (_label, sparse) => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 12,
+        validAccepted: 12,
+        invalidRejected: 4,
+        invalidAccepted: 0,
+        coveredConstraintIds: ['C1'],
+        missingConstraintIds: [],
+        ...sparse,
+      },
+    });
+
+    expect(markup).toContain('12');
+    expect(markup).not.toContain('No validator provided');
+    expectNoExpandedValidatorEvidence(markup);
+    expect(markup).not.toContain('C1');
+    expect(markup).not.toContain('C2');
+  });
+
+  it('renders zero as valid expanded evidence', () => {
+    const markup = render({
+      validator: {
+        ran: true,
+        casesChecked: 0,
+        validAccepted: 0,
+        invalidRejected: 0,
+        invalidAccepted: 0,
+        coveredConstraintIds: [],
+        missingConstraintIds: [],
+      },
+    });
+
+    expect(markup).toContain('Legal inputs accepted');
+    expect(markup).toContain('0/0');
+    expect(markup).not.toContain('No validator provided');
+  });
+
+  it('renders completed mutation evidence using only bounded aggregates', () => {
+    const markup = render({
+      verified: true,
+      wouldBlock: false,
+      mutation: {
+        mode: 'enforce', status: 'completed', generated: 6, historical: 4,
+        viable: 10, killed: 8, survived: 2, score: 0.8,
+        operators: [
+          { id: 'comparison-boundary', viable: 7, killed: 6 },
+          { id: 'historical-submission', viable: 3, killed: 2 },
+        ],
+      },
+    });
+
+    expect(markup).toContain('Mutation evidence');
+    expect(markup).toContain('Enforce');
+    expect(markup).toContain('Completed');
+    expect(markup).toContain('8/10 (80%)');
+    expect(markup).toContain('Generated: 6');
+    expect(markup).toContain('Historical: 4');
+    expect(markup).toContain('Viable: 10');
+    expect(markup).toContain('Killed: 8');
+    expect(markup).toContain('Survived: 2');
+    expect(markup).toContain('Boundary comparison: 6/7');
+    expect(markup).toContain('Historical submission: 2/3');
+  });
+
+  it('renders observe low-score evidence as would-block without hiding aggregates', () => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      mutation: {
+        mode: 'observe', status: 'completed', generated: 7, historical: 3,
+        viable: 10, killed: 7, survived: 3, score: 0.7,
+        operators: [{ id: 'comparison-boundary', viable: 10, killed: 7 }],
+      },
+    });
+
+    expect(markup).toContain('Would block');
+    expect(markup).toContain('Observe');
+    expect(markup).toContain('7/10 (70%)');
+    expect(markup).not.toContain('Verified');
+  });
+
+  it.each([
+    ['partial', {
+      mode: 'observe', status: 'partial', generated: 1, historical: 0,
+      viable: 1, killed: 0, survived: 1, score: 0,
+      operators: [{ id: 'constant-off-by-one', viable: 1, killed: 0 }],
+      skippedReason: 'budget-exhausted',
+    }, ['Partial', '0/1 (0%)', 'Budget exhausted', 'Constant off-by-one: 0/1']],
+    ['skipped', {
+      mode: 'off', status: 'skipped', generated: 0, historical: 0,
+      viable: 0, killed: 0, survived: 0, operators: [], skippedReason: 'gate-off',
+    }, ['Off', 'Skipped', 'Unavailable', 'Gate disabled']],
+  ])('renders bounded %s mutation evidence', (_label, mutation, expected) => {
+    const markup = render({ mutation });
+    for (const text of expected) expect(markup).toContain(text);
+  });
+
+  it.each([
+    ['invalid totals', { generated: 20, historical: 1 }],
+    ['negative count', { generated: -1 }],
+    ['survivor mismatch', { survived: 1 }],
+    ['score mismatch', { score: 0.7 }],
+    ['duplicate operator', { operators: [
+      { id: 'comparison-boundary', viable: 7, killed: 6 },
+      { id: 'comparison-boundary', viable: 3, killed: 2 },
+    ] }],
+    ['unknown operator', { operators: [{ id: 'private-source', viable: 10, killed: 8 }] }],
+    ['arbitrary skip reason', { status: 'partial', skippedReason: '/private/reason' }],
+    ['partial with a terminal skip reason', { status: 'partial', skippedReason: 'no-candidates' }],
+    ['skipped with a partial-only reason', {
+      status: 'skipped', skippedReason: 'checker-infra',
+      generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+      score: undefined, operators: [],
+    }],
+    ['off with evidence', { mode: 'off', status: 'skipped', skippedReason: 'gate-off' }],
+    ['skipped with viable evidence', { status: 'skipped', skippedReason: 'budget-exhausted' }],
+    ['completed without viable evidence', {
+      generated: 0, historical: 0, viable: 0, killed: 0, survived: 0,
+      score: undefined, operators: [],
+    }],
+    ['off with a non-gate reason', {
+      mode: 'off', status: 'skipped', generated: 0, historical: 0,
+      viable: 0, killed: 0, survived: 0, score: undefined, operators: [],
+      skippedReason: 'budget-exhausted',
+    }],
+    ['sensitive field', { source: 'PRIVATE_MUTATION_SOURCE_SENTINEL' }],
+  ])('fails closed for %s in mutation evidence', (_label, patch) => {
+    const markup = render({
+      verified: false,
+      wouldBlock: true,
+      mutation: {
+        mode: 'observe', status: 'completed', generated: 6, historical: 4,
+        viable: 10, killed: 8, survived: 2, score: 0.8,
+        operators: [
+          { id: 'comparison-boundary', viable: 7, killed: 6 },
+          { id: 'historical-submission', viable: 3, killed: 2 },
+        ],
+        ...patch,
+      },
+    });
+
+    expect(markup).toContain('Mutation evidence');
+    expect(markup).toContain('Unavailable');
+    expect(markup).not.toContain('Completed');
+    expect(markup).not.toContain('80%');
+    expect(markup).not.toContain('PRIVATE_MUTATION_SOURCE_SENTINEL');
+    expect(markup).not.toContain('/private/reason');
+  });
+
+  it('falls back to ran and casesChecked for legacy validator evidence', () => {
+    const markup = render({
+      validator: { ran: true, casesChecked: 7 },
+    });
+
+    expect(markup).toContain('7');
+    expectNoExpandedValidatorEvidence(markup);
   });
 });

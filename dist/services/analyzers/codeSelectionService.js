@@ -6,6 +6,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.shouldGenerateFillIn = shouldGenerateFillIn;
 exports.isFillInBlankProblem = isFillInBlankProblem;
+exports.extractFillInTemplate = extractFillInTemplate;
 exports.scoreReadability = scoreReadability;
 exports.selectACCode = selectACCode;
 /**
@@ -36,6 +37,13 @@ const FILL_IN_PATTERNS = [
 ];
 function isFillInBlankProblem(problemContent) {
     return FILL_IN_PATTERNS.some(p => p.test(problemContent));
+}
+/** Require one explicit code template with a hole; ambiguous templates are skipped. */
+function extractFillInTemplate(problemContent) {
+    const templates = [...problemContent.matchAll(/```[^\n]*\n([\s\S]*?)```/g)]
+        .map(match => match[1])
+        .filter(code => FILL_IN_PATTERNS.slice(0, 4).some(pattern => pattern.test(code)));
+    return templates.length === 1 ? templates[0] : undefined;
 }
 // ─── Readability scoring ──────────────────────────────────────────────────────
 /**

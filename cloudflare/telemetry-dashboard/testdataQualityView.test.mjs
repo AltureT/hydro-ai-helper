@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   buildTestdataModelRoleRows,
   buildTestdataQualityCards,
+  buildTestdataStageLatencyRows,
+  formatTestdataStageDuration,
   formatTestdataQualityRate,
 } from './src/testdataQualityView.ts';
 
@@ -63,4 +65,34 @@ test('model role rows preserve Worker counts and explicit denominators', () => {
       completed: '75.0% (3/4)', verified: '66.7% (2/3)', failed: '25.0% (1/4)',
     },
   ]);
+});
+
+test('stage latency rows tolerate an older Worker response', () => {
+  assert.deepEqual(buildTestdataStageLatencyRows({ window_days: 30, total_runs: 2 }), []);
+});
+
+test('stage latency rows sort by p95 then stage and format durations', () => {
+  const rows = buildTestdataStageLatencyRows({
+    window_days: 30,
+    total_runs: 10,
+    stage_latency: [
+      { stage: 'blueprint', runs: 10, p50Ms: 3000, p95Ms: 30000 },
+      { stage: 'sandbox_check', runs: 10, p50Ms: 1000, p95Ms: 300000 },
+      { stage: 'mutation_testing', runs: 3, p50Ms: 300000, p95Ms: 300000 },
+      { stage: 'unknown_latency', runs: 1, p50Ms: null, p95Ms: null },
+    ],
+  });
+
+  assert.deepEqual(rows, [
+    { stage: 'mutation_testing', runs: 3, p50: '5.0 分钟', p95: '5.0 分钟' },
+    { stage: 'sandbox_check', runs: 10, p50: '1.0 秒', p95: '5.0 分钟' },
+    { stage: 'blueprint', runs: 10, p50: '3.0 秒', p95: '30.0 秒' },
+    { stage: 'unknown_latency', runs: 1, p50: '暂无数据', p95: '暂无数据' },
+  ]);
+});
+
+test('stage duration formatter uses compact units without inventing missing values', () => {
+  assert.equal(formatTestdataStageDuration(800), '800 ms');
+  assert.equal(formatTestdataStageDuration(7200000), '2.0 小时');
+  assert.equal(formatTestdataStageDuration(null), '暂无数据');
 });

@@ -13,6 +13,16 @@ test('test-data quality API requests the bounded window and preserves model-role
     return new Response(JSON.stringify({
       window_days: 90,
       total_runs: 2,
+      problem_spec: {
+        extraction_succeeded: { count: 2, total: 2, rate: 1 },
+        constraint_count: 8,
+        invariant_count: 2,
+        uncertainty_count: 0,
+        consensus_statuses: [
+          { key: 'consensus', count: 1 },
+          { key: 'adjudicated', count: 1 },
+        ],
+      },
       model_roles: {
         primary: {
           runs: 1,
@@ -27,6 +37,15 @@ test('test-data quality API requests the bounded window and preserves model-role
           failed: { count: 1, total: 1, rate: 1 },
         },
       },
+      mutation: {
+        runs: 1,
+        generated: 2,
+        historical: 1,
+        viable: 3,
+        killed: 2,
+        survived: 1,
+        average_score: 2 / 3,
+      },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
 
@@ -37,6 +56,19 @@ test('test-data quality API requests the bounded window and preserves model-role
     assert.equal(capturedUrl, 'https://stats.example/api/dashboard/testdata-quality?days=90');
     assert.equal(capturedAuthorization, 'Bearer dashboard-secret');
     assert.equal(response.model_roles?.fallback.failed.total, 1);
+    assert.deepEqual(response.problem_spec?.consensus_statuses, [
+      { key: 'consensus', count: 1 },
+      { key: 'adjudicated', count: 1 },
+    ]);
+    assert.deepEqual(response.mutation, {
+      runs: 1,
+      generated: 2,
+      historical: 1,
+      viable: 3,
+      killed: 2,
+      survived: 1,
+      average_score: 2 / 3,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -10,7 +10,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { i18n } from '../utils/i18n';
 import { COLORS, SPACING, RADIUS, SHADOWS, LAYOUT, markdownTheme, emptyStateStyle } from '../utils/styles';
-import { renderMarkdown } from '../utils/markdown';
+import { renderReportMarkdown as renderMarkdown, reportMarkdownStyles } from '../utils/reportMarkdown';
 
 /** i18n with hardcoded Chinese fallback for keys that may not yet be in lang-*.js */
 const I18N_FALLBACK: Record<string, string> = {
@@ -131,7 +131,7 @@ export const StudentSummaryView: React.FC<StudentSummaryViewProps> = ({ domainId
   }
 
   return (
-    <div style={{
+    <div className="ai-report-content" style={{
       maxWidth: LAYOUT.contentMaxWidth,
       margin: '0 auto',
       width: '100%',
@@ -142,7 +142,7 @@ export const StudentSummaryView: React.FC<StudentSummaryViewProps> = ({ domainId
       overflow: 'hidden',
       marginBottom: SPACING.base,
     }}>
-      <style>{markdownTheme}</style>
+      <style>{markdownTheme + reportMarkdownStyles}</style>
 
       {/* Header */}
       <div style={{

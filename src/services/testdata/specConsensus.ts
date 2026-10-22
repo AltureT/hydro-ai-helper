@@ -3,6 +3,7 @@ import type {
   ChatCallOptions,
   MultiModelChatResult,
   MultiModelClient,
+  TokenUsage,
 } from '../openaiClient';
 import type { TestdataFailureCode } from './failures';
 import { TestdataPipelineError } from './failures';
@@ -12,6 +13,7 @@ import {
   summarizeProblemSpec,
   validateProblemSpecEvidence,
   validateProblemSpecV1,
+  UNCERTAINTY_MAX_COUNT,
   type ProblemSpecSummary,
   type ProblemSpecV1,
 } from './problemSpec';
@@ -23,6 +25,14 @@ import type { TestdataModelRole } from '../../models/aiConfig';
 const ADJUDICATION_MAX_LENGTH = 768 * 1024;
 const RESOLUTION_REASON_MAX_LENGTH = 2048;
 const RESOLUTION_EVIDENCE_MAX_LENGTH = 4096;
+
+const FAILURE_TOKEN_USAGE = new WeakMap<object, TokenUsage>();
+
+export function getSpecConsensusFailureTokenUsage(error: unknown): TokenUsage | undefined {
+  const usage = error && (typeof error === 'object' || typeof error === 'function')
+    ? FAILURE_TOKEN_USAGE.get(error as object) : undefined;
+  return usage ? { ...usage } : undefined;
+}
 
 export interface SpecConflict {
   path: string;
@@ -39,18 +49,22 @@ export interface SpecResolution {
 }
 
 export interface SpecConsensusClient {
-  role: Extract<TestdataModelRole, 'specPrimary' | 'specCritic' | 'adjudicator'>;
+  role: SpecConsensusRole;
   identity?: TestdataModelIdentity;
   client: Pick<MultiModelClient, 'chat'>;
 }
 
 export type SpecConsensusStatus = 'consensus' | 'adjudicated' | 'unresolved';
+export type SpecConsensusRole = Extract<
+  TestdataModelRole,
+  'specPrimary' | 'specCritic' | 'adjudicator'
+>;
 
 export interface SpecConsensusSafeSummary extends ProblemSpecSummary {
   status: SpecConsensusStatus;
   conflictCount: number;
   unresolvedConflictCount: number;
-  rolesUsed: TestdataModelRole[];
+  rolesUsed: SpecConsensusRole[];
 }
 
 export interface SpecConsensusResult {
@@ -63,7 +77,7 @@ export interface SpecConsensusResult {
   failureCode?: Extract<TestdataFailureCode,
     'SPEC_PARSE_FAILED' | 'SPEC_EVIDENCE_NOT_FOUND' | 'SPEC_CONSENSUS_REQUIRED'>;
   results: MultiModelChatResult[];
-  rolesUsed: TestdataModelRole[];
+  rolesUsed: SpecConsensusRole[];
   roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>>;
   safeSummary?: SpecConsensusSafeSummary;
 }
@@ -73,17 +87,101 @@ interface RunSpecConsensusInput {
   requestedProblemKind: 'auto' | 'traditional' | 'function';
   hasCustomChecker: boolean;
   primary: SpecConsensusClient;
-  critic: SpecConsensusClient;
+  critic?: SpecConsensusClient;
   adjudicator?: SpecConsensusClient;
   callOptions?: ChatCallOptions;
 }
 
+function halfWidth(value: string): string {
+  return [...value].map(character => {
+    const code = character.charCodeAt(0);
+    if (code === 0x3000) return ' ';
+    if (code >= 0xFF01 && code <= 0xFF5E) return String.fromCharCode(code - 0xFEE0);
+    return character;
+  }).join('');
+}
+
+function canonicalIntegerToken(token: string): string {
+  const power = /^(\d+)\^(\d+)$/.exec(token);
+  if (power) {
+    const exponent = Number(power[2]);
+    if (!Number.isSafeInteger(exponent) || exponent > 1000
+      || power[1].length * Math.max(1, exponent) > 4096) return token;
+    return (BigInt(power[1]) ** BigInt(exponent)).toString();
+  }
+
+  const numeric = /^(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
+  if (!numeric) return token;
+  const whole = numeric[1];
+  const fraction = numeric[2] || '';
+  const exponent = numeric[3] === undefined ? 0 : Number(numeric[3]);
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 4096) return token;
+  const digits = `${whole}${fraction}`;
+  const decimalPosition = whole.length + exponent;
+  if (decimalPosition <= 0) return /^0+$/.test(digits) ? '0' : token;
+  if (decimalPosition < digits.length && !/^0+$/.test(digits.slice(decimalPosition))) return token;
+  const integer = decimalPosition >= digits.length
+    ? `${digits}${'0'.repeat(decimalPosition - digits.length)}`
+    : digits.slice(0, decimalPosition);
+  return BigInt(integer || '0').toString();
+}
+
 function text(value: string): string {
-  return value.trim().replace(/\s+/g, ' ');
+  return halfWidth(value)
+    .replace(/≤/g, '<=')
+    .replace(/≥/g, '>=')
+    .replace(/≠/g, '!=')
+    .replace(
+      /(?<![\p{L}\p{N}_.])(?:\d+\^\d+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\p{L}\p{N}_.])/gu,
+      canonicalIntegerToken,
+    )
+    .trim()
+    .replace(/\s+/g, ' ');
 }
 
 function signature(value: unknown): string {
   return JSON.stringify(value);
+}
+
+function normalizedUncertainty(uncertainty: ProblemSpecV1['uncertainties'][number]) {
+  return {
+    description: text(uncertainty.description),
+    ...(uncertainty.evidence !== undefined ? { evidence: text(uncertainty.evidence) } : {}),
+  };
+}
+
+function mergeUncertainties(
+  primary: ProblemSpecV1,
+  critic: ProblemSpecV1,
+): ProblemSpecV1['uncertainties'] {
+  const seenDescriptions = new Set<string>();
+  const seenCodes = new Set<string>();
+  return [...primary.uncertainties, ...critic.uncertainties].filter(uncertainty => {
+    const key = signature(normalizedUncertainty(uncertainty));
+    if (seenCodes.has(uncertainty.code) || seenDescriptions.has(key)) return false;
+    seenCodes.add(uncertainty.code);
+    seenDescriptions.add(key);
+    return true;
+  }).slice(0, UNCERTAINTY_MAX_COUNT);
+}
+
+function mergeValidatedSpec(
+  base: ProblemSpecV1,
+  primary: ProblemSpecV1,
+  critic: ProblemSpecV1,
+  input: Pick<RunSpecConsensusInput, 'requestedProblemKind' | 'hasCustomChecker'>,
+): ProblemSpecV1 {
+  const merged = { ...base, uncertainties: mergeUncertainties(primary, critic) };
+  try {
+    return validateProblemSpecV1(merged, {
+      hasCustomChecker: input.hasCustomChecker,
+      ...(input.requestedProblemKind === 'auto'
+        ? {}
+        : { expectedProblemKind: input.requestedProblemKind }),
+    });
+  } catch {
+    return primary;
+  }
 }
 
 function normalizedSpec(spec: ProblemSpecV1): Record<string, unknown> {
@@ -158,24 +256,110 @@ function normalizedSpec(spec: ProblemSpecV1): Record<string, unknown> {
         .map(id => constraintSignatures.get(id) || 'missing')
         .sort(),
     }))),
-    uncertainties: sortObjects(spec.uncertainties.map(uncertainty => ({
-      description: text(uncertainty.description),
-      ...(uncertainty.evidence !== undefined ? { evidence: text(uncertainty.evidence) } : {}),
-    }))),
+    uncertainties: sortObjects(spec.uncertainties.map(normalizedUncertainty)),
   };
 }
 
-const DIFF_PATHS = [
-  'problemKind', 'testCaseMode', 'inputFields', 'constraints', 'invariants',
-  'outputPolicy', 'operations', 'subtasks', 'uncertainties',
+const WHOLE_DIFF_PATHS = [
+  'problemKind', 'testCaseMode', 'inputFields', 'outputPolicy', 'operations', 'subtasks',
 ] as const;
+
+type ItemDiffPath = 'constraints' | 'invariants';
+
+function overlappingItemSignature(item: unknown): string {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return signature(item);
+  const object = item as Record<string, unknown>;
+  if (typeof object.expression !== 'string') return signature(item);
+  return signature({
+    ...object,
+    expression: object.expression.replace(
+      /(?<![\p{L}\p{N}_.])\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\p{L}\p{N}_.])/gu,
+      '#',
+    ).replace(/\s*(<=|>=|!=|==|<|>)\s*/g, '$1'),
+  });
+}
+
+function wholeConflict(
+  path: typeof WHOLE_DIFF_PATHS[number],
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): SpecConflict[] {
+  return isDeepStrictEqual(left[path], right[path])
+    ? []
+    : [{
+      path,
+      kind: 'value-mismatch',
+      primaryValue: left[path],
+      criticValue: right[path],
+    }];
+}
+
+function itemConflicts(
+  path: ItemDiffPath,
+  primaryItems: unknown[],
+  criticItems: unknown[],
+): SpecConflict[] {
+  const primaryBySignature = new Map<string, unknown[]>();
+  const criticBySignature = new Map<string, unknown[]>();
+  const add = (target: Map<string, unknown[]>, item: unknown) => {
+    const key = signature(item);
+    target.set(key, [...(target.get(key) || []), item]);
+  };
+  primaryItems.forEach(item => add(primaryBySignature, item));
+  criticItems.forEach(item => add(criticBySignature, item));
+
+  const unmatchedPrimary: unknown[] = [];
+  const unmatchedCritic: unknown[] = [];
+  const keys = [...new Set([...primaryBySignature.keys(), ...criticBySignature.keys()])].sort();
+  for (const key of keys) {
+    const primary = primaryBySignature.get(key) || [];
+    const critic = criticBySignature.get(key) || [];
+    const paired = Math.min(primary.length, critic.length);
+    unmatchedPrimary.push(...primary.slice(paired));
+    unmatchedCritic.push(...critic.slice(paired));
+  }
+
+  const primaryByOverlap = new Map<string, unknown[]>();
+  const criticByOverlap = new Map<string, unknown[]>();
+  const addOverlap = (target: Map<string, unknown[]>, item: unknown) => {
+    const key = overlappingItemSignature(item);
+    target.set(key, [...(target.get(key) || []), item]);
+  };
+  unmatchedPrimary.forEach(item => addOverlap(primaryByOverlap, item));
+  unmatchedCritic.forEach(item => addOverlap(criticByOverlap, item));
+
+  const unpaired: Array<{ primaryValue: unknown | null; criticValue: unknown | null }> = [];
+  const overlapKeys = [
+    ...new Set([...primaryByOverlap.keys(), ...criticByOverlap.keys()]),
+  ].sort();
+  for (const key of overlapKeys) {
+    const primary = primaryByOverlap.get(key) || [];
+    const critic = criticByOverlap.get(key) || [];
+    const paired = Math.min(primary.length, critic.length);
+    for (let index = 0; index < paired; index += 1) {
+      unpaired.push({ primaryValue: primary[index], criticValue: critic[index] });
+    }
+    primary.slice(paired).forEach(item => unpaired.push({ primaryValue: item, criticValue: null }));
+    critic.slice(paired).forEach(item => unpaired.push({ primaryValue: null, criticValue: item }));
+  }
+  return unpaired.map((item, index) => ({
+    path: `${path}[${index}]`,
+    kind: 'value-mismatch',
+    ...item,
+  }));
+}
 
 export function diffProblemSpecs(primary: ProblemSpecV1, critic: ProblemSpecV1): SpecConflict[] {
   const left = normalizedSpec(primary);
   const right = normalizedSpec(critic);
-  return DIFF_PATHS.flatMap(path => isDeepStrictEqual(left[path], right[path])
-    ? []
-    : [{ path, kind: 'value-mismatch' as const, primaryValue: left[path], criticValue: right[path] }]);
+  return [
+    ...(['problemKind', 'testCaseMode', 'inputFields'] as const)
+      .flatMap(path => wholeConflict(path, left, right)),
+    ...itemConflicts('constraints', left.constraints as unknown[], right.constraints as unknown[]),
+    ...itemConflicts('invariants', left.invariants as unknown[], right.invariants as unknown[]),
+    ...(['outputPolicy', 'operations', 'subtasks'] as const)
+      .flatMap(path => wholeConflict(path, left, right)),
+  ];
 }
 
 function isCancellation(error: unknown): boolean {
@@ -184,6 +368,10 @@ function isCancellation(error: unknown): boolean {
     candidate.name === 'AbortError' || candidate.name === 'CanceledError'
     || candidate.code === 'ERR_CANCELED' || candidate.category === 'aborted'
   );
+}
+
+function isModelCallBudgetExhausted(error: unknown): boolean {
+  return error instanceof TestdataPipelineError && error.code === 'PIPELINE_BUDGET_EXHAUSTED';
 }
 
 function failureCode(error: unknown): SpecConsensusResult['failureCode'] {
@@ -214,6 +402,76 @@ function exactKeys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))
     || allowed.some(key => !Object.prototype.hasOwnProperty.call(value, key))) {
     throw new TypeError('invalid adjudication keys');
+  }
+}
+
+function throwInvalidAdjudication(message: string): never {
+  throw new TestdataPipelineError(
+    message,
+    'SPEC_CONSENSUS_REQUIRED',
+    'spec_consensus',
+    'spec',
+    'manual-review',
+  );
+}
+
+function commonItems(primary: unknown[], critic: unknown[]): unknown[] {
+  const criticCounts = new Map<string, number>();
+  critic.forEach(item => {
+    const key = signature(item);
+    criticCounts.set(key, (criticCounts.get(key) || 0) + 1);
+  });
+  return primary.filter(item => {
+    const key = signature(item);
+    const count = criticCounts.get(key) || 0;
+    if (count === 0) return false;
+    criticCounts.set(key, count - 1);
+    return true;
+  });
+}
+
+function verifyResolvedItems(
+  path: ItemDiffPath,
+  primary: unknown[],
+  critic: unknown[],
+  resolved: unknown[],
+  conflicts: SpecConflict[],
+  resolutions: SpecResolution[],
+): void {
+  const itemPathPattern = new RegExp(`^${path}\\[\\d+\\]$`);
+  const pathConflicts = conflicts.filter(conflict => itemPathPattern.test(conflict.path));
+  const expected = commonItems(primary, critic);
+  let newItemCount = 0;
+  for (const resolution of resolutions.filter(item => itemPathPattern.test(item.path))) {
+    const conflict = pathConflicts.find(item => item.path === resolution.path);
+    if (!conflict) throwInvalidAdjudication('裁决引用了未知冲突条目。');
+    if (resolution.selected === 'new') {
+      newItemCount += 1;
+      continue;
+    }
+    const selected = resolution.selected === 'A'
+      ? conflict.primaryValue
+      : conflict.criticValue;
+    if (selected !== null) expected.push(selected);
+  }
+
+  const remaining = [...resolved];
+  for (const item of expected) {
+    const key = signature(item);
+    const index = remaining.findIndex(candidate => signature(candidate) === key);
+    if (index < 0) throwInvalidAdjudication('裁决结果修改或删除了已达成共识的条目。');
+    remaining.splice(index, 1);
+  }
+  if (remaining.length !== newItemCount) {
+    throwInvalidAdjudication('裁决结果包含未声明的新增条目。');
+  }
+  const knownConflictValues = new Set(pathConflicts.flatMap(conflict => (
+    [conflict.primaryValue, conflict.criticValue]
+      .filter(value => value !== null)
+      .map(signature)
+  )));
+  if (remaining.some(item => knownConflictValues.has(signature(item)))) {
+    throwInvalidAdjudication('裁决把既有条目错误标记为 new。');
   }
 }
 
@@ -262,12 +520,13 @@ function parseAdjudication(
     for (const resolution of resolutions) {
       locateStatementEvidence(input.snapshot, { quote: resolution.evidenceQuote });
     }
-    const resolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
+    const modelResolvedSpec = validateExtractedSpec(JSON.stringify(object.resolvedSpec), input);
+    const resolvedSpec = mergeValidatedSpec(modelResolvedSpec, primary, critic, input);
     const normalizedResolved = normalizedSpec(resolvedSpec);
     const normalizedPrimary = normalizedSpec(primary);
     const normalizedCritic = normalizedSpec(critic);
     const conflictPaths = new Set(conflicts.map(conflict => conflict.path));
-    for (const path of DIFF_PATHS) {
+    for (const path of WHOLE_DIFF_PATHS) {
       if (conflictPaths.has(path)) continue;
       if (!isDeepStrictEqual(normalizedPrimary[path], normalizedCritic[path])
         || !isDeepStrictEqual(normalizedResolved[path], normalizedPrimary[path])) {
@@ -280,7 +539,24 @@ function parseAdjudication(
         );
       }
     }
+    verifyResolvedItems(
+      'constraints',
+      normalizedPrimary.constraints as unknown[],
+      normalizedCritic.constraints as unknown[],
+      normalizedResolved.constraints as unknown[],
+      conflicts,
+      resolutions,
+    );
+    verifyResolvedItems(
+      'invariants',
+      normalizedPrimary.invariants as unknown[],
+      normalizedCritic.invariants as unknown[],
+      normalizedResolved.invariants as unknown[],
+      conflicts,
+      resolutions,
+    );
     for (const resolution of resolutions) {
+      if (/^(?:constraints|invariants)\[\d+\]$/.test(resolution.path)) continue;
       const conflict = conflicts.find(item => item.path === resolution.path);
       const actual = normalizedResolved[resolution.path];
       const matchesA = !!conflict && isDeepStrictEqual(actual, conflict.primaryValue);
@@ -320,7 +596,7 @@ function buildAdjudicatorPrompts(
   conflicts: SpecConflict[],
 ): { systemPrompt: string; userPrompt: string } {
   return {
-    systemPrompt: '你是 OJ 题意裁决器。只输出严格 JSON：resolvedSpec 和 resolutions。不得生成 ORACLE、validator、生成器或代码。每个冲突必须恰好一条 resolution，selected 只能是 A、B、new，evidenceQuote 必须逐字来自题面。',
+    systemPrompt: '你是 OJ 题意裁决器。只输出严格 JSON：resolvedSpec 和 resolutions。不得生成 ORACLE、validator、生成器或代码。只裁决 SERVER CONFLICTS 中列出的整字段或未配对条目；每个冲突必须恰好一条 resolution，selected 只能是 A、B、new，evidenceQuote 必须逐字来自题面。',
     userPrompt: [
       '=== COMPLETE STATEMENT ===',
       snapshot.normalizedMarkdown,
@@ -338,7 +614,7 @@ function safeSummary(
   status: SpecConsensusStatus,
   conflicts: SpecConflict[],
   unresolvedConflictCount: number,
-  rolesUsed: TestdataModelRole[],
+  rolesUsed: SpecConsensusRole[],
   spec?: ProblemSpecV1,
 ): SpecConsensusSafeSummary | undefined {
   if (!spec) return undefined;
@@ -354,26 +630,114 @@ function safeSummary(
 export async function runProblemSpecConsensus(
   input: RunSpecConsensusInput,
 ): Promise<SpecConsensusResult> {
-  const prompt = buildProblemSpecPrompt(input);
-  const extract = async (source: SpecConsensusClient) => {
-    try {
-      const result = await source.client.chat(
-        [{ role: 'user', content: prompt.userPrompt }],
-        prompt.systemPrompt,
-        input.callOptions,
-      );
-      return { result, spec: validateExtractedSpec(result.content, input) };
-    } catch (error) {
-      if (isCancellation(error)) throw error;
-      return { error };
+  const usages: TokenUsage[] = [];
+  try {
+    return await runConsensus(input, result => {
+      if (result.usage) usages.push({ ...result.usage });
+    });
+  } catch (error) {
+    // Keep only numeric accounting out of band; preserve the original abort or
+    // budget error and never attach model responses to it.
+    if (usages.length && error && (typeof error === 'object' || typeof error === 'function')) {
+      FAILURE_TOKEN_USAGE.set(error as object, usages.reduce((sum, usage) => ({
+        promptTokens: sum.promptTokens + usage.promptTokens,
+        completionTokens: sum.completionTokens + usage.completionTokens,
+        totalTokens: sum.totalTokens + usage.totalTokens,
+      }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 }));
     }
+    throw error;
+  }
+}
+
+async function runConsensus(
+  input: RunSpecConsensusInput,
+  recordResponse: (result: MultiModelChatResult) => void,
+): Promise<SpecConsensusResult> {
+  const prompt = buildProblemSpecPrompt(input);
+  const callOptions: ChatCallOptions = { ...input.callOptions, contentMode: 'raw' };
+  const extract = async (source: SpecConsensusClient) => {
+    const attempts: MultiModelChatResult[] = [];
+    let repairHint = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (callOptions.signal?.aborted) throw callOptions.signal.reason
+        ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      let result: MultiModelChatResult;
+      try {
+        result = await source.client.chat(
+          [{ role: 'user', content: prompt.userPrompt + repairHint }],
+          prompt.systemPrompt,
+          callOptions,
+        );
+        attempts.push(result);
+        recordResponse(result);
+      } catch (error) {
+        if (isCancellation(error) || isModelCallBudgetExhausted(error)) throw error;
+        return { error, attempts };
+      }
+      if (callOptions.signal?.aborted) throw callOptions.signal.reason
+        ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      try {
+        return { result, spec: validateExtractedSpec(result.content, input), attempts };
+      } catch (error) {
+        if (callOptions.signal?.aborted) throw callOptions.signal.reason
+          ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        if (isCancellation(error) || isModelCallBudgetExhausted(error)) throw error;
+        if (attempt === 1 || !(error instanceof TestdataPipelineError) || error.code !== 'SPEC_PARSE_FAILED') {
+          return { error, attempts };
+        }
+        // Re-extract from the complete statement using only a server-owned hint.
+        // No invalid response or peer extraction crosses the role boundary.
+        repairHint = `\n\n=== STRICT FORMAT RETRY (ONCE) ===\n${error.message}\n`
+          + '请重新依据完整题面提取规范，保留全部语义与证据；不要猜测、删除约束或更改输出规则来通过格式检查。';
+      }
+    }
+    throw new Error('Unreachable ProblemSpec extraction state');
   };
-  const [primary, critic] = await Promise.all([extract(input.primary), extract(input.critic)]);
-  const results = [primary.result, critic.result].filter(Boolean) as MultiModelChatResult[];
-  const rolesUsed: TestdataModelRole[] = ['specPrimary', 'specCritic'];
+  const settled = await Promise.allSettled([
+    extract(input.primary),
+    ...(input.critic ? [extract(input.critic)] : []),
+  ]);
+  // Drain both roles before exposing a terminal error, so a concurrent response
+  // is accounted for and no extraction keeps running after the caller exits.
+  for (const outcome of settled) {
+    if (outcome.status === 'rejected') throw outcome.reason;
+  }
+  const [primary, critic] = settled.map(outcome => {
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  });
+  const results = [...primary.attempts, ...(critic?.attempts ?? [])];
+  const rolesUsed: SpecConsensusRole[] = input.critic
+    ? ['specPrimary', 'specCritic']
+    : ['specPrimary'];
   const roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
   if (primary.result) roleIdentities.specPrimary = { ...primary.result.usedModel };
-  if (critic.result) roleIdentities.specCritic = { ...critic.result.usedModel };
+  if (critic?.result) roleIdentities.specCritic = { ...critic.result.usedModel };
+  if (!input.critic) {
+    if (!primary.spec) {
+      return {
+        status: 'unresolved',
+        conflictCount: 0,
+        unresolvedConflictCount: 1,
+        conflicts: [],
+        failureCode: failureCode(primary.error),
+        results,
+        rolesUsed,
+        roleIdentities,
+      };
+    }
+    return {
+      status: 'consensus',
+      conflictCount: 0,
+      unresolvedConflictCount: 0,
+      conflicts: [],
+      resolvedSpec: primary.spec,
+      results,
+      rolesUsed,
+      roleIdentities,
+      safeSummary: safeSummary('consensus', [], 0, rolesUsed, primary.spec),
+    };
+  }
   if (!primary.spec || !critic.spec) {
     const error = primary.error || critic.error;
     return {
@@ -389,17 +753,18 @@ export async function runProblemSpecConsensus(
   }
 
   const conflicts = diffProblemSpecs(primary.spec, critic.spec);
+  const mergedSpec = mergeValidatedSpec(primary.spec, primary.spec, critic.spec, input);
   if (conflicts.length === 0) {
     return {
       status: 'consensus',
       conflictCount: 0,
       unresolvedConflictCount: 0,
       conflicts,
-      resolvedSpec: primary.spec,
+      resolvedSpec: mergedSpec,
       results,
       rolesUsed,
       roleIdentities,
-      safeSummary: safeSummary('consensus', conflicts, 0, rolesUsed, primary.spec),
+      safeSummary: safeSummary('consensus', conflicts, 0, rolesUsed, mergedSpec),
     };
   }
   if (!input.adjudicator) {
@@ -424,9 +789,10 @@ export async function runProblemSpecConsensus(
     adjudicatorResult = await input.adjudicator.client.chat(
       [{ role: 'user', content: adjudicatorPrompt.userPrompt }],
       adjudicatorPrompt.systemPrompt,
-      input.callOptions,
+      callOptions,
     );
     results.push(adjudicatorResult);
+    recordResponse(adjudicatorResult);
     roleIdentities.adjudicator = { ...adjudicatorResult.usedModel };
     const adjudication = parseAdjudication(
       adjudicatorResult.content,
@@ -450,7 +816,7 @@ export async function runProblemSpecConsensus(
       ),
     };
   } catch (error) {
-    if (isCancellation(error)) throw error;
+    if (isCancellation(error) || isModelCallBudgetExhausted(error)) throw error;
     return {
       status: 'unresolved',
       conflictCount: conflicts.length,

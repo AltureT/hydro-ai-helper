@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React, { useState } from 'react';
 import { i18n } from '../utils/i18n';
 import {
@@ -119,7 +120,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                 <span style={{
                   display: 'inline-block', transition: `transform ${TRANSITIONS.fast}`,
                   transform: legacyExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
-                }}>&#9654;</span>
+                }}><Icon name="chevronRight" /></span>
                 {i18n('ai_helper_admin_endpoint_quick_config')}
               </button>
 
@@ -261,7 +262,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '4px' }}>
                       <div style={stepCircle(1, step1Done, step1Active)}>
-                        {step1Done ? '\u2713' : '1'}
+                        {step1Done ? <Icon name="check" size={14} /> : '1'}
                       </div>
                       <div style={{ width: '2px', height: '100%', minHeight: '20px', backgroundColor: step1Done ? COLORS.success : COLORS.border, marginTop: '4px' }} />
                     </div>
@@ -302,7 +303,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: SPACING.md, opacity: hasCredentials ? 1 : 0.5 }}>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '4px' }}>
                       <div style={stepCircle(2, step2Done, step2Active)}>
-                        {step2Done ? '\u2713' : '2'}
+                        {step2Done ? <Icon name="check" size={14} /> : '2'}
                       </div>
                       <div style={{ width: '2px', height: '100%', minHeight: '20px', backgroundColor: step2Done ? COLORS.success : COLORS.border, marginTop: '4px' }} />
                     </div>
@@ -331,7 +332,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                         )}
                         {hasModels && (
                           <span style={getBadgeStyle('success')}>
-                            {'\u2713'} {i18n('ai_helper_admin_endpoint_models_fetched', endpoint.models.length)}
+                            {<Icon name="check" size={14} />} {i18n('ai_helper_admin_endpoint_models_fetched', endpoint.models.length)}
                           </span>
                         )}
                         {endpoint.modelsLastFetched && (
@@ -374,7 +375,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: SPACING.md, opacity: hasModels ? 1 : 0.5 }}>
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '4px' }}>
                       <div style={stepCircle(3, step3Done, step3Active)}>
-                        {step3Done ? '\u2713' : '3'}
+                        {step3Done ? <Icon name="check" size={14} /> : '3'}
                       </div>
                     </div>
                     <div style={{ flex: 1 }}>
@@ -491,6 +492,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                     </div>
                     <div style={{ display: 'flex', gap: '4px' }}>
                       <button
+                        aria-label={`${i18n('ai_helper_admin_model_up')} ${sm.modelName}`}
                         onClick={() => onMoveSelectedModel(index, 'up')}
                         disabled={index === 0}
                         style={{
@@ -500,9 +502,10 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                           cursor: index === 0 ? 'not-allowed' : 'pointer',
                         }}
                       >
-                        ↑
+                        <Icon name="arrowUp" />
                       </button>
                       <button
+                        aria-label={`${i18n('ai_helper_admin_model_down')} ${sm.modelName}`}
                         onClick={() => onMoveSelectedModel(index, 'down')}
                         disabled={index === selectedModels.length - 1}
                         style={{
@@ -512,16 +515,17 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                           cursor: index === selectedModels.length - 1 ? 'not-allowed' : 'pointer',
                         }}
                       >
-                        ↓
+                        <Icon name="arrowDown" />
                       </button>
                       <button
+                        aria-label={`${i18n('ai_helper_admin_model_remove')} ${sm.modelName}`}
                         onClick={() => onRemoveSelectedModel(index)}
                         style={{
                           ...getButtonStyle('danger'),
                           padding: '4px 8px', fontSize: '12px',
                         }}
                       >
-                        ×
+                        <Icon name="close" />
                       </button>
                     </div>
                   </div>

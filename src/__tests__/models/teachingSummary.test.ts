@@ -244,11 +244,17 @@ describe('TeachingSummaryModel', () => {
   // ─── updateStatus ───────────────────────────────────
 
   describe('updateStatus', () => {
+    it('persists a localized failure key for page reloads', async () => {
+      await model.updateStatus('summary1', 'failed', 'ai_helper_err_ai_timeout');
+      expect(col.updateOne).toHaveBeenCalledWith({ _id: 'summary1' }, {
+        $set: { status: 'failed', errorMessageKey: 'ai_helper_err_ai_timeout' },
+      });
+    });
     it('should update status to generating', async () => {
       await model.updateStatus('summary1', 'generating');
       expect(col.updateOne).toHaveBeenCalledWith(
         { _id: 'summary1' },
-        { $set: { status: 'generating' } },
+        { $set: { status: 'generating' }, $unset: { errorMessageKey: '' } },
       );
     });
 
@@ -256,7 +262,7 @@ describe('TeachingSummaryModel', () => {
       await model.updateStatus('summary1', 'failed');
       expect(col.updateOne).toHaveBeenCalledWith(
         { _id: 'summary1' },
-        { $set: { status: 'failed' } },
+        { $set: { status: 'failed' }, $unset: { errorMessageKey: '' } },
       );
     });
   });

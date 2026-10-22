@@ -86,7 +86,10 @@ function mergeErrorClusters(findings: TeachingFinding[]): TeachingFinding[] {
     const candidates = commonErrors
       .filter(host =>
         host.evidence.affectedProblems.length === 1
-        && host.evidence.affectedProblems[0] === pid)
+        && host.evidence.affectedProblems[0] === pid
+        && (host.errorStatus !== undefined && cluster.errorStatus !== undefined
+          ? host.errorStatus === cluster.errorStatus
+          : host.title.includes(signatureStatusLabel(cluster.errorSignature) || '\u0000')))
       .map(host => ({
         host,
         overlap: overlapRatio(cluster.evidence.affectedStudents, host.evidence.affectedStudents),
@@ -109,15 +112,20 @@ function mergeErrorClusters(findings: TeachingFinding[]): TeachingFinding[] {
     const host = candidates[0].host;
     host.severity = maxSeverity(host.severity, cluster.severity);
     host.needsDeepDive = host.needsDeepDive || cluster.needsDeepDive;
-    if (!host.errorSignature) host.errorSignature = cluster.errorSignature;
-    if (!host.evidence.samples?.code?.length && cluster.evidence.samples?.code?.length) {
+    if (!host.errorSignature) {
+      host.errorSignature = cluster.errorSignature;
+      // The displayed sample must match the displayed signature, even when the
+      // historical status finding already has a different sample.
       host.evidence.samples = cluster.evidence.samples;
+      host.evidence.metrics.sameSignatureCount = cluster.evidence.affectedStudents.length;
     }
     const clusterSize = cluster.evidence.affectedStudents.length;
-    host.evidence.metrics.sameSignatureCount = clusterSize;
     pushSupplement(host,
-      `${clusterSize} 名学生的最后一次提交失败在同一处（错误签名 ${cluster.errorSignature || '相同错误模式'}），大概率是同一个知识点没讲透`);
+      `${clusterSize} 名尚未通过的学生最近提交具有相同判题特征（${cluster.errorSignature || '详情缺失'}）；相同测试点失败不等于相同代码错误或知识缺陷，需核对代码与题目要求`);
     dropped.add(cluster.id);
+    for (const related of findings) {
+      if (related.sourceFindingId === cluster.id) related.sourceFindingId = host.id;
+    }
   }
 
   return findings.filter(f => !dropped.has(f.id));
@@ -135,10 +143,15 @@ function foldCrossCorrelations(findings: TeachingFinding[]): TeachingFinding[] {
   for (const cross of findings) {
     if (cross.dimension !== 'crossCorrelation') continue;
     if (cross.evidence.affectedStudents.length === 0) continue;
+    if (cross.confidence === 'insufficient_data') continue;
 
     let best: TeachingFinding | null = null;
     let bestContainment = 0;
     for (const host of hosts) {
+      if (cross.sourceFindingId && cross.sourceFindingId !== host.id) continue;
+      if (cross.evidence.affectedProblems.length && !cross.evidence.affectedProblems.some(
+        pid => host.evidence.affectedProblems.includes(pid),
+      )) continue;
       const containment = containmentRatio(
         cross.evidence.affectedStudents,
         host.evidence.affectedStudents,
@@ -150,7 +163,8 @@ function foldCrossCorrelations(findings: TeachingFinding[]): TeachingFinding[] {
     }
 
     if (best && bestContainment >= FOLD_CONTAINMENT_THRESHOLD) {
-      pushSupplement(best, cross.title);
+      pushSupplement(best, cross.confidence === 'low'
+        ? `${cross.title}（数据有限，仅供参考）` : cross.title);
       dropped.add(cross.id);
     }
   }

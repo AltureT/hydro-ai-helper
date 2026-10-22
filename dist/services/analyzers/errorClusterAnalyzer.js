@@ -10,6 +10,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.errorSignature = errorSignature;
 exports.normalizeCompilerError = normalizeCompilerError;
 exports.analyzeErrorClusters = analyzeErrorClusters;
+const crypto_1 = require("crypto");
+const submissionEvidence_1 = require("./submissionEvidence");
 const STATUS_LABEL = {
     2: 'WA', 3: 'TLE', 4: 'MLE', 5: 'OLE', 6: 'RE', 7: 'CE',
 };
@@ -21,7 +23,7 @@ function errorSignature(record) {
         }
         return 'CE:unknown';
     }
-    const failingTCs = (record.testCases || []).filter(tc => tc.status !== 1);
+    const failingTCs = (record.testCases || []).filter(tc => submissionEvidence_1.ERROR_STATUSES.has(tc.status));
     const failingTests = failingTCs
         .map(tc => tc.id ?? tc.subtaskId ?? '?')
         .sort((a, b) => {
@@ -31,8 +33,12 @@ function errorSignature(record) {
     })
         .slice(0, 5)
         .join(',');
-    const suffix = failingTCs.length > 5 ? `...+${failingTCs.length - 5}` : '';
-    return `${STATUS_LABEL[record.status] || record.status}:tests[${failingTests}${suffix}]`;
+    // Hash the complete failure set so identical first five cases cannot merge
+    // different signatures. Subtask IDs disambiguate repeated per-subtask case IDs.
+    const fullSignature = failingTCs.map(tc => `${tc.subtaskId ?? ''}:${tc.id ?? '?'}:${tc.status}`).sort();
+    const suffix = failingTCs.length > 5 || failingTCs.some(tc => tc.subtaskId !== undefined)
+        ? `#${(0, crypto_1.createHash)('sha256').update(JSON.stringify(fullSignature)).digest('hex').slice(0, 16)}` : '';
+    return `${STATUS_LABEL[record.status] || record.status}:tests[${failingTests}${failingTCs.length > 5 ? `...+${failingTCs.length - 5}` : ''}]${suffix}`;
 }
 function normalizeCompilerError(msg) {
     const lines = msg.split('\n').filter(l => l.trim());
@@ -57,13 +63,24 @@ function analyzeErrorClusters(records, pids, totalStudents, pidTitles) {
         const pidRecords = recordsByPid.get(pid) ?? [];
         // Last-write-wins: records must be sorted by judgeAt ascending,
         // so the final set() per uid is the student's latest submission signature.
-        const studentSignatures = new Map();
+        const latestRecords = new Map();
+        const resolvedUids = new Set();
         for (const rec of pidRecords) {
-            const sig = errorSignature(rec);
-            studentSignatures.set(rec.uid, sig);
+            latestRecords.set(rec.uid, rec);
+            if (rec.status === 1)
+                resolvedUids.add(rec.uid);
         }
         const sigStudents = new Map();
-        for (const [uid, sig] of studentSignatures) {
+        for (const [uid, rec] of latestRecords) {
+            if (resolvedUids.has(uid) || !submissionEvidence_1.ERROR_STATUSES.has(rec.status))
+                continue;
+            // Missing judge detail is not evidence of a shared failing location.
+            const hasDetail = rec.status === 7
+                ? rec.compilerTexts?.some(t => t.trim())
+                : rec.testCases?.some(tc => submissionEvidence_1.ERROR_STATUSES.has(tc.status) && (tc.id !== undefined || tc.subtaskId !== undefined));
+            if (!hasDetail)
+                continue;
+            const sig = errorSignature(rec);
             if (!sigStudents.has(sig))
                 sigStudents.set(sig, new Set());
             sigStudents.get(sig).add(uid);
@@ -75,13 +92,14 @@ function analyzeErrorClusters(records, pids, totalStudents, pidTitles) {
             counter++;
             const statusLabel = sig.split(':')[0];
             const pct = Math.round((uids.size / totalStudents) * 100);
-            const sampleRecord = pidRecords.find(r => uids.has(r.uid) && r.code);
+            const matchingRecords = [...uids].map(uid => latestRecords.get(uid));
             findings.push({
                 id: `finding_errorCluster_${counter}`,
                 dimension: 'errorCluster',
                 severity: uids.size >= totalStudents * 0.5 ? 'high' : 'medium',
-                title: `${pidTitles?.get(pid) || `题目 ${pid}`}：${pct}% 学生遇到相同错误模式 (${statusLabel})`,
+                title: `${pidTitles?.get(pid) || `题目 ${pid}`}：${pct}% 学生尚未通过，最近提交的判题特征相同 (${statusLabel})`,
                 errorSignature: sig,
+                errorStatus: matchingRecords[0].status,
                 evidence: {
                     affectedStudents: Array.from(uids),
                     affectedProblems: [pid],
@@ -90,7 +108,7 @@ function analyzeErrorClusters(records, pids, totalStudents, pidTitles) {
                         totalStudents,
                         percentage: pct,
                     },
-                    samples: sampleRecord?.code ? { code: [sampleRecord.code.slice(0, 500)] } : undefined,
+                    samples: (0, submissionEvidence_1.errorCodeSamples)(matchingRecords),
                 },
                 needsDeepDive: true,
             });

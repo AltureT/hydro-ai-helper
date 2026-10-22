@@ -1,3 +1,6 @@
+import { Icon } from '../components/Icon';
+import { getLearningSummaryPreview, reportMarkdownStyles } from '../utils/reportMarkdown';
+import { batchSummaryStyles } from './batchSummaryStyles';
 /**
  * BatchSummaryPanel — teacher-facing UI for AI batch learning summary generation.
  * Injects into homework/contest scoreboard pages automatically.
@@ -6,7 +9,7 @@
 
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { i18n } from '../utils/i18n';
-import { COLORS, SPACING, RADIUS, SHADOWS, LAYOUT, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
+import { COLORS, SPACING, RADIUS, SHADOWS, getButtonStyle, getAlertStyle, markdownTheme } from '../utils/styles';
 
 /** i18n with hardcoded Chinese fallback for keys that may not yet be in lang-*.js */
 const I18N_FALLBACK: Record<string, string> = {
@@ -61,11 +64,20 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
 }) => {
   const {
     state, startGeneration, stopGeneration, continueGeneration,
-    retryFailed, loadLatest, publishAll, retryStudent, cleanup,
+    retryFailed, loadLatest, publishAll, retryStudent, cleanup, updateSummary,
   } = useBatchSummary(domainId);
 
+  const mutationLock = useRef(false);
+  const [isMutating, setIsMutating] = useState(false);
+  const withMutation = useCallback(async (action: () => Promise<void>) => {
+    if (mutationLock.current || state.isGenerating) throw new Error(i18n('ai_helper_batch_summary_action_failed'));
+    mutationLock.current = true;
+    setIsMutating(true);
+    try { await action(); } finally { mutationLock.current = false; setIsMutating(false); }
+  }, [state.isGenerating]);
+
   const [expandedUsers, setExpandedUsers] = useState<Set<number>>(new Set());
-  const [allExpanded, setAllExpanded] = useState(false);
+  const allExpanded = state.summaries.size > 0 && [...state.summaries.keys()].every(userId => expandedUsers.has(userId));
 
   // ── Mount: auto-load existing results ──────────────────────────────────────
 
@@ -88,11 +100,9 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   const toggleExpandAll = useCallback(() => {
     if (allExpanded) {
       setExpandedUsers(new Set());
-      setAllExpanded(false);
     } else {
       const all = new Set<number>(state.summaries.keys());
       setExpandedUsers(all);
-      setAllExpanded(true);
     }
   }, [allExpanded, state.summaries]);
 
@@ -111,6 +121,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   // ── Generate handler ────────────────────────────────────────────────────────
 
   const handleGenerate = useCallback(async (mode?: 'new_only' | 'regenerate') => {
+    if (mutationLock.current) return;
     if (mode === 'regenerate') {
       const confirmed = window.confirm(t('ai_helper_batch_summary_regenerate_all_confirm'));
       if (!confirmed) return;
@@ -183,7 +194,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
     if (failedCount > 0 && state.jobStatus !== 'stopped') {
       return {
         label: t('ai_helper_batch_summary_retry_n_failed').replace('{0}', String(failedCount)),
-        action: retryFailed,
+        action: () => { if (!mutationLock.current) retryFailed(); },
         variant: 'danger',
       };
     }
@@ -191,7 +202,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
     if (state.jobStatus === 'stopped' && hasPending) {
       return {
         label: t('ai_helper_batch_summary_continue'),
-        action: continueGeneration,
+        action: () => { if (!mutationLock.current) continueGeneration(); },
         variant: 'primary',
       };
     }
@@ -227,8 +238,9 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   // ── Publish all ─────────────────────────────────────────────────────────────
 
   const handlePublishAll = useCallback(() => {
-    publishAll();
-  }, [publishAll]);
+    if (mutationLock.current || state.isGenerating) return;
+    withMutation(publishAll);
+  }, [publishAll, withMutation, state.isGenerating]);
 
   // Publish outcome notice — warns when publishAll skipped failed/pending
   // students (they would otherwise see a blank tab with no one the wiser).
@@ -250,52 +262,27 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
 
   // ── Publish single ──────────────────────────────────────────────────────────
 
-  const handlePublishOne = useCallback(async (userId: number) => {
-    if (!state.jobId) return;
-    try {
-      const res = await fetch(buildUrl(domainId, `/${state.jobId}/publish`), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'XMLHttpRequest',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ userId }),
-      });
-      if (res.ok) {
-        // Update local state
-        const prev = state.summaries.get(userId);
-        if (prev) {
-          state.summaries.set(userId, { ...prev, publishStatus: 'published' });
-        }
-      }
-    } catch (err) {
-      console.error('[BatchSummaryPanel] publish error:', err);
-    }
-  }, [domainId, state.jobId, state.summaries]);
+  const handlePublishOne = useCallback((userId: number) => withMutation(async () => {
+    if (!state.jobId) throw new Error(i18n('ai_helper_batch_summary_action_failed'));
+    const res = await fetch(buildUrl(domainId, `/${state.jobId}/publish`), {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ userId }),
+    });
+    if (!res.ok) throw new Error(i18n('ai_helper_batch_summary_action_failed'));
+    updateSummary(userId, { publishStatus: 'published' }, state.jobId);
+  }), [domainId, state.jobId, updateSummary, withMutation]);
 
-  // ── Edit ────────────────────────────────────────────────────────────────────
-
-  const handleEdit = useCallback(async (userId: number, newSummary: string) => {
-    if (!state.jobId) return;
-    try {
-      const res = await fetch(buildUrl(domainId, `/${state.jobId}/edit/${userId}`), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'XMLHttpRequest',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ summary: newSummary }),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        console.error('[BatchSummaryPanel] edit failed:', errData.error);
-      }
-    } catch (err) {
-      console.error('[BatchSummaryPanel] edit error:', err);
-    }
-  }, [domainId, state.jobId]);
+  const handleEdit = useCallback((userId: number, newSummary: string) => withMutation(async () => {
+    if (!state.jobId) throw new Error(i18n('ai_helper_batch_summary_action_failed'));
+    const res = await fetch(buildUrl(domainId, `/${state.jobId}/edit/${userId}`), {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ summary: newSummary }),
+    });
+    if (!res.ok) throw new Error(i18n('ai_helper_batch_summary_action_failed'));
+    updateSummary(userId, { summary: newSummary }, state.jobId);
+  }), [domainId, state.jobId, updateSummary, withMutation]);
 
   // ─── Render ──────────────────────────────────────────────────────────────────
 
@@ -308,69 +295,41 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
   }
 
   return (
-    <div style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
-      <style>{markdownTheme}</style>
+    <div className="ai-batch-summary ai-report-content">
+      <style>{markdownTheme + reportMarkdownStyles + batchSummaryStyles}</style>
 
       {isTeacher && (
         <>
-          {/* Status bar */}
-          {state.jobId && !state.isGenerating && (
-            <div style={{
-              display: 'flex', alignItems: 'center', flexWrap: 'wrap',
-              gap: SPACING.base, marginBottom: SPACING.sm,
-              fontSize: '13px', color: COLORS.textMuted,
-            }}>
-              {completedCount > 0 && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: COLORS.primary, display: 'inline-block' }} />
-                  {t('ai_helper_batch_summary_stats_completed')} {completedCount}
-                </span>
-              )}
-              {draftCount > 0 && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: COLORS.warningText, display: 'inline-block' }} />
-                  {t('ai_helper_batch_summary_stats_draft')} {draftCount}
-                </span>
-              )}
-              {publishedCount > 0 && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: COLORS.successText, display: 'inline-block' }} />
-                  {t('ai_helper_batch_summary_stats_published')} {publishedCount}
-                </span>
-              )}
-              {failedCount > 0 && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: COLORS.errorText, display: 'inline-block' }} />
-                  {t('ai_helper_batch_summary_stats_failed')} {failedCount}
-                </span>
-              )}
-              {state.newStudentCount > 0 && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: COLORS.textMuted, display: 'inline-block' }} />
-                  {t('ai_helper_batch_summary_stats_not_generated')} {state.newStudentCount}
-                </span>
-              )}
+          {state.jobId && (
+            <div className="batch-overview">
+              <div className="batch-generation">
+                <span>{i18n('ai_helper_batch_summary_generated_count', completedCount, state.total)}</span>
+                <span className="batch-subtle">{i18n('ai_helper_batch_summary_remaining_count', Math.max(pendingCount, state.total - completedCount - failedCount, 0))}</span>
+                {failedCount > 0 && <span className="batch-failed">{t('ai_helper_batch_summary_stats_failed')} {failedCount}</span>}
+                {state.newStudentCount > 0 && <span className="batch-subtle">{t('ai_helper_batch_summary_stats_not_generated')} {state.newStudentCount}</span>}
+              </div>
+              <div className="batch-publication">
+                <span><Icon name="document" size={14} /> {i18n('ai_helper_batch_summary_awaiting_review')} <strong>{draftCount}</strong></span>
+                <span><Icon name="checkCircle" size={14} /> {t('ai_helper_batch_summary_stats_published')} <strong>{publishedCount}</strong></span>
+              </div>
             </div>
           )}
 
           {/* Action bar */}
-          <div style={{
-            display: 'flex', alignItems: 'center', flexWrap: 'wrap',
-            gap: SPACING.sm, marginBottom: SPACING.base,
-          }}>
+          <div className="batch-toolbar">
             {state.summaries.size > 0 && (
               <button onClick={toggleExpandAll} style={getButtonStyle('secondary')}>
-                {allExpanded ? i18n('ai_helper_batch_summary_collapse_all') : i18n('ai_helper_batch_summary_expand_all')}
+                <Icon name={allExpanded ? 'chevronUp' : 'chevronDown'} /> {allExpanded ? i18n('ai_helper_batch_summary_collapse_all') : i18n('ai_helper_batch_summary_expand_all')}
               </button>
             )}
             {state.jobId && (
               <button onClick={handleExportCsv} style={getButtonStyle('secondary')}>
-                {i18n('ai_helper_batch_summary_export_csv')}
+                <Icon name="download" /> {i18n('ai_helper_batch_summary_export_csv')}
               </button>
             )}
             {draftCount > 0 && !state.isGenerating && (
-              <button onClick={handlePublishAll} style={getButtonStyle('secondary')}>
-                {t('ai_helper_batch_summary_publish_n_drafts').replace('{0}', String(draftCount))}
+              <button disabled={isMutating} onClick={handlePublishAll} style={getButtonStyle('secondary')}>
+                <Icon name="upload" /> {t('ai_helper_batch_summary_publish_n_drafts').replace('{0}', String(draftCount))}
               </button>
             )}
 
@@ -378,14 +337,15 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
 
             {state.isGenerating && (
               <button onClick={stopGeneration} style={{ ...getButtonStyle('danger'), display: 'flex', alignItems: 'center', gap: '4px' }}>
-                {t('ai_helper_batch_summary_stop')}
+                <Icon name="pause" /> {t('ai_helper_batch_summary_stop')}
               </button>
             )}
 
             {!state.isGenerating && (
-              <div ref={dropdownRef} style={{ position: 'relative', display: 'inline-flex' }}>
+              <div ref={dropdownRef} onKeyDown={event => { if (event.key === 'Escape') { setDropdownOpen(false); dropdownRef.current?.querySelector<HTMLButtonElement>('[aria-expanded]')?.focus(); } }} style={{ position: 'relative', display: 'inline-flex' }}>
                 {smartButton && (
                   <button
+                    disabled={isMutating}
                     onClick={smartButton.action}
                     style={{
                       ...getButtonStyle(smartButton.variant),
@@ -398,6 +358,10 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                 )}
                 {showDropdown && (
                   <button
+                    disabled={isMutating}
+                    aria-label={i18n('ai_helper_batch_summary_more_actions')}
+                    aria-expanded={dropdownOpen}
+                    onKeyDown={event => { if (event.key === 'Escape') setDropdownOpen(false); }}
                     onClick={() => setDropdownOpen(!dropdownOpen)}
                     style={{
                       ...getButtonStyle(smartButton ? smartButton.variant : 'secondary'),
@@ -408,7 +372,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                       minWidth: 'auto',
                     }}
                   >
-                    ▾
+                    <Icon name="chevronDown" />
                   </button>
                 )}
                 {dropdownOpen && (
@@ -419,6 +383,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
                     minWidth: '160px', overflow: 'hidden',
                   }}>
                     <button
+                      disabled={isMutating}
                       onClick={() => { setDropdownOpen(false); handleGenerate('regenerate'); }}
                       style={{
                         display: 'block', width: '100%', padding: `${SPACING.sm} ${SPACING.base}`,
@@ -466,11 +431,11 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
       {/* Stopped notice */}
       {!state.isGenerating && state.jobStatus === 'stopped' && hasPending && (
         <div style={{
-          backgroundColor: COLORS.warningBg, border: `1px solid ${COLORS.warningBorder}`,
+          backgroundColor: COLORS.bgPage, border: `1px solid ${COLORS.border}`,
           borderRadius: RADIUS.md, padding: SPACING.base, marginBottom: SPACING.base,
-          fontSize: '13px', color: COLORS.warningText,
+          fontSize: '13px', color: COLORS.textSecondary,
         }}>
-          {t('ai_helper_batch_summary_stopped_notice')}
+          <Icon name="pause" /> {t('ai_helper_batch_summary_stopped_notice')}
         </div>
       )}
 
@@ -490,79 +455,44 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
 
       {/* Summary cards */}
       {state.summaries.size > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.sm }}>
+        <div className="batch-student-list">
           {Array.from(state.summaries.entries()).map(([userId, data]) => {
             const isExpanded = expandedUsers.has(userId);
+            const statusLabel = data.status === 'failed' ? i18n('ai_helper_batch_summary_failed')
+              : data.status === 'generating' ? i18n('ai_helper_batch_summary_generating')
+                : data.status === 'pending' ? t('ai_helper_batch_summary_pending')
+                : data.publishStatus === 'published' ? i18n('ai_helper_batch_summary_published')
+                  : i18n('ai_helper_batch_summary_draft');
+            const preview = getLearningSummaryPreview(data.summary);
             return (
-              <div key={userId} style={{
-                border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.md,
-                boxShadow: SHADOWS.sm, overflow: 'hidden', backgroundColor: COLORS.bgCard,
-              }}>
-                <div
+              <article key={userId} className="batch-student-row" data-expanded={isExpanded}>
+                <button
+                  type="button" className="batch-student-toggle"
+                  aria-expanded={isExpanded} aria-controls={`batch-student-${userId}`}
                   onClick={() => toggleUser(userId)}
-                  style={{
-                    display: 'flex', alignItems: 'center',
-                    padding: `${SPACING.sm} ${SPACING.base}`, cursor: 'pointer',
-                    borderBottom: isExpanded ? `1px solid ${COLORS.border}` : 'none',
-                    userSelect: 'none', gap: SPACING.sm,
-                    backgroundColor: isExpanded ? COLORS.bgPage : COLORS.bgCard,
-                  }}
                 >
-                  <span style={{
-                    display: 'inline-block', width: 0, height: 0, flexShrink: 0,
-                    borderTop: '5px solid transparent',
-                    borderBottom: '5px solid transparent',
-                    borderLeft: `6px solid ${COLORS.textMuted}`,
-                    transition: 'transform 150ms',
-                    transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
-                    marginLeft: '2px',
-                  }} />
-                  <span style={{
-                    fontWeight: 600, fontSize: '14px', color: COLORS.textPrimary,
-                    flex: 1, minWidth: 0, overflow: 'hidden',
-                    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>
-                    {data.userName || `User #${userId}`}
+                  <Icon name={isExpanded ? 'chevronDown' : 'chevronRight'} />
+                  <span className="batch-student-identity">
+                    <strong>{data.userName || `User #${userId}`}</strong>
+                    {!isExpanded && preview && <span className="batch-student-preview">{preview}</span>}
                   </span>
-                  <span style={{
-                    fontSize: '12px', fontWeight: 500, padding: `2px ${SPACING.sm}`,
-                    borderRadius: RADIUS.full, flexShrink: 0,
-                    color: data.status === 'failed' ? COLORS.errorText
-                      : data.status === 'pending' ? COLORS.textMuted
-                        : data.publishStatus === 'published' ? COLORS.successText : COLORS.warningText,
-                    backgroundColor: data.status === 'failed' ? COLORS.errorBg
-                      : data.status === 'pending' ? COLORS.bgPage
-                        : data.publishStatus === 'published' ? COLORS.successBg : COLORS.warningBg,
-                    border: `1px solid ${
-                      data.status === 'failed' ? COLORS.errorBorder
-                        : data.status === 'pending' ? COLORS.border
-                          : data.publishStatus === 'published' ? COLORS.successBorder : COLORS.warningBorder
-                    }`,
-                  }}>
-                    {data.status === 'failed' ? i18n('ai_helper_batch_summary_failed')
-                      : data.status === 'pending' ? t('ai_helper_batch_summary_pending')
-                        : data.publishStatus === 'published' ? i18n('ai_helper_batch_summary_published')
-                          : i18n('ai_helper_batch_summary_draft')}
-                  </span>
-                </div>
+                  <span className="batch-status" data-status={data.status === 'completed' ? data.publishStatus : data.status}>{statusLabel}</span>
+                </button>
                 {isExpanded && (
-                  <div style={{ padding: SPACING.base }}>
+                  <div id={`batch-student-${userId}`} className="batch-student-body">
                     <SummaryCard
+                      embedded actionsDisabled={isMutating || state.isGenerating}
                       userId={userId}
                       userName={data.userName || `User #${userId}`}
-                      status={data.status}
-                      publishStatus={data.publishStatus}
-                      summary={data.summary}
-                      error={data.error}
-                      domainId={domainId}
-                      isTeacher={isTeacher}
-                      onRetry={() => retryStudent(userId)}
+                      status={data.status} publishStatus={data.publishStatus}
+                      summary={data.summary} error={data.error} domainId={domainId}
+                      isTeacher={isTeacher} onRetry={() => retryStudent(userId)}
                       onPublish={() => handlePublishOne(userId)}
                       onEdit={(newSummary) => handleEdit(userId, newSummary)}
                     />
                   </div>
                 )}
-              </div>
+              </article>
             );
           })}
         </div>

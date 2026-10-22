@@ -140,8 +140,8 @@ describe('buildMainPrompt', () => {
     const input = makeInput();
     const { system } = buildMainPrompt(input);
     expect(system).toContain('错误模式');
-    expect(system).toContain('持续努力型');
-    expect(system).toContain('受挫放弃型');
+    expect(system).toContain('跨时段继续尝试');
+    expect(system).toContain('密集提交后暂无新记录');
   });
 
   it('should not request the removed p0_action_plan section (deduplicated vs finding cards)', () => {
@@ -198,6 +198,18 @@ describe('buildMainPrompt', () => {
     const input = makeInput({ problemContexts: undefined });
     const { user } = buildMainPrompt(input);
     expect(user).not.toContain('## 题目内容');
+  });
+
+  it('marks missing constraints when a problem statement is truncated', () => {
+    const { user } = buildMainPrompt(makeInput({
+      problemContexts: [
+        { pid: 101, title: 'Long statement', content: 'x'.repeat(500) + 'n >= 1' },
+        { pid: 102, title: 'Short statement', content: 'n >= 1' },
+      ],
+    }));
+    expect(user).toContain('x'.repeat(500) + '\n[题目内容已截断，未展示部分的约束不可假定]');
+    expect(user).toContain('### 102. Short statement\nn >= 1');
+    expect(user.match(/题目内容已截断/g)).toHaveLength(1);
   });
 
   it('should include output_sections with p1_behavior_intervention when behaviorSummary has data', () => {
@@ -307,19 +319,19 @@ describe('buildDeepDivePrompt', () => {
     expect(user).not.toContain('AI对话样本');
   });
 
-  it('system prompt should contain "布卢姆"', () => {
+  it('system prompt requires evidence instead of inferring cognitive levels', () => {
     const finding = makeFinding();
     const { system } = buildDeepDivePrompt(finding, '题目描述');
 
-    expect(system).toContain('布卢姆');
+    expect(system).toContain('不推测学生内心、认知层级');
   });
 
   it('system prompt should contain scaffolding and edge case instructions', () => {
     const finding = makeFinding();
     const { system } = buildDeepDivePrompt(finding, '题目描述');
 
-    expect(system).toContain('Scaffolding');
-    expect(system).toContain('过度依赖');
+    expect(system).toContain('下一步课堂动作');
+    expect(system).toContain('不给学生贴标签');
   });
 });
 
@@ -343,7 +355,8 @@ describe('TeachingSuggestionService', () => {
     const result = await service.generateOverallSuggestion(input);
 
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    const [messages, systemPrompt, options] = aiClient.chat.mock.calls[0];
+    expect(options).toEqual({ contentMode: 'report', maxTokens: null });
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toContain('第一次周赛');
     expect(systemPrompt).toContain('P0');
@@ -360,9 +373,10 @@ describe('TeachingSuggestionService', () => {
     const result = await service.generateDeepDive(finding, '题目内容示例');
 
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    const [messages, systemPrompt, options] = aiClient.chat.mock.calls[0];
+    expect(options).toEqual({ contentMode: 'report', maxTokens: null });
     expect(messages[0].content).toContain('题目内容示例');
-    expect(systemPrompt).toContain('布卢姆');
+    expect(systemPrompt).toContain('不推测学生内心、认知层级');
     expect(result.text).toBe('### 认知障碍诊断\n应用层障碍。');
     expect(result.tokenUsage.promptTokens).toBe(100);
     expect(result.tokenUsage.completionTokens).toBe(50);
@@ -399,13 +413,25 @@ describe('TeachingSuggestionService', () => {
     const result = await service.generateFillInExercise(input);
 
     expect(aiClient.chat).toHaveBeenCalledTimes(1);
-    const [messages, systemPrompt] = aiClient.chat.mock.calls[0];
+    const [messages, systemPrompt, options] = aiClient.chat.mock.calls[0];
+    expect(options).toEqual({ contentMode: 'report', maxTokens: null });
     expect(messages[0].content).toContain('数组求和');
     expect(messages[0].content).toContain('int main()');
     expect(messages[0].content).toContain('数组越界错误');
     expect(systemPrompt).toContain('挖空练习');
     expect(systemPrompt).toContain('建议挖空点说明');
     expect(result.text).toContain('课后巩固');
+  });
+
+  it('normalizes provider formatting and Python placeholders before returning homework', async () => {
+    const aiClient = makeAiClient(String.raw`\<think>(thinking…)\</think>###&#x20;课后巩固作业` + '\n```\nfor i in range(/* [空1] _____ (提示：次数) */):\n    pass\n```');
+    const service = new TeachingSuggestionService(aiClient);
+    const result = await service.generateFillInExercise({ candidates: [{
+      pid: 1, title: 'Loop', lang: 'py.py3', code: 'for i in range(3):\n    pass', isFillInProblem: false,
+    }], relatedFindings: [] });
+    expect(result.text).toContain('### 课后巩固作业');
+    expect(result.text).toContain('for i in range(________):');
+    expect(result.text).not.toMatch(/thinking|\/\*/);
   });
 });
 
@@ -438,12 +464,21 @@ describe('buildFillInPrompt', () => {
       candidates: [{
         pid: 102, title: '填空题', lang: 'python',
         code: 'x = ___', isFillInProblem: true,
+        sourceTemplate: 'x = ___\nprint(x)',
       }],
       relatedFindings: [],
     };
     const { user } = buildFillInPrompt(input);
 
     expect(user).toContain('是（避开模板代码）');
+    expect(user).toContain('原题模板（仅明确空位对应的补全区域允许挖空）');
+    expect(user).toContain('x = ___\nprint(x)');
+  });
+
+  it('rejects fill-in candidates without a verifiable original template', () => {
+    expect(() => buildFillInPrompt({ candidates: [{
+      pid: 1, title: 'Ambiguous', lang: 'python', code: 'print(1)', isFillInProblem: true,
+    }], relatedFindings: [] })).toThrow('explicit source template');
   });
 
   it('should handle empty relatedFindings', () => {
@@ -459,4 +494,13 @@ describe('buildFillInPrompt', () => {
     expect(user).not.toContain('相关错误模式');
     expect(user).toContain('求和');
   });
+});
+
+
+it('uses a practice objective rather than an invented misconception for signature-only exercise inputs', () => {
+  const prompt = buildFillInPrompt({ candidates: [{ pid: 1, title: 'Synthetic', lang: 'python', code: 'print(1)', isFillInProblem: false }],
+    relatedFindings: [{ title: 'Historical WA', errorSignature: 'WA:tests[1]', affectedCount: 6 }] });
+  expect(prompt.system).not.toContain('针对什么知识盲点');
+  expect(prompt.system).toContain('训练的代码操作或推理步骤');
+  expect(prompt.system).toContain('不推测学生错误');
 });

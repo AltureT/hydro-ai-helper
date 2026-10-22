@@ -1,3 +1,5 @@
+import { Icon } from '../components/Icon';
+import { FindingCodeSample } from './FindingCodeSample';
 /**
  * TeachingSummaryPanel — teacher-facing UI for AI teaching summary generation.
  * Injects into homework/contest scoreboard pages for whole-class analysis.
@@ -10,11 +12,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { i18n } from '../utils/i18n';
 import {
-  COLORS, SPACING, RADIUS, SHADOWS, TRANSITIONS,
+  COLORS, SPACING, RADIUS,
   getButtonStyle, cardStyle, markdownTheme, LAYOUT,
 } from '../utils/styles';
-import { renderMarkdown } from '../utils/markdown';
-import { useTeachingSummary, TeachingFinding, TeachingSummary } from './useTeachingSummary';
+import { renderReportMarkdown as renderMarkdown, reportMarkdownStyles } from '../utils/reportMarkdown';
+import { useTeachingSummary, TeachingFinding } from './useTeachingSummary';
+import { parseReviewActions, prepareStudentHomework } from './reportContent';
+import { teachingSummaryStyles } from './teachingSummaryStyles';
+import { normalizeHomeworkMarkdown, normalizeReportMarkdown } from '../../src/utils/reportMarkdown';
 
 // ─── i18n with fallback ───────────────────────────────────────────────────────
 
@@ -50,7 +55,6 @@ const I18N_FALLBACK: Record<string, string> = {
   ai_helper_teaching_summary_feedback_helpful: '有帮助',
   ai_helper_teaching_summary_feedback_not_helpful: '没帮助',
   ai_helper_teaching_summary_feedback_thanks: '感谢反馈！',
-  ai_helper_teaching_summary_copy_warning: '共性错误代码示例：',
   ai_helper_teaching_summary_failed: '生成失败，请重试',
   ai_helper_teaching_summary_empty: '暂无教学总结，点击上方按钮生成',
   ai_helper_teaching_summary_generating_notice: '正在分析学生学习数据，请稍候...',
@@ -73,12 +77,12 @@ const DIMENSION_LABELS: Record<string, string> = {
   errorCluster: '错误聚类',
   comprehension: '题意理解',
   strategy: '学习策略',
-  atRisk: '高危预警',
-  difficulty: '难度异常',
-  progress: '进步趋势',
-  cognitivePath: '认知路径',
-  aiEffectiveness: 'AI 实效',
-  temporalPattern: '行为模式',
+  atRisk: '完成情况',
+  difficulty: '题目通过情况',
+  progress: '完成情况',
+  cognitivePath: '提交情况',
+  aiEffectiveness: 'AI 使用观察',
+  temporalPattern: '提交观察',
   crossCorrelation: '交叉关联',
 };
 
@@ -89,16 +93,23 @@ const METRIC_LABELS: Record<string, string> = {
   comprehensionPct: '理解类提问占比',
   aiUserCount: 'AI 使用人数',
   nonAiUserCount: '未使用 AI 人数',
-  bruteForceCount: '暴力尝试人数',
+  bruteForceCount: '多次未通过人数',
   heavyUserCount: '高频使用人数',
   jailbreakStudentCount: '越狱学生数',
   totalJailbreaks: '越狱总次数',
   threshold: '阈值',
   errorRate: '错误率',
-  aiPassRate: 'AI 用户通过率',
-  nonAiPassRate: '非 AI 通过率',
+  aiPassRate: 'AI 组已尝试题目通过率',
+  nonAiPassRate: '非 AI 组已尝试题目通过率',
+  aiAcceptedAttempts: 'AI 组通过题次',
+  aiAttemptedPairs: 'AI 组统计题次',
+  nonAiAcceptedAttempts: '非 AI 组通过题次',
+  nonAiAttemptedPairs: '非 AI 组统计题次',
   diff: '差异',
-  sameSignatureCount: '同一错误位学生数',
+  sameSignatureCount: '相同判题特征且尚未通过人数',
+  resolvedCount: '后来已通过人数',
+  unresolvedCount: '仍未通过人数',
+  pendingCount: '待判题或状态待核实人数',
   aiGroupSize: 'AI组人数',
   nonAiGroupSize: '非AI组人数',
   aiACRate: 'AI组通过率',
@@ -115,12 +126,6 @@ const REDUNDANT_METRICS = new Set([
 
 /** 百分比类指标，展示时补 % 号 */
 const PERCENT_METRIC = /rate|pct|percentage/i;
-
-const SEVERITY_COLORS = {
-  high: { bg: '#fef2f2', text: '#b91c1c', border: '#fecaca' },
-  medium: { bg: '#fffbeb', text: '#92400e', border: '#fde68a' },
-  low: { bg: '#f0fdf4', text: '#166534', border: '#bbf7d0' },
-};
 
 /** 学生名单默认展示上限，超出折叠为 +N */
 const MAX_VISIBLE_NAMES = 24;
@@ -139,6 +144,7 @@ export interface ParsedSuggestion {
 }
 
 export function parseSuggestionSections(md: string): ParsedSuggestion {
+  md = normalizeReportMarkdown(md);
   const result: ParsedSuggestion = { rest: [] };
   if (!md || !md.trim()) return result;
 
@@ -211,58 +217,58 @@ const SkeletonBlock: React.FC<{ lines?: number }> = ({ lines = 8 }) => (
 // ─── Section shell ────────────────────────────────────────────────────────────
 
 interface SectionCardProps {
-  icon: string;
   title: string;
-  accentColor?: string;
   headerRight?: React.ReactNode;
   children: React.ReactNode;
 }
 
 const SectionCard: React.FC<SectionCardProps> = ({
-  icon, title, accentColor = COLORS.border, headerRight, children,
+  title, headerRight, children,
 }) => (
-  <div style={{
-    border: `1px solid ${COLORS.border}`,
-    borderLeft: `4px solid ${accentColor}`,
-    borderRadius: RADIUS.md,
-    backgroundColor: COLORS.bgCard,
-    boxShadow: SHADOWS.sm,
-    marginBottom: SPACING.lg,
-    overflow: 'hidden',
-  }}>
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      gap: SPACING.sm,
-      padding: `${SPACING.md} ${SPACING.base}`,
-      borderBottom: `1px solid ${COLORS.border}`,
-      backgroundColor: COLORS.bgPage,
-    }}>
-      <span style={{
-        fontWeight: 600, fontSize: '13px', color: COLORS.textSecondary,
-        letterSpacing: '0.05em',
-      }}>
-        {icon} {title}
-      </span>
+  <section className="report-section">
+    <div className="report-section-header">
+      <h3 className="report-section-title">{title}</h3>
       {headerRight}
     </div>
-    <div style={{ padding: `${SPACING.md} ${SPACING.base}` }}>
+    <div className="report-section-body">
       {children}
     </div>
-  </div>
+  </section>
 );
+
+const ReviewActions: React.FC<{ markdown: string }> = ({ markdown }) => {
+  const actions = parseReviewActions(markdown);
+  if (!actions) return <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(markdown) }} />;
+  return (
+    <ol className="review-actions">
+      {actions.map((item, index) => (
+        <li className="review-action" key={index}>
+          <span className="review-priority">{item.priority}</span>
+          <div>
+            <div className="markdown-body report-reading review-action-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.action) }} />
+            <div className="review-evidence">
+              <span>{t('ai_helper_teaching_summary_evidence_label')}</span>
+              <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.problem) }} />
+            </div>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+};
 
 // ─── FindingCard subcomponent ─────────────────────────────────────────────────
 
 interface FindingCardProps {
+  domainId: string;
   finding: TeachingFinding;
   deepDiveText?: string;
   studentNames?: Record<string, string>;
 }
 
-const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studentNames }) => {
+const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studentNames, domainId }) => {
   const [expanded, setExpanded] = useState(false);
   const [showAllNames, setShowAllNames] = useState(false);
-  const colors = SEVERITY_COLORS[finding.severity] || SEVERITY_COLORS.low;
   const dimensionLabel = DIMENSION_LABELS[finding.dimension] || finding.dimension;
   const affectedCount = finding.evidence.affectedStudents.length;
 
@@ -288,76 +294,30 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studen
 
   const visibleNames = showAllNames ? names : names.slice(0, MAX_VISIBLE_NAMES);
 
+  const findingSummary = (
+    <>
+      <span style={{ minWidth: 0 }}>
+        <span className="finding-meta">
+          <span>{dimensionLabel}</span>
+          <span>{t('ai_helper_teaching_summary_affected')} {affectedCount} {t('ai_helper_teaching_summary_students')}</span>
+          {finding.severity === 'high' && <span style={{ color: COLORS.warningText }}>{t('ai_helper_teaching_summary_priority_attention')}</span>}
+          {finding.confidence && finding.confidence !== 'high' && (
+            <span>{finding.confidence === 'low' ? '依据有限' : '数据不足'}</span>
+          )}
+        </span>
+        <span className="finding-title">{finding.title}</span>
+      </span>
+      {hasDetails && <span className="finding-expand">{t(expanded ? 'ai_helper_teaching_summary_collapse' : 'ai_helper_teaching_summary_view_details')}</span>}
+    </>
+  );
+
   return (
-    <div style={{
-      backgroundColor: COLORS.bgCard,
-      border: `1px solid ${COLORS.border}`,
-      borderLeft: `3px solid ${colors.text}`,
-      borderRadius: RADIUS.md,
-      marginBottom: SPACING.md,
-      overflow: 'hidden',
-      transition: 'box-shadow 200ms ease',
-    }}>
-      <div
-        onClick={hasDetails ? () => setExpanded(!expanded) : undefined}
-        style={{
-          display: 'flex', alignItems: 'center', gap: SPACING.sm,
-          padding: `${SPACING.md} ${SPACING.base}`,
-          cursor: hasDetails ? 'pointer' : 'default', userSelect: 'none',
-        }}
-      >
-        <span style={{
-          fontSize: '11px', fontWeight: 600, padding: '2px 8px',
-          borderRadius: RADIUS.sm,
-          backgroundColor: colors.bg,
-          border: `1px solid ${colors.border}`,
-          color: colors.text,
-          flexShrink: 0,
-          letterSpacing: '0.02em',
-        }}>
-          {dimensionLabel}
-        </span>
-
-        {finding.confidence && finding.confidence !== 'high' && (
-          <span style={{
-            fontSize: '10px', fontWeight: 500, padding: '1px 6px',
-            borderRadius: RADIUS.sm,
-            backgroundColor: finding.confidence === 'low' ? '#fffbeb' : '#fef2f2',
-            border: `1px solid ${finding.confidence === 'low' ? '#fde68a' : '#fecaca'}`,
-            color: finding.confidence === 'low' ? '#92400e' : '#991b1b',
-            flexShrink: 0,
-          }}>
-            {finding.confidence === 'low' ? '低置信' : '数据不足'}
-          </span>
-        )}
-
-        <span style={{
-          flex: 1, fontSize: '14px', fontWeight: 500,
-          color: COLORS.textPrimary, minWidth: 0,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>
-          {finding.title}
-        </span>
-
-        <span style={{
-          fontSize: '12px', color: COLORS.textMuted, flexShrink: 0,
-          padding: '2px 8px',
-          backgroundColor: COLORS.bgPage,
-          borderRadius: RADIUS.full,
-        }}>
-          {t('ai_helper_teaching_summary_affected')} {affectedCount} {t('ai_helper_teaching_summary_students')}
-        </span>
-
-        {hasDetails && (
-          <span style={{
-            display: 'inline-block', width: '16px', height: '16px', flexShrink: 0,
-            textAlign: 'center', lineHeight: '16px', fontSize: '12px',
-            color: COLORS.textMuted,
-            transition: 'transform 200ms ease',
-            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-          }}>▶</span>
-        )}
-      </div>
+    <div className="finding-row">
+      {hasDetails ? (
+        <button type="button" className="finding-toggle" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+          {findingSummary}
+        </button>
+      ) : <div className="finding-toggle">{findingSummary}</div>}
 
       {expanded && hasDetails && (
         <div style={{
@@ -371,7 +331,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studen
               marginBottom: SPACING.md,
               padding: `${SPACING.sm} ${SPACING.md}`,
               backgroundColor: COLORS.bgPage,
-              borderLeft: `3px solid ${COLORS.textMuted}`,
+              borderLeft: `3px solid ${COLORS.secondary}`,
               borderRadius: RADIUS.sm,
             }}>
               {finding.supplements.map((s, i) => (
@@ -393,26 +353,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studen
             />
           )}
 
-          {/* 典型错误代码 */}
-          {codeSample && (
-            <div style={{ marginTop: SPACING.md }}>
-              <div style={{
-                fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary,
-                marginBottom: SPACING.sm, letterSpacing: '0.02em',
-              }}>
-                {t('ai_helper_teaching_summary_copy_warning')}
-              </div>
-              <pre style={{
-                margin: 0, fontSize: '13px', overflowX: 'auto',
-                backgroundColor: '#1e293b', borderRadius: RADIUS.md,
-                padding: SPACING.base, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                color: '#e2e8f0', lineHeight: 1.6,
-                fontFamily: "'SFMono-Regular', 'Menlo', 'Consolas', monospace",
-              }}>
-                {codeSample}
-              </pre>
-            </div>
-          )}
+          {codeSample && <FindingCodeSample finding={finding} domainId={domainId} />}
 
           {/* 涉及学生名单 — 教师可据此点名辅导 */}
           {names.length > 0 && (
@@ -459,7 +400,7 @@ const FindingCard: React.FC<FindingCardProps> = ({ finding, deepDiveText, studen
               marginTop: SPACING.md,
             }}>
               {extraMetrics.map(([key, val]) => (
-                <span key={key} style={{ fontSize: '12px', color: COLORS.textMuted }}>
+                <span key={key} style={{ fontSize: '12px', color: COLORS.secondary }}>
                   {METRIC_LABELS[key] || key}:{' '}
                   <strong style={{ color: COLORS.textSecondary }}>
                     {typeof val === 'number' ? (val % 1 === 0 ? val : val.toFixed(2)) : val}
@@ -492,10 +433,10 @@ const OverviewBar: React.FC<{ items: OverviewItem[] }> = ({ items }) => (
   }}>
     {items.map(({ label, value, highlight, positive }) => (
       <span key={label} style={{ display: 'inline-flex', alignItems: 'baseline', gap: '4px' }}>
-        <span style={{ fontSize: '12px', color: COLORS.textMuted }}>{label}</span>
+        <span style={{ fontSize: '13px', color: COLORS.textSecondary }}>{label}</span>
         <span style={{
           fontSize: '18px', fontWeight: 700,
-          color: highlight ? COLORS.error : positive ? COLORS.hydroGreenDark : COLORS.textPrimary,
+          color: highlight ? COLORS.warningText : positive ? COLORS.successText : COLORS.textPrimary,
         }}>
           {value}
         </span>
@@ -518,8 +459,8 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
   const [teachingFocus, setTeachingFocus] = useState('');
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
-  const [fullReportCollapsed, setFullReportCollapsed] = useState(true);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [homeworkAudience, setHomeworkAudience] = useState<'student' | 'teacher'>('student');
 
   useEffect(() => {
     fetchSummary();
@@ -536,12 +477,12 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   }, [summary?.findings?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleGenerate = useCallback(async (regenerate?: boolean) => {
-    if (regenerate) {
+    if (regenerate && summary?.status === 'completed') {
       const confirmed = window.confirm('将重新生成教学总结，旧数据将被覆盖。确认继续？');
       if (!confirmed) return;
     }
-    await generate(teachingFocus || undefined, regenerate);
-  }, [generate, teachingFocus]);
+    await generate(teachingFocus || summary?.teachingFocus || undefined, regenerate);
+  }, [generate, teachingFocus, summary?.status, summary?.teachingFocus]);
 
   const handleFeedback = useCallback(async (rating: 'up' | 'down') => {
     if (!summary) return;
@@ -553,7 +494,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
   if (loading && !summary) {
     return (
-      <div style={{ textAlign: 'center', padding: SPACING.xl, color: COLORS.textMuted, fontSize: '14px' }}>
+      <div style={{ textAlign: 'center', padding: SPACING.xl, color: COLORS.secondary, fontSize: '14px' }}>
         {t('ai_helper_teaching_summary_loading')}
       </div>
     );
@@ -588,7 +529,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             borderRadius: RADIUS.md, fontSize: '13px',
             marginBottom: SPACING.base,
           }}>
-            {error}
+            {t(error)}
           </div>
         )}
         <button
@@ -600,7 +541,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
         </button>
         <div style={{
           marginTop: SPACING.base, textAlign: 'center',
-          color: COLORS.textMuted, fontSize: '13px',
+          color: COLORS.secondary, fontSize: '13px',
           border: `2px dashed ${COLORS.border}`, borderRadius: RADIUS.lg,
           padding: SPACING.xl,
         }}>
@@ -628,7 +569,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
           marginBottom: SPACING.base,
         }} />
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-        <div style={{ color: COLORS.textMuted, fontSize: '14px' }}>
+        <div style={{ color: COLORS.secondary, fontSize: '14px' }}>
           {t(summary.progressPhase
             ? `ai_helper_teaching_summary_phase_${summary.progressPhase}`
             : 'ai_helper_teaching_summary_generating_notice')}
@@ -641,22 +582,23 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
   if (summary.status === 'failed') {
     return (
-      <div style={{ ...cardStyle, fontFamily: 'inherit' }}>
-        <style>{markdownTheme}</style>
-        <div style={{ marginBottom: SPACING.base, fontWeight: 600, fontSize: '16px', color: COLORS.textPrimary }}>
-          {t('ai_helper_teaching_summary_title')}
-        </div>
-        <div style={{
-          padding: `${SPACING.sm} ${SPACING.base}`,
-          backgroundColor: COLORS.errorBg, color: COLORS.errorText,
-          borderLeft: `4px solid ${COLORS.errorBorder}`,
-          borderRadius: RADIUS.md, fontSize: '13px', marginBottom: SPACING.base,
-        }}>
-          {t('ai_helper_teaching_summary_failed')}
-        </div>
-        <button onClick={() => handleGenerate(true)} style={getButtonStyle('primary')}>
-          {t('ai_helper_teaching_summary_regenerate')}
-        </button>
+      <div className="ai-teaching-summary ai-report-content" style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
+        <style>{teachingSummaryStyles}</style>
+        <div className="report-failure-header">{t('ai_helper_teaching_summary_title')}</div>
+        <section className="report-failure" aria-labelledby="teaching-report-failure-title" aria-busy={loading}>
+          <div className="report-failure-icon"><Icon name="document" size={24} /></div>
+          <div className="report-failure-body">
+            <h3 id="teaching-report-failure-title">{t('ai_helper_teaching_summary_failure_title')}</h3>
+            <p>{t(summary.errorMessageKey || 'ai_helper_teaching_summary_failure_hint')}</p>
+            <p className="report-note">{t('ai_helper_teaching_summary_retry_hint')}</p>
+            {error && <p role="alert" className="report-failure-error">{t(error)}</p>}
+            <button type="button" onClick={() => handleGenerate(true)} disabled={loading}
+              style={{ ...getButtonStyle('secondary'), display: 'inline-flex', alignItems: 'center', gap: '8px', opacity: loading ? 0.6 : 1 }}>
+              <Icon name="refresh" />
+              {t(loading ? 'ai_helper_teaching_summary_generating' : 'ai_helper_teaching_summary_retry')}
+            </button>
+          </div>
+        </section>
       </div>
     );
   }
@@ -679,17 +621,18 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
   const parsed = parseSuggestionSections(summary.overallSuggestion || '');
   const parsedOk = Boolean(parsed.diagnosis || parsed.reviewList);
-  const homeworkMd = (summary.homeworkText && summary.homeworkText.trim())
+  const homeworkMd = normalizeHomeworkMarkdown((summary.homeworkText && summary.homeworkText.trim())
     ? summary.homeworkText
-    : parsed.homework;
+    : parsed.homework || '');
+  const studentHomework = prepareStudentHomework(homeworkMd || '');
 
   const snapshotDate = summary.dataSnapshotAt
     ? new Date(summary.dataSnapshotAt).toLocaleString('zh-CN', { hour12: false })
     : '';
 
   const handleCopyHomework = async () => {
-    if (!homeworkMd) return;
-    const ok = await copyText(homeworkMd);
+    if (!studentHomework.studentMarkdown) return;
+    const ok = await copyText(studentHomework.studentMarkdown);
     setCopyState(ok ? 'copied' : 'failed');
     setTimeout(() => setCopyState('idle'), 2000);
   };
@@ -744,7 +687,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
                 backgroundColor: 'transparent',
                 color: summary.feedback?.rating === rating
                   ? (rating === 'up' ? COLORS.successText : COLORS.errorText)
-                  : COLORS.textMuted,
+                  : COLORS.secondary,
                 cursor: 'pointer',
               }}
             >
@@ -757,8 +700,9 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
   );
 
   return (
-    <div style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
+    <div className="ai-teaching-summary ai-report-content" style={{ fontFamily: 'inherit', color: COLORS.textPrimary, maxWidth: LAYOUT.contentMaxWidth, margin: '0 auto', width: '100%' }}>
       <style>{markdownTheme}</style>
+      <style>{teachingSummaryStyles + reportMarkdownStyles}</style>
 
       {/* Panel header */}
       <div style={{
@@ -772,7 +716,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             {t('ai_helper_teaching_summary_title')}
           </div>
           {snapshotDate && (
-            <div style={{ fontSize: '12px', color: COLORS.textMuted, marginTop: '4px' }}>
+            <div style={{ fontSize: '12px', color: COLORS.secondary, marginTop: '4px' }}>
               {t('ai_helper_teaching_summary_snapshot_notice')}{snapshotDate}
             </div>
           )}
@@ -794,7 +738,7 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
           borderLeft: `4px solid ${COLORS.errorBorder}`,
           borderRadius: RADIUS.md, fontSize: '13px', marginBottom: SPACING.base,
         }}>
-          {error}
+          {t(error)}
         </div>
       )}
 
@@ -818,69 +762,54 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
       {/* ① 一句话诊断 — 30 秒抓住重点 */}
       {parsed.diagnosis && (
         <div style={{
-          padding: `${SPACING.base} ${SPACING.lg}`,
-          marginBottom: SPACING.lg,
-          backgroundColor: COLORS.bgCard,
-          border: `1px solid ${COLORS.border}`,
-          borderLeft: `4px solid ${COLORS.primary}`,
+          padding: SPACING.lg,
+          backgroundColor: COLORS.bgPage,
           borderRadius: RADIUS.md,
-          boxShadow: SHADOWS.sm,
         }}>
           <div style={{
-            fontSize: '12px', fontWeight: 600, color: COLORS.textMuted,
-            letterSpacing: '0.05em', marginBottom: SPACING.sm,
+            fontSize: '13px', fontWeight: 600, color: COLORS.textSecondary,
+            marginBottom: SPACING.sm,
           }}>
-            📊 {t('ai_helper_teaching_summary_section_diagnosis')}
+            {t('ai_helper_teaching_summary_focus_title')}
           </div>
           <div
-            className="markdown-body"
+            className="markdown-body report-reading"
             style={{ fontSize: '15px', lineHeight: 1.7 }}
             dangerouslySetInnerHTML={{ __html: renderMarkdown(parsed.diagnosis) }}
           />
+          <p className="report-note" style={{ marginBottom: 0 }}>{t('ai_helper_teaching_summary_focus_hint')}</p>
         </div>
       )}
 
       {/* ② 下节课回顾清单 — 拿着就能上课，常驻展示 */}
       {parsed.reviewList && (
         <SectionCard
-          icon="📋"
           title={t('ai_helper_teaching_summary_section_review')}
-          accentColor={COLORS.hydroGreen}
         >
-          <div
-            className="markdown-body"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(parsed.reviewList) }}
-          />
+          <ReviewActions markdown={parsed.reviewList} />
           {parsed.p1 && (
-            <div style={{ marginTop: SPACING.md, paddingTop: SPACING.md, borderTop: `1px dashed ${COLORS.border}` }}>
-              <div style={{
-                fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary,
-                marginBottom: SPACING.sm, letterSpacing: '0.02em',
-              }}>
-                👥 个体干预建议
-              </div>
+            <details className="report-disclosure" style={{ marginTop: SPACING.base, paddingTop: SPACING.base, borderTop: `1px solid ${COLORS.border}` }}>
+              <summary>{t('ai_helper_teaching_summary_individual_support')}</summary>
               <div
                 className="markdown-body"
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(parsed.p1) }}
               />
-            </div>
+            </details>
           )}
         </SectionCard>
       )}
 
       {/* ③ 学生问题 — 去重后的重点卡片 + 其他观察一行带过 */}
-      <SectionCard
-        icon="🔍"
-        title={`${t('ai_helper_teaching_summary_section_problems')}${primaryFindings.length > 0 ? `（${primaryFindings.length}）` : ''}`}
-        accentColor={highCount > 0 ? SEVERITY_COLORS.high.text : COLORS.border}
-      >
+      <details className="report-section report-disclosure" open={!parsed.reviewList}>
+        <summary>{t('ai_helper_teaching_summary_evidence_title')}（{primaryFindings.length}）</summary>
         {primaryFindings.length === 0 ? (
-          <div style={{ color: COLORS.textMuted, fontSize: '13px', fontStyle: 'italic' }}>
+          <div style={{ color: COLORS.secondary, fontSize: '13px', fontStyle: 'italic' }}>
             {t('ai_helper_teaching_summary_no_findings')}
           </div>
         ) : (
           primaryFindings.map(f => (
             <FindingCard
+                  domainId={domainId}
               key={f.id}
               finding={f}
               deepDiveText={summary.deepDiveResults?.[f.id]}
@@ -895,66 +824,71 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
             padding: `${SPACING.sm} ${SPACING.md}`,
             backgroundColor: COLORS.bgPage,
             borderRadius: RADIUS.sm,
-            fontSize: '12px', color: COLORS.textMuted, lineHeight: 1.8,
+            fontSize: '12px', color: COLORS.secondary, lineHeight: 1.8,
           }}>
             <strong>{t('ai_helper_teaching_summary_other_observations')}：</strong>
             {secondaryFindings.map(f => f.title).join(' · ')}
           </div>
         )}
-      </SectionCard>
+      </details>
 
       {/* ④ 课后强化训练 — 一键复制下发 */}
       {homeworkMd && (
         <SectionCard
-          icon="📝"
           title={t('ai_helper_teaching_summary_section_homework')}
-          accentColor={COLORS.primary}
           headerRight={(
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: SPACING.sm }}>
+            <span className="homework-toolbar">
               {copyState !== 'idle' && (
                 <span style={{
                   fontSize: '12px',
                   color: copyState === 'copied' ? COLORS.successText : COLORS.errorText,
-                }}>
+                }} role="status">
                   {copyState === 'copied'
                     ? t('ai_helper_teaching_summary_copied')
                     : t('ai_helper_teaching_summary_copy_failed')}
                 </span>
               )}
               <button
+                type="button"
                 onClick={handleCopyHomework}
+                disabled={!studentHomework.studentMarkdown}
                 style={{
-                  fontSize: '12px', padding: '3px 10px',
-                  border: `1px solid ${COLORS.primary}`,
-                  borderRadius: RADIUS.sm,
-                  backgroundColor: 'transparent',
-                  color: COLORS.primary,
-                  cursor: 'pointer',
+                  ...getButtonStyle('primary'), fontSize: '13px',
+                  opacity: studentHomework.studentMarkdown ? 1 : 0.5,
+                  cursor: studentHomework.studentMarkdown ? 'pointer' : 'not-allowed',
                 }}
               >
-                📄 {t('ai_helper_teaching_summary_copy_homework')}
+                {t('ai_helper_teaching_summary_copy_student')}
               </button>
             </span>
           )}
         >
-          <div style={{
-            fontSize: '12px', color: COLORS.textMuted, marginBottom: SPACING.md,
-          }}>
-            {t('ai_helper_teaching_summary_homework_hint')}
+          <div className="homework-tabs" role="group" aria-label={t('ai_helper_teaching_summary_homework_audience')}>
+            {(['student', 'teacher'] as const).map(audience => (
+              <button type="button" key={audience} aria-pressed={homeworkAudience === audience}
+                onClick={() => setHomeworkAudience(audience)}>
+                {t(`ai_helper_teaching_summary_homework_${audience}`)}
+              </button>
+            ))}
           </div>
-          <div
+          <p className="report-note">{t(!studentHomework.studentMarkdown
+            ? 'ai_helper_teaching_summary_homework_unrecognized'
+            : homeworkAudience === 'student' ? 'ai_helper_teaching_summary_student_hint' : 'ai_helper_teaching_summary_teacher_hint')}</p>
+          {homeworkAudience === 'student' && !studentHomework.studentMarkdown ? (
+            <button type="button" style={getButtonStyle('secondary')} onClick={() => setHomeworkAudience('teacher')}>
+              {t('ai_helper_teaching_summary_view_teacher')}
+            </button>
+          ) : <div
             className="markdown-body"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(homeworkMd) }}
-          />
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(homeworkAudience === 'student' ? studentHomework.studentMarkdown! : homeworkMd) }}
+          />}
         </SectionCard>
       )}
 
       {/* 兜底：解析失败（或旧版文档）时完整展示 AI 报告 */}
       {!parsedOk && summary.overallSuggestion && (
         <SectionCard
-          icon="🤖"
           title={t('ai_helper_teaching_summary_overall_suggestion')}
-          accentColor={COLORS.hydroGreen}
         >
           <div
             className="markdown-body"
@@ -965,43 +899,10 @@ export const TeachingSummaryPanel: React.FC<TeachingSummaryPanelProps> = ({ doma
 
       {/* 已解析主要板块后剩余的未识别章节（如旧版 P0 长报告），默认折叠 */}
       {parsedOk && parsed.rest.length > 0 && (
-        <div style={{
-          border: `1px solid ${COLORS.border}`,
-          borderRadius: RADIUS.md,
-          backgroundColor: COLORS.bgCard,
-          marginBottom: SPACING.lg,
-          overflow: 'hidden',
-        }}>
-          <div
-            onClick={() => setFullReportCollapsed(!fullReportCollapsed)}
-            style={{
-              padding: `${SPACING.md} ${SPACING.base}`,
-              cursor: 'pointer', userSelect: 'none',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            }}
-          >
-            <span style={{
-              fontWeight: 600, fontSize: '13px', color: COLORS.textMuted,
-              letterSpacing: '0.05em',
-            }}>
-              🗂 {t('ai_helper_teaching_summary_section_full_report')}
-            </span>
-            <span style={{
-              display: 'inline-block', width: '16px', height: '16px',
-              textAlign: 'center', lineHeight: '16px', fontSize: '12px',
-              color: COLORS.textMuted,
-              transition: `transform ${TRANSITIONS.fast}`,
-              transform: fullReportCollapsed ? 'rotate(0deg)' : 'rotate(90deg)',
-            }}>▶</span>
-          </div>
-          {!fullReportCollapsed && (
-            <div
-              className="markdown-body"
-              style={{ padding: `0 ${SPACING.base} ${SPACING.base}`, borderTop: `1px solid ${COLORS.border}`, paddingTop: SPACING.md }}
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(parsed.rest.join('\n\n')) }}
-            />
-          )}
-        </div>
+        <details className="report-section report-disclosure">
+          <summary>{t('ai_helper_teaching_summary_section_full_report')}</summary>
+          <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(parsed.rest.join('\n\n')) }} />
+        </details>
       )}
 
       {/* 生成中兜底：completed 但建议为空 */}

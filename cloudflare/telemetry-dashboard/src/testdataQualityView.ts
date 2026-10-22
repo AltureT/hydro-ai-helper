@@ -29,6 +29,38 @@ export interface TestdataModelRoleRow {
   failed: string;
 }
 
+export interface TestdataStageLatencyRow {
+  stage: string;
+  runs: number;
+  p50: string;
+  p95: string;
+}
+
+export function formatTestdataStageDuration(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return '暂无数据';
+  if (value < 1_000) return `${Math.round(value)} ms`;
+  if (value < 60_000) return `${(value / 1_000).toFixed(1)} 秒`;
+  if (value < 3_600_000) return `${(value / 60_000).toFixed(1)} 分钟`;
+  return `${(value / 3_600_000).toFixed(1)} 小时`;
+}
+
+export function buildTestdataStageLatencyRows(
+  data: TestdataQualityResponse,
+): TestdataStageLatencyRow[] {
+  return [...(data.stage_latency ?? [])]
+    .sort((left, right) => {
+      const leftP95 = left.p95Ms ?? Number.NEGATIVE_INFINITY;
+      const rightP95 = right.p95Ms ?? Number.NEGATIVE_INFINITY;
+      return rightP95 - leftP95 || left.stage.localeCompare(right.stage);
+    })
+    .map(item => ({
+      stage: item.stage,
+      runs: item.runs,
+      p50: formatTestdataStageDuration(item.p50Ms),
+      p95: formatTestdataStageDuration(item.p95Ms),
+    }));
+}
+
 export function buildTestdataModelRoleRows(
   data: TestdataQualityResponse,
 ): TestdataModelRoleRow[] {

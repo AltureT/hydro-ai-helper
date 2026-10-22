@@ -17,8 +17,129 @@ const ensureObjectId_1 = require("../utils/ensureObjectId");
 const pipelineContext_1 = require("../services/testdata/pipelineContext");
 var pipelineContext_2 = require("../services/testdata/pipelineContext");
 Object.defineProperty(exports, "TESTDATA_CHECKPOINT_SCHEMA_VERSION", { enumerable: true, get: function () { return pipelineContext_2.TESTDATA_CHECKPOINT_SCHEMA_VERSION; } });
+const validatorManifest_1 = require("../services/testdata/validatorManifest");
 const runTelemetry_1 = require("../services/testdata/runTelemetry");
 exports.TESTDATA_CHECKPOINT_FIELD_MAX_BYTES = 256 * 1024;
+const CHECKPOINT_DECLARATION_ID_MAX_LENGTH = 64;
+const CHECKPOINT_DECLARATION_OPERATION_MAX_LENGTH = 256;
+function boundedCheckpointString(value, maxLength) {
+    return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+}
+function checkpointStringArray(value) {
+    if (!Array.isArray(value) || value.length > 64)
+        return undefined;
+    const result = value.filter(item => boundedCheckpointString(item, CHECKPOINT_DECLARATION_ID_MAX_LENGTH));
+    return result.length === value.length ? result : undefined;
+}
+function checkpointProbeRecipe(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return undefined;
+    const recipe = value;
+    if (!boundedCheckpointString(recipe.targetId, CHECKPOINT_DECLARATION_ID_MAX_LENGTH)
+        || typeof recipe.constructionKind !== 'string'
+        || !validatorManifest_1.VALIDATOR_PROBE_CONSTRUCTION_KINDS.includes(recipe.constructionKind)
+        || (recipe.fieldId !== undefined
+            && !boundedCheckpointString(recipe.fieldId, CHECKPOINT_DECLARATION_ID_MAX_LENGTH))
+        || (recipe.operationName !== undefined
+            && !boundedCheckpointString(recipe.operationName, CHECKPOINT_DECLARATION_OPERATION_MAX_LENGTH)))
+        return undefined;
+    return {
+        targetId: recipe.targetId,
+        constructionKind: recipe.constructionKind,
+        ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId }),
+        ...(recipe.operationName === undefined
+            ? {}
+            : { operationName: recipe.operationName }),
+    };
+}
+/** Persist only declarations needed to deterministically rebuild verifier probes. */
+function checkpointVerifierDeclaration(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return undefined;
+    const verifier = value;
+    if (typeof verifier.bruteCode !== 'string'
+        || typeof verifier.validatorCode !== 'string'
+        || typeof verifier.stressGeneratorCode !== 'string')
+        return undefined;
+    let functionSampleInputs;
+    if (verifier.functionSampleInputs !== undefined) {
+        if (!Array.isArray(verifier.functionSampleInputs)
+            || verifier.functionSampleInputs.length > 64)
+            return undefined;
+        functionSampleInputs = verifier.functionSampleInputs.flatMap(value => {
+            if (!value || typeof value !== 'object' || Array.isArray(value))
+                return [];
+            const sample = value;
+            if (!boundedCheckpointString(sample.id, CHECKPOINT_DECLARATION_ID_MAX_LENGTH)
+                || typeof sample.input !== 'string')
+                return [];
+            return [{ id: sample.id, input: sample.input }];
+        });
+        if (functionSampleInputs.length !== verifier.functionSampleInputs.length)
+            return undefined;
+    }
+    let validatorManifest;
+    if (verifier.validatorManifest !== undefined) {
+        if (!verifier.validatorManifest || typeof verifier.validatorManifest !== 'object'
+            || Array.isArray(verifier.validatorManifest))
+            return undefined;
+        const manifest = verifier.validatorManifest;
+        const constraintIds = checkpointStringArray(manifest.constraintIds);
+        const invariantIds = checkpointStringArray(manifest.invariantIds);
+        if (!constraintIds || !invariantIds)
+            return undefined;
+        validatorManifest = { constraintIds, invariantIds };
+    }
+    let validatorProbeRecipes;
+    if (verifier.validatorProbeRecipes !== undefined) {
+        if (!Array.isArray(verifier.validatorProbeRecipes)
+            || verifier.validatorProbeRecipes.length > 64)
+            return undefined;
+        validatorProbeRecipes = verifier.validatorProbeRecipes.flatMap(recipe => {
+            const projected = checkpointProbeRecipe(recipe);
+            return projected ? [projected] : [];
+        });
+        if (validatorProbeRecipes.length !== verifier.validatorProbeRecipes.length)
+            return undefined;
+    }
+    return {
+        bruteCode: verifier.bruteCode,
+        validatorCode: verifier.validatorCode,
+        stressGeneratorCode: verifier.stressGeneratorCode,
+        ...(verifier.complexityGap === 'exists' || verifier.complexityGap === 'none'
+            ? { complexityGap: verifier.complexityGap }
+            : {}),
+        ...(functionSampleInputs === undefined ? {} : { functionSampleInputs }),
+        ...(verifier.validatorManifestStatus === 'valid'
+            || verifier.validatorManifestStatus === 'invalid'
+            ? { validatorManifestStatus: verifier.validatorManifestStatus }
+            : {}),
+        ...(validatorManifest === undefined ? {} : { validatorManifest }),
+        ...(validatorProbeRecipes === undefined ? {} : { validatorProbeRecipes }),
+    };
+}
+function checkpointArtifactsDeclaration(artifacts) {
+    if (!artifacts || artifacts.generatorPlan !== undefined
+        || typeof artifacts.generatorCode !== 'string')
+        return undefined;
+    return {
+        generatorCode: artifacts.generatorCode,
+        ...(artifacts.templates === undefined ? {} : { templates: artifacts.templates }),
+        ...(typeof artifacts.notes === 'string' ? { notes: artifacts.notes } : {}),
+    };
+}
+function sanitizeResumeCheckpoint(checkpoint) {
+    if (checkpoint.artifacts === undefined && checkpoint.verifier === undefined)
+        return checkpoint;
+    const artifacts = checkpointArtifactsDeclaration(checkpoint.artifacts);
+    const verifier = checkpointVerifierDeclaration(checkpoint.verifier);
+    const { artifacts: _unsafeArtifacts, verifier: _unsafeVerifier, ...safeCheckpoint } = checkpoint;
+    return {
+        ...safeCheckpoint,
+        ...(artifacts === undefined ? {} : { artifacts }),
+        ...(verifier === undefined ? {} : { verifier }),
+    };
+}
 function normalizeForStableJson(value) {
     if (Array.isArray(value))
         return value.map(item => normalizeForStableJson(item));
@@ -100,7 +221,11 @@ function filterTestdataCheckpointUpdate(update) {
         'killTargets',
     ];
     for (const key of keys) {
-        const value = update[key];
+        const value = key === 'verifier'
+            ? checkpointVerifierDeclaration(update.verifier)
+            : key === 'artifacts'
+                ? checkpointArtifactsDeclaration(update.artifacts)
+                : update[key];
         if (value === undefined)
             continue;
         try {
@@ -136,7 +261,7 @@ function selectTestdataResumeCheckpoint(job, expected) {
         return undefined;
     }
     if (!isV2)
-        return checkpoint;
+        return sanitizeResumeCheckpoint(checkpoint);
     if ((expected.checkpointSchemaVersion !== undefined
         && expected.checkpointSchemaVersion !== checkpoint.checkpointSchemaVersion)
         || (expected.promptVersion !== undefined && expected.promptVersion !== checkpoint.promptVersion)
@@ -147,7 +272,7 @@ function selectTestdataResumeCheckpoint(job, expected) {
             .some(value => !/^[a-f0-9]{64}$/.test(value || ''))) {
         return undefined;
     }
-    return checkpoint;
+    return sanitizeResumeCheckpoint(checkpoint);
 }
 exports.TESTDATA_JOB_RETENTION_MS = 24 * 60 * 60 * 1000;
 exports.TESTDATA_JOB_LEASE_MS = 90 * 1000;

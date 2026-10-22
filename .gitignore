@@ -38,7 +38,10 @@ __pycache__/
 # other
 PHASE2_DEPLOYMENT.md
 PHASE3_IMPLEMENTATION.md
-docs/
+# Public documentation is explicitly allowlisted. Keep working notes outside this repository.
+/docs/*
+!/docs/README.md
+!/docs/testdata-large-inputs.md
 DEPLOYMENT.md
 hydro-ai-helper.code-workspace
 specs/

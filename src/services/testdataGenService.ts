@@ -21,10 +21,12 @@ import {
   DISCRIMINATION_BUDGET_MS,
   isSandboxBudgetExceededError,
   SANDBOX_TOTAL_BUDGET_MS,
+  SandboxOutputBudgetExceededError,
 } from './goJudgeSandboxService';
 import { excerpt, excerptTail } from '../lib/textTruncate';
 import type {
   CheckerRunCase,
+  PythonRunInvocation,
   PythonRunDetail,
   PythonRunResult,
   TestdataGenerationMode,
@@ -45,10 +47,24 @@ import {
 import {
   assessTestdataRisk,
   getTestdataDirectFallbackEnabled,
+  getTestdataMaxModelCalls,
   getTestdataReliabilityMode,
+  getTestdataSpecConsensusMode,
   type TestdataReliabilityMode,
   type TestdataRiskAssessment,
 } from './testdata/risk';
+import { getTestdataModelTimeoutMs } from './testdata/latency';
+import {
+  buildGeneratorBudgetPrompt,
+  assertGeneratedDataBudget,
+  GENERATOR_BYTE_LIMITS,
+  parseGeneratorBudgetFailure,
+  throwIfGeneratorBudgetConflict,
+} from './testdata/generatorBudget';
+import { GENERATOR_PLAN_CONTRACT } from './testdata/generatorPlanPrompts';
+import { assertTestdataPlanBudget, TESTDATA_CODE_FILE_MAX_BYTES, TESTDATA_INPUT_MAX_BYTES, TESTDATA_OUTPUT_MAX_BYTES, TESTDATA_PLAN_MAX_BYTES, GENERATOR_REPLAY_DATA_FILENAME } from './testdata/fileBudget';
+import { parseOracleLanguage, type OracleLanguage } from './testdata/oracleLanguage';
+import { assertPythonTemplateInterface } from './testdata/templateInterface';
 import {
   extractStatementSamples,
   type StatementSample,
@@ -58,7 +74,21 @@ import {
   type ProblemSpecV1,
 } from './testdata/problemSpec';
 import {
+  parseAndValidateValidatorManifest,
+  parseAndValidateValidatorProbeRecipes,
+  VALIDATOR_PROBE_CONSTRUCTION_KINDS,
+  type ValidatorManifest,
+  type ValidatorProbeRecipe,
+} from './testdata/validatorManifest';
+import {
+  buildConstraintProbes,
+  type ConstraintProbe,
+  type ConstraintProbeGap,
+  type LegalConstraintProbeSeed,
+} from './testdata/constraintProbes';
+import {
   runProblemSpecConsensus,
+  type SpecConsensusRole,
   type SpecConsensusStatus,
 } from './testdata/specConsensus';
 import {
@@ -92,8 +122,36 @@ import {
   type TemplateOutputAdjudicator,
 } from './testdata/templateVerifier';
 import { computeOriginalFileHashes, createTestdataRunId } from './testdata/runTelemetry';
+import {
+  assessGeneratorDslEligibility,
+  materializeGeneratorPlan,
+  parseGeneratorPlan,
+  renderGeneratorArtifacts,
+  type GeneratorPlanV1,
+  type MaterializedGeneratorCase,
+  type MaterializedGeneratorValue,
+} from './testdata/generatorDsl';
+import {
+  enforceCoverageRequirements,
+  evaluateSemanticCoverage,
+  type CoverageMode,
+  type CoverageVerification,
+} from './testdata/coverage';
+import {
+  generateMutationCandidates,
+  getMutationGateMode,
+  mergeMutationCandidates,
+  type HistoricalMutationCandidate,
+  type MutationGateMode,
+} from './testdata/mutation';
+import {
+  evaluateMutationCandidates,
+  MUTATION_SCORE_THRESHOLD,
+  type MutationVerificationSummary,
+} from './testdata/mutationRunner';
 
 export { extractStatementSamples, type StatementSample } from './testdata/statementSamples';
+import { answerBoundaryRequired, assertAnswerBoundaryCoverage } from './testdata/outputBoundary';
 
 function comparableFileContent(content: string): string {
   return content
@@ -118,9 +176,7 @@ export type DataScale = 'auto' | 'small' | 'medium' | 'large';
 
 /** 单个测试点最终采用的规模档位。 */
 export type CaseDataScale = Exclude<DataScale, 'auto'>;
-
-export type OracleLanguage = 'python' | 'cpp';
-
+export { parseOracleLanguage, type OracleLanguage } from './testdata/oracleLanguage';
 export interface CoverageSlot {
   /** 本次生成内的测试点序号（从 1 开始，不等同于最终文件编号）。 */
   caseNumber: number;
@@ -219,6 +275,12 @@ export interface GenerationResponse {
   notesStructured?: StructuredGenerationNotes;
   /** 沙箱生成模式下用于构造输入的 Python 程序。 */
   generatorCode?: string;
+  /** 受信 DSL 计划；仅服务端物化路径提供，兼容 Python 生成器时缺失。 */
+  generatorPlan?: GeneratorPlanV1;
+  /** Server-generated data companion for large deterministic replays. */
+  generatorReplayData?: string;
+  /** 语义覆盖证据来源；旧 Python 生成器始终为未验证。 */
+  coverageMode?: CoverageMode;
   /** 沙箱生成模式下实际计算 .out 的可执行标程源码。 */
   oracleCode?: string;
   /** 沙箱标程的执行语言；缺失时保持 Python-only 兼容行为。 */
@@ -240,6 +302,8 @@ export interface GenerationResponse {
   discriminationKillTargets?: KillTarget[];
   /** 内部字段：补刀前正式测试点数量，用于识别并展示新增 hack 点。 */
   discriminationInitialCaseCount?: number;
+  /** 内部字段：每个已接纳补刀点在校验前冻结并提交的最终子任务分配。 */
+  tieredAllocations?: SubtaskCaseAllocation[];
 }
 
 /** AI 在沙箱模式下返回的生成蓝图；此阶段不让模型直接填写 .out。 */
@@ -252,6 +316,8 @@ export interface SandboxGenerationBlueprint {
   functionName?: string;
   templates?: Partial<Record<TemplateLang, string>>;
   generatorCode: string;
+  /** 受信、有限、无代码执行能力的生成计划。 */
+  generatorPlan?: GeneratorPlanV1;
   oracleCode: string;        // 自包含 stdin→stdout 完整标程（Python 3 或 C++17）
   oracleLanguage?: OracleLanguage;
   solutions?: TemplateSolutions;
@@ -266,6 +332,9 @@ export interface SandboxGenerationBlueprint {
   complexityGap?: 'exists' | 'none';
   /** 独立验证调用把函数题题面样例转换为主蓝图确定的原始 stdin。 */
   functionSampleInputs?: Array<{ id: string; input: string }>;
+  validatorManifest?: ValidatorManifest;
+  validatorManifestStatus?: 'valid' | 'invalid';
+  validatorProbeRecipes?: ValidatorProbeRecipe[];
   notes?: string;
 }
 
@@ -290,6 +359,7 @@ export interface SandboxSolutionBlueprint {
 /** 第二阶段只生成输入与模板，必须复用第一阶段已经验证的算法与 stdin 编码。 */
 export interface SandboxGenerationArtifacts {
   generatorCode: string;
+  generatorPlan?: GeneratorPlanV1;
   templates?: Partial<Record<TemplateLang, string>>;
   notes?: string;
 }
@@ -302,9 +372,19 @@ export interface IndependentVerifierBlueprint {
   /** 独立验证器声明：该题是否存在明显更慢的朴素解法；缺失时维持现状。 */
   complexityGap?: 'exists' | 'none';
   functionSampleInputs?: Array<{ id: string; input: string }>;
+  validatorManifest?: ValidatorManifest;
+  validatorManifestStatus?: 'valid' | 'invalid';
+  validatorProbeRecipes?: ValidatorProbeRecipe[];
+}
+
+export interface ParseIndependentVerifierOptions {
+  frozenSpec?: ProblemSpecV1;
+  requireValidatorManifest?: boolean;
 }
 
 export type KillTargetKind = 'boundary' | 'wrong-algorithm' | 'overflow-sim';
+
+const MAX_KILL_TARGETS = 2;
 
 export interface KillTarget {
   kind: KillTargetKind;
@@ -349,6 +429,19 @@ export interface DiscriminationCheck {
   allKilled: boolean;
 }
 
+export interface ValidatorVerification {
+  ran: boolean;
+  casesChecked: number;
+  validAccepted: number;
+  invalidRejected: number;
+  invalidAccepted: number;
+  coveredConstraintIds: string[];
+  missingConstraintIds: string[];
+}
+
+type PlanValidatorVerification = Pick<ValidatorVerification, 'ran' | 'casesChecked'>
+  & Partial<Omit<ValidatorVerification, 'ran' | 'casesChecked'>>;
+
 /** 各道机器关卡的验证结果（前端据此渲染验证横幅与徽章）。 */
 export interface PlanVerification {
   mode: 'sandbox' | 'direct';
@@ -361,7 +454,15 @@ export interface PlanVerification {
   wouldBlock: boolean;
   /** 首选模型自动修复后仍失败，整条管线从下一配置模型重新运行并成功。 */
   modelEscalation?: { fromModel: string; toModel: string };
-  sampleCheck?: { total: number; passed: number };
+  sampleCheck?: {
+    total: number;
+    passed: number;
+    skipped?: Array<{
+      /** 题面样例序号，从 1 开始。 */
+      sampleIndex: number;
+      skippedReason: 'checker-infra-error';
+    }>;
+  };
   bruteCheck?: { compared: number; agreed: number; skippedTimeout: number[]; disagreed: number[] };
   /** 独立 BRUTE 在内部小数据集上的强制对拍；压力阶段不允许超时跳过。 */
   stressCheck?: {
@@ -373,10 +474,81 @@ export interface PlanVerification {
     droppedInvalid?: number;
     skippedReason?: 'custom-checker';
   };
-  validator?: { ran: boolean; casesChecked: number };
+  validator?: PlanValidatorVerification;
   templateChecks?: TemplateChecks;
   checkerCheck?: CheckerVerificationCheck;
   discrimination?: DiscriminationCheck;
+  /** 从服务端结构化值计算的语义覆盖矩阵；不信任模型 label。 */
+  coverage?: CoverageVerification;
+  /** 仅含封闭计数与 operator ID 的 mutation 证据摘要。 */
+  mutation?: MutationVerificationSummary;
+}
+
+type MutationGateFailureKind = 'partial' | 'no-viable' | 'score-unavailable' | 'score-too-low';
+
+function mutationGateError(
+  summary: MutationVerificationSummary,
+  code: 'MUTATION_SCORE_TOO_LOW' | 'MUTATION_EVIDENCE_UNAVAILABLE',
+  failureKind: MutationGateFailureKind,
+): TestdataPipelineError {
+  return new TestdataPipelineError(
+    code === 'MUTATION_SCORE_TOO_LOW'
+      ? 'mutation score 未达到 enforce 阈值，已停止生成。'
+      : 'mutation 证据不完整，无法在 enforce 模式下证明测试数据区分度。',
+    code,
+    'mutation_testing',
+    'mutation',
+    'no-retry',
+    {
+      viable: summary.viable,
+      killed: summary.killed,
+      survived: summary.survived,
+      ...(summary.score === undefined ? {} : { score: summary.score }),
+      threshold: MUTATION_SCORE_THRESHOLD,
+      failureKind,
+    },
+  );
+}
+
+export function applyMutationGate(
+  verification: Pick<PlanVerification, 'verified' | 'wouldBlock'>,
+  summary: MutationVerificationSummary,
+): void {
+  const unavailable = summary.status !== 'completed'
+    || summary.viable === 0
+    || summary.score === undefined;
+  const tooLow = summary.score !== undefined && summary.score < MUTATION_SCORE_THRESHOLD;
+  if (summary.mode === 'observe') {
+    if (unavailable || tooLow) verification.wouldBlock = true;
+    return;
+  }
+  if (summary.mode !== 'enforce') return;
+  if (unavailable) {
+    const failureKind: MutationGateFailureKind = summary.viable === 0
+      ? 'no-viable'
+      : summary.status !== 'completed'
+        ? 'partial'
+        : 'score-unavailable';
+    throw mutationGateError(summary, 'MUTATION_EVIDENCE_UNAVAILABLE', failureKind);
+  }
+  if (tooLow) throw mutationGateError(summary, 'MUTATION_SCORE_TOO_LOW', 'score-too-low');
+}
+
+function skippedMutationSummary(
+  mode: MutationGateMode,
+  skippedReason: MutationVerificationSummary['skippedReason'],
+): MutationVerificationSummary {
+  return {
+    mode,
+    status: 'skipped',
+    generated: 0,
+    historical: 0,
+    viable: 0,
+    killed: 0,
+    survived: 0,
+    operators: [],
+    skippedReason,
+  };
 }
 
 export interface StructuredGenerationNotes {
@@ -412,7 +584,9 @@ export interface GenerationPlan {
   specConsensusStatus?: SpecConsensusStatus;
   specConflictCount?: number;
   unresolvedConflictCount?: number;
-  modelRolesUsed?: TestdataModelRole[];
+  modelRolesUsed?: SpecConsensusRole[];
+  /** Server-counted logical AI chat calls for this run, including semantic fallback. */
+  modelCallCount?: number;
   /** 仅保存在 Hydro 本地，apply 时用于判断教师是否修改。 */
   originalFileHashes?: Record<string, string>;
   problemType: 'function' | 'traditional';
@@ -420,7 +594,10 @@ export interface GenerationPlan {
   isFillIn?: boolean;
   analysis?: string;
   notes?: string;
-  /** 结构化说明；缺失时前端回退显示 legacy notes。 */
+  /** Presentation facts for concise teacher guidance; never used to bypass verification. */
+  isSkeleton?: boolean;
+  requiresConfigReview?: boolean;
+  /** Structured diagnostic notes retained for local troubleshooting and older clients. */
   notesStructured?: StructuredGenerationNotes;
   files: PlannedFile[];
   caseCount: number;
@@ -434,6 +611,8 @@ export interface GenerationPlan {
     subtaskId?: number;
     target: string;
   }>;
+  /** trusted-dsl 才表示覆盖矩阵来自服务端结构化物化值。 */
+  coverageMode?: CoverageMode;
   tokenUsage?: TokenUsage;
   usedModel?: string;
   /**
@@ -454,6 +633,10 @@ export interface GenerationPlan {
 /** AI 响应解析选项；常规调用保持严格，服务层可先宽松解析再补齐缺失模板。 */
 export interface ParseAiResponseOptions {
   allowMissingTemplates?: boolean;
+  generatorDsl?: {
+    spec: ProblemSpecV1;
+    expectedCaseCount: number;
+  };
 }
 
 // ─── 常量与校验 ───────────────────────────────────────────────────────────────
@@ -465,13 +648,14 @@ export const TESTDATA_GEN_LIMITS = {
   MAX_PROVIDED_STD: 10000,
   MAX_STATEMENT_LENGTH: STATEMENT_SNAPSHOT_HARD_LIMIT,
   /** apply 时单文件内容上限（字节） */
-  MAX_FILE_SIZE: 256 * 1024,
+  MAX_FILE_SIZE: TESTDATA_CODE_FILE_MAX_BYTES,
+  MAX_INPUT_FILE_SIZE: GENERATOR_BYTE_LIMITS.input,
   /** apply 时文件数量上限 */
   MAX_FILE_COUNT: 80,
   /** apply 时所有文件总大小上限（字节） */
-  MAX_TOTAL_SIZE: 1024 * 1024,
+  MAX_TOTAL_SIZE: GENERATOR_BYTE_LIMITS.plan,
   /** 沙箱生成器 stdout（JSON）上限。 */
-  MAX_GENERATOR_OUTPUT_SIZE: 1024 * 1024,
+  MAX_GENERATOR_OUTPUT_SIZE: GENERATOR_BYTE_LIMITS.stdout,
   /** 独立验证器必须生成的内部小数据数量；这些数据不会写入 Hydro。 */
   STRESS_CASES: 60,
   /** 防止压力生成器用重复输入凑数；不足会进入独立验证器定向修复。 */
@@ -670,24 +854,63 @@ export function allocateCasesToSubtasks(
 /**
  * 补刀等后续阶段追加测试点时，前 N 个 case 的「构造档位 ↔ 配置归档」对应关系必须保持不变，
  * 否则按某档约束构造的输入会被归入另一档、破坏子任务约束契约。
- * 追加项一律归入最后一个子任务：这里采用 OI 题“最后一档约束最宽”的通行约定，
- * 组装阶段会同时写入人工复核警告，提示教师核对追加输入是否确实符合该档约束；
- * 原分配为空或总数反而变少时返回空数组（调用方降级为扁平配置）。
+ * 每个追加项按 Frozen Spec 分值目标重新计算最大缺口；同缺口时保持 Frozen 子任务顺序。
+ * prefix、权重或目标总数非法时返回空数组（调用方降级为扁平配置）。
  */
 export function extendTieredAllocations(
   base: SubtaskCaseAllocation[],
   totalCaseCount: number,
   subtasks: SubtaskSpec[],
 ): SubtaskCaseAllocation[] {
-  if (totalCaseCount === base.length) return base;
-  if (base.length === 0 || totalCaseCount < base.length || subtasks.length === 0) return [];
-  const last = subtasks[subtasks.length - 1];
-  const appended = Array.from({ length: totalCaseCount - base.length }, (_, index) => ({
-    caseNumber: base.length + index + 1,
-    subtaskId: last.id,
-    guidance: last.constraints,
-  }));
-  return [...base, ...appended];
+  if (!Number.isSafeInteger(totalCaseCount)
+    || base.length === 0
+    || totalCaseCount < base.length
+    || subtasks.length === 0) return [];
+
+  const subtaskIndexById = new Map<number, number>();
+  let totalScore = 0;
+  for (let index = 0; index < subtasks.length; index++) {
+    const subtask = subtasks[index];
+    if (!Number.isSafeInteger(subtask.id)
+      || subtask.id <= 0
+      || subtaskIndexById.has(subtask.id)
+      || !Number.isSafeInteger(subtask.score)
+      || subtask.score <= 0
+      || typeof subtask.constraints !== 'string'
+      || !subtask.constraints.trim()) return [];
+    subtaskIndexById.set(subtask.id, index);
+    totalScore += subtask.score;
+  }
+  if (!Number.isSafeInteger(totalScore) || totalScore <= 0) return [];
+
+  const counts = subtasks.map(() => 0);
+  for (let index = 0; index < base.length; index++) {
+    const allocation = base[index];
+    const subtaskIndex = allocation && subtaskIndexById.get(allocation.subtaskId);
+    if (!allocation
+      || allocation.caseNumber !== index + 1
+      || typeof allocation.guidance !== 'string'
+      || subtaskIndex === undefined) return [];
+    counts[subtaskIndex]++;
+  }
+
+  const extended = [...base];
+  for (let nextTotal = base.length + 1; nextTotal <= totalCaseCount; nextTotal++) {
+    const nextIndex = subtasks.reduce((best, subtask, index) => (
+      nextTotal * subtask.score / totalScore - counts[index]
+        > nextTotal * subtasks[best].score / totalScore - counts[best]
+        ? index
+        : best
+    ), 0);
+    const selected = subtasks[nextIndex];
+    counts[nextIndex]++;
+    extended.push({
+      caseNumber: nextTotal,
+      subtaskId: selected.id,
+      guidance: selected.constraints,
+    });
+  }
+  return extended;
 }
 
 interface ExistingNumericCases {
@@ -1589,11 +1812,11 @@ export function buildSolutionBlueprintSystemPrompt(
   frozenSpec = false,
 ): string {
   const oracleRule = cppOracleAvailable
-    ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+    ? '2. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 必须是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 stdin 并严格输出题目答案，不得硬编码样例或答案表。函数题必须选 python，不接受 C++ 标程。'
     : '2. ORACLE 必须是自包含、可直接运行的 Python 3 完整程序，读取一份 stdin 并严格输出题目答案；不得硬编码样例或答案表。';
   const oracleLanguageSection = cppOracleAvailable
-    ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
-    : '';
+    ? '@@@ORACLE_LANG@@@\npython 或 cpp（必须声明并与源码一致；函数题必须为 python）\n'
+    : '@@@ORACLE_LANG@@@\npython（必须声明并与源码一致）\n';
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（与 ORACLE_LANG 一致）'
     : '完整 Python 3 标程';
@@ -1614,7 +1837,7 @@ ${oracleRule}
 
 输出格式：
 ${oracleLanguageSection}\
-=== SUBTASKS ===
+@@@SUBTASKS@@@
 可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
@@ -1719,17 +1942,49 @@ export function buildSolutionBlueprintUserPrompt(
 }
 
 /** 第二阶段：在已验证解法固定后生成输入与函数题驱动模板。 */
-export function buildGenerationArtifactsSystemPrompt(frozenSpec = false): string {
+export function buildGenerationArtifactsSystemPrompt(
+  frozenSpec = false,
+  trustedGeneratorDsl = false,
+): string {
   const sourceContract = frozenSpec
     ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；你看不到且不得请求 ORACLE 或自由文本 analysis。函数题会提供已经验证的 SOLUTION:<lang> 只读学生接口源码，仅用于生成调用它的模板。'
     : '题目的算法、ORACLE 和 stdin 编码已经在上一阶段确定并通过题面样例预验证。';
+  if (trustedGeneratorDsl) {
+    return `你是一位 OJ 测试数据工程师。${sourceContract}本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成有限外围制品。
+
+核心规则：
+1. 只用 @@@GENERATOR_PLAN@@@ 输出严格 JSON 的 GeneratorPlan v1；不得输出 GENERATOR Python 代码、eval/exec 表达式、脚本或任意扩展字段。服务端会按 seed 确定性物化并生成可重放制品。
+2. cases 数量必须与用户要求完全一致；每个 case 只能包含 label、可选 subtaskId 与 frozen Spec 全部字段的受限构造描述。
+3. 仅使用 integer/string/array/matrix/permutation/tree/graph/operation-sequence 的封闭 DSL；tree shape 为 chain/star/balanced/broom/random，graph shape 为 sparse/near-tree/dense/bridge/cycle，操作模式为 add-delete-repeat/nested-lifetime/query-between-updates。
+4. 严格执行逐 CASE 覆盖计划；所有规模、值域、长度和派生计数字段必须符合 frozen Spec 与 stdin encoding。
+5. 函数题输出用户要求的全部 TEMPLATE；模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。
+6. 只读 SOLUTION 接口源码不得修改、复述或输出；模板禁止重定义 class Solution、同名函数/方法、占位实现或覆盖接口的赋值/导入。Python 模板会拼接在 SOLUTION 后执行，只调用既定入口。响应不得包含 ORACLE、SOLUTION、BRUTE、VALIDATOR、GENERATOR 或 CASE。
+7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项。
+
+${GENERATOR_PLAN_CONTRACT}
+预算冲突时遵循用户请求中的 GENERATOR_BUDGET_CONFLICT 协议，仅输出冲突分节，不输出计划或模板。
+
+输出格式：
+@@@GENERATOR_PLAN@@@
+严格 JSON GeneratorPlan v1
+@@@TEMPLATE:py@@@
+函数题 Python 驱动模板
+@@@TEMPLATE:java@@@
+函数题 Java 驱动模板
+@@@TEMPLATE:cc@@@
+函数题 C++ 驱动模板
+@@@NOTES@@@
+外围制品的可选说明
+
+各节使用原文分节，不要代码围栏、JSON 外壳或额外解释。`;
+  }
   return `你是一位 OJ 测试数据工程师。${sourceContract}本阶段不得修改算法、ORACLE、SOLUTION 或 stdin 编码，只生成外围制品。
 
 核心规则：
 1. GENERATOR 是自包含 Python 3 程序，不读 stdin，stdout 只打印紧凑 JSON：{"cases":[{"label":"覆盖意图","input":"原始标准输入"}]}；数量必须与用户要求完全一致。编写 GENERATOR 前，先在代码注释中逐条列出题面的所有硬性保证（如“根至少有两个孩子”“保证按 DFS 序编号”），生成逻辑必须逐条满足；任何一条违反都会导致整体失败。
 2. input 是程序实际读取的原始 stdin，禁止变量赋值、源码字面量说明或答案；所有生成确定性并固定随机种子。
 3. 严格执行逐 CASE 覆盖计划，交叉覆盖最小、典型、边界、退化、反例与临界规模；不得全部生成相似输入。
-4. 每个 input 小于 256KB，GENERATOR stdout 小于 1MB；临界数据使用可解析构造，不能可靠验证时宁可缩小。
+4. 遵循用户请求中的逐 CASE 字节预算与打印前检查：每个正式 input 至多 4 MiB，GENERATOR JSON 经缓存文件传输、至多 8 MiB；不得静默缩减必要覆盖。确实无法同时满足必要覆盖与预算时仅输出 GENERATOR_BUDGET_CONFLICT 分节，交人工复核。
 5. 函数题输出用户要求的全部 TEMPLATE：模板只负责读取同一 stdin、调用既定 SOLUTION、打印结果，不得包含或改写算法。传统题不输出模板。
 6. 只读 SOLUTION 接口源码不得修改、复述或输出；每个 TEMPLATE 必须调用对应学生入口，不得重定义 class Solution、同名函数/方法或内嵌学生实现。响应不得包含 ORACLE、SOLUTION、BRUTE 或 VALIDATOR。
 7. NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。
@@ -1755,6 +2010,9 @@ export function buildGenerationArtifactsUserPrompt(
   coverageOverride?: Array<CoverageSlot | SubtaskCaseAllocation>,
   context?: TestdataPipelineContext,
 ): string {
+  const outputBoundaryGuidance = answerBoundaryRequired(context?.statement.normalizedMarkdown ?? params.statementMarkdown,
+    context?.spec.outputPolicy.kind, params.options.dataScale)
+    ? '- 题面明确提示答案可能超过 32 位：至少一个正式输入必须使实际答案超出 [-2147483648, 2147483647]；只有最大输入规模不能证明这一点。保留正式点数量和字节预算。' : '';
   const coveragePlan = coverageOverride ?? (() => {
     const tiered = resolveTieredSubtaskGeneration({
       caseCount: params.options.caseCount,
@@ -1767,6 +2025,7 @@ export function buildGenerationArtifactsUserPrompt(
       : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
   })();
   if (context) {
+    const trustedGeneratorDsl = assessGeneratorDslEligibility(context.spec).eligible;
     const functionInterface = solution.problemType === 'function'
       ? buildFunctionInterfaceContract(solution, params.options.languages)
       : undefined;
@@ -1790,11 +2049,15 @@ export function buildGenerationArtifactsUserPrompt(
       ] : []),
       '',
       '【生成要求】',
+      outputBoundaryGuidance,
       `- 恰好生成 ${params.options.caseCount} 个独立测试点。`,
       `- 数据规模策略：${DATA_SCALE_TEXT[params.options.dataScale || 'auto']}`,
-      '- 只输出 GENERATOR 与函数题 TEMPLATE；不得输出或推断 ORACLE、SOLUTION、BRUTE、VALIDATOR。',
+      trustedGeneratorDsl
+        ? '- 只输出受限 GENERATOR_PLAN 与函数题 TEMPLATE；由服务端确定性物化，不得输出或执行模型生成代码。'
+        : '- 只输出 GENERATOR 与函数题 TEMPLATE；不得输出或推断 ORACLE、SOLUTION、BRUTE、VALIDATOR。',
       '- 不得重新解释算法规范，不得改变 frozen Spec 的任何字段。',
       buildCoverageGuidanceBlock(coveragePlan),
+      buildGeneratorBudgetPrompt(params.options.caseCount, coveragePlan),
     ].filter(Boolean).join('\n');
   }
   const solutions = solution.solutions ?? (solution.solutionCode ? { py: solution.solutionCode } : {});
@@ -1807,6 +2070,8 @@ export function buildGenerationArtifactsUserPrompt(
   );
   return [
     base,
+    outputBoundaryGuidance,
+    buildGeneratorBudgetPrompt(params.options.caseCount, coveragePlan),
     '',
     '【第一阶段已验证且必须保持不变的解题蓝图】',
     `problemType: ${solution.problemType}`,
@@ -1830,11 +2095,11 @@ export function buildSandboxBlueprintSystemPrompt(
   frozenSpec = false,
 ): string {
   const oracleRule = cppOracleAvailable
-    ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，系统会忽略 cpp 声明。'
+    ? '5. 传统题仅当约束规模使 Python 在 5 秒内明显无法完成时，ORACLE_LANG 才选 cpp，此时 ORACLE 是自包含、可直接编译运行的完整 C++17 程序；其余情况选 python，并输出自包含、可直接运行的 Python 3 完整程序。两种语言都读取一份 input 的 stdin，严格按题面输出 stdout，不得硬编码测试用例或答案表。函数题必须选 python，不接受 C++ 标程。'
     : '5. ORACLE 是自包含、可直接运行的 Python 3 完整程序：读取一份 input 的 stdin，严格按题面输出 stdout。不得硬编码测试用例或答案表。函数题也必须在 ORACLE 内包含函数实现和 stdin 驱动。';
   const oracleLanguageSection = cppOracleAvailable
-    ? '=== ORACLE_LANG ===\npython 或 cpp（函数题必须为 python；缺失按 python）\n'
-    : '';
+    ? '@@@ORACLE_LANG@@@\npython 或 cpp（必须声明并与源码一致；函数题必须为 python）\n'
+    : '@@@ORACLE_LANG@@@\npython（必须声明并与源码一致）\n';
   const oracleDescription = cppOracleAvailable
     ? '完整 Python 3 或 C++17 标程（stdin → stdout，与 ORACLE_LANG 一致）'
     : '完整 Python 3 标程（stdin → stdout，正解算法）';
@@ -1852,7 +2117,7 @@ ${frozenRule}\
 ${oracleRule}
 6. 函数题必须为用户选定的每一种语言输出 SOLUTION:语言 节：与该语言学生提交形式完全一致的函数/类定义（只含实现，不含读输入或打印）。Python 解会与 template.py 拼接后在沙箱实跑，用于验证模板与输入编码。传统题省略 SOLUTION。
 7. 数据必须严格遵守用户消息中的逐 CASE 覆盖计划，并根据题面真实约束交叉变化不同维度；所有生成过程必须确定性，固定随机种子。
-8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），stdout 总量必须小于 1MB。每个 input 的 UTF-8 内容必须小于 256KB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须小于 1MB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
+8. GENERATOR 必须使用紧凑 JSON（Python json.dumps(..., ensure_ascii=False, separators=(',', ':'))），正式 JSON 总量必须不超过 8 MiB（缓存文件传输）。每个 input 的 UTF-8 内容必须不超过 4 MiB，并确保 ORACLE 对该 input 的 stdout 也小于 256KB；全部 .in/.out 与辅助文件合计必须不超过 8 MiB。若临界输入会导致输出过大或超时，应使用仍能触发复杂度/边界行为的可解析构造并适当缩小，而不是打印海量数据。
 9. 教师提供的标准答案（手动）是唯一权威；历史 AC 候选解可能因旧数据薄弱而误 AC，只能作为待验证 ORACLE，必须通过题面样例与独立 BRUTE 压力对拍，禁止让 BRUTE 迁就候选解。
 10. 函数题必须输出用户要求的每一个 TEMPLATE 节：Python 追加到学生代码末尾；Java 为 public class Main 并调用 class Solution；C++ 用 #include "foo.cc"。传统题省略 TEMPLATE。
 11. 不要输出 BRUTE 或 VALIDATOR；系统会在一次全新的、看不到 ORACLE 实现的独立调用中生成验证器，降低两份算法共享同一错误的风险。
@@ -1861,7 +2126,7 @@ ${oracleRule}
 
 输出必须使用以下原文分节，禁止代码围栏、JSON 外壳或额外说明（不适用的可选节直接省略）：
 ${oracleLanguageSection}\
-=== SUBTASKS ===
+@@@SUBTASKS@@@
 可选；每行格式：id | score | 约束摘要
 @@@META@@@
 problemType: traditional 或 function
@@ -1912,6 +2177,39 @@ export function buildIndependentVerifierSystemPrompt(
   const sourceContract = frozenSpec
     ? '你只根据 FROZEN_PROBLEM_SPEC 与完整公开题面证据编写与正解实现隔离的验证制品。Spec 是唯一结构契约；题面仅用于实现它，不得重新定义 problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 或约束引用。'
     : '你只根据题面与已经确定的 stdin 编码，编写与正解实现隔离的验证制品。';
+  const frozenRules = frozenSpec ? `
+9. VALIDATOR 的 argv 契约必须精确：无命令行参数时校验全部全局约束；恰好 \`--subtask <known-positive-integer>\` 且其值是题面已知的正整数时，校验全局约束与该子任务作用域约束。未知参数、缺少值、非整数、重复参数或多余参数（unknown/missing/non-integer/duplicate/extra args）必须向 stderr 说明并 exit 非 0。
+10. 禁止从 stdin 读取子任务标签；stdin 始终只是待校验的题目原始输入。VALIDATOR 禁止接收任意原始 probe input，也不得增加任意调用、label、seed 或其他自定义参数入口。
+11. VALIDATOR_MANIFEST 必须恰好一个严格 JSON 对象，两个数组必须精确列出 frozen Spec 中全部 machine-checkable constraint/invariant id。
+12. VALIDATOR_PROBE_RECIPES 是可选补充，严格形状为 {"recipes":[{"targetId":"I1","constructionKind":"duplicate-element","fieldId":"a","operationName":"ADD"}]}；recipes 最多 64 项。每项只允许必需字段 targetId、constructionKind 与可选字段 fieldId、operationName，constructionKind 只能是：${VALIDATOR_PROBE_CONSTRUCTION_KINDS.join('、')}。没有 recipe 时输出空数组；recipe 只是可选补充，服务器优先从 frozen Spec 确定性构造，模型不得重复已支持目标。
+13. 禁止字段 input；禁止字段 subtaskId；禁止字段 subtask；禁止字段 seedIndex；禁止字段 seed；禁止字段 value；禁止字段 code；也禁止任何其他额外字段。服务器自行选择 seed、subtask、value、expression 与 input；recipe 不得提供原始输入、物化值、可执行表达式或调用 payload。Manifest 与 recipe 两节均禁止代码围栏或 JSON 前后缀。` : '';
+  const sectionContract = frozenSpec
+    ? `只输出以下分节，顺序不得改变；函数题存在题面样例时再在末尾输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+@@@COMPLEXITY_GAP@@@
+exists 或 none
+@@@BRUTE@@@
+完整 Python 3 暴力解
+@@@STRESS_GENERATOR@@@
+完整 Python 3 小数据生成器
+@@@VALIDATOR_MANIFEST@@@
+{"constraintIds":["C1"],"invariantIds":["I1"]}
+@@@VALIDATOR_PROBE_RECIPES@@@
+{"recipes":[]}
+@@@VALIDATOR@@@
+完整 Python 3 输入校验器
+@@@SAMPLE_INPUTS@@@
+函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`
+    : `只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
+@@@COMPLEXITY_GAP@@@
+exists 或 none
+@@@BRUTE@@@
+完整 Python 3 暴力解
+@@@STRESS_GENERATOR@@@
+完整 Python 3 小数据生成器
+@@@VALIDATOR@@@
+完整 Python 3 输入校验器
+@@@SAMPLE_INPUTS@@@
+函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`;
   return `你是一位独立的 OJ 题目验证专家。${sourceContract}你看不到 ORACLE 源码，也不得猜测、复述或要求它。
 
 核心规则：
@@ -1922,19 +2220,9 @@ export function buildIndependentVerifierSystemPrompt(
 5. 三个程序必须使用题目已经确定的同一份原始 stdin 编码。函数题每份 input 只对应一次调用；传统题若有 T，沿用题面和编码说明中的约定。
 6. 所有生成过程必须确定性并固定随机种子。每个 input 小于 256KB，STRESS_GENERATOR stdout 小于 1MB，不打印日志。
 7. 若用户消息列出函数题题面样例，额外输出 SAMPLE_INPUTS，将每个题面参数展示转换成上述 stdin 编码。只转换输入，不填写或改写期望输出；样例 id 必须逐一对应，不能遗漏或增加。
-8. 判断题目是否存在明显的复杂度差异：如果这道题不存在时间复杂度明显劣于标程、且学生现实中可能写出的朴素解法（例如 O(1) 公式题、纯输入输出模拟题），COMPLEXITY_GAP 输出 none；否则输出 exists，且 BRUTE 必须实现那个更慢的朴素解法。
+8. 判断题目是否存在明显的复杂度差异：如果这道题不存在时间复杂度明显劣于标程、且学生现实中可能写出的朴素解法（例如 O(1) 公式题、纯输入输出模拟题），COMPLEXITY_GAP 输出 none；否则输出 exists，且 BRUTE 必须实现那个更慢的朴素解法。${frozenRules}
 
-只输出以下四个必需分节；函数题存在题面样例时再输出 SAMPLE_INPUTS 分节。不要 META、ANALYSIS、ORACLE、SOLUTION、TEMPLATE、代码围栏或解释文字：
-=== COMPLEXITY_GAP ===
-exists 或 none
-@@@BRUTE@@@
-完整 Python 3 暴力解
-@@@STRESS_GENERATOR@@@
-完整 Python 3 小数据生成器
-@@@VALIDATOR@@@
-完整 Python 3 输入校验器
-@@@SAMPLE_INPUTS@@@
-函数题有题面样例时输出紧凑 JSON：{"samples":[{"id":"1","input":"转换后的原始 stdin"}]}`;
+${sectionContract}`;
 }
 
 export function buildIndependentVerifierUserPrompt(
@@ -1996,6 +2284,8 @@ export function buildIndependentVerifierUserPrompt(
   ].filter(line => line !== '').join('\n');
 }
 
+const NO_KILL_TARGETS_RESPONSE = 'NO_KILL_TARGETS';
+
 /** 错误解靶子调用与主蓝图隔离，不接收 ORACLE 或前轮对话。 */
 export function buildKillTargetsSystemPrompt(frozenSpec = false): string {
   const sourceContract = frozenSpec
@@ -2012,12 +2302,23 @@ export function buildKillTargetsSystemPrompt(frozenSpec = false): string {
 1. 每个错误解必须是自包含 Python 3 完整程序，读取一份原始 stdin 并写出 stdout，与题面 IO 约定一致。
 2. 错误解必须能正常运行、不崩溃，并且在给出的全部题面样例上输出正确；样例都过不了的显然错误没有区分度价值。
 3. 错误必须来自所选模式，不得硬编码样例答案，不得输出日志或解释。
-4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时保持响应为空，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
+4. 仅输出 0 至 2 个 KILL_TARGET 分节；没有合适靶子时只输出 ${NO_KILL_TARGETS_RESPONSE}，禁止空响应，不要用说明文字填充。不要 META、ORACLE、正确解、对话历史或额外说明。每节格式严格如下：
 === KILL_TARGET:<kind> ===
 DESC: 一句话说明该错误解会在哪类输入上出错
 \`\`\`python
 完整 Python 3 程序
 \`\`\``;
+}
+
+function truncatePromptText(value: string, limit: number, marker: string): string {
+  const excerpt = value.slice(0, limit);
+  return value.length > limit ? `${excerpt}${marker}` : excerpt;
+}
+
+function stringifySamplePromptText(value: string): string {
+  const limit = 1000;
+  const excerpt = value.slice(0, limit);
+  return `${JSON.stringify(excerpt)}${value.length > limit ? '（样例过长已截断）' : ''}`;
 }
 
 export function buildKillTargetsUserPrompt(input: {
@@ -2037,8 +2338,8 @@ export function buildKillTargetsUserPrompt(input: {
       '【公开题面样例（最多 3 组，错误解必须全部通过）】',
       ...(samples.length > 0
         ? samples.flatMap((sample, index) => [
-          `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
-          `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+          `样例 ${index + 1} 输入：${stringifySamplePromptText(comparableFileContent(sample.input))}`,
+          `样例 ${index + 1} 输出：${stringifySamplePromptText(comparableFileContent(sample.output))}`,
         ])
         : ['题面未解析到公开样例。']),
       '',
@@ -2047,7 +2348,7 @@ export function buildKillTargetsUserPrompt(input: {
     ].join('\n');
   }
   const statement = completeStatementForGenerationPrompt(input.statement);
-  const analysis = input.analysis.slice(0, 2000);
+  const analysis = truncatePromptText(input.analysis, 2000, '（分析过长已截断）');
   const samples = input.samples.slice(0, 3);
   return [
     '【既有解法分析】',
@@ -2059,8 +2360,8 @@ export function buildKillTargetsUserPrompt(input: {
     '【题面样例（最多 3 组，错误解必须全部通过）】',
     ...(samples.length > 0
       ? samples.flatMap((sample, index) => [
-        `样例 ${index + 1} 输入：${JSON.stringify(comparableFileContent(sample.input).slice(0, 1000))}`,
-        `样例 ${index + 1} 输出：${JSON.stringify(comparableFileContent(sample.output).slice(0, 1000))}`,
+        `样例 ${index + 1} 输入：${stringifySamplePromptText(comparableFileContent(sample.input))}`,
+        `样例 ${index + 1} 输出：${stringifySamplePromptText(comparableFileContent(sample.output))}`,
       ])
       : ['题面未解析到样例。']),
     '',
@@ -2133,7 +2434,8 @@ export function buildHackCasesUserPrompt(input: {
   }
   return [
     '【既有解法与 stdin 编码分析】',
-    input.analysis.slice(0, 3000) || '未提供额外分析，请依据错误模式构造合法小规模输入。',
+    truncatePromptText(input.analysis, 3000, '（分析过长已截断）')
+      || '未提供额外分析，请依据错误模式构造合法小规模输入。',
     '',
     '【幸存错误模式】',
     input.target.description,
@@ -2293,6 +2595,10 @@ interface ParsedSection {
   content: string[];
 }
 
+interface RawParsedSection extends ParsedSection {
+  markerLine: string;
+}
+
 /** 去除段落首尾的空行（保留内部空行），供代码/数据节使用 */
 function trimBlankEdges(lines: string[]): string {
   let start = 0;
@@ -2322,6 +2628,97 @@ function splitDelimitedSections(raw: string): ParsedSection[] {
     }
   }
   return sections;
+}
+
+/** Frozen 严格协议保留原始 marker/content；不得删除 think 或规范化代码围栏。 */
+function splitRawDelimitedSections(raw: string): RawParsedSection[] {
+  const sections: RawParsedSection[] = [];
+  let current: RawParsedSection | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    const marker = line.match(SECTION_MARKER_RE);
+    if (marker) {
+      current = { header: marker[1], content: [], markerLine: line };
+      sections.push(current);
+    } else if (current) {
+      current.content.push(line);
+    }
+  }
+  return sections;
+}
+
+type StrictVerifierSectionName =
+  | 'VALIDATOR_MANIFEST'
+  | 'VALIDATOR_PROBE_RECIPES'
+  | 'VALIDATOR';
+
+const STRICT_VERIFIER_SECTION_NAMES: StrictVerifierSectionName[] = [
+  'VALIDATOR_MANIFEST',
+  'VALIDATOR_PROBE_RECIPES',
+  'VALIDATOR',
+];
+
+function normalizedStrictVerifierSectionName(
+  section: RawParsedSection,
+): StrictVerifierSectionName | undefined {
+  const name = section.header.split(':')[0].trim().toUpperCase();
+  return STRICT_VERIFIER_SECTION_NAMES.includes(name as StrictVerifierSectionName)
+    ? name as StrictVerifierSectionName
+    : undefined;
+}
+
+function strictVerifierSectionError(message: string): never {
+  throw new TestdataPipelineError(
+    message,
+    'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+    'independent_verifier_parse',
+    'coverage',
+    'repair-artifact',
+  );
+}
+
+function parseStrictVerifierSections(raw: string): {
+  manifest: RawParsedSection;
+  recipes?: RawParsedSection;
+} {
+  const sections = splitRawDelimitedSections(raw);
+  const matching = (name: StrictVerifierSectionName) => sections.filter(section =>
+    normalizedStrictVerifierSectionName(section) === name);
+  const manifests = matching('VALIDATOR_MANIFEST');
+  const recipes = matching('VALIDATOR_PROBE_RECIPES');
+  const validators = matching('VALIDATOR');
+
+  if (manifests.length !== 1
+    || manifests[0].markerLine !== '@@@VALIDATOR_MANIFEST@@@') {
+    return strictVerifierSectionError(
+      'Frozen 独立验证器必须恰好包含一个精确的 VALIDATOR_MANIFEST 分节。',
+    );
+  }
+  if (recipes.length > 1
+    || recipes.some(section => section.markerLine !== '@@@VALIDATOR_PROBE_RECIPES@@@')) {
+    return strictVerifierSectionError(
+      'Frozen 独立验证器最多包含一个精确的 VALIDATOR_PROBE_RECIPES 分节。',
+    );
+  }
+  if (validators.length !== 1 || validators[0].markerLine !== '@@@VALIDATOR@@@') {
+    return strictVerifierSectionError(
+      'Frozen 独立验证器必须恰好包含一个精确的 VALIDATOR 分节。',
+    );
+  }
+
+  const manifestIndex = sections.indexOf(manifests[0]);
+  const expectedSequence = recipes.length === 1
+    ? [manifests[0], recipes[0], validators[0]]
+    : [manifests[0], validators[0]];
+  if (expectedSequence.some((section, offset) => sections[manifestIndex + offset] !== section)) {
+    return strictVerifierSectionError(
+      'Frozen 独立验证器严格分节必须按 Manifest、可选 Recipes、Validator 连续排列。',
+    );
+  }
+
+  return {
+    manifest: manifests[0],
+    recipes: recipes[0],
+  };
 }
 
 /** 解析学生提交形式的解；未限定语言的旧 SOLUTION 仅兼容为 Python。 */
@@ -2389,6 +2786,28 @@ function normalizeReusableCheckpoint(
   return { ...checkpoint, solution };
 }
 
+function isReusableFrozenVerifierCheckpoint(
+  verifier: IndependentVerifierBlueprint,
+  context: TestdataPipelineContext,
+): boolean {
+  if (verifier.validatorManifestStatus !== 'valid' || !verifier.validatorManifest) return false;
+  try {
+    parseAndValidateValidatorManifest(
+      JSON.stringify(verifier.validatorManifest),
+      context.spec,
+    );
+    if (verifier.validatorProbeRecipes !== undefined) {
+      parseAndValidateValidatorProbeRecipes(
+        JSON.stringify({ recipes: verifier.validatorProbeRecipes }),
+        context.spec,
+      );
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function reusableCheckpointForContext(
   checkpoint: TestdataGenerationCheckpointPayload | undefined,
   options: GenerateOptions,
@@ -2416,7 +2835,11 @@ function reusableCheckpointForContext(
       || dependencies.oracle === dependencies.verifier)) {
     return undefined;
   }
-  return normalizeReusableCheckpoint(checkpoint, options);
+  const normalized = normalizeReusableCheckpoint(checkpoint, options);
+  if (!normalized?.verifier
+    || isReusableFrozenVerifierCheckpoint(normalized.verifier, context)) return normalized;
+  const { verifier: _invalidVerifier, ...safeCheckpoint } = normalized;
+  return safeCheckpoint;
 }
 
 function assertSelectedTemplateSolutions(
@@ -2432,13 +2855,31 @@ function assertSelectedTemplateSolutions(
   }
 }
 
+function capKillTargets(
+  targets: KillTarget[],
+  notesStructured?: Pick<StructuredGenerationNotes, 'warnings'>,
+): KillTarget[] {
+  if (targets.length > MAX_KILL_TARGETS) {
+    const warning = `模型返回了 ${targets.length} 个错误解靶子；服务端仅保留前 ${MAX_KILL_TARGETS} 个。`;
+    if (notesStructured && !notesStructured.warnings.includes(warning)) {
+      notesStructured.warnings.push(warning);
+    }
+  }
+  return targets.slice(0, MAX_KILL_TARGETS);
+}
+
 /** 解析独立错误解靶子；单节损坏时丢弃，不影响其余靶子。 */
-export function parseKillTargetsResponse(raw: string): KillTarget[] {
+export function parseKillTargetsResponse(
+  raw: string,
+  notesStructured?: Pick<StructuredGenerationNotes, 'warnings'>,
+): KillTarget[] {
   const allowedKinds = new Set<KillTargetKind>(['boundary', 'wrong-algorithm', 'overflow-sim']);
   const markerRe = /^\s*===\s*KILL_TARGET:([a-z-]+)\s*===\s*$/i;
   const sections: Array<{ kind: string; lines: string[] }> = [];
   let current: { kind: string; lines: string[] } | null = null;
   const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+  if (text.trim() === NO_KILL_TARGETS_RESPONSE) return [];
 
   for (const line of text.split(/\r?\n/)) {
     const marker = line.match(markerRe);
@@ -2450,7 +2891,7 @@ export function parseKillTargetsResponse(raw: string): KillTarget[] {
     }
   }
 
-  return sections.flatMap(section => {
+  const targets = sections.flatMap(section => {
     if (!allowedKinds.has(section.kind as KillTargetKind)) return [];
     const content = section.lines.join('\n');
     const description = section.lines
@@ -2471,6 +2912,7 @@ export function parseKillTargetsResponse(raw: string): KillTarget[] {
       code: normalizeExecutableContent(rawCode),
     }];
   });
+  return capKillTargets(targets, notesStructured);
 }
 
 /** 解析定向补刀候选；单节损坏、空输入或超过 2000 字符时直接丢弃。 */
@@ -2530,27 +2972,12 @@ export function mergeHackCases(
 }
 
 /**
- * ORACLE_LANG 使用独立的 === 分节，避免改变既有 @@@ 代码分节契约。
- * 缺失、损坏或未知值一律回退 Python；函数题始终忽略 cpp 声明。
- */
-export function parseOracleLanguage(
-  raw: string,
-  problemType: SandboxGenerationBlueprint['problemType'],
-): OracleLanguage {
-  if (problemType === 'function') return 'python';
-  const match = raw.match(
-    /(?:^|\r?\n)[ \t]*===\s*ORACLE_LANG\s*===\s*\r?\n[ \t]*(python|cpp)[ \t]*(?=\r?\n|$)/i,
-  );
-  return match?.[1].toLowerCase() === 'cpp' ? 'cpp' : 'python';
-}
-
-/**
- * SUBTASKS 使用独立的 === 分节，不改变既有 @@@ 代码分节契约。
+ * SUBTASKS 使用统一的 @@@ 分节，同时保留旧 === 元数据的读取兼容。
  * 任一行不满足严格格式时整体丢弃，后续即可无歧义地降级为扁平生成。
  */
 export function parseSubtasksSection(raw: string): SubtaskSpec[] {
   const match = raw.match(
-    /(?:^|\r?\n)[ \t]*===\s*SUBTASKS\s*===\s*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i,
+    /(?:^|\r?\n)[ \t]*(?:@@@SUBTASKS@@@|===\s*SUBTASKS\s*===)[ \t]*(?:\r?\n|$)([\s\S]*?)(?=(?:\r?\n)[ \t]*(?:===\s*[A-Z][A-Z0-9_]*\s*===|@@@[^@\r\n]+@@@)|$)/i,
   );
   const content = match?.[1].trim();
   if (!content) return [];
@@ -2648,7 +3075,7 @@ export function parseSandboxBlueprint(
     templates: problemType === 'function' ? templates : undefined,
     generatorCode: normalizeExecutableContent(generatorCode),
     oracleCode: normalizeExecutableContent(oracleCode),
-    oracleLanguage: parseOracleLanguage(raw, problemType),
+    oracleLanguage: parseOracleLanguage(raw, problemType, normalizeExecutableContent(oracleCode)),
     solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
     solutionCode: solutions.py,
     bruteCode: bruteCode.trim() ? normalizeExecutableContent(bruteCode) : undefined,
@@ -2749,7 +3176,7 @@ export function parseSolutionBlueprint(
     subtasks: parseSubtasksSection(raw),
     functionName: meta.functionName || undefined,
     oracleCode: normalizeExecutableContent(oracleCode),
-    oracleLanguage: parseOracleLanguage(raw, problemType),
+    oracleLanguage: parseOracleLanguage(raw, problemType, normalizeExecutableContent(oracleCode)),
     solutions: Object.keys(solutions).length > 0 ? solutions : undefined,
     solutionCode: solutions.py,
     functionSampleInputs: problemType === 'function'
@@ -2766,22 +3193,29 @@ export function parseGenerationArtifacts(
   parseOptions: ParseAiResponseOptions = {},
 ): SandboxGenerationArtifacts {
   const sections = splitDelimitedSections(raw);
+  throwIfGeneratorBudgetConflict(raw, sections);
   if (sections.length === 0) throw new Error('AI 未返回外围制品分节标记');
+  const allowGeneratorPlan = !!parseOptions.generatorDsl;
   const forbidden = sections.find(section => {
     const kind = section.header.split(':')[0].trim().toUpperCase();
-    return !['GENERATOR', 'TEMPLATE', 'NOTES'].includes(kind);
+    const allowed = allowGeneratorPlan
+      ? ['GENERATOR_PLAN', 'TEMPLATE', 'NOTES']
+      : ['GENERATOR', 'TEMPLATE', 'NOTES'];
+    return !allowed.includes(kind);
   });
   if (forbidden) {
     throw new Error(`第二阶段外围制品包含禁止的 ${forbidden.header} 分节`);
   }
   const templates: Partial<Record<TemplateLang, string>> = {};
   let generatorCode = '';
+  let generatorPlanRaw = '';
   let notes: string | undefined;
   for (const section of sections) {
     const parts = section.header.split(':');
     const kind = parts[0].trim().toUpperCase();
     const content = trimBlankEdges(section.content);
     if (kind === 'GENERATOR') generatorCode = content;
+    else if (kind === 'GENERATOR_PLAN') generatorPlanRaw = content;
     else if (kind === 'NOTES') notes = content;
     else if (kind === 'TEMPLATE') {
       const lang = (parts[1] || '').trim().toLowerCase() as TemplateLang;
@@ -2790,13 +3224,28 @@ export function parseGenerationArtifacts(
       }
     }
   }
-  if (!generatorCode.trim()) throw new Error('AI 外围制品未返回可执行的 GENERATOR');
+  if (!!generatorCode.trim() === !!generatorPlanRaw.trim()) {
+    throw new Error('AI 外围制品必须且只能返回 GENERATOR 或 GENERATOR_PLAN');
+  }
+  let generatorPlan: GeneratorPlanV1 | undefined;
+  if (generatorPlanRaw.trim()) {
+    const generatorDsl = parseOptions.generatorDsl;
+    if (!generatorDsl) throw new Error('当前 frozen Spec 不支持 GENERATOR_PLAN');
+    generatorPlan = parseGeneratorPlan(
+      generatorPlanRaw,
+      generatorDsl.spec,
+      generatorDsl.expectedCaseCount,
+    );
+    const materialized = materializeGeneratorPlan(generatorPlan, generatorDsl.spec);
+    generatorCode = renderGeneratorArtifacts(generatorPlan, materialized).code;
+  }
   if (problemType === 'function' && !parseOptions.allowMissingTemplates) {
     const missing = languages.filter(lang => !templates[lang]?.trim());
     if (missing.length > 0) throw new Error(`AI 外围制品未返回 ${missing.map(lang => LANG_DISPLAY[lang]).join('、')} 模板`);
   }
   return {
     generatorCode: normalizeExecutableContent(generatorCode),
+    ...(generatorPlan ? { generatorPlan } : {}),
     templates: problemType === 'function' ? templates : undefined,
     notes,
   };
@@ -2806,10 +3255,11 @@ export function parseGenerationArtifacts(
 export function parseIndependentVerifierBlueprint(
   raw: string,
   expectedFunctionSamples: StatementSample[] = [],
+  options: ParseIndependentVerifierOptions = {},
 ): IndependentVerifierBlueprint {
   const lines = raw.replace(/<think>[\s\S]*?<\/think>/g, '').split(/\r?\n/);
   const complexityGapMarker = lines.findIndex(line =>
-    /^[ \t]*===\s*COMPLEXITY_GAP\s*===\s*$/i.test(line));
+    /^[ \t]*(?:@@@COMPLEXITY_GAP@@@|===\s*COMPLEXITY_GAP\s*===)[ \t]*$/i.test(line));
   let complexityGap: IndependentVerifierBlueprint['complexityGap'];
   if (complexityGapMarker >= 0) {
     const nextLine = lines[complexityGapMarker + 1];
@@ -2836,12 +3286,75 @@ export function parseIndependentVerifierBlueprint(
     expectedFunctionSamples,
     '独立验证器',
   );
+  let strictManifestFields: Pick<
+    IndependentVerifierBlueprint,
+    'validatorManifest' | 'validatorManifestStatus' | 'validatorProbeRecipes'
+  > = {};
+  if (options.requireValidatorManifest) {
+    if (!options.frozenSpec) {
+      throw new Error('严格 VALIDATOR Manifest 解析缺少 frozen ProblemSpec');
+    }
+    const strictSections = parseStrictVerifierSections(raw);
+    const validation = parseAndValidateValidatorManifest(
+      trimBlankEdges(strictSections.manifest.content),
+      options.frozenSpec,
+    );
+    strictManifestFields = {
+      validatorManifestStatus: 'valid',
+      validatorManifest: {
+        constraintIds: [...validation.manifest.constraintIds],
+        invariantIds: [...validation.manifest.invariantIds],
+      },
+      ...(!strictSections.recipes ? {} : {
+        validatorProbeRecipes: parseAndValidateValidatorProbeRecipes(
+          trimBlankEdges(strictSections.recipes.content),
+          options.frozenSpec,
+        ),
+      }),
+    };
+  }
   return {
     bruteCode: bruteCode as string,
     stressGeneratorCode: stressGeneratorCode as string,
     validatorCode: validatorCode as string,
     complexityGap,
     functionSampleInputs,
+    ...strictManifestFields,
+  };
+}
+
+/**
+ * Observe-only recovery after the one strict Frozen verifier repair is exhausted.
+ * This deliberately parses only executable sections and the already bounded
+ * function-sample mapping; Manifest/recipe proof must never be synthesized.
+ */
+function recoverIndependentVerifierBlueprintForObserve(
+  raw: string,
+  expectedFunctionSamples: StatementSample[],
+): IndependentVerifierBlueprint {
+  const sections = splitDelimitedSections(raw);
+  if (sections.length === 0) throw new Error('AI 未返回独立验证器分节标记');
+  const bruteCode = repairSectionContent(sections, 'BRUTE');
+  const stressGeneratorCode = repairSectionContent(sections, 'STRESS_GENERATOR');
+  const validatorCode = repairSectionContent(sections, 'VALIDATOR');
+  const missing = [
+    !bruteCode ? 'BRUTE' : '',
+    !stressGeneratorCode ? 'STRESS_GENERATOR' : '',
+    !validatorCode ? 'VALIDATOR' : '',
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    throw new Error(`AI 独立验证器缺少必需分节：${missing.join('、')}`);
+  }
+  return {
+    bruteCode: bruteCode as string,
+    stressGeneratorCode: stressGeneratorCode as string,
+    validatorCode: validatorCode as string,
+    functionSampleInputs: parseFunctionSampleInputsSection(
+      sections,
+      expectedFunctionSamples,
+      '独立验证器',
+    ),
+    validatorManifestStatus: 'invalid',
   };
 }
 
@@ -3508,18 +4021,23 @@ export function buildDiscriminationNotes(
 interface GeneratedInputCase {
   label?: string;
   input: string;
+  subtaskId?: number;
+  /** 仅由服务端受信 DSL 物化；不得从模型 label 或 Python stdout 恢复。 */
+  structuredValues?: Record<string, MaterializedGeneratorValue>;
 }
 
 /** 解析沙箱中 GENERATOR 的 stdout，只接受固定、简单的 JSON 契约。 */
-export function parseGeneratorOutput(stdout: string, expectedCount: number): GeneratedInputCase[] {
-  if (Buffer.byteLength(stdout, 'utf8') > TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE) {
-    throw toPipelineError(new Error('GENERATOR 输出超过 1MB 上限'), {
+export function parseGeneratorOutput(stdout: string, expectedCount: number, stress = false): GeneratedInputCase[] {
+  const outputLimit = stress ? 1024 * 1024 : TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE;
+  const inputLimit = stress ? TESTDATA_CODE_FILE_MAX_BYTES : TESTDATA_GEN_LIMITS.MAX_INPUT_FILE_SIZE;
+  if (Buffer.byteLength(stdout, 'utf8') > outputLimit) {
+    throw toPipelineError(new Error(`GENERATOR 输出超过 ${outputLimit} 字节上限`), {
       code: 'GENERATOR_OUTPUT_TOO_LARGE',
       stage: 'generator',
       artifact: 'generator',
       safeDetails: {
         actualBytes: Buffer.byteLength(stdout, 'utf8'),
-        maxBytes: TESTDATA_GEN_LIMITS.MAX_GENERATOR_OUTPUT_SIZE,
+        maxBytes: outputLimit,
       },
     });
   }
@@ -3566,15 +4084,15 @@ export function parseGeneratorOutput(stdout: string, expectedCount: number): Gen
       });
     }
     const input = normalizeFileContent((item as { input: string }).input);
-    if (Buffer.byteLength(input, 'utf8') > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-      throw toPipelineError(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 256KB 上限`), {
+    if (Buffer.byteLength(input, 'utf8') > inputLimit) {
+      throw toPipelineError(new Error(`GENERATOR 的第 ${index + 1} 个 .in 超过 ${inputLimit} 字节上限`), {
         code: 'GENERATOR_OUTPUT_TOO_LARGE',
         stage: 'generator',
         artifact: 'generator',
         safeDetails: {
           caseIndex: index + 1,
           actualBytes: Buffer.byteLength(input, 'utf8'),
-          maxBytes: TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
+          maxBytes: inputLimit,
         },
       });
     }
@@ -3719,7 +4237,7 @@ interface OracleExecutor {
   readonly language: OracleLanguage;
   runBatchDetailed(
     inputs: string[],
-    opts?: { signal?: AbortSignal; deadlineAt?: number; chunkConcurrency?: number },
+    opts?: { signal?: AbortSignal; deadlineAt?: number; chunkConcurrency?: number; outputLimitBytes?: number },
   ): Promise<PythonRunDetail[]>;
   dispose(): Promise<void>;
 }
@@ -3751,6 +4269,9 @@ async function createOracleExecutor(input: {
   const source = providedCpp
     ? normalizeExecutableContent(input.options.providedStd as string)
     : input.blueprint.oracleCode;
+
+  // Also validate restored checkpoints and callers that already hold parsed blueprints.
+  parseOracleLanguage(`@@@ORACLE_LANG@@@\n${language}`, input.blueprint.problemType, source);
 
   if (language === 'python') {
     return {
@@ -3891,6 +4412,7 @@ export async function verifySolutionBlueprintSamples(
     }));
   }
   let executor: OracleExecutor | undefined;
+  let oracleLanguage: OracleLanguage = solution.oracleLanguage || 'python';
   let results: PythonRunDetail[];
   try {
     executor = await createOracleExecutor({
@@ -3900,6 +4422,7 @@ export async function verifySolutionBlueprintSamples(
       cppOracleAvailable,
       signal,
     });
+    oracleLanguage = executor.language;
     results = await executor.runBatchDetailed(
       samples.map(sample => sample.input),
       { signal },
@@ -3911,6 +4434,7 @@ export async function verifySolutionBlueprintSamples(
       code: 'ORACLE_RUNTIME_FAILED',
       stage: 'solution_verification',
       artifact: 'oracle',
+      safeDetails: { oracleLanguage },
       message: `ORACLE 样例预验证执行失败：${err instanceof Error ? err.message : String(err)}`,
     });
   } finally {
@@ -3923,7 +4447,7 @@ export async function verifySolutionBlueprintSamples(
         code: 'ORACLE_RUNTIME_FAILED',
         stage: 'solution_verification',
         artifact: 'oracle',
-        safeDetails: { actualCount: results.length, expectedCount: samples.length },
+        safeDetails: { oracleLanguage, actualCount: results.length, expectedCount: samples.length },
       },
     );
   }
@@ -3942,7 +4466,7 @@ export async function verifySolutionBlueprintSamples(
         code: 'ORACLE_RUNTIME_FAILED',
         stage: 'solution_verification',
         artifact: 'oracle',
-        safeDetails: { caseIndex: i + 1, candidate: acceptedRecord },
+        safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: acceptedRecord },
       },
     );
   }
@@ -3963,7 +4487,7 @@ export async function verifySolutionBlueprintSamples(
           code: 'ORACLE_SAMPLE_MISMATCH',
           stage: 'solution_verification',
           artifact: 'oracle',
-          safeDetails: { caseIndex: i + 1, checkerUsed: true, candidate: acceptedRecord },
+          safeDetails: { oracleLanguage, caseIndex: i + 1, checkerUsed: true, candidate: acceptedRecord },
         },
       );
     }
@@ -3981,7 +4505,7 @@ export async function verifySolutionBlueprintSamples(
           code: 'ORACLE_SAMPLE_MISMATCH',
           stage: 'solution_verification',
           artifact: 'oracle',
-          safeDetails: { caseIndex: i + 1, checkerUsed: false, candidate: acceptedRecord },
+          safeDetails: { oracleLanguage, caseIndex: i + 1, checkerUsed: false, candidate: acceptedRecord },
         },
       );
     }
@@ -4232,6 +4756,10 @@ interface CachedValidationState {
   keptStressIndices: number[];
   droppedInvalid: number;
   validatorRan: boolean;
+  validatorVerification?: ValidatorVerification;
+  validatorTargetEvidence?: ValidatorTargetEvidence[];
+  validatorInvalidInvocationCount?: number;
+  validatorProofComplete?: boolean;
 }
 
 interface CachedOracleState {
@@ -4242,6 +4770,7 @@ interface CachedOracleState {
 }
 
 export interface MaterializationCacheState {
+  generatorReplay?: { code: string; data?: string };
   correctnessBudgetRemainingMs?: number;
   generatedInputs?: GeneratedInputCase[];
   stress?: CachedStressInputs;
@@ -4251,8 +4780,397 @@ export interface MaterializationCacheState {
   templateChecks?: TemplateChecks;
 }
 
+export interface ValidatorProofContext {
+  reliabilityMode: TestdataReliabilityMode;
+  pipelineContext: TestdataPipelineContext;
+  tieredDecision: TieredSubtaskGenerationDecision;
+}
+
+export interface CoverageProofContext {
+  reliabilityMode: TestdataReliabilityMode;
+  pipelineContext: TestdataPipelineContext;
+  tieredDecision?: TieredSubtaskGenerationDecision;
+}
+
 export interface MaterializationRunOptions extends MaterializationResume {
   cache: MaterializationCacheState;
+  validatorProof?: ValidatorProofContext;
+  coverageProof?: CoverageProofContext;
+  planContext?: {
+    existingFiles?: string[];
+    existingConfig?: string;
+    tieredDecision?: TieredSubtaskGenerationDecision;
+  };
+}
+
+function validatorInvocation(stdin: string, subtaskId?: number): PythonRunInvocation {
+  return {
+    stdin,
+    argv: subtaskId === undefined ? [] : ['--subtask', String(subtaskId)],
+  };
+}
+
+export type ValidatorInvalidExecution =
+  | 'rejected'
+  | 'false-accept'
+  | 'timeout-gap'
+  | 'infra-gap';
+
+type ValidatorExecution = 'accepted' | 'rejected' | 'timeout-gap' | 'infra-gap';
+
+/**
+ * Classify an untrusted sandbox result through one closed Validator protocol.
+ * Timeout is kept distinct, while every other proof-bearing result must be
+ * complete and internally consistent.
+ */
+function classifyValidatorExecution(result: unknown): ValidatorExecution {
+  if (!result || typeof result !== 'object') return 'infra-gap';
+  const detail = result as Partial<PythonRunDetail>;
+  if (typeof detail.status !== 'string'
+    || typeof detail.accepted !== 'boolean'
+    || typeof detail.timedOut !== 'boolean'
+    || typeof detail.stdout !== 'string'
+    || typeof detail.stderr !== 'string'
+    || (detail.error !== undefined && detail.error !== '')) return 'infra-gap';
+  if (detail.timedOut) return 'timeout-gap';
+  if (!Number.isSafeInteger(detail.exitStatus)) return 'infra-gap';
+  if (detail.status === 'Accepted' && detail.accepted && detail.exitStatus === 0) {
+    return 'accepted';
+  }
+  if ((detail.status === 'Nonzero Exit Status' || detail.status === 'Runtime Error')
+    && !detail.accepted
+    && detail.exitStatus !== 0) return 'rejected';
+  return 'infra-gap';
+}
+
+/** Invalid input is proof only when Validator returns a strict explicit rejection. */
+export function classifyValidatorInvalidResult(
+  result: PythonRunDetail,
+): ValidatorInvalidExecution {
+  const execution = classifyValidatorExecution(result);
+  return execution === 'accepted' ? 'false-accept' : execution;
+}
+
+interface ValidatorTargetEvidence {
+  targetId: string;
+  targetKind: 'constraint' | 'invariant';
+  subtaskId?: number;
+  declared: boolean;
+  constructed: boolean;
+  execution: ValidatorInvalidExecution | 'not-proven' | 'not-run';
+}
+
+interface InvalidValidatorInvocation {
+  invocation: PythonRunInvocation;
+  probe?: ConstraintProbe;
+  protocolProbe?: boolean;
+}
+
+const validatorInvalidInvocationCounts = new WeakMap<object, number>();
+const validatorProofCompleteness = new WeakMap<object, boolean>();
+
+function validatorEvidenceKey(
+  targetKind: ValidatorTargetEvidence['targetKind'],
+  targetId: string,
+): string {
+  return `${targetKind}\0${targetId}`;
+}
+
+function firstUnknownSubtaskId(knownIds: readonly number[]): number {
+  const known = new Set(knownIds);
+  const maximum = Math.max(0, ...knownIds);
+  if (Number.isSafeInteger(maximum + 1) && !known.has(maximum + 1)) return maximum + 1;
+  for (let candidate = 1; candidate <= known.size + 1; candidate++) {
+    if (!known.has(candidate)) return candidate;
+  }
+  throw new Error('无法构造未知子任务 ID');
+}
+
+interface ValidatorProofPolicyInput {
+  reliabilityMode: TestdataReliabilityMode;
+  riskTier: TestdataRiskAssessment['tier'];
+  manifestStatus: SandboxGenerationBlueprint['validatorManifestStatus'];
+  manifestComplete: boolean;
+  summary: ValidatorVerification;
+  gaps: readonly ValidatorTargetEvidence[];
+  invalidInvocationCount: number;
+  scopedFalseAccept: boolean;
+  protocolFalseAccept: boolean;
+}
+
+/** Single authority for mode/risk decisions over the request-local Validator proof. */
+function applyValidatorProofPolicy(input: ValidatorProofPolicyInput): { complete: boolean } {
+  const classifiedInvalidCount = input.summary.invalidRejected + input.summary.invalidAccepted;
+  const complete = input.summary.ran
+    && input.manifestComplete
+    && input.summary.invalidAccepted === 0
+    && input.summary.missingConstraintIds.length === 0
+    && classifiedInvalidCount === input.invalidInvocationCount
+    && (input.invalidInvocationCount === 0 || input.summary.invalidRejected > 0);
+
+  if (input.reliabilityMode === 'enforce'
+    && (input.manifestStatus !== 'valid' || !input.manifestComplete)) {
+    throw toPipelineError(new Error('VALIDATOR Manifest 未声明全部必需约束目标。'), {
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      stage: 'validator',
+      artifact: 'coverage',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { missingCount: input.summary.missingConstraintIds.length },
+    });
+  }
+  if (input.reliabilityMode === 'enforce' && input.summary.invalidAccepted > 0) {
+    const scoped = input.scopedFalseAccept || input.protocolFalseAccept;
+    throw toPipelineError(new Error(
+      scoped
+        ? 'VALIDATOR 接受了非法子任务或协议探针。'
+        : 'VALIDATOR 接受了服务器构造的非法探针。',
+    ), {
+      code: scoped ? 'SUBTASK_CONSTRAINT_VIOLATION' : 'VALIDATOR_FALSE_ACCEPT',
+      stage: 'validator',
+      artifact: 'validator',
+      retryPolicy: 'repair-artifact',
+      safeDetails: {
+        invalidAccepted: input.summary.invalidAccepted,
+        invalidRejected: input.summary.invalidRejected,
+        ...(input.protocolFalseAccept ? { protocolProbe: true } : {}),
+      },
+    });
+  }
+  if (input.reliabilityMode === 'enforce'
+    && (input.riskTier === 'high' || input.riskTier === 'blocked')
+    && input.gaps.length > 0) {
+    throw toPipelineError(new Error('高风险题目的 VALIDATOR 缺少完整拒绝覆盖。'), {
+      code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+      stage: 'validator',
+      artifact: 'coverage',
+      retryPolicy: 'repair-artifact',
+      safeDetails: { missingCount: input.summary.missingConstraintIds.length },
+    });
+  }
+  return { complete };
+}
+
+function createValidatorTargetEvidence(
+  spec: ProblemSpecV1,
+  manifestStatus: SandboxGenerationBlueprint['validatorManifestStatus'],
+  manifest: ValidatorManifest | undefined,
+  probes: readonly ConstraintProbe[],
+  executions: readonly Exclude<ValidatorTargetEvidence['execution'], 'not-run'>[],
+  constructionGaps: readonly ConstraintProbeGap[] = [],
+): ValidatorTargetEvidence[] {
+  const declaredConstraints = manifestStatus === 'valid'
+    ? new Set(manifest?.constraintIds || []) : new Set<string>();
+  const declaredInvariants = manifestStatus === 'valid'
+    ? new Set(manifest?.invariantIds || []) : new Set<string>();
+  const targets: ValidatorTargetEvidence[] = [
+    ...spec.constraints.filter(item => item.machineCheckable).map(item => ({
+      targetId: item.id,
+      targetKind: 'constraint' as const,
+      ...(item.scope === 'global' ? {} : { subtaskId: item.scope.subtaskId }),
+      declared: declaredConstraints.has(item.id),
+      constructed: false,
+      execution: 'not-run' as const,
+    })),
+    ...spec.invariants.filter(item => item.machineCheckable).map(item => ({
+      targetId: item.id,
+      targetKind: 'invariant' as const,
+      declared: declaredInvariants.has(item.id),
+      constructed: false,
+      execution: 'not-run' as const,
+    })),
+  ];
+  const evidenceByTarget = new Map(targets.map(item => [
+    validatorEvidenceKey(item.targetKind, item.targetId), item,
+  ]));
+  const priority: Record<ValidatorTargetEvidence['execution'], number> = {
+    'not-run': 0,
+    'infra-gap': 1,
+    'timeout-gap': 2,
+    'not-proven': 3,
+    'false-accept': 4,
+    rejected: 5,
+  };
+  probes.forEach((probe, index) => {
+    const evidence = evidenceByTarget.get(validatorEvidenceKey(probe.targetKind, probe.targetId));
+    if (!evidence) return;
+    evidence.constructed = true;
+    const execution = executions[index] || 'not-run';
+    if (priority[execution] > priority[evidence.execution]) evidence.execution = execution;
+  });
+  for (const gap of constructionGaps) {
+    const evidence = evidenceByTarget.get(validatorEvidenceKey(gap.targetKind, gap.targetId));
+    if (evidence) evidence.constructed = false;
+  }
+  return targets;
+}
+
+interface ValidatorInvalidProofResult {
+  summary: ValidatorVerification;
+  targetEvidence: ValidatorTargetEvidence[];
+  invalidInvocationCount: number;
+  complete: boolean;
+}
+
+async function runValidatorInvalidProof(input: {
+  blueprint: SandboxGenerationBlueprint;
+  proof: ValidatorProofContext;
+  runner: TestdataSandboxRunner;
+  seeds: LegalConstraintProbeSeed[];
+  validatorRan: boolean;
+  legalCasesChecked: number;
+  validAccepted: number;
+  signal?: AbortSignal;
+  deadlineAt: number;
+}): Promise<ValidatorInvalidProofResult> {
+  if (input.signal?.aborted) {
+    throw input.signal.reason ?? new Error('VALIDATOR 非法探针构造已取消');
+  }
+  const { spec } = input.proof.pipelineContext;
+  const build = buildConstraintProbes({
+    spec,
+    statementHash: input.proof.pipelineContext.statement.statementHash,
+    specHash: input.proof.pipelineContext.specHash,
+    seeds: input.seeds,
+    recipes: input.blueprint.validatorProbeRecipes || [],
+  });
+  if (input.signal?.aborted) {
+    throw input.signal.reason ?? new Error('VALIDATOR 非法探针构造已取消');
+  }
+  const invalidInvocations: InvalidValidatorInvocation[] = build.probes.map(probe => ({
+    invocation: validatorInvocation(probe.input, probe.subtaskId),
+    probe,
+  }));
+  const firstLegalSeed = input.seeds.reduce<LegalConstraintProbeSeed | undefined>((best, seed) => (
+    !best || Buffer.byteLength(seed.input, 'utf8') < Buffer.byteLength(best.input, 'utf8') ? seed : best
+  ), undefined);
+  if (spec.subtasks.length > 0 && firstLegalSeed) {
+    const unknownSubtaskId = firstUnknownSubtaskId(spec.subtasks.map(subtask => subtask.id));
+    invalidInvocations.push(
+      {
+        invocation: validatorInvocation(firstLegalSeed.input, unknownSubtaskId),
+        protocolProbe: true,
+      },
+      {
+        invocation: {
+          stdin: firstLegalSeed.input,
+          argv: ['--subtask', 'malformed'],
+        },
+        protocolProbe: true,
+      },
+    );
+  }
+
+  const invalidBytes = invalidInvocations.map(item => Buffer.byteLength(item.invocation.stdin, 'utf8'));
+  const totalInvalidBytes = invalidBytes.reduce((sum, bytes) => sum + bytes, 0);
+  if (invalidBytes.some(bytes => bytes > TESTDATA_INPUT_MAX_BYTES) || totalInvalidBytes > TESTDATA_PLAN_MAX_BYTES) {
+    throw new TestdataPipelineError(
+      'VALIDATOR 非法输入及子任务协议探针超出有界验证预算，未省略检查。',
+      'VALIDATOR_CONSTRAINT_COVERAGE_MISSING', 'validator', 'coverage', 'manual-review',
+      { failureKind: 'probe-budget', actualBytes: totalInvalidBytes, maxBytes: TESTDATA_PLAN_MAX_BYTES },
+    );
+  }
+
+  let executions: ValidatorInvalidExecution[] = [];
+  if (invalidInvocations.length > 0 && input.blueprint.validatorCode) {
+    if (input.signal?.aborted) {
+      throw input.signal.reason ?? new Error('VALIDATOR 非法探针执行已取消');
+    }
+    let results: PythonRunDetail[];
+    try {
+      results = await input.runner.runPythonBatchDetailed(
+        input.blueprint.validatorCode,
+        invalidInvocations.map(item => item.invocation),
+        { signal: input.signal, deadlineAt: input.deadlineAt, chunkConcurrency: 3 },
+      );
+    } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      if (isCancellation(err)) throw err;
+      if (isSandboxBudgetExceededError(err)) {
+        throw new TestdataPipelineError(
+          '沙箱执行总时长超出预算，请减少测试点数量后重试',
+          'PIPELINE_BUDGET_EXHAUSTED',
+          'sandbox_budget',
+          'pipeline',
+          'no-retry',
+        );
+      }
+      throw new TestdataPipelineError(
+        'VALIDATOR 非法探针批次的沙箱基础设施不可用',
+        'SANDBOX_UNAVAILABLE',
+        'validator',
+        'validator',
+        'manual-review',
+        { failureKind: 'infra' },
+      );
+    }
+    if (input.signal?.aborted) {
+      throw input.signal.reason ?? new Error('VALIDATOR 非法探针执行已取消');
+    }
+    if (results.length !== invalidInvocations.length) {
+      throw toPipelineError(new Error('VALIDATOR 非法探针批次返回结果数量不匹配'), {
+        code: 'SANDBOX_UNAVAILABLE',
+        stage: 'validator',
+        artifact: 'validator',
+        safeDetails: {
+          actualCount: results.length,
+          expectedCount: invalidInvocations.length,
+          failureKind: 'protocol',
+        },
+      });
+    }
+    executions = results.map(classifyValidatorInvalidResult);
+  }
+
+  const proofExecutions = executions;
+  const targetEvidence = createValidatorTargetEvidence(
+    spec,
+    input.blueprint.validatorManifestStatus,
+    input.blueprint.validatorManifest,
+    build.probes,
+    proofExecutions.slice(0, build.probes.length),
+    build.gaps,
+  );
+  const coveredIds = targetEvidence.filter(item => (
+    item.declared && item.constructed && item.execution === 'rejected'
+  )).map(item => item.targetId);
+  const missingIds = targetEvidence.filter(item => !(
+    item.declared && item.constructed && item.execution === 'rejected'
+  )).map(item => item.targetId);
+  const summary: ValidatorVerification = {
+    ran: input.validatorRan,
+    casesChecked: input.legalCasesChecked,
+    validAccepted: input.validAccepted,
+    invalidRejected: executions.filter(item => item === 'rejected').length,
+    invalidAccepted: proofExecutions.filter(item => item === 'false-accept').length,
+    coveredConstraintIds: [...new Set(coveredIds)].sort(),
+    missingConstraintIds: [...new Set(missingIds)].sort(),
+  };
+  const manifestComplete = input.blueprint.validatorManifestStatus === 'valid'
+    && targetEvidence.every(item => item.declared);
+  const falseAcceptedInvocations = invalidInvocations.filter(
+    (_item, index) => proofExecutions[index] === 'false-accept',
+  );
+  const policy = applyValidatorProofPolicy({
+    reliabilityMode: input.proof.reliabilityMode,
+    riskTier: input.proof.pipelineContext.risk.tier,
+    manifestStatus: input.blueprint.validatorManifestStatus,
+    manifestComplete,
+    summary,
+    gaps: targetEvidence.filter(item => (
+      !item.declared || !item.constructed || item.execution !== 'rejected'
+    )),
+    invalidInvocationCount: invalidInvocations.length,
+    scopedFalseAccept: falseAcceptedInvocations.some(item => item.probe?.subtaskId !== undefined),
+    protocolFalseAccept: falseAcceptedInvocations.some(item => item.protocolProbe === true),
+  });
+  validatorInvalidInvocationCounts.set(summary, invalidInvocations.length);
+  validatorProofCompleteness.set(summary, policy.complete);
+  return {
+    summary,
+    targetEvidence,
+    invalidInvocationCount: invalidInvocations.length,
+    complete: policy.complete,
+  };
 }
 
 const MATERIALIZATION_PHASE_ORDER: Record<MaterializationPhase, number> = {
@@ -4295,6 +5213,14 @@ export async function materializeSandboxBlueprint(
   if (!cacheSupportsResume) {
     requestedPhase = 'generator';
   }
+  if (requestedPhase === 'validator') {
+    // Validator replacement invalidates every result that depended on validation.
+    // Formal/stress legal inputs remain reusable; request-local probes are rebuilt.
+    delete cache.validation;
+    delete cache.oracle;
+    delete cache.templateCompleted;
+    delete cache.templateChecks;
+  }
   const startsAtOrBefore = (phase: MaterializationPhase) =>
     MATERIALIZATION_PHASE_ORDER[requestedPhase] <= MATERIALIZATION_PHASE_ORDER[phase];
   const correctnessBudgetMs = cache.correctnessBudgetRemainingMs ?? SANDBOX_TOTAL_BUDGET_MS;
@@ -4318,6 +5244,8 @@ export async function materializeSandboxBlueprint(
     );
   }
   const coveragePlan = buildCoveragePlan(options.caseCount, options.dataScale || 'auto');
+  let effectiveGeneratorCode = blueprint.generatorCode;
+  let generatorReplayData: string | undefined;
   const checkBudget = () => {
     if (Date.now() >= sandboxDeadlineAt) {
       throw toPipelineError(new Error('沙箱执行总时长超出预算，请减少测试点数量后重试'), {
@@ -4342,23 +5270,66 @@ export async function materializeSandboxBlueprint(
   let oracleExecutor: OracleExecutor | undefined;
 
   try {
+  if (blueprint.problemType === 'function' && options.languages.includes('py') && runner.inspectPythonTemplate) {
+    checkBudget();
+    try {
+      const inspection = await runner.inspectPythonTemplate(
+        blueprint.solutions?.py || blueprint.solutionCode || '', blueprint.templates?.py || '',
+        { signal, deadlineAt: sandboxDeadlineAt },
+      );
+      if (signal?.aborted) throw signal.reason;
+      checkBudget();
+      assertPythonTemplateInterface(inspection);
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      if (isCancellation(error) || error instanceof TestdataPipelineError) throw error;
+      throw toSandboxExecutionPipelineError(error, { code: 'TEMPLATE_RUNTIME_FAILED', stage: 'template', artifact: 'template-py' });
+    }
+  }
   // a. GENERATOR 实跑 → 解析出全部 .in
   let generatedInputs: GeneratedInputCase[];
   if (startsAtOrBefore('generator')) {
     reportProgress('generating_inputs', 56);
-    let generatorResult: PythonRunResult;
-    try {
-      generatorResult = await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
-    } catch (err) {
-      if (isCancellation(err)) throw err;
-      throw toSandboxExecutionPipelineError(err, {
-        code: 'UNKNOWN',
-        stage: 'generator',
-        artifact: 'generator',
-        message: `GENERATOR 实跑失败：${err instanceof Error ? err.message : String(err)}`,
-      });
+    if (blueprint.generatorPlan && materialization?.coverageProof) {
+      const materialized = materializeGeneratorPlan(
+        blueprint.generatorPlan,
+        materialization.coverageProof.pipelineContext.spec,
+      );
+      const replay = renderGeneratorArtifacts(blueprint.generatorPlan, materialized);
+      cache.generatorReplay = replay;
+      effectiveGeneratorCode = replay.code;
+      generatorReplayData = replay.data;
+      const authoritativeAllocations = materialization.coverageProof.tieredDecision?.enabled
+        ? materialization.coverageProof.tieredDecision.allocations
+        : [];
+      generatedInputs = materialized.map((item, index) => ({
+        label: item.label,
+        input: item.input,
+        ...(authoritativeAllocations[index]?.subtaskId === undefined
+          ? {}
+          : { subtaskId: authoritativeAllocations[index].subtaskId }),
+        structuredValues: item.values,
+      }));
+    } else {
+      delete cache.generatorReplay;
+      let generatorResult: PythonRunResult;
+      try {
+        generatorResult = runner.runPythonGenerator
+          ? await runner.runPythonGenerator(blueprint.generatorCode, signal, sandboxDeadlineAt)
+          : await runner.runPython(blueprint.generatorCode, '', signal, sandboxDeadlineAt);
+      } catch (err) {
+        if (isCancellation(err)) throw err;
+        const budgetFailure = parseGeneratorBudgetFailure(err);
+        if (budgetFailure) throw budgetFailure;
+        throw toSandboxExecutionPipelineError(err, {
+          code: 'UNKNOWN',
+          stage: 'generator',
+          artifact: 'generator',
+          message: `GENERATOR 实跑失败：${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      generatedInputs = parseGeneratorOutput(generatorResult.stdout, options.caseCount);
     }
-    generatedInputs = parseGeneratorOutput(generatorResult.stdout, options.caseCount);
     cache.generatedInputs = generatedInputs;
     delete cache.stress;
     delete cache.validation;
@@ -4367,8 +5338,44 @@ export async function materializeSandboxBlueprint(
     delete cache.templateChecks;
   } else {
     generatedInputs = cache.generatedInputs as GeneratedInputCase[];
+    if (cache.generatorReplay) {
+      effectiveGeneratorCode = cache.generatorReplay.code;
+      generatorReplayData = cache.generatorReplay.data;
+    }
   }
+  // A companion is additional persisted data, not a replacement for .in files.
+  // Reject an already impossible lower bound before stress/validator/oracle work.
+  assertGeneratedDataBudget(generatedInputs.map(item => ({ input: item.input, output: '' })),
+    generatorReplayData ? [{ name: GENERATOR_REPLAY_DATA_FILENAME, content: generatorReplayData }] : []);
   const inputs = generatedInputs.map(item => item.input);
+  const structuredCases: MaterializedGeneratorCase[] | undefined = generatedInputs.every(
+    item => item.structuredValues !== undefined,
+  ) ? generatedInputs.map(item => ({
+      label: item.label || '',
+      input: item.input,
+      ...(item.subtaskId === undefined ? {} : { subtaskId: item.subtaskId }),
+      values: item.structuredValues as Record<string, MaterializedGeneratorValue>,
+    })) : undefined;
+  const coverage: CoverageVerification = materialization?.coverageProof
+    ? evaluateSemanticCoverage({
+      spec: materialization.coverageProof.pipelineContext.spec,
+      cases: structuredCases,
+      coverageMode: structuredCases ? 'trusted-dsl' : 'ai-generator-unverified',
+    })
+    : {
+      mode: 'ai-generator-unverified',
+      matrix: [],
+      totalTargets: 0,
+      passedTargets: 0,
+      criticalMissing: 0,
+    };
+  if (materialization?.coverageProof) {
+    enforceCoverageRequirements(
+      coverage,
+      materialization.coverageProof.pipelineContext.risk.tier,
+      materialization.coverageProof.reliabilityMode,
+    );
+  }
 
   // b. 函数题伪 stdin 检查（源码赋值写法拦截）
   if (blueprint.problemType === 'function') {
@@ -4416,6 +5423,7 @@ export async function materializeSandboxBlueprint(
         stressGenerated = parseGeneratorOutput(
           stressGeneratorResult.stdout,
           TESTDATA_GEN_LIMITS.STRESS_CASES,
+          true,
         );
       } catch (err) {
         const code = err instanceof TestdataPipelineError
@@ -4529,7 +5537,23 @@ export async function materializeSandboxBlueprint(
 
   // d. VALIDATOR：正式输入与题面样例仍逐项硬失败；压力输入允许在保底比例内剔除。
   let validatorRan = false;
-  const validationInputs = [...inputs, ...sampleInputs, ...stressInputs];
+  let validAccepted = 0;
+  let validatorVerification: ValidatorVerification | undefined;
+  let validatorTargetEvidence: ValidatorTargetEvidence[] | undefined;
+  let validatorInvalidInvocationCount: number | undefined;
+  let validatorProofComplete = true;
+  const tieredValidatorDecision = materialization?.validatorProof?.tieredDecision;
+  const tieredValidatorEnabled = tieredValidatorDecision?.enabled === true;
+  const validationInputs = tieredValidatorEnabled
+    ? [
+      ...inputs.map((stdin, index) => validatorInvocation(
+        stdin,
+        tieredValidatorDecision.allocations[index]?.subtaskId,
+      )),
+      ...sampleInputs.map(stdin => validatorInvocation(stdin)),
+      ...stressInputs.map(stdin => validatorInvocation(stdin)),
+    ]
+    : [...inputs, ...sampleInputs, ...stressInputs];
   if (startsAtOrBefore('validator')) {
     let keptStressIndices = stressInputs.map((_, index) => index);
     if (blueprint.validatorCode) {
@@ -4543,42 +5567,78 @@ export async function materializeSandboxBlueprint(
           { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 },
         );
       } catch (err) {
+        if (signal?.aborted) throw signal.reason ?? err;
         if (isCancellation(err)) throw err;
         throw toSandboxExecutionPipelineError(err, {
-          code: 'VALIDATOR_FALSE_REJECT',
+          code: 'SANDBOX_UNAVAILABLE',
           stage: 'validator',
           artifact: 'validator',
+          message: 'VALIDATOR 沙箱执行基础设施不可用',
+          safeDetails: { failureKind: 'infra' },
         });
       }
+      if (signal?.aborted) throw signal.reason ?? new Error('VALIDATOR 执行已取消');
       if (validatorResults.length !== validationInputs.length) {
         throw toPipelineError(
           new Error(`VALIDATOR 返回 ${validatorResults.length} 个结果，期望 ${validationInputs.length} 个`),
           {
-            code: 'VALIDATOR_FALSE_REJECT',
+            code: 'SANDBOX_UNAVAILABLE',
             stage: 'validator',
             artifact: 'validator',
             safeDetails: {
               actualCount: validatorResults.length,
               expectedCount: validationInputs.length,
+              failureKind: 'protocol',
             },
           },
         );
       }
+      const validatorExecutions = validatorResults.map(classifyValidatorExecution);
+      for (let i = 0; i < validatorResults.length; i++) {
+        const execution = validatorExecutions[i];
+        if (execution === 'timeout-gap') {
+          throw toPipelineError(new Error(`VALIDATOR 第 ${i + 1} 个合法输入执行超时`), {
+            code: 'SANDBOX_UNAVAILABLE',
+            stage: 'validator',
+            artifact: 'validator',
+            safeDetails: { caseIndex: i + 1, failureKind: 'timeout' },
+          });
+        }
+        if (execution === 'infra-gap') {
+          throw toPipelineError(new Error(`VALIDATOR 第 ${i + 1} 个合法输入返回了不可判定结果`), {
+            code: 'SANDBOX_UNAVAILABLE',
+            stage: 'validator',
+            artifact: 'validator',
+            safeDetails: { caseIndex: i + 1, failureKind: 'protocol' },
+          });
+        }
+      }
+      validAccepted = validatorExecutions.filter(execution => execution === 'accepted').length;
       const formalAndSampleCount = inputs.length + samples.length;
       for (let i = 0; i < formalAndSampleCount; i++) {
         const detail = validatorResults[i];
-        if (!detail.accepted) {
+        if (validatorExecutions[i] === 'rejected') {
           const generatedInput = i < inputs.length;
-          const target = generatedInput
-            ? `第 ${i + 1} 个 .in `
-            : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} `;
+          const assignedSubtaskId = generatedInput && tieredValidatorEnabled
+            ? tieredValidatorDecision.allocations[i]?.subtaskId
+            : undefined;
+          const scopedFormalRejection = assignedSubtaskId !== undefined;
+          const target = scopedFormalRejection
+            ? `第 ${i + 1} 个 .in 未通过服务器分配的子任务约束`
+            : generatedInput
+              ? `第 ${i + 1} 个 .in 未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`
+              : `${blueprint.problemType === 'function' ? '函数题' : '题面'}样例 ${samples[i - inputs.length].id} 未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`;
           throw toPipelineError(
-            new Error(`${target}未通过输入校验：${excerpt(detail.stderr || detail.error || detail.status, 300)}`),
+            new Error(target),
             {
-              code: generatedInput ? 'GENERATOR_INVALID_INPUT' : 'VALIDATOR_FALSE_REJECT',
+              code: scopedFormalRejection
+                ? 'SUBTASK_CONSTRAINT_VIOLATION'
+                : generatedInput ? 'GENERATOR_INVALID_INPUT' : 'VALIDATOR_FALSE_REJECT',
               stage: 'validator',
               artifact: generatedInput ? 'generator' : 'validator',
-              safeDetails: { caseIndex: i + 1, sample: !generatedInput },
+              safeDetails: scopedFormalRejection
+                ? { caseIndex: i + 1, subtaskId: assignedSubtaskId }
+                : { caseIndex: i + 1, sample: !generatedInput },
             },
           );
         }
@@ -4609,10 +5669,54 @@ export async function materializeSandboxBlueprint(
       stressDroppedInvalid = stressPartition.dropped.length;
       validatorRan = true;
     }
+    if (materialization?.validatorProof
+      && materialization.validatorProof.reliabilityMode !== 'legacy') {
+      const legalSeeds: LegalConstraintProbeSeed[] = [
+        ...inputs.map((input, index) => ({
+          source: 'formal' as const,
+          index: index + 1,
+          input,
+          ...(tieredValidatorEnabled
+            ? { subtaskId: tieredValidatorDecision.allocations[index]?.subtaskId }
+            : {}),
+        })),
+        ...samples.map(sample => ({
+          source: 'sample' as const,
+          index: sample.id,
+          input: sample.input,
+        })),
+        ...keptStressIndices.map(originalIndex => ({
+          source: 'stress' as const,
+          index: originalIndex + 1,
+          input: stressInputs[originalIndex],
+        })),
+      ];
+      const invalidProof = await runValidatorInvalidProof({
+        blueprint,
+        proof: materialization.validatorProof,
+        runner,
+        seeds: legalSeeds,
+        validatorRan,
+        legalCasesChecked: validationInputs.length,
+        validAccepted,
+        signal,
+        deadlineAt: sandboxDeadlineAt,
+      });
+      validatorVerification = invalidProof.summary;
+      validatorTargetEvidence = invalidProof.targetEvidence;
+      validatorInvalidInvocationCount = invalidProof.invalidInvocationCount;
+      validatorProofComplete = invalidProof.complete;
+    }
     cache.validation = {
       keptStressIndices,
       droppedInvalid: stressDroppedInvalid,
       validatorRan,
+      ...(validatorVerification ? { validatorVerification } : {}),
+      ...(validatorTargetEvidence ? { validatorTargetEvidence } : {}),
+      ...(validatorInvalidInvocationCount !== undefined
+        ? { validatorInvalidInvocationCount }
+        : {}),
+      ...(validatorVerification ? { validatorProofComplete } : {}),
     };
     stressInputs = keptStressIndices.map(index => stressInputs[index]);
     stressGenerated = keptStressIndices.map(index => stressGenerated[index]);
@@ -4625,11 +5729,24 @@ export async function materializeSandboxBlueprint(
     stressGenerated = cachedValidation.keptStressIndices.map(index => stressGenerated[index]);
     stressDroppedInvalid = cachedValidation.droppedInvalid;
     validatorRan = cachedValidation.validatorRan;
+    validatorVerification = cachedValidation.validatorVerification;
+    validatorTargetEvidence = cachedValidation.validatorTargetEvidence;
+    validatorInvalidInvocationCount = cachedValidation.validatorInvalidInvocationCount;
+    validatorProofComplete = cachedValidation.validatorProofComplete === true;
+    if (validatorVerification) {
+      validatorProofCompleteness.set(validatorVerification, validatorProofComplete);
+      if (validatorInvalidInvocationCount !== undefined) {
+        validatorInvalidInvocationCounts.set(
+          validatorVerification,
+          validatorInvalidInvocationCount,
+        );
+      }
+    }
   }
 
   // e. ORACLE：一次批量跑正式输入、题面样例和内部压力输入。
   const allInputs = [...inputs, ...sampleInputs, ...stressInputs];
-  let oracleLanguage: OracleLanguage;
+  let oracleLanguage: OracleLanguage = blueprint.oracleLanguage || 'python';
   let oracleResults: PythonRunDetail[];
   let cases: GeneratedCase[];
   let sampleCheckerVerdicts: CheckerExecutionVerdict[] | undefined;
@@ -4648,15 +5765,21 @@ export async function materializeSandboxBlueprint(
       oracleLanguage = oracleExecutor.language;
       oracleResults = await oracleExecutor.runBatchDetailed(
         allInputs,
-        { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3 },
+        { signal, deadlineAt: sandboxDeadlineAt, chunkConcurrency: 3, outputLimitBytes: TESTDATA_OUTPUT_MAX_BYTES },
       );
     } catch (err) {
       if (isCancellation(err)) throw err;
       if (err instanceof TestdataGenerationError && err.userMessageKey) throw err;
+      if (err instanceof SandboxOutputBudgetExceededError) {
+        throw new TestdataPipelineError('标准答案实际输出超过数据传输预算；请联合规划输入和输出，保留必要覆盖，不得截断答案。',
+          'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact',
+          { failureKind: 'output-budget', ...(err.actualBytes === undefined ? {} : { actualBytes: err.actualBytes }), maxBytes: err.maxBytes });
+      }
       throw toSandboxExecutionPipelineError(err, {
         code: 'ORACLE_RUNTIME_FAILED',
         stage: 'oracle',
         artifact: 'oracle',
+        safeDetails: { oracleLanguage },
         message: `ORACLE（标程）实跑失败：${err instanceof Error ? err.message : String(err)}`,
       });
     }
@@ -4667,13 +5790,18 @@ export async function materializeSandboxBlueprint(
           code: 'ORACLE_RUNTIME_FAILED',
           stage: 'oracle',
           artifact: 'oracle',
-          safeDetails: { actualCount: oracleResults.length, expectedCount: allInputs.length },
+          safeDetails: { oracleLanguage, actualCount: oracleResults.length, expectedCount: allInputs.length },
         },
       );
     }
     for (let i = 0; i < oracleResults.length; i++) {
       const detail = oracleResults[i];
       if (detail.accepted) continue;
+      if (i < inputs.length && detail.status === 'Output Limit Exceeded') {
+        throw new TestdataPipelineError('标准答案输出超过单个数据文件的 4 MiB 上限；请联合规划输入输出预算，不得截断答案。',
+          'GENERATOR_OUTPUT_TOO_LARGE', 'generator', 'generator', 'repair-artifact',
+          { failureKind: 'output-budget', caseIndex: i + 1, maxBytes: TESTDATA_OUTPUT_MAX_BYTES });
+      }
       // 直接点名失败位置，附输入与 traceback 尾部，供修复回路与教师定位。
       const target = i < inputs.length
         ? `第 ${i + 1} 个测试点`
@@ -4690,27 +5818,15 @@ export async function materializeSandboxBlueprint(
           code: 'ORACLE_RUNTIME_FAILED',
           stage: 'oracle',
           artifact: 'oracle',
-          safeDetails: { caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
+          safeDetails: { oracleLanguage, caseIndex: i + 1, candidate: usingAcceptedRecordCandidate },
         },
       );
     }
 
-    cases = generatedInputs.map((item, index) => {
-      const output = normalizeFileContent(oracleResults[index].stdout);
-      if (Buffer.byteLength(output, 'utf8') > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) {
-        throw toPipelineError(new Error(`ORACLE 为第 ${index + 1} 个测试点生成的 .out 超过 256KB 上限`), {
-          code: 'ORACLE_RUNTIME_FAILED',
-          stage: 'oracle',
-          artifact: 'oracle',
-          safeDetails: {
-            caseIndex: index + 1,
-            actualBytes: Buffer.byteLength(output, 'utf8'),
-            maxBytes: TESTDATA_GEN_LIMITS.MAX_FILE_SIZE,
-          },
-        });
-      }
-      return { ...item, output, dataScale: coveragePlan[index]?.dataScale };
-    });
+    cases = generatedInputs.map((item, index) => ({ ...item,
+      output: normalizeFileContent(oracleResults[index].stdout), dataScale: coveragePlan[index]?.dataScale,
+    }));
+    assertGeneratedDataBudget(cases);
     sampleCheckerVerdicts = customChecker && samples.length > 0
       && checkerExecutor?.status === 'ready'
       ? await runCheckerOutsideCorrectnessBudget(() => checkerExecutor.runBatch(
@@ -4742,6 +5858,7 @@ export async function materializeSandboxBlueprint(
             stage: 'oracle',
             artifact: 'oracle',
             safeDetails: {
+              oracleLanguage,
               caseIndex: i + 1,
               checkerUsed: checkerRejected,
               candidate: usingAcceptedRecordCandidate,
@@ -4765,6 +5882,12 @@ export async function materializeSandboxBlueprint(
     cases = cachedOracle.cases;
     sampleCheckerVerdicts = cachedOracle.sampleCheckerVerdicts;
   }
+
+  // Use the real assembly path so comments, templates, both solution forms,
+  // config numbering and the replay companion are included before later gates.
+  assertSandboxResponseBudget({ ...blueprint, cases, oracleLanguage,
+    stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
+    generatorCode: effectiveGeneratorCode, generatorReplayData }, options, materialization?.planContext);
 
   // f. 函数题：所有所选语言在每个正式点与题面样例上统一验证。
   let templateChecks: TemplateChecks | undefined;
@@ -5099,6 +6222,11 @@ export async function materializeSandboxBlueprint(
     bruteCheck = { compared, agreed, skippedTimeout, disagreed };
   }
 
+  // Attribute missing answer coverage only after independent correctness checks.
+  assertAnswerBoundaryCoverage(statementMarkdown, cases.map(item => item.output),
+    customChecker ? 'custom-checker' : materialization?.coverageProof?.pipelineContext.spec.outputPolicy.kind,
+    options.dataScale);
+
   reportProgress('discrimination_testing', 90);
   const discriminationDeadlineAt = Date.now() + DISCRIMINATION_BUDGET_MS;
   const discriminationKillTargets = await smokeTestKillTargets({
@@ -5128,15 +6256,24 @@ export async function materializeSandboxBlueprint(
       ? 'accepted-record'
       : oracleIsManualStd ? 'provided-std' : 'ai-solution',
     verified: false,
-    wouldBlock: false,
-    validator: { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
+    wouldBlock: materialization?.validatorProof?.reliabilityMode === 'observe'
+      && !validatorProofComplete,
+    validator: validatorVerification
+      || { ran: validatorRan, casesChecked: validatorRan ? validationInputs.length : 0 },
+    coverage,
   };
   if (blueprint.problemType === 'traditional' || samples.length > 0) {
+    const skippedSamples = sampleCheckerVerdicts?.flatMap((verdict, index) => (
+      verdict === 'infra-error'
+        ? [{ sampleIndex: index + 1, skippedReason: 'checker-infra-error' as const }]
+        : []
+    )) ?? [];
     verification.sampleCheck = {
       total: samples.length,
       passed: customChecker
         ? (sampleCheckerVerdicts?.filter(verdict => verdict === 'accept').length ?? 0)
         : samples.length,
+      ...(skippedSamples.length > 0 ? { skipped: skippedSamples } : {}),
     };
   }
   if (bruteCheck) verification.bruteCheck = bruteCheck;
@@ -5195,7 +6332,10 @@ export async function materializeSandboxBlueprint(
     functionName: blueprint.functionName,
     templates: blueprint.templates,
     stdSolution: { language: oracleLanguage, code: blueprint.oracleCode },
-    generatorCode: blueprint.generatorCode,
+    generatorCode: effectiveGeneratorCode,
+    generatorReplayData,
+    generatorPlan: blueprint.generatorPlan,
+    coverageMode: coverage.mode,
     oracleCode: blueprint.oracleCode,
     oracleLanguage,
     solutions: blueprint.solutions,
@@ -5283,6 +6423,7 @@ function prependPurposeComment(name: string, content: string, purpose: string): 
 
 const FILE_PURPOSES = {
   generator: '数据生成器（AI 生成）：运行后向 stdout 输出 JSON，cases[].input 即各测试点 .in，可重跑重造数据',
+  trustedGenerator: '受信生成器（服务端确定生成）：由有限 GeneratorPlan 物化，可按固定 seed 重放',
   brute: '暴力对拍解（AI 生成）：与标程相互独立的第二实现，用于与 .out 交叉验证',
   validator: '输入校验器（AI 生成）：从 stdin 读取单个 .in 校验题面约束，不合法时非零退出',
   oracle: '完整标程 ORACLE（AI 生成）：读取 .in 输出 .out，本次测试数据的输出由它实跑产出',
@@ -5290,6 +6431,18 @@ const FILE_PURPOSES = {
   stdProgram: '参考标程（AI 生成）：读取 stdin 输出答案，用于人工复验与重造数据',
   template: '函数题评测模板（AI 生成）：读取 stdin、调用学生实现并输出结果，学生代码与本文件组合评测',
 } as const;
+
+function assertSandboxResponseBudget(
+  response: GenerationResponse,
+  options: GenerateOptions,
+  context: MaterializationRunOptions['planContext'] = {},
+): void {
+  const plan = assemblePlan(response, options, { ...context, mode: 'sandbox' });
+  const auxiliaryFiles = plan.files.filter(file => file.kind !== 'case-in' && file.kind !== 'case-out');
+  assertGeneratedDataBudget(response.cases, auxiliaryFiles);
+  // Retain the serialized-document ceiling as well as every individual limit.
+  assertTestdataPlanBudget(plan);
+}
 
 export function assemblePlan(
   response: GenerationResponse,
@@ -5315,7 +6468,11 @@ export function assemblePlan(
   });
   const tieredSubtasks = tieredDecision.subtasks ?? response.subtasks ?? [];
   const subtaskAllocations = tieredDecision.enabled
-    ? extendTieredAllocations(tieredDecision.allocations, caseCount, tieredSubtasks)
+    ? extendTieredAllocations(
+      response.tieredAllocations ?? tieredDecision.allocations,
+      caseCount,
+      tieredSubtasks,
+    )
     : [];
   const tieredApplied = tieredDecision.enabled && subtaskAllocations.length === caseCount;
   const newCaseNumbers = allocateCaseNumbers(context.existingFiles, caseCount);
@@ -5340,15 +6497,8 @@ export function assemblePlan(
     ...(tieredApplied ? [{
       kind: 'system' as const,
       message: `已按题面子任务表生成 ${tieredSubtasks.length} 档分层数据;`
-        + 'VALIDATOR 仅机器校验全局约束,各子任务档位约束由生成器构造保证,'
+        + 'VALIDATOR 已按服务器冻结分配校验全局约束与对应子任务约束,'
         + '建议抽查各档 .in 是否符合对应约束',
-    }] : []),
-    ...(tieredApplied && caseCount > tieredDecision.allocations.length ? [{
-      kind: 'warning' as const,
-      message: `补刀新增测试点 ${
-        newCaseNumbers.slice(tieredDecision.allocations.length).map(n => `#${n}`).join('、')
-      } 已归入子任务 ${tieredSubtasks[tieredSubtasks.length - 1]?.id ?? ''}(约束最宽档);`
-        + '其输入仅经全局校验,请人工核对是否符合该档约束',
     }] : []),
   ];
   const discriminationNotes = buildDiscriminationNotes(
@@ -5379,9 +6529,17 @@ export function assemblePlan(
     ],
     ...(sourceNotesStructured.ai ? { ai: sourceNotesStructured.ai } : {}),
   };
+  const defaultCoverage: CoverageVerification = {
+    mode: 'ai-generator-unverified',
+    matrix: [],
+    totalTargets: 0,
+    passedTargets: 0,
+    criticalMissing: 0,
+  };
   const verification = response.verification
     ? {
       ...response.verification,
+      coverage: response.verification.coverage || defaultCoverage,
       ...(response.verification.discrimination ? {
         discrimination: remapDiscriminationCaseNumbers(
           response.verification.discrimination,
@@ -5424,9 +6582,15 @@ export function assemblePlan(
       'generator.py',
       response.generatorCode,
       'generator',
-      sandbox ? 'executed' : 'ai-only',
-      FILE_PURPOSES.generator,
+      response.generatorPlan
+        ? 'deterministic'
+        : sandbox ? 'executed' : 'ai-only',
+      response.generatorPlan ? FILE_PURPOSES.trustedGenerator : FILE_PURPOSES.generator,
     );
+  }
+  if (response.generatorPlan && response.generatorReplayData) {
+    files.push({ name: GENERATOR_REPLAY_DATA_FILENAME, content: response.generatorReplayData,
+      kind: 'generator', origin: 'deterministic' });
   }
   if (sandbox && response.bruteCode?.trim()) {
     pushCode('brute.py', response.bruteCode, 'brute', 'executed', FILE_PURPOSES.brute);
@@ -5495,8 +6659,10 @@ export function assemblePlan(
     analysis: response.analysis,
     notes,
     notesStructured,
+    requiresConfigReview: tieredNotes.length > 0,
     files,
     caseCount,
+    coverageMode: response.coverageMode || 'ai-generator-unverified',
     totalCaseCount: configCaseNumbers.length,
     caseCoverage: response.cases.map((item, index) => ({
       caseNumber: index + 1,
@@ -5576,6 +6742,38 @@ export function finalizePlanVerification(
     && checker.passed === checker.total
     && checker.infraFailures === 0
   );
+  const validator = verification.validator;
+  const validatorExpanded = validator?.validAccepted !== undefined;
+  const validatorInvalidInvocationCount = validator
+    ? validatorInvalidInvocationCounts.get(validator)
+    : undefined;
+  const requestLocalValidatorProofComplete = validator
+    ? validatorProofCompleteness.get(validator)
+    : undefined;
+  const invalidRejected = validator?.invalidRejected;
+  const invalidAccepted = validator?.invalidAccepted;
+  const coveredConstraintIds = validator?.coveredConstraintIds;
+  const missingConstraintIds = validator?.missingConstraintIds;
+  const inferredInvalidInvocationCount = validatorInvalidInvocationCount
+    ?? ((invalidRejected ?? 0) + (invalidAccepted ?? 0));
+  const legalValidatorAccepted = validator?.validAccepted === undefined
+    ? undefined
+    : validator.validAccepted + (stress?.droppedInvalid ?? 0);
+  const validatorGreen = !validator
+    || !validatorExpanded
+    || (
+      validator.ran
+      && requestLocalValidatorProofComplete !== false
+      && legalValidatorAccepted === validator.casesChecked
+      && typeof invalidRejected === 'number'
+      && typeof invalidAccepted === 'number'
+      && Array.isArray(coveredConstraintIds)
+      && Array.isArray(missingConstraintIds)
+      && invalidAccepted === 0
+      && missingConstraintIds.length === 0
+      && invalidRejected + invalidAccepted === inferredInvalidInvocationCount
+      && (inferredInvalidInvocationCount === 0 || invalidRejected > 0)
+    );
   const selectedTemplateNames = new Set(selectedLanguages.map(language => TEMPLATE_FILENAMES[language]));
   const hasAiOnlyCriticalFile = plan.files.some(file => file.origin === 'ai-only' && (
     file.kind === 'case-in'
@@ -5594,6 +6792,7 @@ export function finalizePlanVerification(
     && discriminationGreen
     && templatesGreen
     && checkerGreen
+    && validatorGreen
     && !hasAiOnlyCriticalFile;
   verification.verified = verified;
   verification.wouldBlock = reliabilityMode === 'observe' && !verified;
@@ -5726,6 +6925,8 @@ export function buildSkeletonPlan(
       content: normalizeFileContent(file.content),
     }))),
     problemType,
+    isSkeleton: true,
+    requiresConfigReview: subtaskNotes.length > 0,
     analysis: '骨架模式：仅生成结构性文件（评测配置、编译脚本、模板骨架）与空白测试点，不含 AI 生成的数据。',
     notes: subtaskNotes.length > 0
       ? `${legacyNotes}\n${subtaskNotes.map(note => note.message).join('\n')}`
@@ -6031,6 +7232,52 @@ function repairScopeForPipelineFailure(error: TestdataPipelineError): SandboxRep
   }
 }
 
+/** 定向修复与初始生成采用不同输出契约，历史完整制品只作为修复上下文。 */
+export function buildSandboxRepairSystemPrompt(scope: SandboxRepairScope, frozenSpec = false): string {
+  const contracts: Partial<Record<SandboxRepairScope, { header: string; rule: string }>> = {
+    generator: {
+      header: 'GENERATOR',
+      rule: '输出自包含 Python 3 输入生成器，按本轮请求中的正式点数量、覆盖计划和字节预算生成紧凑 JSON；固定随机种子，禁止日志或无界循环。预算确实冲突时改为只输出请求约定的 GENERATOR_BUDGET_CONFLICT 分节，不得同时输出代码。',
+    },
+    'stress-generator': {
+      header: 'STRESS_GENERATOR',
+      rule: `输出自包含 Python 3 小数据生成器；固定随机种子，恰好 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法输入，至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组不同。stdout 为紧凑 JSON 且小于 1MB，每个 input 小于 256KB，所有数据须让既有 BRUTE 在 5 秒内完成。`,
+    },
+    'function-samples': {
+      header: 'SAMPLE_INPUTS',
+      rule: '输出严格 JSON {"samples":[{"id":"1","input":"原始 stdin"}]}；只转换题面样例输入，保留全部原始样例 id，不得增加或改写期望输出。',
+    },
+    validator: {
+      header: 'VALIDATOR',
+      rule: '输出自包含 Python 3 输入校验器；合法输入静默 exit 0，非法输入向 stderr 说明并 exit 1。完整校验题面约束，不得增加额外限制或无条件成功。'
+        + (frozenSpec ? ' 无参数时校验全局约束；仅允许恰好 --subtask <known-positive-integer> 校验全局与已知子任务约束；未知、缺少、非整数、重复或多余参数均须拒绝，不得从 stdin 读取子任务标签或接收 probe input。既有 Manifest 与 probe recipes 保持不变。' : ''),
+    },
+    oracle: {
+      header: 'ORACLE',
+      rule: '输出完整可执行标程，语言遵循本轮修复请求，保留已确定的输入输出协议和标准答案权威约定；不得硬编码样例或答案表，独立 BRUTE 由另一调用验证。',
+    },
+    brute: {
+      header: 'BRUTE',
+      rule: '输出自包含 Python 3 朴素正确解，读取既定 stdin 并输出完整答案；独立枚举或模拟，不得复制 ORACLE 实现、删除求解逻辑或硬编码答案。',
+    },
+    ...Object.fromEntries((['py', 'java', 'cc'] as const).map(language => [`template-${language}`, {
+      header: `TEMPLATE:${language}`,
+      rule: `只修复 ${LANG_DISPLAY[language]} 调用模板，保留既有学生解、接口和 stdin 编码，按既有拼接/编译约定解析输入、调用接口并打印结果。`,
+    }])),
+  };
+  const contract = contracts[scope];
+  if (!contract) throw new Error(`不支持定向修复范围：${scope}`);
+  const headers = scope === 'oracle' ? 'ORACLE_LANG 与 ORACLE' : contract.header;
+  return `你负责单一制品的定向修复。本次只输出 ${headers}，历史完整回答仅作为定位错误的上下文，不代表本轮输出要求。禁止重发其他制品、代码围栏或解释文字。
+${isVerifierRepairScope(scope) ? '验证制品只依据题面与已确定的 stdin 编码独立实现；不得要求或依赖 ORACLE 源码来推断题意。' : '遵循本轮请求中已确定的题意、接口和标准答案权威约定。'}
+${frozenSpec ? 'FROZEN_PROBLEM_SPEC 是唯一机器题意契约；题型、testCaseMode、stdin encoding、outputPolicy、subtasks 及约束引用必须保持不变。' : '保持已确定的输入输出协议与所有题面约束不变。'}
+${contract.rule}
+
+输出格式（只能有下面列出的分节，标记必须独占一行且逐字一致）：
+${scope === 'oracle' ? '@@@ORACLE_LANG@@@\npython 或 cpp（与源码及本轮允许的语言一致）\n' : ''}@@@${contract.header}@@@
+修复后的正文原文`;
+}
+
 export function buildSandboxRepairPrompt(
   error: unknown,
   options: GenerateOptions,
@@ -6039,8 +7286,20 @@ export function buildSandboxRepairPrompt(
     : 'full',
   coveragePlan?: Array<CoverageSlot | SubtaskCaseAllocation>,
   context?: TestdataPipelineContext,
+  oracleContext?: { language: OracleLanguage; cppAvailable: boolean },
 ): string {
   if (context) {
+    if (scope === 'full') {
+      const typed = error instanceof TestdataPipelineError ? error : undefined;
+      throw new TestdataPipelineError(
+        'frozen ProblemSpec 流程禁止 combined full repair；必须在同一 Spec 下重跑隔离角色。',
+        typed?.code || 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+        'pipeline_repair',
+        typed?.artifact || 'coverage',
+        'switch-model',
+        typed?.safeDetails,
+      );
+    }
     return [
       buildFrozenProblemSpecBlock(context),
       '',
@@ -6051,7 +7310,7 @@ export function buildSandboxRepairPrompt(
       '- problemKind、testCaseMode、stdin encoding、outputPolicy、subtasks 与约束/不变量引用关系必须保持不变。',
       '- 如果失败只能通过修改 Spec 解决，停止输出制品并报告需要回到 Spec 共识阶段。',
       '',
-      buildSandboxRepairPrompt(error, options, scope, coveragePlan),
+      buildSandboxRepairPrompt(error, options, scope, coveragePlan, undefined, oracleContext),
     ].join('\n');
   }
   const templates = options.languages.map(lang => `@@@TEMPLATE:${lang}@@@`).join('、') || '（传统题无需模板）';
@@ -6062,9 +7321,11 @@ export function buildSandboxRepairPrompt(
 ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
-请只输出修复后的 @@@GENERATOR@@@。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
+${buildGeneratorBudgetPrompt(options.caseCount, coveragePlan)}
+
+预算可行时，请只输出修复后的 @@@GENERATOR@@@；预算确实冲突时只返回上述冲突分节。不要重复 META、ORACLE、SOLUTION、TEMPLATE 或说明文字。要求：
 1. stdout 只能是包含恰好 ${options.caseCount} 个 cases 的紧凑 JSON，使用 json.dumps(..., ensure_ascii=False, separators=(',', ':'))。
-2. stdout 必须小于 1MB，每个 input 的 UTF-8 内容必须小于 256KB，且全部 .in/.out 与辅助文件合计必须小于 1MB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
+2. 正式 GENERATOR JSON 经缓存文件传输，至多 8 MiB，每个 input 的 UTF-8 内容至多 4 MiB，且全部 .in/.out 与辅助文件合计必须不超过 8 MiB；程序必须在 5 秒内结束，不要打印日志，不要构造超长字符串或无界循环。
 3. 每个 input 必须合法且符合逐 CASE 覆盖计划；若临界数据过大，使用能保留边界/复杂度特征的可解析构造。
 4. 只使用请求的分节标记和源码原文，不要代码围栏。`;
   }
@@ -6072,35 +7333,39 @@ ${coverage ? `\n${coverage}\n` : ''}
     return `你上一条蓝图的输入校验阶段未通过 Hydro 沙箱验证：
 ${detail}
 
-请只输出修复后的 @@@VALIDATOR@@@。GENERATOR 与 frozen ProblemSpec 已验证并保持不变；不得通过放弃题面约束、删除校验器或让校验器无条件成功来迁就现有输入。不要输出其他分节、代码围栏或说明文字。`;
+请只输出修复后的 @@@VALIDATOR@@@。GENERATOR、VALIDATOR Manifest、probe recipes 与 frozen ProblemSpec 已验证并保持不变，不得修改或重新声明；不得通过放弃题面约束、删除校验器或让校验器无条件成功来迁就现有输入。不要输出其他分节、代码围栏或说明文字。`;
   }
   if (scope === 'stress-generator') {
     return `独立验证器的 STRESS_GENERATOR 未通过沙箱验证：
 ${detail}
 
-请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@ 三个分节。STRESS_GENERATOR 必须恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，其中至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；stdout 只能是紧凑 JSON，且所有数据都必须让 BRUTE 在 5 秒内完成。不要输出 ORACLE、模板、代码围栏或解释。`;
+请只输出修复后的 @@@STRESS_GENERATOR@@@。BRUTE、VALIDATOR、Manifest、probe recipes、SAMPLE_INPUTS 与 frozen ProblemSpec 必须保持不变。STRESS_GENERATOR 必须恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，其中至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；stdout 只能是紧凑 JSON，且所有数据都必须让既有暴力解在 5 秒内完成。不要输出其他分节、代码围栏或解释。`;
   }
   if (scope === 'function-samples') {
     return `独立验证器的函数题样例 stdin 转码未通过验证：
 ${detail}
 
-请重新输出完整的 @@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@、@@@SAMPLE_INPUTS@@@ 四个分节。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出 ORACLE、模板、代码围栏或解释。`;
+请只输出修复后的 @@@SAMPLE_INPUTS@@@。BRUTE、STRESS_GENERATOR、VALIDATOR、Manifest、probe recipes 与 frozen ProblemSpec 必须保持不变。SAMPLE_INPUTS 只能把题面展示参数转换成已经确定的原始 stdin，id 必须与题面样例完全一致，不得填写或篡改期望输出。不要输出其他分节、代码围栏或解释。`;
   }
   if (scope === 'oracle') {
     const typedOracleFailure = error instanceof TestdataPipelineError && error.artifact === 'oracle'
       ? error.safeDetails
       : {};
-    const oracleLanguage = typedOracleFailure.oracleLanguage === 'cpp' ? 'C++17' : 'Python 3';
+    const oracleLanguage = (oracleContext?.language || typedOracleFailure.oracleLanguage) === 'cpp' ? 'C++17' : 'Python 3';
     if (typedOracleFailure.failureKind === 'infra' && typedOracleFailure.oracleLanguage === 'cpp') {
       return `你上一条蓝图选择的 C++ ORACLE 因沙箱编译基础设施暂时不可用而无法验证：
 ${detail}
 
-请只输出改用 Python 3 的 @@@ORACLE@@@，不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+请只输出改用 Python 3 的 @@@ORACLE@@@，并在前面输出 @@@ORACLE_LANG@@@ 与 python。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
     }
     return `你上一条蓝图的标程阶段未通过 Hydro 沙箱验证：
 ${detail}
 
-当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的编译错误。不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
+当前 ORACLE 语言为 ${oracleLanguage}。请只输出修复后的 @@@ORACLE@@@，并在前面输出 @@@ORACLE_LANG@@@ 与实际语言。
+${oracleContext?.cppAvailable && options.problemKind !== 'function'
+    ? '传统题允许在 Python 3 与 C++17 之间切换，但必须同步声明 python 或 cpp；函数题仍只能用 Python 3。'
+    : '保持该语言不变；若为 C++，必须给出完整可编译的 C++17 程序并修复上面的错误。'}
+不要重复 META、GENERATOR、SOLUTION、TEMPLATE 或说明文字。ORACLE 必须通过题面样例、处理所有合法边界且在 5 秒内结束，每个测试点的 stdout UTF-8 内容必须小于 256KB；独立 BRUTE 将由另一调用继续验证。`;
   }
   if (scope === 'brute') {
     return `你上一条蓝图的暴力对拍阶段未通过验证：
@@ -6124,12 +7389,12 @@ ${detail}
 ${coverage ? `\n${coverage}\n` : ''}
 
 请重新输出【完整蓝图】（所有节，不得省略上次已有的节），并针对上述失败修正：
-1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容小于 256KB，全部 .in/.out 与辅助文件合计小于 1MB。
+1. GENERATOR stdout 必须只有合法 JSON，cases 恰好 ${options.caseCount} 个；每个 input 是原始 stdin、UTF-8 内容至多 4 MiB，正式 JSON 及全部 .in/.out 与辅助文件分别至多 8 MiB。
 2. ACM 题若题面有 T，默认每个 input 使用 T=1 并包含恰好一组完整数据；函数题每个 input 只对应一次调用。
 3. ORACLE 必须与原 ORACLE_LANG 保持一致，是可直接运行的 Python 3 或完整可编译的 C++17 程序，不得硬编码用例答案，并应通过题面样例；每个测试点的 stdout UTF-8 内容必须小于 256KB。
 4. 函数题必须完整包含每个已选语言的学生解 ${options.languages.map(lang => `@@@SOLUTION:${lang}@@@`).join('、')} 与全部模板：${templates}。
 5. 不要输出 BRUTE、STRESS_GENERATOR 或 VALIDATOR；它们由隔离的独立验证调用生成。
-6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
+6. 使用 @@@META@@@、@@@GENERATOR@@@、@@@ORACLE_LANG@@@（必须与源码一致）、@@@ORACLE@@@、@@@SOLUTION:语言@@@、@@@TEMPLATE:语言@@@ 分节原文，不要代码围栏。
 7. 若输出 @@@NOTES@@@，NOTES 至多 2 句，只写系统无法自动验证、需要教师人工注意的事项（如输出格式的特殊约定、多解风险）；不要复述你如何构造数据，不要罗列已由沙箱验证的内容。`;
 }
 
@@ -6139,6 +7404,12 @@ export function buildIndependentVerifierRepairPrompt(
   context?: TestdataPipelineContext,
 ): string {
   if (context) {
+    const strictRepair = buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples)
+      .replace(
+        '请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@',
+        '请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、'
+          + '@@@VALIDATOR_MANIFEST@@@、可选的 @@@VALIDATOR_PROBE_RECIPES@@@、@@@VALIDATOR@@@',
+      );
     return [
       buildFrozenProblemSpecBlock(context),
       '',
@@ -6146,7 +7417,7 @@ export function buildIndependentVerifierRepairPrompt(
       '',
       '只修复独立验证制品；不得从 ORACLE、analysis 或正确解推理中推断语义，不得修改 frozen Spec。',
       '',
-      buildIndependentVerifierRepairPrompt(error, expectedFunctionSamples),
+      strictRepair,
     ].join('\n');
   }
   const detail = (error instanceof Error ? error.message : String(error)).slice(0, 1600);
@@ -6156,15 +7427,21 @@ export function buildIndependentVerifierRepairPrompt(
   return `独立验证制品未通过解析或 Hydro 沙箱验证：
 ${detail}
 
-请重新输出完整的 === COMPLEXITY_GAP ===、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
+请重新输出完整的 @@@COMPLEXITY_GAP@@@、@@@BRUTE@@@、@@@STRESS_GENERATOR@@@、@@@VALIDATOR@@@${expectedFunctionSamples.length > 0 ? '、@@@SAMPLE_INPUTS@@@' : ''} 分节，并修正失败原因：
 1. BRUTE 必须是与 ORACLE 隔离的朴素正确实现，不能通过删除逻辑或硬编码答案绕过对拍。
 2. STRESS_GENERATOR 必须恰好生成 ${TESTDATA_GEN_LIMITS.STRESS_CASES} 组合法小数据，至少 ${Math.ceil(TESTDATA_GEN_LIMITS.STRESS_CASES * TESTDATA_GEN_LIMITS.STRESS_MIN_UNIQUE_RATIO)} 组 input 互不相同，禁止复制输入凑数；固定随机种子，所有数据均能让 BRUTE 在 5 秒内完成。
 3. VALIDATOR 必须严格检查题面格式与约束，不得无条件成功。
 4. 所有验证制品必须沿用已经确定的同一原始 stdin 编码；不要输出 ORACLE、模板、代码围栏或解释。${sampleRequirement}`;
 }
 
-function isIndependentVerifierScope(scope: SandboxRepairScope): boolean {
+function isVerifierRepairScope(scope: SandboxRepairScope): boolean {
   return scope === 'stress-generator' || scope === 'function-samples' || scope === 'validator' || scope === 'brute';
+}
+
+function isVerifierSubartifactRepairScope(
+  scope: SandboxRepairScope,
+): scope is 'stress-generator' | 'function-samples' | 'brute' {
+  return scope === 'stress-generator' || scope === 'function-samples' || scope === 'brute';
 }
 
 function repairSectionContent(sections: ParsedSection[], header: string): string | undefined {
@@ -6174,13 +7451,32 @@ function repairSectionContent(sections: ParsedSection[], header: string): string
   return content.trim() ? normalizeExecutableContent(content) : undefined;
 }
 
+function parseStrictSingleRepairSection(raw: string, header: string): ParsedSection[] {
+  const exactMarker = `@@@${header}@@@`;
+  const sections = splitDelimitedSections(raw);
+  if (sections.length !== 1
+    || sections[0].header !== header
+    || !raw.trimStart().startsWith(exactMarker)) {
+    throw new Error(`AI 定向修复只允许单一 ${exactMarker} 分节`);
+  }
+  return sections;
+}
+
 /** 将定向修复结果合并进已解析蓝图；缺少必需节时抛错并由调用方回退完整修复。 */
 export function mergeSandboxBlueprintRepair(
   original: SandboxGenerationBlueprint,
   raw: string,
-  scope: Exclude<SandboxRepairScope, 'full' | 'stress-generator' | 'function-samples' | 'accepted-std'>,
+  scope: Exclude<SandboxRepairScope, 'full' | 'accepted-std'>,
+  expectedFunctionSamples: StatementSample[] = [],
 ): SandboxGenerationBlueprint {
-  const sections = splitDelimitedSections(raw);
+  const singleHeader = scope === 'stress-generator' ? 'STRESS_GENERATOR'
+    : scope === 'function-samples' ? 'SAMPLE_INPUTS'
+      : scope === 'brute' ? 'BRUTE'
+        : undefined;
+  const sections = singleHeader
+    ? parseStrictSingleRepairSection(raw, singleHeader)
+    : splitDelimitedSections(raw);
+  if (scope === 'generator') throwIfGeneratorBudgetConflict(raw, sections);
   if (sections.length === 0) throw new Error('AI 定向修复未返回分节标记');
   const solutions = normalizeTemplateSolutions(original);
   const merged: SandboxGenerationBlueprint = {
@@ -6192,6 +7488,7 @@ export function mergeSandboxBlueprintRepair(
     const generatorCode = repairSectionContent(sections, 'GENERATOR');
     if (!generatorCode) throw new Error('AI 定向修复未返回 GENERATOR');
     merged.generatorCode = generatorCode;
+    delete merged.generatorPlan;
   } else if (scope === 'validator') {
     const validatorCode = repairSectionContent(sections, 'VALIDATOR');
     if (!validatorCode) throw new Error('AI 输入校验修复未返回 VALIDATOR');
@@ -6200,10 +7497,24 @@ export function mergeSandboxBlueprintRepair(
     const oracleCode = repairSectionContent(sections, 'ORACLE');
     if (!oracleCode) throw new Error('AI 定向修复未返回 ORACLE');
     merged.oracleCode = oracleCode;
+    merged.oracleLanguage = parseOracleLanguage(raw, original.problemType, oracleCode, original.oracleLanguage);
   } else if (scope === 'brute') {
     const bruteCode = repairSectionContent(sections, 'BRUTE');
     if (!bruteCode) throw new Error('AI 定向修复未返回 BRUTE');
     merged.bruteCode = bruteCode;
+  } else if (scope === 'stress-generator') {
+    const stressGeneratorCode = repairSectionContent(sections, 'STRESS_GENERATOR');
+    if (!stressGeneratorCode) throw new Error('AI 定向修复未返回 STRESS_GENERATOR');
+    merged.stressGeneratorCode = stressGeneratorCode;
+  } else if (scope === 'function-samples') {
+    if (expectedFunctionSamples.length === 0) {
+      throw new Error('函数题样例修复缺少预期题面样例');
+    }
+    merged.functionSampleInputs = parseFunctionSampleInputsSection(
+      sections,
+      expectedFunctionSamples,
+      '函数题样例定向修复',
+    );
   } else {
     const language: TemplateLang = scope === 'template-java' ? 'java'
       : scope === 'template-cc' ? 'cc'
@@ -6275,6 +7586,7 @@ export type TestdataGenerationProgressStage =
   | 'checking_templates'
   | 'stress_testing'
   | 'discrimination_testing'
+  | 'mutation_testing'
   | 'pipeline_repair'
   | 'model_fallback'
   | 'model_escalation'
@@ -6310,6 +7622,10 @@ export interface GenerateTestdataParams {
   existingConfig?: string;
   /** testlib checker 配置与读取制品的显式状态。 */
   checkerArtifacts?: TestlibCheckerArtifacts;
+  /** 已经 handler 权限过滤，仅限本次请求内 mutation 评估的历史错误源码。 */
+  historicalMutationCandidates?: HistoricalMutationCandidate[];
+  /** generate() 在单次运行入口冻结；内部语义 fallback 必须复用同一值。 */
+  mutationGateMode?: MutationGateMode;
   /** 服务端规则引擎的填空题初判信号 */
   fillInDetected?: boolean;
   signal?: AbortSignal;
@@ -6325,7 +7641,7 @@ export interface GenerateTestdataParams {
     consensusStatus?: SpecConsensusStatus;
     conflictCount?: number;
     unresolvedConflictCount?: number;
-    rolesUsed?: TestdataModelRole[];
+    rolesUsed?: SpecConsensusRole[];
   }) => void;
   /** 已通过 handler 作用域与 hash 校验的解析后断点制品。 */
   checkpoint?: TestdataGenerationCheckpointPayload;
@@ -6356,6 +7672,8 @@ export interface TestdataGenServiceOptions {
   reliabilityMode?: TestdataReliabilityMode;
   /** Task 6 role-scoped clients; omitted for compatibility and ignored in legacy mode. */
   roleClients?: TestdataRoleClients;
+  /** Internal: semantic fallback shares the parent run's model-call budget. */
+  modelCallBudget?: { callCount: number; limit: number };
 }
 
 interface IndependentVerifierCallState {
@@ -6382,10 +7700,9 @@ interface ProblemSpecObservation {
   status: SpecConsensusStatus;
   conflictCount: number;
   unresolvedConflictCount: number;
-  rolesUsed: TestdataModelRole[];
+  rolesUsed: SpecConsensusRole[];
   roleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>>;
   identityWarningCodes: string[];
-  wouldBlock: boolean;
 }
 
 function frozenSubtasks(context: TestdataPipelineContext): SubtaskSpec[] {
@@ -6462,12 +7779,49 @@ function checkpointArtifactsFromBlueprint(
 ): SandboxGenerationArtifacts {
   return {
     generatorCode: blueprint.generatorCode,
+    generatorPlan: blueprint.generatorPlan,
     templates: blueprint.templates,
     notes: blueprint.notes,
   };
 }
 
-function checkpointVerifierFromBlueprint(
+const CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH = 64;
+const CHECKPOINT_VALIDATOR_RECIPE_OPERATION_MAX_LENGTH = 256;
+
+function isBoundedCheckpointRecipeString(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+}
+
+function checkpointValidatorProbeRecipe(value: unknown): ValidatorProbeRecipe | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const recipe = value as Record<string, unknown>;
+  if (!isBoundedCheckpointRecipeString(
+    recipe.targetId,
+    CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH,
+  )) return undefined;
+  if (typeof recipe.constructionKind !== 'string'
+    || !VALIDATOR_PROBE_CONSTRUCTION_KINDS.includes(
+      recipe.constructionKind as ValidatorProbeRecipe['constructionKind'],
+    )) return undefined;
+  if (recipe.fieldId !== undefined && !isBoundedCheckpointRecipeString(
+    recipe.fieldId,
+    CHECKPOINT_VALIDATOR_RECIPE_ID_MAX_LENGTH,
+  )) return undefined;
+  if (recipe.operationName !== undefined && !isBoundedCheckpointRecipeString(
+    recipe.operationName,
+    CHECKPOINT_VALIDATOR_RECIPE_OPERATION_MAX_LENGTH,
+  )) return undefined;
+  return {
+    targetId: recipe.targetId,
+    constructionKind: recipe.constructionKind as ValidatorProbeRecipe['constructionKind'],
+    ...(recipe.fieldId === undefined ? {} : { fieldId: recipe.fieldId as string }),
+    ...(recipe.operationName === undefined
+      ? {}
+      : { operationName: recipe.operationName as string }),
+  };
+}
+
+export function checkpointVerifierFromBlueprint(
   blueprint: SandboxGenerationBlueprint,
 ): IndependentVerifierBlueprint {
   return {
@@ -6476,7 +7830,41 @@ function checkpointVerifierFromBlueprint(
     stressGeneratorCode: blueprint.stressGeneratorCode || '',
     complexityGap: blueprint.complexityGap,
     functionSampleInputs: blueprint.functionSampleInputs,
+    validatorManifestStatus: blueprint.validatorManifestStatus,
+    validatorManifest: blueprint.validatorManifest ? {
+      constraintIds: [...blueprint.validatorManifest.constraintIds],
+      invariantIds: [...blueprint.validatorManifest.invariantIds],
+    } : undefined,
+    validatorProbeRecipes: Array.isArray(blueprint.validatorProbeRecipes)
+      ? blueprint.validatorProbeRecipes.flatMap(recipe => {
+        const checkpointRecipe = checkpointValidatorProbeRecipe(recipe);
+        return checkpointRecipe ? [checkpointRecipe] : [];
+      })
+      : undefined,
   };
+}
+
+function currentVerifierRepairSource(blueprint: SandboxGenerationBlueprint): string {
+  const verifier = checkpointVerifierFromBlueprint(blueprint);
+  return [
+    ...(verifier.complexityGap ? ['@@@COMPLEXITY_GAP@@@', verifier.complexityGap] : []),
+    '@@@BRUTE@@@', verifier.bruteCode,
+    '@@@STRESS_GENERATOR@@@', verifier.stressGeneratorCode,
+    '@@@VALIDATOR@@@', verifier.validatorCode,
+    ...(verifier.validatorManifest
+      ? ['@@@VALIDATOR_MANIFEST@@@', JSON.stringify(verifier.validatorManifest)] : []),
+    ...(verifier.validatorProbeRecipes
+      ? ['@@@VALIDATOR_PROBE_RECIPES@@@', JSON.stringify({ recipes: verifier.validatorProbeRecipes })] : []),
+    ...(verifier.functionSampleInputs?.length
+      ? ['@@@SAMPLE_INPUTS@@@', JSON.stringify({ samples: verifier.functionSampleInputs })] : []),
+  ].join('\n');
+}
+
+function modelRoleForSandboxFailure(error: TestdataPipelineError):
+Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'> | undefined {
+  const scope = repairScopeForPipelineFailure(error);
+  return isVerifierRepairScope(scope) ? 'verifier'
+    : scope === 'oracle' ? 'oracle' : scope === 'full' ? undefined : 'artifacts';
 }
 
 export class TestdataGenService {
@@ -6490,6 +7878,8 @@ export class TestdataGenService {
   private activeRoleIdentities: Partial<Record<TestdataModelRole, TestdataModelIdentity>> = {};
   private restoredRoleDependencies: Partial<Record<TestdataModelRole, string>> = {};
   private activePipelineContext?: TestdataPipelineContext;
+  private modelCallBudget: { callCount: number; limit: number };
+  private readonly ownsModelCallBudget: boolean;
 
   constructor(private aiClient: MultiModelClient, serviceOptions: TestdataGenServiceOptions = {}) {
     this.sandboxRunner = serviceOptions.sandboxRunner;
@@ -6498,6 +7888,11 @@ export class TestdataGenService {
     this.semanticModelFallback = serviceOptions.semanticModelFallback !== false;
     this.reliabilityMode = serviceOptions.reliabilityMode || getTestdataReliabilityMode();
     this.roleClients = this.reliabilityMode === 'legacy' ? undefined : serviceOptions.roleClients;
+    this.ownsModelCallBudget = !serviceOptions.modelCallBudget;
+    this.modelCallBudget = serviceOptions.modelCallBudget || {
+      callCount: 0,
+      limit: getTestdataMaxModelCalls(),
+    };
   }
 
   private assessRisk(params: GenerateTestdataParams, specConflict = false): TestdataRiskAssessment {
@@ -6506,7 +7901,6 @@ export class TestdataGenService {
       statement: params.statementMarkdown,
       hasCustomChecker: customChecker,
       unsupportedCustomChecker: customChecker && !getTestlibCheckerFilename(params.existingConfig),
-      statementTruncated: false,
       directFallbackEnabled: getTestdataDirectFallbackEnabled(),
       confirmDirectFallback: params.options.confirmDirectFallback,
       reliabilityMode: this.reliabilityMode,
@@ -6515,7 +7909,15 @@ export class TestdataGenService {
   }
 
   private attachRisk(plan: GenerationPlan, risk: TestdataRiskAssessment): GenerationPlan {
-    plan.risk = risk;
+    // Static risk only selects gates. wouldBlock is runtime evidence: by this point
+    // direct fallback, incomplete sandbox proof, and unresolved Spec consensus have
+    // all had a chance to mark the plan verification record.
+    plan.risk = {
+      ...risk,
+      ...(this.reliabilityMode === 'observe'
+        ? { wouldBlock: plan.verification?.wouldBlock === true }
+        : {}),
+    };
     plan.reliabilityMode = this.reliabilityMode;
     return plan;
   }
@@ -6523,21 +7925,27 @@ export class TestdataGenService {
   private async observeProblemSpec(
     params: GenerateTestdataParams,
     snapshot: StatementSnapshot,
+    requiresConsensus: boolean,
   ): Promise<ProblemSpecObservation | undefined> {
     if (this.reliabilityMode === 'legacy') return undefined;
     const role = (name: Extract<TestdataModelRole,
-      'specPrimary' | 'specCritic' | 'adjudicator'>) => ({
-      role: name,
-      client: this.roleClients?.[name]?.client || this.aiClient,
-      identity: this.roleClients?.[name]?.identity,
-    });
+      'specPrimary' | 'specCritic' | 'adjudicator'>) => {
+      const client = this.roleClients?.[name]?.client || this.aiClient;
+      return {
+        role: name,
+        client: this.clientWithModelCallBudget(client),
+        identity: this.roleClients?.[name]?.identity,
+      };
+    };
     const consensus = await runProblemSpecConsensus({
       snapshot,
       requestedProblemKind: params.options.problemKind,
       hasCustomChecker: hasCustomChecker(params.existingConfig),
       primary: role('specPrimary'),
-      critic: role('specCritic'),
-      adjudicator: role('adjudicator'),
+      ...(requiresConsensus ? {
+        critic: role('specCritic'),
+        adjudicator: role('adjudicator'),
+      } : {}),
       callOptions: this.getCallOptions(params),
     });
     Object.assign(this.activeRoleIdentities, consensus.roleIdentities);
@@ -6560,7 +7968,6 @@ export class TestdataGenService {
       rolesUsed: consensus.rolesUsed,
       roleIdentities: consensus.roleIdentities,
       identityWarningCodes: identityConflicts.map(() => 'SPEC_ROLE_IDENTITY_CONFLICT'),
-      wouldBlock: identityConflicts.length > 0 || consensus.unresolvedConflictCount > 0,
     };
   }
 
@@ -6614,10 +8021,14 @@ export class TestdataGenService {
       }
       plan.notes = [plan.notes, warning].filter(Boolean).join('\n');
     }
+    const enforceBlocksIdentityConflict = (risk?.tier === 'high' || risk?.tier === 'blocked')
+      && runtimeIdentityConflicts.length > 0;
     const wouldBlock = observation.unresolvedConflictCount > 0
+      || enforceBlocksIdentityConflict;
+    const unverifiedBySpecObservation = observation.unresolvedConflictCount > 0
       || (exposeIdentityWarnings && runtimeIdentityConflicts.length > 0);
+    if (unverifiedBySpecObservation && plan.verification) plan.verification.verified = false;
     if (wouldBlock && plan.verification) {
-      plan.verification.verified = false;
       plan.verification.wouldBlock = true;
     }
     return plan;
@@ -6648,21 +8059,58 @@ export class TestdataGenService {
   }
 
   private clientForRole(role: Extract<TestdataModelRole,
-    'oracle' | 'artifacts' | 'verifier'>): MultiModelClient {
+    'oracle' | 'artifacts' | 'verifier'>, trackIdentity = true): MultiModelClient {
     const client = this.roleClients?.[role]?.client || this.aiClient;
+    if (!trackIdentity) return this.clientWithModelCallBudget(client);
     return {
       chat: async (...args: Parameters<MultiModelClient['chat']>) => {
-        const result = await client.chat(...args);
+        const result = await this.chatWithModelCallBudget(client, ...args);
+        const signal = args[2]?.signal;
+        if (signal?.aborted) {
+          throw signal.reason ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
         this.activeRoleIdentities[role] = { ...result.usedModel };
         return result;
       },
     } as MultiModelClient;
   }
 
+  private consumeModelCall(): void {
+    this.modelCallBudget.callCount += 1;
+    if (this.modelCallBudget.callCount <= this.modelCallBudget.limit) return;
+    throw new TestdataPipelineError(
+      '本次测试数据生成已达到 AI 调用次数上限。',
+      'PIPELINE_BUDGET_EXHAUSTED',
+      'pipeline',
+      'pipeline',
+      'no-retry',
+      {
+        callCount: this.modelCallBudget.callCount,
+        limit: this.modelCallBudget.limit,
+      },
+    );
+  }
+
+  private async chatWithModelCallBudget(
+    client: Pick<MultiModelClient, 'chat'>,
+    ...args: Parameters<MultiModelClient['chat']>
+  ): Promise<ChatResult> {
+    this.consumeModelCall();
+    return client.chat(...args);
+  }
+
+  private clientWithModelCallBudget(client: Pick<MultiModelClient, 'chat'>): MultiModelClient {
+    return {
+      chat: (...args: Parameters<MultiModelClient['chat']>) => (
+        this.chatWithModelCallBudget(client, ...args)
+      ),
+    } as MultiModelClient;
+  }
+
   private async chatForCombinedRepair(
     ...args: Parameters<MultiModelClient['chat']>
   ): Promise<ChatResult> {
-    const result = await this.aiClient.chat(...args);
+    const result = await this.chatWithModelCallBudget(this.aiClient, ...args);
     // The combined repair protocol may replace the ORACLE-bearing solution as well as
     // artifacts, so its successful model is the new Oracle identity for independence.
     this.activeRoleIdentities.oracle = { ...result.usedModel };
@@ -6717,8 +8165,10 @@ export class TestdataGenService {
   }
 
   private attachRunMetadata(plan: GenerationPlan, params: GenerateTestdataParams): GenerationPlan {
+    assertTestdataPlanBudget(plan);
     plan.runId = params.runId || plan.runId || createTestdataRunId();
     plan.promptVersion = TESTDATA_PIPELINE_PROMPT_VERSION;
+    plan.modelCallCount = this.modelCallBudget.callCount;
     plan.originalFileHashes = computeOriginalFileHashes(plan.files.map(file => ({
       name: file.name,
       content: normalizeFileContent(file.content),
@@ -6805,6 +8255,9 @@ export class TestdataGenService {
   }
 
   async generate(params: GenerateTestdataParams): Promise<GenerationPlan> {
+    if (this.ownsModelCallBudget) {
+      this.modelCallBudget = { callCount: 0, limit: getTestdataMaxModelCalls() };
+    }
     this.activeModelTelemetry = undefined;
     this.activeRoleIdentities = {};
     this.restoredRoleDependencies = {};
@@ -6815,6 +8268,8 @@ export class TestdataGenService {
         ...params,
         runId: params.runId || createTestdataRunId(),
         statementMarkdown: snapshot.normalizedMarkdown,
+        mutationGateMode: params.mutationGateMode
+          ?? getMutationGateMode(process.env.AI_HELPER_TESTDATA_MUTATION_GATE),
       }, snapshot);
     } catch (error) {
       rememberFailureModelTelemetry(error, this.activeModelTelemetry);
@@ -6826,10 +8281,52 @@ export class TestdataGenService {
     params: GenerateTestdataParams,
     snapshot: StatementSnapshot,
   ): Promise<GenerationPlan> {
+    let enforceSandboxAvailable: boolean | undefined;
+    if (this.reliabilityMode === 'enforce') {
+      if (this.mode === 'direct' || !this.sandboxRunner) {
+        throw toPipelineError(
+          new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'),
+          {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+          },
+        );
+      }
+      this.emitProgress(params, 'sandbox_check', 5);
+      enforceSandboxAvailable = await this.sandboxRunner.isAvailable(params.signal);
+      if (!enforceSandboxAvailable) {
+        throw toPipelineError(
+          new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'),
+          {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+          },
+        );
+      }
+    }
     assertExistingConfigParsable(params.existingConfig);
+    const observeSandboxAvailability = this.reliabilityMode === 'observe'
+      && this.mode !== 'direct'
+      && this.sandboxRunner
+      ? this.sandboxRunner.isAvailable(params.signal).then(
+        available => ({ ok: true as const, available }),
+        error => ({ ok: false as const, error }),
+      )
+      : undefined;
     this.emitProgress(params, 'preparing', 2);
     const initialRisk = this.assessRisk(params);
-    const problemSpecObservation = await this.observeProblemSpec(params, snapshot);
+    const specConsensusMode = getTestdataSpecConsensusMode();
+    const requiresConsensus = specConsensusMode === 'always'
+      || (specConsensusMode === 'auto' && initialRisk.requiresSpecConsensus);
+    const problemSpecObservation = await this.observeProblemSpec(
+      params,
+      snapshot,
+      requiresConsensus,
+    );
     this.notifyProblemSpecObservation(params, problemSpecObservation);
     const risk = this.assessRisk(params, (problemSpecObservation?.conflictCount || 0) > 0);
     if (this.reliabilityMode === 'enforce' && !problemSpecObservation?.resolvedSpec) {
@@ -6925,7 +8422,17 @@ export class TestdataGenService {
     }
     if (this.mode !== 'direct' && this.sandboxRunner) {
       this.emitProgress(params, 'sandbox_check', 5);
-      const available = await this.sandboxRunner.isAvailable(params.signal);
+      let available = enforceSandboxAvailable;
+      if (available === undefined) {
+        const availability = observeSandboxAvailability
+          ? await observeSandboxAvailability
+          : {
+            ok: true as const,
+            available: await this.sandboxRunner.isAvailable(params.signal),
+          };
+        if (availability.ok === false) throw availability.error;
+        available = availability.available;
+      }
       if (available) {
         const plan = await this.generateSandboxWithSemanticFallback(
           params,
@@ -6937,6 +8444,17 @@ export class TestdataGenService {
         return this.attachRunMetadata(
           this.attachRisk(this.attachProblemSpecObservation(plan, problemSpecObservation, risk), risk),
           params,
+        );
+      }
+      if (this.reliabilityMode === 'enforce') {
+        throw toPipelineError(
+          new Error('enforce 模式要求本次运行实际进入可用的 Hydro 沙箱，禁止降级或使用未验证的标程。'),
+          {
+            code: 'SANDBOX_REQUIRED',
+            stage: 'sandbox_check',
+            artifact: 'pipeline',
+            retryPolicy: 'no-retry',
+          },
         );
       }
       if (requiresProvidedCppOracle) {
@@ -6954,7 +8472,7 @@ export class TestdataGenService {
         throw toPipelineError(
           new Error('Hydro 沙箱不可用，无法验证所选历史 AC 候选解；已拒绝降级生成 .out。请恢复沙箱、改用教师审核后的手动标程，或取消选择。'),
           {
-            code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+            code: 'SANDBOX_UNAVAILABLE',
             stage: 'sandbox_check', artifact: 'pipeline',
           },
         );
@@ -6963,7 +8481,7 @@ export class TestdataGenService {
         throw toPipelineError(
           new Error('Hydro 沙箱不可用，无法安全执行 AI 生成器。请检查 hydrojudge.sandbox_host 或改用骨架模式。'),
           {
-            code: this.reliabilityMode === 'enforce' ? 'SANDBOX_REQUIRED' : 'SANDBOX_UNAVAILABLE',
+            code: 'SANDBOX_UNAVAILABLE',
             stage: 'sandbox_check', artifact: 'pipeline',
           },
         );
@@ -6987,15 +8505,17 @@ export class TestdataGenService {
     if (!fallbackRisk.allowsDirectFallback) {
       this.throwDirectFallbackBlocked(fallbackRisk);
     }
-    if (customChecker && this.reliabilityMode === 'enforce') {
-      throw checkerPipelineError(
-        'CHECKER_REQUIRED_UNAVAILABLE',
-        'unavailable',
-        '直出模式不能编译或执行题目 checker',
-      );
+    const directMutationSummary = params.mutationGateMode === 'off'
+      ? undefined
+      : skippedMutationSummary(params.mutationGateMode || 'observe', 'sandbox-unavailable');
+    if (directMutationSummary?.mode === 'enforce') {
+      applyMutationGate({ verified: false, wouldBlock: false }, directMutationSummary);
     }
-
     const plan = await this.generateDirect(params, pipelineContext);
+    if (directMutationSummary && plan.verification) {
+      plan.verification.mutation = directMutationSummary;
+      applyMutationGate(plan.verification, directMutationSummary);
+    }
     if (this.mode === 'auto') {
       const fallbackWarning = 'Hydro 沙箱当前不可达，本次使用兼容直出模式；写入前请重点核对 .out。';
       plan.notes = [
@@ -7017,10 +8537,10 @@ export class TestdataGenService {
   ): ChatCallOptions {
     return {
       signal: params.signal,
+      contentMode: 'raw',
       maxTokens: null,
-      // 测试数据生成以正确性优先：不由插件设置模型截止时间。调用只会在
-      // 上游明确失败、服务进程中断或用户主动取消时结束。
-      timeoutMs: null,
+      // 保留完整输出预算，只给单次模型调用设置宽松且可配置的墙钟上限。
+      timeoutMs: getTestdataModelTimeoutMs(),
       // 上游明确报告超时时不在同一模型上盲等第二轮；其他短暂错误仍有限重试。
       retryTimeouts: false,
       onAttempt: event => {
@@ -7119,6 +8639,7 @@ export class TestdataGenService {
           semanticModelFallback: false,
           reliabilityMode: this.reliabilityMode,
           roleClients: fallbackRoleClients,
+          modelCallBudget: this.modelCallBudget,
         },
       );
       try {
@@ -7237,7 +8758,7 @@ export class TestdataGenService {
     this.emitProgress(params, 'blueprint', 12);
     // Task 6 只路由已拆分的 sandbox stages。直出协议仍是同时生成解法、ORACLE
     // 与外围制品的兼容单体 prompt，Task 7 拆分前必须继续使用场景/base client。
-    const directClient = this.aiClient;
+    const directClient = this.clientWithModelCallBudget(this.aiClient);
     const initialResult = await directClient.chat(
       [{ role: 'user', content: userPrompt }],
       systemPrompt,
@@ -7392,13 +8913,51 @@ export class TestdataGenService {
     context?: TestdataPipelineContext,
   ): Promise<GenerationArtifactsCallState> {
     const artifactsClient = this.clientForRole('artifacts');
-    const systemPrompt = buildGenerationArtifactsSystemPrompt(!!context);
+    const generatorDsl = context && assessGeneratorDslEligibility(context.spec).eligible
+      ? { spec: context.spec, expectedCaseCount: params.options.caseCount }
+      : undefined;
+    const systemPrompt = buildGenerationArtifactsSystemPrompt(!!context, !!generatorDsl);
     const userPrompt = buildGenerationArtifactsUserPrompt(
       params,
       solution,
       coveragePlan,
       context,
     );
+    const parseAndInspect = async (raw: string, allowDsl: boolean): Promise<SandboxGenerationArtifacts> => {
+      let artifacts: SandboxGenerationArtifacts | undefined;
+      let failure: unknown;
+      try {
+        artifacts = parseGenerationArtifacts(raw, solution.problemType, params.options.languages,
+          { allowMissingTemplates: true, ...(allowDsl && generatorDsl ? { generatorDsl } : {}) });
+      } catch (error) { failure = error; }
+      if (solution.problemType === 'function' && params.options.languages.includes('py')
+        && this.sandboxRunner?.inspectPythonTemplate) {
+        const template = artifacts?.templates?.py || parseTemplateSections(raw).py;
+        if (template) {
+          const inspection = await this.sandboxRunner.inspectPythonTemplate(
+            solution.solutions?.py || solution.solutionCode || '', template,
+            { signal: params.signal, deadlineAt: Date.now() + 10000 },
+          );
+          if (params.signal?.aborted) throw params.signal.reason;
+          try { assertPythonTemplateInterface(inspection); } catch (error) {
+            if (!failure || (error instanceof TestdataPipelineError && error.artifact === 'oracle')) throw error;
+            if (failure instanceof Error && error instanceof Error) failure.message += '\n' + error.message;
+          }
+        }
+      }
+      if (failure) throw failure;
+      return artifacts as SandboxGenerationArtifacts;
+    };
+    const rejectNonArtifactFailure = (error: unknown) => {
+      if (isSandboxBudgetExceededError(error)) {
+        throw new TestdataGenerationError('模板接口预检达到沙箱时限，已停止后续模型修复。', 'sandbox_budget', results, false,
+          undefined, undefined, { code: 'PIPELINE_BUDGET_EXHAUSTED', artifact: 'pipeline', retryPolicy: 'no-retry' });
+      }
+      if (error instanceof TestdataPipelineError && error.artifact === 'oracle') {
+        throw new TestdataGenerationError(error.message, error.stage, results, true, undefined, undefined,
+          { code: error.code, artifact: 'oracle', retryPolicy: error.retryPolicy, safeDetails: error.safeDetails, failedModelRole: 'oracle' });
+      }
+    };
     const initialResult = await artifactsClient.chat(
       [{ role: 'user', content: userPrompt }],
       systemPrompt,
@@ -7407,16 +8966,20 @@ export class TestdataGenService {
     results.push(initialResult);
     try {
       return {
-        artifacts: parseGenerationArtifacts(
-          initialResult.content,
-          solution.problemType,
-          params.options.languages,
-          { allowMissingTemplates: true },
-        ),
+        artifacts: await parseAndInspect(initialResult.content, true),
         sourceContent: initialResult.content,
       };
     } catch (parseError) {
+      if (params.signal?.aborted) throw params.signal.reason;
       if (isCancellation(parseError)) throw parseError;
+      rejectNonArtifactFailure(parseError);
+      if (parseError instanceof TestdataPipelineError && parseError.retryPolicy === 'manual-review') {
+        throw new TestdataGenerationError(parseError.message, 'artifacts_parse', results, false,
+          undefined, undefined, {
+            code: parseError.code, artifact: parseError.artifact, retryPolicy: parseError.retryPolicy,
+            safeDetails: parseError.safeDetails, failedModelRole: 'artifacts',
+          });
+      }
       const repairResult = await artifactsClient.chat(
         [
           { role: 'user', content: userPrompt },
@@ -7427,21 +8990,27 @@ export class TestdataGenService {
               + '请重新完整输出 @@@GENERATOR@@@ 与函数题所需的全部 @@@TEMPLATE:语言@@@ 分节；不要输出 ORACLE、SOLUTION、BRUTE、VALIDATOR、代码围栏或解释。',
           },
         ],
-        systemPrompt,
+        buildGenerationArtifactsSystemPrompt(!!context, false),
         callOptions,
       );
       results.push(repairResult);
       try {
         return {
-          artifacts: parseGenerationArtifacts(
-            repairResult.content,
-            solution.problemType,
-            params.options.languages,
-            { allowMissingTemplates: true },
-          ),
+          artifacts: await parseAndInspect(repairResult.content, false),
           sourceContent: repairResult.content,
         };
       } catch (repairParseError) {
+        if (params.signal?.aborted) throw params.signal.reason;
+        if (isCancellation(repairParseError)) throw repairParseError;
+        rejectNonArtifactFailure(repairParseError);
+        if (repairParseError instanceof TestdataPipelineError && repairParseError.retryPolicy === 'manual-review') {
+          throw new TestdataGenerationError(repairParseError.message, 'artifacts_parse', results, false,
+            undefined, undefined, {
+              code: repairParseError.code, artifact: repairParseError.artifact,
+              retryPolicy: repairParseError.retryPolicy, safeDetails: repairParseError.safeDetails,
+              failedModelRole: 'artifacts',
+            });
+        }
         throw new TestdataGenerationError(
           `AI 自动修复外围制品后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`,
           'artifacts_parse',
@@ -7450,8 +9019,9 @@ export class TestdataGenService {
           undefined,
           undefined,
           {
-            code: 'GENERATOR_INVALID_JSON',
-            artifact: 'generator',
+            code: repairParseError instanceof TestdataPipelineError ? repairParseError.code : 'GENERATOR_INVALID_JSON',
+            artifact: repairParseError instanceof TestdataPipelineError ? repairParseError.artifact : 'generator',
+            safeDetails: repairParseError instanceof TestdataPipelineError ? repairParseError.safeDetails : undefined,
             retryPolicy: 'repair-artifact',
             failedModelRole: 'artifacts',
           },
@@ -7467,8 +9037,10 @@ export class TestdataGenService {
     results: ChatResult[],
     attempt = 1,
     context?: TestdataPipelineContext,
+    checkpoint?: TestdataGenerationCheckpointPayload,
   ): Promise<IndependentVerifierCallState> {
     const verifierClient = this.clientForRole('verifier');
+    const verifierRepairClient = this.clientForRole('verifier', false);
     const systemPrompt = buildIndependentVerifierSystemPrompt(
       TESTDATA_GEN_LIMITS.STRESS_CASES,
       !!context,
@@ -7485,7 +9057,11 @@ export class TestdataGenService {
     results.push(initialResult);
     try {
       return {
-        verifier: parseIndependentVerifierBlueprint(initialResult.content, expectedFunctionSamples),
+        verifier: parseIndependentVerifierBlueprint(
+          initialResult.content,
+          expectedFunctionSamples,
+          context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined,
+        ),
         systemPrompt,
         userPrompt,
         sourceContent: initialResult.content,
@@ -7501,7 +9077,7 @@ export class TestdataGenService {
       );
       let repairResult: ChatResult;
       try {
-        repairResult = await verifierClient.chat(
+        repairResult = await verifierRepairClient.chat(
           [
             { role: 'user', content: userPrompt },
             { role: 'assistant', content: initialResult.content },
@@ -7517,7 +9093,12 @@ export class TestdataGenService {
           systemPrompt,
           callOptions,
         );
+        if (params.signal?.aborted) {
+          throw params.signal.reason
+            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
       } catch (err) {
+        if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
         throw new TestdataGenerationError(
           `AI 独立验证器格式无法解析，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`,
@@ -7527,7 +9108,9 @@ export class TestdataGenService {
           undefined,
           undefined,
           {
-            code: 'COVERAGE_REQUIREMENT_MISSING',
+            code: context
+              ? 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING'
+              : 'COVERAGE_REQUIREMENT_MISSING',
             artifact: 'coverage',
             retryPolicy: 'switch-model',
             failedModelRole: 'verifier',
@@ -7535,30 +9118,71 @@ export class TestdataGenService {
         );
       }
       results.push(repairResult);
+      let repairedVerifier: IndependentVerifierBlueprint;
       try {
-        return {
-          verifier: parseIndependentVerifierBlueprint(repairResult.content, expectedFunctionSamples),
-          systemPrompt,
-          userPrompt,
-          sourceContent: repairResult.content,
+        repairedVerifier = parseIndependentVerifierBlueprint(
+          repairResult.content,
           expectedFunctionSamples,
-        };
-      } catch (repairParseError) {
-        throw new TestdataGenerationError(
-          `AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`,
-          'independent_verifier_parse',
-          results,
-          true,
-          undefined,
-          undefined,
-          {
-            code: 'COVERAGE_REQUIREMENT_MISSING',
-            artifact: 'coverage',
-            retryPolicy: 'switch-model',
-            failedModelRole: 'verifier',
-          },
+          context ? { frozenSpec: context.spec, requireValidatorManifest: true } : undefined,
         );
+      } catch (repairParseError) {
+        if (context && this.reliabilityMode === 'observe') {
+          try {
+            repairedVerifier = recoverIndependentVerifierBlueprintForObserve(
+              repairResult.content,
+              expectedFunctionSamples,
+            );
+          } catch {
+            throw new TestdataGenerationError(
+              `AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`,
+              'independent_verifier_parse',
+              results,
+              true,
+              undefined,
+              undefined,
+              {
+                code: 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING',
+                artifact: 'coverage',
+                retryPolicy: 'switch-model',
+                failedModelRole: 'verifier',
+              },
+            );
+          }
+        } else {
+          throw new TestdataGenerationError(
+            `AI 自动修复独立验证器后仍无法解析：${repairParseError instanceof Error ? repairParseError.message : String(repairParseError)}`,
+            'independent_verifier_parse',
+            results,
+            true,
+            undefined,
+            undefined,
+            {
+              code: context
+                ? 'VALIDATOR_CONSTRAINT_COVERAGE_MISSING'
+                : 'COVERAGE_REQUIREMENT_MISSING',
+              artifact: 'coverage',
+              retryPolicy: 'switch-model',
+              failedModelRole: 'verifier',
+            },
+          );
+        }
       }
+      if (params.signal?.aborted) {
+        throw params.signal.reason
+          ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+      }
+      this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
+      if (context) {
+        this.assertCheckpointRoleIndependence(context.risk, checkpoint);
+        this.assertIndependentRoleIdentities(context.risk);
+      }
+      return {
+        verifier: repairedVerifier,
+        systemPrompt,
+        userPrompt,
+        sourceContent: repairResult.content,
+        expectedFunctionSamples,
+      };
     }
   }
 
@@ -7568,11 +9192,11 @@ export class TestdataGenService {
     samples: SampleIO[];
     signal?: AbortSignal;
     context?: TestdataPipelineContext;
-  }, results?: ChatResult[]): Promise<KillTarget[]> {
+  }, results?: ChatResult[], warnings?: string[]): Promise<KillTarget[]> {
     // Optional discrimination calls share the configured verifier client but are not
     // the Independent Verifier artifact dependency. Do not let them relabel a restored
     // verifier checkpoint with an unrelated fresh model hash.
-    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const verifierClient = this.clientForRole('verifier', false);
     const result = await verifierClient.chat(
       [{ role: 'user', content: buildKillTargetsUserPrompt(input) }],
       buildKillTargetsSystemPrompt(!!input.context),
@@ -7582,7 +9206,7 @@ export class TestdataGenService {
       },
     );
     results?.push(result);
-    return parseKillTargetsResponse(result.content);
+    return parseKillTargetsResponse(result.content, warnings ? { warnings } : undefined);
   }
 
   private async generateHackCandidates(
@@ -7594,7 +9218,7 @@ export class TestdataGenService {
     results: ChatResult[],
     context?: TestdataPipelineContext,
   ): Promise<HackCandidate[]> {
-    const verifierClient = this.roleClients?.verifier?.client || this.aiClient;
+    const verifierClient = this.clientForRole('verifier', false);
     const result = await verifierClient.chat(
       [{ role: 'user', content: buildHackCasesUserPrompt({ analysis, target, context }) }],
       buildHackCasesSystemPrompt(),
@@ -7620,15 +9244,28 @@ export class TestdataGenService {
     results: ChatResult[],
     checkerExecutor?: CheckerExecutor,
     context?: TestdataPipelineContext,
+    tieredDecision?: TieredSubtaskGenerationDecision,
   ): Promise<GenerationResponse> {
     const discrimination = response.verification?.discrimination;
     const deadlineAt = response.discriminationDeadlineAt;
     if (!discrimination || deadlineAt === undefined || killTargets.length === 0) return response;
     let cases: TestCase[] = response.cases;
     const initialCaseCount = cases.length;
+    const tieredSubtasks = tieredDecision?.subtasks || [];
+    let committedTieredAllocations = tieredDecision?.enabled
+      ? extendTieredAllocations(tieredDecision.allocations, cases.length, tieredSubtasks)
+      : [];
+    const tieredHackAllocationEnabled = tieredDecision?.enabled === true
+      && committedTieredAllocations.length === cases.length;
 
     const finish = () => {
       response.cases = cases;
+      if (tieredHackAllocationEnabled
+        && committedTieredAllocations.length === cases.length) {
+        response.tieredAllocations = committedTieredAllocations.map(allocation => ({
+          ...allocation,
+        }));
+      }
       discrimination.allKilled = areAllApplicableDiscriminationTargetsKilled(
         discrimination.targets,
       );
@@ -7700,15 +9337,41 @@ export class TestdataGenService {
             comparableFileContent(item.input) === comparableFileContent(candidate.input))) {
             continue;
           }
+          const prospectiveTieredAllocations = tieredHackAllocationEnabled
+            ? extendTieredAllocations(
+              committedTieredAllocations,
+              cases.length + 1,
+              tieredSubtasks,
+            )
+            : [];
+          const prospectiveAllocation = tieredHackAllocationEnabled
+            && prospectiveTieredAllocations.length === cases.length + 1
+            ? prospectiveTieredAllocations[prospectiveTieredAllocations.length - 1]
+            : undefined;
+          if (tieredHackAllocationEnabled && !prospectiveAllocation) break targetLoop;
           try {
             if (blueprint.validatorCode) {
               const validation = await runner.runPythonBatchDetailed(
                 blueprint.validatorCode,
-                [candidate.input],
+                [prospectiveAllocation
+                  ? validatorInvocation(candidate.input, prospectiveAllocation.subtaskId)
+                  : candidate.input],
                 { signal: params.signal, deadlineAt },
               );
               if (validation.length !== 1) throw new Error('定向补刀 VALIDATOR 未返回单条结果');
-              if (!validation[0].accepted) continue;
+              const validatorExecution = classifyValidatorExecution(validation[0]);
+              if (validatorExecution === 'rejected') continue;
+              if (validatorExecution === 'timeout-gap' || validatorExecution === 'infra-gap') {
+                throw toPipelineError(new Error('定向补刀 VALIDATOR 返回了不可判定结果'), {
+                  code: 'SANDBOX_UNAVAILABLE',
+                  stage: 'validator',
+                  artifact: 'validator',
+                  safeDetails: {
+                    caseIndex: 1,
+                    failureKind: validatorExecution === 'timeout-gap' ? 'timeout' : 'protocol',
+                  },
+                });
+              }
             }
 
             const oracle = await oracleExecutor.runBatchDetailed(
@@ -7718,7 +9381,7 @@ export class TestdataGenService {
             if (oracle.length !== 1) throw new Error('定向补刀 ORACLE 未返回单条结果');
             if (!oracle[0].accepted) continue;
             const output = normalizeFileContent(oracle[0].stdout);
-            if (Buffer.byteLength(output, 'utf8') > TESTDATA_GEN_LIMITS.MAX_FILE_SIZE) continue;
+            if (Buffer.byteLength(output, 'utf8') > TESTDATA_OUTPUT_MAX_BYTES) continue;
 
             const targetRun = await runner.runPythonBatchDetailed(
               target.code,
@@ -7760,8 +9423,23 @@ export class TestdataGenService {
               TESTDATA_GEN_LIMITS.MAX_CASES,
             );
             if (merged.length === cases.length) break targetLoop;
+            try {
+              assertSandboxResponseBudget({ ...response, cases: merged,
+                ...(prospectiveAllocation ? { tieredAllocations: prospectiveTieredAllocations } : {}) },
+              params.options, { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision });
+            } catch (error) {
+              if (!(error instanceof TestdataPipelineError) || error.code !== 'GENERATOR_OUTPUT_TOO_LARGE') throw error;
+              // Keep all admitted cases and the surviving target. An optional
+              // new witness cannot consume more than the remaining file budget.
+              targetResult.skippedReason = 'budget-exhausted';
+              continue;
+            }
             cases = merged;
+            if (prospectiveAllocation) {
+              committedTieredAllocations = prospectiveTieredAllocations;
+            }
             targetResult.killed = true;
+            delete targetResult.skippedReason;
             targetResult.killedBy = killedBy;
             targetResult.killedByCase = cases.length;
             if (executionVerdict === 'runtime-failure') {
@@ -7771,9 +9449,13 @@ export class TestdataGenService {
           } catch (err) {
             if (params.signal?.aborted) throw params.signal.reason ?? err;
             if (isCancellation(err)) throw err;
+            if (err instanceof TestdataPipelineError
+              && err.code === 'SANDBOX_UNAVAILABLE'
+              && err.artifact === 'validator') throw err;
             break targetLoop;
           }
         }
+        if (targetResult.skippedReason === 'budget-exhausted') continue targetLoop;
       }
     }
 
@@ -7875,7 +9557,7 @@ export class TestdataGenService {
     const solutionUserPrompt = buildSolutionBlueprintUserPrompt(params, context);
     const oracleClient = this.clientForRole('oracle');
     const artifactsClient = this.clientForRole('artifacts');
-    const verifierClient = this.clientForRole('verifier');
+    const verifierRepairClient = this.clientForRole('verifier', false);
     const callOptions = this.getCallOptions(params, attempt);
     report('blueprint', 10);
     const results: ChatResult[] = [];
@@ -7975,7 +9657,7 @@ export class TestdataGenService {
               + (cppInfraFailure
                 ? 'C++ 编译基础设施暂时不可用，请把 ORACLE 改写为 Python 3。'
                 : '')
-              + '请重新完整输出 META、ANALYSIS、ORACLE，以及函数题需要的 SOLUTION/SAMPLE_INPUTS；禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
+              + '请重新完整输出 @@@META@@@、@@@ANALYSIS@@@、@@@ORACLE_LANG@@@（python 或 cpp，与源码一致）、@@@ORACLE@@@，以及函数题需要的 SOLUTION/SAMPLE_INPUTS 分节；标记必须独占一行且逐字一致。禁止输出 GENERATOR、BRUTE、VALIDATOR、TEMPLATE、CASE、代码围栏或解释。',
           },
         ],
         solutionSystemPrompt,
@@ -7990,7 +9672,7 @@ export class TestdataGenService {
           expectedFunctionSamples,
         );
         if (
-          !/^[ \t]*===\s*SUBTASKS\s*===\s*$/im.test(repairResult.content)
+          !/^[ \t]*(?:@@@SUBTASKS@@@|===\s*SUBTASKS\s*===)[ \t]*$/im.test(repairResult.content)
           && originalParsedSubtasks?.length
         ) {
           repairedSolution.subtasks = originalParsedSubtasks;
@@ -8047,6 +9729,16 @@ export class TestdataGenService {
       subtasks: solution.subtasks,
       existingConfig: params.existingConfig,
     });
+    const validatorProof: ValidatorProofContext | undefined = context ? {
+      reliabilityMode: this.reliabilityMode,
+      pipelineContext: context,
+      tieredDecision,
+    } : undefined;
+    const coverageProof: CoverageProofContext | undefined = context ? {
+      reliabilityMode: this.reliabilityMode,
+      pipelineContext: context,
+      tieredDecision,
+    } : undefined;
     const generationCoverage: Array<CoverageSlot | SubtaskCaseAllocation> = tieredDecision.enabled
       ? tieredDecision.allocations
       : buildCoveragePlan(params.options.caseCount, params.options.dataScale || 'auto');
@@ -8057,7 +9749,10 @@ export class TestdataGenService {
       generationCoverage,
       context,
     );
-    const artifactsSystemPrompt = buildGenerationArtifactsSystemPrompt(!!context);
+    const artifactsSystemPrompt = buildGenerationArtifactsSystemPrompt(
+      !!context,
+      !!context && assessGeneratorDslEligibility(context.spec).eligible,
+    );
     const userPrompt = context ? artifactsUserPrompt : legacyCombinedUserPrompt;
     const solutionRepairSourceContent = context
       ? JSON.stringify({ ...checkpointSolutionFromBlueprint(solution), analysis: undefined })
@@ -8072,20 +9767,24 @@ export class TestdataGenService {
       context,
     );
     const optionalDiscriminationResults: ChatResult[] = [];
+    const killTargetWarnings: string[] = [];
+    const restoredKillTargets = Array.isArray(checkpoint?.killTargets)
+      ? capKillTargets(checkpoint.killTargets, { warnings: killTargetWarnings })
+      : undefined;
     // 并发完成顺序不可作为因果顺序：两个必需阶段各自持有稳定的失败上下文，
     // 成功后再按“外围制品 → 独立验证器”的固定顺序合并；可选补刀模型单独归档。
     const artifactsResults: ChatResult[] = [...results];
     const verifierResults: ChatResult[] = [...results];
     const [killTargets, artifactsState, initialVerifierState] = await Promise.all([
-      Array.isArray(checkpoint?.killTargets)
-        ? Promise.resolve(checkpoint.killTargets)
+      restoredKillTargets
+        ? Promise.resolve(restoredKillTargets)
         : this.generateKillTargets({
           statement: context ? '' : params.statementMarkdown,
           analysis: context ? '' : solution.analysis || '',
           samples: killTargetSamples,
           signal: params.signal,
           context,
-        }, optionalDiscriminationResults)
+        }, optionalDiscriminationResults, killTargetWarnings)
           .then(targets => {
             void this.emitCheckpoint(params, { killTargets: targets });
             return targets;
@@ -8140,6 +9839,7 @@ export class TestdataGenService {
           verifierResults,
           attempt,
           context,
+          checkpoint,
         ).then(state => {
           void this.emitCheckpoint(params, { verifier: state.verifier });
           return state;
@@ -8229,7 +9929,16 @@ export class TestdataGenService {
     const materializationCache: MaterializationCacheState = {};
     const initialMaterialization = resolveMaterializationResume(['GENERATOR']);
     let response: GenerationResponse;
+    const attemptedMaterializationRepairs = new Set<SandboxRepairScope>();
+    let pendingMaterializationFailure: TestdataPipelineError | undefined;
+    // At most two different artifacts per attempt; retain the shared model and sandbox budgets.
+    for (;;) {
     try {
+      if (pendingMaterializationFailure) {
+        const pending = pendingMaterializationFailure;
+        pendingMaterializationFailure = undefined;
+        throw pending;
+      }
       response = await materializeSandboxBlueprint(
         blueprint, params.options, params.statementMarkdown, runner, params.signal,
         customChecker,
@@ -8237,7 +9946,13 @@ export class TestdataGenService {
         killTargets,
         cppOracleAvailableForAttempt,
         checkerExecutor,
-        { ...initialMaterialization, cache: materializationCache },
+        {
+          ...initialMaterialization,
+          cache: materializationCache,
+          validatorProof,
+          coverageProof,
+          planContext: { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision },
+        },
       );
     } catch (firstError) {
       if (params.signal?.aborted) throw params.signal.reason ?? firstError;
@@ -8261,7 +9976,11 @@ export class TestdataGenService {
         systemPrompt = buildSandboxBlueprintSystemPrompt(false, !!context);
         blueprint = { ...blueprint, oracleLanguage: 'python' };
       }
-      if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED') {
+      const isModelCallBudget = Object.prototype.hasOwnProperty.call(
+        typedFirstError.safeDetails,
+        'callCount',
+      );
+      if (typedFirstError.code === 'PIPELINE_BUDGET_EXHAUSTED' && !isModelCallBudget) {
         throw new TestdataGenerationError(
           '沙箱验证已达到总时长上限，系统已停止后续修复与模型升级。请减少测试点数量、降低数据规模，或检查 BRUTE 是否能在小数据上及时结束。',
           'sandbox_budget',
@@ -8300,12 +10019,14 @@ export class TestdataGenService {
             artifact: typedFirstError.artifact,
             retryPolicy: repairPolicy,
             safeDetails: typedFirstError.safeDetails,
+            failedModelRole: modelRoleForSandboxFailure(typedFirstError),
           },
         );
       }
       const repairScope = repairScopeForPipelineFailure(typedFirstError);
+      attemptedMaterializationRepairs.add(repairScope);
       let failedModelRole: Extract<TestdataModelRole, 'oracle' | 'artifacts' | 'verifier'> | undefined =
-        isIndependentVerifierScope(repairScope)
+        isVerifierRepairScope(repairScope)
           ? 'verifier'
           : repairScope === 'oracle'
             ? 'oracle'
@@ -8313,7 +10034,7 @@ export class TestdataGenService {
               ? undefined
               : 'artifacts';
       let usedFullRepair = repairScope === 'full';
-      report(isIndependentVerifierScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
+      report(isVerifierRepairScope(repairScope) ? 'verifier_repair' : 'pipeline_repair', 87);
       const isolatedFullRegenerationError = (
         detail: string,
         role = failedModelRole || 'artifacts',
@@ -8339,24 +10060,25 @@ export class TestdataGenService {
       }
       let repairResult;
       try {
-        if (isIndependentVerifierScope(repairScope)) {
-          repairResult = await verifierClient.chat(
+        if (repairScope === 'validator' || isVerifierSubartifactRepairScope(repairScope)) {
+          repairResult = await verifierRepairClient.chat(
             [
               { role: 'user', content: verifierState.userPrompt },
               { role: 'assistant', content: verifierState.sourceContent },
               {
                 role: 'user',
-                content: buildIndependentVerifierRepairPrompt(
+                content: buildSandboxRepairPrompt(
                   firstError,
-                  verifierState.expectedFunctionSamples,
+                  params.options,
+                  repairScope,
+                  generationCoverage,
                   context,
                 ),
               },
             ],
-            verifierState.systemPrompt,
+            buildSandboxRepairSystemPrompt(repairScope, !!context),
             callOptions,
           );
-          finalVerifierIdentity = { ...repairResult.usedModel };
         } else if (repairScope === 'full') {
           if (context) assertProblemSpecUnchanged(context);
           repairResult = await this.chatForCombinedRepair(
@@ -8397,10 +10119,14 @@ export class TestdataGenService {
                   repairScope,
                   generationCoverage,
                   context,
+                  {
+                    language: blueprint.oracleLanguage || 'python',
+                    cppAvailable: cppOracleAvailableForAttempt && blueprint.problemType === 'traditional',
+                  },
                 ),
               },
             ],
-            repairScope === 'oracle' ? solutionSystemPrompt : artifactsSystemPrompt,
+            buildSandboxRepairSystemPrompt(repairScope, !!context),
             callOptions,
           );
           if (repairScope === 'oracle') {
@@ -8408,6 +10134,7 @@ export class TestdataGenService {
           }
         }
       } catch (err) {
+        if (params.signal?.aborted) throw params.signal.reason ?? err;
         if (isCancellation(err)) throw err;
         throw new TestdataGenerationError(
           `AI 生成蓝图未通过 Hydro 沙箱验证，自动修复请求又失败了。技术细节：${err instanceof Error ? err.message : String(err)}`,
@@ -8429,16 +10156,29 @@ export class TestdataGenService {
       let pendingIsolatedFullRegeneration: TestdataGenerationError | undefined;
       try {
         try {
-          if (isIndependentVerifierScope(repairScope)) {
+          if (repairScope === 'validator') {
+            blueprint = mergeSandboxBlueprintRepair(
+              blueprint,
+              repairResult.content,
+              'validator',
+            );
             verifierState = {
               ...verifierState,
-              verifier: parseIndependentVerifierBlueprint(
-                repairResult.content,
-                verifierState.expectedFunctionSamples,
-              ),
-              sourceContent: repairResult.content,
+              verifier: checkpointVerifierFromBlueprint(blueprint),
+              sourceContent: currentVerifierRepairSource(blueprint),
             };
-            blueprint = { ...blueprint, ...verifierState.verifier };
+          } else if (isVerifierSubartifactRepairScope(repairScope)) {
+            blueprint = mergeSandboxBlueprintRepair(
+              blueprint,
+              repairResult.content,
+              repairScope,
+              verifierState.expectedFunctionSamples,
+            );
+            verifierState = {
+              ...verifierState,
+              verifier: checkpointVerifierFromBlueprint(blueprint),
+              sourceContent: currentVerifierRepairSource(blueprint),
+            };
           } else if (repairScope === 'full') {
             const repairedMain = parseSandboxBlueprint(repairResult.content, params.options);
             blueprint = { ...repairedMain, ...verifierState.verifier };
@@ -8451,8 +10191,13 @@ export class TestdataGenService {
             );
           }
         } catch (targetedParseError) {
-          if (repairScope === 'full' || isIndependentVerifierScope(repairScope)) throw targetedParseError;
+          if (targetedParseError instanceof TestdataPipelineError
+            && targetedParseError.retryPolicy === 'manual-review') throw targetedParseError;
+          if (repairScope === 'full' || isVerifierRepairScope(repairScope)) throw targetedParseError;
+          if (!context && (attemptedMaterializationRepairs.size >= 2
+            || attemptedMaterializationRepairs.has('full'))) throw targetedParseError;
           usedFullRepair = true;
+          attemptedMaterializationRepairs.add('full');
           failedModelRole = context ? undefined : 'oracle';
           if (context) {
             assertProblemSpecUnchanged(context);
@@ -8495,6 +10240,16 @@ export class TestdataGenService {
           context,
         );
         if (context) assertProblemSpecUnchanged(context);
+        if (params.signal?.aborted) {
+          throw params.signal.reason
+            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
+        if (isVerifierRepairScope(repairScope)) {
+          finalVerifierIdentity = { ...repairResult.usedModel };
+          this.activeRoleIdentities.verifier = { ...repairResult.usedModel };
+          this.assertCheckpointRoleIndependence(risk, checkpoint);
+          this.assertIndependentRoleIdentities(risk);
+        }
         const repairedSolutionCheckpoint = checkpointSolutionFromBlueprint(blueprint);
         const repairedArtifactsCheckpoint = checkpointArtifactsFromBlueprint(blueprint);
         if (usedFullRepair) {
@@ -8505,11 +10260,15 @@ export class TestdataGenService {
           repairedSolutionCheckpoint.notes = solution.notes;
           repairedArtifactsCheckpoint.notes = artifactsState.artifacts.notes;
         }
-        void this.emitCheckpoint(params, {
+        await this.emitCheckpoint(params, {
           solution: repairedSolutionCheckpoint,
           artifacts: repairedArtifactsCheckpoint,
           verifier: checkpointVerifierFromBlueprint(blueprint),
         });
+        if (params.signal?.aborted) {
+          throw params.signal.reason
+            ?? Object.assign(new Error('canceled'), { name: 'AbortError' });
+        }
         const changedArtifacts = usedFullRepair
           ? ['full']
           : findChangedMaterializationArtifacts(blueprintBeforeRepair, blueprint);
@@ -8521,7 +10280,13 @@ export class TestdataGenService {
           killTargets,
           cppOracleAvailableForAttempt,
           checkerExecutor,
-          { ...materializationResume, cache: materializationCache },
+          {
+            ...materializationResume,
+            cache: materializationCache,
+            validatorProof,
+            coverageProof,
+            planContext: { existingFiles: params.existingFiles, existingConfig: params.existingConfig, tieredDecision },
+          },
         );
       } catch (err) {
         if (params.signal?.aborted) throw params.signal.reason ?? err;
@@ -8537,6 +10302,15 @@ export class TestdataGenService {
             retryPolicy: 'switch-model',
           });
         const finalPolicy = typedRepairError.retryPolicy;
+        const nextScope = repairScopeForPipelineFailure(typedRepairError);
+        if (finalPolicy === 'repair-artifact'
+          && attemptedMaterializationRepairs.size < 2
+          && !attemptedMaterializationRepairs.has(nextScope)
+          && nextScope !== 'full'
+          && nextScope !== 'accepted-std') {
+          pendingMaterializationFailure = typedRepairError;
+          continue;
+        }
         throw new TestdataGenerationError(
           `AI 自动修复后仍未通过 Hydro 沙箱验证。请重试或使用骨架模式。技术细节：${err instanceof Error ? err.message : String(err)}`,
           typedRepairError.stage,
@@ -8549,10 +10323,12 @@ export class TestdataGenService {
             artifact: typedRepairError.artifact,
             retryPolicy: finalPolicy,
             safeDetails: typedRepairError.safeDetails,
-            failedModelRole,
+            failedModelRole: modelRoleForSandboxFailure(typedRepairError) ?? failedModelRole,
           },
         );
       }
+    }
+    break;
     }
 
     const initialCaseCount = response.cases.length;
@@ -8566,7 +10342,17 @@ export class TestdataGenService {
       optionalDiscriminationResults,
       checkerExecutor,
       context,
+      tieredDecision,
     );
+    for (const warning of killTargetWarnings) {
+      response.notes = [response.notes, warning].filter(Boolean).join('\n');
+      if (!response.notesStructured) {
+        response.notesStructured = { warnings: [], system: [] };
+      }
+      if (!response.notesStructured.warnings.includes(warning)) {
+        response.notesStructured.warnings.push(warning);
+      }
+    }
     appendCheckerExecutionNotes(response, customChecker, checkerExecutor);
     if (customChecker && this.reliabilityMode === 'enforce') {
       const check = checkerExecutor.check;
@@ -8583,6 +10369,47 @@ export class TestdataGenService {
         );
       }
     }
+    report('mutation_testing', 94);
+    // 正常入口已在 generate() 冻结；仅为内部/旧测试直接调用该方法时补齐。
+    const mutationMode = params.mutationGateMode
+      ?? getMutationGateMode(process.env.AI_HELPER_TESTDATA_MUTATION_GATE);
+    const mutationSummary = mutationMode === 'off'
+      ? skippedMutationSummary('off', 'gate-off')
+      : await evaluateMutationCandidates({
+        mode: mutationMode,
+        candidates: mergeMutationCandidates(
+          generateMutationCandidates(
+            response.oracleCode || '',
+            response.oracleLanguage || 'python',
+          ),
+          response.problemType === 'traditional'
+            ? params.historicalMutationCandidates || []
+            : [],
+        ),
+        cases: response.cases.map(item => ({ input: item.input, answer: item.output })),
+        runner,
+        customChecker,
+        ...(customChecker && checkerExecutor.status === 'ready' ? {
+          judgeWithChecker: (cases, opts) => checkerExecutor.runBatch(cases, opts),
+        } : {}),
+        signal: params.signal,
+        correctnessDeadlineAt: Date.now()
+          + Math.max(0, materializationCache.correctnessBudgetRemainingMs || 0),
+      });
+    if (!response.verification) {
+      response.verification = {
+        mode: 'sandbox',
+        oracleKind: params.options.providedStd?.trim()
+          ? params.options.providedStdSource === 'accepted-record'
+            ? 'accepted-record'
+            : 'provided-std'
+          : 'ai-solution',
+        verified: false,
+        wouldBlock: true,
+      };
+    }
+    response.verification.mutation = mutationSummary;
+    applyMutationGate(response.verification, mutationSummary);
     if (finalOracleIdentity) this.activeRoleIdentities.oracle = finalOracleIdentity;
     if (finalVerifierIdentity) this.activeRoleIdentities.verifier = finalVerifierIdentity;
     this.assertCheckpointRoleIndependence(risk, checkpoint);
@@ -8594,12 +10421,20 @@ export class TestdataGenService {
       existingConfig: params.existingConfig,
       tieredDecision,
     });
-    return this.applyResultMetadata(finalizePlanVerification(
+    const finalizedPlan = finalizePlanVerification(
       plan,
       params.options.languages,
       customChecker,
       this.reliabilityMode,
-    ), [...results, ...optionalDiscriminationResults]);
+    );
+    if (finalizedPlan.verification) {
+      // finalize 只负责既有正确性门槛；mutation observe 标志在其后独立叠加。
+      applyMutationGate(finalizedPlan.verification, mutationSummary);
+    }
+    return this.applyResultMetadata(
+      finalizedPlan,
+      [...results, ...optionalDiscriminationResults],
+    );
     } finally {
       await checkerExecutor.dispose();
     }

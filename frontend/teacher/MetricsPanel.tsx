@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 /**
  * MetricsPanel — 对话有效性信号展示组件
  * 共享用于 ConversationDetail 页面和 ConversationDetailModal
@@ -55,27 +56,16 @@ function CompactMetrics({ metrics, metricsStatus }: MetricsPanelProps) {
   const m = metrics;
   if (!m) return null;
 
-  const parts: string[] = [];
-  parts.push(`\u{1F4AC}${m.studentMessageCount}`);
-
-  if (metricsStatus === 'pending') {
-    parts.push(`\u23F3`);
-  } else if (m.submissionsAfter !== null) {
-    parts.push(`\u{1F4DD}${m.submissionsAfter}`);
-    if (m.firstAcceptedIndex !== null) {
-      parts.push(`\u2705AC(#${m.firstAcceptedIndex + 1})`);
-    } else if (m.submissionsAfter > 0) {
-      parts.push(`\u274C`);
-    }
-  }
-
-  if (m.problemDifficulty !== null) {
-    parts.push(`${i18n('ai_helper_teacher_metrics_difficulty')} ${Math.round(m.problemDifficulty * 100)}%`);
-  }
-
   return (
-    <span style={{ fontSize: '13px', color: COLORS.textSecondary }}>
-      {parts.join(' \u00B7 ')}
+    <span style={{ display: 'inline-flex', gap: '12px', flexWrap: 'wrap', fontSize: '13px', color: COLORS.textSecondary }}>
+      <span><Icon name="message" size={14} /> {i18n('ai_helper_teacher_signal_messages')} {m.studentMessageCount}</span>
+      {metricsStatus === 'pending' ? <span><Icon name="clock" size={14} /> {i18n('ai_helper_teacher_signal_pending')}</span>
+        : m.submissionsAfter !== null && <>
+          <span><Icon name="send" size={14} /> {i18n('ai_helper_teacher_signal_submissions')} {m.submissionsAfter}</span>
+          {m.firstAcceptedIndex !== null ? <span><Icon name="check" size={14} /> AC (#{m.firstAcceptedIndex + 1})</span>
+            : m.submissionsAfter > 0 && <span><Icon name="close" size={14} /> {i18n('ai_helper_teacher_signal_no_ac')}</span>}
+        </>}
+      {m.problemDifficulty !== null && <span>{i18n('ai_helper_teacher_metrics_difficulty')} {Math.round(m.problemDifficulty * 100)}%</span>}
     </span>
   );
 }
@@ -96,8 +86,10 @@ export function MetricsPanel({ metrics, metricsStatus, compact = false }: Metric
 
   return (
     <div style={{ ...cardStyle, marginBottom: SPACING.xl }}>
-      <h2
+      <button
+        type="button" aria-expanded={!collapsed}
         style={{
+          width: '100%', padding: 0, background: 'none', border: 0, textAlign: 'left',
           margin: `0 0 ${collapsed ? '0' : SPACING.lg}`,
           ...TYPOGRAPHY.md,
           color: COLORS.textPrimary,
@@ -110,9 +102,9 @@ export function MetricsPanel({ metrics, metricsStatus, compact = false }: Metric
       >
         {i18n('ai_helper_teacher_metrics_title')}
         <span style={{ fontSize: '12px', color: COLORS.textMuted }}>
-          {collapsed ? '\u25B6' : '\u25BC'}
+          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} />
         </span>
-      </h2>
+      </button>
 
       {!collapsed && (
         <>

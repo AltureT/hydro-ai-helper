@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 /**
  * 教师端对话详情组件
  * 显示单个会话的完整对话内容,支持 Markdown 渲染 (只读)
@@ -51,6 +52,7 @@ interface Message {
   attachedError?: boolean;
   metadata?: {
     codeLength?: number;
+    codeContent?: string;
     codeWarning?: string;
   };
 }
@@ -187,7 +189,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           transition: 'all 0.2s'
         }}
       >
-        ← {i18n('ai_helper_teacher_conv_back_to_list')}
+        <Icon name="arrowLeft" /> {i18n('ai_helper_teacher_conv_back_to_list')}
       </a>
 
       {/* 页面标题 */}
@@ -212,7 +214,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
           borderRadius: RADIUS.lg,
           border: `1px solid ${COLORS.border}`
         }}>
-          <div style={{ fontSize: '32px', marginBottom: SPACING.base }}>⏳</div>
+          <div style={{ fontSize: '32px', marginBottom: SPACING.base }}><Icon name="clock" size={28} /></div>
           <div style={{ ...TYPOGRAPHY.sm }}>{i18n('ai_helper_teacher_loading')}</div>
         </div>
       )}
@@ -391,7 +393,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                         padding: SPACING.md,
                         fontSize: '12px',
                       }}>
-                        <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.sm }}>&#128221; {i18n('ai_helper_teacher_conv_student_code')}</div>
+                        <div style={{ fontSize: '11px', color: COLORS.textMuted, marginBottom: SPACING.sm }}><Icon name="code" size={14} /> {i18n('ai_helper_teacher_conv_student_code')}</div>
                         <MarkdownContent content={`\`\`\`\n${msg.metadata.codeContent}\n\`\`\``} className="markdown-body" />
                       </div>
                     )}
@@ -407,7 +409,7 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
                         fontSize: '13px',
                         color: COLORS.warningText
                       }}>
-                        ⚠️ {msg.metadata.codeWarning}
+                        <Icon name="warning" /> {msg.metadata.codeWarning}
                       </div>
                     )}
                   </div>

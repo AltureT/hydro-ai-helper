@@ -1,7 +1,9 @@
 import {
   assessTestdataRisk,
   getTestdataDirectFallbackEnabled,
+  getTestdataMaxModelCalls,
   getTestdataReliabilityMode,
+  getTestdataSpecConsensusMode,
   type TestdataRiskInput,
 } from '../../services/testdata/risk';
 import { extractStatementSamples } from '../../services/testdataGenService';
@@ -21,6 +23,8 @@ describe('deterministic test-data risk assessment', () => {
   afterEach(() => {
     delete process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE;
     delete process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK;
+    delete process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS;
+    delete process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS;
   });
 
   it.each([
@@ -35,7 +39,6 @@ describe('deterministic test-data risk assessment', () => {
     ['counted test cases', { statement: `${sampleStatement}\nThe first line contains T test cases.` }, 'COUNTED_TEST_CASES'],
     ['no parseable samples', { statement: 'There is no example section.' }, 'NO_PARSEABLE_SAMPLES'],
     ['spec conflict', { specConflict: true }, 'SPEC_CONFLICT'],
-    ['truncated statement', { statementTruncated: true }, 'STATEMENT_TRUNCATED'],
     ['multiple guarantees or conventions', { statement: `${sampleStatement}\n保证输入合法。约定下标从 1 开始。` }, 'MULTIPLE_GUARANTEES_OR_CONVENTIONS'],
   ] as const)('detects %s without AI or database access', (_label, input, code) => {
     expect(assess(input).reasons).toEqual(expect.arrayContaining([
@@ -50,6 +53,19 @@ describe('deterministic test-data risk assessment', () => {
     expect(assess({ statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.` })).toMatchObject({ score: 5, tier: 'medium' });
     expect(assess({ statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.\nSubtask 1.` })).toMatchObject({ score: 7, tier: 'high' });
     expect(assess({ statement: `${sampleStatement}\nProcess ADD operations.\nGiven a graph.\nSubtask 1.` })).toMatchObject({ score: 6, tier: 'high' });
+  });
+
+  it('requires Spec consensus for medium, high, and blocked tiers only', () => {
+    expect(assess()).toMatchObject({ tier: 'low', requiresSpecConsensus: false });
+    expect(assess({
+      statement: `${sampleStatement}\nFloating point values are accepted.`,
+    })).toMatchObject({ tier: 'medium', requiresSpecConsensus: true });
+    expect(assess({
+      statement: `${sampleStatement}\nFloating point values are accepted.\nGiven a graph.\nSubtask 1.`,
+    })).toMatchObject({ tier: 'high', requiresSpecConsensus: true });
+    expect(assess({ unsupportedCustomChecker: true })).toMatchObject({
+      tier: 'blocked', requiresSpecConsensus: true,
+    });
   });
 
   it.each([
@@ -115,16 +131,15 @@ describe('deterministic test-data risk assessment', () => {
     });
   });
 
-  it('blocks a truncated statement because its semantics cannot be verified', () => {
-    expect(assess({
+  it('rejects the unreachable statementTruncated risk input contract', () => {
+    const assessment = assessTestdataRisk({
+      statement: sampleStatement,
+      directFallbackEnabled: false,
+      reliabilityMode: 'observe',
+      // @ts-expect-error StatementSnapshot never truncates; it rejects over-limit input.
       statementTruncated: true,
-      directFallbackEnabled: true,
-      confirmDirectFallback: true,
-    })).toMatchObject({
-      tier: 'blocked',
-      requiresSandbox: true,
-      allowsDirectFallback: false,
     });
+    expect(assessment.reasons.map(reason => reason.code)).not.toContain('STATEMENT_TRUNCATED');
   });
 
   it('applies direct fallback rules without exposing statement content', () => {
@@ -184,17 +199,17 @@ describe('deterministic test-data risk assessment', () => {
       expect(mediumUnconfirmed).toMatchObject({ tier: 'medium', allowsDirectFallback: false, requiresSandbox: true });
       expect(mediumConfirmed).toMatchObject({ tier: 'medium', allowsDirectFallback: true, requiresSandbox: false });
       expect(highConfirmed).toMatchObject({ tier: 'high', allowsDirectFallback: false, requiresSandbox: true });
-      expect(lowDisabled.wouldBlock).toBe(reliabilityMode === 'observe' ? true : undefined);
-      expect(mediumConfirmed.wouldBlock).toBe(reliabilityMode === 'observe' ? false : undefined);
+      expect(lowDisabled.wouldBlock).toBeUndefined();
+      expect(mediumConfirmed.wouldBlock).toBeUndefined();
     },
   );
 
-  it('normalizes reliability mode and records observe-only wouldBlock', () => {
+  it('normalizes reliability mode without predicting a runtime wouldBlock event', () => {
     process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'ENFORCE';
     expect(getTestdataReliabilityMode()).toBe('enforce');
     process.env.AI_HELPER_TESTDATA_RELIABILITY_MODE = 'invalid';
     expect(getTestdataReliabilityMode()).toBe('observe');
-    expect(assess({ reliabilityMode: 'observe' }).wouldBlock).toBe(true);
+    expect(assess({ reliabilityMode: 'observe' }).wouldBlock).toBeUndefined();
     expect(assess({ reliabilityMode: 'enforce' }).wouldBlock).toBeUndefined();
   });
 
@@ -206,5 +221,25 @@ describe('deterministic test-data risk assessment', () => {
     expect(getTestdataDirectFallbackEnabled()).toBe(true);
     process.env.AI_HELPER_TESTDATA_ALLOW_DIRECT_FALLBACK = '1';
     expect(getTestdataDirectFallbackEnabled()).toBe(false);
+  });
+
+  it('normalizes the Spec consensus rollout switch and defaults invalid values to auto', () => {
+    expect(getTestdataSpecConsensusMode()).toBe('auto');
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'ALWAYS';
+    expect(getTestdataSpecConsensusMode()).toBe('always');
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'off';
+    expect(getTestdataSpecConsensusMode()).toBe('off');
+    process.env.AI_HELPER_TESTDATA_SPEC_CONSENSUS = 'invalid';
+    expect(getTestdataSpecConsensusMode()).toBe('auto');
+  });
+
+  it('accepts only a positive integer model-call limit and otherwise defaults to 40', () => {
+    expect(getTestdataMaxModelCalls()).toBe(40);
+    process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS = '7';
+    expect(getTestdataMaxModelCalls()).toBe(7);
+    for (const invalid of ['0', '-1', '1.5', 'invalid', '9007199254740992']) {
+      process.env.AI_HELPER_TESTDATA_MAX_MODEL_CALLS = invalid;
+      expect(getTestdataMaxModelCalls()).toBe(40);
+    }
   });
 });

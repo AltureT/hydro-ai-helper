@@ -7,6 +7,7 @@ import type {
 import {
   buildTestdataModelRoleRows,
   buildTestdataQualityCards,
+  buildTestdataStageLatencyRows,
   formatTestdataQualityRate,
 } from '../testdataQualityView';
 
@@ -83,6 +84,21 @@ export function TestdataQualityPanel() {
             <Distribution title="失败 Artifact 分布" items={data.failure_artifacts} />
             <Distribution title="Risk tier 分布" items={data.risk_tiers} />
           </div>
+
+          <section style={sectionStyle}>
+            <h3 style={headingStyle}>阶段耗时</h3>
+            {(data.stage_latency?.length ?? 0) === 0 ? <p style={emptyStyle}>暂无数据</p> : (
+              <div style={tableWrapStyle}>
+                <table style={tableStyle}>
+                  <thead><tr><th>Stage</th><th>样本数</th><th>P50</th><th>P95</th></tr></thead>
+                  <tbody>{buildTestdataStageLatencyRows(data).map(item => <tr key={item.stage}>
+                    <td><code>{item.stage}</code></td><td>{item.runs}</td>
+                    <td>{item.p50}</td><td>{item.p95}</td>
+                  </tr>)}</tbody>
+                </table>
+              </div>
+            )}
+          </section>
 
           <section style={sectionStyle}>
             <h3 style={headingStyle}>模型角色成功率</h3>

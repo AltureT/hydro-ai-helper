@@ -1,3 +1,4 @@
+import { Icon } from '../components/Icon';
 import React from 'react';
 import { i18n } from '../utils/i18n';
 import { TypeIcon, SendIcon, AttachIcon, RefreshIcon, RemoveIcon } from './icons';
@@ -117,7 +118,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       />
       {labelText}
       {questionType === 'optimize' && <span style={{ marginLeft: '4px', color: A.warning, fontSize: '11px' }}>({i18n('ai_helper_student_required')})</span>}
-      {includeCode && code && questionType !== 'optimize' && <span style={{ marginLeft: '4px', color: A.success, fontSize: '11px' }}>&#10003;</span>}
+      {includeCode && code && questionType !== 'optimize' && <span style={{ marginLeft: '4px', color: A.success, fontSize: '11px' }}><Icon name="check" size={13} /></span>}
     </label>
   );
 
@@ -191,7 +192,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       {isFollowUp && includeCode && code && (
         <div style={{ background: A.inputBg, border: `1px solid ${A.cardBorder}`, borderRadius: '10px', padding: '8px', margin: '8px 16px 0', fontSize: '11px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-            <span style={{ color: A.textMuted }}>📝 {i18n('ai_helper_student_code_attached')} ({code.length} {i18n('ai_helper_student_chars')})</span>
+            <span style={{ color: A.textMuted }}><Icon name="code" size={14} /> {i18n('ai_helper_student_code_attached')} ({code.length} {i18n('ai_helper_student_chars')})</span>
             <button type="button" onClick={onCodeClear} style={{ display: 'flex', alignItems: 'center', gap: '3px', background: 'none', border: 'none', color: A.error, cursor: 'pointer', fontSize: '11px', padding: '2px 4px', fontFamily: 'inherit' }}>
               <RemoveIcon size={11} /> {i18n('ai_helper_student_remove')}
             </button>

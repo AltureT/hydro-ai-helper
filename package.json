@@ -1,13 +1,18 @@
 {
   "name": "hydro-ai-helper",
-  "version": "3.1.0",
+  "version": "3.2.1",
   "description": "HydroOJ AI Learning Assistant - 一个教学优先的 AI 辅助学习插件",
   "main": "dist/index.js",
   "author": "Alture",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AltureT/hydro-ai-helper.git"
+  },
   "files": [
     "dist/",
     "frontend/",
+    "src/utils/reportMarkdown.ts",
     "templates/",
     "locales/",
     "assets/trusted-keys/",
