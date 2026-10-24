@@ -20,7 +20,8 @@ class SafeOutputStream {
         if (this.deferred)
             return undefined;
         this.pending += chunk;
-        const boundaries = /[。！？\n]|[.!?](?=\s)/g;
+        // Clause-level boundaries keep the preview moving inside long Chinese sentences.
+        const boundaries = /[。！？；，\n]|[.!?](?=\s)/g;
         let match;
         let changed = false;
         // OpenAIClient adds this fixed placeholder for separate reasoning deltas.
@@ -36,7 +37,12 @@ class SafeOutputStream {
             const end = match.index + match[0].length;
             const sentence = this.pending.slice(0, end);
             // Only simple inline identifiers/numbers are safe to expose before the full scan.
-            const prose = sentence.replace(/`([\w\u4e00-\u9fff.+*/%-]+)`/g, 'identifier');
+            // Complexity notation and keywords named in Chinese prose ("for 循环") are not code,
+            // but stopping on them used to defer nearly every tutoring answer to the end.
+            const prose = sentence
+                .replace(/`([\w\u4e00-\u9fff.+*/%^[\]-]+)`/g, 'identifier')
+                .replace(/\bO\([\w\s^*+/]{1,20}\)/g, 'complexity')
+                .replace(/\b(?:for|while|if|elif|else|try|except|with|return|import)\s*(?=(?:循环|语句|判断|分支|条件|结构|关键字|代码块|里|中|内|的|后|前))/g, 'keyword ');
             if (/[`~<>{};=]|\b(?:def|class|return|import|from|yield|raise|assert|using)\b|\b[A-Za-z_]\w*\s*\(|\b(?:int|long|double|float|char|bool|string|void|auto|vector|map|set|queue|stack)\s+[A-Za-z_]|\b(?:for|while|if|elif|else|try|except|with)\b|#include|std::|cin\s*>>|cout\s*<</.test(prose)) {
                 this.deferred = true;
                 break;
