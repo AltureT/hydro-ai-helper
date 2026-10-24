@@ -57,6 +57,32 @@ describe('SafeOutputStream', () => {
       .toBe('变量 `ans` 表示答案，数字 `3` 表示周三。');
   });
 
+  it.each([
+    '时间复杂度是 O(n log n)，空间复杂度是 O(1)。',
+    '用 for 循环遍历数组，在 if 判断里更新答案。',
+    '比较 `a[i]` 和 `dp[i-1]` 的大小。',
+  ])('keeps streaming prose that only names code concepts: %s', (sentence) => {
+    const stream = createStream();
+    expect(stream.push(sentence)).toBe(sentence);
+    expect(stream.push('后面的解释。')).toBe(sentence + '后面的解释。');
+  });
+
+  it.each([
+    'for i in range(n)，累加答案。',
+    'if x > 0 就输出。',
+    '可以写 return 答案(x)。',
+  ])('still defers keywords used as statements: %s', (sentence) => {
+    const stream = createStream();
+    expect(stream.push(sentence)).toBeUndefined();
+    expect(stream.content).toBe('');
+  });
+
+  it('publishes long Chinese sentences clause by clause', () => {
+    const stream = createStream();
+    expect(stream.push('先读入数据，')).toBe('先读入数据，');
+    expect(stream.push('再统计答案')).toBeUndefined();
+  });
+
   it('resets both the previous prose and deferred code before fallback', () => {
     const stream = createStream();
     stream.push('第一条提示。\n```python\n');

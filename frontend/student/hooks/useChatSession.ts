@@ -8,6 +8,7 @@ import {
   shouldResetConversation,
 } from '../../utils/conversationStorage';
 import { consumeSSEStream, type SSEHandlers } from '../../utils/sseParser';
+import { createStreamPacer, type StreamPacer } from '../../utils/streamPacer';
 import {
   type ChatState,
   type ChatAction,
@@ -40,8 +41,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const streamingContentRef = useRef<string>('');
-  const rafRef = useRef<number | null>(null);
+  const pacerRef = useRef<StreamPacer | null>(null);
 
   const QUESTION_TYPES = useMemo(() => {
     const types = [...BASE_QUESTION_TYPES];
@@ -308,8 +308,15 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
 
       if (isSSE && response.body) {
         dispatch({ type: 'SET_IS_STREAMING', payload: true });
-        streamingContentRef.current = '';
         dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
+        const pacer = createStreamPacer({
+          onUpdate: (text) => {
+            dispatch({ type: 'SET_STREAMING_CONTENT', payload: text });
+            scrollToBottom();
+          },
+        });
+        pacerRef.current = pacer;
+        let doneMessageId: string | undefined;
 
         const reader = response.body.getReader();
         const handlers: SSEHandlers = {
@@ -319,56 +326,35 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
               saveConversationId(problemId, data.conversationId);
             }
           },
-          onChunk: (data) => {
-            streamingContentRef.current += data.content;
-            if (rafRef.current === null) {
-              rafRef.current = requestAnimationFrame(() => {
-                dispatch({ type: 'SET_STREAMING_CONTENT', payload: streamingContentRef.current });
-                scrollToBottom();
-                rafRef.current = null;
-              });
-            }
-          },
-          onReplace: (data) => {
-            streamingContentRef.current = data.content;
-            dispatch({ type: 'SET_STREAMING_CONTENT', payload: data.content });
-          },
-          onDone: (data) => {
-            const finalContent = streamingContentRef.current;
-            const aiMessage: Message = {
-              role: 'ai',
-              content: finalContent,
-              timestamp: new Date(),
-              id: data.messageId,
-            };
-            dispatch({ type: 'ADD_MESSAGE', payload: aiMessage });
-            dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
-            streamingContentRef.current = '';
-            dispatch({ type: 'SET_IS_STREAMING', payload: false });
-            scrollToBottom();
-          },
+          onChunk: (data) => pacer.append(data.content),
+          onReplace: (data) => pacer.replace(data.content),
+          onDone: (data) => { doneMessageId = data.messageId; },
           onError: (data) => {
+            pacer.cancel();
             dispatch({ type: 'SET_IS_STREAMING', payload: false });
             dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
-            streamingContentRef.current = '';
             throw createCategorizedError(data.error || i18n('ai_helper_student_err_ai_service'), data.category, data.retryable);
           },
         };
 
+        ac.signal.addEventListener('abort', () => pacer.cancel(), { once: true });
         await consumeSSEStream(reader, handlers, ac.signal);
 
-        if (streamingContentRef.current) {
-          const finalContent = streamingContentRef.current;
+        // Let the typewriter catch up before the bubble becomes a stored message.
+        // An abort (new conversation, unmount) during the catch-up drops the bubble.
+        if (!ac.signal.aborted) await pacer.finish();
+        if (pacer.text && !ac.signal.aborted) {
           const aiMessage: Message = {
             role: 'ai',
-            content: finalContent,
+            content: pacer.text,
             timestamp: new Date(),
+            ...(doneMessageId ? { id: doneMessageId } : {}),
           };
           dispatch({ type: 'ADD_MESSAGE', payload: aiMessage });
-          dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
-          streamingContentRef.current = '';
-          dispatch({ type: 'SET_IS_STREAMING', payload: false });
         }
+        dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
+        dispatch({ type: 'SET_IS_STREAMING', payload: false });
+        scrollToBottom();
       } else {
         let data: any;
         try {
@@ -424,10 +410,8 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
       dispatch({ type: 'REMOVE_LAST_MESSAGE' });
     } finally {
       clearTimeout(clientTimeout);
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
+      pacerRef.current?.cancel();
+      pacerRef.current = null;
       abortControllerRef.current = null;
       dispatch({ type: 'SET_IS_LOADING', payload: false });
       dispatch({ type: 'SET_IS_STREAMING', payload: false });
