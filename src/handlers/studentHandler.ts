@@ -25,6 +25,8 @@ import { getDomainId } from '../utils/domainHelper';
 import { translateWithParams } from '../utils/i18nHelper';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
+import { AccessPolicyResolver, type EffectiveAccess } from '../services/accessPolicyService';
+import type { AIAccessPolicyModel } from '../models/aiAccessPolicy';
 import { createSSEWriter } from '../lib/sseHelper';
 
 function extractContestIdFromReferer(referer: unknown): string | undefined {
@@ -312,9 +314,39 @@ export class ChatHandler extends Handler {
     const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
     const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
 
+    // 管理员按用户/用户组设置的访问策略（禁用、个人额度、频率覆盖）
+    // 查询失败时 fail-closed：管理员的禁用不能因数据库抖动而失效
+    let access: EffectiveAccess | undefined;
+    const accessPolicyModel: AIAccessPolicyModel | undefined = this.ctx.get('aiAccessPolicyModel');
+    if (accessPolicyModel) {
+      try {
+        access = await new AccessPolicyResolver(accessPolicyModel).resolve(domainId, userId);
+      } catch (err) {
+        console.error('[ChatHandler] Access policy check failed:', err);
+        this.response.status = 503;
+        this.response.body = {
+          error: this.translate('ai_helper_err_internal'),
+          code: 'ACCESS_POLICY_UNAVAILABLE',
+        };
+        this.response.type = 'application/json';
+        return null;
+      }
+      if (!access.enabled) {
+        this.response.status = 403;
+        this.response.body = {
+          error: this.translate('ai_helper_err_access_disabled'),
+          code: 'AI_ACCESS_DISABLED',
+          category: 'access',
+          retryable: false,
+        };
+        this.response.type = 'application/json';
+        return null;
+      }
+    }
+
     // 频率限制检查（在任何 AI 请求调用之前执行）
     // 使用 HydroOJ 内置 limitRate (opcount)，fail-closed 策略
-    const rateLimitPerMinute = aiConfig?.rateLimitPerMinute ?? 5;
+    const rateLimitPerMinute = access?.rateLimitPerMinute ?? aiConfig?.rateLimitPerMinute ?? 5;
 
     if (rateLimitPerMinute > 0) {
       // 主限流：N 次/60秒
@@ -335,9 +367,12 @@ export class ChatHandler extends Handler {
     let budgetWarning: string | undefined;
     try {
       const tokenUsageModel: TokenUsageModel = this.ctx.get('tokenUsageModel');
-      if (aiConfig?.budgetConfig) {
+      if (aiConfig?.budgetConfig || access?.dailyTokenLimit) {
         const budgetService = new BudgetService(tokenUsageModel);
-        const budgetCheck = await budgetService.checkBudget(domainId, userId, aiConfig.budgetConfig);
+        const budgetCheck = await budgetService.checkBudget(domainId, userId, aiConfig?.budgetConfig ?? {}, {
+          dailyTokenLimitPerUser: access?.dailyTokenLimit,
+          extraTokens: access?.extraTokens,
+        });
         if (!budgetCheck.allowed) {
           this.response.status = 429;
           this.response.body = {
@@ -358,8 +393,8 @@ export class ChatHandler extends Handler {
     } catch (err) {
       console.error('[ChatHandler] Budget check failed:', err);
       const budget = aiConfig?.budgetConfig;
-      if (budget && (budget.dailyTokenLimitPerUser > 0
-        || budget.dailyTokenLimitPerDomain > 0 || budget.monthlyTokenLimitPerDomain > 0)) {
+      if ((access?.dailyTokenLimit ?? 0) > 0 || (budget && (budget.dailyTokenLimitPerUser > 0
+        || budget.dailyTokenLimitPerDomain > 0 || budget.monthlyTokenLimitPerDomain > 0))) {
         this.response.status = 503;
         this.response.body = {
           error: this.translate('ai_helper_err_internal'),

@@ -8,19 +8,30 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BudgetService = void 0;
+exports.effectiveUserDailyLimit = effectiveUserDailyLimit;
+/**
+ * 计算生效的个人日上限：覆盖值优先，> 0 时叠加今日追加额度；0 = 不限
+ */
+function effectiveUserDailyLimit(budgetConfig, override) {
+    const base = override?.dailyTokenLimitPerUser ?? budgetConfig.dailyTokenLimitPerUser ?? 0;
+    if (!base || base <= 0)
+        return 0;
+    return base + Math.max(0, override?.extraTokens ?? 0);
+}
 class BudgetService {
     constructor(tokenUsageModel) {
         this.tokenUsageModel = tokenUsageModel;
     }
-    async checkBudget(domainId, userId, budgetConfig) {
+    async checkBudget(domainId, userId, budgetConfig, override) {
         const today = new Date().toISOString().slice(0, 10);
         const softPercent = budgetConfig.softLimitPercent ?? 80;
         let warning;
-        // 1. 检查用户日限额
-        if (budgetConfig.dailyTokenLimitPerUser && budgetConfig.dailyTokenLimitPerUser > 0) {
+        // 1. 检查用户日限额（域默认，或按用户/用户组策略覆盖；域日/月限额仍然叠加生效）
+        const userDailyLimit = effectiveUserDailyLimit(budgetConfig, override);
+        if (userDailyLimit > 0) {
             const userUsage = await this.tokenUsageModel.getUserDailyUsage(domainId, userId, today);
             const used = userUsage?.totalTokens ?? 0;
-            const limit = budgetConfig.dailyTokenLimitPerUser;
+            const limit = userDailyLimit;
             if (used >= limit) {
                 return {
                     allowed: false,

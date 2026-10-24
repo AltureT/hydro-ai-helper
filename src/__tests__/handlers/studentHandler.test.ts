@@ -891,6 +891,115 @@ describe('ChatHandler', () => {
     expect(createMultiModelClientFromConfig).toHaveBeenCalled();
   });
 
+  describe('access policies', () => {
+    function withAccessPolicies(handler: ChatHandler, policies: any[], groups: string[] = []) {
+      const findForUser = jest.fn().mockResolvedValue(policies);
+      const originalGet = handler.ctx.get;
+      handler.ctx.get = jest.fn((name: string) => (
+        name === 'aiAccessPolicyModel' ? { findForUser } : originalGet(name)
+      ));
+      (db.collection as jest.Mock).mockReturnValueOnce({
+        find: jest.fn().mockReturnValue({ toArray: jest.fn().mockResolvedValue(groups.map((name) => ({ name }))) }),
+      });
+      return findForUser;
+    }
+
+    it('rejects a disabled user with AI_ACCESS_DISABLED before any rate limit or AI call', async () => {
+      const handler = createMockHandler();
+      const findForUser = withAccessPolicies(handler, [
+        { scope: 'user', target: 42, enabled: false, domainId: 'test-domain' },
+      ]);
+
+      await handler.post();
+
+      expect(findForUser).toHaveBeenCalledWith('test-domain', 42, []);
+      expect(handler.response.status).toBe(403);
+      expect(handler.response.body).toMatchObject({
+        code: 'AI_ACCESS_DISABLED',
+        error: 'ai_helper_err_access_disabled',
+        retryable: false,
+      });
+      expect(applyRateLimit).not.toHaveBeenCalled();
+      expect(createMultiModelClientFromConfig).not.toHaveBeenCalled();
+    });
+
+    it('rejects members of a disabled Hydro group', async () => {
+      const handler = createMockHandler();
+      const findForUser = withAccessPolicies(handler, [
+        { scope: 'group', target: 'class-1', enabled: false, domainId: 'test-domain' },
+      ], ['class-1']);
+
+      await handler.post();
+
+      expect(findForUser).toHaveBeenCalledWith('test-domain', 42, ['class-1']);
+      expect(handler.response.status).toBe(403);
+      expect(handler.response.body.code).toBe('AI_ACCESS_DISABLED');
+    });
+
+    it('ignores an expired disable', async () => {
+      const handler = createMockHandler();
+      withAccessPolicies(handler, [
+        { scope: 'user', target: 42, enabled: false, expiresAt: new Date(Date.now() - 1000) },
+      ]);
+
+      await handler.post();
+
+      expect(handler.response.body.code).toBeUndefined();
+      expect(createMultiModelClientFromConfig).toHaveBeenCalled();
+    });
+
+    it('passes the per-user limit and today\'s top-up into the budget check and overrides the rate limit', async () => {
+      const handler = createMockHandler();
+      const configModel = handler.ctx.get('aiConfigModel');
+      const config = await configModel.getConfig();
+      configModel.getConfig.mockResolvedValue({ ...config, budgetConfig: { dailyTokenLimitPerUser: 1000, dailyTokenLimitPerDomain: 90000 } });
+      const today = new Date().toISOString().slice(0, 10);
+      withAccessPolicies(handler, [
+        { scope: 'user', target: 42, enabled: true, dailyTokenLimit: 8000, extraTokens: { date: today, amount: 2000 }, rateLimitPerMinute: 30 },
+      ]);
+      const checkBudget = jest.fn().mockResolvedValue({ allowed: true });
+      (BudgetService as jest.Mock).mockImplementationOnce(() => ({ checkBudget }));
+
+      await handler.post();
+
+      expect(checkBudget).toHaveBeenCalledWith(
+        'test-domain', 42,
+        { dailyTokenLimitPerUser: 1000, dailyTokenLimitPerDomain: 90000 },
+        { dailyTokenLimitPerUser: 8000, extraTokens: 2000 },
+      );
+      expect(applyRateLimit).toHaveBeenCalledWith(handler, expect.objectContaining({ op: 'ai_chat', maxOps: 30 }));
+      expect(applyRateLimit).toHaveBeenCalledWith(handler, expect.objectContaining({ op: 'ai_chat_burst', maxOps: 10 }));
+    });
+
+    it('checks the budget for a per-user limit even without a domain budget config', async () => {
+      const handler = createMockHandler();
+      withAccessPolicies(handler, [
+        { scope: 'group', target: 'class-1', enabled: true, dailyTokenLimit: 500 },
+      ], ['class-1']);
+      const checkBudget = jest.fn().mockResolvedValue({ allowed: false, reasonKey: 'ai_helper_budget_user_daily_exceeded', reasonParams: ['500', '500'] });
+      (BudgetService as jest.Mock).mockImplementationOnce(() => ({ checkBudget }));
+
+      await handler.post();
+
+      expect(checkBudget).toHaveBeenCalledWith('test-domain', 42, {}, { dailyTokenLimitPerUser: 500, extraTokens: 0 });
+      expect(handler.response.status).toBe(429);
+      expect(handler.response.body.code).toBe('BUDGET_EXCEEDED');
+    });
+
+    it('fails closed when the policy lookup errors', async () => {
+      const handler = createMockHandler();
+      jest.spyOn(console, 'error').mockImplementation();
+      const findForUser = withAccessPolicies(handler, []);
+      findForUser.mockRejectedValueOnce(new Error('Synthetic database failure'));
+
+      await handler.post();
+
+      expect(handler.response.status).toBe(503);
+      expect(handler.response.body.code).toBe('ACCESS_POLICY_UNAVAILABLE');
+      expect(createMultiModelClientFromConfig).not.toHaveBeenCalled();
+    });
+  });
+
   it('should include tokenUsage in response', async () => {
     const handler = createMockHandler();
     jest.spyOn(console, 'log').mockImplementation();

@@ -20,19 +20,44 @@ export interface BudgetCheckResult {
   remaining?: number;
 }
 
+/**
+ * 按用户/用户组策略解析出的个人额度覆盖（见 accessPolicyService）
+ */
+export interface UserBudgetOverride {
+  /** 覆盖 budgetConfig.dailyTokenLimitPerUser；undefined = 沿用域默认，0 = 不限 */
+  dailyTokenLimitPerUser?: number;
+  /** 今日追加额度，叠加在生效的个人日上限之上（上限为 0/不限时无意义） */
+  extraTokens?: number;
+}
+
+/**
+ * 计算生效的个人日上限：覆盖值优先，> 0 时叠加今日追加额度；0 = 不限
+ */
+export function effectiveUserDailyLimit(budgetConfig: BudgetConfig, override?: UserBudgetOverride): number {
+  const base = override?.dailyTokenLimitPerUser ?? budgetConfig.dailyTokenLimitPerUser ?? 0;
+  if (!base || base <= 0) return 0;
+  return base + Math.max(0, override?.extraTokens ?? 0);
+}
+
 export class BudgetService {
   constructor(private tokenUsageModel: TokenUsageModel) {}
 
-  async checkBudget(domainId: string, userId: number, budgetConfig: BudgetConfig): Promise<BudgetCheckResult> {
+  async checkBudget(
+    domainId: string,
+    userId: number,
+    budgetConfig: BudgetConfig,
+    override?: UserBudgetOverride,
+  ): Promise<BudgetCheckResult> {
     const today = new Date().toISOString().slice(0, 10);
     const softPercent = budgetConfig.softLimitPercent ?? 80;
     let warning: BudgetCheckResult | undefined;
 
-    // 1. 检查用户日限额
-    if (budgetConfig.dailyTokenLimitPerUser && budgetConfig.dailyTokenLimitPerUser > 0) {
+    // 1. 检查用户日限额（域默认，或按用户/用户组策略覆盖；域日/月限额仍然叠加生效）
+    const userDailyLimit = effectiveUserDailyLimit(budgetConfig, override);
+    if (userDailyLimit > 0) {
       const userUsage = await this.tokenUsageModel.getUserDailyUsage(domainId, userId, today);
       const used = userUsage?.totalTokens ?? 0;
-      const limit = budgetConfig.dailyTokenLimitPerUser;
+      const limit = userDailyLimit;
 
       if (used >= limit) {
         return {

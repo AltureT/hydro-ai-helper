@@ -1,4 +1,4 @@
-import { BudgetService, BudgetCheckResult } from '../../services/budgetService';
+import { BudgetService, BudgetCheckResult, effectiveUserDailyLimit } from '../../services/budgetService';
 import { BudgetConfig } from '../../models/aiConfig';
 
 function createMockTokenUsageModel(overrides: Record<string, any> = {}) {
@@ -214,5 +214,58 @@ describe('BudgetService', () => {
 
       expect(result.allowed).toBe(true);
     });
+  });
+});
+
+describe('BudgetService — per-user overrides from access policies', () => {
+  it('uses the override limit instead of the domain default', async () => {
+    const model = createMockTokenUsageModel({
+      getUserDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 1500 }),
+    });
+    const service = new BudgetService(model);
+
+    const raised = await service.checkBudget('domain1', 1001, { dailyTokenLimitPerUser: 1000 }, { dailyTokenLimitPerUser: 5000 });
+    expect(raised.allowed).toBe(true);
+
+    const lowered = await service.checkBudget('domain1', 1001, { dailyTokenLimitPerUser: 10000 }, { dailyTokenLimitPerUser: 1000 });
+    expect(lowered.allowed).toBe(false);
+    expect(lowered.reasonParams).toEqual(['1,500', '1,000']);
+  });
+
+  it('treats an override of 0 as unlimited even when the domain default is limited', async () => {
+    const getUserDailyUsage = jest.fn().mockResolvedValue({ totalTokens: 999999 });
+    const service = new BudgetService(createMockTokenUsageModel({ getUserDailyUsage }));
+    const result = await service.checkBudget('domain1', 1001, { dailyTokenLimitPerUser: 1000 }, { dailyTokenLimitPerUser: 0 });
+    expect(result.allowed).toBe(true);
+    expect(getUserDailyUsage).not.toHaveBeenCalled();
+  });
+
+  it('adds today\'s extra tokens on top of the effective limit', async () => {
+    const model = createMockTokenUsageModel({
+      getUserDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 1200 }),
+    });
+    const service = new BudgetService(model);
+    const result = await service.checkBudget('domain1', 1001, { dailyTokenLimitPerUser: 1000 }, { extraTokens: 500 });
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(300);
+  });
+
+  it('still enforces domain caps for users with a raised limit', async () => {
+    const model = createMockTokenUsageModel({
+      getDomainDailyUsage: jest.fn().mockResolvedValue({ totalTokens: 50000 }),
+    });
+    const service = new BudgetService(model);
+    const result = await service.checkBudget('domain1', 1001, {
+      dailyTokenLimitPerUser: 1000, dailyTokenLimitPerDomain: 50000,
+    }, { dailyTokenLimitPerUser: 0, extraTokens: 100000 });
+    expect(result.allowed).toBe(false);
+    expect(result.reasonKey).toBe('ai_helper_budget_domain_daily_exceeded');
+  });
+
+  it('computes the effective limit for display', () => {
+    expect(effectiveUserDailyLimit({ dailyTokenLimitPerUser: 1000 })).toBe(1000);
+    expect(effectiveUserDailyLimit({ dailyTokenLimitPerUser: 1000 }, { extraTokens: 50 })).toBe(1050);
+    expect(effectiveUserDailyLimit({}, { extraTokens: 50 })).toBe(0);
+    expect(effectiveUserDailyLimit({ dailyTokenLimitPerUser: 1000 }, { dailyTokenLimitPerUser: 0, extraTokens: 50 })).toBe(0);
   });
 });
