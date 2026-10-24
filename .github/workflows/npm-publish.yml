@@ -73,10 +73,13 @@ jobs:
 
           echo "✅ 已提取 ${TAG_NAME} 的独立发布说明"
 
+      # Trusted Publishing（OIDC）需要 npm >= 11.5.1；Node 22 自带的 npm 10 不支持。
+      - name: 升级 npm 以支持 Trusted Publishing
+        run: npm install -g npm@11.21.0
+
+      # 通过 npm Trusted Publishing（OIDC）认证，不再使用会过期的 NPM_TOKEN。
       - name: 发布到 npm
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

@@ -109,6 +109,7 @@ function releasePolicyViolations(workflow: Workflow): string[] {
   const buildIndex = commandIndex(steps, 'npm run build:plugin');
   const versionCheckIndex = namedStepIndex(steps, '验证版本一致性');
   const publishIndex = commandIndex(steps, 'npm publish --provenance --access public');
+  const npmUpgradeIndex = steps.findIndex((step) => /^npm install -g npm@\d+\.\d+\.\d+$/.test(step.run?.trim() || ''));
   const verifier = steps[verifierIndex];
   const publish = steps[publishIndex];
 
@@ -127,15 +128,16 @@ function releasePolicyViolations(workflow: Workflow): string[] {
   if (!verifier || verifier.env?.GITHUB_TOKEN !== '${{ secrets.GITHUB_TOKEN }}') {
     violations.push('release verifier must receive GITHUB_TOKEN');
   }
-  if (!publish || publish.env?.NODE_AUTH_TOKEN !== '${{ secrets.NPM_TOKEN }}') {
-    violations.push('provenance publish must retain NODE_AUTH_TOKEN');
+  // Trusted Publishing (OIDC) replaces the expiring NPM_TOKEN; a long-lived token must not come back.
+  if (!publish || publish.env?.NODE_AUTH_TOKEN !== undefined || expressionPaths(workflow, 'secrets.NPM_TOKEN').length > 0) {
+    violations.push('publish must authenticate through Trusted Publishing, not NPM_TOKEN');
   }
-  if ([setupNodeIndex, verifierIndex, installIndex, lintIndex, testIndex, buildIndex, versionCheckIndex, publishIndex]
+  if ([setupNodeIndex, verifierIndex, installIndex, lintIndex, testIndex, buildIndex, versionCheckIndex, npmUpgradeIndex, publishIndex]
     .some((index) => index < 0)) {
     violations.push('release gate command is missing');
   } else if (verifierIndex !== setupNodeIndex + 1 || verifierIndex >= installIndex) {
     violations.push('release verifier must run immediately after setup-node and before dependency install');
-  } else if (![verifierIndex, installIndex, lintIndex, testIndex, buildIndex, versionCheckIndex]
+  } else if (![verifierIndex, installIndex, lintIndex, testIndex, buildIndex, versionCheckIndex, npmUpgradeIndex]
     .every((index) => index < publishIndex)) {
     violations.push('release gates must run before publish');
   }
@@ -146,6 +148,7 @@ function releasePolicyViolations(workflow: Workflow): string[] {
     steps[testIndex],
     steps[buildIndex],
     steps[versionCheckIndex],
+    steps[npmUpgradeIndex],
     publish,
   ];
   if (mandatorySteps.some(
@@ -311,9 +314,9 @@ describe('workflow security policy', () => {
     expect(automationGuide).toContain('npm test -- --runInBand --silent');
     expect(automationGuide).toContain('npm publish --provenance');
     expect(automationGuide).toContain('Trusted Publishing');
-    expect(automationGuide).toContain('当前发布工作流使用 OIDC provenance，同时保留令牌认证');
-    expect(automationGuide).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
-    expect(automationGuide).toContain('Trusted Publishing 尚待 npm 包设置和一次受控发布确认');
+    expect(automationGuide).toContain('发布工作流通过 npm **Trusted Publishing**');
+    expect(automationGuide).toContain('npm >= 11.5.1');
+    expect(automationGuide).not.toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
     expect(automationGuide).toContain('npm version patch --no-git-tag-version');
     expect(automationGuide).toContain('git fetch origin main --tags');
     expect(automationGuide).toContain('git tag -s -a');
