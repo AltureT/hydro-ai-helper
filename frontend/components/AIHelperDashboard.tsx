@@ -10,18 +10,20 @@ import { AnalyticsPage } from '../teacher/AnalyticsPage';
 import { ConversationList } from '../teacher/ConversationList';
 import { ConfigPanel } from '../admin/ConfigPanel';
 import { SafetyGovernancePanel } from '../admin/SafetyGovernancePanel';
+import { AccessPolicyPanel } from '../admin/AccessPolicyPanel';
 import { CostDashboard } from '../teacher/CostDashboard';
 import { TeachingReviewPanel } from '../teachingSummary/TeachingReviewPanel';
 import { COLORS, FONT_FAMILY, RADIUS, SPACING, getTabStyle } from '../utils/styles';
 import { getDomainFromUrl } from '../utils/domainUtils';
 
-type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'safety' | 'config';
+type TabType = 'conversations' | 'analytics' | 'teaching_review' | 'cost' | 'access' | 'safety' | 'config';
 
 const isTabType = (tab: string | null): tab is TabType => (
   tab === 'conversations'
   || tab === 'analytics'
   || tab === 'teaching_review'
   || tab === 'cost'
+  || tab === 'access'
   || tab === 'safety'
   || tab === 'config'
 );
@@ -64,6 +66,7 @@ export const AIHelperDashboard: React.FC = () => {
     { id: 'analytics', icon: 'chart', label: i18n('ai_helper_dashboard_tab_analytics') },
     { id: 'teaching_review', icon: 'document', label: i18n('ai_helper_dashboard_tab_teaching_review') || '教学总结回顾' },
     { id: 'cost', icon: 'wallet', label: i18n('ai_helper_dashboard_tab_cost') },
+    { id: 'access', icon: 'users', label: i18n('ai_helper_dashboard_tab_access') },
     { id: 'safety', icon: 'shield', label: i18n('ai_helper_dashboard_tab_safety') },
     { id: 'config', icon: 'settings', label: i18n('ai_helper_dashboard_tab_config') },
   ];
@@ -138,6 +141,7 @@ export const AIHelperDashboard: React.FC = () => {
           {activeTab === 'analytics' && <AnalyticsPage embedded />}
           {activeTab === 'teaching_review' && <TeachingReviewPanel domainId={domainId} />}
           {activeTab === 'cost' && <CostDashboard embedded />}
+          {activeTab === 'access' && <AccessPolicyPanel embedded />}
           {safetyVisited && (
             <div style={{ display: activeTab === 'safety' ? 'block' : 'none' }}>
               <SafetyGovernancePanel embedded />

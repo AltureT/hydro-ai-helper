@@ -75,6 +75,20 @@ class TokenUsageModel {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return this.dailyAggCollection.findOne({ _id: aggId });
     }
+    /**
+     * 批量获取多个用户某日的聚合用量（按主键 $in 查询，避免逐个 getUserDailyUsage）
+     */
+    async getUsersDailyUsage(domainId, userIds, date) {
+        const result = new Map();
+        if (userIds.length === 0)
+            return result;
+        const ids = userIds.map((uid) => `${domainId}:${uid}:${date}`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const docs = await this.dailyAggCollection.find({ _id: { $in: ids } }).toArray();
+        for (const doc of docs)
+            result.set(doc.userId, doc);
+        return result;
+    }
     async getDomainDailyUsage(domainId, date) {
         const pipeline = [
             { $match: { domainId, date } },
