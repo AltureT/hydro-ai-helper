@@ -50,9 +50,9 @@ npm publish --provenance --access public
 
 ## Trusted Publishing 与凭据迁移
 
-当前发布工作流使用 OIDC provenance，同时保留令牌认证：`NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` 仍为 npm 发布提供认证，以保证现有发布链不断裂。
+发布工作流通过 npm **Trusted Publishing**（GitHub Actions OIDC，`id-token: write`）认证，并以 `--provenance` 生成来源证明，不再使用 `NPM_TOKEN`。npm 包设置中的受信任发布者为 `AltureT/hydro-ai-helper` 的 `npm-publish.yml`（未绑定 environment，允许 `npm publish`）。Trusted Publishing 需要 npm >= 11.5.1，工作流会在发布前把 npm 升级到固定版本。
 
-**Trusted Publishing 尚待 npm 包设置和一次受控发布确认**。在该迁移完成并确认不再需要令牌前，**暂不删除 `NPM_TOKEN`**。届时应先更新工作流和发布验证，再移除 GitHub Secret；不得在未验证的情况下删除凭据或将令牌写入仓库、日志或 `.npmrc`。
+旧的 `NPM_TOKEN` Secret 暂时保留，待首个 OIDC 发布成功确认后再从 GitHub 删除；不得将令牌写入仓库、日志或 `.npmrc`。若重命名发布工作流文件，必须同步更新 npm 包的受信任发布者设置，否则发布会以 404 失败。
 
 ## 版本通道
 
