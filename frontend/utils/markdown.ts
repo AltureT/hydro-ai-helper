@@ -5,11 +5,12 @@ import texmath from 'markdown-it-texmath';
 import katex from 'katex';
 
 // Load KaTeX CSS from CDN at runtime (esbuild cannot handle .woff/.ttf font files in katex's CSS)
+// CSS version follows the bundled katex JS so layout rules always match
 if (typeof document !== 'undefined' && !document.getElementById('katex-css')) {
   const link = document.createElement('link');
   link.id = 'katex-css';
   link.rel = 'stylesheet';
-  link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.33/dist/katex.min.css';
+  link.href = `https://cdn.jsdelivr.net/npm/katex@${katex.version}/dist/katex.min.css`;
   document.head.appendChild(link);
 }
 
