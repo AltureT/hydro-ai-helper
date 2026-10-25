@@ -42,6 +42,8 @@ const batchSummaryHandler_1 = require("./handlers/batchSummaryHandler");
 console.log('[AI-Helper] batchSummaryHandler OK');
 const feedbackHandler_1 = require("./handlers/feedbackHandler");
 console.log('[AI-Helper] feedbackHandler OK');
+const accessPolicyHandler_1 = require("./handlers/accessPolicyHandler");
+console.log('[AI-Helper] accessPolicyHandler OK');
 const teachingSummaryHandler_1 = require("./handlers/teachingSummaryHandler");
 const teachingSummary_1 = require("./models/teachingSummary");
 const updateHandler_1 = require("./handlers/updateHandler");
@@ -60,6 +62,8 @@ const batchSummaryJob_1 = require("./models/batchSummaryJob");
 const testdataGenerationJob_1 = require("./models/testdataGenerationJob");
 const studentSummary_1 = require("./models/studentSummary");
 const studentHistory_1 = require("./models/studentHistory");
+const aiAccessPolicy_1 = require("./models/aiAccessPolicy");
+const aiAccessAudit_1 = require("./models/aiAccessAudit");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -119,6 +123,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const studentSummaryModel = new studentSummary_1.StudentSummaryModel(db);
         const studentHistoryModel = new studentHistory_1.StudentHistoryModel(db);
         const teachingSummaryModel = new teachingSummary_1.TeachingSummaryModel(db);
+        const aiAccessPolicyModel = new aiAccessPolicy_1.AIAccessPolicyModel(db);
+        const aiAccessAuditModel = new aiAccessAudit_1.AIAccessAuditModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -168,6 +174,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
         await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
         await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
+        await safeEnsureIndexes(aiAccessPolicyModel, 'aiAccessPolicyModel');
+        await safeEnsureIndexes(aiAccessAuditModel, 'aiAccessAuditModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -232,6 +240,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('studentSummaryModel', studentSummaryModel);
         ctx.provide('studentHistoryModel', studentHistoryModel);
         ctx.provide('teachingSummaryModel', teachingSummaryModel);
+        ctx.provide('aiAccessPolicyModel', aiAccessPolicyModel);
+        ctx.provide('aiAccessAuditModel', aiAccessAuditModel);
         ctx.provide('errorReporter', errorReporter);
         ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
         // 初始化版本服务
@@ -302,6 +312,21 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_helper_admin_jailbreak_logs_bulk_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/bulk-review', adminConfigHandler_1.JailbreakLogBulkReviewHandler, adminConfigHandler_1.JailbreakLogBulkReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_log_review', '/ai-helper/admin/jailbreak-logs/:id/review', adminConfigHandler_1.JailbreakLogReviewHandler, adminConfigHandler_1.JailbreakLogReviewHandlerPriv);
         ctx.Route('ai_helper_admin_jailbreak_log_review_domain', '/d/:domainId/ai-helper/admin/jailbreak-logs/:id/review', adminConfigHandler_1.JailbreakLogReviewHandler, adminConfigHandler_1.JailbreakLogReviewHandlerPriv);
+        // AI 访问策略（按用户/用户组禁用、调额度、调频率；域管理员，权限在 Handler 内校验）
+        ctx.Route('ai_helper_admin_access', '/ai-helper/admin/access', accessPolicyHandler_1.AccessPolicyHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_domain', '/d/:domainId/ai-helper/admin/access', accessPolicyHandler_1.AccessPolicyHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_groups', '/ai-helper/admin/access/groups', accessPolicyHandler_1.AccessPolicyGroupsHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_groups_domain', '/d/:domainId/ai-helper/admin/access/groups', accessPolicyHandler_1.AccessPolicyGroupsHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_users', '/ai-helper/admin/access/users', accessPolicyHandler_1.AccessPolicyUsersHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_users_domain', '/d/:domainId/ai-helper/admin/access/users', accessPolicyHandler_1.AccessPolicyUsersHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_audit', '/ai-helper/admin/access/audit', accessPolicyHandler_1.AccessPolicyAuditHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_audit_domain', '/d/:domainId/ai-helper/admin/access/audit', accessPolicyHandler_1.AccessPolicyAuditHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_policy', '/ai-helper/admin/access/policy', accessPolicyHandler_1.AccessPolicyUpsertHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_policy_domain', '/d/:domainId/ai-helper/admin/access/policy', accessPolicyHandler_1.AccessPolicyUpsertHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_policy_delete', '/ai-helper/admin/access/policy/delete', accessPolicyHandler_1.AccessPolicyDeleteHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_policy_delete_domain', '/d/:domainId/ai-helper/admin/access/policy/delete', accessPolicyHandler_1.AccessPolicyDeleteHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_batch', '/ai-helper/admin/access/batch', accessPolicyHandler_1.AccessPolicyBatchHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
+        ctx.Route('ai_helper_admin_access_batch_domain', '/d/:domainId/ai-helper/admin/access/batch', accessPolicyHandler_1.AccessPolicyBatchHandler, accessPolicyHandler_1.AccessPolicyHandlerPriv);
         // GET /ai-helper/export - 数据导出 API
         ctx.Route('ai_helper_export', '/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);
         ctx.Route('ai_helper_export_domain', '/d/:domainId/ai-helper/export', exportHandler_1.ExportHandler, exportHandler_1.ExportHandlerPriv);

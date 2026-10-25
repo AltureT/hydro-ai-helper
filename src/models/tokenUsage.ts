@@ -159,6 +159,19 @@ export class TokenUsageModel {
     return this.dailyAggCollection.findOne({ _id: aggId } as any);
   }
 
+  /**
+   * 批量获取多个用户某日的聚合用量（按主键 $in 查询，避免逐个 getUserDailyUsage）
+   */
+  async getUsersDailyUsage(domainId: string, userIds: number[], date: string): Promise<Map<number, DailyUsageAggregate>> {
+    const result = new Map<number, DailyUsageAggregate>();
+    if (userIds.length === 0) return result;
+    const ids = userIds.map((uid) => `${domainId}:${uid}:${date}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const docs = await this.dailyAggCollection.find({ _id: { $in: ids } } as any).toArray();
+    for (const doc of docs) result.set(doc.userId, doc);
+    return result;
+  }
+
   async getDomainDailyUsage(domainId: string, date: string): Promise<{
     totalTokens: number;
     totalCost: number;

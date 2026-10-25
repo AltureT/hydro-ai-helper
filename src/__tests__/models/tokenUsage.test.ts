@@ -359,4 +359,19 @@ describe('TokenUsageModel', () => {
       expect(cost1).toBe(cost2);
     });
   });
+  describe('getUsersDailyUsage', () => {
+    it('loads several users by aggregate id in one query', async () => {
+      dailyAggColl._chain.toArray.mockResolvedValue([{ userId: 42, totalTokens: 10 }]);
+      const result = await model.getUsersDailyUsage('d1', [42, 43], '2026-10-24');
+      expect(dailyAggColl.find).toHaveBeenCalledWith({ _id: { $in: ['d1:42:2026-10-24', 'd1:43:2026-10-24'] } });
+      expect(result.get(42)).toEqual({ userId: 42, totalTokens: 10 });
+      expect(result.has(43)).toBe(false);
+    });
+
+    it('skips the query for an empty list', async () => {
+      const result = await model.getUsersDailyUsage('d1', [], '2026-10-24');
+      expect(result.size).toBe(0);
+      expect(dailyAggColl.find).not.toHaveBeenCalled();
+    });
+  });
 });
