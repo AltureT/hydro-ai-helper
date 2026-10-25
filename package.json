@@ -44,7 +44,7 @@
     "chart.js": "^4.5.1",
     "dompurify": "^3.4.17",
     "highlight.js": "^11.11.1",
-    "katex": "^0.16.33",
+    "katex": "^0.18.2",
     "markdown-it": "^14.3.3",
     "markdown-it-texmath": "^1.0.0",
     "mongodb": "^6.3.0",

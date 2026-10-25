@@ -15,6 +15,9 @@ updates:
       # peerDependencies 固定为 hydrooj ^4，大版本升级需人工评估兼容性
       - dependency-name: hydrooj
         update-types: [version-update:semver-major]
+      # 运行时使用 Hydro 自带的 js-yaml 4.x，devDependency 需保持同一大版本
+      - dependency-name: js-yaml
+        update-types: [version-update:semver-major]
     groups:
       runtime-security:
         applies-to: security-updates
@@ -22,10 +25,20 @@ updates:
       dev-security:
         applies-to: security-updates
         dependency-type: development
+      # 0.x 包的 minor 升级按 semver 可能不兼容，不随 runtime 组一起合并；
+      # 不用 ignore 是因为 ignore 也会拦截安全更新
+      katex:
+        applies-to: version-updates
+        patterns: [katex]
       runtime:
         applies-to: version-updates
         dependency-type: production
+        exclude-patterns: [katex]
         update-types: [minor, patch]
+      # parser 与 eslint-plugin 必须同版本，大版本升级放在同一个 PR
+      typescript-eslint:
+        applies-to: version-updates
+        patterns: ["@typescript-eslint/*"]
       dev:
         applies-to: version-updates
         dependency-type: development

@@ -37,6 +37,10 @@ const workflowFiles = [
 ];
 const CHECKOUT_ACTION = 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
 const SETUP_NODE_ACTION = 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38';
+// Steps are matched by action name; SHA pinning is enforced separately so Dependabot bumps stay valid.
+const actionName = (pinnedAction: string) => pinnedAction.split('@')[0];
+const usesAction = (step: WorkflowStep, pinnedAction: string) =>
+  step.uses?.startsWith(`${actionName(pinnedAction)}@`) === true;
 const GITEE_HOST_KEY = 'gitee.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEKxHSJ7084RmkJ4YdEi5tngynE8aZe2uEoVVsB/OvYN';
 const DISPATCH_TAG_EXPRESSION = '${{ github.event.inputs.tag_name }}';
 const RELEASE_EVENT_TAG_EXPRESSION = '${{ github.event.release.tag_name }}';
@@ -100,8 +104,8 @@ function releasePolicyViolations(workflow: Workflow): string[] {
   const job = getJob(workflow, 'publish');
   const steps = getSteps(job);
   const violations: string[] = [];
-  const checkout = steps.find((step) => step.uses === CHECKOUT_ACTION);
-  const setupNodeIndex = steps.findIndex((step) => step.uses === SETUP_NODE_ACTION);
+  const checkout = steps.find((step) => usesAction(step, CHECKOUT_ACTION));
+  const setupNodeIndex = steps.findIndex((step) => usesAction(step, SETUP_NODE_ACTION));
   const verifierIndex = commandIndex(steps, 'node scripts/verifyReleaseRef.js');
   const installIndex = commandIndex(steps, 'npm ci');
   const lintIndex = commandIndex(steps, 'npm run lint');
@@ -331,7 +335,7 @@ describe('workflow security policy', () => {
       .filter((line) => line.includes('uses:'));
 
     for (const line of usesLines) {
-      expect(line).toMatch(/^\s*(?:-\s+)?uses:\s+[^\s@]+@[a-f0-9]{40}\s+# v\d+\s*$/);
+      expect(line).toMatch(/^\s*(?:-\s+)?uses:\s+[^\s@]+@[a-f0-9]{40}\s+# v\d+(?:\.\d+){0,2}\s*$/);
     }
   });
 
