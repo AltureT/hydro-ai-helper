@@ -1,0 +1,58 @@
+version: 2
+
+updates:
+  # 插件本体：运行时依赖与开发依赖分别归组，安全更新与版本更新也分开，
+  # 每类最多一个 PR，避免多个 PR 同时改 package-lock.json 相互冲突。
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+    ignore:
+      # peerDependencies 固定为 hydrooj ^4，大版本升级需人工评估兼容性
+      - dependency-name: hydrooj
+        update-types: [version-update:semver-major]
+    groups:
+      runtime-security:
+        applies-to: security-updates
+        dependency-type: production
+      dev-security:
+        applies-to: security-updates
+        dependency-type: development
+      runtime:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [minor, patch]
+      dev:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /cloudflare/telemetry-dashboard
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      dashboard-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      dashboard:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
