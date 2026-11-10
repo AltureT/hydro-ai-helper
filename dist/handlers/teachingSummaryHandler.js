@@ -10,6 +10,7 @@ const temporalPatternAnalyzer_1 = require("../services/analyzers/temporalPattern
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
+const problemStatement_1 = require("../utils/problemStatement");
 const openaiClient_1 = require("../services/openaiClient");
 const teachingAnalysisService_1 = require("../services/teachingAnalysisService");
 const teachingSuggestionService_1 = require("../services/teachingSuggestionService");
@@ -168,9 +169,9 @@ class TeachingSummaryHandler extends hydrooj_1.Handler {
                 .filter((n) => !isNaN(n));
             // Fetch problem docs early — needed for both analyzer titles and LLM context
             const documentColl = hydrooj_1.db.collection('document');
-            const problemDocs = await documentColl
+            const problemDocs = await (0, problemStatement_1.resolveProblemContents)(await documentColl
                 .find({ domainId, docType: 10, docId: { $in: pids } })
-                .toArray();
+                .toArray(), domainId);
             const pidTitles = new Map();
             const pidAliases = new Map();
             const problemContexts = problemDocs.map((doc) => {

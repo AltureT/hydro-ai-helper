@@ -12,10 +12,12 @@ updates:
       prefix: chore(deps)
       prefix-development: chore(deps-dev)
     ignore:
-      # peerDependencies 固定为 hydrooj ^4，大版本升级需人工评估兼容性
+      # peerDependencies 为 hydrooj ^4 || ^5，开发依赖锁定在 4.x 作为最低兼容基线；
+      # 新的大版本需人工评估兼容性后再放开
       - dependency-name: hydrooj
         update-types: [version-update:semver-major]
-      # 运行时使用 Hydro 自带的 js-yaml 4.x，devDependency 需保持同一大版本
+      # 运行时使用 Hydro 自带的 js-yaml（Hydro 4 为 4.x，Hydro 5 为 5.x），
+      # devDependency 保持 4.x 作为最低兼容基线
       - dependency-name: js-yaml
         update-types: [version-update:semver-major]
     groups:

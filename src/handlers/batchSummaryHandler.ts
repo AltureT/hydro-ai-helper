@@ -8,6 +8,7 @@ import { Handler, PRIV, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
 import { ObjectId } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
+import { resolveProblemContents } from '../utils/problemStatement';
 import { createSSEWriter } from '../lib/sseHelper';
 import { createMultiModelClientFromConfig } from '../services/openaiClient';
 import { BatchSummaryJobModel, BatchSummaryJob } from '../models/batchSummaryJob';
@@ -161,9 +162,9 @@ export class BatchSummaryGenerateHandler extends Handler {
       // Fetch problem info
       const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
       const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
-      const problemDocs = await documentColl
+      const problemDocs = await resolveProblemContents(await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
-        .toArray();
+        .toArray(), domainId);
       const problems: ProblemInfo[] = problemDocs.map((doc: { docId?: unknown; title?: unknown; content?: unknown }) => ({
         pid: String(doc.docId),
         title: doc.title as string || `Problem ${doc.docId}`,
@@ -680,9 +681,9 @@ export class BatchSummaryContinueHandler extends Handler {
 
       const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
       const numericPids = pids.map((p) => parseInt(p.replace(/^P/i, ''), 10)).filter((n) => !isNaN(n));
-      const problemDocs = await documentColl
+      const problemDocs = await resolveProblemContents(await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
-        .toArray();
+        .toArray(), domainId);
       const problems: ProblemInfo[] = problemDocs.map((doc: { docId?: unknown; title?: unknown; content?: unknown }) => ({
         pid: String(doc.docId),
         title: doc.title as string || `Problem ${doc.docId}`,

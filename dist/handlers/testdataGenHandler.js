@@ -20,6 +20,7 @@ const hydrooj_1 = require("hydrooj");
 const crypto_1 = require("crypto");
 const promises_1 = require("fs/promises");
 const fileBudget_1 = require("../services/testdata/fileBudget");
+const problemStatement_1 = require("../utils/problemStatement");
 const path_1 = require("path");
 const openaiClient_1 = require("../services/openaiClient");
 const modelRoles_1 = require("../services/testdata/modelRoles");
@@ -408,7 +409,7 @@ class TestdataGenContextHandler extends hydrooj_1.Handler {
             }
             if (!checkEditPermission(this, pdoc))
                 return;
-            const statement = extractStatementMarkdown(pdoc.content);
+            const statement = extractStatementMarkdown(await (0, problemStatement_1.resolveProblemContent)(pdoc, domainId));
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
@@ -892,7 +893,7 @@ class TestdataGenGenerateHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'INVALID_OPTIONS', optionError);
                 return;
             }
-            const statement = extractStatementMarkdown(pdoc.content);
+            const statement = extractStatementMarkdown(await (0, problemStatement_1.resolveProblemContent)(pdoc, domainId));
             if (!statement.trim()) {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
@@ -1156,7 +1157,7 @@ class TestdataGenJobStartHandler extends hydrooj_1.Handler {
                 sendError(this, 400, 'INVALID_OPTIONS', optionError);
                 return;
             }
-            const statement = extractStatementMarkdown(pdoc.content);
+            const statement = extractStatementMarkdown(await (0, problemStatement_1.resolveProblemContent)(pdoc, domainId));
             if (!statement.trim()) {
                 sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
                 return;
@@ -1454,7 +1455,7 @@ class TestdataGenSkeletonHandler extends hydrooj_1.Handler {
             const existingFiles = (pdoc.data || [])
                 .map(f => String(f._id ?? f.name ?? ''))
                 .filter(Boolean);
-            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(pdoc.content), existingFiles, pdoc.config);
+            const plan = (0, testdataGenService_1.buildSkeletonPlan)(options, extractStatementMarkdown(await (0, problemStatement_1.resolveProblemContent)(pdoc, domainId)), existingFiles, pdoc.config);
             this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { });
             this.response.body = { plan: serializeGenerationPlan(plan) };
             this.response.type = 'application/json';

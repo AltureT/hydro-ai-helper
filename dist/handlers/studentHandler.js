@@ -21,6 +21,7 @@ const topicGuardService_1 = require("../services/topicGuardService");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
+const problemStatement_1 = require("../utils/problemStatement");
 const budgetService_1 = require("../services/budgetService");
 const sseHelper_1 = require("../lib/sseHelper");
 function extractContestIdFromReferer(referer) {
@@ -394,17 +395,19 @@ class ChatHandler extends hydrooj_1.Handler {
         let trustedProblemContent;
         let trustedProblemDocId;
         try {
-            const pdoc = await hydrooj_1.ProblemModel.get(domainId, problemId, ['title', 'content', 'docId']);
+            const pdoc = await hydrooj_1.ProblemModel.get(domainId, problemId, ['title', 'content', 'html', 'reference', 'docId']);
             if (pdoc) {
                 trustedProblemTitle = pdoc.title;
                 trustedProblemDocId = pdoc.docId;
+                // Hydro 5 新题面存于 problem.statement，document.content 为空时回退读取
+                const content = await (0, problemStatement_1.resolveProblemContent)(pdoc, domainId);
                 // 题目内容可能是字符串或 JSON 对象（多语言支持）
-                if (typeof pdoc.content === 'string') {
-                    trustedProblemContent = pdoc.content;
+                if (typeof content === 'string') {
+                    trustedProblemContent = content;
                 }
-                else if (pdoc.content && typeof pdoc.content === 'object') {
+                else if (content && typeof content === 'object') {
                     // 多语言内容，取第一个可用的值
-                    const values = Object.values(pdoc.content);
+                    const values = Object.values(content);
                     trustedProblemContent = values[0] || '';
                 }
             }

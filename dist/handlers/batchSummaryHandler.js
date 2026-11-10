@@ -9,6 +9,7 @@ exports.StudentSummaryHandler = exports.BatchSummaryContinueHandler = exports.Ba
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const domainHelper_1 = require("../utils/domainHelper");
+const problemStatement_1 = require("../utils/problemStatement");
 const sseHelper_1 = require("../lib/sseHelper");
 const openaiClient_1 = require("../services/openaiClient");
 const batchSummaryService_1 = require("../services/batchSummaryService");
@@ -135,9 +136,9 @@ class BatchSummaryGenerateHandler extends hydrooj_1.Handler {
             // Fetch problem info
             const pids = (tdoc.pids || []).map((p) => String(p));
             const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
-            const problemDocs = await documentColl
+            const problemDocs = await (0, problemStatement_1.resolveProblemContents)(await documentColl
                 .find({ domainId, docType: 10, docId: { $in: numericPids } })
-                .toArray();
+                .toArray(), domainId);
             const problems = problemDocs.map((doc) => ({
                 pid: String(doc.docId),
                 title: doc.title || `Problem ${doc.docId}`,
@@ -603,9 +604,9 @@ class BatchSummaryContinueHandler extends hydrooj_1.Handler {
             }
             const pids = (tdoc.pids || []).map((p) => String(p));
             const numericPids = pids.map((p) => parseInt(p.replace(/^P/i, ''), 10)).filter((n) => !isNaN(n));
-            const problemDocs = await documentColl
+            const problemDocs = await (0, problemStatement_1.resolveProblemContents)(await documentColl
                 .find({ domainId, docType: 10, docId: { $in: numericPids } })
-                .toArray();
+                .toArray(), domainId);
             const problems = problemDocs.map((doc) => ({
                 pid: String(doc.docId),
                 title: doc.title || `Problem ${doc.docId}`,
