@@ -6,14 +6,21 @@
  *
  * v2 新增：支持多 API 端点配置、模型自动获取、Fallback 机制
  * v3 新增：测试数据生成的独立角色模型链
+ * v4 新增：次数额度与信誉、偏题守卫、AI 抽查、负责老师访问（默认均为“不限 / 关闭”）
  */
 
 import type { Db, Collection } from 'mongodb';
 import { randomUUID } from 'crypto';
 import { reEncrypt } from '../lib/crypto';
+import {
+  normalizeV4Sections,
+  type AIReviewConfig,
+  type QuotaConfig,
+  type TopicGuardConfig,
+} from './configSections';
 
 /** 当前配置版本号 */
-export const CURRENT_CONFIG_VERSION = 3;
+export const CURRENT_CONFIG_VERSION = 4;
 
 /**
  * API 端点配置
@@ -79,7 +86,7 @@ export interface BudgetConfig {
 }
 
 /**
- * AI 配置接口 (v3)
+ * AI 配置接口 (v4)
  */
 export interface AIConfig {
   _id: string;                  // 固定为 'default'
@@ -93,6 +100,11 @@ export interface AIConfig {
   systemPromptTemplate?: string; // 系统提示词模板(可选)
   extraJailbreakPatternsText?: string; // 自定义越狱规则(多行文本)
   budgetConfig?: BudgetConfig;  // 预算控制配置
+  // v4：读取时请用 configSections 中的 normalize* 兜底（旧文档可能缺失这些字段）
+  quotaConfig?: QuotaConfig;            // 次数额度与信誉
+  topicGuardConfig?: TopicGuardConfig;  // 偏题守卫
+  aiReviewConfig?: AIReviewConfig;      // AI 抽查
+  groupTeacherAccessEnabled?: boolean;  // 负责老师访问
   updatedAt: Date;              // 最后更新时间
   // 保留旧字段用于向后兼容（迁移完成后可能为空）
   apiBaseUrl?: string;
@@ -119,6 +131,10 @@ interface LegacyAIConfig {
   scenarioModels?: ScenarioModelConfig;
   testdataRoleModels?: TestdataRoleModelConfig;
   budgetConfig?: BudgetConfig;
+  quotaConfig?: unknown;
+  topicGuardConfig?: unknown;
+  aiReviewConfig?: unknown;
+  groupTeacherAccessEnabled?: unknown;
 }
 
 /**
@@ -176,10 +192,26 @@ export class AIConfigModel {
   }
 
   /**
-   * 从旧版配置迁移到新版
+   * 从旧版配置迁移到新版：先完成 v1/v2 → v3 的结构迁移，再补入 v4 配置段的默认值。
+   * 已有字段（包括未知字段）保持不变。
    */
   private migrateFromLegacy(legacy: LegacyAIConfig): AIConfig {
-    console.log('[AIConfigModel] Migrating AI config to v3...');
+    console.log(`[AIConfigModel] Migrating AI config to v${CURRENT_CONFIG_VERSION}...`);
+    const structural = this.migrateStructure(legacy);
+    return {
+      ...structural,
+      ...normalizeV4Sections(structural),
+      configVersion: CURRENT_CONFIG_VERSION,
+    };
+  }
+
+  /**
+   * v1/v2/无版本 → v3 结构迁移（v3 原样返回）
+   */
+  private migrateStructure(legacy: LegacyAIConfig): AIConfig {
+    if (legacy.configVersion === 3) {
+      return { ...legacy } as AIConfig;
+    }
 
     // v2 is already a structured configuration. Upgrade only the schema version and
     // supply required arrays when they are absent; explicit empty chains, stale model
@@ -467,6 +499,7 @@ export class AIConfigModel {
         endpoints: [],
         selectedModels: [],
         ...defaults,
+        ...normalizeV4Sections(defaults),
         updatedAt: new Date()
       } as AIConfig);
 

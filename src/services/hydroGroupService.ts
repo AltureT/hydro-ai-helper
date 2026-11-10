@@ -1,0 +1,737 @@
+/**
+ * HydroGroupService - 在 Hydro 原生小组上做批量管理（US1，plan R2–R4）
+ *
+ * 关键约束：
+ * - 成员变更只用原子 `$addToSet` / `$pull`，并取写前文档算出实际变化；绝不对 uids 使用 `$set`
+ *   （Hydro 的 `UserModel.updateGroup` 与原生页面都是读-改-写，会丢失并发更新）。
+ * - 写入后清除该域用户缓存（含多进程广播），作业可见性立即生效。
+ * - 每次写入记审计；撤销只回退该次操作实际做出的改变。
+ */
+
+import type { Collection, Db } from 'mongodb';
+import { DomainModel, PERM, PRIV } from 'hydrooj';
+import { GroupMetaModel, type GroupKind, type GroupMeta, type GroupMetaPatch } from '../models/groupMeta';
+import type { AuditLog } from '../models/auditLog';
+import { AuditService } from './auditService';
+import {
+  allowedJoinRoles,
+  clearDomainUserCache,
+  defaultJoinRole,
+  domainUserColl,
+  groupColl,
+  hasSystemPriv,
+  isJoinFlagMembership,
+  joinDomain,
+  leaveDomain,
+  memberFilter,
+  roleHasPerm,
+  type ContextLike,
+  type DomainDocLike,
+  type HydroGroupDoc,
+} from '../utils/hydroCompat';
+import { validateGroupName } from '../utils/groupName';
+import { ObjectId, unwrapModifyResult, type ObjectIdType } from '../utils/mongo';
+
+export const MAX_BATCH_USERS = 500;
+export const MAX_REGEX_LENGTH = 64;
+export const SEARCH_MAX_TIME_MS = 2000;
+export const MAX_TEACHERS_PER_GROUP = 50;
+
+export type SearchMode = 'prefix' | 'regex' | 'list';
+export type SearchScope = 'domain' | 'all';
+
+export interface SearchUser {
+  uid: number;
+  uname: string;
+  role: string | null;
+  isMember: boolean;
+  isManager: boolean;
+  groups: string[];
+  domains?: Array<{ id: string; name: string }>;
+}
+
+export interface SearchResult {
+  users: SearchUser[];
+  unmatched?: string[];
+  overflow: boolean;
+}
+
+export interface GroupListItem {
+  name: string;
+  existsInHydro: boolean;
+  memberCount: number;
+  meta: {
+    kind: GroupKind;
+    academicYear?: string;
+    teacherUids: number[];
+    teachers: Array<{ uid: number; uname: string }>;
+    archived: boolean;
+  } | null;
+  drift: Array<{ uid: number; uname: string }>;
+}
+
+export interface GroupListResult {
+  domain: { id: string; name: string };
+  domains: Array<{ id: string; name: string }>;
+  groups: GroupListItem[];
+  joinRoles: string[];
+  defaultJoinRole: string | null;
+  membership: 'join_flag' | 'role';
+}
+
+export interface ApplyResult {
+  added: number[];
+  removed: number[];
+  joined: number[];
+  unchanged: number[];
+  auditId: string | null;
+}
+
+/** 业务错误：handler 映射为 4xx */
+export class GroupServiceError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number,
+    public readonly i18nKey: string,
+    public readonly params: Array<string | number> = [],
+  ) {
+    super(code);
+    this.name = 'GroupServiceError';
+  }
+}
+
+interface UserDocLite {
+  _id: number;
+  uname: string;
+  unameLower?: string;
+  priv?: number;
+}
+
+interface DomainUserRow {
+  domainId: string;
+  uid: number;
+  role?: string | null;
+  join?: boolean;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sanitizeUids(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: number[] = [];
+  for (const item of raw) {
+    const uid = typeof item === 'string' && /^\d+$/.test(item) ? Number(item) : item;
+    if (typeof uid !== 'number' || !Number.isSafeInteger(uid) || uid <= 1) return null;
+    if (!out.includes(uid)) out.push(uid);
+  }
+  return out;
+}
+
+function isMemberRow(row: DomainUserRow | undefined): boolean {
+  if (!row) return false;
+  if (isJoinFlagMembership()) return row.join === true;
+  return !!row.role && row.role !== 'default' && row.role !== 'guest';
+}
+
+function isMaxTimeError(err: unknown): boolean {
+  const e = err as { code?: number; codeName?: string } | null;
+  return !!e && (e.code === 50 || e.codeName === 'MaxTimeMSExpired');
+}
+
+/**
+ * 新建会话时记录学生当时在该域所属的全部小组（FR-055，plan R13）。
+ * 走 Hydro 的 (domainId, uids) 索引；失败时返回空数组，不阻塞对话。
+ */
+export async function snapshotGroupNames(db: Db, domainId: string, userId: number): Promise<string[]> {
+  try {
+    const docs = await groupColl(db)
+      .find({ domainId, uids: userId }, { projection: { name: 1 } })
+      .toArray();
+    const names = docs.map((doc) => doc.name).filter((name) => typeof name === 'string' && !/^\d+$/.test(name));
+    return [...new Set(names)].sort();
+  } catch (err) {
+    console.warn('[AI-Helper] snapshotGroupNames failed:', err instanceof Error ? err.message : String(err));
+    return [];
+  }
+}
+
+export class HydroGroupService {
+  private readonly groups: Collection<HydroGroupDoc>;
+  private readonly users: Collection<UserDocLite>;
+  private readonly domainUsers: Collection<DomainUserRow>;
+  private readonly domains: Collection<{ _id: string; name?: string }>;
+
+  constructor(
+    db: Db,
+    private readonly groupMeta: GroupMetaModel,
+    private readonly audit: AuditService,
+    private readonly ctx?: ContextLike,
+  ) {
+    this.groups = groupColl(db);
+    this.users = db.collection<UserDocLite>('user');
+    this.domainUsers = domainUserColl(db) as unknown as Collection<DomainUserRow>;
+    this.domains = db.collection<{ _id: string; name?: string }>('domain');
+  }
+
+  // ─── 读取 ──────────────────────────────────────────────────────────────────
+
+  private async getDomainDoc(domainId: string): Promise<DomainDocLike | null> {
+    try {
+      return (await DomainModel.get(domainId)) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async unameMap(uids: number[]): Promise<Map<number, string>> {
+    if (!uids.length) return new Map();
+    const docs = await this.users
+      .find({ _id: { $in: uids } }, { projection: { _id: 1, uname: 1 } })
+      .toArray();
+    return new Map(docs.map((doc) => [doc._id, doc.uname]));
+  }
+
+  async listDomains(): Promise<Array<{ id: string; name: string }>> {
+    const docs = await this.domains.find({}, { projection: { _id: 1, name: 1 } }).sort({ _id: 1 }).limit(500).toArray();
+    return docs.map((doc) => ({ id: doc._id, name: doc.name || doc._id }));
+  }
+
+  /** 本域 Hydro 小组 + 扩展信息 + 人数 + 漂移成员 + 已删除小组 */
+  async list(domainId: string, options: { includeArchived?: boolean } = {}): Promise<GroupListResult> {
+    const [ddoc, domains, hydroGroups, metas] = await Promise.all([
+      this.getDomainDoc(domainId),
+      this.listDomains(),
+      this.groups.find({ domainId }, { projection: { name: 1, uids: 1 } }).toArray(),
+      this.groupMeta.listByDomain(domainId),
+    ]);
+    const metaByName = new Map(metas.map((meta) => [meta.name, meta]));
+    const groupByName = new Map(
+      hydroGroups.filter((group) => !/^\d+$/.test(group.name)).map((group) => [group.name, group]),
+    );
+
+    const names = new Set<string>([...groupByName.keys(), ...metaByName.keys()]);
+    const lookupUids = new Set<number>();
+    const driftByName = new Map<string, number[]>();
+    for (const name of names) {
+      const meta = metaByName.get(name);
+      const current = new Set(groupByName.get(name)?.uids || []);
+      const drift = (meta?.pluginAdded || []).filter((uid) => !current.has(uid));
+      driftByName.set(name, drift);
+      drift.forEach((uid) => lookupUids.add(uid));
+      (meta?.teacherUids || []).forEach((uid) => lookupUids.add(uid));
+    }
+    const unames = await this.unameMap([...lookupUids]);
+    const named = (uid: number) => ({ uid, uname: unames.get(uid) || String(uid) });
+
+    const items: GroupListItem[] = [];
+    for (const name of names) {
+      const meta = metaByName.get(name);
+      if (meta?.archived && !options.includeArchived) continue;
+      const group = groupByName.get(name);
+      items.push({
+        name,
+        existsInHydro: !!group,
+        memberCount: group?.uids?.length || 0,
+        meta: meta ? {
+          kind: meta.kind,
+          ...(meta.academicYear ? { academicYear: meta.academicYear } : {}),
+          teacherUids: meta.teacherUids || [],
+          teachers: (meta.teacherUids || []).map(named),
+          archived: !!meta.archived,
+        } : null,
+        drift: (driftByName.get(name) || []).map(named),
+      });
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }));
+
+    return {
+      domain: { id: domainId, name: ddoc?.name || domainId },
+      domains,
+      groups: items,
+      joinRoles: allowedJoinRoles(ddoc),
+      defaultJoinRole: defaultJoinRole(ddoc),
+      membership: isJoinFlagMembership() ? 'join_flag' : 'role',
+    };
+  }
+
+  // ─── 搜索与预览 ────────────────────────────────────────────────────────────
+
+  async search(domainId: string, mode: SearchMode, rawQuery: unknown, scope: SearchScope): Promise<SearchResult> {
+    if (typeof rawQuery !== 'string' || !rawQuery.trim()) {
+      throw new GroupServiceError('INVALID_QUERY', 400, 'ai_helper_group_search_query_required');
+    }
+    const filter: Record<string, unknown> = {
+      _id: { $gt: 1 },
+      priv: { $bitsAllSet: Number(PRIV.PRIV_USER_PROFILE) },
+    };
+    let listNames: string[] | null = null;
+
+    if (mode === 'prefix') {
+      filter.unameLower = { $regex: `^${escapeRegex(rawQuery.trim().toLowerCase())}` };
+    } else if (mode === 'regex') {
+      const pattern = rawQuery.trim();
+      if (pattern.length > MAX_REGEX_LENGTH) {
+        throw new GroupServiceError('QUERY_TOO_LONG', 400, 'ai_helper_group_search_regex_too_long', [MAX_REGEX_LENGTH]);
+      }
+      try {
+        // eslint-disable-next-line no-new
+        new RegExp(pattern);
+      } catch {
+        throw new GroupServiceError('INVALID_REGEX', 400, 'ai_helper_group_search_regex_invalid');
+      }
+      filter.uname = { $regex: pattern, $options: 'i' };
+    } else if (mode === 'list') {
+      const seen = new Set<string>();
+      listNames = [];
+      for (const line of rawQuery.split(/[\r\n\t]+/)) {
+        const name = line.trim();
+        if (!name || seen.has(name.toLowerCase())) continue;
+        seen.add(name.toLowerCase());
+        listNames.push(name);
+      }
+      if (listNames.length > MAX_BATCH_USERS) {
+        throw new GroupServiceError('LIST_TOO_LONG', 400, 'ai_helper_group_search_list_too_long', [MAX_BATCH_USERS]);
+      }
+      filter.unameLower = { $in: listNames.map((name) => name.toLowerCase()) };
+    } else {
+      throw new GroupServiceError('INVALID_SEARCH_MODE', 400, 'ai_helper_group_search_mode_invalid');
+    }
+
+    // “本域成员”范围只作用于前缀与正则；粘贴名单是明确点名，始终按全部用户匹配并标注是否本域成员
+    if (scope === 'domain' && mode !== 'list') {
+      const memberRows = await this.domainUsers
+        .find({ domainId, ...memberFilter() }, { projection: { uid: 1 } })
+        .toArray();
+      filter._id = { $gt: 1, $in: memberRows.map((row) => row.uid) };
+    }
+
+    let docs: UserDocLite[];
+    try {
+      docs = await this.users
+        .find(filter, { projection: { _id: 1, uname: 1, unameLower: 1, priv: 1 }, maxTimeMS: SEARCH_MAX_TIME_MS })
+        .sort({ unameLower: 1 })
+        .limit(MAX_BATCH_USERS + 1)
+        .toArray();
+    } catch (err) {
+      if (isMaxTimeError(err)) throw new GroupServiceError('SEARCH_TIMEOUT', 400, 'ai_helper_group_search_timeout');
+      throw err;
+    }
+
+    if (docs.length > MAX_BATCH_USERS) return { users: [], overflow: true };
+
+    const users = await this.annotate(domainId, docs, scope === 'all');
+    const result: SearchResult = { users, overflow: false };
+    if (listNames) {
+      const found = new Set(docs.map((doc) => (doc.unameLower || doc.uname.toLowerCase())));
+      result.unmatched = listNames.filter((name) => !found.has(name.toLowerCase()));
+    }
+    return result;
+  }
+
+  /** 标注本域角色、成员、管理者、已在小组；全部域范围时附带所属域 */
+  private async annotate(domainId: string, docs: UserDocLite[], withDomains: boolean): Promise<SearchUser[]> {
+    if (!docs.length) return [];
+    const uids = docs.map((doc) => doc._id);
+    const [ddoc, rows, groups, memberships] = await Promise.all([
+      this.getDomainDoc(domainId),
+      this.domainUsers.find({ domainId, uid: { $in: uids } }, { projection: { uid: 1, role: 1, join: 1 } }).toArray(),
+      this.groups.find({ domainId, uids: { $in: uids } }, { projection: { name: 1, uids: 1 } }).toArray(),
+      withDomains
+        ? this.domainUsers.find({ uid: { $in: uids }, ...memberFilter() }, { projection: { uid: 1, domainId: 1 } }).toArray()
+        : Promise.resolve([] as DomainUserRow[]),
+    ]);
+    const rowByUid = new Map(rows.map((row) => [row.uid, row]));
+    const uidSet = new Set(uids);
+    const groupsByUid = new Map<number, string[]>();
+    for (const group of groups) {
+      if (/^\d+$/.test(group.name)) continue;
+      for (const uid of group.uids || []) {
+        if (!uidSet.has(uid)) continue;
+        const list = groupsByUid.get(uid) || [];
+        list.push(group.name);
+        groupsByUid.set(uid, list);
+      }
+    }
+    let domainsByUid = new Map<number, Array<{ id: string; name: string }>>();
+    if (withDomains && memberships.length) {
+      const domainIds = [...new Set(memberships.map((row) => row.domainId))];
+      const domainDocs = await this.domains.find({ _id: { $in: domainIds } }, { projection: { _id: 1, name: 1 } }).toArray();
+      const domainName = new Map(domainDocs.map((doc) => [doc._id, doc.name || doc._id]));
+      domainsByUid = new Map();
+      for (const row of memberships) {
+        const list = domainsByUid.get(row.uid) || [];
+        list.push({ id: row.domainId, name: domainName.get(row.domainId) || row.domainId });
+        domainsByUid.set(row.uid, list);
+      }
+    }
+    const editDomain = BigInt(PERM.PERM_EDIT_DOMAIN);
+    return docs.map((doc) => {
+      const row = rowByUid.get(doc._id);
+      const isMember = isMemberRow(row);
+      const role = isMember ? (row?.role || 'default') : null;
+      return {
+        uid: doc._id,
+        uname: doc.uname,
+        role,
+        isMember,
+        isManager: (isMember && roleHasPerm(ddoc, role, editDomain)) || hasSystemPriv(doc.priv),
+        groups: (groupsByUid.get(doc._id) || []).sort(),
+        ...(withDomains ? { domains: domainsByUid.get(doc._id) || [] } : {}),
+      };
+    });
+  }
+
+  // ─── 写入 ──────────────────────────────────────────────────────────────────
+
+  private requireGroupName(raw: unknown): string {
+    const result = validateGroupName(raw);
+    if ('error' in result) {
+      throw new GroupServiceError('INVALID_GROUP_NAME', 400, `ai_helper_group_name_err_${result.error}`);
+    }
+    return result.name;
+  }
+
+  private requireUids(raw: unknown, { allowEmpty = false } = {}): number[] {
+    const uids = sanitizeUids(raw);
+    if (!uids || (!allowEmpty && !uids.length)) {
+      throw new GroupServiceError('INVALID_UIDS', 400, 'ai_helper_group_uids_invalid');
+    }
+    if (uids.length > MAX_BATCH_USERS) {
+      throw new GroupServiceError('TOO_MANY_USERS', 400, 'ai_helper_group_too_many_users', [MAX_BATCH_USERS]);
+    }
+    return uids;
+  }
+
+  /** 原子加入：返回实际新加入的 uid（upsert 时小组不存在则全部视为新加入） */
+  private async atomicAdd(domainId: string, name: string, uids: number[]): Promise<number[]> {
+    if (!uids.length) return [];
+    const raw = await this.groups.findOneAndUpdate(
+      { domainId, name },
+      { $addToSet: { uids: { $each: uids } } },
+      { upsert: true, returnDocument: 'before' },
+    );
+    const before = new Set(unwrapModifyResult<HydroGroupDoc>(raw)?.uids || []);
+    return uids.filter((uid) => !before.has(uid));
+  }
+
+  /** 原子移出：返回实际被移出的 uid */
+  private async atomicRemove(domainId: string, name: string, uids: number[]): Promise<number[]> {
+    if (!uids.length) return [];
+    const raw = await this.groups.findOneAndUpdate(
+      { domainId, name },
+      { $pull: { uids: { $in: uids } } },
+      { returnDocument: 'before' },
+    );
+    const before = new Set(unwrapModifyResult<HydroGroupDoc>(raw)?.uids || []);
+    return uids.filter((uid) => before.has(uid));
+  }
+
+  private async existingUids(uids: number[]): Promise<number[]> {
+    if (!uids.length) return [];
+    const docs = await this.users.find({ _id: { $in: uids, $gt: 1 } }, { projection: { _id: 1 } }).toArray();
+    const found = new Set(docs.map((doc) => doc._id));
+    return uids.filter((uid) => found.has(uid));
+  }
+
+  private async nonMembers(domainId: string, uids: number[]): Promise<number[]> {
+    const rows = await this.domainUsers
+      .find({ domainId, uid: { $in: uids } }, { projection: { uid: 1, role: 1, join: 1 } })
+      .toArray();
+    const rowByUid = new Map(rows.map((row) => [row.uid, row]));
+    return uids.filter((uid) => !isMemberRow(rowByUid.get(uid)));
+  }
+
+  /** 校验“同时加入本域”的角色 */
+  async resolveJoinRole(domainId: string, role: unknown): Promise<string> {
+    const ddoc = await this.getDomainDoc(domainId);
+    if (typeof role !== 'string' || !allowedJoinRoles(ddoc).includes(role)) {
+      throw new GroupServiceError('INVALID_JOIN_ROLE', 400, 'ai_helper_group_join_role_invalid');
+    }
+    return role;
+  }
+
+  async apply(input: {
+    domainId: string;
+    groupName: unknown;
+    action: unknown;
+    uids: unknown;
+    joinDomain?: { role?: unknown } | null;
+    actorUid: number;
+  }): Promise<ApplyResult> {
+    const name = this.requireGroupName(input.groupName);
+    if (input.action !== 'add' && input.action !== 'remove') {
+      throw new GroupServiceError('INVALID_ACTION', 400, 'ai_helper_group_action_invalid');
+    }
+    const requested = this.requireUids(input.uids);
+    const { domainId, actorUid } = input;
+
+    let added: number[] = [];
+    let removed: number[] = [];
+    let joined: number[] = [];
+    let joinRole: string | undefined;
+    let ledgerRemoved: number[] = [];
+
+    if (input.action === 'add') {
+      const uids = await this.existingUids(requested);
+      if (input.joinDomain) {
+        joinRole = await this.resolveJoinRole(domainId, input.joinDomain.role);
+        joined = await this.nonMembers(domainId, uids);
+        await joinDomain(domainId, joined, joinRole);
+      }
+      added = await this.atomicAdd(domainId, name, uids);
+      await this.groupMeta.addPluginAdded(domainId, name, added, actorUid);
+    } else {
+      removed = await this.atomicRemove(domainId, name, requested);
+      // 管理员经插件明确移出：同步清出台账（即使此人已不在组内），避免误报漂移
+      ledgerRemoved = await this.groupMeta.removePluginAdded(domainId, name, requested);
+    }
+
+    if (added.length || removed.length || joined.length) clearDomainUserCache(this.ctx, domainId);
+
+    const changed = new Set([...added, ...removed]);
+    const unchanged = requested.filter((uid) => !changed.has(uid));
+    let auditId: ObjectIdType | null = null;
+    try {
+      auditId = await this.audit.record({
+        actorUid,
+        action: input.action === 'add' ? 'group.add' : 'group.remove',
+        domainId,
+        target: { type: 'group', id: name },
+        detail: {
+          requested: requested.length,
+          added,
+          removed,
+          joined,
+          ...(joinRole ? { joinRole } : {}),
+          ledgerRemoved,
+          unchangedCount: unchanged.length,
+        },
+        undoable: added.length > 0 || removed.length > 0 || joined.length > 0 || ledgerRemoved.length > 0,
+      });
+    } catch (err) {
+      console.error('[AI-Helper] group audit record failed:', err instanceof Error ? err.message : String(err));
+    }
+
+    return { added, removed, joined, unchanged, auditId: auditId ? auditId.toHexString() : null };
+  }
+
+  // ─── 撤销 ──────────────────────────────────────────────────────────────────
+
+  async undo(domainId: string, auditIdRaw: unknown, actorUid: number): Promise<{ reverted: Record<string, number[]> }> {
+    if (typeof auditIdRaw !== 'string' || !ObjectId.isValid(auditIdRaw)) {
+      throw new GroupServiceError('INVALID_AUDIT_ID', 400, 'ai_helper_group_undo_invalid');
+    }
+    const id = new ObjectId(auditIdRaw);
+    const existing = await this.audit.findById(id);
+    if (!existing || existing.category !== 'group') {
+      throw new GroupServiceError('AUDIT_NOT_FOUND', 404, 'ai_helper_group_undo_not_found');
+    }
+    if (existing.domainId !== domainId) {
+      throw new GroupServiceError('AUDIT_DOMAIN_MISMATCH', 400, 'ai_helper_group_undo_domain_mismatch');
+    }
+    const log = await this.audit.markUndone(id, actorUid);
+    if (!log) throw new GroupServiceError('UNDO_NOT_ALLOWED', 409, 'ai_helper_group_undo_not_allowed');
+
+    try {
+      const reverted = await this.revert(log);
+      if (Object.values(reverted).some((list) => list.length)) clearDomainUserCache(this.ctx, domainId);
+      return { reverted };
+    } catch (err) {
+      await this.audit.revertUndoMark(id).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private async revert(log: AuditLog): Promise<Record<string, number[]>> {
+    const domainId = log.domainId as string;
+    const name = log.target.id;
+    const detail = log.detail || {};
+    const list = (key: string): number[] => (sanitizeUids(detail[key]) || []);
+
+    switch (log.action) {
+      case 'group.add':
+      case 'group.drift_restore': {
+        const added = list('added');
+        const removed = await this.atomicRemove(domainId, name, added);
+        await this.groupMeta.removePluginAdded(domainId, name, added);
+        const joined = list('joined');
+        await leaveDomain(domainId, joined);
+        return { removed, left: joined };
+      }
+      case 'group.remove': {
+        const restored = await this.atomicAdd(domainId, name, list('removed'));
+        await this.groupMeta.addPluginAdded(domainId, name, list('ledgerRemoved'), log.actorUid);
+        return { added: restored };
+      }
+      case 'group.drift_dismiss': {
+        const dismissed = list('dismissed');
+        await this.groupMeta.addPluginAdded(domainId, name, dismissed, log.actorUid);
+        return { ledgerRestored: dismissed };
+      }
+      default:
+        throw new GroupServiceError('UNDO_NOT_ALLOWED', 409, 'ai_helper_group_undo_not_allowed');
+    }
+  }
+
+  // ─── 漂移与扩展信息 ────────────────────────────────────────────────────────
+
+  private async currentDrift(domainId: string, name: string): Promise<{ meta: GroupMeta | null; drift: number[] }> {
+    const [meta, group] = await Promise.all([
+      this.groupMeta.get(domainId, name),
+      this.groups.findOne({ domainId, name }, { projection: { uids: 1 } }),
+    ]);
+    const current = new Set(group?.uids || []);
+    return { meta, drift: (meta?.pluginAdded || []).filter((uid) => !current.has(uid)) };
+  }
+
+  /** 恢复被覆盖成员（小组已被删除时会重建）或忽略（从台账移除） */
+  async resolveDrift(input: {
+    domainId: string;
+    groupName: unknown;
+    action: unknown;
+    uids: unknown;
+    actorUid: number;
+  }): Promise<{ restored: number[]; dismissed: number[]; auditId: string | null }> {
+    const name = this.requireGroupName(input.groupName);
+    if (input.action !== 'restore' && input.action !== 'dismiss') {
+      throw new GroupServiceError('INVALID_ACTION', 400, 'ai_helper_group_action_invalid');
+    }
+    const requested = this.requireUids(input.uids);
+    const { domainId, actorUid } = input;
+    const { drift } = await this.currentDrift(domainId, name);
+    const driftSet = new Set(drift);
+    const targets = requested.filter((uid) => driftSet.has(uid));
+
+    let restored: number[] = [];
+    let dismissed: number[] = [];
+    if (input.action === 'restore') {
+      restored = await this.atomicAdd(domainId, name, targets);
+      if (restored.length) clearDomainUserCache(this.ctx, domainId);
+    } else {
+      dismissed = await this.groupMeta.removePluginAdded(domainId, name, targets);
+    }
+
+    let auditId: ObjectIdType | null = null;
+    if (restored.length || dismissed.length) {
+      try {
+        auditId = await this.audit.record({
+          actorUid,
+          action: input.action === 'restore' ? 'group.drift_restore' : 'group.drift_dismiss',
+          domainId,
+          target: { type: 'group', id: name },
+          detail: input.action === 'restore' ? { added: restored } : { dismissed },
+          undoable: true,
+        });
+      } catch (err) {
+        console.error('[AI-Helper] drift audit record failed:', err instanceof Error ? err.message : String(err));
+      }
+    }
+    return { restored, dismissed, auditId: auditId ? auditId.toHexString() : null };
+  }
+
+  /**
+   * 扩展信息：update（含新建空小组）或 delete（仅限 Hydro 中已不存在的小组）
+   */
+  async updateMeta(input: {
+    domainId: string;
+    groupName: unknown;
+    action?: unknown;
+    kind?: unknown;
+    academicYear?: unknown;
+    teacherUids?: unknown;
+    archived?: unknown;
+    create?: unknown;
+    actorUid: number;
+  }): Promise<{ meta: GroupMeta | null; created: boolean; deleted: boolean }> {
+    const name = this.requireGroupName(input.groupName);
+    const { domainId, actorUid } = input;
+    const hydroGroup = await this.groups.findOne({ domainId, name }, { projection: { _id: 1 } });
+
+    if (input.action === 'delete') {
+      if (hydroGroup) throw new GroupServiceError('GROUP_STILL_EXISTS', 409, 'ai_helper_group_meta_delete_exists');
+      const before = await this.groupMeta.delete(domainId, name);
+      if (!before) throw new GroupServiceError('GROUP_NOT_FOUND', 404, 'ai_helper_group_not_found');
+      await this.recordMetaAudit(actorUid, domainId, name, { deleted: true, before: this.metaSnapshot(before) });
+      return { meta: null, created: false, deleted: true };
+    }
+
+    const patch: GroupMetaPatch = {};
+    if (input.kind !== undefined) {
+      if (input.kind !== 'class' && input.kind !== 'other') throw this.invalidMeta('kind');
+      patch.kind = input.kind;
+    }
+    if (input.academicYear !== undefined) {
+      if (input.academicYear !== null && (typeof input.academicYear !== 'string' || input.academicYear.trim().length > 16)) {
+        throw this.invalidMeta('academicYear');
+      }
+      patch.academicYear = typeof input.academicYear === 'string' ? input.academicYear.trim() : null;
+    }
+    if (input.teacherUids !== undefined) {
+      const uids = sanitizeUids(input.teacherUids);
+      if (!uids || uids.length > MAX_TEACHERS_PER_GROUP) throw this.invalidMeta('teacherUids');
+      const existing = await this.existingUids(uids);
+      if (existing.length !== uids.length) throw this.invalidMeta('teacherUids');
+      patch.teacherUids = uids;
+    }
+    if (input.archived !== undefined) {
+      if (typeof input.archived !== 'boolean') throw this.invalidMeta('archived');
+      patch.archived = input.archived;
+    }
+
+    let created = false;
+    if (!hydroGroup) {
+      const existingMeta = await this.groupMeta.get(domainId, name);
+      if (input.create !== true && !existingMeta) {
+        throw new GroupServiceError('GROUP_NOT_FOUND', 404, 'ai_helper_group_not_found');
+      }
+      if (input.create === true) {
+        const raw = await this.groups.updateOne(
+          { domainId, name },
+          { $setOnInsert: { uids: [] } },
+          { upsert: true },
+        );
+        created = !!(raw as { upsertedCount?: number })?.upsertedCount;
+        if (created) clearDomainUserCache(this.ctx, domainId);
+      }
+    }
+
+    const before = await this.groupMeta.update(domainId, name, patch, actorUid);
+    const after = await this.groupMeta.get(domainId, name);
+    await this.recordMetaAudit(actorUid, domainId, name, {
+      ...(created ? { created: true } : {}),
+      before: before ? this.metaSnapshot(before) : null,
+      after: after ? this.metaSnapshot(after) : null,
+    });
+    return { meta: after, created, deleted: false };
+  }
+
+  private metaSnapshot(meta: GroupMeta) {
+    return {
+      kind: meta.kind,
+      academicYear: meta.academicYear || null,
+      teacherUids: meta.teacherUids || [],
+      archived: !!meta.archived,
+    };
+  }
+
+  private invalidMeta(field: string): GroupServiceError {
+    return new GroupServiceError('INVALID_META', 400, 'ai_helper_group_meta_invalid', [field]);
+  }
+
+  private async recordMetaAudit(actorUid: number, domainId: string, name: string, detail: Record<string, unknown>) {
+    try {
+      await this.audit.record({
+        actorUid,
+        action: 'group.meta',
+        domainId,
+        target: { type: 'group', id: name },
+        detail,
+        undoable: false,
+      });
+    } catch (err) {
+      console.error('[AI-Helper] group meta audit failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
+}

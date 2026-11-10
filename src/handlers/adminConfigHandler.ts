@@ -11,6 +11,14 @@ import {
 } from '../models/aiConfig';
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
+import {
+  applyAIReviewConfigPatch,
+  applyQuotaConfigPatch,
+  applyTopicGuardConfigPatch,
+  normalizeV4Sections,
+  type PatchResult,
+} from '../models/configSections';
+import type { AuditService } from '../services/auditService';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog, JailbreakLogListFilters } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
@@ -56,6 +64,38 @@ interface UpdateConfigRequest {
   extraJailbreakPatternsText?: string;
   budgetConfig?: BudgetConfig;
   telemetryEnabled?: boolean;
+  // v4 配置段（白名单 + 校验见 configSections.apply*Patch）
+  quotaConfig?: unknown;
+  topicGuardConfig?: unknown;
+  aiReviewConfig?: unknown;
+  groupTeacherAccessEnabled?: unknown;
+}
+
+/** 校验 v4 配置段并写入 partial；返回第一个非法字段 */
+function applyV4SectionPatches(
+  body: UpdateConfigRequest,
+  current: ReturnType<typeof normalizeV4Sections>,
+  partial: Partial<Omit<AIConfig, '_id' | 'updatedAt'>>,
+): { field: string; code?: string } | null {
+  const steps: Array<[unknown, () => PatchResult<unknown>, (value: unknown) => void]> = [
+    [body.quotaConfig, () => applyQuotaConfigPatch(current.quotaConfig, body.quotaConfig),
+      (value) => { partial.quotaConfig = value as AIConfig['quotaConfig']; }],
+    [body.topicGuardConfig, () => applyTopicGuardConfigPatch(current.topicGuardConfig, body.topicGuardConfig),
+      (value) => { partial.topicGuardConfig = value as AIConfig['topicGuardConfig']; }],
+    [body.aiReviewConfig, () => applyAIReviewConfigPatch(current.aiReviewConfig, body.aiReviewConfig),
+      (value) => { partial.aiReviewConfig = value as AIConfig['aiReviewConfig']; }],
+  ];
+  for (const [provided, run, assign] of steps) {
+    if (provided === undefined) continue;
+    const result = run();
+    if ('field' in result) return { field: result.field, code: result.code };
+    assign(result.value);
+  }
+  if (body.groupTeacherAccessEnabled !== undefined) {
+    if (typeof body.groupTeacherAccessEnabled !== 'boolean') return { field: 'groupTeacherAccessEnabled' };
+    partial.groupTeacherAccessEnabled = body.groupTeacherAccessEnabled;
+  }
+  return null;
 }
 
 /**
@@ -157,6 +197,7 @@ export class AdminConfigHandler extends Handler {
           systemPromptTemplate: config.systemPromptTemplate,
           extraJailbreakPatternsText: config.extraJailbreakPatternsText || '',
           budgetConfig: config.budgetConfig || {},
+          ...normalizeV4Sections(config),
           apiKeyMasked,
           hasApiKey,
           updatedAt: config.updatedAt.toISOString()
@@ -184,6 +225,25 @@ export class AdminConfigHandler extends Handler {
       const body = this.request.body as UpdateConfigRequest;
 
       const partial: Partial<Omit<AIConfig, '_id' | 'updatedAt'>> = {};
+
+      // v4 配置段：先整体校验，非法时在任何副作用（遥测开关、加密）之前拒绝
+      let previousTeacherAccess: boolean | undefined;
+      if (body.quotaConfig !== undefined || body.topicGuardConfig !== undefined
+        || body.aiReviewConfig !== undefined || body.groupTeacherAccessEnabled !== undefined) {
+        const current = normalizeV4Sections(await aiConfigModel.getConfig());
+        previousTeacherAccess = current.groupTeacherAccessEnabled;
+        const invalid = applyV4SectionPatches(body, current, partial);
+        if (invalid) {
+          this.response.status = 400;
+          this.response.body = {
+            error: translateWithParams(this, 'ai_helper_config_field_invalid', invalid.field),
+            code: invalid.code || 'INVALID_CONFIG_FIELD',
+            field: invalid.field,
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+      }
 
       // 处理新版多端点配置
       if (body.endpoints !== undefined) {
@@ -381,6 +441,23 @@ export class AdminConfigHandler extends Handler {
 
       await aiConfigModel.updateConfig(partial);
 
+      if (partial.groupTeacherAccessEnabled !== undefined
+        && partial.groupTeacherAccessEnabled !== previousTeacherAccess) {
+        try {
+          const auditService = this.ctx.get('auditService') as AuditService | undefined;
+          if (typeof auditService?.record === 'function') {
+            await auditService.record({
+              actorUid: Number(this.user?._id),
+              action: 'settings.teacher_access',
+              target: { type: 'config', id: 'groupTeacherAccessEnabled' },
+              detail: { from: !!previousTeacherAccess, to: partial.groupTeacherAccessEnabled },
+            });
+          }
+        } catch (err) {
+          console.warn('[AdminConfigHandler] 记录审计失败:', err instanceof Error ? err.message : 'unknown');
+        }
+      }
+
       const updatedConfig = await aiConfigModel.getConfig();
       if (!updatedConfig) {
         throw new Error('配置更新后读取失败');
@@ -439,6 +516,7 @@ export class AdminConfigHandler extends Handler {
           systemPromptTemplate: updatedConfig.systemPromptTemplate,
           extraJailbreakPatternsText: updatedConfig.extraJailbreakPatternsText || '',
           budgetConfig: updatedConfig.budgetConfig || {},
+          ...normalizeV4Sections(updatedConfig),
           apiKeyMasked,
           hasApiKey,
           updatedAt: updatedConfig.updatedAt.toISOString()

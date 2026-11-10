@@ -200,6 +200,7 @@ function createMockHandler(): ChatHandler {
     }),
     db: {
       collection: jest.fn().mockReturnValue({
+        find: jest.fn().mockReturnValue({ toArray: jest.fn().mockResolvedValue([]) }),
         findOne: jest.fn().mockResolvedValue(null),
         updateOne: jest.fn().mockResolvedValue(undefined),
       }),
@@ -244,6 +245,50 @@ describe('ChatHandler', () => {
     expect(handler.response.body.message.role).toBe('ai');
     expect(handler.response.body.message.content).toBe('AI response');
     expect(handler.response.type).toBe('application/json');
+  });
+
+  it('records the student group snapshot when a new conversation is created', async () => {
+    const handler = createMockHandler();
+    jest.spyOn(console, 'log').mockImplementation();
+    jest.spyOn(console, 'error').mockImplementation();
+    const groupFind = jest.fn().mockReturnValue({
+      toArray: jest.fn().mockResolvedValue([{ name: '信息学竞赛队' }, { name: '2023级1班' }, { name: '42' }]),
+    });
+    const defaultCollection = handler.ctx.db.collection();
+    handler.ctx.db.collection = jest.fn((name: string) => (
+      name === 'user.group' ? { find: groupFind } : defaultCollection
+    ));
+
+    await handler.post();
+
+    expect(groupFind).toHaveBeenCalledWith({ domainId: 'test-domain', uids: 42 }, { projection: { name: 1 } });
+    const conversationModel = handler.ctx.get('conversationModel');
+    expect(conversationModel.create).toHaveBeenCalledWith(expect.objectContaining({
+      domainId: 'test-domain',
+      userId: 42,
+      groupNames: ['2023级1班', '信息学竞赛队'],
+      groupSource: 'snapshot',
+    }));
+  });
+
+  it('still creates the conversation with an empty snapshot when the group lookup fails', async () => {
+    const handler = createMockHandler();
+    jest.spyOn(console, 'log').mockImplementation();
+    jest.spyOn(console, 'error').mockImplementation();
+    const warn = jest.spyOn(console, 'warn').mockImplementation();
+    const defaultCollection = handler.ctx.db.collection();
+    handler.ctx.db.collection = jest.fn((name: string) => (
+      name === 'user.group'
+        ? { find: () => ({ toArray: () => Promise.reject(new Error('group lookup down')) }) }
+        : defaultCollection
+    ));
+
+    await handler.post();
+
+    expect(warn).toHaveBeenCalledWith('[AI-Helper] snapshotGroupNames failed:', 'group lookup down');
+    const conversationModel = handler.ctx.get('conversationModel');
+    expect(conversationModel.create).toHaveBeenCalledWith(expect.objectContaining({ groupNames: [], groupSource: 'snapshot' }));
+    expect(handler.response.body.message.role).toBe('ai');
   });
 
   it('JSON 路径：body 读完后 context.req.destroyed=true 属正常态，不得误判为断开', async () => {

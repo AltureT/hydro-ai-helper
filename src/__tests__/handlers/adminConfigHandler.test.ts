@@ -581,3 +581,94 @@ describe('JailbreakLogBulkReviewHandler', () => {
     expect(reviewMany).not.toHaveBeenCalled();
   });
 });
+
+describe('AdminConfigHandler v4 sections', () => {
+  function makeHandler(body: Record<string, unknown>, initial: Record<string, unknown> = {}) {
+    let config: any = { endpoints: [], selectedModels: [], updatedAt: new Date('2026-11-10T00:00:00Z'), ...initial };
+    const configModel = {
+      getConfig: jest.fn(async () => config),
+      updateConfig: jest.fn(async (partial) => { config = { ...config, ...partial }; }),
+    };
+    const auditService = { record: jest.fn().mockResolvedValue('audit-id') };
+    const pluginInstallModel = { updateTelemetryEnabled: jest.fn(), getInstall: jest.fn().mockResolvedValue(null) };
+    const handler = new AdminConfigHandler();
+    handler.request = { headers: { 'x-requested-with': 'XMLHttpRequest' }, body };
+    handler.response = {};
+    handler.user = { _id: 2 };
+    handler.translate = (key: string) => key;
+    handler.ctx = {
+      Route: jest.fn(),
+      get: (name: string) => ({ aiConfigModel: configModel, auditService, pluginInstallModel } as any)[name],
+    };
+    return { handler, configModel, auditService, getConfig: () => config, pluginInstallModel };
+  }
+
+  it('returns normalized v4 sections from GET even for an older document', async () => {
+    const { handler } = makeHandler({});
+    handler.request = { headers: { accept: 'application/json' }, query: {} };
+    await handler.get();
+    const body = handler.response.body.config;
+    expect(body.quotaConfig).toEqual(expect.objectContaining({ dailyMessageLimit: 0, timezone: 'Asia/Shanghai' }));
+    expect(body.topicGuardConfig.strikeWindowHours).toBe(24);
+    expect(body.aiReviewConfig.enabled).toBe(false);
+    expect(body.groupTeacherAccessEnabled).toBe(false);
+  });
+
+  it('merges partial section updates with the stored values', async () => {
+    const { handler, getConfig } = makeHandler(
+      { quotaConfig: { dailyMessageLimit: 30, credit: { weights: { off_topic: 0.1 } } } },
+      { quotaConfig: { dailyMessageLimit: 10, timezone: 'UTC', guaranteeCount: 5 } },
+    );
+    await handler.put();
+    expect(handler.response.status).toBeUndefined();
+    const stored = getConfig().quotaConfig;
+    expect(stored).toEqual(expect.objectContaining({ dailyMessageLimit: 30, timezone: 'UTC', guaranteeCount: 5 }));
+    expect(stored.credit.weights.off_topic).toBe(0.1);
+    expect(stored.credit.weights.answer_seeking).toBe(0.1);
+    expect(handler.response.body.config.quotaConfig.dailyMessageLimit).toBe(30);
+  });
+
+  it.each([
+    [{ quotaConfig: { dailyMessageLimit: -1 } }, 'quotaConfig.dailyMessageLimit', 'INVALID_CONFIG_FIELD'],
+    [{ quotaConfig: { dailyMessageLimit: 2.5 } }, 'quotaConfig.dailyMessageLimit', 'INVALID_CONFIG_FIELD'],
+    [{ quotaConfig: { timezone: 'Mars/Olympus' } }, 'quotaConfig.timezone', 'INVALID_TIMEZONE'],
+    [{ quotaConfig: { credit: { floor: 1.5 } } }, 'quotaConfig.credit.floor', 'INVALID_CONFIG_FIELD'],
+    [{ quotaConfig: { credit: { weights: { off_topic: -0.1 } } } }, 'quotaConfig.credit.weights.off_topic', 'INVALID_CONFIG_FIELD'],
+    [{ aiReviewConfig: { sampleRate: 2 } }, 'aiReviewConfig.sampleRate', 'INVALID_CONFIG_FIELD'],
+    [{ aiReviewConfig: { runAt: '25:00' } }, 'aiReviewConfig.runAt', 'INVALID_CONFIG_FIELD'],
+    [{ aiReviewConfig: { breakerWindow: 20, breakerMinSample: 30 } }, 'aiReviewConfig.breakerMinSample', 'INVALID_CONFIG_FIELD'],
+    [{ topicGuardConfig: { customOffTopicKeywords: 'game' } }, 'topicGuardConfig.customOffTopicKeywords', 'INVALID_CONFIG_FIELD'],
+    [{ groupTeacherAccessEnabled: 'yes' }, 'groupTeacherAccessEnabled', 'INVALID_CONFIG_FIELD'],
+  ])('rejects invalid input %j before any side effect', async (body, field, code) => {
+    const { handler, configModel, pluginInstallModel } = makeHandler({ ...body, telemetryEnabled: false });
+    await handler.put();
+    expect(handler.response.status).toBe(400);
+    expect(handler.response.body).toEqual(expect.objectContaining({ code, field }));
+    expect(configModel.updateConfig).not.toHaveBeenCalled();
+    expect(pluginInstallModel.updateTelemetryEnabled).not.toHaveBeenCalled();
+  });
+
+  it('dedupes off-topic keywords and ignores unknown section fields', async () => {
+    const { handler, getConfig } = makeHandler({
+      topicGuardConfig: { customOffTopicKeywords: [' 王者 ', '王者', '原神'], unknownField: 1 },
+    });
+    await handler.put();
+    expect(getConfig().topicGuardConfig).toEqual({
+      customOffTopicKeywords: ['王者', '原神'], codeExemptMinChars: 30, strikeWindowHours: 24,
+    });
+  });
+
+  it('records an audit entry only when teacher access actually changes', async () => {
+    const changed = makeHandler({ groupTeacherAccessEnabled: true });
+    await changed.handler.put();
+    expect(changed.auditService.record).toHaveBeenCalledWith(expect.objectContaining({
+      actorUid: 2,
+      action: 'settings.teacher_access',
+      detail: { from: false, to: true },
+    }));
+
+    const unchanged = makeHandler({ groupTeacherAccessEnabled: true }, { groupTeacherAccessEnabled: true });
+    await unchanged.handler.put();
+    expect(unchanged.auditService.record).not.toHaveBeenCalled();
+  });
+});

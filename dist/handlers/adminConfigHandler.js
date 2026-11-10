@@ -43,12 +43,38 @@ const hydrooj_1 = require("hydrooj");
 const aiConfig_1 = require("../models/aiConfig");
 const crypto_1 = require("../lib/crypto");
 const jailbreakRules_1 = require("../constants/jailbreakRules");
+const configSections_1 = require("../models/configSections");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
 const domainHelper_1 = require("../utils/domainHelper");
 const problemIdHelper_1 = require("../utils/problemIdHelper");
 const mongo_1 = require("../utils/mongo");
+/** 校验 v4 配置段并写入 partial；返回第一个非法字段 */
+function applyV4SectionPatches(body, current, partial) {
+    const steps = [
+        [body.quotaConfig, () => (0, configSections_1.applyQuotaConfigPatch)(current.quotaConfig, body.quotaConfig),
+            (value) => { partial.quotaConfig = value; }],
+        [body.topicGuardConfig, () => (0, configSections_1.applyTopicGuardConfigPatch)(current.topicGuardConfig, body.topicGuardConfig),
+            (value) => { partial.topicGuardConfig = value; }],
+        [body.aiReviewConfig, () => (0, configSections_1.applyAIReviewConfigPatch)(current.aiReviewConfig, body.aiReviewConfig),
+            (value) => { partial.aiReviewConfig = value; }],
+    ];
+    for (const [provided, run, assign] of steps) {
+        if (provided === undefined)
+            continue;
+        const result = run();
+        if ('field' in result)
+            return { field: result.field, code: result.code };
+        assign(result.value);
+    }
+    if (body.groupTeacherAccessEnabled !== undefined) {
+        if (typeof body.groupTeacherAccessEnabled !== 'boolean')
+            return { field: 'groupTeacherAccessEnabled' };
+        partial.groupTeacherAccessEnabled = body.groupTeacherAccessEnabled;
+    }
+    return null;
+}
 /**
  * AdminConfigHandler - AI 配置页面
  * GET /ai-helper/admin/config
@@ -143,6 +169,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     systemPromptTemplate: config.systemPromptTemplate,
                     extraJailbreakPatternsText: config.extraJailbreakPatternsText || '',
                     budgetConfig: config.budgetConfig || {},
+                    ...(0, configSections_1.normalizeV4Sections)(config),
                     apiKeyMasked,
                     hasApiKey,
                     updatedAt: config.updatedAt.toISOString()
@@ -170,6 +197,24 @@ class AdminConfigHandler extends hydrooj_1.Handler {
             const aiConfigModel = this.ctx.get('aiConfigModel');
             const body = this.request.body;
             const partial = {};
+            // v4 配置段：先整体校验，非法时在任何副作用（遥测开关、加密）之前拒绝
+            let previousTeacherAccess;
+            if (body.quotaConfig !== undefined || body.topicGuardConfig !== undefined
+                || body.aiReviewConfig !== undefined || body.groupTeacherAccessEnabled !== undefined) {
+                const current = (0, configSections_1.normalizeV4Sections)(await aiConfigModel.getConfig());
+                previousTeacherAccess = current.groupTeacherAccessEnabled;
+                const invalid = applyV4SectionPatches(body, current, partial);
+                if (invalid) {
+                    this.response.status = 400;
+                    this.response.body = {
+                        error: (0, i18nHelper_1.translateWithParams)(this, 'ai_helper_config_field_invalid', invalid.field),
+                        code: invalid.code || 'INVALID_CONFIG_FIELD',
+                        field: invalid.field,
+                    };
+                    this.response.type = 'application/json';
+                    return;
+                }
+            }
             // 处理新版多端点配置
             if (body.endpoints !== undefined) {
                 const existingConfig = await aiConfigModel.getConfig();
@@ -346,6 +391,23 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                 }
             }
             await aiConfigModel.updateConfig(partial);
+            if (partial.groupTeacherAccessEnabled !== undefined
+                && partial.groupTeacherAccessEnabled !== previousTeacherAccess) {
+                try {
+                    const auditService = this.ctx.get('auditService');
+                    if (typeof auditService?.record === 'function') {
+                        await auditService.record({
+                            actorUid: Number(this.user?._id),
+                            action: 'settings.teacher_access',
+                            target: { type: 'config', id: 'groupTeacherAccessEnabled' },
+                            detail: { from: !!previousTeacherAccess, to: partial.groupTeacherAccessEnabled },
+                        });
+                    }
+                }
+                catch (err) {
+                    console.warn('[AdminConfigHandler] 记录审计失败:', err instanceof Error ? err.message : 'unknown');
+                }
+            }
             const updatedConfig = await aiConfigModel.getConfig();
             if (!updatedConfig) {
                 throw new Error('配置更新后读取失败');
@@ -403,6 +465,7 @@ class AdminConfigHandler extends hydrooj_1.Handler {
                     systemPromptTemplate: updatedConfig.systemPromptTemplate,
                     extraJailbreakPatternsText: updatedConfig.extraJailbreakPatternsText || '',
                     budgetConfig: updatedConfig.budgetConfig || {},
+                    ...(0, configSections_1.normalizeV4Sections)(updatedConfig),
                     apiKeyMasked,
                     hasApiKey,
                     updatedAt: updatedConfig.updatedAt.toISOString()

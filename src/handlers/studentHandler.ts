@@ -27,6 +27,7 @@ import { resolveProblemContent } from '../utils/problemStatement';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
 import { createSSEWriter } from '../lib/sseHelper';
+import { snapshotGroupNames } from '../services/hydroGroupService';
 
 function extractContestIdFromReferer(referer: unknown): string | undefined {
   if (typeof referer !== 'string') return undefined;
@@ -637,13 +638,16 @@ export class ChatHandler extends Handler {
       }
       currentConversationId = conversation._id;
     } else {
-      // 创建新会话
+      // 创建新会话（记录学生当时在该域所属的小组，用于按班级统计）
       const now = new Date();
+      const groupNames = await snapshotGroupNames(this.ctx.db, domainId, userId);
       currentConversationId = await conversationModel.create({
         domainId,
         userId,
         problemId,
         classId: undefined,
+        groupNames,
+        groupSource: 'snapshot',
         startTime: now,
         endTime: now,
         messageCount: 0,

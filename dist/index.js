@@ -46,6 +46,9 @@ const teachingSummaryHandler_1 = require("./handlers/teachingSummaryHandler");
 const teachingSummary_1 = require("./models/teachingSummary");
 const updateHandler_1 = require("./handlers/updateHandler");
 console.log('[AI-Helper] updateHandler OK');
+const groupAdminHandler_1 = require("./handlers/groupAdminHandler");
+const auditHandler_1 = require("./handlers/auditHandler");
+console.log('[AI-Helper] groupAdminHandler OK');
 const testdataGenHandler_1 = require("./handlers/testdataGenHandler");
 console.log('[AI-Helper] testdataGenHandler OK');
 const conversation_1 = require("./models/conversation");
@@ -60,6 +63,8 @@ const batchSummaryJob_1 = require("./models/batchSummaryJob");
 const testdataGenerationJob_1 = require("./models/testdataGenerationJob");
 const studentSummary_1 = require("./models/studentSummary");
 const studentHistory_1 = require("./models/studentHistory");
+const auditLog_1 = require("./models/auditLog");
+const groupMeta_1 = require("./models/groupMeta");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -69,6 +74,8 @@ const errorReporter_1 = require("./services/errorReporter");
 const runTelemetry_1 = require("./services/testdata/runTelemetry");
 const requestStats_1 = require("./models/requestStats");
 const featureStats_1 = require("./models/featureStats");
+const auditService_1 = require("./services/auditService");
+const hydroGroupService_1 = require("./services/hydroGroupService");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
 /**
@@ -119,6 +126,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const studentSummaryModel = new studentSummary_1.StudentSummaryModel(db);
         const studentHistoryModel = new studentHistory_1.StudentHistoryModel(db);
         const teachingSummaryModel = new teachingSummary_1.TeachingSummaryModel(db);
+        const auditLogModel = new auditLog_1.AuditLogModel(db);
+        const groupMetaModel = new groupMeta_1.GroupMetaModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -168,6 +177,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
         await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
         await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
+        await safeEnsureIndexes(auditLogModel, 'auditLogModel');
+        await safeEnsureIndexes(groupMetaModel, 'groupMetaModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -232,6 +243,11 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('studentSummaryModel', studentSummaryModel);
         ctx.provide('studentHistoryModel', studentHistoryModel);
         ctx.provide('teachingSummaryModel', teachingSummaryModel);
+        ctx.provide('auditLogModel', auditLogModel);
+        ctx.provide('groupMetaModel', groupMetaModel);
+        const auditService = new auditService_1.AuditService(auditLogModel);
+        ctx.provide('auditService', auditService);
+        ctx.provide('hydroGroupService', new hydroGroupService_1.HydroGroupService(db, groupMetaModel, auditService, ctx));
         ctx.provide('errorReporter', errorReporter);
         ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
         // 初始化版本服务
@@ -385,6 +401,21 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_teaching_review_domain', '/d/:domainId/ai-helper/teaching-review', teachingSummaryHandler_1.TeachingReviewHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
         ctx.Route('ai_teaching_summary_feedback', '/ai-helper/teaching-summary/:summaryId/feedback', teachingSummaryHandler_1.TeachingSummaryFeedbackHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
         ctx.Route('ai_teaching_summary_feedback_domain', '/d/:domainId/ai-helper/teaching-summary/:summaryId/feedback', teachingSummaryHandler_1.TeachingSummaryFeedbackHandler, teachingSummaryHandler_1.TeachingSummaryHandlerPriv);
+        // 用户管理：Hydro 小组批量管理与操作审计（仅系统管理员）
+        ctx.Route('ai_group_list', '/ai-helper/groups', groupAdminHandler_1.GroupListHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_list_domain', '/d/:domainId/ai-helper/groups', groupAdminHandler_1.GroupListHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_search', '/ai-helper/groups/search', groupAdminHandler_1.GroupSearchHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_search_domain', '/d/:domainId/ai-helper/groups/search', groupAdminHandler_1.GroupSearchHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_apply', '/ai-helper/groups/apply', groupAdminHandler_1.GroupApplyHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_apply_domain', '/d/:domainId/ai-helper/groups/apply', groupAdminHandler_1.GroupApplyHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_undo', '/ai-helper/groups/undo', groupAdminHandler_1.GroupUndoHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_undo_domain', '/d/:domainId/ai-helper/groups/undo', groupAdminHandler_1.GroupUndoHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_meta', '/ai-helper/groups/meta', groupAdminHandler_1.GroupMetaHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_meta_domain', '/d/:domainId/ai-helper/groups/meta', groupAdminHandler_1.GroupMetaHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_drift', '/ai-helper/groups/drift', groupAdminHandler_1.GroupDriftHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_drift_domain', '/d/:domainId/ai-helper/groups/drift', groupAdminHandler_1.GroupDriftHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_admin_audit', '/ai-helper/admin/audit', auditHandler_1.AuditListHandler, auditHandler_1.AuditListHandlerPriv);
+        ctx.Route('ai_admin_audit_domain', '/d/:domainId/ai-helper/admin/audit', auditHandler_1.AuditListHandler, auditHandler_1.AuditListHandlerPriv);
     }
 });
 exports.Config = configSchema;

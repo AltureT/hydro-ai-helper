@@ -52,7 +52,11 @@ describe('ConversationModel', () => {
   describe('ensureIndexes', () => {
     it('should create all indexes and log success', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(13);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(14);
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { domainId: 1, groupNames: 1, startTime: -1 },
+        { name: 'idx_domainId_groupNames_startTime' },
+      );
       expect(console.log).toHaveBeenCalledWith('[ConversationModel] Indexes created successfully');
     });
   });
