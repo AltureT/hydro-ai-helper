@@ -3,12 +3,16 @@
  * JailbreakLog Model - 越狱尝试记录
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.JailbreakLogModel = exports.DEFAULT_JAILBREAK_LOG_RETENTION_DAYS = void 0;
+exports.JailbreakLogModel = exports.DEFAULT_JAILBREAK_LOG_RETENTION_DAYS = exports.MAX_REVIEW_REASON_LENGTH = exports.MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH = exports.MAX_REVIEW_EVIDENCE_ITEMS = void 0;
 exports.resolveJailbreakLogRetentionDays = resolveJailbreakLogRetentionDays;
 exports.sanitizeSafetyLogSnippet = sanitizeSafetyLogSnippet;
 const mongo_1 = require("../utils/mongo");
 const ensureObjectId_1 = require("../utils/ensureObjectId");
 const safetyPenaltyService_1 = require("../services/safetyPenaltyService");
+/** AI 抽查证据最多保存的条数与每条片段长度（FR-060：只保存必要的短片段） */
+exports.MAX_REVIEW_EVIDENCE_ITEMS = 5;
+exports.MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH = 120;
+exports.MAX_REVIEW_REASON_LENGTH = 300;
 exports.DEFAULT_JAILBREAK_LOG_RETENTION_DAYS = 180;
 const MIN_JAILBREAK_LOG_RETENTION_DAYS = 7;
 const MAX_JAILBREAK_LOG_RETENTION_DAYS = 3650;
@@ -71,6 +75,8 @@ class JailbreakLogModel {
         await this.collection.createIndex({ domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 }, { name: 'idx_domain_review_category_createdAt' });
         await this.collection.createIndex({ domainId: 1, studentAppealedAt: -1, createdAt: -1 }, { name: 'idx_domain_appealed_createdAt' });
         await this.collection.createIndex({ domainId: 1, problemId: 1, createdAt: -1 }, { name: 'idx_domain_problem_createdAt' });
+        // AI 抽查：最近发现、熔断样本、处罚去重（PR5）
+        await this.collection.createIndex({ detectionSource: 1, createdAt: -1 }, { name: 'idx_source_createdAt' });
         await this.collection.createIndex({ expiresAt: 1 }, { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 });
         console.log('[JailbreakLogModel] Indexes ensured');
     }
@@ -95,6 +101,17 @@ class JailbreakLogModel {
             reviewStatus: 'pending',
             penaltyCounterId: data.penaltyCounterId,
             penaltyEventId: data.penaltyEventId,
+            ...(data.reviewRunId ? { reviewRunId: data.reviewRunId } : {}),
+            ...(data.evidence ? {
+                evidence: data.evidence.slice(0, exports.MAX_REVIEW_EVIDENCE_ITEMS).map((item) => ({
+                    ref: String(item.ref).slice(0, 16),
+                    snippet: sanitizeSafetyLogSnippet(item.snippet).slice(0, exports.MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH),
+                    verified: !!item.verified,
+                })),
+            } : {}),
+            ...(data.evidenceVerified !== undefined ? { evidenceVerified: data.evidenceVerified } : {}),
+            ...(data.autoPenalized !== undefined ? { autoPenalized: data.autoPenalized } : {}),
+            ...(data.reviewReason ? { reviewReason: sanitizeSafetyLogSnippet(data.reviewReason).slice(0, exports.MAX_REVIEW_REASON_LENGTH) } : {}),
             expiresAt: this.getExpiryDate(createdAt),
             createdAt
         };
@@ -220,7 +237,7 @@ class JailbreakLogModel {
         if (!ids.length)
             return [];
         return this.collection
-            .find({ _id: { $in: ids.map((id) => (0, ensureObjectId_1.ensureObjectId)(id)) }, userId }, { projection: { _id: 1, domainId: 1, reviewStatus: 1, studentAppealedAt: 1 } })
+            .find({ _id: { $in: ids.map((id) => (0, ensureObjectId_1.ensureObjectId)(id)) }, userId }, { projection: { _id: 1, domainId: 1, problemId: 1, reviewStatus: 1, studentAppealedAt: 1 } })
             .toArray();
     }
     /** 学生申诉：按 `{ _id, userId }` 查找本人的记录，不要求与当前域一致（plan R12） */
@@ -251,6 +268,67 @@ class JailbreakLogModel {
             studentAppealedAt: { $exists: true },
         });
         return existingAppeal ? 'already_submitted' : 'unavailable';
+    }
+    // ─── AI 抽查（PR5） ────────────────────────────────────────
+    /** 过去一段时间内规则中置信度命中所在的会话（候选来源 1，FR-041） */
+    async conversationsWithConfidenceSince(confidence, since, limit = 2000) {
+        const docs = await this.collection
+            .find({ confidence, createdAt: { $gte: since }, conversationId: { $exists: true }, detectionSource: { $ne: 'ai_review' } }, { projection: { conversationId: 1, domainId: 1, userId: 1 } })
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .toArray();
+        return docs
+            .filter((doc) => !!doc.conversationId)
+            .map((doc) => ({ conversationId: doc.conversationId, domainId: doc.domainId, userId: doc.userId }));
+    }
+    /** 计数窗口内有过某类计数事件的用户（候选来源 2：出现过偏题提醒） */
+    async usersWithPenaltyEventsSince(group, since, limit = 5000) {
+        const docs = await this.penaltyCounterCollection
+            .find({ group, 'events.at': { $gte: since } }, { projection: { userId: 1 } })
+            .limit(limit)
+            .toArray();
+        return [...new Set(docs.map((doc) => doc.userId).filter((uid) => Number.isSafeInteger(uid)))];
+    }
+    /** 该会话是否已因 AI 抽查被处罚过（FR-044） */
+    async hasAutoPenaltyForConversation(conversationId) {
+        const doc = await this.collection.findOne({ conversationId: (0, ensureObjectId_1.ensureObjectId)(conversationId), detectionSource: 'ai_review', autoPenalized: true }, { projection: { _id: 1 } });
+        return !!doc;
+    }
+    /** 该学生从某时刻起是否被 AI 抽查处罚过（FR-044：当天只处罚一次） */
+    async hasAutoPenaltyForUserSince(userId, since) {
+        const doc = await this.collection.findOne({ userId, detectionSource: 'ai_review', autoPenalized: true, createdAt: { $gte: since } }, { projection: { _id: 1 } });
+        return !!doc;
+    }
+    /** 熔断样本：最近已复核的自动处罚（只看恢复时间之后产生的处罚，FR-047） */
+    async recentReviewedAutoPenalties(limit, createdAfter) {
+        return this.collection
+            .find({
+            detectionSource: 'ai_review',
+            autoPenalized: true,
+            reviewStatus: { $in: ['confirmed', 'false_positive'] },
+            ...(createdAfter ? { createdAt: { $gt: createdAfter } } : {}),
+        }, { projection: { _id: 1, reviewStatus: 1, reviewedAt: 1, createdAt: 1 } })
+            .sort({ reviewedAt: -1 })
+            .limit(limit)
+            .toArray();
+    }
+    /** 抽查标签页的“最近发现” */
+    async listAIReviewFindings(limit = 20) {
+        return this.collection
+            .find({ detectionSource: 'ai_review' })
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .toArray();
+    }
+    /** 自动处罚的扣分没有写成功：改回“标记待复核”，避免记录与信誉不一致 */
+    async downgradeAutoPenalty(id) {
+        await this.collection.updateOne({ _id: (0, ensureObjectId_1.ensureObjectId)(id), autoPenalized: true }, { $set: { autoPenalized: false, actionTaken: 'flagged' } });
+    }
+    /** 若干安全记录的复核状态（判断复核是否涉及 AI 抽查的自动处罚） */
+    async findByIds(ids) {
+        if (!ids.length)
+            return [];
+        return this.collection.find({ _id: { $in: ids.map((id) => (0, ensureObjectId_1.ensureObjectId)(id)) } }).toArray();
     }
     async backfillExpiry(now = new Date()) {
         const result = await this.collection.updateMany({ expiresAt: { $exists: false } }, { $set: { expiresAt: this.getExpiryDate(now) } });

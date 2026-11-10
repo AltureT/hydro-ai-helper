@@ -12,6 +12,7 @@ import type {
   JailbreakLogPagination,
   JailbreakReviewStatus,
 } from './configTypes';
+import { findingActionKey } from './reviewLogic';
 
 interface JailbreakLogsViewerProps {
   logPagination: JailbreakLogPagination;
@@ -44,6 +45,68 @@ const DETECTION_SOURCE_OPTIONS: Array<{
   { value: 'topic_guard', labelKey: 'ai_helper_admin_jailbreak_source_topic_guard' },
   { value: 'ai_review', labelKey: 'ai_helper_admin_jailbreak_source_ai_review' },
 ];
+
+/** AI 抽查记录：来源、处置标记、证据片段（标出未通过核对的条目）与审核理由 */
+export const AIReviewFindingDetail: React.FC<{ log: JailbreakLogEntry }> = ({ log }) => {
+  const pending = (log.reviewStatus || 'pending') === 'pending';
+  const badge = (text: string, tone: 'warn' | 'error' | 'muted' | 'info') => {
+    const palette = {
+      warn: { background: '#fffbeb', color: '#92400e', border: '#fde68a' },
+      error: { background: COLORS.errorBg, color: COLORS.errorText, border: COLORS.errorBorder },
+      muted: { background: COLORS.bgPage, color: COLORS.textSecondary, border: COLORS.border },
+      info: { background: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+    }[tone];
+    return (
+      <span style={{
+        display: 'inline-block', padding: '1px 8px', borderRadius: '9999px', fontSize: '12px',
+        background: palette.background, color: palette.color, border: `1px solid ${palette.border}`,
+      }}>
+        {text}
+      </span>
+    );
+  };
+  return (
+    <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
+        {badge(i18n('ai_helper_admin_jailbreak_source_ai_review'), 'info')}
+        {log.confidence && badge(i18n(`ai_helper_review_confidence_${log.confidence}`), 'muted')}
+        {badge(
+          log.evidenceVerified ? i18n('ai_helper_review_evidence_verified') : i18n('ai_helper_review_evidence_unverified'),
+          log.evidenceVerified ? 'muted' : 'error',
+        )}
+        {log.autoPenalized
+          ? badge(i18n(findingActionKey({ autoPenalized: true, reviewStatus: log.reviewStatus || 'pending' })), log.reviewStatus === 'false_positive' ? 'muted' : 'warn')
+          : badge(pending ? i18n('ai_helper_review_flagged_pending') : i18n('ai_helper_review_flagged'), 'muted')}
+      </div>
+      {(log.evidence || []).length > 0 && (
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          {(log.evidence || []).map((item, index) => (
+            <li
+              key={`${item.ref}-${index}`}
+              style={{
+                padding: '8px 10px', borderRadius: RADIUS.sm, fontSize: '13px', lineHeight: 1.6,
+                background: COLORS.bgPage, borderLeft: `3px solid ${item.verified ? COLORS.border : COLORS.error}`,
+                color: COLORS.textPrimary, wordBreak: 'break-word',
+              }}
+            >
+              {i18n('ai_helper_review_evidence_quote', item.ref, item.snippet)}
+              {!item.verified && (
+                <span style={{ marginLeft: '6px', color: COLORS.errorText, fontSize: '12px' }}>
+                  {i18n('ai_helper_review_evidence_item_unverified')}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {log.reviewReason && (
+        <div style={{ fontSize: '13px', color: COLORS.textSecondary }}>
+          {i18n('ai_helper_review_reason', log.reviewReason)}
+        </div>
+      )}
+    </div>
+  );
+};
 
 function getDetectionSourceLabel(source: JailbreakLogFilters['detectionSource']): string {
   const option = DETECTION_SOURCE_OPTIONS.find((item) => item.value === source);
@@ -436,6 +499,8 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
               <option value="blocked">{i18n('ai_helper_admin_jailbreak_action_blocked')}</option>
               <option value="cooldown_60s">{i18n('ai_helper_admin_jailbreak_action_cooldown_60s')}</option>
               <option value="cooldown_5m">{i18n('ai_helper_admin_jailbreak_action_cooldown_5m')}</option>
+              <option value="flagged">{i18n('ai_helper_admin_jailbreak_action_flagged')}</option>
+              <option value="ai_review_penalty">{i18n('ai_helper_admin_jailbreak_action_ai_review_penalty')}</option>
             </select>
           </label>
           <label style={{ minWidth: '220px', flex: '1 1 220px', fontSize: '13px', color: COLORS.textSecondary }}>
@@ -581,7 +646,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             if (log.questionType) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_question_type')}${log.questionType}`);
             if (log.category) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_category')}${i18n(`ai_helper_admin_jailbreak_category_${log.category}`)}`);
             if (log.riskScore !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_risk_score')}${log.riskScore}`);
-            if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${log.actionTaken}`);
+            if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${i18n(`ai_helper_admin_jailbreak_action_${log.actionTaken}`)}`);
             if (log.detectionSource) {
               contextPieces.push(
                 `${i18n('ai_helper_admin_jailbreak_detection_source')}${getDetectionSourceLabel(log.detectionSource)}`
@@ -597,6 +662,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             );
             const contextText = contextPieces.join(' \u00b7 ');
             const isReviewing = reviewingId === log.id;
+            const fromAIReview = log.detectionSource === 'ai_review';
 
             return (
               <div key={log.id} style={{
@@ -614,15 +680,21 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                     {i18n('ai_helper_admin_jailbreak_time')}{new Date(log.createdAt).toLocaleString()}
                   </div>
                 </div>
-                <div style={{ marginTop: '6px', fontSize: '13px', color: COLORS.textSecondary }}>
-                  {i18n('ai_helper_admin_jailbreak_matched_rule')}<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
-                </div>
-                <pre style={{
-                  marginTop: '10px', padding: SPACING.md, backgroundColor: '#1f2937', color: '#f9fafb',
-                  borderRadius: RADIUS.md, fontSize: '13px', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                }}>
-                  {log.matchedText}
-                </pre>
+                {fromAIReview ? (
+                  <AIReviewFindingDetail log={log} />
+                ) : (
+                  <>
+                    <div style={{ marginTop: '6px', fontSize: '13px', color: COLORS.textSecondary }}>
+                      {i18n('ai_helper_admin_jailbreak_matched_rule')}<code style={{ fontFamily: 'monospace' }}>{log.matchedPattern}</code>
+                    </div>
+                    <pre style={{
+                      marginTop: '10px', padding: SPACING.md, backgroundColor: '#1f2937', color: '#f9fafb',
+                      borderRadius: RADIUS.md, fontSize: '13px', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    }}>
+                      {log.matchedText}
+                    </pre>
+                  </>
+                )}
                 {contextText && (
                   <div style={{ marginTop: '6px', fontSize: '12px', color: COLORS.textMuted }}>
                     {contextText}
@@ -642,17 +714,21 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
                   <button type="button" onClick={() => onCopyToClipboard(log.matchedText)} style={getButtonStyle('secondary')}>
                     {i18n('ai_helper_admin_jailbreak_copy_text')}
                   </button>
-                  <button type="button" onClick={() => onCopyToClipboard(log.matchedPattern)} style={getButtonStyle('secondary')}>
-                    {i18n('ai_helper_admin_jailbreak_copy_regex')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAppendPattern(log.matchedPattern)}
-                    disabled={appendPatternDisabled}
-                    style={getButtonStyle('ghost')}
-                  >
-                    {i18n('ai_helper_admin_jailbreak_append_rule')}
-                  </button>
+                  {!fromAIReview && (
+                    <>
+                      <button type="button" onClick={() => onCopyToClipboard(log.matchedPattern)} style={getButtonStyle('secondary')}>
+                        {i18n('ai_helper_admin_jailbreak_copy_regex')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onAppendPattern(log.matchedPattern)}
+                        disabled={appendPatternDisabled}
+                        style={getButtonStyle('ghost')}
+                      >
+                        {i18n('ai_helper_admin_jailbreak_append_rule')}
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     disabled={isReviewing || !isPendingReview}

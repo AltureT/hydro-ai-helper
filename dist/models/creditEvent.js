@@ -67,6 +67,33 @@ class CreditEventModel {
         });
         return uids.slice(0, limit);
     }
+    /** 某会话中的实时规则扣分（AI 抽查判断“涉及的消息已被实时规则扣过分”，FR-044） */
+    async listRealtimeForConversation(uid, conversationId) {
+        return this.collection
+            .find({ uid, conversationId, type: 'deduction', source: 'realtime' })
+            .sort({ at: 1 })
+            .toArray();
+    }
+    /** 学生尚未确认的 AI 抽查处罚通知（FR-046）；已撤销的不再提示 */
+    async pendingReviewNotices(uid, since, limit = 5) {
+        return this.collection
+            .find({
+            uid,
+            type: 'deduction',
+            source: 'ai_review',
+            at: { $gte: since },
+            revokedAt: { $exists: false },
+            noticeAckAt: { $exists: false },
+        })
+            .sort({ at: -1 })
+            .limit(limit)
+            .toArray();
+    }
+    /** 学生确认通知：只能确认本人的 AI 抽查扣分 */
+    async ackReviewNotice(id, uid, at) {
+        const result = await this.collection.updateOne({ _id: id, uid, source: 'ai_review', type: 'deduction' }, { $set: { noticeAckAt: at } });
+        return result.matchedCount > 0;
+    }
     /** 撤销关联到某条安全记录的扣分，返回被撤销的事件（撤销前） */
     async revokeBySafetyLog(safetyLogId, revokedBy, reason, at) {
         const filter = { safetyLogId, type: 'deduction', revokedAt: { $exists: false } };

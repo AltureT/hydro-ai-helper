@@ -18,7 +18,7 @@ import type {
 } from './configTypes';
 
 const EMPTY_SCENARIO_MODELS: ScenarioModelsState = {
-  studentChat: [], learningSummary: [], teachingAnalysis: [], testdataGeneration: [],
+  studentChat: [], learningSummary: [], teachingAnalysis: [], testdataGeneration: [], aiReview: [],
 };
 
 const EMPTY_TESTDATA_ROLE_MODELS: TestdataRoleModelsState = {
@@ -31,6 +31,7 @@ function parseScenarioModels(raw?: Partial<Record<AIScenarioKey, SelectedModel[]
     learningSummary: raw?.learningSummary || [],
     teachingAnalysis: raw?.teachingAnalysis || [],
     testdataGeneration: raw?.testdataGeneration || [],
+    aiReview: raw?.aiReview || [],
   };
 }
 
@@ -267,6 +268,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
           learningSummary: dropEndpoint(prev.scenarioModels.learningSummary),
           teachingAnalysis: dropEndpoint(prev.scenarioModels.teachingAnalysis),
           testdataGeneration: dropEndpoint(prev.scenarioModels.testdataGeneration),
+          aiReview: dropEndpoint(prev.scenarioModels.aiReview),
         },
         testdataRoleModels: {
           specPrimary: dropEndpoint(prev.testdataRoleModels.specPrimary),

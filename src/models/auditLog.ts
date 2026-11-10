@@ -40,6 +40,10 @@ export type AuditAction =
   | 'transfer.users'
   | 'credit.reset'
   | 'credit.revoke'
+  | 'review.run'
+  | 'review.breaker_trip'
+  | 'review.auto_penalty_disable'
+  | 'review.auto_penalty_resume'
   | 'settings.teacher_access';
 
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -61,6 +65,10 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'transfer.users',
   'credit.reset',
   'credit.revoke',
+  'review.run',
+  'review.breaker_trip',
+  'review.auto_penalty_disable',
+  'review.auto_penalty_resume',
   'settings.teacher_access',
 ] as const;
 

@@ -55,6 +55,10 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'transfer.users': 'ai_helper_um_action_transfer_users',
   'credit.reset': 'ai_helper_um_action_credit_reset',
   'credit.revoke': 'ai_helper_um_action_credit_revoke',
+  'review.run': 'ai_helper_um_action_review_run',
+  'review.breaker_trip': 'ai_helper_um_action_review_breaker_trip',
+  'review.auto_penalty_disable': 'ai_helper_um_action_review_disable',
+  'review.auto_penalty_resume': 'ai_helper_um_action_review_resume',
 };
 
 const TRANSFER_API = {
@@ -68,7 +72,7 @@ function actionLabel(action: string): string {
 
 function actionVariant(log: AuditLogItem): BadgeVariant {
   if (log.category === 'settings') return 'ok';
-  if (log.category === 'review') return 'warn';
+  if (log.category === 'review') return log.action === 'review.run' || log.action === 'review.auto_penalty_resume' ? 'info' : 'warn';
   if (log.category === 'quota') return log.action.endsWith('delete') || log.action.endsWith('clear') ? 'muted' : 'ok';
   if (log.category === 'transfer') return log.detail?.status === 'partial' ? 'warn' : 'info';
   if (log.category === 'credit') return log.action === 'credit.revoke' ? 'muted' : 'ok';
@@ -77,6 +81,7 @@ function actionVariant(log: AuditLogItem): BadgeVariant {
 
 const TARGET_LABEL_KEYS: Record<string, string> = {
   'config:groupTeacherAccessEnabled': 'ai_helper_um_action_teacher_access',
+  'review:auto_penalty': 'ai_helper_um_audit_target_auto_penalty',
 };
 
 function targetLabel(log: AuditLogItem): string {
@@ -89,7 +94,9 @@ function targetLabel(log: AuditLogItem): string {
     return `${what} → ${target}`;
   }
   const key = TARGET_LABEL_KEYS[`${log.target.type}:${log.target.id}`];
-  return key ? i18n(key) : log.target.label || log.target.id;
+  if (key) return i18n(key);
+  if (log.action === 'review.run') return log.target.label || i18n('ai_helper_review_trigger_all');
+  return log.target.label || log.target.id;
 }
 
 function describeQuotaAudit(log: AuditLogItem): string {
@@ -192,7 +199,23 @@ function describeCreditAudit(log: AuditLogItem): string {
   return i18n('ai_helper_um_audit_credit_revoke', category, String(Math.round(Number(d.deduction || 0) * 100) / 100));
 }
 
+/** AI 抽查审计：手动抽查对象、熔断时的误判统计 */
+function describeReviewAudit(log: AuditLogItem): string {
+  const d = log.detail || {};
+  if (log.action === 'review.run') {
+    if (Array.isArray(d.uids)) return i18n('ai_helper_um_audit_review_run_users', d.uids.length);
+    if (typeof d.conversationCount === 'number') return i18n('ai_helper_um_audit_review_run_conversations', d.conversationCount);
+    return i18n('ai_helper_um_audit_review_run_all');
+  }
+  const stats = (log.action === 'review.breaker_trip' ? d : d.trippedStats) as Record<string, unknown> | undefined;
+  if (stats && typeof stats.sample === 'number') {
+    return i18n('ai_helper_um_audit_review_breaker', Number(stats.falsePositives || 0), stats.sample, `${Math.round(Number(stats.rate || 0) * 1000) / 10}%`);
+  }
+  return '—';
+}
+
 function changeSummary(log: AuditLogItem): string {
+  if (log.category === 'review') return describeReviewAudit(log);
   if (log.category === 'group') return describeGroupAudit(log);
   if (log.category === 'quota') return describeQuotaAudit(log);
   if (log.category === 'transfer') return describeTransferAudit(log);
@@ -230,6 +253,12 @@ function detailLines(log: AuditLogItem): string[] {
   }
   if (summary.dismissed.length) lines.push(i18n('ai_helper_um_detail_dismissed', summary.dismissed.length, named(summary.dismissed)));
   if (log.action === 'group.meta' || log.action === 'settings.teacher_access') lines.push(changeSummary(log));
+  if (log.category === 'review') {
+    lines.push(changeSummary(log));
+    const uids = Array.isArray(log.detail?.uids) ? (log.detail.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number') : [];
+    if (uids.length) lines.push(i18n('ai_helper_um_audit_review_run_users_list', uids.length, named(uids)));
+    return lines;
+  }
   if (log.category === 'credit') {
     lines.push(changeSummary(log));
     const uids = Array.isArray(log.detail?.uids) ? (log.detail.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number') : [];
@@ -358,6 +387,7 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
             <option value="quota">{i18n('ai_helper_um_audit_category_quota')}</option>
             <option value="transfer">{i18n('ai_helper_um_audit_category_transfer')}</option>
             <option value="credit">{i18n('ai_helper_um_audit_category_credit')}</option>
+            <option value="review">{i18n('ai_helper_um_audit_category_review')}</option>
             <option value="settings">{i18n('ai_helper_um_audit_category_settings')}</option>
           </select>
         </label>

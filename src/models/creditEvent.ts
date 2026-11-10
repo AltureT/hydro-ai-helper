@@ -104,6 +104,39 @@ export class CreditEventModel {
     return (uids as number[]).slice(0, limit);
   }
 
+  /** 某会话中的实时规则扣分（AI 抽查判断“涉及的消息已被实时规则扣过分”，FR-044） */
+  async listRealtimeForConversation(uid: number, conversationId: ObjectIdType): Promise<CreditEvent[]> {
+    return this.collection
+      .find({ uid, conversationId, type: 'deduction', source: 'realtime' } as Filter<CreditEvent>)
+      .sort({ at: 1 })
+      .toArray();
+  }
+
+  /** 学生尚未确认的 AI 抽查处罚通知（FR-046）；已撤销的不再提示 */
+  async pendingReviewNotices(uid: number, since: Date, limit = 5): Promise<CreditEvent[]> {
+    return this.collection
+      .find({
+        uid,
+        type: 'deduction',
+        source: 'ai_review',
+        at: { $gte: since },
+        revokedAt: { $exists: false },
+        noticeAckAt: { $exists: false },
+      } as Filter<CreditEvent>)
+      .sort({ at: -1 })
+      .limit(limit)
+      .toArray();
+  }
+
+  /** 学生确认通知：只能确认本人的 AI 抽查扣分 */
+  async ackReviewNotice(id: ObjectIdType, uid: number, at: Date): Promise<boolean> {
+    const result = await this.collection.updateOne(
+      { _id: id, uid, source: 'ai_review', type: 'deduction' } as Filter<CreditEvent>,
+      { $set: { noticeAckAt: at } },
+    );
+    return result.matchedCount > 0;
+  }
+
   /** 撤销关联到某条安全记录的扣分，返回被撤销的事件（撤销前） */
   async revokeBySafetyLog(safetyLogId: ObjectIdType, revokedBy: number, reason: string, at: Date): Promise<CreditEvent[]> {
     const filter: Filter<CreditEvent> = { safetyLogId, type: 'deduction', revokedAt: { $exists: false } };

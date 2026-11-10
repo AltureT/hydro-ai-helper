@@ -24,7 +24,20 @@ export type SafetyDetectionSource =
   | 'topic_guard'
   | 'ai_review';
 
-export type SafetyAction = 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+/**
+ * 处置方式。`flagged`：AI 抽查标记待复核，未处罚；`ai_review_penalty`：AI 抽查自动处罚（只扣信誉，不设冷却）。
+ */
+export type SafetyAction = 'blocked' | 'cooldown_60s' | 'cooldown_5m' | 'flagged' | 'ai_review_penalty';
+
+/** 实时规则只会产生的处置 */
+export type RealtimeSafetyAction = Extract<SafetyAction, 'blocked' | 'cooldown_60s' | 'cooldown_5m'>;
+
+/** AI 抽查的证据：匿名消息编号 + 短片段，以及是否通过核对（FR-043） */
+export interface SafetyEvidence {
+  ref: string;
+  snippet: string;
+  verified: boolean;
+}
 
 export type SafetyReviewStatus = 'pending' | 'confirmed' | 'false_positive';
 

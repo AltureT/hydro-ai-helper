@@ -50,10 +50,11 @@ export interface SelectedModel {
  * - learningSummary: 批量学生学习总结
  * - teachingAnalysis: 教学分析报告（含挖空作业、深度诊断）
  * - testdataGeneration: 教师侧测试数据生成（建议配置强模型，正确性优先）
+ * - aiReview: AI 定期抽查的审核模型（独立于对话模型，FR-040）
  */
-export type AIScenario = 'studentChat' | 'learningSummary' | 'teachingAnalysis' | 'testdataGeneration';
+export type AIScenario = 'studentChat' | 'learningSummary' | 'teachingAnalysis' | 'testdataGeneration' | 'aiReview';
 
-export const AI_SCENARIOS: readonly AIScenario[] = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'] as const;
+export const AI_SCENARIOS: readonly AIScenario[] = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration', 'aiReview'] as const;
 
 /**
  * 按场景覆盖的模型链

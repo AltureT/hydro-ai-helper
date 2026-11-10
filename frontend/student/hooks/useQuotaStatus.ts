@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildApiUrl } from '../../utils/domainUtils';
 import {
+  dismissNotice,
   markAppealed,
   mergeSnapshot,
   refreshDelayMs,
@@ -78,5 +79,20 @@ export function useQuotaStatus() {
     }
   }, []);
 
-  return { status, refresh, applySnapshot, markBlocked, appeal };
+  /** 确认 AI 抽查处罚通知；先在本地移除，失败时下次刷新会重新出现 */
+  const ackNotice = useCallback(async (noticeId: string): Promise<void> => {
+    setStatus((prev) => dismissNotice(prev, noticeId));
+    try {
+      await fetch(buildApiUrl(`/ai-helper/quota-status/notices/${encodeURIComponent(noticeId)}/ack`), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({}),
+      });
+    } catch {
+      /* 网络失败：下次刷新时通知会再次出现 */
+    }
+  }, []);
+
+  return { status, refresh, applySnapshot, markBlocked, appeal, ackNotice };
 }

@@ -104,7 +104,7 @@ import {
   GroupAdminHandlerPriv,
 } from './handlers/groupAdminHandler';
 import { AuditListHandler, AuditListHandlerPriv } from './handlers/auditHandler';
-import { QuotaStatusHandler, QuotaStatusHandlerPriv } from './handlers/quotaStatusHandler';
+import { QuotaNoticeAckHandler, QuotaStatusHandler, QuotaStatusHandlerPriv } from './handlers/quotaStatusHandler';
 import {
   QuotaAdminHandlerPriv,
   QuotaGroupDetailHandler,
@@ -171,6 +171,12 @@ import { QuotaAdminService } from './services/quotaAdminService';
 import { UserOverviewService } from './services/userOverviewService';
 import { CreditService } from './services/creditService';
 import { CreditEventModel } from './models/creditEvent';
+import { ReviewRunModel } from './models/reviewRun';
+import { AIReviewService } from './services/aiReviewService';
+import { AIReviewScheduler, REVIEW_TICK_MS } from './services/aiReviewScheduler';
+import { createMultiModelClientFromConfig } from './services/openaiClient';
+import { ReviewAdminHandler, ReviewAdminHandlerPriv, ReviewAutoPenaltyHandler, ReviewRunHandler } from './handlers/reviewAdminHandler';
+import { hostname } from 'os';
 import { TransferService } from './services/transferService';
 console.log('[AI-Helper] services OK');
 
@@ -238,6 +244,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const quotaOverrideModel = new QuotaOverrideModel(db);
     const transferJobModel = new TransferJobModel(db);
     const creditEventModel = new CreditEventModel(db);
+    const reviewRunModel = new ReviewRunModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -295,6 +302,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
     await safeEnsureIndexes(transferJobModel, 'transferJobModel');
     await safeEnsureIndexes(creditEventModel, 'creditEventModel');
+    await safeEnsureIndexes(reviewRunModel, 'reviewRunModel');
 
     try {
       const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
@@ -402,6 +410,39 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('userOverviewService', new UserOverviewService(
       db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel, undefined, creditService,
     ));
+    // AI 定期抽查（US7）：审核模型使用场景 aiReview；调度不用 Hydro worker（plan R9）
+    ctx.provide('reviewRunModel', reviewRunModel);
+    const aiReviewService = new AIReviewService({
+      db,
+      runs: reviewRunModel,
+      messages: messageModel,
+      safetyLogs: jailbreakLogModel,
+      creditEvents: creditEventModel,
+      credit: creditService,
+      configModel: aiConfigModel,
+      audit: auditService,
+      quotaUsage: quotaUsageModel,
+      quota: quotaService,
+      createClient: () => createMultiModelClientFromConfig(ctx, undefined, 'aiReview'),
+      estimateCost: (modelName, promptTokens, completionTokens) => TokenUsageModel.estimateCost(modelName, promptTokens, completionTokens),
+    });
+    ctx.provide('aiReviewService', aiReviewService);
+    const aiReviewScheduler = new AIReviewScheduler(
+      aiReviewService, reviewRunModel, aiConfigModel,
+      `${hostname()}:${process.pid}:${Math.random().toString(36).slice(2, 8)}`,
+    );
+    ctx.provide('aiReviewScheduler', aiReviewScheduler);
+    const reviewTick = () => { aiReviewScheduler.tick().catch(() => undefined); };
+    const timerCtx = ctx as unknown as { setInterval?: (fn: () => void, ms: number) => unknown; setTimeout?: (fn: () => void, ms: number) => unknown };
+    if (typeof timerCtx.setInterval === 'function' && typeof timerCtx.setTimeout === 'function') {
+      // 随插件卸载自动清理
+      timerCtx.setTimeout(reviewTick, 60 * 1000);
+      timerCtx.setInterval(reviewTick, REVIEW_TICK_MS);
+    } else {
+      setTimeout(reviewTick, 60 * 1000).unref?.();
+      setInterval(reviewTick, REVIEW_TICK_MS).unref?.();
+    }
+
     ctx.provide('transferJobModel', transferJobModel);
     ctx.provide('transferService', new TransferService(
       db, groupMetaModel, quotaGroupModel, transferJobModel, auditService, quotaGroupResolver, ctx,
@@ -617,11 +658,18 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // 学生端：今日剩余次数（跨域合计）
     ctx.Route('ai_quota_status', '/ai-helper/quota-status', QuotaStatusHandler, QuotaStatusHandlerPriv);
     ctx.Route('ai_quota_status_domain', '/d/:domainId/ai-helper/quota-status', QuotaStatusHandler, QuotaStatusHandlerPriv);
+    // 学生确认 AI 抽查处罚通知
+    ctx.Route('ai_quota_notice_ack', '/ai-helper/quota-status/notices/:id/ack', QuotaNoticeAckHandler, QuotaStatusHandlerPriv);
+    ctx.Route('ai_quota_notice_ack_domain', '/d/:domainId/ai-helper/quota-status/notices/:id/ack', QuotaNoticeAckHandler, QuotaStatusHandlerPriv);
     // 额度组、个人覆盖、学生总览：插件级（不属于任何域），仅系统管理员
     ctx.Route('ai_admin_quota_groups', '/ai-helper/admin/quota/groups', QuotaGroupsHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_quota_group_detail', '/ai-helper/admin/quota/groups/detail', QuotaGroupDetailHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', QuotaOverridesHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_credit_reset', '/ai-helper/admin/credit/reset', CreditResetHandler, QuotaAdminHandlerPriv);
+    // AI 抽查：状态、手动触发、停用或恢复自动处罚（仅系统管理员）
+    ctx.Route('ai_admin_review', '/ai-helper/admin/review', ReviewAdminHandler, ReviewAdminHandlerPriv);
+    ctx.Route('ai_admin_review_run', '/ai-helper/admin/review/run', ReviewRunHandler, ReviewAdminHandlerPriv);
+    ctx.Route('ai_admin_review_auto_penalty', '/ai-helper/admin/review/auto-penalty', ReviewAutoPenaltyHandler, ReviewAdminHandlerPriv);
     ctx.Route('ai_admin_users', '/ai-helper/admin/users', UserOverviewHandler, UserOverviewHandlerPriv);
     ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', UserDetailHandler, UserOverviewHandlerPriv);
     // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）

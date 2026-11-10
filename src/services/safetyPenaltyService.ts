@@ -1,11 +1,11 @@
 import type { JailbreakLogModel } from '../models/jailbreakLog';
-import type { SafetyAction, SafetyViolationCategory } from '../types/safety';
+import type { RealtimeSafetyAction, SafetyViolationCategory } from '../types/safety';
 
 const PENALTY_WINDOW_MS = 10 * 60 * 1000;
 export const SAFETY_PENALTY_WINDOW_MS = PENALTY_WINDOW_MS;
 
 export interface SafetyPenaltyDecision {
-  action: SafetyAction;
+  action: RealtimeSafetyAction;
   blockedUntil?: Date;
   retryAfterSeconds?: number;
   currentCount: number;

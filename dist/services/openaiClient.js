@@ -208,7 +208,7 @@ class OpenAIClient {
                 { role: 'system', content: systemPrompt },
                 ...messages
             ],
-            temperature: limits_1.API_DEFAULTS.DEFAULT_TEMPERATURE,
+            temperature: options?.temperature ?? limits_1.API_DEFAULTS.DEFAULT_TEMPERATURE,
         };
         if (options?.maxTokens !== null) {
             payload.max_tokens = options?.maxTokens ?? limits_1.API_DEFAULTS.MAX_COMPLETION_TOKENS;

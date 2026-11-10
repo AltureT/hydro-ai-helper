@@ -57,7 +57,12 @@ describe('JailbreakLogModel', () => {
   describe('ensureIndexes', () => {
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(11);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(12);
+      // AI 抽查的最近发现、熔断样本与处罚去重
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { detectionSource: 1, createdAt: -1 },
+        { name: 'idx_source_createdAt' }
+      );
       // 跨域冷却与回退计数按用户查询
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { userId: 1, blockedUntil: -1 },

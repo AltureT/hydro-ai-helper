@@ -9,6 +9,7 @@ import type {
   SafetyAction,
   SafetyConfidence,
   SafetyDetectionSource,
+  SafetyEvidence,
   SafetyReviewStatus,
   SafetyViolationCategory,
 } from '../types/safety';
@@ -57,6 +58,12 @@ export interface JailbreakLog {
   studentAppealReason?: string;
   penaltyCounterId?: string;
   penaltyEventId?: string;
+  /** AI 抽查（PR5）：所属批次、证据、证据是否全部通过核对、是否已自动处罚、审核模型给出的理由 */
+  reviewRunId?: string;
+  evidence?: SafetyEvidence[];
+  evidenceVerified?: boolean;
+  autoPenalized?: boolean;
+  reviewReason?: string;
   expiresAt?: Date;
   createdAt: Date;
 }
@@ -78,7 +85,17 @@ export interface JailbreakLogCreateInput {
   createdAt?: Date;
   penaltyCounterId?: string;
   penaltyEventId?: string;
+  reviewRunId?: string;
+  evidence?: SafetyEvidence[];
+  evidenceVerified?: boolean;
+  autoPenalized?: boolean;
+  reviewReason?: string;
 }
+
+/** AI 抽查证据最多保存的条数与每条片段长度（FR-060：只保存必要的短片段） */
+export const MAX_REVIEW_EVIDENCE_ITEMS = 5;
+export const MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH = 120;
+export const MAX_REVIEW_REASON_LENGTH = 300;
 
 export interface JailbreakLogListFilters {
   reviewStatus?: SafetyReviewStatus;
@@ -245,6 +262,11 @@ export class JailbreakLogModel {
       { domainId: 1, problemId: 1, createdAt: -1 },
       { name: 'idx_domain_problem_createdAt' }
     );
+    // AI 抽查：最近发现、熔断样本、处罚去重（PR5）
+    await this.collection.createIndex(
+      { detectionSource: 1, createdAt: -1 },
+      { name: 'idx_source_createdAt' }
+    );
     await this.collection.createIndex(
       { expiresAt: 1 },
       { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 }
@@ -274,6 +296,17 @@ export class JailbreakLogModel {
       reviewStatus: 'pending',
       penaltyCounterId: data.penaltyCounterId,
       penaltyEventId: data.penaltyEventId,
+      ...(data.reviewRunId ? { reviewRunId: data.reviewRunId } : {}),
+      ...(data.evidence ? {
+        evidence: data.evidence.slice(0, MAX_REVIEW_EVIDENCE_ITEMS).map((item) => ({
+          ref: String(item.ref).slice(0, 16),
+          snippet: sanitizeSafetyLogSnippet(item.snippet).slice(0, MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH),
+          verified: !!item.verified,
+        })),
+      } : {}),
+      ...(data.evidenceVerified !== undefined ? { evidenceVerified: data.evidenceVerified } : {}),
+      ...(data.autoPenalized !== undefined ? { autoPenalized: data.autoPenalized } : {}),
+      ...(data.reviewReason ? { reviewReason: sanitizeSafetyLogSnippet(data.reviewReason).slice(0, MAX_REVIEW_REASON_LENGTH) } : {}),
       expiresAt: this.getExpiryDate(createdAt),
       createdAt
     };
@@ -446,12 +479,12 @@ export class JailbreakLogModel {
   async findForUser(
     ids: Array<string | ObjectIdType>,
     userId: number
-  ): Promise<Array<Pick<JailbreakLog, '_id' | 'domainId' | 'reviewStatus' | 'studentAppealedAt'>>> {
+  ): Promise<Array<Pick<JailbreakLog, '_id' | 'domainId' | 'problemId' | 'reviewStatus' | 'studentAppealedAt'>>> {
     if (!ids.length) return [];
     return this.collection
       .find(
         { _id: { $in: ids.map((id) => ensureObjectId(id)) }, userId },
-        { projection: { _id: 1, domainId: 1, reviewStatus: 1, studentAppealedAt: 1 } }
+        { projection: { _id: 1, domainId: 1, problemId: 1, reviewStatus: 1, studentAppealedAt: 1 } }
       )
       .toArray();
   }
@@ -492,6 +525,97 @@ export class JailbreakLogModel {
       studentAppealedAt: { $exists: true },
     });
     return existingAppeal ? 'already_submitted' : 'unavailable';
+  }
+
+  // ─── AI 抽查（PR5） ────────────────────────────────────────
+
+  /** 过去一段时间内规则中置信度命中所在的会话（候选来源 1，FR-041） */
+  async conversationsWithConfidenceSince(
+    confidence: SafetyConfidence,
+    since: Date,
+    limit = 2000
+  ): Promise<Array<{ conversationId: ObjectIdType; domainId?: string; userId?: number }>> {
+    const docs = await this.collection
+      .find(
+        { confidence, createdAt: { $gte: since }, conversationId: { $exists: true }, detectionSource: { $ne: 'ai_review' } },
+        { projection: { conversationId: 1, domainId: 1, userId: 1 } }
+      )
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+    return docs
+      .filter((doc) => !!doc.conversationId)
+      .map((doc) => ({ conversationId: doc.conversationId as ObjectIdType, domainId: doc.domainId, userId: doc.userId }));
+  }
+
+  /** 计数窗口内有过某类计数事件的用户（候选来源 2：出现过偏题提醒） */
+  async usersWithPenaltyEventsSince(group: SafetyPenaltyGroup, since: Date, limit = 5000): Promise<number[]> {
+    const docs = await this.penaltyCounterCollection
+      .find({ group, 'events.at': { $gte: since } }, { projection: { userId: 1 } })
+      .limit(limit)
+      .toArray();
+    return [...new Set(docs.map((doc) => doc.userId).filter((uid) => Number.isSafeInteger(uid)))];
+  }
+
+  /** 该会话是否已因 AI 抽查被处罚过（FR-044） */
+  async hasAutoPenaltyForConversation(conversationId: string | ObjectIdType): Promise<boolean> {
+    const doc = await this.collection.findOne(
+      { conversationId: ensureObjectId(conversationId), detectionSource: 'ai_review', autoPenalized: true },
+      { projection: { _id: 1 } }
+    );
+    return !!doc;
+  }
+
+  /** 该学生从某时刻起是否被 AI 抽查处罚过（FR-044：当天只处罚一次） */
+  async hasAutoPenaltyForUserSince(userId: number, since: Date): Promise<boolean> {
+    const doc = await this.collection.findOne(
+      { userId, detectionSource: 'ai_review', autoPenalized: true, createdAt: { $gte: since } },
+      { projection: { _id: 1 } }
+    );
+    return !!doc;
+  }
+
+  /** 熔断样本：最近已复核的自动处罚（只看恢复时间之后产生的处罚，FR-047） */
+  async recentReviewedAutoPenalties(
+    limit: number,
+    createdAfter?: Date
+  ): Promise<Array<Pick<JailbreakLog, '_id' | 'reviewStatus' | 'reviewedAt' | 'createdAt'>>> {
+    return this.collection
+      .find(
+        {
+          detectionSource: 'ai_review',
+          autoPenalized: true,
+          reviewStatus: { $in: ['confirmed', 'false_positive'] },
+          ...(createdAfter ? { createdAt: { $gt: createdAfter } } : {}),
+        },
+        { projection: { _id: 1, reviewStatus: 1, reviewedAt: 1, createdAt: 1 } }
+      )
+      .sort({ reviewedAt: -1 })
+      .limit(limit)
+      .toArray();
+  }
+
+  /** 抽查标签页的“最近发现” */
+  async listAIReviewFindings(limit = 20): Promise<JailbreakLog[]> {
+    return this.collection
+      .find({ detectionSource: 'ai_review' })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+  }
+
+  /** 自动处罚的扣分没有写成功：改回“标记待复核”，避免记录与信誉不一致 */
+  async downgradeAutoPenalty(id: string | ObjectIdType): Promise<void> {
+    await this.collection.updateOne(
+      { _id: ensureObjectId(id), autoPenalized: true },
+      { $set: { autoPenalized: false, actionTaken: 'flagged' } }
+    );
+  }
+
+  /** 若干安全记录的复核状态（判断复核是否涉及 AI 抽查的自动处罚） */
+  async findByIds(ids: Array<string | ObjectIdType>): Promise<JailbreakLog[]> {
+    if (!ids.length) return [];
+    return this.collection.find({ _id: { $in: ids.map((id) => ensureObjectId(id)) } }).toArray();
   }
 
   async backfillExpiry(now: Date = new Date()): Promise<number> {

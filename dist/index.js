@@ -90,6 +90,12 @@ const quotaAdminService_1 = require("./services/quotaAdminService");
 const userOverviewService_1 = require("./services/userOverviewService");
 const creditService_1 = require("./services/creditService");
 const creditEvent_1 = require("./models/creditEvent");
+const reviewRun_1 = require("./models/reviewRun");
+const aiReviewService_1 = require("./services/aiReviewService");
+const aiReviewScheduler_1 = require("./services/aiReviewScheduler");
+const openaiClient_1 = require("./services/openaiClient");
+const reviewAdminHandler_1 = require("./handlers/reviewAdminHandler");
+const os_1 = require("os");
 const transferService_1 = require("./services/transferService");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
@@ -148,6 +154,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const quotaOverrideModel = new quotaOverride_1.QuotaOverrideModel(db);
         const transferJobModel = new transferJob_1.TransferJobModel(db);
         const creditEventModel = new creditEvent_1.CreditEventModel(db);
+        const reviewRunModel = new reviewRun_1.ReviewRunModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -204,6 +211,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
         await safeEnsureIndexes(transferJobModel, 'transferJobModel');
         await safeEnsureIndexes(creditEventModel, 'creditEventModel');
+        await safeEnsureIndexes(reviewRunModel, 'reviewRunModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -298,6 +306,36 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('quotaService', quotaService);
         ctx.provide('quotaAdminService', new quotaAdminService_1.QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
         ctx.provide('userOverviewService', new userOverviewService_1.UserOverviewService(db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel, undefined, creditService));
+        // AI 定期抽查（US7）：审核模型使用场景 aiReview；调度不用 Hydro worker（plan R9）
+        ctx.provide('reviewRunModel', reviewRunModel);
+        const aiReviewService = new aiReviewService_1.AIReviewService({
+            db,
+            runs: reviewRunModel,
+            messages: messageModel,
+            safetyLogs: jailbreakLogModel,
+            creditEvents: creditEventModel,
+            credit: creditService,
+            configModel: aiConfigModel,
+            audit: auditService,
+            quotaUsage: quotaUsageModel,
+            quota: quotaService,
+            createClient: () => (0, openaiClient_1.createMultiModelClientFromConfig)(ctx, undefined, 'aiReview'),
+            estimateCost: (modelName, promptTokens, completionTokens) => tokenUsage_1.TokenUsageModel.estimateCost(modelName, promptTokens, completionTokens),
+        });
+        ctx.provide('aiReviewService', aiReviewService);
+        const aiReviewScheduler = new aiReviewScheduler_1.AIReviewScheduler(aiReviewService, reviewRunModel, aiConfigModel, `${(0, os_1.hostname)()}:${process.pid}:${Math.random().toString(36).slice(2, 8)}`);
+        ctx.provide('aiReviewScheduler', aiReviewScheduler);
+        const reviewTick = () => { aiReviewScheduler.tick().catch(() => undefined); };
+        const timerCtx = ctx;
+        if (typeof timerCtx.setInterval === 'function' && typeof timerCtx.setTimeout === 'function') {
+            // 随插件卸载自动清理
+            timerCtx.setTimeout(reviewTick, 60 * 1000);
+            timerCtx.setInterval(reviewTick, aiReviewScheduler_1.REVIEW_TICK_MS);
+        }
+        else {
+            setTimeout(reviewTick, 60 * 1000).unref?.();
+            setInterval(reviewTick, aiReviewScheduler_1.REVIEW_TICK_MS).unref?.();
+        }
         ctx.provide('transferJobModel', transferJobModel);
         ctx.provide('transferService', new transferService_1.TransferService(db, groupMetaModel, quotaGroupModel, transferJobModel, auditService, quotaGroupResolver, ctx));
         ctx.provide('errorReporter', errorReporter);
@@ -471,11 +509,18 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // 学生端：今日剩余次数（跨域合计）
         ctx.Route('ai_quota_status', '/ai-helper/quota-status', quotaStatusHandler_1.QuotaStatusHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
         ctx.Route('ai_quota_status_domain', '/d/:domainId/ai-helper/quota-status', quotaStatusHandler_1.QuotaStatusHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
+        // 学生确认 AI 抽查处罚通知
+        ctx.Route('ai_quota_notice_ack', '/ai-helper/quota-status/notices/:id/ack', quotaStatusHandler_1.QuotaNoticeAckHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
+        ctx.Route('ai_quota_notice_ack_domain', '/d/:domainId/ai-helper/quota-status/notices/:id/ack', quotaStatusHandler_1.QuotaNoticeAckHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
         // 额度组、个人覆盖、学生总览：插件级（不属于任何域），仅系统管理员
         ctx.Route('ai_admin_quota_groups', '/ai-helper/admin/quota/groups', quotaAdminHandler_1.QuotaGroupsHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_quota_group_detail', '/ai-helper/admin/quota/groups/detail', quotaAdminHandler_1.QuotaGroupDetailHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', quotaAdminHandler_1.QuotaOverridesHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_credit_reset', '/ai-helper/admin/credit/reset', quotaAdminHandler_1.CreditResetHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
+        // AI 抽查：状态、手动触发、停用或恢复自动处罚（仅系统管理员）
+        ctx.Route('ai_admin_review', '/ai-helper/admin/review', reviewAdminHandler_1.ReviewAdminHandler, reviewAdminHandler_1.ReviewAdminHandlerPriv);
+        ctx.Route('ai_admin_review_run', '/ai-helper/admin/review/run', reviewAdminHandler_1.ReviewRunHandler, reviewAdminHandler_1.ReviewAdminHandlerPriv);
+        ctx.Route('ai_admin_review_auto_penalty', '/ai-helper/admin/review/auto-penalty', reviewAdminHandler_1.ReviewAutoPenaltyHandler, reviewAdminHandler_1.ReviewAdminHandlerPriv);
         ctx.Route('ai_admin_users', '/ai-helper/admin/users', userOverviewHandler_1.UserOverviewHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
         ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', userOverviewHandler_1.UserDetailHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
         // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）

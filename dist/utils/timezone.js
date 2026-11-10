@@ -10,6 +10,9 @@ exports.isValidTimezone = isValidTimezone;
 exports.resolveTimezone = resolveTimezone;
 exports.dateKey = dateKey;
 exports.nextResetAt = nextResetAt;
+exports.minutesOfDay = minutesOfDay;
+exports.startOfDay = startOfDay;
+exports.previousDateKey = previousDateKey;
 exports.DEFAULT_TIMEZONE = 'Asia/Shanghai';
 const formatterCache = new Map();
 function getFormatter(timeZone) {
@@ -89,5 +92,22 @@ function nextResetAt(timeZone, now = new Date()) {
         ts += 60 * 60 * 1000;
     }
     return new Date(ts);
+}
+/** 指定时区下当日已过的分钟数（0–1439），用于判断每日任务是否到点 */
+function minutesOfDay(timeZone, now = new Date()) {
+    const p = zonedParts(resolveTimezone(timeZone), now);
+    return p.hour * 60 + p.minute;
+}
+/** 指定时区下当天零点（上一次额度重置时间） */
+function startOfDay(timeZone, now = new Date()) {
+    const start = nextResetAt(timeZone, new Date(now.getTime() - 24 * 60 * 60 * 1000));
+    // 跨夏令时的 23/25 小时日：结果晚于 now 时退回一天
+    return start.getTime() > now.getTime()
+        ? nextResetAt(timeZone, new Date(now.getTime() - 48 * 60 * 60 * 1000))
+        : start;
+}
+/** 前一天的日期键 */
+function previousDateKey(timeZone, now = new Date()) {
+    return dateKey(timeZone, new Date(startOfDay(timeZone, now).getTime() - 60 * 1000));
 }
 //# sourceMappingURL=timezone.js.map

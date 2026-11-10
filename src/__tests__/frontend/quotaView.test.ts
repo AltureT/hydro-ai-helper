@@ -1,6 +1,8 @@
 import {
   creditReduction,
+  dismissNotice,
   markAppealed,
+  noticeProblemUrl,
   violationTimeLabel,
   mergeSnapshot,
   quotaBlock,
@@ -94,5 +96,34 @@ describe('student credit view (FR-034)', () => {
     const next = markAppealed({ ...base, credit }, 'a');
     expect(next?.credit?.recentViolations[0]).toEqual(expect.objectContaining({ appealable: false, appealed: true }));
     expect(markAppealed({ ...base }, 'a')).toEqual({ ...base });
+  });
+});
+
+describe('student AI review notices (FR-046)', () => {
+  const notices = [
+    { id: 'n1', category: 'off_topic' as const, at: '2026-11-09T18:14:00.000Z', domainId: 'oi2023', problemId: 'P1000', safetyEventId: 's1', appealable: true, appealed: false },
+    { id: 'n2', category: 'answer_seeking' as const, at: '2026-11-08T18:14:00.000Z', domainId: 'system', problemId: '1001', safetyEventId: 's2', appealable: true, appealed: false },
+  ];
+
+  it('marks an appealed notice and its credit violation together', () => {
+    const credit = { m: 0.95, reduced: true, recoveryAt: null, recentViolations: [
+      { category: 'off_topic' as const, at: notices[0].at, source: 'ai_review' as const, safetyEventId: 's1', appealable: true, appealed: false },
+    ] };
+    const next = markAppealed({ ...base, credit, notices }, 's1');
+    expect(next?.notices?.[0]).toMatchObject({ appealable: false, appealed: true });
+    expect(next?.notices?.[1]).toMatchObject({ appealable: true });
+    expect(next?.credit?.recentViolations[0]).toMatchObject({ appealed: true });
+  });
+
+  it('removes a dismissed notice locally', () => {
+    expect(dismissNotice({ ...base, notices }, 'n1')?.notices?.map((n) => n.id)).toEqual(['n2']);
+    expect(dismissNotice({ ...base }, 'n1')).toEqual({ ...base });
+    expect(dismissNotice(null, 'n1')).toBeNull();
+  });
+
+  it('links to the problem where it happened', () => {
+    expect(noticeProblemUrl(notices[0])).toBe('/d/oi2023/p/P1000');
+    expect(noticeProblemUrl(notices[1])).toBe('/p/1001');
+    expect(noticeProblemUrl({ domainId: 'oi2023' })).toBeNull();
   });
 });

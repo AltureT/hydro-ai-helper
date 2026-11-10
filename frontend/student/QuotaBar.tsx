@@ -10,6 +10,7 @@ import { i18n } from '../utils/i18n';
 import { Icon } from '../components/Icon';
 import {
   creditReduction,
+  noticeProblemUrl,
   remainingPercent,
   resetLabel,
   violationTimeLabel,
@@ -148,6 +149,67 @@ export const CreditNotice: React.FC<{
           <div style={{ color: C.muted, marginTop: '4px' }}>{i18n('ai_helper_student_credit_appeal_hint')}</div>
         </div>
       )}
+    </div>
+  );
+};
+
+/** AI 抽查处罚通知（FR-046，设计稿“学生端面板”②）：原因、查看那道题、申诉、知道了 */
+export const ReviewNoticeBanner: React.FC<{
+  status: QuotaStatusView | null;
+  onAppeal: (safetyEventId: string) => Promise<{ ok: boolean; message?: string }>;
+  onAck: (noticeId: string) => void;
+}> = ({ status, onAppeal, onAck }) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const notice = status?.notices?.[0];
+  if (!notice) return null;
+  const more = (status?.notices?.length || 0) - 1;
+  const problemUrl = noticeProblemUrl(notice);
+  const appeal = async () => {
+    if (!notice.safetyEventId || busy) return;
+    setBusy(true);
+    setError(null);
+    const result = await onAppeal(notice.safetyEventId);
+    setBusy(false);
+    if (!result.ok) setError(result.message || i18n('ai_helper_err_safety_appeal_failed'));
+  };
+  const buttonStyle: React.CSSProperties = {
+    border: '1px solid #fcd34d', background: '#fff', color: '#92400e', borderRadius: '8px',
+    padding: '3px 10px', fontSize: '12px', cursor: 'pointer', fontFamily: 'inherit', textDecoration: 'none', lineHeight: 1.5,
+  };
+  return (
+    <div
+      role="status"
+      style={{
+        margin: '12px 16px 0', padding: '10px 12px', borderRadius: '10px', background: '#fffbeb',
+        border: '1px solid #fde68a', color: '#92400e', fontSize: '12.5px', lineHeight: 1.6,
+        display: 'flex', flexDirection: 'column', gap: '8px', flexShrink: 0,
+      }}
+    >
+      <div>
+        <strong>{i18n('ai_helper_student_review_notice_title')}</strong>
+        {i18n(
+          'ai_helper_student_review_notice_body',
+          violationTimeText(notice.at),
+          i18n(`ai_helper_admin_jailbreak_category_${notice.category}`),
+        )}
+        {more > 0 && <span style={{ color: '#b45309' }}>{i18n('ai_helper_student_review_notice_more', more)}</span>}
+      </div>
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+        {problemUrl && (
+          <a href={problemUrl} style={buttonStyle}>{i18n('ai_helper_student_review_notice_view_problem')}</a>
+        )}
+        {notice.appealable && notice.safetyEventId && (
+          <button type="button" onClick={appeal} disabled={busy} style={{ ...buttonStyle, opacity: busy ? 0.65 : 1 }}>
+            {i18n(busy ? 'ai_helper_safety_appeal_submitting' : 'ai_helper_student_review_notice_appeal')}
+          </button>
+        )}
+        {notice.appealed && <span>{i18n('ai_helper_student_credit_appealed')}</span>}
+        <button type="button" onClick={() => onAck(notice.id)} style={{ ...buttonStyle, marginLeft: 'auto' }}>
+          {i18n('ai_helper_student_review_notice_ack')}
+        </button>
+      </div>
+      {error && <div style={{ color: C.danger }}>{error}</div>}
     </div>
   );
 };
