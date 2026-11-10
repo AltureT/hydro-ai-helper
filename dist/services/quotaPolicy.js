@@ -14,6 +14,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.isOverrideActive = isOverrideActive;
 exports.defaultLimitFromConfig = defaultLimitFromConfig;
 exports.resolveBase = resolveBase;
+exports.explainBase = explainBase;
 exports.effective = effective;
 function isNonNegativeInt(value) {
     return typeof value === 'number' && Number.isInteger(value) && value >= 0;
@@ -50,6 +51,20 @@ function resolveBase(override, grantLimits, capLimits, defaultLimit, now = new D
         }
     }
     return { base, source, capped };
+}
+/** resolveBase 的可解释版本：同时指出是哪个组决定了结果（FR-026） */
+function explainBase(override, groups, defaultLimit, now = new Date()) {
+    const active = groups.filter((group) => group.enabled && isNonNegativeInt(group.dailyLimit));
+    const grants = active.filter((group) => group.mode === 'grant');
+    const caps = active.filter((group) => group.mode === 'cap');
+    const result = resolveBase(override, grants.map((group) => group.dailyLimit), caps.map((group) => group.dailyLimit), defaultLimit, now);
+    if (result.source === 'override')
+        return { ...result, grantGroupId: null, capGroupId: null };
+    const grant = grants.reduce((best, group) => (!best || group.dailyLimit > best.dailyLimit ? group : best), null);
+    const cap = result.capped
+        ? caps.reduce((best, group) => (!best || group.dailyLimit < best.dailyLimit ? group : best), null)
+        : null;
+    return { ...result, grantGroupId: grant?.id ?? null, capGroupId: cap?.id ?? null };
 }
 /** 信誉系数换算当日有效额度 */
 function effective(base, m, guarantee) {

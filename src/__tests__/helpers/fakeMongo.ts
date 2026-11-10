@@ -35,9 +35,21 @@ function unsetPath(doc: Doc, path: string): void {
   delete target[keys[keys.length - 1]];
 }
 
+function isPlainObject(value: any): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && !(value instanceof ObjectId) && !(value instanceof Date) && !(value instanceof RegExp);
+}
+
+/** 与 MongoDB 一致：内嵌文档按字段（含顺序）整体比较 */
 function eq(a: any, b: any): boolean {
   if (a instanceof ObjectId || b instanceof ObjectId) return String(a) === String(b);
   if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((item, i) => eq(item, b[i]));
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    return ka.length === kb.length && ka.every((key, i) => key === kb[i] && eq(a[key], b[key]));
+  }
   return a === b;
 }
 
@@ -117,9 +129,12 @@ function evalExpr(doc: Doc, expr: any): any {
 }
 
 export function matches(doc: Doc, filter: Doc = {}): boolean {
-  return Object.entries(filter).every(([key, cond]) => (
-    key === '$expr' ? !!evalExpr(doc, cond) : matchCondition(getPath(doc, key), cond)
-  ));
+  return Object.entries(filter).every(([key, cond]) => {
+    if (key === '$expr') return !!evalExpr(doc, cond);
+    if (key === '$or') return (cond as Doc[]).some((sub) => matches(doc, sub));
+    if (key === '$and') return (cond as Doc[]).every((sub) => matches(doc, sub));
+    return matchCondition(getPath(doc, key), cond);
+  });
 }
 
 function applyUpdate(doc: Doc, update: Doc, inserting: boolean): void {
@@ -259,6 +274,23 @@ export function createFakeCollection(initial: Doc[] = []) {
       if (index < 0) return null;
       const [removed] = docs.splice(index, 1);
       return removed;
+    }),
+    deleteOne: jest.fn(async (filter: Doc) => {
+      const index = docs.findIndex((item) => matches(item, filter));
+      if (index < 0) return { deletedCount: 0 };
+      docs.splice(index, 1);
+      return { deletedCount: 1 };
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    distinct: jest.fn(async (field: string, filter: Doc = {}, _options?: Doc) => {
+      const out: any[] = [];
+      for (const doc of docs.filter((item) => matches(item, filter))) {
+        const value = getPath(doc, field);
+        for (const item of Array.isArray(value) ? value : [value]) {
+          if (item !== undefined && !out.some((x) => eq(x, item))) out.push(item);
+        }
+      }
+      return out;
     }),
   };
   return collection;

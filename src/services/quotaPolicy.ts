@@ -73,6 +73,46 @@ export function resolveBase(
   return { base, source, capped };
 }
 
+/** 参与计算的额度组（停用的组不参与） */
+export interface PolicyGroup {
+  id: string;
+  mode: 'grant' | 'cap';
+  dailyLimit: number;
+  enabled: boolean;
+}
+
+export interface QuotaExplainBase extends QuotaBaseResult {
+  /** 决定基础额度的授予型组（取最大的那个）；个人覆盖生效或不属于授予型组时为 null */
+  grantGroupId: string | null;
+  /** 压低结果的限制型组（取最小的那个）；未被限制时为 null */
+  capGroupId: string | null;
+}
+
+/** resolveBase 的可解释版本：同时指出是哪个组决定了结果（FR-026） */
+export function explainBase(
+  override: QuotaOverrideInput | null | undefined,
+  groups: PolicyGroup[],
+  defaultLimit: QuotaLimit,
+  now: Date = new Date(),
+): QuotaExplainBase {
+  const active = groups.filter((group) => group.enabled && isNonNegativeInt(group.dailyLimit));
+  const grants = active.filter((group) => group.mode === 'grant');
+  const caps = active.filter((group) => group.mode === 'cap');
+  const result = resolveBase(
+    override,
+    grants.map((group) => group.dailyLimit),
+    caps.map((group) => group.dailyLimit),
+    defaultLimit,
+    now,
+  );
+  if (result.source === 'override') return { ...result, grantGroupId: null, capGroupId: null };
+  const grant = grants.reduce<PolicyGroup | null>((best, group) => (!best || group.dailyLimit > best.dailyLimit ? group : best), null);
+  const cap = result.capped
+    ? caps.reduce<PolicyGroup | null>((best, group) => (!best || group.dailyLimit < best.dailyLimit ? group : best), null)
+    : null;
+  return { ...result, grantGroupId: grant?.id ?? null, capGroupId: cap?.id ?? null };
+}
+
 /** 信誉系数换算当日有效额度 */
 export function effective(base: QuotaLimit, m: number, guarantee: number): QuotaLimit {
   if (base === null) return null;

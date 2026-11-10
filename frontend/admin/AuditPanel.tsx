@@ -27,6 +27,7 @@ import {
   type GroupListResponse,
 } from './userManagementLogic';
 import { describeGroupAudit } from './GroupManagerPanel';
+import { formatGroupLimit, formatOverrideSetting } from './quotaAdminUi';
 import { Badge, Drawer, TableScroll, labelStyle, linkButtonStyle, mutedTextStyle, type BadgeVariant } from './userManagementUi';
 
 interface AuditPanelProps {
@@ -40,6 +41,15 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'group.drift_restore': 'ai_helper_um_action_group_drift_restore',
   'group.drift_dismiss': 'ai_helper_um_action_group_drift_dismiss',
   'group.meta': 'ai_helper_um_action_group_meta',
+  'quota.group_create': 'ai_helper_um_action_quota_group_create',
+  'quota.group_update': 'ai_helper_um_action_quota_group_update',
+  'quota.group_delete': 'ai_helper_um_action_quota_group_delete',
+  'quota.group_member_add': 'ai_helper_um_action_quota_member_add',
+  'quota.group_member_remove': 'ai_helper_um_action_quota_member_remove',
+  'quota.group_link': 'ai_helper_um_action_quota_link',
+  'quota.group_unlink': 'ai_helper_um_action_quota_unlink',
+  'quota.override_set': 'ai_helper_um_action_override_set',
+  'quota.override_clear': 'ai_helper_um_action_override_clear',
   'settings.teacher_access': 'ai_helper_um_action_teacher_access',
 };
 
@@ -50,6 +60,7 @@ function actionLabel(action: string): string {
 function actionVariant(log: AuditLogItem): BadgeVariant {
   if (log.category === 'settings') return 'ok';
   if (log.category === 'review') return 'warn';
+  if (log.category === 'quota') return log.action.endsWith('delete') || log.action.endsWith('clear') ? 'muted' : 'ok';
   return 'info';
 }
 
@@ -62,8 +73,47 @@ function targetLabel(log: AuditLogItem): string {
   return key ? i18n(key) : log.target.label || log.target.id;
 }
 
+function describeQuotaAudit(log: AuditLogItem): string {
+  const d = log.detail || {};
+  const limitText = (mode: unknown, limit: unknown) => (
+    mode === 'grant' || mode === 'cap' ? formatGroupLimit(mode, Number(limit)) : String(limit ?? '')
+  );
+  switch (log.action) {
+    case 'quota.group_create':
+      return `${d.mode === 'grant' ? i18n('ai_helper_um_qgroup_type_grant') : i18n('ai_helper_um_qgroup_type_cap')} · ${limitText(d.mode, d.dailyLimit)}`;
+    case 'quota.group_update': {
+      const before = (d.before || {}) as Record<string, unknown>;
+      const after = (d.after || {}) as Record<string, unknown>;
+      const parts: string[] = [];
+      if ('name' in after) parts.push(`${String(before.name)} → ${String(after.name)}`);
+      if ('dailyLimit' in after || 'mode' in after) parts.push(i18n('ai_helper_um_audit_quota_limit_change', String(before.dailyLimit ?? '—'), String(after.dailyLimit ?? '—')));
+      if ('enabled' in after) parts.push(after.enabled ? i18n('ai_helper_um_audit_change_enabled') : i18n('ai_helper_um_audit_change_disabled'));
+      return parts.join('；') || '—';
+    }
+    case 'quota.group_delete':
+      return i18n('ai_helper_um_audit_quota_deleted', Array.isArray(d.memberUids) ? d.memberUids.length : 0);
+    case 'quota.group_member_add':
+      return i18n('ai_helper_um_audit_change_add', summarizeAuditDetail(log).added.length);
+    case 'quota.group_member_remove':
+      return i18n('ai_helper_um_audit_change_remove', summarizeAuditDetail(log).removed.length);
+    case 'quota.group_link':
+    case 'quota.group_unlink':
+      return `${String(d.name)} @ ${String(d.domainId)}`;
+    case 'quota.override_set': {
+      const count = Array.isArray(d.uids) ? d.uids.length : 0;
+      const setting = formatOverrideSetting(d.mode === 'disabled' ? 'disabled' : 'limit', Number(d.dailyLimit));
+      return i18n('ai_helper_um_audit_override_set', count, setting, String(d.reason || ''));
+    }
+    case 'quota.override_clear':
+      return i18n('ai_helper_um_audit_override_clear', Array.isArray(d.uids) ? d.uids.length : 0);
+    default:
+      return '—';
+  }
+}
+
 function changeSummary(log: AuditLogItem): string {
   if (log.category === 'group') return describeGroupAudit(log);
+  if (log.category === 'quota') return describeQuotaAudit(log);
   if (log.action === 'settings.teacher_access') {
     return log.detail?.to ? i18n('ai_helper_um_audit_change_enabled') : i18n('ai_helper_um_audit_change_disabled');
   }
@@ -84,6 +134,11 @@ function detailLines(log: AuditLogItem): string[] {
   }
   if (summary.dismissed.length) lines.push(i18n('ai_helper_um_detail_dismissed', summary.dismissed.length, named(summary.dismissed)));
   if (log.action === 'group.meta' || log.action === 'settings.teacher_access') lines.push(changeSummary(log));
+  if (log.category === 'quota' && !log.action.startsWith('quota.group_member')) {
+    lines.push(changeSummary(log));
+    const uids = Array.isArray(log.detail?.uids) ? (log.detail.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number') : [];
+    if (uids.length) lines.push(i18n('ai_helper_um_audit_override_users', uids.length, named(uids)));
+  }
   if (!lines.length) lines.push(i18n('ai_helper_um_detail_no_change'));
   return lines;
 }
@@ -169,6 +224,7 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
           <select value={category} onChange={(event) => setCategory(event.target.value)} style={{ ...getInputStyle(), width: 'auto' }}>
             <option value="">{i18n('ai_helper_um_all')}</option>
             <option value="group">{i18n('ai_helper_um_audit_category_group')}</option>
+            <option value="quota">{i18n('ai_helper_um_audit_category_quota')}</option>
             <option value="settings">{i18n('ai_helper_um_audit_category_settings')}</option>
           </select>
         </label>

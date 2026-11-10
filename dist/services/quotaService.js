@@ -1,9 +1,9 @@
 "use strict";
 /**
- * QuotaService - 每日 AI 次数（US2）
+ * QuotaService - 每日 AI 次数（US2、US3）
  *
- * 解析有效额度 → 预占 → 确认 / 退还，并提供学生端状态。
- * 额度组、个人覆盖、信誉系数通过 QuotaPolicySources 接入（PR3 / PR4），本版本只有全局默认。
+ * 解析有效额度 → 预占 → 确认 / 退还，并提供学生端状态与管理端的额度来源说明（explain）。
+ * 额度组、个人覆盖、信誉系数通过 QuotaPolicySources 接入；信誉系数随 PR4 加入。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.QuotaService = void 0;
@@ -27,6 +27,31 @@ class QuotaService {
         this.sources = sources;
         this.clock = clock;
     }
+    memberships(uid) {
+        return this.sources.getGroupMemberships ? this.sources.getGroupMemberships(uid) : Promise.resolve([]);
+    }
+    multiplier(uid, now) {
+        return this.sources.getCreditMultiplier ? this.sources.getCreditMultiplier(uid, now) : Promise.resolve(1);
+    }
+    build(override, groups, m, quotaConfig, now) {
+        const defaultLimit = (0, quotaPolicy_1.defaultLimitFromConfig)(quotaConfig.dailyMessageLimit);
+        const result = (0, quotaPolicy_1.explainBase)(override, groups, defaultLimit, now);
+        return {
+            limit: (0, quotaPolicy_1.effective)(result.base, m, quotaConfig.guaranteeCount),
+            base: result.base,
+            source: result.source,
+            capped: result.capped,
+            disabled: result.base === 0,
+            defaultLimit,
+            guaranteeCount: quotaConfig.guaranteeCount,
+            m,
+            override: override ? { ...override, active: (0, quotaPolicy_1.isOverrideActive)(override, now) } : null,
+            groups: groups.map((group) => ({
+                ...group,
+                applied: group.id === result.grantGroupId || group.id === result.capGroupId,
+            })),
+        };
+    }
     /** 解析用户当前的有效额度；传入已读取的配置可省去一次查询 */
     async resolve(uid, config) {
         const cfg = config === undefined ? await this.configModel.getConfig() : config;
@@ -34,19 +59,57 @@ class QuotaService {
         const now = this.clock();
         const [override, groups, m] = await Promise.all([
             this.sources.getOverride ? this.sources.getOverride(uid, now) : Promise.resolve(null),
-            this.sources.getGroupLimits ? this.sources.getGroupLimits(uid) : Promise.resolve({ grants: [], caps: [] }),
-            this.sources.getCreditMultiplier ? this.sources.getCreditMultiplier(uid, now) : Promise.resolve(1),
+            this.memberships(uid),
+            this.multiplier(uid, now),
         ]);
-        const { base, source, capped } = (0, quotaPolicy_1.resolveBase)(override, groups.grants, groups.caps, (0, quotaPolicy_1.defaultLimitFromConfig)(quotaConfig.dailyMessageLimit), now);
+        const explained = this.build(override, groups, m, quotaConfig, now);
         return {
-            limit: (0, quotaPolicy_1.effective)(base, m, quotaConfig.guaranteeCount),
-            base,
-            source,
-            capped,
+            limit: explained.limit,
+            base: explained.base,
+            source: explained.source,
+            capped: explained.capped,
             m,
             quotaConfig,
             timeoutSeconds: cfg?.timeoutSeconds || 30,
         };
+    }
+    /** 管理端：一个用户的有效额度、来源与今日用量（FR-026） */
+    async explain(uid) {
+        const result = await this.explainMany([uid]);
+        return result.get(uid);
+    }
+    /** 管理端批量版本（学生总览一页最多 50 人）：覆盖与用量各一次批量查询 */
+    async explainMany(uids) {
+        const out = new Map();
+        if (!uids.length)
+            return out;
+        const cfg = await this.configModel.getConfig();
+        const quotaConfig = (0, configSections_1.normalizeQuotaConfig)(cfg?.quotaConfig);
+        const now = this.clock();
+        const tz = quotaConfig.timezone;
+        const date = (0, timezone_1.dateKey)(tz, now);
+        const resetAt = (0, timezone_1.nextResetAt)(tz, now).toISOString();
+        const overridesPromise = this.sources.getOverrides
+            ? this.sources.getOverrides(uids, now)
+            : Promise.all(uids.map(async (uid) => [uid, this.sources.getOverride ? await this.sources.getOverride(uid, now) : null]))
+                .then((pairs) => new Map(pairs.filter((pair) => !!pair[1])));
+        const [overrides, usage, perUser] = await Promise.all([
+            overridesPromise,
+            this.usage.getMany(uids, date),
+            Promise.all(uids.map(async (uid) => ({ uid, groups: await this.memberships(uid), m: await this.multiplier(uid, now) }))),
+        ]);
+        for (const { uid, groups, m } of perUser) {
+            const explained = this.build(overrides.get(uid) || null, groups, m, quotaConfig, now);
+            const used = usage.get(uid)?.used ?? 0;
+            out.set(uid, {
+                ...explained,
+                used,
+                remaining: explained.limit === null ? null : Math.max(0, explained.limit - used),
+                resetAt,
+                timezone: tz,
+            });
+        }
+        return out;
     }
     /** 请求开始时预占一次；被拒时不留下任何数据 */
     async reserve(uid, config) {

@@ -1115,7 +1115,11 @@ describe('ChatHandler daily quota', () => {
 
   it('rejects with AI_DISABLED_BY_ADMIN when the effective base is zero', async () => {
     const handler = createMockHandler();
-    withQuota(handler, { sources: { getGroupLimits: async () => ({ grants: [], caps: [0] }) } });
+    withQuota(handler, {
+      sources: {
+        getGroupMemberships: async () => [{ id: 'g', name: 'pause', mode: 'cap' as const, dailyLimit: 0, enabled: true, via: [{ kind: 'direct' as const }] }],
+      },
+    });
 
     await handler.post();
 

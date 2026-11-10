@@ -11,7 +11,7 @@ exports.parseAuditFilters = parseAuditFilters;
 const hydrooj_1 = require("hydrooj");
 const auditLog_1 = require("../models/auditLog");
 const groupAdminHandler_1 = require("./groupAdminHandler");
-const DETAIL_UID_KEYS = ['added', 'removed', 'joined', 'left', 'dismissed', 'ledgerRemoved'];
+const DETAIL_UID_KEYS = ['added', 'removed', 'joined', 'left', 'dismissed', 'ledgerRemoved', 'uids', 'memberUids'];
 const TARGET_TYPES = ['group', 'user', 'quota_group', 'config', 'review', 'transfer'];
 const MAX_NAMED_UIDS_PER_LOG = 50;
 function parseDate(value, endOfDay) {

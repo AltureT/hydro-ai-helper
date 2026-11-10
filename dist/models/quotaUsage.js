@@ -46,6 +46,14 @@ class QuotaUsageModel {
             .toArray();
         return new Map(docs.map((doc) => [doc.uid, doc]));
     }
+    /** 当天已用 ≥ minUsed 次的用户（走 { date, used } 索引），用于总览的用量筛选 */
+    async usersWithUsage(date, minUsed = 1, limit = 20000) {
+        const docs = await this.collection
+            .find({ date, used: { $gte: Math.max(1, minUsed) } }, { projection: { uid: 1, used: 1 } })
+            .limit(limit)
+            .toArray();
+        return docs.map((doc) => ({ uid: doc.uid, used: doc.used }));
+    }
     async ensureDoc(uid, date, now) {
         try {
             await this.collection.updateOne({ _id: quotaUsageId(uid, date) }, {

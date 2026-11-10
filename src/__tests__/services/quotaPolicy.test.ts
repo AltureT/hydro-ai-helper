@@ -1,4 +1,4 @@
-import { defaultLimitFromConfig, effective, isOverrideActive, resolveBase } from '../../services/quotaPolicy';
+import { defaultLimitFromConfig, effective, explainBase, isOverrideActive, resolveBase } from '../../services/quotaPolicy';
 
 const now = new Date('2026-11-10T08:00:00Z');
 const later = new Date('2026-11-17T00:00:00Z');
@@ -66,5 +66,36 @@ describe('defaultLimitFromConfig', () => {
     expect(defaultLimitFromConfig(undefined)).toBeNull();
     expect(defaultLimitFromConfig(-5)).toBeNull();
     expect(defaultLimitFromConfig(20)).toBe(20);
+  });
+});
+
+describe('explainBase', () => {
+  const now = new Date('2026-11-10T08:00:00Z');
+  const g = (id: string, mode: 'grant' | 'cap', dailyLimit: number, enabled = true) => ({ id, mode, dailyLimit, enabled });
+
+  it('names the grant group that wins (largest) and the cap group that applies (smallest)', () => {
+    const result = explainBase(null, [g('team', 'grant', 60), g('ta', 'grant', 40), g('watch', 'cap', 5), g('soft', 'cap', 30)], 20, now);
+    expect(result).toEqual({ base: 5, source: 'grant', capped: true, grantGroupId: 'team', capGroupId: 'watch' });
+  });
+
+  it('ignores disabled groups', () => {
+    const result = explainBase(null, [g('team', 'grant', 60, false), g('pause', 'cap', 0, false)], 20, now);
+    expect(result).toEqual({ base: 20, source: 'default', capped: false, grantGroupId: null, capGroupId: null });
+  });
+
+  it('reports no cap group when the cap is not lower than the base', () => {
+    const result = explainBase(null, [g('team', 'grant', 60), g('soft', 'cap', 80)], 20, now);
+    expect(result).toEqual(expect.objectContaining({ base: 60, capped: false, grantGroupId: 'team', capGroupId: null }));
+  });
+
+  it('caps an unlimited default', () => {
+    expect(explainBase(null, [g('watch', 'cap', 5)], null, now)).toEqual(
+      expect.objectContaining({ base: 5, source: 'default', capped: true, capGroupId: 'watch' }),
+    );
+  });
+
+  it('lets an active override win over every group', () => {
+    const result = explainBase({ mode: 'limit', dailyLimit: 100 }, [g('team', 'grant', 60), g('watch', 'cap', 5)], 20, now);
+    expect(result).toEqual({ base: 100, source: 'override', capped: false, grantGroupId: null, capGroupId: null });
   });
 });
