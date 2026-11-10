@@ -27,6 +27,15 @@ export type AuditAction =
   | 'group.drift_restore'
   | 'group.drift_dismiss'
   | 'group.meta'
+  | 'quota.group_create'
+  | 'quota.group_update'
+  | 'quota.group_delete'
+  | 'quota.group_member_add'
+  | 'quota.group_member_remove'
+  | 'quota.group_link'
+  | 'quota.group_unlink'
+  | 'quota.override_set'
+  | 'quota.override_clear'
   | 'settings.teacher_access';
 
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -35,6 +44,15 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'group.drift_restore',
   'group.drift_dismiss',
   'group.meta',
+  'quota.group_create',
+  'quota.group_update',
+  'quota.group_delete',
+  'quota.group_member_add',
+  'quota.group_member_remove',
+  'quota.group_link',
+  'quota.group_unlink',
+  'quota.override_set',
+  'quota.override_clear',
   'settings.teacher_access',
 ] as const;
 

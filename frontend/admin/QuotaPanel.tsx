@@ -1,6 +1,6 @@
 /**
  * 额度与信誉（设计稿“额度与信誉”）
- * 本版本：全局设置（每日默认次数、重置时区）。额度组、个人覆盖、信誉规则随后续版本加入。
+ * 全局设置（每日默认次数、重置时区）、额度组、个人覆盖。信誉规则随 PR4 加入。
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -15,6 +15,8 @@ import {
 } from '../utils/styles';
 import { errorMessage, getJson } from './userManagementApi';
 import { labelStyle, mutedTextStyle } from './userManagementUi';
+import { QuotaGroupsSection } from './QuotaGroupsSection';
+import { QuotaOverridesSection } from './QuotaOverridesSection';
 
 interface QuotaConfigView {
   dailyMessageLimit: number;
@@ -50,8 +52,9 @@ function localMidnightHint(timezone: string): string | null {
 }
 
 export const QuotaPanel: React.FC<{
+  domainId: string;
   showToast: (text: string, type?: 'success' | 'warning' | 'error' | 'info') => void;
-}> = ({ showToast }) => {
+}> = ({ domainId, showToast }) => {
   const [saved, setSaved] = useState<QuotaConfigView | null>(null);
   const [limitText, setLimitText] = useState('0');
   const [timezone, setTimezone] = useState('Asia/Shanghai');
@@ -117,7 +120,7 @@ export const QuotaPanel: React.FC<{
   const tzHint = localMidnightHint(timezone.trim());
 
   return (
-    <div style={{ display: 'grid', gap: SPACING.base }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: SPACING.base }}>
       <section style={{ ...cardStyle, padding: SPACING.lg }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: SPACING.sm, flexWrap: 'wrap', marginBottom: SPACING.base }}>
           <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 650, color: COLORS.textPrimary }}>{i18n('ai_helper_um_quota_global_title')}</h3>
@@ -176,6 +179,9 @@ export const QuotaPanel: React.FC<{
               {saved.dailyMessageLimit > 0
                 ? i18n('ai_helper_um_quota_current_limited', saved.dailyMessageLimit, saved.timezone)
                 : i18n('ai_helper_um_quota_current_unlimited')}
+              {saved.dailyMessageLimit === 0 && (
+                <div style={{ marginTop: '4px' }}>{i18n('ai_helper_um_quota_unlimited_grant_hint')}</div>
+              )}
             </div>
 
             {saveError && <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>{saveError}</div>}
@@ -197,6 +203,8 @@ export const QuotaPanel: React.FC<{
           </>
         )}
       </section>
+      <QuotaGroupsSection domainId={domainId} showToast={showToast} />
+      <QuotaOverridesSection domainId={domainId} showToast={showToast} />
     </div>
   );
 };

@@ -5,6 +5,10 @@ import { QuotaService, type QuotaPolicySources } from '../../services/quotaServi
 // 2026-11-10 23:30 北京时间
 const NOW = new Date('2026-11-10T15:30:00Z');
 
+function group(id: string, mode: 'grant' | 'cap', dailyLimit: number, enabled = true) {
+  return { id, name: id, mode, dailyLimit, enabled, via: [{ kind: 'direct' as const }] };
+}
+
 function setup(quotaConfig: Record<string, unknown> | undefined, sources: QuotaPolicySources = {}) {
   const collection = createFakeCollection();
   const usage = new QuotaUsageModel(createFakeDb({ ai_quota_usage: collection }) as any);
@@ -76,7 +80,7 @@ describe('QuotaService', () => {
   });
 
   it('distinguishes admin-disabled from exhausted', async () => {
-    const disabled = setup({ dailyMessageLimit: 20 }, { getGroupLimits: async () => ({ grants: [], caps: [0] }) });
+    const disabled = setup({ dailyMessageLimit: 20 }, { getGroupMemberships: async () => [group('cap-0', 'cap', 0)] });
     await expect(disabled.service.reserve(1031)).resolves.toEqual({ ok: false, code: 'AI_DISABLED_BY_ADMIN' });
     await expect(disabled.service.status(1031)).resolves.toEqual(expect.objectContaining({ disabled: true, limit: 0, remaining: 0 }));
 
@@ -88,7 +92,7 @@ describe('QuotaService', () => {
   it('combines overrides, groups and credit through the policy sources', async () => {
     const { service } = setup({ dailyMessageLimit: 20, guaranteeCount: 3 }, {
       getOverride: async () => null,
-      getGroupLimits: async () => ({ grants: [60], caps: [] }),
+      getGroupMemberships: async () => [group('team', 'grant', 60)],
       getCreditMultiplier: async () => 0.5,
     });
     await expect(service.resolve(1031)).resolves.toEqual(expect.objectContaining({ limit: 30, base: 60, source: 'grant', m: 0.5 }));
@@ -106,5 +110,78 @@ describe('QuotaService', () => {
     const { service, configModel } = setup({ dailyMessageLimit: 5 });
     await service.reserve(1031, { timeoutSeconds: 30, quotaConfig: { dailyMessageLimit: 5 } } as any);
     expect(configModel.getConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('QuotaService.explain (US3)', () => {
+  const override = (input: { mode: 'limit' | 'disabled'; dailyLimit?: number; expiresAt?: Date }) => (
+    { reason: '准备省赛', setBy: 2, setAt: NOW, ...input }
+  );
+
+  it('follows acceptance scenarios 1–3: grant max, then the smallest cap', async () => {
+    let groups = [group('team', 'grant', 60)];
+    const { service } = setup({ dailyMessageLimit: 20 }, { getGroupMemberships: async () => groups });
+    await expect(service.explain(1031)).resolves.toEqual(expect.objectContaining({
+      limit: 60, source: 'grant', capped: false, defaultLimit: 20,
+      groups: [expect.objectContaining({ id: 'team', applied: true })],
+    }));
+
+    groups = [group('team', 'grant', 60), group('ta', 'grant', 40)];
+    const two = await service.explain(1031);
+    expect(two.limit).toBe(60);
+    expect(two.groups.map((g) => [g.id, g.applied])).toEqual([['team', true], ['ta', false]]);
+
+    groups = [...groups, group('watch', 'cap', 5)];
+    const capped = await service.explain(1031);
+    expect(capped).toEqual(expect.objectContaining({ limit: 5, source: 'grant', capped: true }));
+    expect(capped.groups.filter((g) => g.applied).map((g) => g.id)).toEqual(['team', 'watch']);
+  });
+
+  it('follows acceptance scenario 4: an override wins until it expires', async () => {
+    const expiresAt = new Date(NOW.getTime() + 7 * 24 * 3600 * 1000);
+    const { service, setNow } = setup({ dailyMessageLimit: 20 }, {
+      getOverride: async () => override({ mode: 'limit', dailyLimit: 100, expiresAt }),
+      getGroupMemberships: async () => [group('watch', 'cap', 5)],
+    });
+    await expect(service.explain(1031)).resolves.toEqual(expect.objectContaining({
+      limit: 100, source: 'override', override: expect.objectContaining({ active: true, reason: '准备省赛' }),
+    }));
+    expect((await service.explain(1031)).groups[0].applied).toBe(false);
+
+    setNow(new Date(expiresAt.getTime() + 1000));
+    await expect(service.explain(1031)).resolves.toEqual(expect.objectContaining({
+      limit: 5, source: 'default', capped: true, override: expect.objectContaining({ active: false }),
+    }));
+  });
+
+  it('reports a disabled override and a zero cap as AI switched off (scenario 7)', async () => {
+    const off = setup({ dailyMessageLimit: 20 }, { getOverride: async () => override({ mode: 'disabled' }) });
+    await expect(off.service.explain(1031)).resolves.toEqual(expect.objectContaining({ disabled: true, limit: 0 }));
+    await expect(off.service.reserve(1031)).resolves.toEqual({ ok: false, code: 'AI_DISABLED_BY_ADMIN' });
+
+    const paused = setup({ dailyMessageLimit: 20 }, { getGroupMemberships: async () => [group('pause', 'cap', 0, false)] });
+    await expect(paused.service.explain(1031)).resolves.toEqual(expect.objectContaining({ disabled: false, limit: 20 }));
+  });
+
+  it('batches overrides and usage for an overview page', async () => {
+    const getOverrides = jest.fn(async () => new Map([[1032, override({ mode: 'disabled' })]]));
+    const getOverride = jest.fn();
+    const { service } = setup({ dailyMessageLimit: 2 }, {
+      getOverrides,
+      getOverride,
+      getGroupMemberships: async (uid) => (uid === 1033 ? [group('team', 'grant', 60)] : []),
+    });
+    const reserved = await service.reserve(1031);
+    if (!('reservation' in reserved)) throw new Error('expected reservation');
+    await service.confirm(reserved.reservation);
+    getOverride.mockClear();
+
+    const result = await service.explainMany([1031, 1032, 1033]);
+    expect(getOverrides).toHaveBeenCalledTimes(1);
+    expect(getOverride).not.toHaveBeenCalled();
+    expect(result.get(1031)).toEqual(expect.objectContaining({ limit: 2, used: 1, remaining: 1, source: 'default' }));
+    expect(result.get(1032)).toEqual(expect.objectContaining({ disabled: true, used: 0 }));
+    expect(result.get(1033)).toEqual(expect.objectContaining({ limit: 60, source: 'grant', timezone: 'Asia/Shanghai' }));
+    await expect(service.explainMany([])).resolves.toEqual(new Map());
   });
 });

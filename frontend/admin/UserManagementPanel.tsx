@@ -1,7 +1,7 @@
 /**
  * “用户管理”标签：二级导航
  *
- * 只显示已实现的分区；学生总览随后续版本加入 SECTIONS。
+ * 分区顺序与设计稿一致：学生总览 / 小组 / 每日额度 / 操作审计。
  * 当前分区写入 URL 的 `section` 参数，刷新或分享链接时保持。
  */
 
@@ -13,16 +13,17 @@ import { Toast, useToast } from '../components/Toast';
 import { GroupManagerPanel } from './GroupManagerPanel';
 import { AuditPanel } from './AuditPanel';
 import { QuotaPanel } from './QuotaPanel';
+import { UserOverviewPanel } from './UserOverviewPanel';
 import { SubNav } from './userManagementUi';
 
-type UserSection = 'groups' | 'quota' | 'audit';
+type UserSection = 'students' | 'groups' | 'quota' | 'audit';
 
-const SECTIONS: UserSection[] = ['groups', 'quota', 'audit'];
+const SECTIONS: UserSection[] = ['students', 'groups', 'quota', 'audit'];
 
 function readSection(): UserSection {
-  if (typeof window === 'undefined') return 'groups';
+  if (typeof window === 'undefined') return 'students';
   const value = new URLSearchParams(window.location.search).get('section');
-  return SECTIONS.includes(value as UserSection) ? value as UserSection : 'groups';
+  return SECTIONS.includes(value as UserSection) ? value as UserSection : 'students';
 }
 
 export const UserManagementPanel: React.FC = () => {
@@ -44,6 +45,7 @@ export const UserManagementPanel: React.FC = () => {
   }, []);
 
   const labels: Record<UserSection, string> = {
+    students: i18n('ai_helper_um_nav_students'),
     groups: i18n('ai_helper_um_nav_groups'),
     quota: i18n('ai_helper_um_nav_quota'),
     audit: i18n('ai_helper_um_nav_audit'),
@@ -62,10 +64,11 @@ export const UserManagementPanel: React.FC = () => {
         active={section}
         onChange={changeSection}
       />
+      {section === 'students' && <UserOverviewPanel domainId={domainId} showToast={showToast} />}
       {section === 'groups' && (
         <GroupManagerPanel initialDomainId={domainId} onOpenAudit={() => changeSection('audit')} showToast={showToast} />
       )}
-      {section === 'quota' && <QuotaPanel showToast={showToast} />}
+      {section === 'quota' && <QuotaPanel domainId={domainId} showToast={showToast} />}
       {section === 'audit' && <AuditPanel currentDomainId={domainId} showToast={showToast} />}
     </div>
   );

@@ -49,6 +49,8 @@ console.log('[AI-Helper] updateHandler OK');
 const groupAdminHandler_1 = require("./handlers/groupAdminHandler");
 const auditHandler_1 = require("./handlers/auditHandler");
 const quotaStatusHandler_1 = require("./handlers/quotaStatusHandler");
+const quotaAdminHandler_1 = require("./handlers/quotaAdminHandler");
+const userOverviewHandler_1 = require("./handlers/userOverviewHandler");
 console.log('[AI-Helper] groupAdminHandler OK');
 const testdataGenHandler_1 = require("./handlers/testdataGenHandler");
 console.log('[AI-Helper] testdataGenHandler OK');
@@ -67,6 +69,8 @@ const studentHistory_1 = require("./models/studentHistory");
 const auditLog_1 = require("./models/auditLog");
 const groupMeta_1 = require("./models/groupMeta");
 const quotaUsage_1 = require("./models/quotaUsage");
+const quotaGroup_1 = require("./models/quotaGroup");
+const quotaOverride_1 = require("./models/quotaOverride");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -79,6 +83,9 @@ const featureStats_1 = require("./models/featureStats");
 const auditService_1 = require("./services/auditService");
 const hydroGroupService_1 = require("./services/hydroGroupService");
 const quotaService_1 = require("./services/quotaService");
+const quotaGroupResolver_1 = require("./services/quotaGroupResolver");
+const quotaAdminService_1 = require("./services/quotaAdminService");
+const userOverviewService_1 = require("./services/userOverviewService");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
 /**
@@ -132,6 +139,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const auditLogModel = new auditLog_1.AuditLogModel(db);
         const groupMetaModel = new groupMeta_1.GroupMetaModel(db);
         const quotaUsageModel = new quotaUsage_1.QuotaUsageModel(db);
+        const quotaGroupModel = new quotaGroup_1.QuotaGroupModel(db);
+        const quotaOverrideModel = new quotaOverride_1.QuotaOverrideModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -184,6 +193,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(auditLogModel, 'auditLogModel');
         await safeEnsureIndexes(groupMetaModel, 'groupMetaModel');
         await safeEnsureIndexes(quotaUsageModel, 'quotaUsageModel');
+        await safeEnsureIndexes(quotaGroupModel, 'quotaGroupModel');
+        await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -254,7 +265,19 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('auditService', auditService);
         ctx.provide('hydroGroupService', new hydroGroupService_1.HydroGroupService(db, groupMetaModel, auditService, ctx));
         ctx.provide('quotaUsageModel', quotaUsageModel);
-        ctx.provide('quotaService', new quotaService_1.QuotaService(quotaUsageModel, aiConfigModel));
+        ctx.provide('quotaGroupModel', quotaGroupModel);
+        ctx.provide('quotaOverrideModel', quotaOverrideModel);
+        // 额度组解析缓存（60 秒）：插件写入时本地失效并广播，其他进程收到广播后失效
+        const quotaGroupResolver = new quotaGroupResolver_1.QuotaGroupResolver(db, quotaGroupModel, quotaOverrideModel, ctx);
+        quotaGroupResolver.listen(ctx);
+        const quotaService = new quotaService_1.QuotaService(quotaUsageModel, aiConfigModel, {
+            getOverride: (uid) => quotaGroupResolver.getOverride(uid),
+            getOverrides: (uids) => quotaGroupResolver.getOverrides(uids),
+            getGroupMemberships: (uid) => quotaGroupResolver.getGroupMemberships(uid),
+        });
+        ctx.provide('quotaService', quotaService);
+        ctx.provide('quotaAdminService', new quotaAdminService_1.QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
+        ctx.provide('userOverviewService', new userOverviewService_1.UserOverviewService(db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel));
         ctx.provide('errorReporter', errorReporter);
         ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
         // 初始化版本服务
@@ -426,6 +449,12 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // 学生端：今日剩余次数（跨域合计）
         ctx.Route('ai_quota_status', '/ai-helper/quota-status', quotaStatusHandler_1.QuotaStatusHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
         ctx.Route('ai_quota_status_domain', '/d/:domainId/ai-helper/quota-status', quotaStatusHandler_1.QuotaStatusHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
+        // 额度组、个人覆盖、学生总览：插件级（不属于任何域），仅系统管理员
+        ctx.Route('ai_admin_quota_groups', '/ai-helper/admin/quota/groups', quotaAdminHandler_1.QuotaGroupsHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
+        ctx.Route('ai_admin_quota_group_detail', '/ai-helper/admin/quota/groups/detail', quotaAdminHandler_1.QuotaGroupDetailHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
+        ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', quotaAdminHandler_1.QuotaOverridesHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
+        ctx.Route('ai_admin_users', '/ai-helper/admin/users', userOverviewHandler_1.UserOverviewHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
+        ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', userOverviewHandler_1.UserDetailHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
     }
 });
 exports.Config = configSchema;

@@ -19,7 +19,7 @@ import {
 import type { AuditService } from '../services/auditService';
 import { rejectIfNotSystemAdmin } from './groupAdminHandler';
 
-const DETAIL_UID_KEYS = ['added', 'removed', 'joined', 'left', 'dismissed', 'ledgerRemoved'];
+const DETAIL_UID_KEYS = ['added', 'removed', 'joined', 'left', 'dismissed', 'ledgerRemoved', 'uids', 'memberUids'];
 const TARGET_TYPES: ReadonlyArray<AuditTarget['type']> = ['group', 'user', 'quota_group', 'config', 'review', 'transfer'];
 const MAX_NAMED_UIDS_PER_LOG = 50;
 
