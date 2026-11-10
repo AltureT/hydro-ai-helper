@@ -55,6 +55,28 @@ describe('JailbreakLogModel', () => {
   });
 
   describe('ensureIndexes', () => {
+    it('reuses an older index with the same keys and still creates the rest', async () => {
+      // 旧版本以 idx_userId_createdAt 建过同样的键；MongoDB 对新名字报 85（IndexOptionsConflict）
+      const warn = jest.spyOn(console, 'warn').mockImplementation();
+      mockColl.createIndex.mockImplementation(async (_keys: unknown, options: { name: string }) => {
+        if (options.name === 'idx_user_createdAt') {
+          throw Object.assign(new Error('Index with name: idx_user_createdAt already exists with a different name'), { code: 85 });
+        }
+        return options.name;
+      });
+      await expect(model.ensureIndexes()).resolves.toBeUndefined();
+      const names = mockColl.createIndex.mock.calls.map(([, options]: any[]) => options.name);
+      expect(names.slice(names.indexOf('idx_user_createdAt') + 1)).toEqual(
+        expect.arrayContaining(['idx_domain_review_category_createdAt', 'idx_expiresAt_ttl']),
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('idx_user_createdAt'));
+    });
+
+    it('still fails on other index errors', async () => {
+      mockColl.createIndex.mockRejectedValueOnce(Object.assign(new Error('not authorized'), { code: 13 }));
+      await expect(model.ensureIndexes()).rejects.toThrow('not authorized');
+    });
+
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
       expect(mockColl.createIndex).toHaveBeenCalledTimes(12);
