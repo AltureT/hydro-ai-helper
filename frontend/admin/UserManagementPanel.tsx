@@ -1,7 +1,7 @@
 /**
  * “用户管理”标签：二级导航
  *
- * 只显示已实现的分区；学生总览、额度与信誉随后续版本加入 SECTIONS。
+ * 只显示已实现的分区；学生总览随后续版本加入 SECTIONS。
  * 当前分区写入 URL 的 `section` 参数，刷新或分享链接时保持。
  */
 
@@ -12,11 +12,12 @@ import { SPACING } from '../utils/styles';
 import { Toast, useToast } from '../components/Toast';
 import { GroupManagerPanel } from './GroupManagerPanel';
 import { AuditPanel } from './AuditPanel';
+import { QuotaPanel } from './QuotaPanel';
 import { SubNav } from './userManagementUi';
 
-type UserSection = 'groups' | 'audit';
+type UserSection = 'groups' | 'quota' | 'audit';
 
-const SECTIONS: UserSection[] = ['groups', 'audit'];
+const SECTIONS: UserSection[] = ['groups', 'quota', 'audit'];
 
 function readSection(): UserSection {
   if (typeof window === 'undefined') return 'groups';
@@ -44,6 +45,7 @@ export const UserManagementPanel: React.FC = () => {
 
   const labels: Record<UserSection, string> = {
     groups: i18n('ai_helper_um_nav_groups'),
+    quota: i18n('ai_helper_um_nav_quota'),
     audit: i18n('ai_helper_um_nav_audit'),
   };
 
@@ -63,6 +65,7 @@ export const UserManagementPanel: React.FC = () => {
       {section === 'groups' && (
         <GroupManagerPanel initialDomainId={domainId} onOpenAudit={() => changeSection('audit')} showToast={showToast} />
       )}
+      {section === 'quota' && <QuotaPanel showToast={showToast} />}
       {section === 'audit' && <AuditPanel currentDomainId={domainId} showToast={showToast} />}
     </div>
   );

@@ -50,6 +50,8 @@ interface ChatInputProps {
   onRefreshCode: () => void;
   onNewConversation: () => void;
   errorBanner?: React.ReactNode;
+  /** 额度用完或 AI 被关闭时禁用输入 */
+  disabled?: boolean;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -57,7 +59,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   questionType, onQuestionTypeChange, questionTypes,
   includeCode, onIncludeCodeChange, code, onCodeClear,
   isLoading, conversationHistoryLength,
-  onSubmit, onCancel, onRefreshCode, onNewConversation,
+  onSubmit, onCancel, onRefreshCode, onNewConversation, disabled = false,
   errorBanner,
 }) => {
   const isFirstConversation = conversationHistoryLength === 0;
@@ -125,6 +127,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const renderTextarea = (minHeight: string, maxHeight: string) => (
     <textarea
       value={userThinking}
+      disabled={disabled}
       onChange={(e) => onUserThinkingChange(e.target.value)}
       placeholder={isFirstConversation ? i18n('ai_helper_student_placeholder_first') : i18n('ai_helper_student_placeholder_followup')}
       style={{
@@ -134,12 +137,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         flex: 1, minHeight, maxHeight, resize: 'none', boxSizing: 'border-box', padding: 0,
       }}
       onKeyDown={(e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onSubmit(); }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (!disabled) onSubmit(); }
       }}
     />
   );
 
-  const disabledSubmit = isLoading || !canSubmit;
+  const disabledSubmit = disabled || isLoading || !canSubmit;
   const submitStyle: React.CSSProperties = {
     width: '32px', height: '32px', borderRadius: '50%',
     background: disabledSubmit ? A.disabledBg : A.gradient,

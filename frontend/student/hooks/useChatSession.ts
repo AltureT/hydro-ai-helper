@@ -19,13 +19,22 @@ import {
   type ChatApiErrorPayload,
   type ProblemInfo,
 } from '../types';
+import type { QuotaSnapshotView } from '../quotaView';
+
+export type QuotaBlockedCode = 'QUOTA_EXHAUSTED' | 'AI_DISABLED_BY_ADMIN';
 
 interface UseChatSessionOptions {
   problemId: string;
+  /** 聊天成功后服务端返回的最新次数 */
+  onQuota?: (quota: QuotaSnapshotView) => void;
+  /** 因额度用完或被管理员关闭而被拒 */
+  onQuotaBlocked?: (code: QuotaBlockedCode, quota?: QuotaSnapshotView) => void;
 }
 
-export function useChatSession({ problemId }: UseChatSessionOptions) {
+export function useChatSession({ problemId, onQuota, onQuotaBlocked }: UseChatSessionOptions) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
+  const quotaHandlersRef = useRef({ onQuota, onQuotaBlocked });
+  quotaHandlersRef.current = { onQuota, onQuotaBlocked };
   const {
     questionType,
     userThinking,
@@ -273,6 +282,11 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
       if (!response.ok) {
         let errorData = await parseErrorPayload(response);
 
+        if (errorData.code === 'QUOTA_EXHAUSTED' || errorData.code === 'AI_DISABLED_BY_ADMIN') {
+          quotaHandlersRef.current.onQuotaBlocked?.(errorData.code, errorData.quota);
+          throw createCategorizedError(errorData.error || i18n('ai_helper_student_err_request_failed'), 'quota', false);
+        }
+
         if (response.status === 403 && errorData.code === 'CONTEST_MODE_RESTRICTED') {
           dispatch({ type: 'SET_CONTEST_RESTRICTED', payload: true });
           throw new Error(errorData.error || i18n('ai_helper_student_contest_restricted'));
@@ -328,7 +342,10 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           },
           onChunk: (data) => pacer.append(data.content),
           onReplace: (data) => pacer.replace(data.content),
-          onDone: (data) => { doneMessageId = data.messageId; },
+          onDone: (data) => {
+            doneMessageId = data.messageId;
+            if (data.quota) quotaHandlersRef.current.onQuota?.(data.quota);
+          },
           onError: (data) => {
             pacer.cancel();
             dispatch({ type: 'SET_IS_STREAMING', payload: false });
@@ -379,6 +396,7 @@ export function useChatSession({ problemId }: UseChatSessionOptions) {
           dispatch({ type: 'SET_CONVERSATION_ID', payload: data.conversationId });
           saveConversationId(problemId, data.conversationId);
         }
+        if (data.quota) quotaHandlersRef.current.onQuota?.(data.quota);
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {

@@ -32,6 +32,8 @@ export interface ChatApiErrorPayload {
   safetyEventId?: string;
   appealAllowed?: boolean;
   safetyProgress?: SafetyProgress;
+  /** QUOTA_EXHAUSTED 时附带当日用量 */
+  quota?: { limit: number | null; used: number; remaining: number | null; resetAt: string };
 }
 
 export interface SafetyProgress {

@@ -28,6 +28,7 @@ import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
 import { createSSEWriter } from '../lib/sseHelper';
 import { snapshotGroupNames } from '../services/hydroGroupService';
+import type { QuotaReservation, QuotaService, QuotaSnapshot } from '../services/quotaService';
 
 function extractContestIdFromReferer(referer: unknown): string | undefined {
   if (typeof referer !== 'string') return undefined;
@@ -76,7 +77,7 @@ interface ChatResponse {
     content: string;
     timestamp: string;
   };
-  remainingRequests?: number;
+  quota?: QuotaSnapshot;
   codeWarning?: string;
   hasJudgeInfo?: boolean;
   tokenUsage?: {
@@ -114,6 +115,9 @@ interface PrepareChatResult {
  * POST /ai-helper/chat
  */
 export class ChatHandler extends Handler {
+  /** 本次请求的次数预占：成功回复后确认，其余情况在 post() 结束时退还 */
+  private quotaReservation: QuotaReservation | null = null;
+
   async post() {
     try {
       if (rejectIfCsrfInvalid(this)) return;
@@ -133,6 +137,82 @@ export class ChatHandler extends Handler {
       this.response.status = 500;
       this.response.body = { error: this.translate('ai_helper_err_internal') };
       this.response.type = 'application/json';
+    } finally {
+      // 输入校验失败、安全拦截、偏题固定回复、模型调用失败等：预占都未确认，在此退还
+      await this.releaseQuota();
+    }
+  }
+
+  private getQuotaService(): QuotaService | undefined {
+    const service = this.ctx.get('quotaService') as QuotaService | undefined;
+    return service && typeof service.reserve === 'function' ? service : undefined;
+  }
+
+  /**
+   * 预占一次每日次数。返回 true 表示已拒绝（响应已写入）。
+   * 发生在创建会话、保存消息之前，被拒请求不留下数据；数据库异常时放行。
+   */
+  private async reserveQuota(userId: number, aiConfig: AIConfig | null): Promise<boolean> {
+    const quotaService = this.getQuotaService();
+    if (!quotaService) return false;
+    try {
+      const result = await quotaService.reserve(userId, aiConfig);
+      if ('reservation' in result) {
+        this.quotaReservation = result.reservation;
+        return false;
+      }
+      if (result.code === 'AI_DISABLED_BY_ADMIN') {
+        this.response.status = 403;
+        this.response.body = {
+          error: this.translate('ai_helper_err_ai_disabled_by_admin'),
+          code: 'AI_DISABLED_BY_ADMIN',
+          category: 'quota',
+          retryable: false,
+        };
+      } else {
+        this.response.status = 429;
+        this.response.body = {
+          error: translateWithParams(this, 'ai_helper_err_quota_exhausted', result.used, result.limit),
+          code: 'QUOTA_EXHAUSTED',
+          category: 'quota',
+          retryable: false,
+          quota: {
+            limit: result.limit,
+            used: result.used,
+            remaining: 0,
+            resetAt: result.resetAt.toISOString(),
+          },
+        };
+      }
+      this.response.type = 'application/json';
+      return true;
+    } catch (err) {
+      console.warn('[ChatHandler] 次数预占失败，放行请求:', err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
+  /** 拿到 AI 回复后确认计次，返回最新用量；失败不影响已生成的回复 */
+  private async confirmQuota(): Promise<QuotaSnapshot | undefined> {
+    const quotaService = this.getQuotaService();
+    if (!quotaService || !this.quotaReservation) return undefined;
+    try {
+      return (await quotaService.confirm(this.quotaReservation)) || undefined;
+    } catch (err) {
+      console.error('[ChatHandler] 次数确认失败:', err instanceof Error ? err.message : err);
+      return undefined;
+    }
+  }
+
+  private async releaseQuota(): Promise<void> {
+    const reservation = this.quotaReservation;
+    this.quotaReservation = null;
+    const quotaService = this.getQuotaService();
+    if (!quotaService || !reservation) return;
+    try {
+      await quotaService.release(reservation);
+    } catch (err) {
+      console.warn('[ChatHandler] 次数退还失败（预占将自动过期）:', err instanceof Error ? err.message : err);
     }
   }
 
@@ -401,6 +481,9 @@ export class ChatHandler extends Handler {
     } catch (err) {
       console.warn('[ChatHandler] 安全冷却检查失败，放行请求:', err);
     }
+
+    // 每日次数：预占一次（比赛模式、频率限制、预算、冷却之后；创建会话之前）
+    if (await this.reserveQuota(userId, aiConfig)) return null;
 
     // 从请求体获取参数
     const {
@@ -1067,6 +1150,9 @@ export class ChatHandler extends Handler {
       await p.conversationModel.incrementMessageCount(p.currentConversationId);
       await p.conversationModel.updateEndTime(p.currentConversationId, aiMessageTimestamp);
 
+      // 拿到 AI 回复：确认计次
+      const quota = await this.confirmQuota();
+
       // Send done event
       sse.writeEvent('done', {
         messageId: aiMessageId.toHexString(),
@@ -1076,6 +1162,7 @@ export class ChatHandler extends Handler {
           totalTokens: streamUsage.totalTokens,
         } : undefined,
         budgetWarning: p.budgetWarning || null,
+        ...(quota ? { quota } : {}),
       });
 
       // Async: record token usage
@@ -1120,6 +1207,10 @@ export class ChatHandler extends Handler {
         this.ctx.logger.error('Schedule effectiveness analyze failed', err);
       }
     } catch (error) {
+      // 学生中途停止但已产生回复内容：计 1 次（FR-012）；其余失败在 post() 结束时退还
+      if (error instanceof AIServiceError && error.category === 'aborted' && fullContent.trim()) {
+        await this.confirmQuota();
+      }
       try {
         const er = this.ctx.get('errorReporter');
         const rsm = this.ctx.get('requestStatsModel');
@@ -1287,6 +1378,9 @@ export class ChatHandler extends Handler {
     await p.conversationModel.incrementMessageCount(p.currentConversationId);
     await p.conversationModel.updateEndTime(p.currentConversationId, aiMessageTimestamp);
 
+    // 拿到 AI 回复：确认计次
+    const quota = await this.confirmQuota();
+
     // 异步记录 token 用量（不阻塞主流程）
     if (aiResult?.usage && aiResult.usedModel && aiResult.usage.totalTokens > 0) {
       const { usedModel: um, usage: usg } = aiResult;
@@ -1338,7 +1432,8 @@ export class ChatHandler extends Handler {
         role: 'ai',
         content: aiResponse,
         timestamp: aiMessageTimestamp.toISOString()
-      }
+      },
+      ...(quota ? { quota } : {}),
     };
 
     // 如果代码被截断,添加警告信息

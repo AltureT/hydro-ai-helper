@@ -2,7 +2,12 @@ export interface SSEHandlers {
   onMeta?: (data: { conversationId: string }) => void;
   onChunk?: (data: { content: string }) => void;
   onReplace?: (data: { content: string }) => void;
-  onDone?: (data: { messageId: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number }; budgetWarning?: string | null }) => void;
+  onDone?: (data: {
+    messageId: string;
+    usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+    budgetWarning?: string | null;
+    quota?: { limit: number | null; used: number; remaining: number | null; resetAt: string };
+  }) => void;
   onError?: (data: { error: string; category?: string; retryable?: boolean }) => void;
 }
 

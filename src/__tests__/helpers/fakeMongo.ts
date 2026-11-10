@@ -7,7 +7,12 @@ import { ObjectId } from 'mongodb';
 type Doc = Record<string, any>;
 
 function getPath(doc: Doc, path: string): any {
-  return path.split('.').reduce((value, key) => (value == null ? undefined : value[key]), doc as any);
+  // 与 Mongo 相同：点路径穿过数组时取每个元素的字段（如 'reservations.id'）
+  return path.split('.').reduce((value, key) => {
+    if (value == null) return undefined;
+    if (Array.isArray(value) && !/^\d+$/.test(key)) return value.map((item) => item?.[key]).filter((item) => item !== undefined);
+    return value[key];
+  }, doc as any);
 }
 
 function setPath(doc: Doc, path: string, value: any): void {
@@ -59,6 +64,9 @@ function matchCondition(value: any, cond: any): boolean {
       case '$gt':
         if (!(value > (arg as any))) return false;
         break;
+      case '$lt':
+        if (!(value < (arg as any))) return false;
+        break;
       case '$gte':
         if (!(value >= (arg as any))) return false;
         break;
@@ -85,8 +93,33 @@ function matchCondition(value: any, cond: any): boolean {
   return true;
 }
 
+/** 仅支持测试需要的 $expr 子集：字段引用、$add、$size、$ifNull、比较运算 */
+function evalExpr(doc: Doc, expr: any): any {
+  if (typeof expr === 'string' && expr.startsWith('$')) return getPath(doc, expr.slice(1));
+  if (Array.isArray(expr)) return expr.map((item) => evalExpr(doc, item));
+  if (expr && typeof expr === 'object' && !(expr instanceof Date) && !(expr instanceof ObjectId)) {
+    const [[op, args]] = Object.entries(expr);
+    const list = Array.isArray(args) ? args : [args];
+    const v = list.map((item) => evalExpr(doc, item));
+    switch (op) {
+      case '$add': return v.reduce((sum: number, n: number) => sum + n, 0);
+      case '$size': return (v[0] || []).length;
+      case '$ifNull': return v[0] ?? v[1];
+      case '$lt': return v[0] < v[1];
+      case '$lte': return v[0] <= v[1];
+      case '$gt': return v[0] > v[1];
+      case '$gte': return v[0] >= v[1];
+      case '$eq': return v[0] === v[1];
+      default: throw new Error(`fakeMongo: unsupported $expr operator ${op}`);
+    }
+  }
+  return expr;
+}
+
 export function matches(doc: Doc, filter: Doc = {}): boolean {
-  return Object.entries(filter).every(([key, cond]) => matchCondition(getPath(doc, key), cond));
+  return Object.entries(filter).every(([key, cond]) => (
+    key === '$expr' ? !!evalExpr(doc, cond) : matchCondition(getPath(doc, key), cond)
+  ));
 }
 
 function applyUpdate(doc: Doc, update: Doc, inserting: boolean): void {
@@ -120,7 +153,10 @@ function applyUpdate(doc: Doc, update: Doc, inserting: boolean): void {
         }
         case '$pull': {
           const list: any[] = getPath(doc, path) || [];
-          setPath(doc, path, list.filter((item) => !matchCondition(item, arg)));
+          const isFieldFilter = arg && typeof arg === 'object' && !Array.isArray(arg)
+            && !(arg instanceof Date) && !(arg instanceof ObjectId)
+            && Object.keys(arg).every((k) => !k.startsWith('$'));
+          setPath(doc, path, list.filter((item) => !(isFieldFilter ? matches(item, arg) : matchCondition(item, arg))));
           break;
         }
         default:
