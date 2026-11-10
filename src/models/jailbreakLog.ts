@@ -3,7 +3,7 @@
  */
 
 import type { Collection, Db, Filter, UpdateFilter } from 'mongodb';
-import { ObjectId, type ObjectIdType } from '../utils/mongo';
+import { ObjectId, createIndexReusingExisting, type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 import type {
   SafetyAction,
@@ -224,50 +224,61 @@ export class JailbreakLogModel {
   }
 
   async ensureIndexes(): Promise<void> {
-    await this.collection.createIndex({ createdAt: -1 }, { name: 'idx_createdAt' });
-    await this.collection.createIndex(
+    await createIndexReusingExisting(this.collection, { createdAt: -1 }, { name: 'idx_createdAt' });
+    await createIndexReusingExisting(
+      this.collection,
       { domainId: 1, userId: 1, createdAt: -1 },
       { name: 'idx_domain_user_createdAt' }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { domainId: 1, createdAt: -1 },
       { name: 'idx_domain_createdAt' }
     );
-    await this.penaltyCounterCollection.createIndex(
+    await createIndexReusingExisting(
+      this.penaltyCounterCollection,
       { expiresAt: 1 },
       { name: 'idx_safety_penalty_counter_ttl', expireAfterSeconds: 0 }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { domainId: 1, userId: 1, blockedUntil: -1 },
       { name: 'idx_domain_user_blockedUntil' }
     );
     // 跨域冷却与回退计数按用户查询（plan R12）
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { userId: 1, blockedUntil: -1 },
       { name: 'idx_user_blockedUntil' }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { userId: 1, createdAt: -1 },
       { name: 'idx_user_createdAt' }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 },
       { name: 'idx_domain_review_category_createdAt' }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { domainId: 1, studentAppealedAt: -1, createdAt: -1 },
       { name: 'idx_domain_appealed_createdAt' }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { domainId: 1, problemId: 1, createdAt: -1 },
       { name: 'idx_domain_problem_createdAt' }
     );
     // AI 抽查：最近发现、熔断样本、处罚去重（PR5）
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { detectionSource: 1, createdAt: -1 },
       { name: 'idx_source_createdAt' }
     );
-    await this.collection.createIndex(
+    await createIndexReusingExisting(
+      this.collection,
       { expiresAt: 1 },
       { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 }
     );
