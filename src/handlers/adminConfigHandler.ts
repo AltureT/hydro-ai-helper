@@ -19,6 +19,7 @@ import {
   type PatchResult,
 } from '../models/configSections';
 import type { AuditService } from '../services/auditService';
+import type { CreditService } from '../services/creditService';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog, JailbreakLogListFilters } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
@@ -774,6 +775,10 @@ export class JailbreakLogReviewHandler extends Handler {
         return;
       }
 
+      if (reviewStatus === 'false_positive') {
+        await revokeCreditForFalsePositives(this, [id], Number(this.user._id), getDomainId(this));
+      }
+
       this.response.body = { success: true, reviewStatus };
       this.response.type = 'application/json';
     } catch (err) {
@@ -822,13 +827,16 @@ export class JailbreakLogBulkReviewHandler extends Handler {
 
       const uniqueIds = [...new Set(ids as string[])];
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
-      const result = await jailbreakLogModel.reviewMany(
+      const { reviewedIds, ...counts } = await jailbreakLogModel.reviewMany(
         uniqueIds,
         getDomainId(this),
         reviewStatus,
         Number(this.user._id)
       );
-      this.response.body = { success: true, ...result, reviewStatus };
+      if (reviewStatus === 'false_positive') {
+        await revokeCreditForFalsePositives(this, reviewedIds || [], Number(this.user._id), getDomainId(this));
+      }
+      this.response.body = { success: true, ...counts, reviewStatus };
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[AI Helper] JailbreakLogBulkReviewHandler error:', err instanceof Error ? err.message : 'unknown');
@@ -882,6 +890,7 @@ const VALID_CATEGORIES: SafetyViolationCategory[] = [
   'prompt_injection',
   'prompt_exfiltration',
   'obfuscated_injection',
+  'off_topic',
 ];
 const VALID_ACTIONS: SafetyAction[] = ['blocked', 'cooldown_60s', 'cooldown_5m'];
 const VALID_DETECTION_SOURCES: SafetyDetectionSource[] = [
@@ -891,7 +900,22 @@ const VALID_DETECTION_SOURCES: SafetyDetectionSource[] = [
   'hex',
   'conversation',
   'custom',
+  'topic_guard',
+  'ai_review',
 ];
+
+/** 复核为误判后撤销对应的信誉扣分（FR-031）；失败只记日志，复核结论已经生效 */
+async function revokeCreditForFalsePositives(handler: Handler, ids: string[], reviewerUid: number, domainId: string): Promise<void> {
+  const creditService = handler.ctx.get('creditService') as CreditService | undefined;
+  if (!creditService || typeof creditService.revokeBySafetyLog !== 'function') return;
+  for (const id of ids) {
+    try {
+      await creditService.revokeBySafetyLog(new ObjectId(id), reviewerUid, domainId);
+    } catch (err) {
+      console.error('[AI Helper] 撤销信誉扣分失败:', err instanceof Error ? err.message : 'unknown');
+    }
+  }
+}
 
 function parseDateFilter(value: string, endOfDay: boolean): Date | undefined | null {
   if (!value) return undefined;

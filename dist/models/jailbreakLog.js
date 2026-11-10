@@ -65,6 +65,9 @@ class JailbreakLogModel {
         await this.collection.createIndex({ domainId: 1, createdAt: -1 }, { name: 'idx_domain_createdAt' });
         await this.penaltyCounterCollection.createIndex({ expiresAt: 1 }, { name: 'idx_safety_penalty_counter_ttl', expireAfterSeconds: 0 });
         await this.collection.createIndex({ domainId: 1, userId: 1, blockedUntil: -1 }, { name: 'idx_domain_user_blockedUntil' });
+        // 跨域冷却与回退计数按用户查询（plan R12）
+        await this.collection.createIndex({ userId: 1, blockedUntil: -1 }, { name: 'idx_user_blockedUntil' });
+        await this.collection.createIndex({ userId: 1, createdAt: -1 }, { name: 'idx_user_createdAt' });
         await this.collection.createIndex({ domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 }, { name: 'idx_domain_review_category_createdAt' });
         await this.collection.createIndex({ domainId: 1, studentAppealedAt: -1, createdAt: -1 }, { name: 'idx_domain_appealed_createdAt' });
         await this.collection.createIndex({ domainId: 1, problemId: 1, createdAt: -1 }, { name: 'idx_domain_problem_createdAt' });
@@ -98,16 +101,20 @@ class JailbreakLogModel {
         const result = await this.collection.insertOne(insertDoc);
         return result.insertedId;
     }
-    async nextPenaltySequence(domainId, userId, category, now = new Date()) {
-        const group = category === 'answer_seeking' ? 'answer_seeking' : 'high_risk';
-        const counterId = [encodeURIComponent(domainId), userId, group].join(':');
+    /**
+     * 原子递增用户在窗口内的违规序号（跨域）。偏题使用单独的分组和更长的窗口（plan R14）。
+     */
+    async nextPenaltySequence(userId, category, now = new Date(), windowMs = safetyPenaltyService_1.SAFETY_PENALTY_WINDOW_MS) {
+        const group = category === 'answer_seeking'
+            ? 'answer_seeking'
+            : category === 'off_topic' ? 'off_topic' : 'high_risk';
+        const counterId = `${userId}:${group}`;
         const eventId = new mongo_1.ObjectId().toHexString();
-        const since = new Date(now.getTime() - safetyPenaltyService_1.SAFETY_PENALTY_WINDOW_MS);
-        const expiresAt = new Date(now.getTime() + safetyPenaltyService_1.SAFETY_PENALTY_WINDOW_MS * 2);
+        const since = new Date(now.getTime() - windowMs);
+        const expiresAt = new Date(now.getTime() + windowMs * 2);
         const rawResult = await this.penaltyCounterCollection.findOneAndUpdate({ _id: counterId }, [
             {
                 $set: {
-                    domainId,
                     userId,
                     group,
                     expiresAt,
@@ -156,19 +163,21 @@ class JailbreakLogModel {
         const filter = domainId ? { domainId } : {};
         return this.collection.find(filter).sort({ createdAt: -1 }).limit(limit).toArray();
     }
-    async countRecentByCategories(domainId, userId, categories, since) {
+    /**
+     * 计数器不可用时的回退计数（跨域）。不按置信度过滤：索要答案的前两次是中置信度，
+     * 若只数高置信度，回退路径会漏数（plan R7）。
+     */
+    async countRecentByCategories(userId, categories, since) {
         return this.collection.countDocuments({
-            domainId,
             userId,
             category: { $in: categories },
-            confidence: 'high',
             reviewStatus: { $ne: 'false_positive' },
             createdAt: { $gte: since },
         });
     }
-    async findActiveCooldown(domainId, userId, now = new Date()) {
+    /** 用户当前生效的冷却（跨域，plan R12） */
+    async findActiveCooldown(userId, now = new Date()) {
         return this.collection.findOne({
-            domainId,
             userId,
             blockedUntil: { $gt: now },
             reviewStatus: { $ne: 'false_positive' },
@@ -201,12 +210,21 @@ class JailbreakLogModel {
     }
     async reviewMany(ids, domainId, reviewStatus, reviewedBy, reviewedAt = new Date()) {
         if (ids.length === 0)
-            return { matchedCount: 0, modifiedCount: 0 };
+            return { matchedCount: 0, modifiedCount: 0, reviewedIds: [] };
         const results = await Promise.all(ids.map((id) => this.review(id, domainId, reviewStatus, reviewedBy, reviewedAt)));
-        const matchedCount = results.filter(Boolean).length;
-        return { matchedCount, modifiedCount: matchedCount };
+        const reviewedIds = ids.filter((_, index) => results[index]).map((id) => String(id));
+        return { matchedCount: reviewedIds.length, modifiedCount: reviewedIds.length, reviewedIds };
     }
-    async appealByStudent(id, domainId, userId, reason, appealedAt = new Date()) {
+    /** 学生本人的若干安全记录的复核与申诉状态（学生端信誉说明） */
+    async findForUser(ids, userId) {
+        if (!ids.length)
+            return [];
+        return this.collection
+            .find({ _id: { $in: ids.map((id) => (0, ensureObjectId_1.ensureObjectId)(id)) }, userId }, { projection: { _id: 1, domainId: 1, reviewStatus: 1, studentAppealedAt: 1 } })
+            .toArray();
+    }
+    /** 学生申诉：按 `{ _id, userId }` 查找本人的记录，不要求与当前域一致（plan R12） */
+    async appealByStudent(id, userId, reason, appealedAt = new Date()) {
         const pendingReviewFilter = {
             $or: [
                 { reviewStatus: 'pending' },
@@ -215,7 +233,6 @@ class JailbreakLogModel {
         };
         const result = await this.collection.updateOne({
             _id: (0, ensureObjectId_1.ensureObjectId)(id),
-            domainId,
             userId,
             ...pendingReviewFilter,
             studentAppealedAt: { $exists: false },
@@ -229,7 +246,6 @@ class JailbreakLogModel {
             return 'submitted';
         const existingAppeal = await this.collection.findOne({
             _id: (0, ensureObjectId_1.ensureObjectId)(id),
-            domainId,
             userId,
             ...pendingReviewFilter,
             studentAppealedAt: { $exists: true },

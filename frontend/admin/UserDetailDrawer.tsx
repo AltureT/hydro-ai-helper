@@ -1,6 +1,7 @@
 /**
- * 用户详情抽屉（设计稿“学生总览”右侧）：今日额度、额度怎么来的、近期安全记录
- * 只展示统计与成员信息；对话原文在所属域的对话页查看（FR-053）。信誉系数随 PR4 加入。
+ * 用户详情抽屉（设计稿“学生总览”右侧）：今日额度、额度怎么来的（含信誉系数）、信誉记录、近期安全记录
+ * 只展示统计与成员信息；对话原文在所属域的对话页查看（FR-053）。
+ * 信誉记录可直接“标记误判并撤销”（按记录所在域复核，复核为误判即撤销扣分），也可手动重置信誉。
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -9,7 +10,10 @@ import { COLORS, RADIUS, SPACING, getAlertStyle, getButtonStyle } from '../utils
 import { formatResetText } from '../student/QuotaBar';
 import { errorMessage, getJson, postJson } from './userManagementApi';
 import { Badge, Drawer, linkButtonStyle, mutedTextStyle } from './userManagementUi';
-import type { QuotaGroupMembership, UserDetailResponse } from './quotaAdminLogic';
+import type { CreditEventView, QuotaGroupMembership, UserDetailResponse } from './quotaAdminLogic';
+import { formatMultiplier, recoveryDaysFrom } from './creditLogic';
+import { CreditResetModal } from './CreditDialogs';
+import { domainApiUrl } from './userManagementLogic';
 import {
   ConfirmModal,
   OverrideFormModal,
@@ -67,6 +71,64 @@ function GroupList({ groups, mode, ignored }: { groups: QuotaGroupMembership[]; 
   );
 }
 
+function sourceLabel(event: CreditEventView): string {
+  if (event.source === 'ai_review') return i18n('ai_helper_um_credit_source_review');
+  if (event.source === 'manual') return i18n('ai_helper_um_credit_source_manual');
+  return event.sequence && event.sequence > 1
+    ? i18n('ai_helper_um_credit_source_realtime_k', event.sequence)
+    : i18n('ai_helper_um_credit_source_realtime');
+}
+
+const CreditEventRow: React.FC<{
+  event: CreditEventView;
+  busy: boolean;
+  onRevoke: (event: CreditEventView) => void;
+}> = ({ event, busy, onRevoke }) => {
+  if (event.type === 'reset') {
+    return (
+      <div style={{ padding: `${SPACING.sm} 0`, borderTop: `1px solid ${COLORS.border}`, fontSize: '14px' }}>
+        <div style={{ fontWeight: 600, color: COLORS.textPrimary }}>{i18n('ai_helper_um_credit_event_reset')}</div>
+        <div style={mutedTextStyle}>
+          {[formatDateTime(event.at), event.actorName, event.reason].filter(Boolean).join(' · ')}
+        </div>
+      </div>
+    );
+  }
+  const revoked = !!event.revokedAt;
+  return (
+    <div style={{ padding: `${SPACING.sm} 0`, borderTop: `1px solid ${COLORS.border}`, fontSize: '14px' }}>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600, color: revoked ? COLORS.textMuted : COLORS.textPrimary }}>
+          {event.category ? translateOr(`ai_helper_admin_jailbreak_category_${event.category}`, event.category) : '—'}
+        </span>
+        <span style={{ fontWeight: 650, color: revoked ? COLORS.textMuted : COLORS.errorText, textDecoration: revoked ? 'line-through' : 'none' }}>
+          −{formatMultiplier(event.deduction ?? 0)}
+        </span>
+      </div>
+      <div style={mutedTextStyle}>
+        {[formatDateTime(event.at), event.domainName, sourceLabel(event)].filter(Boolean).join(' · ')}
+      </div>
+      {revoked ? (
+        <div style={mutedTextStyle}>
+          {i18n('ai_helper_um_credit_event_revoked', event.revokedByName || '—', formatDate(event.revokedAt as string))}
+        </div>
+      ) : event.safetyLogId && event.domainId ? (
+        <div>
+          <a
+            href={`/d/${encodeURIComponent(event.domainId)}/ai-helper?tab=safety`}
+            style={{ ...linkButtonStyle, paddingLeft: 0, textDecoration: 'none', display: 'inline-block' }}
+          >
+            {i18n('ai_helper_um_credit_view_record')}
+          </a>
+          <button type="button" disabled={busy} style={{ ...linkButtonStyle, color: COLORS.errorText }} onClick={() => onRevoke(event)}>
+            {i18n('ai_helper_um_credit_revoke')}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 export const UserDetailDrawer: React.FC<{
   uid: number;
   domainId: string;
@@ -79,6 +141,8 @@ export const UserDetailDrawer: React.FC<{
   const [editing, setEditing] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [revoking, setRevoking] = useState<CreditEventView | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -106,8 +170,31 @@ export const UserDetailDrawer: React.FC<{
     }
   };
 
+  /** 标记误判：按安全记录所在域复核；服务端复核为误判后撤销扣分并写审计 */
+  const revoke = async () => {
+    if (!revoking?.safetyLogId || !revoking.domainId) return;
+    setBusy(true);
+    try {
+      await postJson(
+        domainApiUrl(revoking.domainId, `/ai-helper/admin/jailbreak-logs/${encodeURIComponent(revoking.safetyLogId)}/review`),
+        { reviewStatus: 'false_positive' },
+        i18n('ai_helper_admin_jailbreak_review_failed'),
+      );
+      showToast(i18n('ai_helper_um_credit_revoked'), 'success');
+      setRevoking(null);
+      await load();
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, i18n('ai_helper_admin_jailbreak_review_failed')), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const quota = detail?.quota;
   const override = quota?.override?.active ? quota.override : null;
+  const credit = detail?.credit || null;
+  const recoveryDays = credit ? recoveryDaysFrom(credit.recoveryAt) : null;
 
   return (
     <Drawer
@@ -175,12 +262,43 @@ export const UserDetailDrawer: React.FC<{
                 </span>
               )}
             </Row>
+            {credit && (
+              <Row label={i18n('ai_helper_um_detail_credit')}>
+                <span style={{ fontWeight: 600, color: credit.reduced ? COLORS.errorText : COLORS.textPrimary }}>
+                  × {formatMultiplier(credit.m)}
+                </span>
+                <span style={{ ...mutedTextStyle, marginLeft: SPACING.sm }}>
+                  {credit.reduced
+                    ? recoveryDays ? i18n('ai_helper_um_credit_recovery_days', recoveryDays) : i18n('ai_helper_um_credit_no_recovery')
+                    : i18n('ai_helper_um_credit_normal')}
+                </span>
+                {credit.reduced && !quota.disabled && quota.limit !== null && (
+                  <div style={mutedTextStyle}>{i18n('ai_helper_um_credit_floor_note', quota.guaranteeCount)}</div>
+                )}
+              </Row>
+            )}
             <Row label={i18n('ai_helper_um_detail_effective')} strong>
               {quota.disabled
                 ? i18n('ai_helper_um_detail_ai_off')
                 : quota.limit === null ? i18n('ai_helper_um_detail_unlimited') : i18n('ai_helper_um_quota_limit_grant', quota.limit)}
             </Row>
           </section>
+
+          {credit && (
+            <section>
+              <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.xs }}>
+                <h4 style={{ margin: 0, fontSize: '15px', color: COLORS.textPrimary, flex: 1 }}>{i18n('ai_helper_um_credit_records')}</h4>
+                {credit.reduced && (
+                  <button type="button" style={getButtonStyle('secondary')} onClick={() => setResetting(true)}>
+                    {i18n('ai_helper_um_credit_reset')}
+                  </button>
+                )}
+              </div>
+              {credit.events.length === 0
+                ? <div style={mutedTextStyle}>{i18n('ai_helper_um_credit_records_none')}</div>
+                : credit.events.map((event) => <CreditEventRow key={event.id} event={event} busy={busy} onRevoke={setRevoking} />)}
+            </section>
+          )}
 
           <section>
             <h4 style={{ margin: `0 0 ${SPACING.sm}`, fontSize: '15px', color: COLORS.textPrimary }}>
@@ -230,6 +348,29 @@ export const UserDetailDrawer: React.FC<{
           initial={override ? { mode: override.mode, dailyLimit: override.dailyLimit, expiresAt: override.expiresAt, reason: override.reason } : undefined}
           onClose={() => setEditing(false)}
           onSaved={(message) => { setEditing(false); showToast(message, 'success'); load(); onChanged(); }}
+        />
+      )}
+      {resetting && detail && (
+        <CreditResetModal
+          users={[{ uid: detail.uid, uname: detail.uname }]}
+          onClose={() => setResetting(false)}
+          onDone={(message) => { setResetting(false); showToast(message, 'success'); load(); onChanged(); }}
+        />
+      )}
+      {revoking && detail && (
+        <ConfirmModal
+          title={i18n('ai_helper_um_credit_revoke_title')}
+          message={i18n(
+            'ai_helper_um_credit_revoke_message',
+            revoking.category ? translateOr(`ai_helper_admin_jailbreak_category_${revoking.category}`, revoking.category) : '—',
+            formatDateTime(revoking.at),
+            revoking.domainName || revoking.domainId || '',
+          )}
+          confirmLabel={i18n('ai_helper_um_credit_revoke')}
+          danger
+          busy={busy}
+          onConfirm={revoke}
+          onClose={() => setRevoking(null)}
         />
       )}
       {clearing && detail && (

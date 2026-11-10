@@ -20,7 +20,7 @@ exports.OVERVIEW_SCAN_MAX = 5000;
 const VIOLATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const DETAIL_VIOLATIONS_LIMIT = 10;
 const HIGH_USAGE_RATIO = 0.8;
-exports.OVERVIEW_STATUSES = ['exhausted', 'high_usage', 'disabled', 'violations'];
+exports.OVERVIEW_STATUSES = ['exhausted', 'high_usage', 'credit_reduced', 'disabled', 'violations'];
 function escapeRegex(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -63,7 +63,7 @@ function matchesStatus(quota, status) {
     return true;
 }
 class UserOverviewService {
-    constructor(db, quotaService, resolver, overrides, usage, configModel, clock = () => new Date()) {
+    constructor(db, quotaService, resolver, overrides, usage, configModel, clock = () => new Date(), credit) {
         this.db = db;
         this.quotaService = quotaService;
         this.resolver = resolver;
@@ -71,6 +71,7 @@ class UserOverviewService {
         this.usage = usage;
         this.configModel = configModel;
         this.clock = clock;
+        this.credit = credit;
         this.users = db.collection('user');
         this.domains = db.collection('domain');
         this.safetyLogs = db.collection('ai_jailbreak_logs');
@@ -129,6 +130,9 @@ class UserOverviewService {
             });
             set = intersect(set, uids.filter((uid) => typeof uid === 'number'));
         }
+        else if (filters.status === 'credit_reduced') {
+            set = intersect(set, this.credit ? await this.credit.reducedUids(set ? [...set] : undefined, now) : []);
+        }
         else if (filters.status === 'disabled') {
             const [overridden, zeroCap] = await Promise.all([
                 this.overrides.activeUids(now, 'disabled'),
@@ -158,7 +162,7 @@ class UserOverviewService {
                 return { rows: [], total: 0, page, pageSize: exports.OVERVIEW_PAGE_SIZE, pageCount: 0, truncated: false };
             filter._id = { $gt: 1, $in: [...candidateSet] };
         }
-        const computedStatus = filters.status && filters.status !== 'violations' ? filters.status : null;
+        const computedStatus = filters.status && filters.status !== 'violations' && filters.status !== 'credit_reduced' ? filters.status : null;
         try {
             if (computedStatus) {
                 const docs = await this.users
@@ -250,10 +254,11 @@ class UserOverviewService {
         if (!docs.length)
             return [];
         const uids = docs.map((doc) => doc._id);
-        const [{ domainsByUid, groupsByUid }, quotas, violations] = await Promise.all([
+        const [{ domainsByUid, groupsByUid }, quotas, violations, credits] = await Promise.all([
             this.membership(uids),
             known ? Promise.resolve(known) : this.quotaService.explainMany(uids),
             this.violationCounts(uids, now),
+            this.credit ? this.credit.getSummaries(uids, now) : Promise.resolve(null),
         ]);
         return docs.map((doc) => {
             const quota = quotas.get(doc._id);
@@ -265,9 +270,33 @@ class UserOverviewService {
                     .map(({ domainId, name }) => ({ domainId, name }))
                     .sort((a, b) => a.name.localeCompare(b.name)),
                 quota: toOverviewQuota(quota),
+                credit: credits ? toOverviewCredit(credits.get(doc._id)) : null,
                 violations7d: violations.get(doc._id) || 0,
             };
         });
+    }
+    /** 详情里的信誉记录：补上域名、操作人与撤销人的用户名 */
+    async creditDetail(uid, now) {
+        if (!this.credit)
+            return null;
+        const detail = await this.credit.detail(uid, now);
+        const peopleIds = [...new Set(detail.events.flatMap((event) => [event.actorUid, event.revokedBy]).filter((id) => typeof id === 'number'))];
+        const [people, domainNames] = await Promise.all([
+            peopleIds.length
+                ? this.users.find({ _id: { $in: peopleIds } }, { projection: { _id: 1, uname: 1 } }).toArray()
+                : Promise.resolve([]),
+            this.domainNames([...new Set(detail.events.map((event) => event.domainId).filter((id) => !!id))]),
+        ]);
+        const unames = new Map(people.map((person) => [person._id, person.uname]));
+        return {
+            ...toOverviewCredit(detail),
+            events: detail.events.map((event) => ({
+                ...event,
+                ...(event.domainId ? { domainName: domainNames.get(event.domainId) || event.domainId } : {}),
+                ...(event.actorUid !== undefined ? { actorName: unames.get(event.actorUid) || String(event.actorUid) } : {}),
+                ...(event.revokedBy !== undefined ? { revokedByName: unames.get(event.revokedBy) || String(event.revokedBy) } : {}),
+            })),
+        };
     }
     async detail(uidRaw) {
         const uid = typeof uidRaw === 'string' && /^\d+$/.test(uidRaw) ? Number(uidRaw) : uidRaw;
@@ -278,7 +307,7 @@ class UserOverviewService {
         if (!user)
             throw new hydroGroupService_1.GroupServiceError('USER_NOT_FOUND', 404, 'ai_helper_overview_user_not_found');
         const now = this.clock();
-        const [{ domainsByUid, groupsByUid }, quota, violations, recent] = await Promise.all([
+        const [{ domainsByUid, groupsByUid }, quota, violations, recent, credit] = await Promise.all([
             this.membership([uid]),
             this.quotaService.explain(uid),
             this.violationCounts([uid], now),
@@ -287,6 +316,7 @@ class UserOverviewService {
                 .sort({ createdAt: -1 })
                 .limit(DETAIL_VIOLATIONS_LIMIT)
                 .toArray(),
+            this.creditDetail(uid, now),
         ]);
         const names = await this.domainNames([...new Set(recent.map((log) => log.domainId).filter((id) => !!id))]);
         let overrideSetByName;
@@ -309,9 +339,14 @@ class UserOverviewService {
                 ...(log.reviewStatus ? { reviewStatus: log.reviewStatus } : {}),
                 createdAt: new Date(log.createdAt).toISOString(),
             })),
-            credit: null,
+            credit,
         };
     }
 }
 exports.UserOverviewService = UserOverviewService;
+function toOverviewCredit(summary) {
+    if (!summary)
+        return { m: 1, reduced: false, recoveryAt: null };
+    return { m: summary.m, reduced: summary.reduced, recoveryAt: summary.recoveryAt ? summary.recoveryAt.toISOString() : null };
+}
 //# sourceMappingURL=userOverviewService.js.map

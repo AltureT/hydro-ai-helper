@@ -6,7 +6,10 @@ import { QuotaOverrideModel } from '../../models/quotaOverride';
 import { AuditService } from '../../services/auditService';
 import { QuotaAdminService } from '../../services/quotaAdminService';
 import { QuotaGroupResolver } from '../../services/quotaGroupResolver';
+import { CreditEventModel } from '../../models/creditEvent';
+import { CreditService } from '../../services/creditService';
 import {
+  CreditResetHandler,
   QuotaAdminHandlerPriv,
   QuotaGroupDetailHandler,
   QuotaGroupsHandler,
@@ -25,8 +28,10 @@ function setup() {
   const groups = new QuotaGroupModel(db as any);
   const overrides = new QuotaOverrideModel(db as any);
   const resolver = new QuotaGroupResolver(db as any, groups, overrides, { broadcast: jest.fn() });
-  const service = new QuotaAdminService(db as any, groups, overrides, resolver, new AuditService(new AuditLogModel(db as any)));
-  return { db, service };
+  const audit = new AuditService(new AuditLogModel(db as any));
+  const service = new QuotaAdminService(db as any, groups, overrides, resolver, audit);
+  const credit = new CreditService(db as any, new CreditEventModel(db as any), { getConfig: jest.fn().mockResolvedValue(null) }, audit);
+  return { db, service, credit };
 }
 
 function makeHandler<T extends { request: any; response: any; ctx: any; user?: any }>(
@@ -46,9 +51,36 @@ function makeHandler<T extends { request: any; response: any; ctx: any; user?: a
     hasPriv: (priv: number) => (options.admin === false ? false : priv === PRIV.PRIV_EDIT_SYSTEM),
   };
   (handler as any).translate = (key: string) => key;
-  handler.ctx = { get: (name: string) => (name === 'quotaAdminService' ? env.service : undefined) };
+  const services: Record<string, unknown> = { quotaAdminService: env.service, creditService: env.credit };
+  handler.ctx = { get: (name: string) => services[name] };
   return handler;
 }
+
+describe('credit reset handler (FR-032)', () => {
+  it('is system-admin only and requires the CSRF header', async () => {
+    const env = setup();
+    const denied = makeHandler(CreditResetHandler, env, { admin: false, body: { uids: [1031], reason: '误判' } });
+    await denied.post();
+    expect(denied.response.status).toBe(403);
+    const noCsrf = makeHandler(CreditResetHandler, env, { csrf: false, body: { uids: [1031], reason: '误判' } });
+    await noCsrf.post();
+    expect(noCsrf.response.status).toBe(403);
+    expect(env.db.store.ai_credit_events?.docs || []).toHaveLength(0);
+  });
+
+  it('requires a reason, then resets and audits', async () => {
+    const env = setup();
+    const missing = makeHandler(CreditResetHandler, env, { body: { uids: [1031], reason: '' } });
+    await missing.post();
+    expect(missing.response.status).toBe(400);
+    expect(missing.response.body).toEqual({ error: 'ai_helper_credit_reason_required', code: 'REASON_REQUIRED' });
+
+    const ok = makeHandler(CreditResetHandler, env, { body: { uids: [1031], reason: '误判较多，已沟通' } });
+    await ok.post();
+    expect(ok.response.body).toEqual({ success: true, reset: [1031], missing: [] });
+    expect(env.db.store.ai_audit_logs.docs).toEqual([expect.objectContaining({ action: 'credit.reset', actorUid: 2 })]);
+  });
+});
 
 describe('quota admin handlers', () => {
   it('registers routes with system-admin privilege', () => {

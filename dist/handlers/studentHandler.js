@@ -25,6 +25,7 @@ const problemStatement_1 = require("../utils/problemStatement");
 const budgetService_1 = require("../services/budgetService");
 const sseHelper_1 = require("../lib/sseHelper");
 const hydroGroupService_1 = require("../services/hydroGroupService");
+const configSections_1 = require("../models/configSections");
 function extractContestIdFromReferer(referer) {
     if (typeof referer !== 'string')
         return undefined;
@@ -155,6 +156,62 @@ class ChatHandler extends hydrooj_1.Handler {
             console.warn('[ChatHandler] 次数退还失败（预占将自动过期）:', err instanceof Error ? err.message : err);
         }
     }
+    /** 高置信度违规扣信誉（跨域生效）；信誉服务不可用或写入失败时只记录日志 */
+    async recordCreditDeduction(userId, category, safetyLogId, domainId, conversationId) {
+        const creditService = this.ctx.get('creditService');
+        if (!creditService || typeof creditService.recordRealtimeDeduction !== 'function')
+            return;
+        try {
+            await creditService.recordRealtimeDeduction({
+                uid: userId,
+                category,
+                safetyLogId,
+                domainId,
+                ...(conversationId ? { conversationId: typeof conversationId === 'string' ? new mongo_1.ObjectId(conversationId) : conversationId } : {}),
+            });
+        }
+        catch (err) {
+            console.error('[ChatHandler] 信誉扣分失败:', err instanceof Error ? err.message : err);
+        }
+    }
+    /**
+     * 偏题违规（第 2 次起）：写安全记录（类别 off_topic、高置信度、来源 topic_guard、只拦截不冷却）并扣信誉。
+     * 记录失败时回滚计数，避免下一次被误判为“又一次偏题”。
+     */
+    async recordOffTopicViolation(params) {
+        const { jailbreakLogModel, domainId, userId, conversationId, penaltyCounterId, penaltyEventId } = params;
+        let logId;
+        try {
+            logId = await new effectivenessService_1.EffectivenessService(this.ctx).logJailbreakAttempt({
+                domainId,
+                userId,
+                conversationId,
+                problemId: params.problemId,
+                questionType: params.questionType,
+                matchedPattern: `off_topic:${params.matchedKeyword}`,
+                matchedText: params.userThinking.substring(0, 120),
+                category: 'off_topic',
+                confidence: 'high',
+                detectionSource: 'topic_guard',
+                actionTaken: 'blocked',
+                penaltyCounterId,
+                penaltyEventId,
+            });
+        }
+        catch (err) {
+            console.error('[ChatHandler] 记录偏题违规失败', err);
+        }
+        if (!logId) {
+            if (penaltyCounterId && penaltyEventId) {
+                await jailbreakLogModel.rollbackPenaltySequence(penaltyCounterId, penaltyEventId).catch((err) => {
+                    console.error('[ChatHandler] 回滚偏题计数失败', err);
+                });
+            }
+            return undefined;
+        }
+        await this.recordCreditDeduction(userId, 'off_topic', logId, domainId, conversationId);
+        return logId.toHexString();
+    }
     async rejectSafetyViolation(params) {
         const { validation, jailbreakLogModel, domainId, userId, conversationId, problemId, questionType, fallbackMatchedText, } = params;
         let actionTaken = 'blocked';
@@ -165,7 +222,7 @@ class ChatHandler extends hydrooj_1.Handler {
         let safetyProgress;
         if (validation.category) {
             try {
-                const sequence = await jailbreakLogModel.nextPenaltySequence(domainId, userId, validation.category);
+                const sequence = await jailbreakLogModel.nextPenaltySequence(userId, validation.category);
                 penaltyCounterId = sequence.counterId;
                 penaltyEventId = sequence.eventId;
                 const penalty = (0, safetyPenaltyService_1.decideSafetyPenaltyFromCount)(validation.category, sequence.currentCount);
@@ -182,7 +239,7 @@ class ChatHandler extends hydrooj_1.Handler {
             catch (penaltyErr) {
                 console.warn('[ChatHandler] 原子安全计数失败，回退到日志计数:', penaltyErr);
                 try {
-                    const penalty = await (0, safetyPenaltyService_1.decideSafetyPenalty)(jailbreakLogModel, domainId, userId, validation.category);
+                    const penalty = await (0, safetyPenaltyService_1.decideSafetyPenalty)(jailbreakLogModel, userId, validation.category);
                     actionTaken = penalty.action;
                     blockedUntil = penalty.blockedUntil;
                     retryAfterSeconds = penalty.retryAfterSeconds;
@@ -198,6 +255,10 @@ class ChatHandler extends hydrooj_1.Handler {
                 }
             }
         }
+        // 置信度（FR-028a）：由规则风险分决定；索要答案达到冷却阈值的那一次记为高
+        let confidence = validation.confidence;
+        if (validation.category === 'answer_seeking' && actionTaken !== 'blocked')
+            confidence = 'high';
         let safetyEventId;
         try {
             const effectivenessService = new effectivenessService_1.EffectivenessService(this.ctx);
@@ -210,7 +271,7 @@ class ChatHandler extends hydrooj_1.Handler {
                 matchedPattern: validation.matchedPattern,
                 matchedText: validation.matchedText || fallbackMatchedText.substring(0, 120),
                 category: validation.category,
-                confidence: validation.confidence,
+                confidence,
                 riskScore: validation.riskScore,
                 detectionSource: validation.detectionSource,
                 actionTaken,
@@ -219,6 +280,10 @@ class ChatHandler extends hydrooj_1.Handler {
                 penaltyEventId,
             });
             safetyEventId = logId?.toHexString();
+            // 只有高置信度违规扣信誉（FR-028）；扣分失败不影响拦截
+            if (logId && confidence === 'high' && validation.category) {
+                await this.recordCreditDeduction(userId, validation.category, logId, domainId, conversationId);
+            }
             if (!logId && penaltyCounterId && penaltyEventId) {
                 const counterToRollback = penaltyCounterId;
                 const eventToRollback = penaltyEventId;
@@ -360,7 +425,7 @@ class ChatHandler extends hydrooj_1.Handler {
         const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
         // 渐进式冷却仅限制 AI 对话；数据库不可用时保持主流程可用。
         try {
-            const activeCooldown = await jailbreakLogModel.findActiveCooldown(domainId, userId);
+            const activeCooldown = await jailbreakLogModel.findActiveCooldown(userId);
             if (activeCooldown?.blockedUntil) {
                 const retryAfterSeconds = Math.max(1, Math.ceil((activeCooldown.blockedUntil.getTime() - Date.now()) / 1000));
                 this.response.status = 429;
@@ -372,6 +437,8 @@ class ChatHandler extends hydrooj_1.Handler {
                     retryAfterSeconds,
                     safetyEventId: activeCooldown._id.toHexString(),
                     appealAllowed: activeCooldown.reviewStatus !== 'confirmed',
+                    // 冷却按用户跨域生效：记录可能来自其他域，复核时按该域查看（plan R12）
+                    ...(activeCooldown.domainId ? { domainId: activeCooldown.domainId } : {}),
                 };
                 this.response.type = 'application/json';
                 return null;
@@ -662,17 +729,43 @@ class ChatHandler extends hydrooj_1.Handler {
                 return null;
             }
         }
-        // P1-2: 偏题检测（在 LLM 调用前执行）
+        // P1-2: 偏题检测（在 LLM 调用前执行）。按用户跨会话计数（窗口默认 24 小时，FR-037）：
+        // 第 1 次照常回答并计次；第 2 次起记为偏题违规、扣信誉，返回固定回复且不计次。
+        const topicGuardConfig = (0, configSections_1.normalizeTopicGuardConfig)(aiConfig?.topicGuardConfig);
         const topicGuardService = new topicGuardService_1.TopicGuardService();
         const topicResult = topicGuardService.evaluate(userThinking, {
             code: processedCode,
             problemTitle: problemTitleStr,
-            problemContent: processedProblemContent
+            problemContent: processedProblemContent,
+            codeExemptMinChars: topicGuardConfig.codeExemptMinChars,
+            customKeywords: topicGuardConfig.customOffTopicKeywords,
         });
         if (topicResult.isOffTopic) {
-            const strikeCount = await conversationModel.incrementOffTopicStrike(currentConversationId);
+            let strikeCount = 1;
+            let penaltyCounterId;
+            let penaltyEventId;
+            try {
+                const sequence = await jailbreakLogModel.nextPenaltySequence(userId, 'off_topic', new Date(), topicGuardConfig.strikeWindowHours * 60 * 60 * 1000);
+                strikeCount = sequence.currentCount;
+                penaltyCounterId = sequence.counterId;
+                penaltyEventId = sequence.eventId;
+            }
+            catch (err) {
+                console.warn('[ChatHandler] 偏题计数失败，本次按第 1 次处理:', err instanceof Error ? err.message : err);
+            }
             if (strikeCount >= 2) {
-                // 连续偏题 >= 2 次，直接返回固定模板，不调 LLM
+                const safetyEventId = await this.recordOffTopicViolation({
+                    jailbreakLogModel,
+                    domainId,
+                    userId,
+                    conversationId: currentConversationId,
+                    problemId,
+                    questionType,
+                    matchedKeyword: topicResult.matchedKeyword || '',
+                    userThinking,
+                    penaltyCounterId,
+                    penaltyEventId,
+                });
                 const fixedReply = this.translate('ai_helper_err_off_topic_reply');
                 // 先保存学生消息，确保会话消息顺序与实际轮次一致
                 const studentMessageTimestamp = new Date();
@@ -703,16 +796,13 @@ class ChatHandler extends hydrooj_1.Handler {
                         role: 'ai',
                         content: fixedReply,
                         timestamp: aiMessageTimestamp.toISOString()
-                    }
+                    },
+                    offTopicViolation: { ...(safetyEventId ? { safetyEventId } : {}), appealAllowed: !!safetyEventId },
                 };
                 this.response.body = response;
                 this.response.type = 'application/json';
                 return null;
             }
-        }
-        else {
-            // 正常对话，重置偏题计数
-            await conversationModel.resetOffTopicStrike(currentConversationId);
         }
         // 查询评测数据（debug 类型时自动附带）
         let judgeInfo;
@@ -1305,7 +1395,7 @@ class SafetyAppealHandler extends hydrooj_1.Handler {
                 return;
             }
             const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
-            const appealResult = await jailbreakLogModel.appealByStudent(id, (0, domainHelper_1.getDomainId)(this), Number(this.user._id), reason || undefined);
+            const appealResult = await jailbreakLogModel.appealByStudent(id, Number(this.user._id), reason || undefined);
             if (appealResult === 'unavailable') {
                 this.response.status = 404;
                 this.response.body = {

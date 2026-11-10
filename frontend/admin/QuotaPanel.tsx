@@ -1,6 +1,6 @@
 /**
  * 额度与信誉（设计稿“额度与信誉”）
- * 全局设置（每日默认次数、重置时区）、额度组、个人覆盖。信誉规则随 PR4 加入。
+ * 全局设置（每日默认次数、重置时区、保底次数）、额度组、个人覆盖、信誉规则。
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -17,11 +17,31 @@ import { errorMessage, getJson } from './userManagementApi';
 import { labelStyle, mutedTextStyle } from './userManagementUi';
 import { QuotaGroupsSection } from './QuotaGroupsSection';
 import { QuotaOverridesSection } from './QuotaOverridesSection';
+import { CreditRulesSection } from './CreditRulesSection';
+import { DEFAULT_CREDIT_RULES, type CreditRules } from './creditLogic';
 
 interface QuotaConfigView {
   dailyMessageLimit: number;
   timezone: string;
   guaranteeCount: number;
+  credit?: CreditRules;
+}
+
+/** 写入 quotaConfig 的部分字段，返回保存后的完整配置 */
+async function putQuotaConfig(patch: Record<string, unknown>): Promise<QuotaConfigView | undefined> {
+  const res = await fetch('/ai-helper/admin/config', {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify({ quotaConfig: patch }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body?.code === 'INVALID_TIMEZONE'
+      ? i18n('ai_helper_um_quota_tz_invalid')
+      : body?.error || i18n('ai_helper_um_quota_save_failed'));
+  }
+  return body?.config?.quotaConfig as QuotaConfigView | undefined;
 }
 
 interface ConfigResponse {
@@ -58,6 +78,7 @@ export const QuotaPanel: React.FC<{
   const [saved, setSaved] = useState<QuotaConfigView | null>(null);
   const [limitText, setLimitText] = useState('0');
   const [timezone, setTimezone] = useState('Asia/Shanghai');
+  const [guaranteeText, setGuaranteeText] = useState('3');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -73,6 +94,7 @@ export const QuotaPanel: React.FC<{
       setSaved(quota);
       setLimitText(String(quota.dailyMessageLimit));
       setTimezone(quota.timezone);
+      setGuaranteeText(String(quota.guaranteeCount ?? 3));
     } catch (err) {
       setLoadError(errorMessage(err, i18n('ai_helper_um_quota_load_failed')));
     } finally {
@@ -84,31 +106,31 @@ export const QuotaPanel: React.FC<{
 
   const limitValue = /^\d+$/.test(limitText.trim()) ? Number(limitText.trim()) : NaN;
   const limitInvalid = !Number.isInteger(limitValue) || limitValue < 0 || limitValue > 100000;
-  const dirty = !!saved && (limitValue !== saved.dailyMessageLimit || timezone.trim() !== saved.timezone);
+  const guaranteeValue = /^\d+$/.test(guaranteeText.trim()) ? Number(guaranteeText.trim()) : NaN;
+  const guaranteeInvalid = !Number.isInteger(guaranteeValue) || guaranteeValue < 0 || guaranteeValue > 1000;
+  const dirty = !!saved && (
+    limitValue !== saved.dailyMessageLimit || timezone.trim() !== saved.timezone || guaranteeValue !== saved.guaranteeCount
+  );
+
+  const applySaved = (quota: QuotaConfigView | undefined) => {
+    if (!quota) return;
+    setSaved(quota);
+    setLimitText(String(quota.dailyMessageLimit));
+    setTimezone(quota.timezone);
+    setGuaranteeText(String(quota.guaranteeCount ?? 3));
+  };
+
+  const saveCreditRules = async (rules: CreditRules) => {
+    applySaved(await putQuotaConfig({ credit: rules }));
+    showToast(i18n('ai_helper_um_credit_rules_saved'), 'success');
+  };
 
   const save = async () => {
-    if (limitInvalid) return;
+    if (limitInvalid || guaranteeInvalid) return;
     setSaving(true);
     setSaveError(null);
     try {
-      const res = await fetch('/ai-helper/admin/config', {
-        method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        body: JSON.stringify({ quotaConfig: { dailyMessageLimit: limitValue, timezone: timezone.trim() } }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(body?.code === 'INVALID_TIMEZONE'
-          ? i18n('ai_helper_um_quota_tz_invalid')
-          : body?.error || i18n('ai_helper_um_quota_save_failed'));
-      }
-      const quota = body?.config?.quotaConfig as QuotaConfigView | undefined;
-      if (quota) {
-        setSaved(quota);
-        setLimitText(String(quota.dailyMessageLimit));
-        setTimezone(quota.timezone);
-      }
+      applySaved(await putQuotaConfig({ dailyMessageLimit: limitValue, timezone: timezone.trim(), guaranteeCount: guaranteeValue }));
       showToast(i18n('ai_helper_um_quota_saved'), 'success');
     } catch (err) {
       setSaveError(errorMessage(err, i18n('ai_helper_um_quota_save_failed')));
@@ -173,6 +195,24 @@ export const QuotaPanel: React.FC<{
                   {i18n('ai_helper_um_quota_timezone_hint')}{tzHint ? ` ${tzHint}` : ''}
                 </div>
               </div>
+              <div>
+                <label style={{ ...labelStyle, display: 'block' }} htmlFor="ai-um-quota-guarantee">{i18n('ai_helper_um_quota_guarantee')}</label>
+                <input
+                  id="ai-um-quota-guarantee"
+                  type="number"
+                  min={0}
+                  max={1000}
+                  step={1}
+                  inputMode="numeric"
+                  value={guaranteeText}
+                  onChange={(event) => setGuaranteeText(event.target.value)}
+                  aria-invalid={guaranteeInvalid}
+                  style={{ ...getInputStyle(), marginTop: '6px', maxWidth: '160px', borderColor: guaranteeInvalid ? COLORS.error : COLORS.border }}
+                />
+                <div style={{ ...mutedTextStyle, marginTop: '4px', color: guaranteeInvalid ? COLORS.errorText : COLORS.textMuted }}>
+                  {guaranteeInvalid ? i18n('ai_helper_um_quota_guarantee_invalid') : i18n('ai_helper_um_quota_guarantee_hint')}
+                </div>
+              </div>
             </div>
 
             <div style={{ ...getAlertStyle('info'), marginTop: SPACING.lg }}>
@@ -187,14 +227,14 @@ export const QuotaPanel: React.FC<{
             {saveError && <div style={{ ...getAlertStyle('error'), marginTop: SPACING.md }}>{saveError}</div>}
 
             <div style={{ display: 'flex', gap: SPACING.sm, marginTop: SPACING.lg, flexWrap: 'wrap' }}>
-              <button type="button" disabled={!dirty || limitInvalid || saving} onClick={save} style={getButtonStyle('primary')}>
+              <button type="button" disabled={!dirty || limitInvalid || guaranteeInvalid || saving} onClick={save} style={getButtonStyle('primary')}>
                 {saving ? i18n('ai_helper_um_saving') : i18n('ai_helper_um_save')}
               </button>
               {dirty && (
                 <button
                   type="button"
                   style={getButtonStyle('ghost')}
-                  onClick={() => { setLimitText(String(saved.dailyMessageLimit)); setTimezone(saved.timezone); setSaveError(null); }}
+                  onClick={() => { applySaved(saved); setSaveError(null); }}
                 >
                   {i18n('ai_helper_um_cancel')}
                 </button>
@@ -205,6 +245,14 @@ export const QuotaPanel: React.FC<{
       </section>
       <QuotaGroupsSection domainId={domainId} showToast={showToast} />
       <QuotaOverridesSection domainId={domainId} showToast={showToast} />
+      {saved && (
+        <CreditRulesSection
+          rules={saved.credit || DEFAULT_CREDIT_RULES}
+          exampleBase={saved.dailyMessageLimit > 0 ? saved.dailyMessageLimit : 20}
+          guaranteeCount={saved.guaranteeCount ?? 3}
+          onSave={saveCreditRules}
+        />
+      )}
     </div>
   );
 };

@@ -4,6 +4,7 @@ import { buildApiUrl } from '../utils/domainUtils';
 import { Toast, useToast } from '../components/Toast';
 import { JailbreakAnalyticsPanel } from './JailbreakAnalyticsPanel';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
+import { OffTopicRulesCard } from './OffTopicRulesCard';
 import {
   COLORS,
   FONT_FAMILY,
@@ -613,6 +614,8 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
               </button>
             </div>
           </div>
+
+          <OffTopicRulesCard showToast={showToast} />
         </div>
       )}
     </div>

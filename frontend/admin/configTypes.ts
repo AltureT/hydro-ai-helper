@@ -65,7 +65,8 @@ export type JailbreakCategory =
   | 'answer_seeking'
   | 'prompt_injection'
   | 'prompt_exfiltration'
-  | 'obfuscated_injection';
+  | 'obfuscated_injection'
+  | 'off_topic';
 
 export type JailbreakReviewStatus = 'pending' | 'confirmed' | 'false_positive';
 
@@ -76,7 +77,7 @@ export interface JailbreakLogFilters {
   userId?: string;
   problemId?: string;
   actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
-  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom';
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom' | 'topic_guard' | 'ai_review';
   dateFrom?: string;
   dateTo?: string;
 }

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildApiUrl } from '../../utils/domainUtils';
 import {
+  markAppealed,
   mergeSnapshot,
   refreshDelayMs,
   type QuotaSnapshotView,
@@ -59,5 +60,23 @@ export function useQuotaStatus() {
     else refresh();
   }, [refresh]);
 
-  return { status, refresh, applySnapshot, markBlocked };
+  /** 对降低额度的某条违规申诉（复用安全记录申诉接口，按本人记录跨域查找） */
+  const appeal = useCallback(async (safetyEventId: string): Promise<{ ok: boolean; message?: string }> => {
+    try {
+      const res = await fetch(buildApiUrl(`/ai-helper/safety-events/${encodeURIComponent(safetyEventId)}/appeal`), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string; message?: string };
+      if (!res.ok) return { ok: false, message: data.error };
+      setStatus((prev) => markAppealed(prev, safetyEventId));
+      return { ok: true, message: data.message };
+    } catch {
+      return { ok: false };
+    }
+  }, []);
+
+  return { status, refresh, applySnapshot, markBlocked, appeal };
 }

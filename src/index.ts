@@ -110,6 +110,7 @@ import {
   QuotaGroupDetailHandler,
   QuotaGroupsHandler,
   QuotaOverridesHandler,
+  CreditResetHandler,
 } from './handlers/quotaAdminHandler';
 import { UserDetailHandler, UserOverviewHandler, UserOverviewHandlerPriv } from './handlers/userOverviewHandler';
 import {
@@ -168,6 +169,8 @@ import { QuotaService } from './services/quotaService';
 import { QuotaGroupResolver } from './services/quotaGroupResolver';
 import { QuotaAdminService } from './services/quotaAdminService';
 import { UserOverviewService } from './services/userOverviewService';
+import { CreditService } from './services/creditService';
+import { CreditEventModel } from './models/creditEvent';
 import { TransferService } from './services/transferService';
 console.log('[AI-Helper] services OK');
 
@@ -234,6 +237,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const quotaGroupModel = new QuotaGroupModel(db);
     const quotaOverrideModel = new QuotaOverrideModel(db);
     const transferJobModel = new TransferJobModel(db);
+    const creditEventModel = new CreditEventModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -290,6 +294,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(quotaGroupModel, 'quotaGroupModel');
     await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
     await safeEnsureIndexes(transferJobModel, 'transferJobModel');
+    await safeEnsureIndexes(creditEventModel, 'creditEventModel');
 
     try {
       const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
@@ -376,15 +381,26 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     // 额度组解析缓存（60 秒）：插件写入时本地失效并广播，其他进程收到广播后失效
     const quotaGroupResolver = new QuotaGroupResolver(db, quotaGroupModel, quotaOverrideModel, ctx);
     quotaGroupResolver.listen(ctx);
+    // 信誉系数：由信誉事件推导，跨域生效（US4）
+    ctx.provide('creditEventModel', creditEventModel);
+    const creditService = new CreditService(db, creditEventModel, aiConfigModel, auditService, {
+      findForUser: (ids, userId) => jailbreakLogModel.findForUser(ids, userId),
+    });
+    ctx.provide('creditService', creditService);
     const quotaService = new QuotaService(quotaUsageModel, aiConfigModel, {
       getOverride: (uid) => quotaGroupResolver.getOverride(uid),
       getOverrides: (uids) => quotaGroupResolver.getOverrides(uids),
       getGroupMemberships: (uid) => quotaGroupResolver.getGroupMemberships(uid),
+      getCreditMultiplier: (uid, now) => creditService.getMultiplier(uid, now),
+      getCreditMultipliers: async (uids, now) => {
+        const summaries = await creditService.getSummaries(uids, now);
+        return new Map([...summaries].map(([uid, summary]) => [uid, summary.m]));
+      },
     });
     ctx.provide('quotaService', quotaService);
     ctx.provide('quotaAdminService', new QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
     ctx.provide('userOverviewService', new UserOverviewService(
-      db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel,
+      db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel, undefined, creditService,
     ));
     ctx.provide('transferJobModel', transferJobModel);
     ctx.provide('transferService', new TransferService(
@@ -605,6 +621,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_admin_quota_groups', '/ai-helper/admin/quota/groups', QuotaGroupsHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_quota_group_detail', '/ai-helper/admin/quota/groups/detail', QuotaGroupDetailHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', QuotaOverridesHandler, QuotaAdminHandlerPriv);
+    ctx.Route('ai_admin_credit_reset', '/ai-helper/admin/credit/reset', CreditResetHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_users', '/ai-helper/admin/users', UserOverviewHandler, UserOverviewHandlerPriv);
     ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', UserDetailHandler, UserOverviewHandlerPriv);
     // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）

@@ -5,7 +5,7 @@ import 'highlight.js/styles/github.css';
 import { useChatSession } from './hooks/useChatSession';
 import { useTextSelection } from './hooks/useTextSelection';
 import { useQuotaStatus } from './hooks/useQuotaStatus';
-import { QuotaBar, QuotaBlockedNotice } from './QuotaBar';
+import { CreditNotice, QuotaBar, QuotaBlockedNotice } from './QuotaBar';
 import { quotaBlock } from './quotaView';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatInput } from './ChatInput';
@@ -22,7 +22,12 @@ const RETRYABLE_CATEGORIES = new Set(['rate_limit', 'timeout', 'network']);
 
 export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId }) => {
   const quota = useQuotaStatus();
-  const chat = useChatSession({ problemId, onQuota: quota.applySnapshot, onQuotaBlocked: quota.markBlocked });
+  const chat = useChatSession({
+    problemId,
+    onQuota: quota.applySnapshot,
+    onQuotaBlocked: quota.markBlocked,
+    onSafetyEvent: quota.refresh,
+  });
   const { state, dispatch } = chat;
   const block = quotaBlock(quota.status);
 
@@ -234,6 +239,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: COLORS.bgCard }}>
       <style>{markdownTheme}{keyframeStyles}</style>
       {quota.status && <QuotaBar status={quota.status} />}
+      {quota.status && <CreditNotice status={quota.status} onAppeal={quota.appeal} />}
       <ChatMessageList {...messageListProps}>
         {renderErrorBanner(false)}
       </ChatMessageList>

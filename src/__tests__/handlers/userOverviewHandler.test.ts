@@ -11,6 +11,10 @@ import { QuotaUsageModel } from '../../models/quotaUsage';
 import { QuotaGroupResolver } from '../../services/quotaGroupResolver';
 import { QuotaService } from '../../services/quotaService';
 import { UserOverviewService } from '../../services/userOverviewService';
+import { AuditLogModel } from '../../models/auditLog';
+import { CreditEventModel } from '../../models/creditEvent';
+import { AuditService } from '../../services/auditService';
+import { CreditService } from '../../services/creditService';
 import {
   UserDetailHandler,
   UserOverviewHandler,
@@ -27,7 +31,7 @@ function usageDoc(uid: number, used: number) {
   return { _id: `${uid}:${DATE}`, uid, date: DATE, used, reservations: [], updatedAt: NOW, expireAt: NOW };
 }
 
-function setup(mode: 'v4' | 'v5' = 'v5', dailyMessageLimit = 20) {
+function setup(mode: 'v4' | 'v5' = 'v5', dailyMessageLimit = 20, withCredit = false) {
   setHydroMode(mode);
   const member = (domainId: string, uid: number) => (mode === 'v5'
     ? { domainId, uid, role: 'default', join: true }
@@ -66,19 +70,27 @@ function setup(mode: 'v4' | 'v5' = 'v5', dailyMessageLimit = 20) {
     ]),
     ai_quota_groups: createFakeCollection(),
     ai_quota_overrides: createFakeCollection(),
+    ai_credit_events: createFakeCollection(),
+    ai_audit_logs: createFakeCollection(),
   });
   const groups = new QuotaGroupModel(db as any);
   const overrides = new QuotaOverrideModel(db as any);
   const usage = new QuotaUsageModel(db as any);
   const resolver = new QuotaGroupResolver(db as any, groups, overrides, undefined, () => NOW);
   const configModel = { getConfig: jest.fn().mockResolvedValue({ quotaConfig: { dailyMessageLimit, timezone: 'Asia/Shanghai', guaranteeCount: 3 } }) };
+  const credit = withCredit
+    ? new CreditService(db as any, new CreditEventModel(db as any), configModel, new AuditService(new AuditLogModel(db as any)), undefined, () => NOW)
+    : undefined;
   const quotaService = new QuotaService(usage, configModel, {
     getOverride: (uid) => resolver.getOverride(uid),
     getOverrides: (uids) => resolver.getOverrides(uids),
     getGroupMemberships: (uid) => resolver.getGroupMemberships(uid),
+    ...(credit ? {
+      getCreditMultipliers: async (uids: number[], now: Date) => new Map([...(await credit.getSummaries(uids, now))].map(([uid, s]) => [uid, s.m])),
+    } : {}),
   }, () => NOW);
-  const service = new UserOverviewService(db as any, quotaService, resolver, overrides, usage, configModel, () => NOW);
-  return { db, service, groups, overrides, resolver };
+  const service = new UserOverviewService(db as any, quotaService, resolver, overrides, usage, configModel, () => NOW, credit);
+  return { db, service, groups, overrides, resolver, credit };
 }
 
 function makeHandler<T extends { request: any; response: any; ctx: any; user?: any }>(
@@ -129,6 +141,7 @@ describe('user overview', () => {
       domains: [{ id: 'oi2023', name: '信息学 2023' }, { id: 'oi2024', name: '信息学 2024' }],
       groups: [{ domainId: 'oi2023', name: '2023级2班' }],
       quota: expect.objectContaining({ limit: 20, used: 20, remaining: 0, disabled: false, source: 'default', override: null, appliedGroups: [] }),
+      credit: null,
       violations7d: 2,
     });
     // 数字命名的 Hydro 内部组不展示；已退出的域不算所属域
@@ -238,6 +251,39 @@ describe('user overview', () => {
       await missing.get();
       expect(missing.response.status).toBe(404);
     }
+  });
+
+  it('shows each student\'s credit, filters by reduced credit and lists credit records in the detail (US4)', async () => {
+    const env = setup('v5', 20, true);
+    const credit = env.credit as CreditService;
+    await credit.recordRealtimeDeduction({ uid: 1032, category: 'prompt_injection', domainId: 'oi2024', at: NOW });
+    await credit.recordRealtimeDeduction({ uid: 1052, category: 'answer_seeking', domainId: 'oi2023', at: new Date(NOW.getTime() - 3 * 86400000) });
+    await credit.reset([1101], '误判', 2);
+
+    const all = await list(env);
+    const lisi = all.body.rows.find((row: any) => row.uid === 1032);
+    expect(lisi.credit).toEqual({ m: 0.75, reduced: true, recoveryAt: '2026-11-15T08:00:00.000Z' });
+    // 系数降低后当日额度也随之降低：⌊20 × 0.75⌋ = 15，已用 17 → 剩余 0
+    expect(lisi.quota).toEqual(expect.objectContaining({ limit: 15, used: 17, remaining: 0 }));
+    expect(all.body.rows.find((row: any) => row.uid === 1052).credit).toEqual(expect.objectContaining({ m: 1, reduced: false }));
+
+    const reduced = await list(env, { status: 'credit_reduced' });
+    expect(reduced.body.rows.map((row: any) => row.uid)).toEqual([1032]);
+    const reducedInDomain = await list(env, { status: 'credit_reduced', domainId: 'oi2024' });
+    expect(reducedInDomain.body.rows).toEqual([]);
+
+    const handler = makeHandler(UserDetailHandler, env, { params: { uid: '1101' } });
+    await handler.get();
+    expect(handler.response.body.credit).toEqual(expect.objectContaining({
+      m: 1,
+      reduced: false,
+      events: [expect.objectContaining({ type: 'reset', source: 'manual', actorUid: 2, actorName: 'admin', reason: '误判' })],
+    }));
+    const detail = makeHandler(UserDetailHandler, env, { params: { uid: '1032' } });
+    await detail.get();
+    expect(detail.response.body.credit.events[0]).toEqual(expect.objectContaining({
+      category: 'prompt_injection', deduction: 0.25, domainId: 'oi2024', domainName: '信息学 2024',
+    }));
   });
 
   it('parses query filters defensively', () => {

@@ -1,6 +1,6 @@
 /**
  * 学生总览（设计稿“学生总览”，US6）：跨域查看学生的小组、额度与用量、近 7 天违规，并批量操作
- * 仅系统管理员可见；不展示对话原文（FR-053）。信誉列随 PR4 加入；批量栏可打开跨域复制或移动（TransferDialog）。
+ * 仅系统管理员可见；不展示对话原文（FR-053）。批量栏可打开跨域复制或移动（TransferDialog）、重置信誉。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -35,9 +35,11 @@ import { OverrideFormModal, QUOTA_API, formatOverrideSetting } from './quotaAdmi
 import { HydroGroupBatchDialog, QuotaGroupBatchDialog } from './OverviewBatchDialogs';
 import { UserDetailDrawer } from './UserDetailDrawer';
 import { TransferDialog } from './TransferDialog';
+import { CreditResetModal } from './CreditDialogs';
+import { formatMultiplier, recoveryDaysFrom } from './creditLogic';
 
 type ShowToast = (text: string, type?: 'success' | 'warning' | 'error' | 'info') => void;
-type Dialog = 'group' | 'quota' | 'override' | 'transfer' | null;
+type Dialog = 'group' | 'quota' | 'override' | 'transfer' | 'credit' | null;
 
 const TONE_COLORS: Record<string, string> = {
   normal: COLORS.primary,
@@ -47,10 +49,24 @@ const TONE_COLORS: Record<string, string> = {
   unlimited: COLORS.border,
 };
 
+/** 信誉列：正常显示 1.0；降低时显示系数与恢复天数 */
+function CreditCell({ credit }: { credit: OverviewRow['credit'] }) {
+  if (!credit) return <span style={{ color: COLORS.textMuted }}>—</span>;
+  if (!credit.reduced) return <span style={{ color: COLORS.textMuted }}>{formatMultiplier(credit.m)}</span>;
+  const days = recoveryDaysFrom(credit.recoveryAt);
+  return (
+    <div>
+      <span style={{ fontWeight: 650, color: credit.m < 0.6 ? COLORS.errorText : COLORS.warningText }}>{formatMultiplier(credit.m)} ↓</span>
+      {days && <div style={{ ...mutedTextStyle, fontSize: '12px' }}>{i18n('ai_helper_um_credit_recovery_days', days)}</div>}
+    </div>
+  );
+}
+
 const STATUS_OPTIONS: Array<{ id: OverviewStatus; key: string }> = [
   { id: '', key: 'ai_helper_um_overview_status_all' },
   { id: 'exhausted', key: 'ai_helper_um_overview_status_exhausted' },
   { id: 'high_usage', key: 'ai_helper_um_overview_status_high' },
+  { id: 'credit_reduced', key: 'ai_helper_um_overview_status_credit' },
   { id: 'disabled', key: 'ai_helper_um_overview_status_disabled' },
   { id: 'violations', key: 'ai_helper_um_overview_status_violations' },
 ];
@@ -184,6 +200,8 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
     loadMeta();
   };
 
+  const hasCredit = rows.some((row) => row.credit !== null);
+  const columnCount = hasCredit ? 8 : 7;
   const th = getTableHeaderStyle();
   const td = getTableCellStyle();
   const fieldStyle: React.CSSProperties = { ...getInputStyle(), width: 'auto', minWidth: '120px' };
@@ -272,6 +290,7 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
         <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size} onClick={() => setDialog('quota')}>{i18n('ai_helper_um_overview_batch_qgroup')}</button>
         <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size} onClick={() => setDialog('override')}>{i18n('ai_helper_um_override_dialog_title')}</button>
         <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size || domains.length < 2} onClick={() => setDialog('transfer')}>{i18n('ai_helper_transfer_open_users')}</button>
+        <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size} onClick={() => setDialog('credit')}>{i18n('ai_helper_um_credit_reset')}</button>
         <span style={{ flex: 1 }} />
         {selected.size > 0 && (
           <button type="button" style={linkButtonStyle} onClick={() => setSelected(new Map())}>{i18n('ai_helper_um_overview_clear_selection')}</button>
@@ -305,15 +324,16 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
                 <th style={th}>{i18n('ai_helper_um_overview_group')}</th>
                 <th style={th}>{i18n('ai_helper_um_overview_quota_col')}</th>
                 <th style={th}>{i18n('ai_helper_um_overview_usage_col')}</th>
+                {hasCredit && <th style={th}>{i18n('ai_helper_um_overview_credit_col')}</th>}
                 <th style={th}>{i18n('ai_helper_um_overview_violations_col')}</th>
               </tr>
             </thead>
             <tbody>
               {loading && !data && (
-                <tr><td colSpan={7} style={{ ...td, color: COLORS.textMuted, textAlign: 'center' }}>{i18n('ai_helper_um_loading')}</td></tr>
+                <tr><td colSpan={columnCount} style={{ ...td, color: COLORS.textMuted, textAlign: 'center' }}>{i18n('ai_helper_um_loading')}</td></tr>
               )}
               {data && rows.length === 0 && (
-                <tr><td colSpan={7} style={{ ...td, color: COLORS.textMuted, textAlign: 'center' }}>{i18n('ai_helper_um_overview_empty')}</td></tr>
+                <tr><td colSpan={columnCount} style={{ ...td, color: COLORS.textMuted, textAlign: 'center' }}>{i18n('ai_helper_um_overview_empty')}</td></tr>
               )}
               {rows.map((row) => {
                 const checked = selected.has(row.uid);
@@ -340,6 +360,7 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
                     </td>
                     <td style={td}><QuotaCell quota={row.quota} /></td>
                     <td style={td}><UsageCell quota={row.quota} /></td>
+                    {hasCredit && <td style={td}><CreditCell credit={row.credit} /></td>}
                     <td style={{ ...td, color: row.violations7d ? COLORS.errorText : COLORS.textMuted, fontWeight: row.violations7d ? 600 : 400 }}>
                       {row.violations7d}
                     </td>
@@ -394,6 +415,13 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
           onClose={() => setDialog(null)}
           onFinished={() => { setDialog(null); setSelected(new Map()); load(); loadMeta(); }}
           onOpenAudit={onOpenAudit}
+        />
+      )}
+      {dialog === 'credit' && (
+        <CreditResetModal
+          users={selectedRows.map((row) => ({ uid: row.uid, uname: row.uname }))}
+          onClose={() => setDialog(null)}
+          onDone={finishBatch}
         />
       )}
       {dialog === 'override' && (

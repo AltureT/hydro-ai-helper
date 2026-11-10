@@ -1,4 +1,7 @@
 import {
+  creditReduction,
+  markAppealed,
+  violationTimeLabel,
   mergeSnapshot,
   quotaBlock,
   refreshDelayMs,
@@ -50,5 +53,46 @@ describe('student quota view', () => {
     expect(refreshDelayMs(base.resetAt, now)).toBe(60 * 60 * 1000 + 2000);
     expect(refreshDelayMs('2026-11-10T14:00:00.000Z', now)).toBeNull();
     expect(refreshDelayMs('2026-11-20T00:00:00.000Z', now)).toBeNull();
+  });
+});
+
+describe('student credit view (FR-034)', () => {
+  const now = new Date('2026-11-10T04:00:00Z');
+  const credit = {
+    m: 0.95,
+    reduced: true,
+    recoveryAt: '2026-11-11T02:14:00.000Z',
+    recentViolations: [
+      { category: 'off_topic' as const, at: '2026-11-10T02:14:00.000Z', source: 'ai_review' as const, safetyEventId: 'a', appealable: true, appealed: false },
+      { category: 'answer_seeking' as const, at: '2026-11-08T02:14:00.000Z', source: 'realtime' as const, safetyEventId: 'b', appealable: false, appealed: true },
+    ],
+  };
+
+  it('explains a reduced limit with the base, the new limit and the days to recover', () => {
+    expect(creditReduction({ ...base, limit: 19, base: 20, credit }, now)).toEqual({ from: 20, to: 19, recoveryDays: 1 });
+    expect(creditReduction({ ...base, limit: 19, base: 20, credit: { ...credit, recoveryAt: null } }, now)).toEqual({ from: 20, to: 19, recoveryDays: null });
+  });
+
+  it('says nothing when credit does not lower today\'s limit', () => {
+    expect(creditReduction({ ...base, limit: 20, base: 20, credit }, now)).toBeNull();
+    expect(creditReduction({ ...base, limit: null, base: null, credit }, now)).toBeNull();
+    expect(creditReduction({ ...base, limit: 0, base: 0, disabled: true, credit }, now)).toBeNull();
+    expect(creditReduction({ ...base, limit: 15, base: 20, credit: { ...credit, reduced: false } }, now)).toBeNull();
+    expect(creditReduction({ ...base, limit: 15, base: 20 }, now)).toBeNull();
+  });
+
+  it('labels violation times relative to today', () => {
+    const local = (y: number, mo: number, d: number, h: number, mi: number) => new Date(y, mo - 1, d, h, mi).toISOString();
+    const today = new Date(2026, 10, 10, 12, 0);
+    expect(violationTimeLabel(local(2026, 11, 10, 2, 14), today)).toEqual({ kind: 'today', time: '02:14', date: '11-10' });
+    expect(violationTimeLabel(local(2026, 11, 9, 23, 5), today)).toEqual(expect.objectContaining({ kind: 'yesterday', time: '23:05' }));
+    expect(violationTimeLabel(local(2026, 11, 3, 8, 0), today)).toEqual(expect.objectContaining({ kind: 'date', date: '11-03' }));
+    expect(violationTimeLabel('nope', today)).toBeNull();
+  });
+
+  it('marks an appealed violation locally', () => {
+    const next = markAppealed({ ...base, credit }, 'a');
+    expect(next?.credit?.recentViolations[0]).toEqual(expect.objectContaining({ appealable: false, appealed: true }));
+    expect(markAppealed({ ...base }, 'a')).toEqual({ ...base });
   });
 });

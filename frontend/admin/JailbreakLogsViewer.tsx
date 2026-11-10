@@ -41,6 +41,8 @@ const DETECTION_SOURCE_OPTIONS: Array<{
   { value: 'hex', labelKey: 'ai_helper_admin_jailbreak_source_hex' },
   { value: 'conversation', labelKey: 'ai_helper_admin_jailbreak_source_conversation' },
   { value: 'custom', labelKey: 'ai_helper_admin_jailbreak_source_custom' },
+  { value: 'topic_guard', labelKey: 'ai_helper_admin_jailbreak_source_topic_guard' },
+  { value: 'ai_review', labelKey: 'ai_helper_admin_jailbreak_source_ai_review' },
 ];
 
 function getDetectionSourceLabel(source: JailbreakLogFilters['detectionSource']): string {
@@ -276,6 +278,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             <option value="prompt_injection">{i18n('ai_helper_admin_jailbreak_category_prompt_injection')}</option>
             <option value="prompt_exfiltration">{i18n('ai_helper_admin_jailbreak_category_prompt_exfiltration')}</option>
             <option value="obfuscated_injection">{i18n('ai_helper_admin_jailbreak_category_obfuscated_injection')}</option>
+            <option value="off_topic">{i18n('ai_helper_admin_jailbreak_category_off_topic')}</option>
           </select>
         </label>
         <label style={{ minWidth: '170px', flex: '1 1 170px', fontSize: '13px', color: COLORS.textSecondary }}>
@@ -576,7 +579,7 @@ export const JailbreakLogsViewer: React.FC<JailbreakLogsViewerProps> = ({
             if (log.problemId) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_problem_id')}${log.problemId}`);
             if (log.conversationId) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_conversation_id')}${log.conversationId}`);
             if (log.questionType) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_question_type')}${log.questionType}`);
-            if (log.category) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_category')}${log.category}`);
+            if (log.category) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_category')}${i18n(`ai_helper_admin_jailbreak_category_${log.category}`)}`);
             if (log.riskScore !== undefined) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_risk_score')}${log.riskScore}`);
             if (log.actionTaken) contextPieces.push(`${i18n('ai_helper_admin_jailbreak_action')}${log.actionTaken}`);
             if (log.detectionSource) {

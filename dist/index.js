@@ -88,6 +88,8 @@ const quotaService_1 = require("./services/quotaService");
 const quotaGroupResolver_1 = require("./services/quotaGroupResolver");
 const quotaAdminService_1 = require("./services/quotaAdminService");
 const userOverviewService_1 = require("./services/userOverviewService");
+const creditService_1 = require("./services/creditService");
+const creditEvent_1 = require("./models/creditEvent");
 const transferService_1 = require("./services/transferService");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
@@ -145,6 +147,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const quotaGroupModel = new quotaGroup_1.QuotaGroupModel(db);
         const quotaOverrideModel = new quotaOverride_1.QuotaOverrideModel(db);
         const transferJobModel = new transferJob_1.TransferJobModel(db);
+        const creditEventModel = new creditEvent_1.CreditEventModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -200,6 +203,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(quotaGroupModel, 'quotaGroupModel');
         await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
         await safeEnsureIndexes(transferJobModel, 'transferJobModel');
+        await safeEnsureIndexes(creditEventModel, 'creditEventModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -275,14 +279,25 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         // 额度组解析缓存（60 秒）：插件写入时本地失效并广播，其他进程收到广播后失效
         const quotaGroupResolver = new quotaGroupResolver_1.QuotaGroupResolver(db, quotaGroupModel, quotaOverrideModel, ctx);
         quotaGroupResolver.listen(ctx);
+        // 信誉系数：由信誉事件推导，跨域生效（US4）
+        ctx.provide('creditEventModel', creditEventModel);
+        const creditService = new creditService_1.CreditService(db, creditEventModel, aiConfigModel, auditService, {
+            findForUser: (ids, userId) => jailbreakLogModel.findForUser(ids, userId),
+        });
+        ctx.provide('creditService', creditService);
         const quotaService = new quotaService_1.QuotaService(quotaUsageModel, aiConfigModel, {
             getOverride: (uid) => quotaGroupResolver.getOverride(uid),
             getOverrides: (uids) => quotaGroupResolver.getOverrides(uids),
             getGroupMemberships: (uid) => quotaGroupResolver.getGroupMemberships(uid),
+            getCreditMultiplier: (uid, now) => creditService.getMultiplier(uid, now),
+            getCreditMultipliers: async (uids, now) => {
+                const summaries = await creditService.getSummaries(uids, now);
+                return new Map([...summaries].map(([uid, summary]) => [uid, summary.m]));
+            },
         });
         ctx.provide('quotaService', quotaService);
         ctx.provide('quotaAdminService', new quotaAdminService_1.QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
-        ctx.provide('userOverviewService', new userOverviewService_1.UserOverviewService(db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel));
+        ctx.provide('userOverviewService', new userOverviewService_1.UserOverviewService(db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel, undefined, creditService));
         ctx.provide('transferJobModel', transferJobModel);
         ctx.provide('transferService', new transferService_1.TransferService(db, groupMetaModel, quotaGroupModel, transferJobModel, auditService, quotaGroupResolver, ctx));
         ctx.provide('errorReporter', errorReporter);
@@ -460,6 +475,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_admin_quota_groups', '/ai-helper/admin/quota/groups', quotaAdminHandler_1.QuotaGroupsHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_quota_group_detail', '/ai-helper/admin/quota/groups/detail', quotaAdminHandler_1.QuotaGroupDetailHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', quotaAdminHandler_1.QuotaOverridesHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
+        ctx.Route('ai_admin_credit_reset', '/ai-helper/admin/credit/reset', quotaAdminHandler_1.CreditResetHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_users', '/ai-helper/admin/users', userOverviewHandler_1.UserOverviewHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
         ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', userOverviewHandler_1.UserDetailHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
         // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）
