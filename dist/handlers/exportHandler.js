@@ -12,9 +12,10 @@ const exportService_1 = require("../services/exportService");
 const domainHelper_1 = require("../utils/domainHelper");
 const rateLimitHelper_1 = require("../lib/rateLimitHelper");
 const i18nHelper_1 = require("../utils/i18nHelper");
+const groupFilter_1 = require("../utils/groupFilter");
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
- * GET /ai-helper/export?format=csv&startDate=...&endDate=...&classId=...&problemId=...&userId=...&includeSensitive=false
+ * GET /ai-helper/export?format=csv&startDate=...&endDate=...&group=...&problemId=...&userId=...&includeSensitive=false
  * GET /d/:domainId/ai-helper/export?format=csv&...
  */
 class ExportHandler extends hydrooj_1.Handler {
@@ -30,7 +31,7 @@ class ExportHandler extends hydrooj_1.Handler {
             // 获取当前域 ID（用于域隔离）
             const domainId = (0, domainHelper_1.getDomainId)(this);
             // 1. 解析查询参数
-            const { format = 'csv', startDate, endDate, classId, problemId, userId, includeSensitive = 'false', includeMetrics = 'false', } = this.request.query;
+            const { format = 'csv', startDate, endDate, problemId, userId, includeSensitive = 'false', includeMetrics = 'false', } = this.request.query;
             // 2. 验证导出格式(目前仅支持 CSV)
             if (format !== 'csv') {
                 this.response.status = 400;
@@ -79,8 +80,9 @@ class ExportHandler extends hydrooj_1.Handler {
                     return;
                 }
             }
-            if (classId) {
-                filters.classId = String(classId);
+            const group = (0, groupFilter_1.readGroupParam)(this.request.query);
+            if (group) {
+                filters.group = group;
             }
             if (problemId) {
                 filters.problemId = String(problemId);

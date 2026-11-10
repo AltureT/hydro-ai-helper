@@ -7,6 +7,7 @@
 import type { Context } from 'hydrooj';
 import type { Collection, Filter } from 'mongodb';
 import { Conversation } from '../models/conversation';
+import { groupCondition, joinGroupNames } from '../utils/groupFilter';
 
 /**
  * 导出筛选条件接口
@@ -15,7 +16,7 @@ export interface ConversationExportFilters {
   domainId?: string;     // 域 ID (用于域隔离)
   startDate?: Date;      // 开始日期 (会话 startTime >= startDate)
   endDate?: Date;        // 结束日期 (会话 startTime <= endDate)
-  classId?: string;      // 班级 ID
+  group?: string;        // 小组名（`__ungrouped__` 为未分组）
   problemId?: string;    // 题目 ID
   userId?: string;       // 学生用户 ID (字符串类型,用于传递)
 }
@@ -52,7 +53,7 @@ export class ExportService {
     const projection: Partial<Record<keyof Conversation, 1 | 0>> = {
       _id: 1,
       userId: 1,
-      classId: 1,
+      groupNames: 1,
       problemId: 1,
       startTime: 1,
       endTime: 1,
@@ -80,9 +81,9 @@ export class ExportService {
       }
     }
 
-    // 班级/题目/用户筛选
-    if (filters.classId) {
-      query.classId = filters.classId;
+    // 小组/题目/用户筛选
+    if (filters.group) {
+      Object.assign(query, groupCondition(filters.group));
     }
     if (filters.problemId) {
       query.problemId = filters.problemId;
@@ -122,7 +123,7 @@ export class ExportService {
     const headers = [
       'conversationId',
       options.includeSensitive ? 'userId' : 'anonymousId',
-      'classId',
+      'groups',
       'problemId',
       'problemTitle',
       'startTime',
@@ -147,7 +148,7 @@ export class ExportService {
       const row = [
         conv._id.toString(),
         getAnonymousId(conv.userId),
-        conv.classId || '',
+        joinGroupNames(conv.groupNames),
         conv.problemId || '',
         conv.metadata?.problemTitle || '',
         conv.startTime.toISOString(),

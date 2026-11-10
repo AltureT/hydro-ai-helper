@@ -6,6 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConversationModel = void 0;
+const groupFilter_1 = require("../utils/groupFilter");
 const ensureObjectId_1 = require("../utils/ensureObjectId");
 /**
  * Conversation Model 操作类
@@ -131,8 +132,8 @@ class ConversationModel {
         if (filters.problemId) {
             query.problemId = filters.problemId;
         }
-        if (filters.classId) {
-            query.classId = filters.classId;
+        if (filters.group) {
+            Object.assign(query, (0, groupFilter_1.groupCondition)(filters.group));
         }
         // 时间范围筛选
         if (filters.startDate || filters.endDate) {
@@ -152,7 +153,8 @@ class ConversationModel {
             _id: 1,
             domainId: 1,
             userId: 1,
-            classId: 1,
+            groupNames: 1,
+            groupSource: 1,
             problemId: 1,
             startTime: 1,
             endTime: 1,

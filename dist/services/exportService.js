@@ -6,6 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ExportService = void 0;
+const groupFilter_1 = require("../utils/groupFilter");
 /**
  * ExportService 类
  * 负责导出会话级数据为 CSV 字符串
@@ -27,7 +28,7 @@ class ExportService {
         const projection = {
             _id: 1,
             userId: 1,
-            classId: 1,
+            groupNames: 1,
             problemId: 1,
             startTime: 1,
             endTime: 1,
@@ -52,9 +53,9 @@ class ExportService {
                 query.startTime.$lte = filters.endDate;
             }
         }
-        // 班级/题目/用户筛选
-        if (filters.classId) {
-            query.classId = filters.classId;
+        // 小组/题目/用户筛选
+        if (filters.group) {
+            Object.assign(query, (0, groupFilter_1.groupCondition)(filters.group));
         }
         if (filters.problemId) {
             query.problemId = filters.problemId;
@@ -89,7 +90,7 @@ class ExportService {
         const headers = [
             'conversationId',
             options.includeSensitive ? 'userId' : 'anonymousId',
-            'classId',
+            'groups',
             'problemId',
             'problemTitle',
             'startTime',
@@ -113,7 +114,7 @@ class ExportService {
             const row = [
                 conv._id.toString(),
                 getAnonymousId(conv.userId),
-                conv.classId || '',
+                (0, groupFilter_1.joinGroupNames)(conv.groupNames),
                 conv.problemId || '',
                 conv.metadata?.problemTitle || '',
                 conv.startTime.toISOString(),

@@ -5,6 +5,7 @@ import { EndpointManager } from './EndpointManager';
 import { ScenarioModelSelector } from './ScenarioModelSelector';
 import { BudgetConfigForm } from './BudgetConfigForm';
 import { TelemetrySettings } from './TelemetrySettings';
+import { TeacherAccessSettings } from './TeacherAccessSettings';
 import { FeedbackForm } from './FeedbackForm';
 import { useToast, Toast } from '../components/Toast';
 import {
@@ -101,6 +102,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
   const { toasts, showToast, dismissToast } = useToast();
 
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
+  const [teacherAccess, setTeacherAccess] = useState<boolean | null>(null);
 
   useEffect(() => {
     loadConfig();
@@ -118,6 +120,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
       }
       const json: APIConfigResponse = await res.json();
       if (json.telemetry) setTelemetry(json.telemetry);
+      setTeacherAccess(json.config ? json.config.groupTeacherAccessEnabled === true : null);
 
       const nextConfig = toConfigState(json.config);
       setConfig(nextConfig);
@@ -486,6 +489,29 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
             />
           </div>
         </div>
+
+        {teacherAccess !== null && (
+          <TeacherAccessSettings
+            enabled={teacherAccess}
+            disabled={saving}
+            onChange={async (enabled) => {
+              try {
+                const res = await fetch('/ai-helper/admin/config', {
+                  method: 'PUT', credentials: 'include',
+                  headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                  body: JSON.stringify({ groupTeacherAccessEnabled: enabled }),
+                });
+                if (!res.ok) throw new Error(String(res.status));
+                setTeacherAccess(enabled);
+                showToast(enabled ? i18n('ai_helper_teacher_access_saved_on') : i18n('ai_helper_teacher_access_saved_off'), 'success');
+                return true;
+              } catch {
+                showToast(i18n('ai_helper_teacher_access_save_failed'), 'error');
+                return false;
+              }
+            }}
+          />
+        )}
 
         <TelemetrySettings
           telemetry={telemetry}

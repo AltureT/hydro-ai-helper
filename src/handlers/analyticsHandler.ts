@@ -9,6 +9,7 @@ import { getDomainId } from '../utils/domainHelper';
 import { parseProblemId } from '../utils/problemIdHelper';
 import type { ProblemDocument, UserDocument } from '../types/hydrooj';
 import { applyRateLimit } from '../lib/rateLimitHelper';
+import { UNGROUPED_KEY, groupCondition, readGroupParam } from '../utils/groupFilter';
 
 /**
  * 统计项接口（包含可选的 displayName）
@@ -125,13 +126,84 @@ async function getUserNameMap(userIds: number[], deletedUserFallback: string): P
 /**
  * 筛选条件接口
  */
-interface AnalyticsFilters {
+export interface AnalyticsFilters {
   domainId?: string;  // 域 ID（用于域隔离）
   startDate?: Date;
   endDate?: Date;
-  classId?: string;
+  /** 小组名；`__ungrouped__` 为未分组（旧参数 classId 是它的别名） */
+  group?: string;
   problemId?: string;
   userId?: number;
+}
+
+/** 三个维度共用的会话筛选条件 */
+export function buildConversationMatch(filters: AnalyticsFilters): Document {
+  const match: Document = {};
+  if (filters.domainId) match.domainId = filters.domainId;
+  if (filters.startDate || filters.endDate) {
+    match.startTime = {};
+    if (filters.startDate) match.startTime.$gte = filters.startDate;
+    if (filters.endDate) match.startTime.$lte = filters.endDate;
+  }
+  if (filters.group) Object.assign(match, groupCondition(filters.group));
+  if (filters.problemId) match.problemId = filters.problemId;
+  if (filters.userId !== undefined) match.userId = filters.userId;
+  return match;
+}
+
+/**
+ * 小组维度（FR-056）：按会话快照的 groupNames 展开，一次会话属于几个组就计入几个组；
+ * 没有小组记录的会话归入“未分组”。
+ */
+export function buildGroupDimensionPipeline(filters: AnalyticsFilters): Document[] {
+  const match = buildConversationMatch(filters);
+  const pipeline: Document[] = [];
+  if (Object.keys(match).length > 0) pipeline.push({ $match: match });
+  pipeline.push({ $unwind: { path: '$groupNames', preserveNullAndEmptyArrays: true } });
+  // 按某个组筛选时，同一会话的其他组不应出现在结果里
+  if (filters.group && filters.group !== UNGROUPED_KEY) {
+    pipeline.push({ $match: { groupNames: filters.group } });
+  }
+  pipeline.push({
+    $group: {
+      _id: { group: '$groupNames', userId: '$userId' },
+      conversations: { $sum: 1 },
+      effectiveConversations: { $sum: { $cond: ['$isEffective', 1, 0] } },
+    },
+  });
+  pipeline.push({
+    $group: {
+      _id: '$_id.group',
+      totalConversations: { $sum: '$conversations' },
+      effectiveConversations: { $sum: '$effectiveConversations' },
+      studentCount: { $sum: 1 },
+    },
+  });
+  pipeline.push({
+    $project: {
+      _id: 0,
+      key: { $ifNull: ['$_id', UNGROUPED_KEY] },
+      totalConversations: 1,
+      effectiveConversations: 1,
+      studentCount: 1,
+      avgConversationsPerStudent: {
+        $cond: [
+          { $gt: ['$studentCount', 0] },
+          { $divide: ['$totalConversations', '$studentCount'] },
+          0,
+        ],
+      },
+      effectiveRatio: {
+        $cond: [
+          { $gt: ['$totalConversations', 0] },
+          { $divide: ['$effectiveConversations', '$totalConversations'] },
+          0,
+        ],
+      },
+    },
+  });
+  pipeline.push({ $sort: { totalConversations: -1, key: 1 } });
+  return pipeline;
 }
 
 /**
@@ -157,14 +229,14 @@ export class AnalyticsHandler extends Handler {
       const preferJson = accept.includes('application/json');
 
       // 读取查询参数
-      const { dimension, startDate, endDate, classId, problemId, userId } = this.request.query as {
+      const { dimension, startDate, endDate, problemId, userId } = this.request.query as {
         dimension?: string;
         startDate?: string;
         endDate?: string;
-        classId?: string;
         problemId?: string;
         userId?: string;
       };
+      const group = readGroupParam(this.request.query as Record<string, unknown>);
 
       // 浏览器直接访问页面时（无 dimension 参数且未声明 JSON），返回模板而不是报错
       if (!dimension && !preferJson) {
@@ -207,8 +279,8 @@ export class AnalyticsHandler extends Handler {
         }
       }
 
-      if (classId) {
-        filters.classId = String(classId);
+      if (group) {
+        filters.group = group;
       }
 
       if (problemId) {
@@ -247,11 +319,7 @@ export class AnalyticsHandler extends Handler {
     }
   }
 
-  /**
-   * 按班级维度聚合统计
-   * @param filters 筛选条件
-   * @returns 按班级聚合的统计数据
-   */
+  /** 分层 metrics 标志 */
   private static metricsAddFieldsStage(): Document {
     return {
       $addFields: {
@@ -265,91 +333,10 @@ export class AnalyticsHandler extends Handler {
     };
   }
 
+  /** 小组维度（dimension 仍叫 class，兼容旧前端与链接） */
   private async aggregateByClass(filters: AnalyticsFilters) {
-    const db = this.ctx.db;
-    const col = db.collection('ai_conversations');
-
-    // 构造 match 条件（始终包含 domainId 以实现域隔离）
-    const match: Document = {};
-
-    // 域隔离：只统计当前域的数据
-    if (filters.domainId) {
-      match.domainId = filters.domainId;
-    }
-
-    if (filters.startDate || filters.endDate) {
-      match.startTime = {};
-      if (filters.startDate) match.startTime.$gte = filters.startDate;
-      if (filters.endDate) match.startTime.$lte = filters.endDate;
-    }
-
-    if (filters.classId) {
-      match.classId = filters.classId;
-    }
-
-    if (filters.problemId) {
-      match.problemId = filters.problemId;
-    }
-
-    if (filters.userId !== undefined) {
-      match.userId = filters.userId;
-    }
-
-    const pipeline: Document[] = [];
-
-    // 1. Match 阶段
-    if (Object.keys(match).length > 0) {
-      pipeline.push({ $match: match });
-    }
-
-    // 2. 以 classId + userId 做中间分组,用于统计 studentCount
-    pipeline.push({
-      $group: {
-        _id: { classId: '$classId', userId: '$userId' },
-        conversations: { $sum: 1 },
-        effectiveConversations: {
-          $sum: { $cond: ['$isEffective', 1, 0] },
-        },
-      },
-    });
-
-    // 3. 再按 classId 分组，汇总
-    pipeline.push({
-      $group: {
-        _id: '$_id.classId',
-        totalConversations: { $sum: '$conversations' },
-        effectiveConversations: { $sum: '$effectiveConversations' },
-        studentCount: { $sum: 1 }, // 每个 (classId, userId) 对应一名学生
-      },
-    });
-
-    // 4. 计算派生字段
-    pipeline.push({
-      $project: {
-        _id: 0,
-        key: '$_id',
-        totalConversations: 1,
-        effectiveConversations: 1,
-        studentCount: 1,
-        avgConversationsPerStudent: {
-          $cond: [
-            { $gt: ['$studentCount', 0] },
-            { $divide: ['$totalConversations', '$studentCount'] },
-            0,
-          ],
-        },
-        effectiveRatio: {
-          $cond: [
-            { $gt: ['$totalConversations', 0] },
-            { $divide: ['$effectiveConversations', '$totalConversations'] },
-            0,
-          ],
-        },
-      },
-    });
-
-    const items = await col.aggregate(pipeline).toArray();
-
+    const col = this.ctx.db.collection('ai_conversations');
+    const items = await col.aggregate(buildGroupDimensionPipeline(filters)).toArray();
     return { dimension: 'class', items };
   }
 
@@ -363,30 +350,7 @@ export class AnalyticsHandler extends Handler {
     const col = db.collection('ai_conversations');
 
     // 构造 match 条件（始终包含 domainId 以实现域隔离）
-    const match: Document = {};
-
-    // 域隔离：只统计当前域的数据
-    if (filters.domainId) {
-      match.domainId = filters.domainId;
-    }
-
-    if (filters.startDate || filters.endDate) {
-      match.startTime = {};
-      if (filters.startDate) match.startTime.$gte = filters.startDate;
-      if (filters.endDate) match.startTime.$lte = filters.endDate;
-    }
-
-    if (filters.classId) {
-      match.classId = filters.classId;
-    }
-
-    if (filters.problemId) {
-      match.problemId = filters.problemId;
-    }
-
-    if (filters.userId !== undefined) {
-      match.userId = filters.userId;
-    }
+    const match = buildConversationMatch(filters);
 
     const pipeline: Document[] = [];
 
@@ -539,30 +503,7 @@ export class AnalyticsHandler extends Handler {
     const col = db.collection('ai_conversations');
 
     // 构造 match 条件（始终包含 domainId 以实现域隔离）
-    const match: Document = {};
-
-    // 域隔离：只统计当前域的数据
-    if (filters.domainId) {
-      match.domainId = filters.domainId;
-    }
-
-    if (filters.startDate || filters.endDate) {
-      match.startTime = {};
-      if (filters.startDate) match.startTime.$gte = filters.startDate;
-      if (filters.endDate) match.startTime.$lte = filters.endDate;
-    }
-
-    if (filters.classId) {
-      match.classId = filters.classId;
-    }
-
-    if (filters.problemId) {
-      match.problemId = filters.problemId;
-    }
-
-    if (filters.userId !== undefined) {
-      match.userId = filters.userId;
-    }
+    const match = buildConversationMatch(filters);
 
     const pipeline: Document[] = [];
 
@@ -649,7 +590,7 @@ export class AnalyticsHandler extends Handler {
 }
 
 /**
- * AnalyticsFilterOptionsHandler - 返回筛选条件的可选值（班级/题目）
+ * AnalyticsFilterOptionsHandler - 返回筛选条件的可选值（小组/题目/学生）
  * GET /ai-helper/analytics/filter-options
  */
 export class AnalyticsFilterOptionsHandler extends Handler {
@@ -666,14 +607,16 @@ export class AnalyticsFilterOptionsHandler extends Handler {
       const filter: Document = {};
       if (domainId) filter.domainId = domainId;
 
-      const [classIds, problemIds, userIds] = await Promise.all([
-        col.distinct('classId', filter) as Promise<string[]>,
+      const [groupNames, ungrouped, problemIds, userIds] = await Promise.all([
+        col.distinct('groupNames', filter) as Promise<string[]>,
+        col.findOne({ ...filter, ...groupCondition(UNGROUPED_KEY) }, { projection: { _id: 1 } }),
         col.distinct('problemId', filter) as Promise<string[]>,
         col.distinct('userId', filter) as Promise<number[]>,
       ]);
 
+      const groups = groupNames.filter((name) => typeof name === 'string' && name).sort((a, b) => a.localeCompare(b));
+
       // 获取题目标题映射
-      const validClassIds = classIds.filter(Boolean).sort();
       const validProblemIds = problemIds.filter(Boolean).sort();
       const titleMap = validProblemIds.length > 0
         ? await _getProblemTitleMap(domainId, validProblemIds, this.translate('ai_helper_problem_fallback_prefix'))
@@ -696,7 +639,15 @@ export class AnalyticsFilterOptionsHandler extends Handler {
         name: userNameMap.get(id) || String(id),
       }));
 
-      this.response.body = { classIds: validClassIds, problemOptions, userIds: validUserIds, userOptions };
+      this.response.body = {
+        groups,
+        hasUngrouped: !!ungrouped,
+        // 旧前端读取 classIds，保留同值别名
+        classIds: groups,
+        problemOptions,
+        userIds: validUserIds,
+        userOptions,
+      };
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[AI Helper] AnalyticsFilterOptionsHandler error:', err);

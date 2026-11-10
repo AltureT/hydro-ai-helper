@@ -8,6 +8,8 @@
  * POST /d/:domainId/ai-helper/groups/undo      撤销一次操作
  * POST /d/:domainId/ai-helper/groups/meta      扩展信息（含新建空小组、删除失效扩展信息）
  * POST /d/:domainId/ai-helper/groups/drift     恢复 / 忽略被覆盖的成员
+ * GET  /d/:domainId/ai-helper/groups/backfill  没有小组记录的历史会话数
+ * POST /d/:domainId/ai-helper/groups/backfill  按当前成员关系回填（FR-057）
  */
 
 import { Handler, PRIV } from 'hydrooj';
@@ -17,6 +19,7 @@ import { translateWithParams } from '../utils/i18nHelper';
 import { getDomainId } from '../utils/domainHelper';
 import { hasSystemPriv } from '../utils/hydroCompat';
 import { GroupServiceError, type HydroGroupService, type SearchMode, type SearchScope } from '../services/hydroGroupService';
+import type { GroupBackfillService } from '../services/groupBackfillService';
 
 function json(handler: Handler, status: number, body: Record<string, unknown>): void {
   if (status !== 200) handler.response.status = status;
@@ -170,6 +173,38 @@ export class GroupDriftHandler extends Handler {
       json(this, 200, { success: true, ...result });
     } catch (err) {
       respondGroupError(this, err, 'ai_helper_group_drift_failed', 'GROUP_DRIFT_FAILED');
+    }
+  }
+}
+
+export class GroupBackfillHandler extends Handler {
+  private backfill(): GroupBackfillService {
+    return this.ctx.get('groupBackfillService') as GroupBackfillService;
+  }
+
+  async get() {
+    if (rejectIfNotSystemAdmin(this)) return;
+    try {
+      json(this, 200, { pending: await this.backfill().countPending(getDomainId(this)) });
+    } catch (err) {
+      respondGroupError(this, err, 'ai_helper_group_backfill_failed', 'GROUP_BACKFILL_FAILED');
+    }
+  }
+
+  async post() {
+    if (rejectIfCsrfInvalid(this)) return;
+    if (rejectIfNotSystemAdmin(this)) return;
+    try {
+      if (await applyRateLimit(this, {
+        op: 'ai_group_backfill',
+        periodSecs: 60,
+        maxOps: 6,
+        errorMessage: 'ai_helper_err_rate_limited',
+      })) return;
+      const result = await this.backfill().run(getDomainId(this), Number(this.user?._id));
+      json(this, 200, { success: true, ...result });
+    } catch (err) {
+      respondGroupError(this, err, 'ai_helper_group_backfill_failed', 'GROUP_BACKFILL_FAILED');
     }
   }
 }

@@ -10,6 +10,7 @@ import {
   COLORS, SPACING, RADIUS, TYPOGRAPHY,
   modalOverlayStyle, modalContentStyle, getButtonStyle,
 } from '../utils/styles';
+import { UNGROUPED_KEY } from './groupFilterLogic';
 
 /**
  * 导出对话框 Props 接口
@@ -23,7 +24,8 @@ export interface ExportDialogProps {
   filters: {
     startDate?: string;
     endDate?: string;
-    classId?: string;
+    /** 小组名；`__ungrouped__` 为未分组 */
+    group?: string;
     problemId?: string;
     userId?: string;
   };
@@ -52,7 +54,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
     // 2. 添加筛选条件（如果存在）
     if (filters.startDate) params.startDate = filters.startDate;
     if (filters.endDate) params.endDate = filters.endDate;
-    if (filters.classId) params.classId = filters.classId;
+    if (filters.group) params.group = filters.group;
     if (filters.problemId) params.problemId = filters.problemId;
     if (filters.userId) params.userId = filters.userId;
 
@@ -85,8 +87,8 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, fil
       items.push(`${i18n('ai_helper_teacher_export_time_range')}${start} ~ ${end}`);
     }
 
-    if (filters.classId) {
-      items.push(`${i18n('ai_helper_teacher_conv_col_class')}${filters.classId}`);
+    if (filters.group) {
+      items.push(i18n('ai_helper_group_export_filter', filters.group === UNGROUPED_KEY ? i18n('ai_helper_group_ungrouped') : filters.group));
     }
 
     if (filters.problemId) {

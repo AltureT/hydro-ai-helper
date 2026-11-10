@@ -71,6 +71,11 @@ export class GroupMetaModel {
     return this.collection.find({ domainId }).toArray();
   }
 
+  /** 某用户在本域负责的小组（负责老师访问，FR-058） */
+  async listByTeacher(domainId: string, uid: number): Promise<GroupMeta[]> {
+    return this.collection.find({ domainId, teacherUids: uid }).toArray();
+  }
+
   async get(domainId: string, name: string): Promise<GroupMeta | null> {
     return this.collection.findOne({ _id: groupMetaId(domainId, name) });
   }

@@ -10,6 +10,9 @@ import { AnalyticsItem, Dimension, ProblemColumnKey, PROBLEM_COLUMNS } from './a
 import { ClassAnalyticsTable } from './ClassAnalyticsTable';
 import { ProblemAnalyticsTable } from './ProblemAnalyticsTable';
 import { StudentAnalyticsTable } from './StudentAnalyticsTable';
+import { GroupSelect } from './GroupSelect';
+import { GroupBackfillBar } from './GroupBackfillBar';
+import { parseGroupOptions, readGroupFromSearch, type GroupFilterOptions } from './groupFilterLogic';
 
 interface AnalyticsResponse {
   dimension: Dimension;
@@ -18,13 +21,13 @@ interface AnalyticsResponse {
 
 function getInitialFiltersFromUrl() {
   if (typeof window === 'undefined') {
-    return { startDate: '', endDate: '', classId: '', problemId: '', userId: '' };
+    return { startDate: '', endDate: '', group: '', problemId: '', userId: '' };
   }
   const params = new URLSearchParams(window.location.search);
   return {
     startDate: params.get('startDate') || '',
     endDate: params.get('endDate') || '',
-    classId: params.get('classId') || '',
+    group: readGroupFromSearch(window.location.search),
     problemId: params.get('problemId') || '',
     userId: params.get('userId') || '',
   };
@@ -64,7 +67,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [dimension, setDimension] = useState<Dimension>('problem');
   const [startDate, setStartDate] = useState<string>(initialFilters.startDate);
   const [endDate, setEndDate] = useState<string>(initialFilters.endDate);
-  const [classId, setClassId] = useState<string>(initialFilters.classId);
+  const [group, setGroup] = useState<string>(initialFilters.group);
   const [problemId, setProblemId] = useState<string>(initialFilters.problemId);
   const [userId, setUserId] = useState<string>(initialFilters.userId);
 
@@ -73,7 +76,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   const [data, setData] = useState<AnalyticsResponse | null>(null);
 
   // 筛选条件自动补全选项
-  const [classOptions, setClassOptions] = useState<string[]>([]);
+  const [groupOptions, setGroupOptions] = useState<GroupFilterOptions>({ groups: [], hasUngrouped: false });
   const [problemOptions, setProblemOptions] = useState<FilterOption[]>([]);
   const [userOptions, setUserOptions] = useState<UserOption[]>([]);
 
@@ -102,7 +105,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
   }, [visibleColumns]);
 
   const hasInitialFilters = initialFilters.startDate || initialFilters.endDate ||
-                           initialFilters.classId || initialFilters.problemId ||
+                           initialFilters.group || initialFilters.problemId ||
                            initialFilters.userId;
 
   const fetchData = async () => {
@@ -113,7 +116,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
       params.set('dimension', dimension);
       if (startDate) params.set('startDate', startDate);
       if (endDate) params.set('endDate', endDate);
-      if (classId) params.set('classId', classId);
+      if (group) params.set('group', group);
       if (problemId) params.set('problemId', problemId);
       if (userId) params.set('userId', userId);
 
@@ -139,7 +142,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
     if (hasInitialFilters) fetchData();
   }, []);
 
-  // 加载筛选条件自动补全选项
+  // 加载筛选条件自动补全选项（回填后重新加载，“未分组”可能消失）
+  const [optionsVersion, setOptionsVersion] = useState(0);
   useEffect(() => {
     (async () => {
       try {
@@ -149,13 +153,13 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
         });
         if (res.ok) {
           const json = await res.json();
-          setClassOptions(json.classIds || []);
+          setGroupOptions(parseGroupOptions(json));
           setProblemOptions(json.problemOptions || []);
           setUserOptions(json.userOptions || (json.userIds || []).map((id: number) => ({ id, name: String(id) })));
         }
       } catch {}
     })();
-  }, []);
+  }, [optionsVersion]);
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -247,6 +251,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
         </div>
       )}
 
+      <GroupBackfillBar onDone={() => { setOptionsVersion((v) => v + 1); if (data) fetchData(); }} />
+
       {/* Filter form */}
       <form onSubmit={(e) => { e.preventDefault(); fetchData(); }} style={{ ...cardStyle, marginBottom: SPACING.lg }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.lg }}>
@@ -260,7 +266,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
               <button
                 type="button"
                 key={opt.value}
-                onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); setProblemId(''); setClassId(''); setUserId(''); }}
+                onClick={() => { setDimension(opt.value); setData(null); setSortField(null); setSortOrder('desc'); setProblemId(''); setGroup(''); setUserId(''); }}
                 style={getPillStyle(dimension === opt.value)}
               >
                 {i18n(opt.labelKey)}
@@ -281,12 +287,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({ embedded = false }
               style={getInputStyle()} />
           </div>
           <div>
-            <label style={labelStyle}>{i18n('ai_helper_teacher_conv_col_class')}</label>
-            <input type="text" value={classId} onChange={(e) => setClassId(e.target.value)} placeholder={i18n('ai_helper_teacher_filter_class_id_optional')}
-              list="analytics-class-options" style={getInputStyle()} />
-            <datalist id="analytics-class-options">
-              {classOptions.map(c => <option key={c} value={c} />)}
-            </datalist>
+            <label style={labelStyle} htmlFor="analytics-group-filter">{i18n('ai_helper_teacher_conv_col_class')}</label>
+            <GroupSelect id="analytics-group-filter" value={group} options={groupOptions} onChange={setGroup} />
           </div>
           <div>
             <label style={labelStyle}>{i18n('ai_helper_teacher_filter_problem_id')}</label>

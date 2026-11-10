@@ -41,6 +41,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'group.drift_restore': 'ai_helper_um_action_group_drift_restore',
   'group.drift_dismiss': 'ai_helper_um_action_group_drift_dismiss',
   'group.meta': 'ai_helper_um_action_group_meta',
+  'group.backfill': 'ai_helper_um_action_group_backfill',
   'quota.group_create': 'ai_helper_um_action_quota_group_create',
   'quota.group_update': 'ai_helper_um_action_quota_group_update',
   'quota.group_delete': 'ai_helper_um_action_quota_group_delete',
@@ -93,6 +94,7 @@ function targetLabel(log: AuditLogItem): string {
       : i18n('ai_helper_transfer_user_count', Array.isArray(d.uids) ? d.uids.length : 0);
     return `${what} → ${target}`;
   }
+  if (log.action === 'group.backfill') return i18n('ai_helper_um_audit_target_backfill');
   const key = TARGET_LABEL_KEYS[`${log.target.type}:${log.target.id}`];
   if (key) return i18n(key);
   if (log.action === 'review.run') return log.target.label || i18n('ai_helper_review_trigger_all');
@@ -253,6 +255,11 @@ function detailLines(log: AuditLogItem): string[] {
   }
   if (summary.dismissed.length) lines.push(i18n('ai_helper_um_detail_dismissed', summary.dismissed.length, named(summary.dismissed)));
   if (log.action === 'group.meta' || log.action === 'settings.teacher_access') lines.push(changeSummary(log));
+  if (log.action === 'group.backfill') {
+    const d = log.detail || {};
+    lines.push(i18n('ai_helper_um_audit_backfill_detail', Number(d.updated) || 0, Number(d.remaining) || 0, Number(d.groupCount) || 0));
+    return lines;
+  }
   if (log.category === 'review') {
     lines.push(changeSummary(log));
     const uids = Array.isArray(log.detail?.uids) ? (log.detail.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number') : [];

@@ -8,6 +8,7 @@ import {
   tableStyle, cellStyle, linkStyle,
   formatPercent, formatNumber, renderEffectiveRatio,
 } from './analyticsTypes';
+import { isUngroupedKey, UNGROUPED_KEY } from './groupFilterLogic';
 
 const SortableHeader: React.FC<SortableHeaderProps> = ({
   field, label, align = 'right', sortField, sortOrder, onSort
@@ -58,7 +59,9 @@ export const ClassAnalyticsTable: React.FC<ClassAnalyticsTableProps> = ({
       <tbody>
         {items.map((item, idx) => (
           <tr key={idx} style={getTableRowStyle(false, idx % 2 !== 0)}>
-            <td style={{ ...cellStyle, fontWeight: 500, color: COLORS.textPrimary }}>{item.key || '-'}</td>
+            <td style={{ ...cellStyle, fontWeight: 500, color: isUngroupedKey(item.key) ? COLORS.textSecondary : COLORS.textPrimary }}>
+              {isUngroupedKey(item.key) ? i18n('ai_helper_group_ungrouped') : item.key}
+            </td>
             <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.totalConversations}</td>
             <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>{item.studentCount ?? '-'}</td>
             <td style={{ ...cellStyle, textAlign: 'right', color: COLORS.textSecondary }}>
@@ -69,11 +72,17 @@ export const ClassAnalyticsTable: React.FC<ClassAnalyticsTableProps> = ({
               <span style={renderEffectiveRatio(item.effectiveRatio)}>{formatPercent(item.effectiveRatio)}</span>
             </td>
             <td style={{ ...cellStyle, textAlign: 'center' }}>
-              <a href={buildPageUrl(`/ai-helper/conversations?classId=${item.key}`)} style={linkStyle}>{i18n('ai_helper_teacher_view_conversations')}</a>
+              <a
+                href={buildPageUrl(`/ai-helper/conversations?group=${encodeURIComponent(isUngroupedKey(item.key) ? UNGROUPED_KEY : String(item.key))}`)}
+                style={linkStyle}
+              >
+                {i18n('ai_helper_teacher_view_conversations')}
+              </a>
             </td>
           </tr>
         ))}
       </tbody>
     </table>
+    <div style={{ marginTop: '8px', fontSize: '12px', color: COLORS.textSecondary }}>{i18n('ai_helper_group_stats_hint')}</div>
   </div>
 );
