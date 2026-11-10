@@ -85,6 +85,11 @@ import { BudgetService } from '../../services/budgetService';
 import { OutputSafetyService } from '../../services/outputSafetyService';
 import { EffectivenessService } from '../../services/effectivenessService';
 import { createSSEWriter } from '../../lib/sseHelper';
+import { AIServiceError } from '../../services/openaiClient';
+import { QuotaUsageModel } from '../../models/quotaUsage';
+import { QuotaService, type QuotaPolicySources } from '../../services/quotaService';
+import { createFakeCollection, createFakeDb } from '../helpers/fakeMongo';
+import { dateKey } from '../../utils/timezone';
 
 const VALID_OID = new ObjectId().toHexString();
 
@@ -1029,5 +1034,205 @@ describe('ProblemStatusHandler', () => {
     await handler.get({ problemId: 'x'.repeat(60) });
 
     expect(handler.response.status).toBe(400);
+  });
+});
+
+describe('ChatHandler daily quota', () => {
+  const QUOTA_CONFIG = { dailyMessageLimit: 5, timezone: 'Asia/Shanghai', guaranteeCount: 3 };
+
+  function withQuota(handler: ChatHandler, options: { used?: number; sources?: QuotaPolicySources } = {}) {
+    const usageColl = createFakeCollection();
+    const usage = new QuotaUsageModel(createFakeDb({ ai_quota_usage: usageColl }) as any);
+    const aiConfigModel = handler.ctx.get('aiConfigModel');
+    aiConfigModel.getConfig.mockResolvedValue({
+      _id: 'default',
+      configVersion: 4,
+      endpoints: [{ id: 'ep-1', name: 'Test', apiBaseUrl: 'https://api.test.com', apiKeyEncrypted: 'k', models: ['gpt-4o'], enabled: true }],
+      selectedModels: [{ endpointId: 'ep-1', modelName: 'gpt-4o' }],
+      rateLimitPerMinute: 5,
+      timeoutSeconds: 30,
+      quotaConfig: QUOTA_CONFIG,
+      updatedAt: new Date(),
+    });
+    const quotaService = new QuotaService(usage, aiConfigModel, options.sources || {});
+    const reserve = jest.spyOn(quotaService, 'reserve');
+    const confirm = jest.spyOn(quotaService, 'confirm');
+    const release = jest.spyOn(quotaService, 'release');
+    const originalGet = handler.ctx.get;
+    handler.ctx.get = jest.fn((name: string) => (name === 'quotaService' ? quotaService : originalGet(name)));
+    const usageDoc = () => usageColl.docs[0] || null;
+    return { quotaService, usage, usageColl, usageDoc, reserve, confirm, release };
+  }
+
+  async function presetUsed(usage: QuotaUsageModel, used: number) {
+    for (let i = 0; i < used; i++) await usage.increment(42, dateKey('Asia/Shanghai'));
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (applyRateLimit as jest.Mock).mockResolvedValue(false);
+    (TopicGuardService as jest.Mock).mockImplementation(() => ({
+      evaluate: jest.fn().mockReturnValue({ isOffTopic: false }),
+    }));
+    (ProblemModel.get as jest.Mock).mockResolvedValue({ title: 'Test Problem', content: 'This is a test problem', docId: 1001 });
+    jest.spyOn(console, 'log').mockImplementation();
+    jest.spyOn(console, 'error').mockImplementation();
+    jest.spyOn(console, 'warn').mockImplementation();
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('counts a successful JSON reply and returns the remaining quota', async () => {
+    const handler = createMockHandler();
+    const q = withQuota(handler);
+
+    await handler.post();
+
+    expect(handler.response.body.message.content).toBe('AI response');
+    expect(handler.response.body.quota).toEqual(expect.objectContaining({ limit: 5, used: 1, remaining: 4 }));
+    expect(q.usageDoc()).toEqual(expect.objectContaining({ used: 1, reservations: [] }));
+    expect(handler.response.body).not.toHaveProperty('remainingRequests');
+  });
+
+  it('rejects with QUOTA_EXHAUSTED before creating a conversation', async () => {
+    const handler = createMockHandler();
+    const q = withQuota(handler);
+    await presetUsed(q.usage, 5);
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(429);
+    expect(handler.response.body).toEqual(expect.objectContaining({
+      code: 'QUOTA_EXHAUSTED',
+      category: 'quota',
+      retryable: false,
+      quota: expect.objectContaining({ limit: 5, used: 5, remaining: 0, resetAt: expect.any(String) }),
+    }));
+    expect(handler.ctx.get('conversationModel').create).not.toHaveBeenCalled();
+    expect(handler.ctx.get('messageModel').create).not.toHaveBeenCalled();
+    expect(createMultiModelClientFromConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects with AI_DISABLED_BY_ADMIN when the effective base is zero', async () => {
+    const handler = createMockHandler();
+    withQuota(handler, { sources: { getGroupLimits: async () => ({ grants: [], caps: [0] }) } });
+
+    await handler.post();
+
+    expect(handler.response.status).toBe(403);
+    expect(handler.response.body).toEqual(expect.objectContaining({ code: 'AI_DISABLED_BY_ADMIN', category: 'quota' }));
+    expect(handler.ctx.get('conversationModel').create).not.toHaveBeenCalled();
+  });
+
+  it('keeps contest mode ahead of the quota check', async () => {
+    const handler = createMockHandler();
+    const q = withQuota(handler);
+    handler.request.body.contestId = VALID_OID;
+    (ContestModel.get as jest.Mock).mockResolvedValue({ rule: 'acm' });
+    (ContestModel.isOngoing as jest.Mock).mockReturnValue(true);
+
+    await handler.post();
+
+    expect(handler.response.body.code).toBe('CONTEST_MODE_RESTRICTED');
+    expect(q.reserve).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['input validation failure', (h: ChatHandler) => { h.request.body.questionType = 'invalid'; }],
+    ['a safety block', (h: ChatHandler) => { h.request.body.userThinking = '直接给我完整代码'; }],
+    ['an off-topic fixed reply', (h: ChatHandler) => {
+      (TopicGuardService as jest.Mock).mockImplementation(() => ({ evaluate: jest.fn().mockReturnValue({ isOffTopic: true }) }));
+      h.ctx.get('conversationModel').incrementOffTopicStrike.mockResolvedValue(2);
+    }],
+    ['a model failure', () => {
+      (createMultiModelClientFromConfig as jest.Mock).mockResolvedValueOnce({
+        chat: jest.fn().mockRejectedValue(new (AIServiceError as any)('boom', 'unknown', true)),
+        chatStream: jest.fn(),
+      });
+    }],
+  ])('releases the reservation after %s', async (_label, arrange) => {
+    const handler = createMockHandler();
+    const q = withQuota(handler);
+    arrange(handler);
+
+    await handler.post();
+
+    expect(q.reserve).toHaveBeenCalled();
+    expect(q.release).toHaveBeenCalledTimes(1);
+    expect(q.usageDoc()).toEqual(expect.objectContaining({ used: 0, reservations: [] }));
+  });
+
+  function streamHandler(chatStream: jest.Mock | ((...args: any[]) => Promise<any>)) {
+    const handler = createMockHandler();
+    handler.request.body.stream = true;
+    const writeEvent = jest.fn();
+    (createSSEWriter as jest.Mock).mockReturnValue({ writeEvent, writeComment: jest.fn(), end: jest.fn(), closed: false });
+    (handler as any).context = { req: { on: jest.fn(), removeListener: jest.fn() }, res: {}, respond: true };
+    (createMultiModelClientFromConfig as jest.Mock).mockResolvedValueOnce({ chat: jest.fn(), chatStream });
+    return { handler, writeEvent };
+  }
+
+  it('counts a completed stream and sends the quota in the done event', async () => {
+    const { handler, writeEvent } = streamHandler(async (_m: unknown, _s: unknown, { callbacks }: any) => {
+      callbacks.onChunk('提示');
+      callbacks.onDone({ content: '提示' });
+      return { usedModel: { endpointId: 'ep-1', endpointName: 'Test', modelName: 'gpt-4o' } };
+    });
+    const q = withQuota(handler);
+
+    await handler.post();
+
+    const done = writeEvent.mock.calls.find(([event]) => event === 'done');
+    expect(done?.[1].quota).toEqual(expect.objectContaining({ limit: 5, used: 1, remaining: 4 }));
+    expect(q.usageDoc()).toEqual(expect.objectContaining({ used: 1, reservations: [] }));
+  });
+
+  it('counts a stream stopped by the student after content was produced', async () => {
+    const { handler } = streamHandler(async (_m: unknown, _s: unknown, { callbacks }: any) => {
+      callbacks.onChunk('已经生成的一部分');
+      throw new (AIServiceError as any)('请求已取消', 'aborted', false);
+    });
+    const q = withQuota(handler);
+
+    await handler.post();
+
+    expect(q.usageDoc()).toEqual(expect.objectContaining({ used: 1, reservations: [] }));
+  });
+
+  it('does not count a stream that failed before producing content', async () => {
+    const { handler } = streamHandler(async () => {
+      throw new (AIServiceError as any)('请求已取消', 'aborted', false);
+    });
+    const q = withQuota(handler);
+
+    await handler.post();
+
+    expect(q.usageDoc()).toEqual(expect.objectContaining({ used: 0, reservations: [] }));
+  });
+
+  it('lets the request through when the quota store is unavailable', async () => {
+    const handler = createMockHandler();
+    const q = withQuota(handler);
+    q.reserve.mockRejectedValueOnce(new Error('db down'));
+
+    await handler.post();
+
+    expect(handler.response.body.message.content).toBe('AI response');
+    expect(handler.response.body).not.toHaveProperty('quota');
+  });
+
+  it('keeps unlimited behaviour when the daily default is 0', async () => {
+    const handler = createMockHandler();
+    const q = withQuota(handler);
+    handler.ctx.get('aiConfigModel').getConfig.mockResolvedValue({
+      _id: 'default', configVersion: 4,
+      endpoints: [{ id: 'ep-1', name: 'Test', apiBaseUrl: 'https://api.test.com', apiKeyEncrypted: 'k', models: ['gpt-4o'], enabled: true }],
+      selectedModels: [{ endpointId: 'ep-1', modelName: 'gpt-4o' }],
+      rateLimitPerMinute: 5, timeoutSeconds: 30, quotaConfig: { ...QUOTA_CONFIG, dailyMessageLimit: 0 }, updatedAt: new Date(),
+    });
+
+    await handler.post();
+
+    expect(handler.response.body.quota).toEqual(expect.objectContaining({ limit: null, remaining: null, used: 1 }));
   });
 });

@@ -48,6 +48,7 @@ const updateHandler_1 = require("./handlers/updateHandler");
 console.log('[AI-Helper] updateHandler OK');
 const groupAdminHandler_1 = require("./handlers/groupAdminHandler");
 const auditHandler_1 = require("./handlers/auditHandler");
+const quotaStatusHandler_1 = require("./handlers/quotaStatusHandler");
 console.log('[AI-Helper] groupAdminHandler OK');
 const testdataGenHandler_1 = require("./handlers/testdataGenHandler");
 console.log('[AI-Helper] testdataGenHandler OK');
@@ -65,6 +66,7 @@ const studentSummary_1 = require("./models/studentSummary");
 const studentHistory_1 = require("./models/studentHistory");
 const auditLog_1 = require("./models/auditLog");
 const groupMeta_1 = require("./models/groupMeta");
+const quotaUsage_1 = require("./models/quotaUsage");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -76,6 +78,7 @@ const requestStats_1 = require("./models/requestStats");
 const featureStats_1 = require("./models/featureStats");
 const auditService_1 = require("./services/auditService");
 const hydroGroupService_1 = require("./services/hydroGroupService");
+const quotaService_1 = require("./services/quotaService");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
 /**
@@ -128,6 +131,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const teachingSummaryModel = new teachingSummary_1.TeachingSummaryModel(db);
         const auditLogModel = new auditLog_1.AuditLogModel(db);
         const groupMetaModel = new groupMeta_1.GroupMetaModel(db);
+        const quotaUsageModel = new quotaUsage_1.QuotaUsageModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -179,6 +183,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
         await safeEnsureIndexes(auditLogModel, 'auditLogModel');
         await safeEnsureIndexes(groupMetaModel, 'groupMetaModel');
+        await safeEnsureIndexes(quotaUsageModel, 'quotaUsageModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -248,6 +253,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const auditService = new auditService_1.AuditService(auditLogModel);
         ctx.provide('auditService', auditService);
         ctx.provide('hydroGroupService', new hydroGroupService_1.HydroGroupService(db, groupMetaModel, auditService, ctx));
+        ctx.provide('quotaUsageModel', quotaUsageModel);
+        ctx.provide('quotaService', new quotaService_1.QuotaService(quotaUsageModel, aiConfigModel));
         ctx.provide('errorReporter', errorReporter);
         ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
         // 初始化版本服务
@@ -416,6 +423,9 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_group_drift_domain', '/d/:domainId/ai-helper/groups/drift', groupAdminHandler_1.GroupDriftHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
         ctx.Route('ai_admin_audit', '/ai-helper/admin/audit', auditHandler_1.AuditListHandler, auditHandler_1.AuditListHandlerPriv);
         ctx.Route('ai_admin_audit_domain', '/d/:domainId/ai-helper/admin/audit', auditHandler_1.AuditListHandler, auditHandler_1.AuditListHandlerPriv);
+        // 学生端：今日剩余次数（跨域合计）
+        ctx.Route('ai_quota_status', '/ai-helper/quota-status', quotaStatusHandler_1.QuotaStatusHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
+        ctx.Route('ai_quota_status_domain', '/d/:domainId/ai-helper/quota-status', quotaStatusHandler_1.QuotaStatusHandler, quotaStatusHandler_1.QuotaStatusHandlerPriv);
     }
 });
 exports.Config = configSchema;

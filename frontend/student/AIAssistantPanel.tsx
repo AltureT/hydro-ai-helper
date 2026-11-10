@@ -4,6 +4,9 @@ import { i18n } from '../utils/i18n';
 import 'highlight.js/styles/github.css';
 import { useChatSession } from './hooks/useChatSession';
 import { useTextSelection } from './hooks/useTextSelection';
+import { useQuotaStatus } from './hooks/useQuotaStatus';
+import { QuotaBar, QuotaBlockedNotice } from './QuotaBar';
+import { quotaBlock } from './quotaView';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatInput } from './ChatInput';
 import {
@@ -18,8 +21,10 @@ interface AIAssistantPanelProps {
 const RETRYABLE_CATEGORIES = new Set(['rate_limit', 'timeout', 'network']);
 
 export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId }) => {
-  const chat = useChatSession({ problemId });
+  const quota = useQuotaStatus();
+  const chat = useChatSession({ problemId, onQuota: quota.applySnapshot, onQuotaBlocked: quota.markBlocked });
   const { state, dispatch } = chat;
+  const block = quotaBlock(quota.status);
 
   const textSelection = useTextSelection({
     onClarify: useCallback((text: string, _sourceId: string) => {
@@ -40,7 +45,8 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
   }, [textSelection.pendingAutoSubmit, state.questionType, state.userThinking]);
 
   const renderErrorBanner = (compact: boolean) => {
-    if (!state.error) return null;
+    // 额度用完 / 被关闭由输入区上方的专门提示展示，不再重复
+    if (!state.error || state.errorCategory === 'quota') return null;
     const isRetryable = state.errorRetryable && RETRYABLE_CATEGORIES.has(state.errorCategory || '');
     const alertStyle = isRetryable ? getAlertStyle('warning') : getAlertStyle('error');
     return (
@@ -202,6 +208,8 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
     onCancel: chat.cancelRequest,
     onRefreshCode: chat.refreshCodeFromScratchpad,
     onNewConversation: chat.startNewConversation,
+    disabled: !!block,
+    errorBanner: <QuotaBlockedNotice block={block} status={quota.status} />,
   };
 
   // Contest restricted UI
@@ -225,6 +233,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: COLORS.bgCard }}>
       <style>{markdownTheme}{keyframeStyles}</style>
+      {quota.status && <QuotaBar status={quota.status} />}
       <ChatMessageList {...messageListProps}>
         {renderErrorBanner(false)}
       </ChatMessageList>

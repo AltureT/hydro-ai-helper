@@ -104,6 +104,7 @@ import {
   GroupAdminHandlerPriv,
 } from './handlers/groupAdminHandler';
 import { AuditListHandler, AuditListHandlerPriv } from './handlers/auditHandler';
+import { QuotaStatusHandler, QuotaStatusHandlerPriv } from './handlers/quotaStatusHandler';
 console.log('[AI-Helper] groupAdminHandler OK');
 
 import {
@@ -133,6 +134,7 @@ import { StudentSummaryModel } from './models/studentSummary';
 import { StudentHistoryModel } from './models/studentHistory';
 import { AuditLogModel } from './models/auditLog';
 import { GroupMetaModel } from './models/groupMeta';
+import { QuotaUsageModel } from './models/quotaUsage';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -145,6 +147,7 @@ import { RequestStatsModel } from './models/requestStats';
 import { FeatureStatsModel } from './models/featureStats';
 import { AuditService } from './services/auditService';
 import { HydroGroupService } from './services/hydroGroupService';
+import { QuotaService } from './services/quotaService';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -206,6 +209,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const teachingSummaryModel = new TeachingSummaryModel(db);
     const auditLogModel = new AuditLogModel(db);
     const groupMetaModel = new GroupMetaModel(db);
+    const quotaUsageModel = new QuotaUsageModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -258,6 +262,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
     await safeEnsureIndexes(auditLogModel, 'auditLogModel');
     await safeEnsureIndexes(groupMetaModel, 'groupMetaModel');
+    await safeEnsureIndexes(quotaUsageModel, 'quotaUsageModel');
 
     try {
       const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
@@ -338,6 +343,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const auditService = new AuditService(auditLogModel);
     ctx.provide('auditService', auditService);
     ctx.provide('hydroGroupService', new HydroGroupService(db, groupMetaModel, auditService, ctx));
+    ctx.provide('quotaUsageModel', quotaUsageModel);
+    ctx.provide('quotaService', new QuotaService(quotaUsageModel, aiConfigModel));
     ctx.provide('errorReporter', errorReporter);
     ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
 
@@ -546,6 +553,9 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_group_drift_domain', '/d/:domainId/ai-helper/groups/drift', GroupDriftHandler, GroupAdminHandlerPriv);
     ctx.Route('ai_admin_audit', '/ai-helper/admin/audit', AuditListHandler, AuditListHandlerPriv);
     ctx.Route('ai_admin_audit_domain', '/d/:domainId/ai-helper/admin/audit', AuditListHandler, AuditListHandlerPriv);
+    // 学生端：今日剩余次数（跨域合计）
+    ctx.Route('ai_quota_status', '/ai-helper/quota-status', QuotaStatusHandler, QuotaStatusHandlerPriv);
+    ctx.Route('ai_quota_status_domain', '/d/:domainId/ai-helper/quota-status', QuotaStatusHandler, QuotaStatusHandlerPriv);
   }
 });
 
