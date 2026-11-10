@@ -1,6 +1,6 @@
 /**
  * 学生总览（设计稿“学生总览”，US6）：跨域查看学生的小组、额度与用量、近 7 天违规，并批量操作
- * 仅系统管理员可见；不展示对话原文（FR-053）。信誉列随 PR4 加入，跨域转移随 PR3b 加入。
+ * 仅系统管理员可见；不展示对话原文（FR-053）。信誉列随 PR4 加入；批量栏可打开跨域复制或移动（TransferDialog）。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -34,9 +34,10 @@ import {
 import { OverrideFormModal, QUOTA_API, formatOverrideSetting } from './quotaAdminUi';
 import { HydroGroupBatchDialog, QuotaGroupBatchDialog } from './OverviewBatchDialogs';
 import { UserDetailDrawer } from './UserDetailDrawer';
+import { TransferDialog } from './TransferDialog';
 
 type ShowToast = (text: string, type?: 'success' | 'warning' | 'error' | 'info') => void;
-type Dialog = 'group' | 'quota' | 'override' | null;
+type Dialog = 'group' | 'quota' | 'override' | 'transfer' | null;
 
 const TONE_COLORS: Record<string, string> = {
   normal: COLORS.primary,
@@ -97,7 +98,7 @@ function UsageCell({ quota }: { quota: OverviewQuota }) {
   );
 }
 
-export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToast }> = ({ domainId, showToast }) => {
+export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToast; onOpenAudit?: () => void }> = ({ domainId, showToast, onOpenAudit }) => {
   const [draft, setDraft] = useState<OverviewFiltersState>(EMPTY_OVERVIEW_FILTERS);
   const [filters, setFilters] = useState<OverviewFiltersState>(EMPTY_OVERVIEW_FILTERS);
   const [page, setPage] = useState(1);
@@ -167,6 +168,13 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
   const reset = () => { setDraft(EMPTY_OVERVIEW_FILTERS); setFilters(EMPTY_OVERVIEW_FILTERS); setPage(1); };
   const selectedRows = useMemo(() => [...selected.values()], [selected]);
   const domains = meta?.domains || [];
+
+  const filterDomainName = domains.find((domain) => domain.id === filters.domainId)?.name || filters.domainId;
+  const transferSourceNote = filters.domainId
+    ? (filters.group
+      ? i18n('ai_helper_transfer_source_note_group', filterDomainName, filters.group)
+      : i18n('ai_helper_transfer_source_note', filterDomainName))
+    : undefined;
 
   const finishBatch = (message: string) => {
     setDialog(null);
@@ -263,6 +271,7 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
         <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size} onClick={() => setDialog('group')}>{i18n('ai_helper_um_overview_batch_group')}</button>
         <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size} onClick={() => setDialog('quota')}>{i18n('ai_helper_um_overview_batch_qgroup')}</button>
         <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size} onClick={() => setDialog('override')}>{i18n('ai_helper_um_override_dialog_title')}</button>
+        <button type="button" style={getButtonStyle('secondary')} disabled={!selected.size || domains.length < 2} onClick={() => setDialog('transfer')}>{i18n('ai_helper_transfer_open_users')}</button>
         <span style={{ flex: 1 }} />
         {selected.size > 0 && (
           <button type="button" style={linkButtonStyle} onClick={() => setSelected(new Map())}>{i18n('ai_helper_um_overview_clear_selection')}</button>
@@ -374,6 +383,18 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
       )}
       {dialog === 'quota' && (
         <QuotaGroupBatchDialog rows={selectedRows} groups={meta?.groups || []} onClose={() => setDialog(null)} onDone={finishBatch} />
+      )}
+      {dialog === 'transfer' && (
+        <TransferDialog
+          kind="users"
+          domains={domains}
+          sourceDomainId={domains.some((domain) => domain.id === filters.domainId) ? filters.domainId : domainId}
+          users={selectedRows.map((row) => ({ uid: row.uid, uname: row.uname }))}
+          sourceNote={transferSourceNote}
+          onClose={() => setDialog(null)}
+          onFinished={() => { setDialog(null); setSelected(new Map()); load(); loadMeta(); }}
+          onOpenAudit={onOpenAudit}
+        />
       )}
       {dialog === 'override' && (
         <OverrideFormModal

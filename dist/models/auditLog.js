@@ -29,6 +29,8 @@ exports.AUDIT_ACTIONS = [
     'quota.group_unlink',
     'quota.override_set',
     'quota.override_clear',
+    'transfer.groups',
+    'transfer.users',
     'settings.teacher_access',
 ];
 function auditCategoryOf(action) {

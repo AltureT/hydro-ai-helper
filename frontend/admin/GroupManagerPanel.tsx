@@ -33,6 +33,7 @@ import {
   type SearchResponse,
 } from './userManagementLogic';
 import { GroupBatchAddView } from './GroupBatchAddView';
+import { TransferDialog } from './TransferDialog';
 import { Badge, Drawer, Modal, TableScroll, labelStyle, linkButtonStyle, mutedTextStyle } from './userManagementUi';
 
 interface GroupManagerPanelProps {
@@ -360,6 +361,7 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
   const [editing, setEditing] = useState<GroupListItem | 'new' | null>(null);
   const [batchPreset, setBatchPreset] = useState<string | null | undefined>(undefined);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -518,6 +520,9 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
           {selectedGroups.some((group) => group.meta?.archived) && (
             <button type="button" disabled={bulkBusy} style={linkButtonStyle} onClick={() => setArchived(false)}>{i18n('ai_helper_um_unarchive')}</button>
           )}
+          {selectedGroups.some((group) => group.existsInHydro) && (
+            <button type="button" disabled={bulkBusy} style={linkButtonStyle} onClick={() => setTransferOpen(true)}>{i18n('ai_helper_transfer_open_groups')}</button>
+          )}
           <button type="button" style={{ ...linkButtonStyle, color: COLORS.textSecondary }} onClick={() => setSelected(new Set())}>
             {i18n('ai_helper_um_clear_selection')}
           </button>
@@ -615,6 +620,18 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
           onChanged={load}
           onAddMembers={() => { setDrawerName(null); setBatchPreset(drawerGroup.existsInHydro ? drawerGroup.name : null); }}
           showToast={showToast}
+        />
+      )}
+
+      {transferOpen && (
+        <TransferDialog
+          kind="groups"
+          domains={domainOptions}
+          sourceDomainId={domainId}
+          groupNames={selectedGroups.filter((group) => group.existsInHydro).map((group) => group.name)}
+          onClose={() => setTransferOpen(false)}
+          onFinished={() => { setTransferOpen(false); setSelected(new Set()); load(); }}
+          onOpenAudit={onOpenAudit}
         />
       )}
 

@@ -51,6 +51,13 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'quota.override_set': 'ai_helper_um_action_override_set',
   'quota.override_clear': 'ai_helper_um_action_override_clear',
   'settings.teacher_access': 'ai_helper_um_action_teacher_access',
+  'transfer.groups': 'ai_helper_um_action_transfer_groups',
+  'transfer.users': 'ai_helper_um_action_transfer_users',
+};
+
+const TRANSFER_API = {
+  undo: '/ai-helper/admin/transfer/undo',
+  resume: '/ai-helper/admin/transfer/resume',
 };
 
 function actionLabel(action: string): string {
@@ -61,6 +68,7 @@ function actionVariant(log: AuditLogItem): BadgeVariant {
   if (log.category === 'settings') return 'ok';
   if (log.category === 'review') return 'warn';
   if (log.category === 'quota') return log.action.endsWith('delete') || log.action.endsWith('clear') ? 'muted' : 'ok';
+  if (log.category === 'transfer') return log.detail?.status === 'partial' ? 'warn' : 'info';
   return 'info';
 }
 
@@ -69,6 +77,14 @@ const TARGET_LABEL_KEYS: Record<string, string> = {
 };
 
 function targetLabel(log: AuditLogItem): string {
+  if (log.category === 'transfer') {
+    const d = log.detail || {};
+    const target = (log.target.label || '').split(' → ').pop() || String(d.targetDomainId ?? '');
+    const what = Array.isArray(d.groupNames)
+      ? (d.groupNames as unknown[]).map(String).join('、')
+      : i18n('ai_helper_transfer_user_count', Array.isArray(d.uids) ? d.uids.length : 0);
+    return `${what} → ${target}`;
+  }
   const key = TARGET_LABEL_KEYS[`${log.target.type}:${log.target.id}`];
   return key ? i18n(key) : log.target.label || log.target.id;
 }
@@ -111,9 +127,62 @@ function describeQuotaAudit(log: AuditLogItem): string {
   }
 }
 
+const TRANSFER_STATUS_KEYS: Record<string, string> = {
+  running: 'ai_helper_um_audit_transfer_running',
+  partial: 'ai_helper_um_audit_transfer_partial',
+  done: 'ai_helper_um_audit_transfer_done',
+  undone: 'ai_helper_um_audit_transfer_undone',
+};
+
+/** 跨域转移的一行摘要：方式 · 源域 → 目标域 · 状态 */
+function describeTransferAudit(log: AuditLogItem): string {
+  const d = log.detail || {};
+  const mode = d.mode === 'move' ? i18n('ai_helper_transfer_move') : i18n('ai_helper_transfer_copy');
+  const status = TRANSFER_STATUS_KEYS[String(d.status)] ? i18n(TRANSFER_STATUS_KEYS[String(d.status)]) : '';
+  return [mode, `${String(d.sourceDomainId ?? '')} → ${String(d.targetDomainId ?? '')}`, status].filter(Boolean).join(' · ');
+}
+
+const STEP_TYPE_KEYS: Record<string, string> = {
+  join: 'ai_helper_um_audit_step_type_join',
+  group: 'ai_helper_um_audit_step_type_group',
+  relink: 'ai_helper_um_audit_step_type_relink',
+  delete_group: 'ai_helper_um_audit_step_type_delete',
+  leave: 'ai_helper_um_audit_step_type_leave',
+  pull: 'ai_helper_um_audit_step_type_pull',
+};
+
+/** 跨域转移审计中每一步的说明（步骤详情来自服务端的 stepAuditDetail） */
+export function describeTransferStep(step: NonNullable<AuditLogItem['steps']>[number]): string {
+  const d = step.detail || {};
+  const type = String(d.type || '');
+  if (step.name === 'resume') return i18n('ai_helper_um_audit_step_resume');
+  if (step.status === 'failed') {
+    const label = STEP_TYPE_KEYS[type] ? i18n(STEP_TYPE_KEYS[type]) : step.name;
+    return i18n('ai_helper_um_audit_step_failed', label, String(d.error || '—'));
+  }
+  const to = (d.to || {}) as Record<string, unknown>;
+  switch (type) {
+    case 'join': return i18n('ai_helper_um_audit_step_join', String(d.domainId), Number(d.count) || 0, String(d.role || '—'));
+    case 'group': return d.created
+      ? i18n('ai_helper_um_audit_step_group_created', String(d.domainId), String(d.name), Number(d.added) || 0)
+      : i18n('ai_helper_um_audit_step_group_merged', String(d.domainId), String(d.name), Number(d.added) || 0);
+    case 'relink': return i18n('ai_helper_um_audit_step_relink', String(d.quotaGroup), String(to.domainId), String(to.name));
+    case 'delete_group': return i18n('ai_helper_um_audit_step_delete', String(d.domainId), String(d.name), Number(d.members) || 0);
+    case 'leave': return i18n('ai_helper_um_audit_step_leave', String(d.domainId), Number(d.count) || 0);
+    case 'pull': {
+      const groups = Array.isArray(d.groups) ? (d.groups as unknown[]).map(String) : [];
+      return groups.length
+        ? i18n('ai_helper_um_audit_step_pull', String(d.domainId), groups.join('、'))
+        : i18n('ai_helper_um_audit_step_pull_none', String(d.domainId));
+    }
+    default: return step.name;
+  }
+}
+
 function changeSummary(log: AuditLogItem): string {
   if (log.category === 'group') return describeGroupAudit(log);
   if (log.category === 'quota') return describeQuotaAudit(log);
+  if (log.category === 'transfer') return describeTransferAudit(log);
   if (log.action === 'settings.teacher_access') {
     return log.detail?.to ? i18n('ai_helper_um_audit_change_enabled') : i18n('ai_helper_um_audit_change_disabled');
   }
@@ -127,6 +196,19 @@ function detailLines(log: AuditLogItem): string[] {
     const { text, more } = formatUidNames(uids, log.uidNames, 8);
     return more ? `${text} ${i18n('ai_helper_um_and_more', more)}` : text;
   };
+  if (log.category === 'transfer') {
+    const d = log.detail || {};
+    lines.push(describeTransferAudit(log));
+    if (Array.isArray(d.groupNames)) lines.push(i18n('ai_helper_um_audit_transfer_groups', (d.groupNames as unknown[]).map(String).join('、')));
+    if (Array.isArray(d.uids)) {
+      const uids = (d.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number');
+      lines.push(i18n('ai_helper_um_audit_transfer_users', uids.length, named(uids)));
+    }
+    if (d.targetGroup) lines.push(i18n('ai_helper_um_audit_transfer_target_group', String(d.targetGroup)));
+    if (d.removeMembersFromSource) lines.push(i18n('ai_helper_um_audit_transfer_remove_members'));
+    for (const step of log.steps || []) lines.push(describeTransferStep(step));
+    return lines;
+  }
   if (summary.added.length) lines.push(i18n('ai_helper_um_detail_added', summary.added.length, named(summary.added)));
   if (summary.removed.length) lines.push(i18n('ai_helper_um_detail_removed', summary.removed.length, named(summary.removed)));
   if (summary.joined.length) {
@@ -145,7 +227,12 @@ function detailLines(log: AuditLogItem): string[] {
 
 function undoUrl(log: AuditLogItem): string | null {
   if (log.category === 'group' && log.domainId) return domainApiUrl(log.domainId, '/ai-helper/groups/undo');
+  if (log.category === 'transfer' && log.detail?.status !== 'running') return TRANSFER_API.undo;
   return null;
+}
+
+function canResume(log: AuditLogItem): boolean {
+  return log.category === 'transfer' && log.detail?.status === 'partial' && !log.undoneAt;
 }
 
 export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToast }) => {
@@ -191,18 +278,37 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
     const url = undoUrl(log);
     if (!url) return;
     const joined = summarizeAuditDetail(log).joined.length;
-    const confirmText = log.action === 'group.add' && joined
+    const isTransfer = log.category === 'transfer';
+    let confirmText = log.action === 'group.add' && joined
       ? `${i18n('ai_helper_um_undo_confirm')}\n${i18n('ai_helper_um_undo_confirm_joined', joined)}`
       : i18n('ai_helper_um_undo_confirm');
+    if (isTransfer) {
+      confirmText = i18n(log.detail?.status === 'partial' ? 'ai_helper_transfer_undo_partial_confirm' : 'ai_helper_transfer_undo_confirm');
+    }
     if (!window.confirm(confirmText)) return;
+    const failedText = i18n(isTransfer ? 'ai_helper_transfer_undo_failed' : 'ai_helper_group_undo_failed');
     setUndoing(true);
     try {
-      await postJson(url, { auditId: log.id }, i18n('ai_helper_group_undo_failed'));
+      await postJson(url, { auditId: log.id }, failedText);
       showToast(i18n('ai_helper_um_undo_done'), 'success');
       setDetail(null);
       load(page);
     } catch (err) {
-      showToast(errorMessage(err, i18n('ai_helper_group_undo_failed')), 'error');
+      showToast(errorMessage(err, failedText), 'error');
+    } finally {
+      setUndoing(false);
+    }
+  };
+
+  const resume = async (log: AuditLogItem) => {
+    setUndoing(true);
+    try {
+      const res = await postJson<{ status: string }>(TRANSFER_API.resume, { auditId: log.id }, i18n('ai_helper_transfer_execute_failed'));
+      showToast(i18n(res.status === 'done' ? 'ai_helper_transfer_resume_done' : 'ai_helper_transfer_resume_partial'), res.status === 'done' ? 'success' : 'warning');
+      setDetail(null);
+      load(page);
+    } catch (err) {
+      showToast(errorMessage(err, i18n('ai_helper_transfer_execute_failed')), 'error');
     } finally {
       setUndoing(false);
     }
@@ -225,6 +331,7 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
             <option value="">{i18n('ai_helper_um_all')}</option>
             <option value="group">{i18n('ai_helper_um_audit_category_group')}</option>
             <option value="quota">{i18n('ai_helper_um_audit_category_quota')}</option>
+            <option value="transfer">{i18n('ai_helper_um_audit_category_transfer')}</option>
             <option value="settings">{i18n('ai_helper_um_audit_category_settings')}</option>
           </select>
         </label>
@@ -312,11 +419,18 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
           )}
           {detail.undoable && undoUrl(detail) && (
             <div style={{ marginTop: SPACING.lg }}>
-              <button type="button" disabled={undoing} onClick={() => undo(detail)} style={getButtonStyle('primary')}>
-                {i18n('ai_helper_um_undo_this')}
-              </button>
+              <div style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
+                {canResume(detail) && (
+                  <button type="button" disabled={undoing} onClick={() => resume(detail)} style={getButtonStyle('primary')}>
+                    {i18n('ai_helper_transfer_resume')}
+                  </button>
+                )}
+                <button type="button" disabled={undoing} onClick={() => undo(detail)} style={getButtonStyle(canResume(detail) ? 'secondary' : 'primary')}>
+                  {canResume(detail) ? i18n('ai_helper_transfer_undo_partial') : i18n('ai_helper_um_undo_this')}
+                </button>
+              </div>
               <p style={{ ...mutedTextStyle, marginTop: SPACING.sm }}>
-                {i18n('ai_helper_um_undo_note')}
+                {i18n(detail.category === 'transfer' ? 'ai_helper_transfer_undo_note' : 'ai_helper_um_undo_note')}
                 {detail.action === 'group.add' && summarizeAuditDetail(detail).joined.length
                   ? ` ${i18n('ai_helper_um_undo_confirm_joined', summarizeAuditDetail(detail).joined.length)}`
                   : ''}

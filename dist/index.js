@@ -51,6 +51,7 @@ const auditHandler_1 = require("./handlers/auditHandler");
 const quotaStatusHandler_1 = require("./handlers/quotaStatusHandler");
 const quotaAdminHandler_1 = require("./handlers/quotaAdminHandler");
 const userOverviewHandler_1 = require("./handlers/userOverviewHandler");
+const transferHandler_1 = require("./handlers/transferHandler");
 console.log('[AI-Helper] groupAdminHandler OK');
 const testdataGenHandler_1 = require("./handlers/testdataGenHandler");
 console.log('[AI-Helper] testdataGenHandler OK');
@@ -71,6 +72,7 @@ const groupMeta_1 = require("./models/groupMeta");
 const quotaUsage_1 = require("./models/quotaUsage");
 const quotaGroup_1 = require("./models/quotaGroup");
 const quotaOverride_1 = require("./models/quotaOverride");
+const transferJob_1 = require("./models/transferJob");
 console.log('[AI-Helper] models OK');
 const migrationService_1 = require("./services/migrationService");
 const versionService_1 = require("./services/versionService");
@@ -86,6 +88,7 @@ const quotaService_1 = require("./services/quotaService");
 const quotaGroupResolver_1 = require("./services/quotaGroupResolver");
 const quotaAdminService_1 = require("./services/quotaAdminService");
 const userOverviewService_1 = require("./services/userOverviewService");
+const transferService_1 = require("./services/transferService");
 console.log('[AI-Helper] services OK');
 console.log('[AI-Helper] All imports completed successfully');
 /**
@@ -141,6 +144,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const quotaUsageModel = new quotaUsage_1.QuotaUsageModel(db);
         const quotaGroupModel = new quotaGroup_1.QuotaGroupModel(db);
         const quotaOverrideModel = new quotaOverride_1.QuotaOverrideModel(db);
+        const transferJobModel = new transferJob_1.TransferJobModel(db);
         // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
         const errorReporter = new errorReporter_1.ErrorReporter(pluginInstallModel);
         // 采集运行环境，随错误上报以便面板定位版本相关故障。
@@ -195,6 +199,7 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         await safeEnsureIndexes(quotaUsageModel, 'quotaUsageModel');
         await safeEnsureIndexes(quotaGroupModel, 'quotaGroupModel');
         await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
+        await safeEnsureIndexes(transferJobModel, 'transferJobModel');
         try {
             const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
             if (interruptedJobs > 0) {
@@ -278,6 +283,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.provide('quotaService', quotaService);
         ctx.provide('quotaAdminService', new quotaAdminService_1.QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
         ctx.provide('userOverviewService', new userOverviewService_1.UserOverviewService(db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel));
+        ctx.provide('transferJobModel', transferJobModel);
+        ctx.provide('transferService', new transferService_1.TransferService(db, groupMetaModel, quotaGroupModel, transferJobModel, auditService, quotaGroupResolver, ctx));
         ctx.provide('errorReporter', errorReporter);
         ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
         // 初始化版本服务
@@ -455,6 +462,11 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', quotaAdminHandler_1.QuotaOverridesHandler, quotaAdminHandler_1.QuotaAdminHandlerPriv);
         ctx.Route('ai_admin_users', '/ai-helper/admin/users', userOverviewHandler_1.UserOverviewHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
         ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', userOverviewHandler_1.UserDetailHandler, userOverviewHandler_1.UserOverviewHandlerPriv);
+        // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）
+        ctx.Route('ai_admin_transfer_preview', '/ai-helper/admin/transfer/preview', transferHandler_1.TransferPreviewHandler, transferHandler_1.TransferHandlerPriv);
+        ctx.Route('ai_admin_transfer_execute', '/ai-helper/admin/transfer/execute', transferHandler_1.TransferExecuteHandler, transferHandler_1.TransferHandlerPriv);
+        ctx.Route('ai_admin_transfer_resume', '/ai-helper/admin/transfer/resume', transferHandler_1.TransferResumeHandler, transferHandler_1.TransferHandlerPriv);
+        ctx.Route('ai_admin_transfer_undo', '/ai-helper/admin/transfer/undo', transferHandler_1.TransferUndoHandler, transferHandler_1.TransferHandlerPriv);
     }
 });
 exports.Config = configSchema;

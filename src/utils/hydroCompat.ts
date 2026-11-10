@@ -24,6 +24,7 @@ export interface HydroGroupDoc {
 export interface DomainDocLike {
   _id?: string;
   name?: string;
+  owner?: number;
   roles?: Record<string, string | number | bigint>;
   _join?: { role?: string } | null;
 }
@@ -74,6 +75,34 @@ export async function leaveDomain(domainId: string, uids: number[]): Promise<voi
   for (const uid of list) {
     await DomainModel.setUserRole(domainId, uid, 'default');
   }
+}
+
+export interface DomainMembershipRow {
+  uid: number;
+  role?: string | null;
+  join?: boolean;
+}
+
+/**
+ * 撤销时恢复用户在域中的原状态：有原记录的恢复原角色（Hydro 5 同时恢复 join），
+ * 原本没有记录的按“退出域”处理。
+ */
+export async function restoreDomainMembership(domainId: string, rows: DomainMembershipRow[], absentUids: number[] = []): Promise<void> {
+  if (isJoinFlagMembership()) {
+    const byRole = new Map<string, number[]>();
+    for (const row of rows) {
+      const role = row.role || 'guest';
+      byRole.set(role, [...(byRole.get(role) || []), row.uid]);
+    }
+    for (const [role, uids] of byRole) await DomainModel.setUserRole(domainId, uniqueUids(uids), role);
+    const joined = uniqueUids(rows.filter((row) => row.join === true).map((row) => row.uid));
+    const notJoined = uniqueUids(rows.filter((row) => row.join === false).map((row) => row.uid));
+    if (joined.length) await DomainModel.setJoin(domainId, joined, true);
+    if (notJoined.length) await DomainModel.setJoin(domainId, notJoined, false);
+  } else {
+    for (const row of rows) await DomainModel.setUserRole(domainId, row.uid, row.role || 'default');
+  }
+  await leaveDomain(domainId, absentUids);
 }
 
 /**

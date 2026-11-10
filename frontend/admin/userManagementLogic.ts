@@ -70,6 +70,8 @@ export interface AuditLogItem {
   domainName: string | null;
   target: { type: string; id: string; label?: string };
   detail: Record<string, unknown>;
+  /** 多步骤操作（跨域转移）逐步追加的执行记录 */
+  steps?: Array<{ name: string; status: 'done' | 'failed' | 'skipped'; detail?: Record<string, unknown>; at: string }>;
   undoable: boolean;
   undoneAt: string | null;
   undoneByName: string | null;
