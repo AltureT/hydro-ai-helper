@@ -75,15 +75,31 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 - **Batch AI Summary** — one-click personalized learning summaries for all students on scoreboard pages
   - Longitudinal history tracking + milestone-based submission sampling; supplemental generation for late-arriving students
   - Draft/publish workflow with real-time SSE progress and stop/continue/retry controls
-- Conversation browsing (time / problem / class / student filters with autocomplete), effectiveness metrics, CSV export with optional anonymization
+- Conversation browsing (time / problem / group / student filters with autocomplete), effectiveness metrics, CSV export with optional anonymization
+- **Read-only view for group teachers** (off by default) — once a system admin turns on Teacher access, a group's teachers can open `/d/<domain ID>/ai-helper/class` to view, read-only, their students' AI conversations and stats for the last 7 days in that domain. They can't see other classes or domains
 
 ### Admins
 
-- Unified portal: Conversations / Analytics / Configuration tabs
+- Unified portal: Conversations / Analytics / Safety Governance / Users / Configuration tabs
 - Multi-endpoint API management with model auto-discovery, drag-to-reorder priority, and automatic failover
 - Per-scenario model assignment: student chat / learning summary / teaching analysis / test data generation
 - Cost control: token usage tracking, budget limits, cost dashboard
 - Rate limiting, custom system prompt, one-click plugin update
+
+<details>
+<summary><b>User management and AI quota</b> (system admins only)</summary>
+
+- **Groups**: add or remove students in Hydro's own groups in bulk, by username prefix, regex or a list, optionally joining them to the domain; every change can be undone. Finds members that Hydro's own group page overwrote and restores them, and records each group's type, academic year and teachers
+- **Cross-domain transfer**: copy or move groups or selected students to another domain, with a preview before and undo after
+- **Daily quota**: a daily limit on AI questions, counted across all domains, unlimited by default. Quota groups (grant or cap, optionally linked to Hydro groups) and personal overrides can only be changed by system admins
+- **Credit**: high-confidence violations lower a student's credit and with it their daily quota; credit recovers each day without violations, with a floor and a minimum number of questions. A deduction is reversed when a review or appeal finds a false positive, and admins can reset credit by hand. Cooldowns and credit apply in every domain
+- **Off-topic**: counted per student across conversations; a second off-topic message within 24 hours counts as a violation, and a few characters of "code" no longer skip the check
+- **AI review** (off by default): each day, suspicious and random conversations are anonymized and sent to a separate review model. Only high-confidence findings whose quotes match the student's own messages are penalized automatically; all medium- and high-confidence findings go to the review list. Auto-penalty stops itself if too many turn out to be false positives
+- **Students**: see each student's groups, quota group, today's usage, violations in the last 7 days and credit across domains, and add students to groups or quota groups in bulk
+- **Stats by group**: analytics, conversations and export filter by group. New conversations record the student's groups at the time; older ones can be backfilled from current membership
+- **Audit log**: membership changes, quotas, credit, AI review, transfers and setting changes are all recorded and kept for 180 days
+
+</details>
 
 <details>
 <summary><b>Security</b></summary>
