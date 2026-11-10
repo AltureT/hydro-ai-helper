@@ -188,4 +188,45 @@ describe('CreditService', () => {
     ]);
     expect(detail.events[1]).toEqual(expect.objectContaining({ safetyLogId: String(logId), domainId: 'oi2023', deduction: 0.1, sequence: 1 }));
   });
+
+  it('records AI review penalties at the base weight without escalating (FR-044)', async () => {
+    const env = setup();
+    await env.service.recordRealtimeDeduction({ uid: 1031, category: 'off_topic' });
+    const conversationId = new ObjectId();
+    const result = await env.service.recordReviewDeduction({
+      uid: 1031, category: 'off_topic', safetyLogId: new ObjectId(), domainId: 'oi2023', conversationId,
+    });
+    expect(result).toEqual({ deduction: 0.05 });
+    expect(env.events()[1]).toMatchObject({ source: 'ai_review', deduction: 0.05, conversationId });
+    expect(env.events()[1]).not.toHaveProperty('sequence');
+    // AI review deductions do not count toward realtime doubling
+    expect(await env.service.recordRealtimeDeduction({ uid: 1031, category: 'off_topic' })).toEqual({ deduction: 0.1, sequence: 2 });
+    const zero = setup({ credit: { weights: { off_topic: 0 } } });
+    expect(await zero.service.recordReviewDeduction({ uid: 1031, category: 'off_topic' })).toBeNull();
+  });
+
+  it('lists AI review notices until the student acknowledges them or the deduction is revoked (FR-046)', async () => {
+    const logA = new ObjectId();
+    const logB = new ObjectId();
+    const env = setup({ logs: [
+      { _id: logA, userId: 1031, domainId: 'oi2023', problemId: 'P1000', reviewStatus: 'pending' },
+      { _id: logB, userId: 1031, domainId: 'club', reviewStatus: 'pending', studentAppealedAt: new Date('2026-11-10T05:00:00Z') },
+    ] });
+    await env.service.recordReviewDeduction({ uid: 1031, category: 'off_topic', safetyLogId: logA, domainId: 'oi2023' });
+    await env.service.recordReviewDeduction({ uid: 1031, category: 'answer_seeking', safetyLogId: logB, domainId: 'club' });
+    await env.service.recordRealtimeDeduction({ uid: 1031, category: 'prompt_injection' });
+    const notices = await env.service.reviewNotices(1031);
+    expect(notices.map((notice) => [notice.category, notice.safetyEventId, notice.domainId])).toEqual(
+      expect.arrayContaining([['off_topic', String(logA), 'oi2023'], ['answer_seeking', String(logB), 'club']]),
+    );
+    expect(notices).toHaveLength(2);
+    expect(notices.find((notice) => notice.category === 'off_topic')).toMatchObject({ problemId: 'P1000', appealable: true, appealed: false });
+    expect(notices.find((notice) => notice.category === 'answer_seeking')).toMatchObject({ appealable: false, appealed: true });
+
+    const offTopic = notices.find((notice) => notice.category === 'off_topic')!;
+    expect(await env.service.ackReviewNotice(new ObjectId(offTopic.id), 1032)).toBe(false);
+    expect(await env.service.ackReviewNotice(new ObjectId(offTopic.id), 1031)).toBe(true);
+    await env.service.revokeBySafetyLog(logB, 2);
+    expect(await env.service.reviewNotices(1031)).toEqual([]);
+  });
 });

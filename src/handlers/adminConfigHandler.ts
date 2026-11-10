@@ -20,6 +20,7 @@ import {
 } from '../models/configSections';
 import type { AuditService } from '../services/auditService';
 import type { CreditService } from '../services/creditService';
+import type { AIReviewService } from '../services/aiReviewService';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog, JailbreakLogListFilters } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
@@ -778,6 +779,7 @@ export class JailbreakLogReviewHandler extends Handler {
       if (reviewStatus === 'false_positive') {
         await revokeCreditForFalsePositives(this, [id], Number(this.user._id), getDomainId(this));
       }
+      await checkReviewBreaker(this);
 
       this.response.body = { success: true, reviewStatus };
       this.response.type = 'application/json';
@@ -836,6 +838,7 @@ export class JailbreakLogBulkReviewHandler extends Handler {
       if (reviewStatus === 'false_positive') {
         await revokeCreditForFalsePositives(this, reviewedIds || [], Number(this.user._id), getDomainId(this));
       }
+      if (reviewedIds?.length) await checkReviewBreaker(this);
       this.response.body = { success: true, ...counts, reviewStatus };
       this.response.type = 'application/json';
     } catch (err) {
@@ -879,6 +882,11 @@ function formatJailbreakLog(log: JailbreakLog) {
     reviewedBy: log.reviewedBy,
     studentAppealedAt: log.studentAppealedAt?.toISOString(),
     studentAppealReason: log.studentAppealReason,
+    ...(log.reviewRunId ? { reviewRunId: log.reviewRunId } : {}),
+    ...(log.evidence ? { evidence: log.evidence } : {}),
+    ...(log.evidenceVerified !== undefined ? { evidenceVerified: log.evidenceVerified } : {}),
+    ...(log.autoPenalized ? { autoPenalized: true } : {}),
+    ...(log.reviewReason ? { reviewReason: log.reviewReason } : {}),
     expiresAt: log.expiresAt?.toISOString(),
     createdAt: log.createdAt.toISOString()
   };
@@ -892,7 +900,7 @@ const VALID_CATEGORIES: SafetyViolationCategory[] = [
   'obfuscated_injection',
   'off_topic',
 ];
-const VALID_ACTIONS: SafetyAction[] = ['blocked', 'cooldown_60s', 'cooldown_5m'];
+const VALID_ACTIONS: SafetyAction[] = ['blocked', 'cooldown_60s', 'cooldown_5m', 'flagged', 'ai_review_penalty'];
 const VALID_DETECTION_SOURCES: SafetyDetectionSource[] = [
   'plain',
   'compacted',
@@ -914,6 +922,17 @@ async function revokeCreditForFalsePositives(handler: Handler, ids: string[], re
     } catch (err) {
       console.error('[AI Helper] 撤销信誉扣分失败:', err instanceof Error ? err.message : 'unknown');
     }
+  }
+}
+
+/** 复核后检查 AI 抽查熔断（FR-047）：复核结论改变了自动处罚的误判比例。失败只记日志 */
+async function checkReviewBreaker(handler: Handler): Promise<void> {
+  const reviewService = handler.ctx.get('aiReviewService') as AIReviewService | undefined;
+  if (!reviewService || typeof reviewService.checkBreaker !== 'function') return;
+  try {
+    await reviewService.checkBreaker();
+  } catch (err) {
+    console.error('[AI Helper] AI 抽查熔断检查失败:', err instanceof Error ? err.message : 'unknown');
   }
 }
 

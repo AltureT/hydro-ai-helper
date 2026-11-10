@@ -180,6 +180,8 @@ export interface ChatCallOptions {
    * - null：不设置客户端截止时间，仅响应上游失败或 AbortSignal 取消
    */
   timeoutMs?: number | null;
+  /** 覆盖本次请求的 temperature（仅非流式调用）；AI 抽查用 0 以便结果稳定。 */
+  temperature?: number;
   /** 是否对单次超时重试同一模型；默认 true，长推理任务可关闭并直接尝试后备模型。 */
   retryTimeouts?: boolean;
   /** 模型请求开始、重试或切换后备模型时的可观测事件。 */
@@ -373,7 +375,7 @@ export class OpenAIClient {
         { role: 'system', content: systemPrompt },
         ...messages
       ],
-      temperature: API_DEFAULTS.DEFAULT_TEMPERATURE,
+      temperature: options?.temperature ?? API_DEFAULTS.DEFAULT_TEMPERATURE,
     };
     if (options?.maxTokens !== null) {
       payload.max_tokens = options?.maxTokens ?? API_DEFAULTS.MAX_COMPLETION_TOKENS;

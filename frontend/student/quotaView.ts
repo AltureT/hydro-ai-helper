@@ -28,12 +28,25 @@ export interface StudentCreditView {
   recentViolations: CreditViolationView[];
 }
 
+/** AI 抽查处罚通知（FR-046），学生确认后不再显示 */
+export interface ReviewNoticeView {
+  id: string;
+  category: CreditCategoryView;
+  at: string;
+  domainId?: string;
+  problemId?: string;
+  safetyEventId?: string;
+  appealable: boolean;
+  appealed: boolean;
+}
+
 export interface QuotaStatusView extends QuotaSnapshotView {
   /** 信誉换算前的基础额度 */
   base?: number | null;
   disabled?: boolean;
   timezone?: string;
   credit?: StudentCreditView | null;
+  notices?: ReviewNoticeView[];
 }
 
 export interface CreditReduction {
@@ -69,18 +82,30 @@ export function violationTimeLabel(at: string, now: Date = new Date()): { kind: 
   };
 }
 
-/** 申诉成功后在本地标记，避免重复申诉 */
+/** 申诉成功后在本地标记（降额说明与抽查通知两处），避免重复申诉 */
 export function markAppealed(status: QuotaStatusView | null, safetyEventId: string): QuotaStatusView | null {
-  if (!status?.credit) return status;
+  if (!status) return status;
+  const mark = <T extends { safetyEventId?: string; appealable: boolean; appealed: boolean }>(item: T): T => (
+    item.safetyEventId === safetyEventId ? { ...item, appealable: false, appealed: true } : item
+  );
   return {
     ...status,
-    credit: {
-      ...status.credit,
-      recentViolations: status.credit.recentViolations.map((item) => (
-        item.safetyEventId === safetyEventId ? { ...item, appealable: false, appealed: true } : item
-      )),
-    },
+    ...(status.credit ? { credit: { ...status.credit, recentViolations: status.credit.recentViolations.map(mark) } } : {}),
+    ...(status.notices ? { notices: status.notices.map(mark) } : {}),
   };
+}
+
+/** 学生点“知道了”后移除这条通知 */
+export function dismissNotice(status: QuotaStatusView | null, noticeId: string): QuotaStatusView | null {
+  if (!status?.notices) return status;
+  return { ...status, notices: status.notices.filter((notice) => notice.id !== noticeId) };
+}
+
+/** 违规所在题目的链接（仅在有题号时） */
+export function noticeProblemUrl(notice: Pick<ReviewNoticeView, 'domainId' | 'problemId'>): string | null {
+  if (!notice.problemId) return null;
+  const domain = notice.domainId && notice.domainId !== 'system' ? `/d/${encodeURIComponent(notice.domainId)}` : '';
+  return `${domain}/p/${encodeURIComponent(notice.problemId)}`;
 }
 
 export type QuotaBlock = 'exhausted' | 'disabled' | null;

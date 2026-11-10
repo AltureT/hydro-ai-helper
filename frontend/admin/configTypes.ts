@@ -17,9 +17,9 @@ export interface SelectedModel {
   modelName: string;
 }
 
-export type AIScenarioKey = 'studentChat' | 'learningSummary' | 'teachingAnalysis' | 'testdataGeneration';
+export type AIScenarioKey = 'studentChat' | 'learningSummary' | 'teachingAnalysis' | 'testdataGeneration' | 'aiReview';
 
-export const AI_SCENARIO_KEYS: readonly AIScenarioKey[] = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'] as const;
+export const AI_SCENARIO_KEYS: readonly AIScenarioKey[] = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration', 'aiReview'] as const;
 
 /** 每个场景的专属模型链；空数组 = 跟随全局 selectedModels */
 export type ScenarioModelsState = Record<AIScenarioKey, SelectedModel[]>;
@@ -76,7 +76,7 @@ export interface JailbreakLogFilters {
   appealedOnly?: boolean;
   userId?: string;
   problemId?: string;
-  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m' | 'flagged' | 'ai_review_penalty';
   detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom' | 'topic_guard' | 'ai_review';
   dateFrom?: string;
   dateTo?: string;
@@ -133,9 +133,15 @@ export interface JailbreakLogEntry {
   category?: JailbreakCategory;
   confidence?: 'medium' | 'high';
   riskScore?: number;
-  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom';
-  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m';
+  detectionSource?: 'plain' | 'compacted' | 'base64' | 'hex' | 'conversation' | 'custom' | 'topic_guard' | 'ai_review';
+  actionTaken?: 'blocked' | 'cooldown_60s' | 'cooldown_5m' | 'flagged' | 'ai_review_penalty';
   blockedUntil?: string;
+  /** AI 抽查（PR5） */
+  reviewRunId?: string;
+  evidence?: Array<{ ref: string; snippet: string; verified: boolean }>;
+  evidenceVerified?: boolean;
+  autoPenalized?: boolean;
+  reviewReason?: string;
   reviewStatus?: JailbreakReviewStatus;
   reviewedAt?: string;
   reviewedBy?: number;

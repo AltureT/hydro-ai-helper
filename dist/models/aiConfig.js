@@ -16,7 +16,7 @@ const crypto_2 = require("../lib/crypto");
 const configSections_1 = require("./configSections");
 /** 当前配置版本号 */
 exports.CURRENT_CONFIG_VERSION = 4;
-exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'];
+exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration', 'aiReview'];
 exports.TESTDATA_MODEL_ROLES = [
     'specPrimary', 'specCritic', 'oracle', 'artifacts', 'verifier', 'adjudicator',
 ];

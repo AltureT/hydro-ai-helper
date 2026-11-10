@@ -101,3 +101,23 @@ export function nextResetAt(timeZone: unknown, now: Date = new Date()): Date {
   }
   return new Date(ts);
 }
+
+/** 指定时区下当日已过的分钟数（0–1439），用于判断每日任务是否到点 */
+export function minutesOfDay(timeZone: unknown, now: Date = new Date()): number {
+  const p = zonedParts(resolveTimezone(timeZone), now);
+  return p.hour * 60 + p.minute;
+}
+
+/** 指定时区下当天零点（上一次额度重置时间） */
+export function startOfDay(timeZone: unknown, now: Date = new Date()): Date {
+  const start = nextResetAt(timeZone, new Date(now.getTime() - 24 * 60 * 60 * 1000));
+  // 跨夏令时的 23/25 小时日：结果晚于 now 时退回一天
+  return start.getTime() > now.getTime()
+    ? nextResetAt(timeZone, new Date(now.getTime() - 48 * 60 * 60 * 1000))
+    : start;
+}
+
+/** 前一天的日期键 */
+export function previousDateKey(timeZone: unknown, now: Date = new Date()): string {
+  return dateKey(timeZone, new Date(startOfDay(timeZone, now).getTime() - 60 * 1000));
+}

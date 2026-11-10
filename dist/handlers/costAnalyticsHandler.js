@@ -49,6 +49,20 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
                 tokenUsageModel.getTopUsersByDateRange(domainId, periodStart, periodEnd, 10),
                 tokenUsageModel.getModelBreakdown(domainId, periodStart, periodEnd),
             ]);
+            // AI 抽查的消耗单独统计（FR-049）：全部域合计，不计入任何学生或域的用量
+            const reviewRunModel = this.ctx.get('reviewRunModel');
+            let aiReview = null;
+            if (reviewRunModel && typeof reviewRunModel.costBetween === 'function') {
+                try {
+                    const from = new Date(`${periodStart}T00:00:00.000Z`);
+                    const to = new Date(new Date(`${periodEnd}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000);
+                    const cost = await reviewRunModel.costBetween(from, to);
+                    aiReview = { ...cost, totalCost: Math.round(cost.totalCost * 10000) / 10000 };
+                }
+                catch (err) {
+                    console.warn('[CostAnalyticsHandler] AI 抽查成本读取失败:', err instanceof Error ? err.message : err);
+                }
+            }
             // 计算预算使用百分比
             let budgetUsagePercent = null;
             if (aiConfig?.budgetConfig?.dailyTokenLimitPerDomain && aiConfig.budgetConfig.dailyTokenLimitPerDomain > 0) {
@@ -107,6 +121,7 @@ class CostAnalyticsHandler extends hydrooj_1.Handler {
                     ...m,
                     estimatedCostUSD: Math.round(m.estimatedCostUSD * 10000) / 10000,
                 })),
+                aiReview,
                 period: validPeriod,
                 dateRange: { startDate, endDate },
             };

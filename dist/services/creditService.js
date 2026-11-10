@@ -161,6 +161,53 @@ class CreditService {
         return { deduction, sequence };
     }
     /**
+     * AI 抽查自动处罚（FR-044）：只用类别基础分，不翻倍、不计入翻倍次数。配置为 0 分时不记录。
+     */
+    async recordReviewDeduction(input) {
+        const at = input.at || this.clock();
+        const config = await this.creditConfig();
+        const deduction = Math.min(config.weights[input.category] ?? 0, config.maxDeduction);
+        if (!(deduction > 0))
+            return null;
+        await this.events.insert({
+            uid: input.uid,
+            at,
+            type: 'deduction',
+            source: 'ai_review',
+            category: input.category,
+            deduction,
+            ...(input.safetyLogId ? { safetyLogId: input.safetyLogId } : {}),
+            ...(input.domainId ? { domainId: input.domainId } : {}),
+            ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+        });
+        return { deduction };
+    }
+    /** 学生尚未确认的 AI 抽查处罚通知（FR-046），最近 30 天 */
+    async reviewNotices(uid, now = this.clock()) {
+        const events = await this.events.pendingReviewNotices(uid, this.lookbackStart(now));
+        const logIds = events.map((event) => event.safetyLogId).filter((id) => !!id);
+        const logs = logIds.length && this.safetyLogs ? await this.safetyLogs.findForUser(logIds, uid) : [];
+        const logById = new Map(logs.map((log) => [String(log._id), log]));
+        return events.map((event) => {
+            const log = event.safetyLogId ? logById.get(String(event.safetyLogId)) : undefined;
+            const pending = !!log && (!log.reviewStatus || log.reviewStatus === 'pending');
+            return {
+                id: String(event._id),
+                category: event.category,
+                at: event.at.toISOString(),
+                ...(event.domainId ? { domainId: event.domainId } : {}),
+                ...(log?.problemId ? { problemId: log.problemId } : {}),
+                ...(event.safetyLogId ? { safetyEventId: String(event.safetyLogId) } : {}),
+                ...(event.conversationId ? { conversationId: String(event.conversationId) } : {}),
+                appealable: pending && !log?.studentAppealedAt,
+                appealed: !!log?.studentAppealedAt,
+            };
+        });
+    }
+    async ackReviewNotice(id, uid) {
+        return this.events.ackReviewNotice(id, uid, this.clock());
+    }
+    /**
      * 安全记录被复核为误判：撤销对应扣分（FR-031），写审计（FR-059“影响扣分的复核结论”）。
      * 返回被撤销的扣分条数。
      */

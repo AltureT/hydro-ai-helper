@@ -69,6 +69,8 @@ interface CostData {
   dailyTrend: DailyTrendItem[];
   topUsers: TopUserItem[];
   modelBreakdown: ModelBreakdownItem[];
+  /** AI 抽查的消耗（全部域合计，不计入任何学生；无权限或读取失败时为 null） */
+  aiReview?: { totalTokens: number; totalCost: number; runCount: number } | null;
   period: string;
   dateRange: { startDate: string; endDate: string };
 }
@@ -466,6 +468,27 @@ export const CostDashboard: React.FC<CostDashboardProps> = ({ embedded = false }
           {i18n('ai_helper_teacher_cost_avg')} {data.summary.avgTokensPerRequest} tokens/{i18n('ai_helper_teacher_cost_per_request')}
         </span>
       </div>
+
+      {data.aiReview && (
+        <div style={{
+          marginTop: SPACING.sm,
+          padding: `${SPACING.md} ${SPACING.base}`,
+          backgroundColor: COLORS.bgPage,
+          borderRadius: RADIUS.md,
+          fontSize: '13px',
+          fontFamily: FONT_FAMILY,
+          color: COLORS.textSecondary,
+          display: 'flex',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: SPACING.sm,
+        }}>
+          <span>
+            {i18n('ai_helper_teacher_cost_ai_review')}: {formatTokens(data.aiReview.totalTokens)} tokens / {formatCost(data.aiReview.totalCost)} / {i18n('ai_helper_teacher_cost_ai_review_runs', data.aiReview.runCount)}
+          </span>
+          <span>{i18n('ai_helper_teacher_cost_ai_review_note')}</span>
+        </div>
+      )}
     </div>
   );
 };

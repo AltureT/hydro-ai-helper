@@ -189,7 +189,7 @@ function createLogsHandler(query: Record<string, string> = {}) {
   return { handler, listWithPagination, getReviewSummary, getRuleMetrics, getOperationalMetrics };
 }
 
-function createReviewHandler(creditService?: { revokeBySafetyLog: jest.Mock }) {
+function createReviewHandler(creditService?: { revokeBySafetyLog: jest.Mock }, aiReviewService?: { checkBreaker: jest.Mock }) {
   const handler = new JailbreakLogReviewHandler();
   const review = jest.fn().mockResolvedValue(true);
   handler.user = { _id: 7 };
@@ -202,7 +202,9 @@ function createReviewHandler(creditService?: { revokeBySafetyLog: jest.Mock }) {
   handler.translate = jest.fn((key: string) => key);
   handler.ctx = {
     Route: jest.fn(),
-    get: jest.fn((name: string) => (name === 'jailbreakLogModel' ? { review } : name === 'creditService' ? creditService : undefined)),
+    get: jest.fn((name: string) => (name === 'jailbreakLogModel' ? { review }
+      : name === 'creditService' ? creditService
+        : name === 'aiReviewService' ? aiReviewService : undefined)),
   };
   return { handler, review };
 }
@@ -272,6 +274,29 @@ describe('JailbreakLogReviewHandler', () => {
     await missing.handler.post({ id: new ObjectId().toHexString() });
 
     expect(creditService.revokeBySafetyLog).not.toHaveBeenCalled();
+  });
+
+  it('checks the AI review breaker after every successful review (FR-047)', async () => {
+    const aiReviewService = { checkBreaker: jest.fn().mockResolvedValue(false) };
+    const falsePositive = createReviewHandler(undefined, aiReviewService);
+    await falsePositive.handler.post({ id: new ObjectId().toHexString() });
+    const confirm = createReviewHandler(undefined, aiReviewService);
+    confirm.handler.request.body = { reviewStatus: 'confirmed' };
+    await confirm.handler.post({ id: new ObjectId().toHexString() });
+    expect(aiReviewService.checkBreaker).toHaveBeenCalledTimes(2);
+
+    const missing = createReviewHandler(undefined, aiReviewService);
+    missing.review.mockResolvedValue(false);
+    await missing.handler.post({ id: new ObjectId().toHexString() });
+    expect(aiReviewService.checkBreaker).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the review result when the breaker check fails', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const aiReviewService = { checkBreaker: jest.fn().mockRejectedValue(new Error('Synthetic breaker failure')) };
+    const { handler } = createReviewHandler(undefined, aiReviewService);
+    await handler.post({ id: new ObjectId().toHexString() });
+    expect(handler.response.body).toEqual({ success: true, reviewStatus: 'false_positive' });
   });
 
   it('keeps the review result when revoking the deduction fails', async () => {

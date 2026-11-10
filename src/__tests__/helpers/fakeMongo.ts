@@ -226,6 +226,10 @@ export function createFakeCollection(initial: Doc[] = []) {
   const upsertDoc = (filter: Doc, update: Doc) => {
     const doc: Doc = { ...equalityFields(filter) };
     if (doc._id === undefined) doc._id = new ObjectId();
+    if (docs.some((item) => eq(item._id, doc._id))) {
+      // 与 MongoDB 一致：过滤条件未命中但 _id 已存在时，upsert 报重复键
+      throw Object.assign(new Error(`E11000 duplicate key error: _id ${String(doc._id)}`), { code: 11000 });
+    }
     applyUpdate(doc, update, true);
     docs.push(doc);
     return doc;
@@ -241,6 +245,9 @@ export function createFakeCollection(initial: Doc[] = []) {
     insertOne: jest.fn(async (doc: Doc) => {
       const stored = clone(doc);
       if (stored._id === undefined) stored._id = new ObjectId();
+      if (docs.some((item) => eq(item._id, stored._id))) {
+        throw Object.assign(new Error(`E11000 duplicate key error: _id ${String(stored._id)}`), { code: 11000 });
+      }
       docs.push(stored);
       return { insertedId: stored._id };
     }),

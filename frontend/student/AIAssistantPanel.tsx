@@ -5,7 +5,7 @@ import 'highlight.js/styles/github.css';
 import { useChatSession } from './hooks/useChatSession';
 import { useTextSelection } from './hooks/useTextSelection';
 import { useQuotaStatus } from './hooks/useQuotaStatus';
-import { CreditNotice, QuotaBar, QuotaBlockedNotice } from './QuotaBar';
+import { CreditNotice, QuotaBar, QuotaBlockedNotice, ReviewNoticeBanner } from './QuotaBar';
 import { quotaBlock } from './quotaView';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatInput } from './ChatInput';
@@ -238,6 +238,7 @@ export const AIAssistantPanel: React.FC<AIAssistantPanelProps> = ({ problemId })
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: COLORS.bgCard }}>
       <style>{markdownTheme}{keyframeStyles}</style>
+      <ReviewNoticeBanner status={quota.status} onAppeal={quota.appeal} onAck={quota.ackNotice} />
       {quota.status && <QuotaBar status={quota.status} />}
       {quota.status && <CreditNotice status={quota.status} onAppeal={quota.appeal} />}
       <ChatMessageList {...messageListProps}>
