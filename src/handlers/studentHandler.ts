@@ -23,6 +23,7 @@ import { JailbreakLogModel } from '../models/jailbreakLog';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { translateWithParams } from '../utils/i18nHelper';
+import { resolveProblemContent } from '../utils/problemStatement';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
 import { createSSEWriter } from '../lib/sseHelper';
@@ -521,16 +522,18 @@ export class ChatHandler extends Handler {
     let trustedProblemContent: string | undefined;
     let trustedProblemDocId: number | undefined;
     try {
-      const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content', 'docId']);
+      const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content', 'html', 'reference', 'docId']);
       if (pdoc) {
         trustedProblemTitle = pdoc.title;
         trustedProblemDocId = pdoc.docId;
+        // Hydro 5 新题面存于 problem.statement，document.content 为空时回退读取
+        const content = await resolveProblemContent(pdoc, domainId);
         // 题目内容可能是字符串或 JSON 对象（多语言支持）
-        if (typeof pdoc.content === 'string') {
-          trustedProblemContent = pdoc.content;
-        } else if (pdoc.content && typeof pdoc.content === 'object') {
+        if (typeof content === 'string') {
+          trustedProblemContent = content;
+        } else if (content && typeof content === 'object') {
           // 多语言内容，取第一个可用的值
-          const values = Object.values(pdoc.content as Record<string, string>);
+          const values = Object.values(content as Record<string, string>);
           trustedProblemContent = values[0] || '';
         }
       }

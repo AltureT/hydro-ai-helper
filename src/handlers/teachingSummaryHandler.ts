@@ -8,6 +8,7 @@ import { studentPatternGroups } from '../services/analyzers/temporalPatternAnaly
 import { Handler, PRIV, db } from 'hydrooj';
 import { ObjectId, ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
+import { resolveProblemContents } from '../utils/problemStatement';
 import { AIServiceError, USER_ERROR_MESSAGE_KEYS, createMultiModelClientFromConfig, extractAiErrorMetadata } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
@@ -210,9 +211,9 @@ export class TeachingSummaryHandler extends Handler {
 
       // Fetch problem docs early — needed for both analyzer titles and LLM context
       const documentColl = db.collection('document');
-      const problemDocs = await documentColl
+      const problemDocs = await resolveProblemContents(await documentColl
         .find({ domainId, docType: 10, docId: { $in: pids } })
-        .toArray();
+        .toArray(), domainId);
 
       const pidTitles = new Map<number, string>();
       const pidAliases = new Map<number, string[]>();
