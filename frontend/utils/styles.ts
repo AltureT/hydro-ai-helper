@@ -219,6 +219,23 @@ export const getPillStyle = (isActive: boolean): React.CSSProperties => ({
   transition: 'all 200ms cubic-bezier(0.4, 0, 0.2, 1)',
 });
 
+/** 二级导航（用户管理等页面内的分区切换） */
+export const getSubNavStyle = (isActive: boolean): React.CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '7px 16px',
+  fontSize: '14px',
+  fontWeight: isActive ? 600 : 400,
+  fontFamily: FONT_FAMILY,
+  color: isActive ? COLORS.primaryHover : COLORS.textSecondary,
+  backgroundColor: isActive ? COLORS.primaryLight : 'transparent',
+  border: '1px solid transparent',
+  borderRadius: RADIUS.full,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+  transition: `all ${TRANSITIONS.fast}`,
+});
+
 export const modalOverlayStyle: React.CSSProperties = {
   position: 'fixed',
   top: 0,

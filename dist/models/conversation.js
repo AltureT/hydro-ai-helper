@@ -44,6 +44,8 @@ class ConversationModel {
         await this.collection.createIndex({ endTime: -1 }, { name: 'idx_endTime' });
         // 创建复合索引: 用户 + 题目 + 开始时间 (用于行为信号归因查询)
         await this.collection.createIndex({ userId: 1, problemId: 1, startTime: -1 }, { name: 'idx_userId_problemId_startTime' });
+        // 创建复合索引: 域 ID + 小组 + 开始时间 (按班级筛选与统计)
+        await this.collection.createIndex({ domainId: 1, groupNames: 1, startTime: -1 }, { name: 'idx_domainId_groupNames_startTime' });
         // 创建稀疏索引: 待回填文档扫描 (启动补偿用)
         await this.collection.createIndex({ 'metrics.backfilledAt': 1, endTime: 1 }, { name: 'idx_metrics_backfill', sparse: true });
         console.log('[ConversationModel] Indexes created successfully');

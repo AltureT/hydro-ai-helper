@@ -15,9 +15,16 @@ export const PRIV = {
 };
 
 export const PERM = {
+  PERM_EDIT_DOMAIN: 1n << 1n,
   PERM_EDIT_PROBLEM: 1n << 5n,
   PERM_EDIT_PROBLEM_SELF: 1n << 6n,
   PERM_READ_RECORD_CODE: 1n << 7n,
+};
+
+export const BUILTIN_ROLES: Record<string, bigint> = {
+  guest: 1n,
+  default: 1n << 3n,
+  root: -1n,
 };
 
 export const db = {
@@ -28,6 +35,41 @@ export const db = {
     toArray: jest.fn().mockResolvedValue([])
   }))
 };
+
+/**
+ * Hydro 4 / Hydro 5 differ in how domain membership and user-cache invalidation work.
+ * The plugin feature-detects (`DomainModel.setJoin`, `UserModel._deleteUserCache`), so the
+ * mock exposes a toggle. Default shape is Hydro 4 (the version in devDependencies).
+ */
+export const UserModel: any = {
+  cache: new Map<string, unknown>(),
+  getById: jest.fn(),
+};
+
+export const DomainModel: any = {
+  get: jest.fn(),
+  setUserRole: jest.fn(),
+  collUser: {
+    find: jest.fn(),
+    updateMany: jest.fn(),
+  },
+};
+
+export type HydroMockMode = 'v4' | 'v5';
+
+export function setHydroMode(mode: HydroMockMode): void {
+  UserModel.cache = new Map<string, unknown>();
+  UserModel.getById = jest.fn();
+  DomainModel.get = jest.fn();
+  DomainModel.setUserRole = jest.fn();
+  if (mode === 'v5') {
+    DomainModel.setJoin = jest.fn();
+    UserModel._deleteUserCache = jest.fn();
+  } else {
+    delete DomainModel.setJoin;
+    delete UserModel._deleteUserCache;
+  }
+}
 
 export const ProblemModel = {
   get: jest.fn(),

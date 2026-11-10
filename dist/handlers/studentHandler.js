@@ -24,6 +24,7 @@ const i18nHelper_1 = require("../utils/i18nHelper");
 const problemStatement_1 = require("../utils/problemStatement");
 const budgetService_1 = require("../services/budgetService");
 const sseHelper_1 = require("../lib/sseHelper");
+const hydroGroupService_1 = require("../services/hydroGroupService");
 function extractContestIdFromReferer(referer) {
     if (typeof referer !== 'string')
         return undefined;
@@ -498,13 +499,16 @@ class ChatHandler extends hydrooj_1.Handler {
             currentConversationId = conversation._id;
         }
         else {
-            // 创建新会话
+            // 创建新会话（记录学生当时在该域所属的小组，用于按班级统计）
             const now = new Date();
+            const groupNames = await (0, hydroGroupService_1.snapshotGroupNames)(this.ctx.db, domainId, userId);
             currentConversationId = await conversationModel.create({
                 domainId,
                 userId,
                 problemId,
                 classId: undefined,
+                groupNames,
+                groupSource: 'snapshot',
                 startTime: now,
                 endTime: now,
                 messageCount: 0,

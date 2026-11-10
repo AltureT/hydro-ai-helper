@@ -38,7 +38,9 @@ export interface Conversation {
   domainId: string;        // 域 ID (用于多租户隔离)
   userId: number;          // 学生用户 ID
   problemId: string;       // 题目 ID
-  classId?: string;        // 班级 ID (可选)
+  classId?: string;        // 班级 ID (可选，历史字段，从未写入；按班级统计请用 groupNames)
+  groupNames?: string[];   // 新建会话时学生在该域所属的 Hydro 小组（FR-055）
+  groupSource?: 'snapshot' | 'backfill'; // groupNames 来源：建会话时快照 / 管理员按当前成员回填
   startTime: Date;         // 会话开始时间
   endTime: Date;           // 会话最后更新时间
   messageCount: number;    // 消息总数
@@ -141,6 +143,12 @@ export class ConversationModel {
     await this.collection.createIndex(
       { userId: 1, problemId: 1, startTime: -1 },
       { name: 'idx_userId_problemId_startTime' }
+    );
+
+    // 创建复合索引: 域 ID + 小组 + 开始时间 (按班级筛选与统计)
+    await this.collection.createIndex(
+      { domainId: 1, groupNames: 1, startTime: -1 },
+      { name: 'idx_domainId_groupNames_startTime' }
     );
 
     // 创建稀疏索引: 待回填文档扫描 (启动补偿用)

@@ -95,6 +95,18 @@ import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerP
 console.log('[AI-Helper] updateHandler OK');
 
 import {
+  GroupListHandler,
+  GroupSearchHandler,
+  GroupApplyHandler,
+  GroupUndoHandler,
+  GroupMetaHandler,
+  GroupDriftHandler,
+  GroupAdminHandlerPriv,
+} from './handlers/groupAdminHandler';
+import { AuditListHandler, AuditListHandlerPriv } from './handlers/auditHandler';
+console.log('[AI-Helper] groupAdminHandler OK');
+
+import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
   TestdataGenJobStartHandler,
@@ -119,6 +131,8 @@ import { BatchSummaryJobModel } from './models/batchSummaryJob';
 import { TestdataGenerationJobModel } from './models/testdataGenerationJob';
 import { StudentSummaryModel } from './models/studentSummary';
 import { StudentHistoryModel } from './models/studentHistory';
+import { AuditLogModel } from './models/auditLog';
+import { GroupMetaModel } from './models/groupMeta';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -129,6 +143,8 @@ import { ErrorReporter } from './services/errorReporter';
 import { TestdataRunTelemetryService } from './services/testdata/runTelemetry';
 import { RequestStatsModel } from './models/requestStats';
 import { FeatureStatsModel } from './models/featureStats';
+import { AuditService } from './services/auditService';
+import { HydroGroupService } from './services/hydroGroupService';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -188,6 +204,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const studentSummaryModel = new StudentSummaryModel(db);
     const studentHistoryModel = new StudentHistoryModel(db);
     const teachingSummaryModel = new TeachingSummaryModel(db);
+    const auditLogModel = new AuditLogModel(db);
+    const groupMetaModel = new GroupMetaModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -238,6 +256,8 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
     await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
     await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
+    await safeEnsureIndexes(auditLogModel, 'auditLogModel');
+    await safeEnsureIndexes(groupMetaModel, 'groupMetaModel');
 
     try {
       const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
@@ -313,6 +333,11 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('studentSummaryModel', studentSummaryModel);
     ctx.provide('studentHistoryModel', studentHistoryModel);
     ctx.provide('teachingSummaryModel', teachingSummaryModel);
+    ctx.provide('auditLogModel', auditLogModel);
+    ctx.provide('groupMetaModel', groupMetaModel);
+    const auditService = new AuditService(auditLogModel);
+    ctx.provide('auditService', auditService);
+    ctx.provide('hydroGroupService', new HydroGroupService(db, groupMetaModel, auditService, ctx));
     ctx.provide('errorReporter', errorReporter);
     ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
 
@@ -506,6 +531,21 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_teaching_review_domain', '/d/:domainId/ai-helper/teaching-review', TeachingReviewHandler, TeachingSummaryHandlerPriv);
     ctx.Route('ai_teaching_summary_feedback', '/ai-helper/teaching-summary/:summaryId/feedback', TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv);
     ctx.Route('ai_teaching_summary_feedback_domain', '/d/:domainId/ai-helper/teaching-summary/:summaryId/feedback', TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv);
+    // 用户管理：Hydro 小组批量管理与操作审计（仅系统管理员）
+    ctx.Route('ai_group_list', '/ai-helper/groups', GroupListHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_list_domain', '/d/:domainId/ai-helper/groups', GroupListHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_search', '/ai-helper/groups/search', GroupSearchHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_search_domain', '/d/:domainId/ai-helper/groups/search', GroupSearchHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_apply', '/ai-helper/groups/apply', GroupApplyHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_apply_domain', '/d/:domainId/ai-helper/groups/apply', GroupApplyHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_undo', '/ai-helper/groups/undo', GroupUndoHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_undo_domain', '/d/:domainId/ai-helper/groups/undo', GroupUndoHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_meta', '/ai-helper/groups/meta', GroupMetaHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_meta_domain', '/d/:domainId/ai-helper/groups/meta', GroupMetaHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_drift', '/ai-helper/groups/drift', GroupDriftHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_group_drift_domain', '/d/:domainId/ai-helper/groups/drift', GroupDriftHandler, GroupAdminHandlerPriv);
+    ctx.Route('ai_admin_audit', '/ai-helper/admin/audit', AuditListHandler, AuditListHandlerPriv);
+    ctx.Route('ai_admin_audit_domain', '/d/:domainId/ai-helper/admin/audit', AuditListHandler, AuditListHandlerPriv);
   }
 });
 

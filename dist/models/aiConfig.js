@@ -7,13 +7,15 @@
  *
  * v2 新增：支持多 API 端点配置、模型自动获取、Fallback 机制
  * v3 新增：测试数据生成的独立角色模型链
+ * v4 新增：次数额度与信誉、偏题守卫、AI 抽查、负责老师访问（默认均为“不限 / 关闭”）
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AIConfigModel = exports.TESTDATA_MODEL_ROLES = exports.AI_SCENARIOS = exports.CURRENT_CONFIG_VERSION = void 0;
 const crypto_1 = require("crypto");
 const crypto_2 = require("../lib/crypto");
+const configSections_1 = require("./configSections");
 /** 当前配置版本号 */
-exports.CURRENT_CONFIG_VERSION = 3;
+exports.CURRENT_CONFIG_VERSION = 4;
 exports.AI_SCENARIOS = ['studentChat', 'learningSummary', 'teachingAnalysis', 'testdataGeneration'];
 exports.TESTDATA_MODEL_ROLES = [
     'specPrimary', 'specCritic', 'oracle', 'artifacts', 'verifier', 'adjudicator',
@@ -61,10 +63,25 @@ class AIConfigModel {
         return !config.configVersion || config.configVersion < exports.CURRENT_CONFIG_VERSION;
     }
     /**
-     * 从旧版配置迁移到新版
+     * 从旧版配置迁移到新版：先完成 v1/v2 → v3 的结构迁移，再补入 v4 配置段的默认值。
+     * 已有字段（包括未知字段）保持不变。
      */
     migrateFromLegacy(legacy) {
-        console.log('[AIConfigModel] Migrating AI config to v3...');
+        console.log(`[AIConfigModel] Migrating AI config to v${exports.CURRENT_CONFIG_VERSION}...`);
+        const structural = this.migrateStructure(legacy);
+        return {
+            ...structural,
+            ...(0, configSections_1.normalizeV4Sections)(structural),
+            configVersion: exports.CURRENT_CONFIG_VERSION,
+        };
+    }
+    /**
+     * v1/v2/无版本 → v3 结构迁移（v3 原样返回）
+     */
+    migrateStructure(legacy) {
+        if (legacy.configVersion === 3) {
+            return { ...legacy };
+        }
         // v2 is already a structured configuration. Upgrade only the schema version and
         // supply required arrays when they are absent; explicit empty chains, stale model
         // references, endpoint structure, and unknown fields must remain byte-for-byte data.
@@ -309,6 +326,7 @@ class AIConfigModel {
                 endpoints: [],
                 selectedModels: [],
                 ...defaults,
+                ...(0, configSections_1.normalizeV4Sections)(defaults),
                 updatedAt: new Date()
             });
             console.log('[AIConfigModel] Default config initialized');

@@ -1,4 +1,7 @@
 import { AIConfigModel, CURRENT_CONFIG_VERSION, type AIConfig, type APIEndpoint, type SelectedModel } from '../../models/aiConfig';
+import { normalizeV4Sections } from '../../models/configSections';
+
+const V4_DEFAULTS = normalizeV4Sections({});
 
 jest.mock('../../lib/crypto', () => ({
   reEncrypt: jest.fn((cipher: string) => `re_${cipher}`),
@@ -87,7 +90,7 @@ describe('AIConfigModel', () => {
       expect(mockCollection.updateOne).not.toHaveBeenCalled();
     });
 
-    it('migrates v2 to v3 without losing endpoints, scenarios, selected models, budgets, or optional fields', async () => {
+    it('migrates v2 to v4 without losing endpoints, scenarios, selected models, budgets, or optional fields', async () => {
       const v2Config = {
         ...makeV2Config(),
         configVersion: 2,
@@ -102,9 +105,10 @@ describe('AIConfigModel', () => {
 
       const result = await model.getConfig();
 
-      expect(CURRENT_CONFIG_VERSION).toBe(3);
+      expect(CURRENT_CONFIG_VERSION).toBe(4);
       expect(result).toEqual(expect.objectContaining({
-        configVersion: 3,
+        configVersion: 4,
+        ...V4_DEFAULTS,
         endpoints: v2Config.endpoints,
         selectedModels: v2Config.selectedModels,
         scenarioModels: v2Config.scenarioModels,
@@ -114,7 +118,7 @@ describe('AIConfigModel', () => {
       }));
       expect(mockCollection.updateOne).toHaveBeenCalledWith(
         { _id: 'default' },
-        { $set: expect.objectContaining({ configVersion: 3 }) },
+        { $set: expect.objectContaining({ configVersion: 4, quotaConfig: V4_DEFAULTS.quotaConfig }) },
       );
     });
 
@@ -136,7 +140,7 @@ describe('AIConfigModel', () => {
 
       const result = await model.getConfig() as AIConfig & { futureV2Field?: { keep: boolean } };
 
-      expect(result).toEqual({ ...v2Config, configVersion: 3 });
+      expect(result).toEqual({ ...v2Config, ...V4_DEFAULTS, configVersion: 4 });
       expect(result.scenarioModels).toEqual(v2Config.scenarioModels);
       expect(result.budgetConfig).toEqual(v2Config.budgetConfig);
       expect(result.futureV2Field).toEqual({ keep: true });
@@ -164,7 +168,7 @@ describe('AIConfigModel', () => {
 
       const result = await model.getConfig();
 
-      expect(result).toStrictEqual({ ...v2Config, configVersion: 3 });
+      expect(result).toStrictEqual({ ...v2Config, ...V4_DEFAULTS, configVersion: 4 });
     });
 
     it('preserves every v2 selectedModels reference instead of filtering missing endpoints', async () => {
@@ -181,7 +185,48 @@ describe('AIConfigModel', () => {
 
       const result = await model.getConfig();
 
-      expect(result).toStrictEqual({ ...v2Config, configVersion: 3 });
+      expect(result).toStrictEqual({ ...v2Config, ...V4_DEFAULTS, configVersion: 4 });
+    });
+
+    it('migrates v3 to v4 by adding the new sections with default values', async () => {
+      const v3Config = {
+        ...makeV2Config(),
+        configVersion: 3,
+        budgetConfig: { dailyTokenLimitPerUser: 5000 },
+        testdataRoleModels: { oracle: [{ endpointId: 'ep-1', modelName: 'gpt-4o' }] },
+        futureField: { keep: true },
+      } as AIConfig & { futureField: { keep: boolean } };
+      mockCollection.findOne.mockResolvedValue(v3Config);
+
+      const result = await model.getConfig();
+
+      expect(result).toStrictEqual({ ...v3Config, ...V4_DEFAULTS, configVersion: 4 });
+      expect(result!.quotaConfig).toEqual(expect.objectContaining({
+        dailyMessageLimit: 0, timezone: 'Asia/Shanghai', guaranteeCount: 3,
+      }));
+      expect(result!.quotaConfig!.credit.recoveryPerDay).toBe(0.05);
+      expect(result!.aiReviewConfig!.enabled).toBe(false);
+      expect(result!.groupTeacherAccessEnabled).toBe(false);
+      expect(mockCollection.updateOne).toHaveBeenCalledWith(
+        { _id: 'default' },
+        { $set: expect.objectContaining({ configVersion: 4, aiReviewConfig: V4_DEFAULTS.aiReviewConfig }) },
+      );
+    });
+
+    it('keeps v4 sections that a partially migrated v3 document already has', async () => {
+      const v3Config = {
+        ...makeV2Config(),
+        configVersion: 3,
+        quotaConfig: { dailyMessageLimit: 30, timezone: 'UTC' },
+        groupTeacherAccessEnabled: true,
+      } as unknown as AIConfig;
+      mockCollection.findOne.mockResolvedValue(v3Config);
+
+      const result = await model.getConfig();
+
+      expect(result!.quotaConfig).toEqual({ ...V4_DEFAULTS.quotaConfig, dailyMessageLimit: 30, timezone: 'UTC' });
+      expect(result!.groupTeacherAccessEnabled).toBe(true);
+      expect(result!.topicGuardConfig).toEqual(V4_DEFAULTS.topicGuardConfig);
     });
 
     it('should migrate legacy config without endpoints', async () => {

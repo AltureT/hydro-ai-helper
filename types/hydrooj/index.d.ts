@@ -56,6 +56,12 @@ declare module 'hydrooj' {
 
   export const ProblemModel: any;
 
+  // Hydro 4.19 与 5.x 的形态不同（setJoin / _deleteUserCache 仅 5.x 有），
+  // 统一经 src/utils/hydroCompat.ts 做特性检测后再调用。
+  export const UserModel: any;
+  export const DomainModel: any;
+  export const BUILTIN_ROLES: Record<string, bigint>;
+
   export const StorageModel: {
     get(path: string): Promise<NodeJS.ReadableStream | Buffer | string>;
   };

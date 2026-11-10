@@ -38,6 +38,7 @@ export const iconPaths = {
   shield: 'm12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z M9 12l2 2 4-4',
   settings: 'M4 7h16 M4 17h16 M8 4v6 M16 14v6',
   wallet: 'M20 7H5a2 2 0 0 1 0-4h13v4 M3 5v14a2 2 0 0 0 2 2h15V7 M20 11h-5v6h5 M17 14h.01',
+  plus: 'M12 5v14 M5 12h14',
 } as const;
 
 export type IconName = keyof typeof iconPaths;
