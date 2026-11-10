@@ -112,6 +112,13 @@ import {
   QuotaOverridesHandler,
 } from './handlers/quotaAdminHandler';
 import { UserDetailHandler, UserOverviewHandler, UserOverviewHandlerPriv } from './handlers/userOverviewHandler';
+import {
+  TransferExecuteHandler,
+  TransferHandlerPriv,
+  TransferPreviewHandler,
+  TransferResumeHandler,
+  TransferUndoHandler,
+} from './handlers/transferHandler';
 console.log('[AI-Helper] groupAdminHandler OK');
 
 import {
@@ -144,6 +151,7 @@ import { GroupMetaModel } from './models/groupMeta';
 import { QuotaUsageModel } from './models/quotaUsage';
 import { QuotaGroupModel } from './models/quotaGroup';
 import { QuotaOverrideModel } from './models/quotaOverride';
+import { TransferJobModel } from './models/transferJob';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -160,6 +168,7 @@ import { QuotaService } from './services/quotaService';
 import { QuotaGroupResolver } from './services/quotaGroupResolver';
 import { QuotaAdminService } from './services/quotaAdminService';
 import { UserOverviewService } from './services/userOverviewService';
+import { TransferService } from './services/transferService';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -224,6 +233,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const quotaUsageModel = new QuotaUsageModel(db);
     const quotaGroupModel = new QuotaGroupModel(db);
     const quotaOverrideModel = new QuotaOverrideModel(db);
+    const transferJobModel = new TransferJobModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -279,6 +289,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(quotaUsageModel, 'quotaUsageModel');
     await safeEnsureIndexes(quotaGroupModel, 'quotaGroupModel');
     await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
+    await safeEnsureIndexes(transferJobModel, 'transferJobModel');
 
     try {
       const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
@@ -374,6 +385,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('quotaAdminService', new QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
     ctx.provide('userOverviewService', new UserOverviewService(
       db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel,
+    ));
+    ctx.provide('transferJobModel', transferJobModel);
+    ctx.provide('transferService', new TransferService(
+      db, groupMetaModel, quotaGroupModel, transferJobModel, auditService, quotaGroupResolver, ctx,
     ));
     ctx.provide('errorReporter', errorReporter);
     ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
@@ -592,6 +607,11 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', QuotaOverridesHandler, QuotaAdminHandlerPriv);
     ctx.Route('ai_admin_users', '/ai-helper/admin/users', UserOverviewHandler, UserOverviewHandlerPriv);
     ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', UserDetailHandler, UserOverviewHandlerPriv);
+    // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）
+    ctx.Route('ai_admin_transfer_preview', '/ai-helper/admin/transfer/preview', TransferPreviewHandler, TransferHandlerPriv);
+    ctx.Route('ai_admin_transfer_execute', '/ai-helper/admin/transfer/execute', TransferExecuteHandler, TransferHandlerPriv);
+    ctx.Route('ai_admin_transfer_resume', '/ai-helper/admin/transfer/resume', TransferResumeHandler, TransferHandlerPriv);
+    ctx.Route('ai_admin_transfer_undo', '/ai-helper/admin/transfer/undo', TransferUndoHandler, TransferHandlerPriv);
   }
 });
 

@@ -64,7 +64,7 @@ export const UserManagementPanel: React.FC = () => {
         active={section}
         onChange={changeSection}
       />
-      {section === 'students' && <UserOverviewPanel domainId={domainId} showToast={showToast} />}
+      {section === 'students' && <UserOverviewPanel domainId={domainId} showToast={showToast} onOpenAudit={() => changeSection('audit')} />}
       {section === 'groups' && (
         <GroupManagerPanel initialDomainId={domainId} onOpenAudit={() => changeSection('audit')} showToast={showToast} />
       )}

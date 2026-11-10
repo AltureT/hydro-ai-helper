@@ -15,6 +15,7 @@ exports.isJoinFlagMembership = isJoinFlagMembership;
 exports.memberFilter = memberFilter;
 exports.joinDomain = joinDomain;
 exports.leaveDomain = leaveDomain;
+exports.restoreDomainMembership = restoreDomainMembership;
 exports.allowedJoinRoles = allowedJoinRoles;
 exports.defaultJoinRole = defaultJoinRole;
 exports.roleHasPerm = roleHasPerm;
@@ -62,6 +63,32 @@ async function leaveDomain(domainId, uids) {
     for (const uid of list) {
         await hydrooj_1.DomainModel.setUserRole(domainId, uid, 'default');
     }
+}
+/**
+ * 撤销时恢复用户在域中的原状态：有原记录的恢复原角色（Hydro 5 同时恢复 join），
+ * 原本没有记录的按“退出域”处理。
+ */
+async function restoreDomainMembership(domainId, rows, absentUids = []) {
+    if (isJoinFlagMembership()) {
+        const byRole = new Map();
+        for (const row of rows) {
+            const role = row.role || 'guest';
+            byRole.set(role, [...(byRole.get(role) || []), row.uid]);
+        }
+        for (const [role, uids] of byRole)
+            await hydrooj_1.DomainModel.setUserRole(domainId, uniqueUids(uids), role);
+        const joined = uniqueUids(rows.filter((row) => row.join === true).map((row) => row.uid));
+        const notJoined = uniqueUids(rows.filter((row) => row.join === false).map((row) => row.uid));
+        if (joined.length)
+            await hydrooj_1.DomainModel.setJoin(domainId, joined, true);
+        if (notJoined.length)
+            await hydrooj_1.DomainModel.setJoin(domainId, notJoined, false);
+    }
+    else {
+        for (const row of rows)
+            await hydrooj_1.DomainModel.setUserRole(domainId, row.uid, row.role || 'default');
+    }
+    await leaveDomain(domainId, absentUids);
 }
 /**
  * 可用于“同时加入本域”的角色。
