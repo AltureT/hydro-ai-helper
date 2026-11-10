@@ -10,7 +10,7 @@
  * POST /ai-helper/admin/quota/overrides         { action: set | clear, uids, mode?, dailyLimit?, expiresAt?, reason? }
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.QuotaAdminHandlerPriv = exports.QuotaOverridesHandler = exports.QuotaGroupDetailHandler = exports.QuotaGroupsHandler = void 0;
+exports.QuotaAdminHandlerPriv = exports.CreditResetHandler = exports.QuotaOverridesHandler = exports.QuotaGroupDetailHandler = exports.QuotaGroupsHandler = void 0;
 const hydrooj_1 = require("hydrooj");
 const csrfHelper_1 = require("../lib/csrfHelper");
 const hydroGroupService_1 = require("../services/hydroGroupService");
@@ -127,5 +127,26 @@ class QuotaOverridesHandler extends hydrooj_1.Handler {
     }
 }
 exports.QuotaOverridesHandler = QuotaOverridesHandler;
+/**
+ * POST /ai-helper/admin/credit/reset  { uids, reason }
+ * 手动重置信誉（FR-032）：系数回到 1.0，须填写原因，写审计。学生总览可批量重置。
+ */
+class CreditResetHandler extends hydrooj_1.Handler {
+    async post() {
+        if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+            return;
+        if ((0, groupAdminHandler_1.rejectIfNotSystemAdmin)(this))
+            return;
+        try {
+            const b = body(this);
+            const creditService = this.ctx.get('creditService');
+            json(this, 200, { success: true, ...await creditService.reset(b.uids, b.reason, actor(this)) });
+        }
+        catch (err) {
+            (0, groupAdminHandler_1.respondGroupError)(this, err, 'ai_helper_credit_reset_failed', 'CREDIT_RESET_FAILED');
+        }
+    }
+}
+exports.CreditResetHandler = CreditResetHandler;
 exports.QuotaAdminHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 //# sourceMappingURL=quotaAdminHandler.js.map

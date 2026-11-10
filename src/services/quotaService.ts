@@ -2,7 +2,7 @@
  * QuotaService - 每日 AI 次数（US2、US3）
  *
  * 解析有效额度 → 预占 → 确认 / 退还，并提供学生端状态与管理端的额度来源说明（explain）。
- * 额度组、个人覆盖、信誉系数通过 QuotaPolicySources 接入；信誉系数随 PR4 加入。
+ * 额度组、个人覆盖、信誉系数通过 QuotaPolicySources 接入。
  */
 
 import { randomUUID } from 'crypto';
@@ -29,12 +29,13 @@ export interface QuotaOverrideDetail extends QuotaOverrideInput {
   setAt?: Date;
 }
 
-/** 额度来源的接入点：额度组与个人覆盖（QuotaGroupResolver），信誉系数（PR4） */
+/** 额度来源的接入点：额度组与个人覆盖（QuotaGroupResolver），信誉系数（CreditService） */
 export interface QuotaPolicySources {
   getOverride?(uid: number, now: Date): Promise<QuotaOverrideDetail | null>;
   getOverrides?(uids: number[], now: Date): Promise<Map<number, QuotaOverrideDetail>>;
   getGroupMemberships?(uid: number): Promise<QuotaGroupMembership[]>;
   getCreditMultiplier?(uid: number, now: Date): Promise<number>;
+  getCreditMultipliers?(uids: number[], now: Date): Promise<Map<number, number>>;
 }
 
 export interface ResolvedQuota {
@@ -79,6 +80,8 @@ export interface QuotaSnapshot {
 }
 
 export interface QuotaStatus extends QuotaSnapshot {
+  /** 信誉系数换算前的基础额度：与 limit 不同时说明额度因违规降低 */
+  base: QuotaLimit;
   /** 管理员禁用（基础额度为 0），与“额度用完”区分 */
   disabled: boolean;
   timezone: string;
@@ -193,12 +196,17 @@ export class QuotaService {
       ? this.sources.getOverrides(uids, now)
       : Promise.all(uids.map(async (uid) => [uid, this.sources.getOverride ? await this.sources.getOverride(uid, now) : null] as const))
         .then((pairs) => new Map(pairs.filter((pair): pair is readonly [number, QuotaOverrideDetail] => !!pair[1])));
-    const [overrides, usage, perUser] = await Promise.all([
+    const multipliersPromise: Promise<Map<number, number>> = this.sources.getCreditMultipliers
+      ? this.sources.getCreditMultipliers(uids, now)
+      : Promise.all(uids.map(async (uid) => [uid, await this.multiplier(uid, now)] as const)).then((pairs) => new Map(pairs));
+    const [overrides, usage, perUser, multipliers] = await Promise.all([
       overridesPromise,
       this.usage.getMany(uids, date),
-      Promise.all(uids.map(async (uid) => ({ uid, groups: await this.memberships(uid), m: await this.multiplier(uid, now) }))),
+      Promise.all(uids.map(async (uid) => ({ uid, groups: await this.memberships(uid) }))),
+      multipliersPromise,
     ]);
-    for (const { uid, groups, m } of perUser) {
+    for (const { uid, groups } of perUser) {
+      const m = multipliers.get(uid) ?? 1;
       const explained = this.build(overrides.get(uid) || null, groups, m, quotaConfig, now);
       const used = usage.get(uid)?.used ?? 0;
       out.set(uid, {
@@ -261,6 +269,7 @@ export class QuotaService {
     const doc = await this.usage.get(uid, dateKey(tz, now));
     return {
       ...snapshot(resolved.limit, doc?.used ?? 0, nextResetAt(tz, now)),
+      base: resolved.base,
       disabled: resolved.base === 0,
       timezone: tz,
     };

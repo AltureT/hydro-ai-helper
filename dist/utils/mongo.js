@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObjectId = void 0;
 exports.unwrapModifyResult = unwrapModifyResult;
+exports.createIndexReusingExisting = createIndexReusingExisting;
 /**
  * MongoDB helpers
  *
@@ -26,5 +27,21 @@ function unwrapModifyResult(raw) {
         return (maybe.value ?? null);
     }
     return raw;
+}
+/** MongoDB IndexOptionsConflict：同样的键已有其他名字或其他选项的索引 */
+const INDEX_OPTIONS_CONFLICT = 85;
+/**
+ * 创建索引。同样的键已有一个名字不同的索引时（旧版本遗留，MongoDB 报 85），沿用已有索引并继续，
+ * 避免一个冲突让同一集合后面的索引都没有建。其他错误照常抛出。
+ */
+async function createIndexReusingExisting(collection, keys, options) {
+    try {
+        await collection.createIndex(keys, options);
+    }
+    catch (err) {
+        if (err?.code !== INDEX_OPTIONS_CONFLICT)
+            throw err;
+        console.warn(`[AI-Helper] 索引 ${options.name} 未创建，已有等价的索引：${err instanceof Error ? err.message : String(err)}`);
+    }
 }
 //# sourceMappingURL=mongo.js.map

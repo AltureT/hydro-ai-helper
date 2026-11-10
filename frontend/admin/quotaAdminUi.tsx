@@ -24,6 +24,7 @@ export const QUOTA_API = {
   groupDetail: '/ai-helper/admin/quota/groups/detail',
   overrides: '/ai-helper/admin/quota/overrides',
   users: '/ai-helper/admin/users',
+  creditReset: '/ai-helper/admin/credit/reset',
 };
 
 export function formatGroupLimit(mode: QuotaGroupMode, limit: number): string {

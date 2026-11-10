@@ -5,9 +5,11 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PromptService = exports.builtinJailbreakPatternSources = void 0;
+exports.confidenceFromRiskScore = confidenceFromRiskScore;
 const jailbreakRules_1 = require("../constants/jailbreakRules");
 const limits_1 = require("../constants/limits");
 const promptSanitizer_1 = require("../lib/promptSanitizer");
+const safety_1 = require("../types/safety");
 var jailbreakRules_2 = require("../constants/jailbreakRules");
 Object.defineProperty(exports, "builtinJailbreakPatternSources", { enumerable: true, get: function () { return jailbreakRules_2.builtinJailbreakPatternSources; } });
 /**
@@ -55,6 +57,10 @@ const QUESTION_TYPE_STRATEGIES = {
 /**
  * Prompt 服务类
  */
+/** 规则命中的置信度由风险分推导：≥ 70 为高，其余为中（FR-028a）。拦截不看置信度 */
+function confidenceFromRiskScore(riskScore) {
+    return (riskScore ?? 0) >= safety_1.HIGH_CONFIDENCE_RISK_SCORE ? 'high' : 'medium';
+}
 class PromptService {
     /**
      * 构造 System Prompt
@@ -337,12 +343,14 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
             const combinedValidation = this.detectSafetyViolation(`${previousOnly}\n${currentInput}`, extraJailbreakPatterns, problemContentWhitelist);
             if (combinedValidation.valid || !combinedValidation.matchedPattern)
                 continue;
+            const riskScore = combinedValidation.category === 'answer_seeking'
+                ? Math.max(60, combinedValidation.riskScore ?? 0)
+                : Math.max(90, combinedValidation.riskScore ?? 0);
             return {
                 ...combinedValidation,
                 detectionSource: 'conversation',
-                riskScore: combinedValidation.category === 'answer_seeking'
-                    ? Math.max(60, combinedValidation.riskScore ?? 0)
-                    : Math.max(90, combinedValidation.riskScore ?? 0),
+                riskScore,
+                confidence: confidenceFromRiskScore(riskScore),
             };
         }
         return { valid: true };
@@ -401,6 +409,11 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
                     : rule.category === 'answer_seeking'
                         ? 'answer_seeking'
                         : 'obfuscated_injection';
+                const riskScore = candidate.source === 'plain'
+                    ? rule.riskScore
+                    : category === 'answer_seeking'
+                        ? Math.max(60, rule.riskScore)
+                        : Math.max(95, rule.riskScore);
                 return {
                     valid: false,
                     error: category === 'answer_seeking'
@@ -412,12 +425,8 @@ ${(0, promptSanitizer_1.sanitizeForPrompt)(clarifySelectedText)}
                     matchedPattern: rule.pattern.source,
                     matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
                     category,
-                    confidence: 'high',
-                    riskScore: candidate.source === 'plain'
-                        ? rule.riskScore
-                        : category === 'answer_seeking'
-                            ? Math.max(60, rule.riskScore)
-                            : Math.max(95, rule.riskScore),
+                    confidence: confidenceFromRiskScore(riskScore),
+                    riskScore,
                     detectionSource,
                 };
             }

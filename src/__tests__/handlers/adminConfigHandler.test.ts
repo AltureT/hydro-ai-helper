@@ -189,7 +189,7 @@ function createLogsHandler(query: Record<string, string> = {}) {
   return { handler, listWithPagination, getReviewSummary, getRuleMetrics, getOperationalMetrics };
 }
 
-function createReviewHandler() {
+function createReviewHandler(creditService?: { revokeBySafetyLog: jest.Mock }) {
   const handler = new JailbreakLogReviewHandler();
   const review = jest.fn().mockResolvedValue(true);
   handler.user = { _id: 7 };
@@ -202,7 +202,7 @@ function createReviewHandler() {
   handler.translate = jest.fn((key: string) => key);
   handler.ctx = {
     Route: jest.fn(),
-    get: jest.fn((name: string) => name === 'jailbreakLogModel' ? { review } : undefined),
+    get: jest.fn((name: string) => (name === 'jailbreakLogModel' ? { review } : name === 'creditService' ? creditService : undefined)),
   };
   return { handler, review };
 }
@@ -248,6 +248,40 @@ describe('JailbreakLogReviewHandler', () => {
 
     expect(handler.response.status).toBe(404);
     expect(handler.response.body.code).toBe('JAILBREAK_LOG_NOT_FOUND');
+  });
+
+  it('revokes the credit deduction when a log is marked false positive (FR-031)', async () => {
+    const creditService = { revokeBySafetyLog: jest.fn().mockResolvedValue(1) };
+    const { handler } = createReviewHandler(creditService);
+    const id = new ObjectId().toHexString();
+
+    await handler.post({ id });
+
+    expect(creditService.revokeBySafetyLog).toHaveBeenCalledWith(new ObjectId(id), 7, 'domain-a');
+    expect(handler.response.body).toEqual({ success: true, reviewStatus: 'false_positive' });
+  });
+
+  it('leaves credit alone when confirming, or when the review did not change anything', async () => {
+    const creditService = { revokeBySafetyLog: jest.fn() };
+    const confirm = createReviewHandler(creditService);
+    confirm.handler.request.body = { reviewStatus: 'confirmed' };
+    await confirm.handler.post({ id: new ObjectId().toHexString() });
+
+    const missing = createReviewHandler(creditService);
+    missing.review.mockResolvedValue(false);
+    await missing.handler.post({ id: new ObjectId().toHexString() });
+
+    expect(creditService.revokeBySafetyLog).not.toHaveBeenCalled();
+  });
+
+  it('keeps the review result when revoking the deduction fails', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const creditService = { revokeBySafetyLog: jest.fn().mockRejectedValue(new Error('Synthetic credit failure')) };
+    const { handler } = createReviewHandler(creditService);
+
+    await handler.post({ id: new ObjectId().toHexString() });
+
+    expect(handler.response.body).toEqual({ success: true, reviewStatus: 'false_positive' });
   });
 });
 
@@ -558,6 +592,22 @@ describe('JailbreakLogBulkReviewHandler', () => {
     );
     expect(reviewMany.mock.calls[0][0]).toHaveLength(2);
     expect(handler.response.body).toEqual(expect.objectContaining({ success: true, modifiedCount: 2 }));
+  });
+
+  it('revokes deductions only for the logs whose review actually changed to false positive', async () => {
+    const { handler, reviewMany } = createBulkReviewHandler();
+    const [changed, unchanged] = handler.request.body.ids;
+    handler.request.body.reviewStatus = 'false_positive';
+    reviewMany.mockResolvedValue({ matchedCount: 1, modifiedCount: 1, reviewedIds: [changed] });
+    const creditService = { revokeBySafetyLog: jest.fn().mockResolvedValue(1) };
+    handler.ctx.get = jest.fn((name: string) => (name === 'creditService' ? creditService : { reviewMany }));
+
+    await handler.post();
+
+    expect(creditService.revokeBySafetyLog).toHaveBeenCalledTimes(1);
+    expect(creditService.revokeBySafetyLog).toHaveBeenCalledWith(new ObjectId(changed), 7, 'domain-a');
+    expect(creditService.revokeBySafetyLog).not.toHaveBeenCalledWith(new ObjectId(unchanged), 7, 'domain-a');
+    expect(handler.response.body).toEqual({ success: true, matchedCount: 1, modifiedCount: 1, reviewStatus: 'false_positive' });
   });
 
   it('rejects invalid or oversized ID batches', async () => {

@@ -53,6 +53,8 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'settings.teacher_access': 'ai_helper_um_action_teacher_access',
   'transfer.groups': 'ai_helper_um_action_transfer_groups',
   'transfer.users': 'ai_helper_um_action_transfer_users',
+  'credit.reset': 'ai_helper_um_action_credit_reset',
+  'credit.revoke': 'ai_helper_um_action_credit_revoke',
 };
 
 const TRANSFER_API = {
@@ -69,6 +71,7 @@ function actionVariant(log: AuditLogItem): BadgeVariant {
   if (log.category === 'review') return 'warn';
   if (log.category === 'quota') return log.action.endsWith('delete') || log.action.endsWith('clear') ? 'muted' : 'ok';
   if (log.category === 'transfer') return log.detail?.status === 'partial' ? 'warn' : 'info';
+  if (log.category === 'credit') return log.action === 'credit.revoke' ? 'muted' : 'ok';
   return 'info';
 }
 
@@ -179,10 +182,21 @@ export function describeTransferStep(step: NonNullable<AuditLogItem['steps']>[nu
   }
 }
 
+/** 信誉审计的摘要：重置（人数与原因）、复核为误判后撤销扣分（类别与分值） */
+function describeCreditAudit(log: AuditLogItem): string {
+  const d = log.detail || {};
+  if (log.action === 'credit.reset') {
+    return i18n('ai_helper_um_audit_credit_reset', Array.isArray(d.uids) ? d.uids.length : 0, String(d.reason || ''));
+  }
+  const category = typeof d.category === 'string' ? i18n(`ai_helper_admin_jailbreak_category_${d.category}`) : '—';
+  return i18n('ai_helper_um_audit_credit_revoke', category, String(Math.round(Number(d.deduction || 0) * 100) / 100));
+}
+
 function changeSummary(log: AuditLogItem): string {
   if (log.category === 'group') return describeGroupAudit(log);
   if (log.category === 'quota') return describeQuotaAudit(log);
   if (log.category === 'transfer') return describeTransferAudit(log);
+  if (log.category === 'credit') return describeCreditAudit(log);
   if (log.action === 'settings.teacher_access') {
     return log.detail?.to ? i18n('ai_helper_um_audit_change_enabled') : i18n('ai_helper_um_audit_change_disabled');
   }
@@ -216,6 +230,17 @@ function detailLines(log: AuditLogItem): string[] {
   }
   if (summary.dismissed.length) lines.push(i18n('ai_helper_um_detail_dismissed', summary.dismissed.length, named(summary.dismissed)));
   if (log.action === 'group.meta' || log.action === 'settings.teacher_access') lines.push(changeSummary(log));
+  if (log.category === 'credit') {
+    lines.push(changeSummary(log));
+    const uids = Array.isArray(log.detail?.uids) ? (log.detail.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number') : [];
+    if (uids.length) lines.push(i18n('ai_helper_um_audit_credit_users', uids.length, named(uids)));
+    const before = Array.isArray(log.detail?.before) ? log.detail.before as Array<{ uid?: number; m?: number }> : [];
+    if (before.length) {
+      lines.push(i18n('ai_helper_um_audit_credit_before', before
+        .map((item) => `${log.uidNames[String(item.uid)] || `#${item.uid}`} ${Math.round(Number(item.m) * 100) / 100}`)
+        .join('、')));
+    }
+  }
   if (log.category === 'quota' && !log.action.startsWith('quota.group_member')) {
     lines.push(changeSummary(log));
     const uids = Array.isArray(log.detail?.uids) ? (log.detail.uids as unknown[]).filter((uid): uid is number => typeof uid === 'number') : [];
@@ -332,6 +357,7 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
             <option value="group">{i18n('ai_helper_um_audit_category_group')}</option>
             <option value="quota">{i18n('ai_helper_um_audit_category_quota')}</option>
             <option value="transfer">{i18n('ai_helper_um_audit_category_transfer')}</option>
+            <option value="credit">{i18n('ai_helper_um_audit_category_credit')}</option>
             <option value="settings">{i18n('ai_helper_um_audit_category_settings')}</option>
           </select>
         </label>

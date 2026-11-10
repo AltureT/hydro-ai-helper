@@ -244,6 +244,21 @@ export function createFakeCollection(initial: Doc[] = []) {
       docs.push(stored);
       return { insertedId: stored._id };
     }),
+    insertMany: jest.fn(async (items: Doc[]) => {
+      const insertedIds: Record<number, unknown> = {};
+      items.forEach((doc, index) => {
+        const stored = clone(doc);
+        if (stored._id === undefined) stored._id = new ObjectId();
+        docs.push(stored);
+        insertedIds[index] = stored._id;
+      });
+      return { insertedCount: items.length, insertedIds };
+    }),
+    updateMany: jest.fn(async (filter: Doc, update: Doc) => {
+      const targets = docs.filter((item) => matches(item, filter));
+      for (const doc of targets) applyUpdate(doc, update, false);
+      return { matchedCount: targets.length, modifiedCount: targets.length, upsertedCount: 0 };
+    }),
     updateOne: jest.fn(async (filter: Doc, update: Doc, options: Doc = {}) => {
       const doc = docs.find((item) => matches(item, filter));
       if (doc) {

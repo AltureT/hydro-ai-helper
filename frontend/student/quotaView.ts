@@ -9,9 +9,78 @@ export interface QuotaSnapshotView {
   resetAt: string;
 }
 
+export type CreditCategoryView = 'off_topic' | 'answer_seeking' | 'prompt_injection' | 'prompt_exfiltration' | 'obfuscated_injection';
+
+export interface CreditViolationView {
+  category: CreditCategoryView;
+  at: string;
+  source: 'realtime' | 'ai_review' | 'manual';
+  domainId?: string;
+  safetyEventId?: string;
+  appealable: boolean;
+  appealed: boolean;
+}
+
+export interface StudentCreditView {
+  m: number;
+  reduced: boolean;
+  recoveryAt: string | null;
+  recentViolations: CreditViolationView[];
+}
+
 export interface QuotaStatusView extends QuotaSnapshotView {
+  /** 信誉换算前的基础额度 */
+  base?: number | null;
   disabled?: boolean;
   timezone?: string;
+  credit?: StudentCreditView | null;
+}
+
+export interface CreditReduction {
+  /** 基础额度与降低后的当日额度 */
+  from: number;
+  to: number;
+  /** 约几天后恢复（向上取整，至少 1） */
+  recoveryDays: number | null;
+}
+
+/** 当日额度因违规降低时的说明；额度不受影响（不限额、保底、关闭）时为 null（FR-034） */
+export function creditReduction(status: QuotaStatusView | null, now: Date = new Date()): CreditReduction | null {
+  if (!status?.credit?.reduced || status.disabled) return null;
+  if (status.limit === null || typeof status.base !== 'number' || status.base <= status.limit) return null;
+  const recovery = status.credit.recoveryAt ? new Date(status.credit.recoveryAt).getTime() - now.getTime() : NaN;
+  return {
+    from: status.base,
+    to: status.limit,
+    recoveryDays: Number.isFinite(recovery) ? Math.max(1, Math.ceil(recovery / (24 * 60 * 60 * 1000))) : null,
+  };
+}
+
+/** “为什么降低”里一条违规的时间：今天 / 昨天 / 月-日，加 时:分（浏览器本地时间） */
+export function violationTimeLabel(at: string, now: Date = new Date()): { kind: 'today' | 'yesterday' | 'date'; time: string; date: string } | null {
+  const when = new Date(at);
+  if (Number.isNaN(when.getTime())) return null;
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(when)) / (24 * 60 * 60 * 1000));
+  return {
+    kind: dayDiff <= 0 ? 'today' : dayDiff === 1 ? 'yesterday' : 'date',
+    time: `${pad(when.getHours())}:${pad(when.getMinutes())}`,
+    date: `${pad(when.getMonth() + 1)}-${pad(when.getDate())}`,
+  };
+}
+
+/** 申诉成功后在本地标记，避免重复申诉 */
+export function markAppealed(status: QuotaStatusView | null, safetyEventId: string): QuotaStatusView | null {
+  if (!status?.credit) return status;
+  return {
+    ...status,
+    credit: {
+      ...status.credit,
+      recentViolations: status.credit.recentViolations.map((item) => (
+        item.safetyEventId === safetyEventId ? { ...item, appealable: false, appealed: true } : item
+      )),
+    },
+  };
 }
 
 export type QuotaBlock = 'exhausted' | 'disabled' | null;

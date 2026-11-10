@@ -29,12 +29,14 @@ interface UseChatSessionOptions {
   onQuota?: (quota: QuotaSnapshotView) => void;
   /** 因额度用完或被管理员关闭而被拒 */
   onQuotaBlocked?: (code: QuotaBlockedCode, quota?: QuotaSnapshotView) => void;
+  /** 本次请求记了安全记录（可能扣了信誉），需要刷新额度与信誉状态 */
+  onSafetyEvent?: () => void;
 }
 
-export function useChatSession({ problemId, onQuota, onQuotaBlocked }: UseChatSessionOptions) {
+export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEvent }: UseChatSessionOptions) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
-  const quotaHandlersRef = useRef({ onQuota, onQuotaBlocked });
-  quotaHandlersRef.current = { onQuota, onQuotaBlocked };
+  const quotaHandlersRef = useRef({ onQuota, onQuotaBlocked, onSafetyEvent });
+  quotaHandlersRef.current = { onQuota, onQuotaBlocked, onSafetyEvent };
   const {
     questionType,
     userThinking,
@@ -281,6 +283,7 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked }: UseChatSe
       let response = await sendChatRequest(conversationId);
       if (!response.ok) {
         let errorData = await parseErrorPayload(response);
+        if (errorData.safetyEventId) quotaHandlersRef.current.onSafetyEvent?.();
 
         if (errorData.code === 'QUOTA_EXHAUSTED' || errorData.code === 'AI_DISABLED_BY_ADMIN') {
           quotaHandlersRef.current.onQuotaBlocked?.(errorData.code, errorData.quota);
@@ -397,6 +400,7 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked }: UseChatSe
           saveConversationId(problemId, data.conversationId);
         }
         if (data.quota) quotaHandlersRef.current.onQuota?.(data.quota);
+        if (data.offTopicViolation) quotaHandlersRef.current.onSafetyEvent?.();
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {

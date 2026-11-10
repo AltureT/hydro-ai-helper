@@ -55,9 +55,40 @@ describe('JailbreakLogModel', () => {
   });
 
   describe('ensureIndexes', () => {
+    it('reuses an older index with the same keys and still creates the rest', async () => {
+      // 旧版本以 idx_userId_createdAt 建过同样的键；MongoDB 对新名字报 85（IndexOptionsConflict）
+      const warn = jest.spyOn(console, 'warn').mockImplementation();
+      mockColl.createIndex.mockImplementation(async (_keys: unknown, options: { name: string }) => {
+        if (options.name === 'idx_user_createdAt') {
+          throw Object.assign(new Error('Index with name: idx_user_createdAt already exists with a different name'), { code: 85 });
+        }
+        return options.name;
+      });
+      await expect(model.ensureIndexes()).resolves.toBeUndefined();
+      const names = mockColl.createIndex.mock.calls.map(([, options]: any[]) => options.name);
+      expect(names.slice(names.indexOf('idx_user_createdAt') + 1)).toEqual(
+        expect.arrayContaining(['idx_domain_review_category_createdAt', 'idx_expiresAt_ttl']),
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('idx_user_createdAt'));
+    });
+
+    it('still fails on other index errors', async () => {
+      mockColl.createIndex.mockRejectedValueOnce(Object.assign(new Error('not authorized'), { code: 13 }));
+      await expect(model.ensureIndexes()).rejects.toThrow('not authorized');
+    });
+
     it('should create tenant-aware query and cooldown indexes', async () => {
       await model.ensureIndexes();
-      expect(mockColl.createIndex).toHaveBeenCalledTimes(9);
+      expect(mockColl.createIndex).toHaveBeenCalledTimes(11);
+      // 跨域冷却与回退计数按用户查询
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { userId: 1, blockedUntil: -1 },
+        { name: 'idx_user_blockedUntil' }
+      );
+      expect(mockColl.createIndex).toHaveBeenCalledWith(
+        { userId: 1, createdAt: -1 },
+        { name: 'idx_user_createdAt' }
+      );
       expect(mockColl.createIndex).toHaveBeenCalledWith(
         { domainId: 1, userId: 1, createdAt: -1 },
         { name: 'idx_domain_user_createdAt' }
@@ -227,56 +258,70 @@ describe('JailbreakLogModel', () => {
   });
 
   describe('penalty queries', () => {
-    it('should atomically keep a sliding ten-minute window across wall-clock boundaries', async () => {
+    it('should atomically keep a sliding ten-minute window per user across domains', async () => {
       const now = new Date('2026-07-23T10:01:00Z');
       mockColl.findOneAndUpdate.mockResolvedValue({
-        _id: 'domain-a:42:answer_seeking',
+        _id: '42:answer_seeking',
         count: 2,
       });
 
-      const sequence = await model.nextPenaltySequence('domain-a', 42, 'answer_seeking', now);
+      const sequence = await model.nextPenaltySequence(42, 'answer_seeking', now);
 
       expect(sequence.currentCount).toBe(2);
       const [filter, pipeline, options] = mockColl.findOneAndUpdate.mock.calls[0];
-      expect(filter).toEqual({ _id: 'domain-a:42:answer_seeking' });
+      // 计数器键不含域：在任一域的违规都计入（FR-033）
+      expect(filter).toEqual({ _id: '42:answer_seeking' });
+      expect(pipeline[0].$set).not.toHaveProperty('domainId');
       expect(pipeline[0].$set.events.$concatArrays[0].$filter.cond).toEqual({
         $gte: ['$$event.at', new Date('2026-07-23T09:51:00Z')],
       });
       expect(options).toEqual({ upsert: true, returnDocument: 'after' });
     });
 
-    it('should count high-confidence events by domain, user and category', async () => {
+    it('should count off-topic strikes in their own group over a longer window', async () => {
+      const now = new Date('2026-07-23T10:00:00Z');
+      mockColl.findOneAndUpdate.mockResolvedValue({ _id: '42:off_topic', count: 2 });
+
+      await model.nextPenaltySequence(42, 'off_topic', now, 24 * 60 * 60 * 1000);
+
+      const [filter, pipeline] = mockColl.findOneAndUpdate.mock.calls[0];
+      expect(filter).toEqual({ _id: '42:off_topic' });
+      expect(pipeline[0].$set.group).toBe('off_topic');
+      expect(pipeline[0].$set.events.$concatArrays[0].$filter.cond).toEqual({
+        $gte: ['$$event.at', new Date('2026-07-22T10:00:00Z')],
+      });
+      expect(pipeline[0].$set.expiresAt).toEqual(new Date('2026-07-25T10:00:00Z'));
+    });
+
+    it('should count events by user and category across domains and confidence levels', async () => {
       mockColl.countDocuments.mockResolvedValue(2);
       const since = new Date('2026-07-23T00:00:00Z');
 
       const count = await model.countRecentByCategories(
-        'domain-a',
         42,
         ['prompt_injection', 'prompt_exfiltration'],
         since
       );
 
       expect(count).toBe(2);
+      // 不再按置信度过滤：索要答案的前两次是中置信度，回退计数也要数到
       expect(mockColl.countDocuments).toHaveBeenCalledWith({
-        domainId: 'domain-a',
         userId: 42,
         category: { $in: ['prompt_injection', 'prompt_exfiltration'] },
-        confidence: 'high',
         reviewStatus: { $ne: 'false_positive' },
         createdAt: { $gte: since },
       });
     });
 
-    it('should find only active cooldowns in the same domain', async () => {
+    it('should find active cooldowns from any domain', async () => {
       const now = new Date('2026-07-23T00:00:00Z');
       mockColl.findOne.mockResolvedValue({ blockedUntil: new Date('2026-07-23T00:01:00Z') });
 
-      const result = await model.findActiveCooldown('domain-a', 42, now);
+      const result = await model.findActiveCooldown(42, now);
 
       expect(result).toBeTruthy();
       expect(mockColl.findOne).toHaveBeenCalledWith(
         {
-          domainId: 'domain-a',
           userId: 42,
           blockedUntil: { $gt: now },
           reviewStatus: { $ne: 'false_positive' },
@@ -360,27 +405,36 @@ describe('JailbreakLogModel', () => {
         reviewedAt
       );
 
-      expect(result).toEqual({ matchedCount: 2, modifiedCount: 2 });
+      expect(result).toEqual({ matchedCount: 2, modifiedCount: 2, reviewedIds: ['log-1', 'log-2'] });
       expect(mockColl.findOneAndUpdate).toHaveBeenCalledTimes(2);
     });
 
-    it('should allow a student to appeal only their own pending unappealed log', async () => {
+    it('should report only the IDs whose review actually changed', async () => {
+      mockColl.findOneAndUpdate
+        .mockResolvedValueOnce({ _id: 'log-1' })
+        .mockResolvedValueOnce(null);
+
+      const result = await model.reviewMany(['log-1', 'log-2'], 'domain-a', 'false_positive', 7);
+
+      expect(result).toEqual({ matchedCount: 1, modifiedCount: 1, reviewedIds: ['log-1'] });
+    });
+
+    it('should allow a student to appeal their own pending log from any domain', async () => {
       mockColl.updateOne.mockResolvedValue({ matchedCount: 1 });
       const appealedAt = new Date('2026-07-23T02:00:00Z');
 
       const result = await model.appealByStudent(
         'log-3',
-        'domain-a',
         42,
         'contact test@example.com',
         appealedAt
       );
 
       expect(result).toBe('submitted');
+      // 按 { _id, userId } 查找：在域 B 被域 A 的记录冷却时也能申诉（plan R12）
       expect(mockColl.updateOne).toHaveBeenCalledWith(
         {
           _id: 'log-3',
-          domainId: 'domain-a',
           userId: 42,
           $or: [
             { reviewStatus: 'pending' },
@@ -401,10 +455,9 @@ describe('JailbreakLogModel', () => {
       mockColl.updateOne.mockResolvedValue({ matchedCount: 0 });
       mockColl.findOne.mockResolvedValue({ _id: 'log-4', studentAppealedAt: new Date() });
 
-      await expect(model.appealByStudent('log-4', 'domain-a', 42)).resolves.toBe('already_submitted');
+      await expect(model.appealByStudent('log-4', 42)).resolves.toBe('already_submitted');
       expect(mockColl.findOne).toHaveBeenCalledWith(expect.objectContaining({
         _id: 'log-4',
-        domainId: 'domain-a',
         userId: 42,
         studentAppealedAt: { $exists: true },
       }));

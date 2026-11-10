@@ -13,6 +13,7 @@ import { Handler, PRIV } from 'hydrooj';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
 import { GroupServiceError } from '../services/hydroGroupService';
 import type { QuotaAdminService } from '../services/quotaAdminService';
+import type { CreditService } from '../services/creditService';
 import { rejectIfNotSystemAdmin, respondGroupError } from './groupAdminHandler';
 
 function json(handler: Handler, status: number, body: Record<string, unknown>): void {
@@ -127,6 +128,24 @@ export class QuotaOverridesHandler extends Handler {
       throw new GroupServiceError('INVALID_ACTION', 400, 'ai_helper_quota_action_invalid');
     } catch (err) {
       respondGroupError(this, err, 'ai_helper_quota_override_save_failed', 'QUOTA_OVERRIDE_SAVE_FAILED');
+    }
+  }
+}
+
+/**
+ * POST /ai-helper/admin/credit/reset  { uids, reason }
+ * 手动重置信誉（FR-032）：系数回到 1.0，须填写原因，写审计。学生总览可批量重置。
+ */
+export class CreditResetHandler extends Handler {
+  async post() {
+    if (rejectIfCsrfInvalid(this)) return;
+    if (rejectIfNotSystemAdmin(this)) return;
+    try {
+      const b = body(this);
+      const creditService = this.ctx.get('creditService') as CreditService;
+      json(this, 200, { success: true, ...await creditService.reset(b.uids, b.reason, actor(this)) });
+    } catch (err) {
+      respondGroupError(this, err, 'ai_helper_credit_reset_failed', 'CREDIT_RESET_FAILED');
     }
   }
 }

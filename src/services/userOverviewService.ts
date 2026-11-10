@@ -18,6 +18,7 @@ import type { QuotaOverrideModel } from '../models/quotaOverride';
 import { GroupServiceError, MAX_REGEX_LENGTH, SEARCH_MAX_TIME_MS } from './hydroGroupService';
 import type { QuotaGroupResolver } from './quotaGroupResolver';
 import type { QuotaService, QuotaUserQuota } from './quotaService';
+import type { CreditEventView, CreditSummary } from './creditService';
 
 export const OVERVIEW_PAGE_SIZE = 50;
 /** 需要逐个计算有效额度的筛选最多检查这么多人，超出时提示缩小范围 */
@@ -26,8 +27,21 @@ const VIOLATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const DETAIL_VIOLATIONS_LIMIT = 10;
 const HIGH_USAGE_RATIO = 0.8;
 
-export type OverviewStatus = 'exhausted' | 'high_usage' | 'disabled' | 'violations';
-export const OVERVIEW_STATUSES: readonly OverviewStatus[] = ['exhausted', 'high_usage', 'disabled', 'violations'];
+export type OverviewStatus = 'exhausted' | 'high_usage' | 'credit_reduced' | 'disabled' | 'violations';
+export const OVERVIEW_STATUSES: readonly OverviewStatus[] = ['exhausted', 'high_usage', 'credit_reduced', 'disabled', 'violations'];
+
+/** 信誉系数的来源（CreditService）；未接入时总览不显示信誉 */
+export interface CreditOverviewSource {
+  getSummaries(uids: number[], now: Date): Promise<Map<number, CreditSummary>>;
+  reducedUids(candidates: number[] | undefined, now: Date): Promise<number[]>;
+  detail(uid: number, now: Date): Promise<CreditSummary & { events: CreditEventView[] }>;
+}
+
+export interface OverviewCredit {
+  m: number;
+  reduced: boolean;
+  recoveryAt: string | null;
+}
 
 export interface OverviewFilters {
   q?: string;
@@ -59,6 +73,7 @@ export interface OverviewRow {
   domains: Array<{ id: string; name: string }>;
   groups: Array<{ domainId: string; name: string }>;
   quota: OverviewQuota;
+  credit: OverviewCredit | null;
   violations7d: number;
 }
 
@@ -90,8 +105,9 @@ export interface UserDetail {
   quota: QuotaUserQuota & { overrideSetByName?: string };
   violations7d: number;
   recentViolations: UserDetailViolation[];
-  /** 信誉系数随 PR4 加入 */
-  credit: null;
+  credit: (OverviewCredit & {
+    events: Array<CreditEventView & { domainName?: string; actorName?: string; revokedByName?: string }>;
+  }) | null;
 }
 
 interface UserDocLite {
@@ -165,6 +181,7 @@ export class UserOverviewService {
     private readonly usage: QuotaUsageModel,
     private readonly configModel: Pick<AIConfigModel, 'getConfig'>,
     private readonly clock: () => Date = () => new Date(),
+    private readonly credit?: CreditOverviewSource,
   ) {
     this.users = db.collection<UserDocLite>('user');
     this.domains = db.collection<{ _id: string; name?: string }>('domain');
@@ -222,6 +239,8 @@ export class UserOverviewService {
         reviewStatus: { $ne: 'false_positive' },
       }) as number[];
       set = intersect(set, uids.filter((uid) => typeof uid === 'number'));
+    } else if (filters.status === 'credit_reduced') {
+      set = intersect(set, this.credit ? await this.credit.reducedUids(set ? [...set] : undefined, now) : []);
     } else if (filters.status === 'disabled') {
       const [overridden, zeroCap] = await Promise.all([
         this.overrides.activeUids(now, 'disabled'),
@@ -251,7 +270,7 @@ export class UserOverviewService {
       filter._id = { $gt: 1, $in: [...candidateSet] };
     }
 
-    const computedStatus = filters.status && filters.status !== 'violations' ? filters.status : null;
+    const computedStatus = filters.status && filters.status !== 'violations' && filters.status !== 'credit_reduced' ? filters.status : null;
     try {
       if (computedStatus) {
         const docs = await this.users
@@ -343,10 +362,11 @@ export class UserOverviewService {
   private async annotate(docs: UserDocLite[], now: Date, known?: Map<number, QuotaUserQuota>): Promise<OverviewRow[]> {
     if (!docs.length) return [];
     const uids = docs.map((doc) => doc._id);
-    const [{ domainsByUid, groupsByUid }, quotas, violations] = await Promise.all([
+    const [{ domainsByUid, groupsByUid }, quotas, violations, credits] = await Promise.all([
       this.membership(uids),
       known ? Promise.resolve(known) : this.quotaService.explainMany(uids),
       this.violationCounts(uids, now),
+      this.credit ? this.credit.getSummaries(uids, now) : Promise.resolve(null),
     ]);
     return docs.map((doc) => {
       const quota = quotas.get(doc._id) as QuotaUserQuota;
@@ -358,9 +378,33 @@ export class UserOverviewService {
           .map(({ domainId, name }) => ({ domainId, name }))
           .sort((a, b) => a.name.localeCompare(b.name)),
         quota: toOverviewQuota(quota),
+        credit: credits ? toOverviewCredit(credits.get(doc._id)) : null,
         violations7d: violations.get(doc._id) || 0,
       };
     });
+  }
+
+  /** 详情里的信誉记录：补上域名、操作人与撤销人的用户名 */
+  private async creditDetail(uid: number, now: Date): Promise<UserDetail['credit']> {
+    if (!this.credit) return null;
+    const detail = await this.credit.detail(uid, now);
+    const peopleIds = [...new Set(detail.events.flatMap((event) => [event.actorUid, event.revokedBy]).filter((id): id is number => typeof id === 'number'))];
+    const [people, domainNames] = await Promise.all([
+      peopleIds.length
+        ? this.users.find({ _id: { $in: peopleIds } }, { projection: { _id: 1, uname: 1 } }).toArray()
+        : Promise.resolve([] as UserDocLite[]),
+      this.domainNames([...new Set(detail.events.map((event) => event.domainId).filter((id): id is string => !!id))]),
+    ]);
+    const unames = new Map(people.map((person) => [person._id, person.uname]));
+    return {
+      ...(toOverviewCredit(detail) as OverviewCredit),
+      events: detail.events.map((event) => ({
+        ...event,
+        ...(event.domainId ? { domainName: domainNames.get(event.domainId) || event.domainId } : {}),
+        ...(event.actorUid !== undefined ? { actorName: unames.get(event.actorUid) || String(event.actorUid) } : {}),
+        ...(event.revokedBy !== undefined ? { revokedByName: unames.get(event.revokedBy) || String(event.revokedBy) } : {}),
+      })),
+    };
   }
 
   async detail(uidRaw: unknown): Promise<UserDetail> {
@@ -371,7 +415,7 @@ export class UserOverviewService {
     const user = await this.users.findOne({ _id: uid }, { projection: { _id: 1, uname: 1, priv: 1 } });
     if (!user) throw new GroupServiceError('USER_NOT_FOUND', 404, 'ai_helper_overview_user_not_found');
     const now = this.clock();
-    const [{ domainsByUid, groupsByUid }, quota, violations, recent] = await Promise.all([
+    const [{ domainsByUid, groupsByUid }, quota, violations, recent, credit] = await Promise.all([
       this.membership([uid]),
       this.quotaService.explain(uid),
       this.violationCounts([uid], now),
@@ -383,6 +427,7 @@ export class UserOverviewService {
         .sort({ createdAt: -1 })
         .limit(DETAIL_VIOLATIONS_LIMIT)
         .toArray(),
+      this.creditDetail(uid, now),
     ]);
     const names = await this.domainNames([...new Set(recent.map((log) => log.domainId).filter((id): id is string => !!id))]);
     let overrideSetByName: string | undefined;
@@ -405,7 +450,12 @@ export class UserOverviewService {
         ...(log.reviewStatus ? { reviewStatus: log.reviewStatus } : {}),
         createdAt: new Date(log.createdAt).toISOString(),
       })),
-      credit: null,
+      credit,
     };
   }
+}
+
+function toOverviewCredit(summary: CreditSummary | undefined): OverviewCredit {
+  if (!summary) return { m: 1, reduced: false, recoveryAt: null };
+  return { m: summary.m, reduced: summary.reduced, recoveryAt: summary.recoveryAt ? summary.recoveryAt.toISOString() : null };
 }

@@ -38,6 +38,8 @@ export type AuditAction =
   | 'quota.override_clear'
   | 'transfer.groups'
   | 'transfer.users'
+  | 'credit.reset'
+  | 'credit.revoke'
   | 'settings.teacher_access';
 
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -57,6 +59,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'quota.override_clear',
   'transfer.groups',
   'transfer.users',
+  'credit.reset',
+  'credit.revoke',
   'settings.teacher_access',
 ] as const;
 

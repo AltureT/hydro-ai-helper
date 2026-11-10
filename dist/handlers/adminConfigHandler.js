@@ -708,6 +708,9 @@ class JailbreakLogReviewHandler extends hydrooj_1.Handler {
                 this.response.type = 'application/json';
                 return;
             }
+            if (reviewStatus === 'false_positive') {
+                await revokeCreditForFalsePositives(this, [id], Number(this.user._id), (0, domainHelper_1.getDomainId)(this));
+            }
             this.response.body = { success: true, reviewStatus };
             this.response.type = 'application/json';
         }
@@ -754,8 +757,11 @@ class JailbreakLogBulkReviewHandler extends hydrooj_1.Handler {
             }
             const uniqueIds = [...new Set(ids)];
             const jailbreakLogModel = this.ctx.get('jailbreakLogModel');
-            const result = await jailbreakLogModel.reviewMany(uniqueIds, (0, domainHelper_1.getDomainId)(this), reviewStatus, Number(this.user._id));
-            this.response.body = { success: true, ...result, reviewStatus };
+            const { reviewedIds, ...counts } = await jailbreakLogModel.reviewMany(uniqueIds, (0, domainHelper_1.getDomainId)(this), reviewStatus, Number(this.user._id));
+            if (reviewStatus === 'false_positive') {
+                await revokeCreditForFalsePositives(this, reviewedIds || [], Number(this.user._id), (0, domainHelper_1.getDomainId)(this));
+            }
+            this.response.body = { success: true, ...counts, reviewStatus };
             this.response.type = 'application/json';
         }
         catch (err) {
@@ -808,6 +814,7 @@ const VALID_CATEGORIES = [
     'prompt_injection',
     'prompt_exfiltration',
     'obfuscated_injection',
+    'off_topic',
 ];
 const VALID_ACTIONS = ['blocked', 'cooldown_60s', 'cooldown_5m'];
 const VALID_DETECTION_SOURCES = [
@@ -817,7 +824,23 @@ const VALID_DETECTION_SOURCES = [
     'hex',
     'conversation',
     'custom',
+    'topic_guard',
+    'ai_review',
 ];
+/** 复核为误判后撤销对应的信誉扣分（FR-031）；失败只记日志，复核结论已经生效 */
+async function revokeCreditForFalsePositives(handler, ids, reviewerUid, domainId) {
+    const creditService = handler.ctx.get('creditService');
+    if (!creditService || typeof creditService.revokeBySafetyLog !== 'function')
+        return;
+    for (const id of ids) {
+        try {
+            await creditService.revokeBySafetyLog(new mongo_1.ObjectId(id), reviewerUid, domainId);
+        }
+        catch (err) {
+            console.error('[AI Helper] 撤销信誉扣分失败:', err instanceof Error ? err.message : 'unknown');
+        }
+    }
+}
 function parseDateFilter(value, endOfDay) {
     if (!value)
         return undefined;

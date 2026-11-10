@@ -4,7 +4,7 @@
  * 轻量级关键词匹配，不依赖额外模型
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TopicGuardService = void 0;
+exports.TopicGuardService = exports.DEFAULT_CODE_EXEMPT_MIN_CHARS = void 0;
 // 编程相关关键词（命中任一即认为与编程相关）
 const PROGRAMMING_KEYWORDS = [
     '代码', '函数', '变量', '循环', '数组', '列表', '字典', '集合',
@@ -35,19 +35,26 @@ const OFF_TOPIC_KEYWORDS = [
     '讲个笑话', '讲个故事', '写首诗', '写一篇作文',
     '今天天气', '帮我写情书', '你喜欢', '你觉得好看吗'
 ];
+exports.DEFAULT_CODE_EXEMPT_MIN_CHARS = 30;
 const ASCII_TOKEN_REGEX = /^[a-z0-9_+\-.#]+$/i;
 class TopicGuardService {
     evaluate(userThinking, options = {}) {
         const { code, problemTitle, problemContent } = options;
-        // 带代码的请求默认不判偏题
-        if (code && code.trim().length > 0) {
+        const minCodeChars = Number.isFinite(options.codeExemptMinChars)
+            ? Math.max(0, Math.floor(options.codeExemptMinChars))
+            : exports.DEFAULT_CODE_EXEMPT_MIN_CHARS;
+        // 附带了足够长的代码才不判偏题；一两个字符的“代码”不能绕过检查
+        const codeChars = (code || '').replace(/\s+/g, '').length;
+        if (codeChars > 0 && codeChars >= minCodeChars) {
             return { isOffTopic: false };
         }
         const text = this.normalize(userThinking);
         const whitelistSource = this.normalize([problemTitle, problemContent].filter(Boolean).join(' '));
         // 必须显式命中偏题关键词
         let matchedOffTopic;
-        for (const keyword of OFF_TOPIC_KEYWORDS) {
+        const customKeywords = (options.customKeywords || [])
+            .filter((keyword) => typeof keyword === 'string' && keyword.trim().length > 0);
+        for (const keyword of [...OFF_TOPIC_KEYWORDS, ...customKeywords]) {
             if (!this.matchesKeyword(text, keyword))
                 continue;
             // 题面/标题中已出现的关键词默认视为白名单，不计偏题

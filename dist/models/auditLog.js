@@ -31,6 +31,8 @@ exports.AUDIT_ACTIONS = [
     'quota.override_clear',
     'transfer.groups',
     'transfer.users',
+    'credit.reset',
+    'credit.revoke',
     'settings.teacher_access',
 ];
 function auditCategoryOf(action) {

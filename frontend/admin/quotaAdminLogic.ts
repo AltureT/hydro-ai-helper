@@ -54,7 +54,33 @@ export interface OverridesResponse {
   total: number;
 }
 
-export type OverviewStatus = '' | 'exhausted' | 'high_usage' | 'disabled' | 'violations';
+export type OverviewStatus = '' | 'exhausted' | 'high_usage' | 'credit_reduced' | 'disabled' | 'violations';
+
+export interface OverviewCredit {
+  m: number;
+  reduced: boolean;
+  recoveryAt: string | null;
+}
+
+export interface CreditEventView {
+  id: string;
+  type: 'deduction' | 'reset';
+  source: 'realtime' | 'ai_review' | 'manual';
+  category?: string;
+  deduction?: number;
+  sequence?: number;
+  at: string;
+  domainId?: string;
+  domainName?: string;
+  safetyLogId?: string;
+  revokedAt?: string;
+  revokedBy?: number;
+  revokedByName?: string;
+  revokeReason?: string;
+  actorUid?: number;
+  actorName?: string;
+  reason?: string;
+}
 
 export interface OverviewFiltersState {
   q: string;
@@ -87,6 +113,8 @@ export interface OverviewRow {
   domains: Array<{ id: string; name: string }>;
   groups: Array<{ domainId: string; name: string }>;
   quota: OverviewQuota;
+  /** 未接入信誉时为 null */
+  credit: OverviewCredit | null;
   violations7d: number;
 }
 
@@ -149,7 +177,7 @@ export interface UserDetailResponse {
     reviewStatus?: string;
     createdAt: string;
   }>;
-  credit: null;
+  credit: (OverviewCredit & { events: CreditEventView[] }) | null;
 }
 
 export const QUOTA_LIMIT_MAX = 100000;

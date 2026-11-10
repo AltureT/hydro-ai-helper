@@ -3,7 +3,7 @@
  * QuotaService - 每日 AI 次数（US2、US3）
  *
  * 解析有效额度 → 预占 → 确认 / 退还，并提供学生端状态与管理端的额度来源说明（explain）。
- * 额度组、个人覆盖、信誉系数通过 QuotaPolicySources 接入；信誉系数随 PR4 加入。
+ * 额度组、个人覆盖、信誉系数通过 QuotaPolicySources 接入。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.QuotaService = void 0;
@@ -93,12 +93,17 @@ class QuotaService {
             ? this.sources.getOverrides(uids, now)
             : Promise.all(uids.map(async (uid) => [uid, this.sources.getOverride ? await this.sources.getOverride(uid, now) : null]))
                 .then((pairs) => new Map(pairs.filter((pair) => !!pair[1])));
-        const [overrides, usage, perUser] = await Promise.all([
+        const multipliersPromise = this.sources.getCreditMultipliers
+            ? this.sources.getCreditMultipliers(uids, now)
+            : Promise.all(uids.map(async (uid) => [uid, await this.multiplier(uid, now)])).then((pairs) => new Map(pairs));
+        const [overrides, usage, perUser, multipliers] = await Promise.all([
             overridesPromise,
             this.usage.getMany(uids, date),
-            Promise.all(uids.map(async (uid) => ({ uid, groups: await this.memberships(uid), m: await this.multiplier(uid, now) }))),
+            Promise.all(uids.map(async (uid) => ({ uid, groups: await this.memberships(uid) }))),
+            multipliersPromise,
         ]);
-        for (const { uid, groups, m } of perUser) {
+        for (const { uid, groups } of perUser) {
+            const m = multipliers.get(uid) ?? 1;
             const explained = this.build(overrides.get(uid) || null, groups, m, quotaConfig, now);
             const used = usage.get(uid)?.used ?? 0;
             out.set(uid, {
@@ -159,6 +164,7 @@ class QuotaService {
         const doc = await this.usage.get(uid, (0, timezone_1.dateKey)(tz, now));
         return {
             ...snapshot(resolved.limit, doc?.used ?? 0, (0, timezone_1.nextResetAt)(tz, now)),
+            base: resolved.base,
             disabled: resolved.base === 0,
             timezone: tz,
         };

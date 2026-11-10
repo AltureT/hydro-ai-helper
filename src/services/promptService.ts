@@ -6,6 +6,7 @@
 import { getBuiltinJailbreakRules } from '../constants/jailbreakRules';
 import { PROMPT_LIMITS } from '../constants/limits';
 import { sanitizeForPrompt, normalizeUnicode } from '../lib/promptSanitizer';
+import { HIGH_CONFIDENCE_RISK_SCORE } from '../types/safety';
 import type {
   SafetyConfidence,
   SafetyDetectionSource,
@@ -93,6 +94,11 @@ interface DetectionCandidate {
 /**
  * Prompt 服务类
  */
+/** 规则命中的置信度由风险分推导：≥ 70 为高，其余为中（FR-028a）。拦截不看置信度 */
+export function confidenceFromRiskScore(riskScore: number | undefined): SafetyConfidence {
+  return (riskScore ?? 0) >= HIGH_CONFIDENCE_RISK_SCORE ? 'high' : 'medium';
+}
+
 export class PromptService {
   /**
    * 构造 System Prompt
@@ -487,12 +493,14 @@ ${sanitizeForPrompt(clarifySelectedText)}
       );
       if (combinedValidation.valid || !combinedValidation.matchedPattern) continue;
 
+      const riskScore = combinedValidation.category === 'answer_seeking'
+        ? Math.max(60, combinedValidation.riskScore ?? 0)
+        : Math.max(90, combinedValidation.riskScore ?? 0);
       return {
         ...combinedValidation,
         detectionSource: 'conversation',
-        riskScore: combinedValidation.category === 'answer_seeking'
-          ? Math.max(60, combinedValidation.riskScore ?? 0)
-          : Math.max(90, combinedValidation.riskScore ?? 0),
+        riskScore,
+        confidence: confidenceFromRiskScore(riskScore),
       };
     }
 
@@ -577,6 +585,12 @@ ${sanitizeForPrompt(clarifySelectedText)}
             ? 'answer_seeking'
             : 'obfuscated_injection';
 
+        const riskScore = candidate.source === 'plain'
+          ? rule.riskScore
+          : category === 'answer_seeking'
+            ? Math.max(60, rule.riskScore)
+            : Math.max(95, rule.riskScore);
+
         return {
           valid: false,
           error: category === 'answer_seeking'
@@ -588,12 +602,8 @@ ${sanitizeForPrompt(clarifySelectedText)}
           matchedPattern: rule.pattern.source,
           matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
           category,
-          confidence: 'high',
-          riskScore: candidate.source === 'plain'
-            ? rule.riskScore
-            : category === 'answer_seeking'
-              ? Math.max(60, rule.riskScore)
-              : Math.max(95, rule.riskScore),
+          confidence: confidenceFromRiskScore(riskScore),
+          riskScore,
           detectionSource,
         };
       }
