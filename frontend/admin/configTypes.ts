@@ -201,6 +201,7 @@ export interface APIConfigResponse {
     };
     apiKeyMasked?: string;
     hasApiKey?: boolean;
+    groupTeacherAccessEnabled?: boolean;
   } | null;
   telemetry?: TelemetryStatus | null;
   builtinJailbreakPatterns?: string[];

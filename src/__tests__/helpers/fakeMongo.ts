@@ -88,6 +88,9 @@ function matchCondition(value: any, cond: any): boolean {
       case '$exists':
         if ((value !== undefined) !== arg) return false;
         break;
+      case '$size':
+        if (!Array.isArray(value) || value.length !== arg) return false;
+        break;
       case '$bitsAllSet':
         if (typeof value !== 'number' || (value & (arg as number)) !== arg) return false;
         break;

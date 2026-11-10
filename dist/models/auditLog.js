@@ -20,6 +20,7 @@ exports.AUDIT_ACTIONS = [
     'group.drift_restore',
     'group.drift_dismiss',
     'group.meta',
+    'group.backfill',
     'quota.group_create',
     'quota.group_update',
     'quota.group_delete',

@@ -185,12 +185,22 @@ describe('ConversationModel', () => {
       expect(mockColl.countDocuments).toHaveBeenCalledWith({ problemId: 'P1001' });
     });
 
-    it('should filter by classId', async () => {
+    it('should filter by group snapshot', async () => {
       mockColl.countDocuments.mockResolvedValue(2);
       mockColl._chain.toArray.mockResolvedValue([]);
 
-      await model.findByFilters({ classId: 'class-A' });
-      expect(mockColl.countDocuments).toHaveBeenCalledWith({ classId: 'class-A' });
+      await model.findByFilters({ group: '2023级1班' });
+      expect(mockColl.countDocuments).toHaveBeenCalledWith({ groupNames: '2023级1班' });
+    });
+
+    it('should filter ungrouped conversations (no snapshot or empty)', async () => {
+      mockColl.countDocuments.mockResolvedValue(0);
+      mockColl._chain.toArray.mockResolvedValue([]);
+
+      await model.findByFilters({ group: '__ungrouped__' });
+      expect(mockColl.countDocuments).toHaveBeenCalledWith({
+        $or: [{ groupNames: { $exists: false } }, { groupNames: { $size: 0 } }],
+      });
     });
 
     it('should filter by startDate only', async () => {
@@ -231,14 +241,14 @@ describe('ConversationModel', () => {
         domainId: 'test',
         userId: 1,
         problemId: 'P1',
-        classId: 'cls',
+        group: 'cls',
         startDate: '2025-01-01',
       });
       expect(mockColl.countDocuments).toHaveBeenCalledWith({
         domainId: 'test',
         userId: 1,
         problemId: 'P1',
-        classId: 'cls',
+        groupNames: 'cls',
         startTime: { $gte: new Date('2025-01-01') },
       });
     });

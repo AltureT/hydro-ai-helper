@@ -42,6 +42,10 @@ class GroupMetaModel {
     async listByDomain(domainId) {
         return this.collection.find({ domainId }).toArray();
     }
+    /** 某用户在本域负责的小组（负责老师访问，FR-058） */
+    async listByTeacher(domainId, uid) {
+        return this.collection.find({ domainId, teacherUids: uid }).toArray();
+    }
     async get(domainId, name) {
         return this.collection.findOne({ _id: groupMetaId(domainId, name) });
     }

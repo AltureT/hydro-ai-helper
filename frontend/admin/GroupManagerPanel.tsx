@@ -70,6 +70,8 @@ export function describeGroupAudit(log: AuditLogItem): string {
       if (summary.created) return i18n('ai_helper_um_audit_change_created');
       if (summary.deleted) return i18n('ai_helper_um_audit_change_meta_deleted');
       return i18n('ai_helper_um_audit_change_meta');
+    case 'group.backfill':
+      return i18n('ai_helper_um_audit_change_backfill', Number(log.detail?.updated) || 0);
     default:
       return log.action;
   }

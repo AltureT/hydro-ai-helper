@@ -9,9 +9,11 @@
  * POST /d/:domainId/ai-helper/groups/undo      撤销一次操作
  * POST /d/:domainId/ai-helper/groups/meta      扩展信息（含新建空小组、删除失效扩展信息）
  * POST /d/:domainId/ai-helper/groups/drift     恢复 / 忽略被覆盖的成员
+ * GET  /d/:domainId/ai-helper/groups/backfill  没有小组记录的历史会话数
+ * POST /d/:domainId/ai-helper/groups/backfill  按当前成员关系回填（FR-057）
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GroupAdminHandlerPriv = exports.GroupDriftHandler = exports.GroupMetaHandler = exports.GroupUndoHandler = exports.GroupApplyHandler = exports.GroupSearchHandler = exports.GroupListHandler = void 0;
+exports.GroupAdminHandlerPriv = exports.GroupBackfillHandler = exports.GroupDriftHandler = exports.GroupMetaHandler = exports.GroupUndoHandler = exports.GroupApplyHandler = exports.GroupSearchHandler = exports.GroupListHandler = void 0;
 exports.rejectIfNotSystemAdmin = rejectIfNotSystemAdmin;
 exports.respondGroupError = respondGroupError;
 const hydrooj_1 = require("hydrooj");
@@ -187,5 +189,41 @@ class GroupDriftHandler extends hydrooj_1.Handler {
     }
 }
 exports.GroupDriftHandler = GroupDriftHandler;
+class GroupBackfillHandler extends hydrooj_1.Handler {
+    backfill() {
+        return this.ctx.get('groupBackfillService');
+    }
+    async get() {
+        if (rejectIfNotSystemAdmin(this))
+            return;
+        try {
+            json(this, 200, { pending: await this.backfill().countPending((0, domainHelper_1.getDomainId)(this)) });
+        }
+        catch (err) {
+            respondGroupError(this, err, 'ai_helper_group_backfill_failed', 'GROUP_BACKFILL_FAILED');
+        }
+    }
+    async post() {
+        if ((0, csrfHelper_1.rejectIfCsrfInvalid)(this))
+            return;
+        if (rejectIfNotSystemAdmin(this))
+            return;
+        try {
+            if (await (0, rateLimitHelper_1.applyRateLimit)(this, {
+                op: 'ai_group_backfill',
+                periodSecs: 60,
+                maxOps: 6,
+                errorMessage: 'ai_helper_err_rate_limited',
+            }))
+                return;
+            const result = await this.backfill().run((0, domainHelper_1.getDomainId)(this), Number(this.user?._id));
+            json(this, 200, { success: true, ...result });
+        }
+        catch (err) {
+            respondGroupError(this, err, 'ai_helper_group_backfill_failed', 'GROUP_BACKFILL_FAILED');
+        }
+    }
+}
+exports.GroupBackfillHandler = GroupBackfillHandler;
 exports.GroupAdminHandlerPriv = hydrooj_1.PRIV.PRIV_EDIT_SYSTEM;
 //# sourceMappingURL=groupAdminHandler.js.map

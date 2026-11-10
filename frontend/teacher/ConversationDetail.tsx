@@ -15,6 +15,7 @@ import {
   COLORS, FONT_FAMILY, TYPOGRAPHY, SPACING, RADIUS, SHADOWS,
   cardStyle, getAlertStyle, markdownTheme,
 } from '../utils/styles';
+import { groupNamesText } from './groupFilterLogic';
 
 /**
  * 对话接口
@@ -23,7 +24,8 @@ interface Conversation {
   _id: string;
   userId: number;
   userName?: string;
-  classId?: string;
+  groupNames?: string[];
+  groupSource?: 'snapshot' | 'backfill';
   problemId: string;
   startTime: string;
   endTime: string;
@@ -249,7 +251,11 @@ export const ConversationDetail: React.FC<ConversationDetailProps> = ({ conversa
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
                 <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_class')}</div>
-                <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>{conversation.classId || '-'}</div>
+                <div style={{ ...TYPOGRAPHY.sm, fontWeight: 500, color: COLORS.textPrimary }}>{groupNamesText(conversation.groupNames) || i18n('ai_helper_group_ungrouped')}
+                  {conversation.groupSource === 'backfill' && (
+                    <span title={i18n('ai_helper_group_source_backfill_hint')} style={{ color: COLORS.textMuted, fontWeight: 400, marginLeft: '4px' }}>{i18n('ai_helper_group_source_backfill')}</span>
+                  )}
+                </div>
               </div>
               <div style={{ padding: `${SPACING.md} ${SPACING.base}`, backgroundColor: COLORS.bgPage, borderRadius: RADIUS.md }}>
                 <div style={{ ...TYPOGRAPHY.xs, color: COLORS.textMuted, marginBottom: SPACING.xs }}>{i18n('ai_helper_teacher_conv_col_problem')}</div>

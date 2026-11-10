@@ -47,6 +47,7 @@ const teachingSummary_1 = require("./models/teachingSummary");
 const updateHandler_1 = require("./handlers/updateHandler");
 console.log('[AI-Helper] updateHandler OK');
 const groupAdminHandler_1 = require("./handlers/groupAdminHandler");
+const classTeacherHandler_1 = require("./handlers/classTeacherHandler");
 const auditHandler_1 = require("./handlers/auditHandler");
 const quotaStatusHandler_1 = require("./handlers/quotaStatusHandler");
 const quotaAdminHandler_1 = require("./handlers/quotaAdminHandler");
@@ -84,6 +85,8 @@ const requestStats_1 = require("./models/requestStats");
 const featureStats_1 = require("./models/featureStats");
 const auditService_1 = require("./services/auditService");
 const hydroGroupService_1 = require("./services/hydroGroupService");
+const groupBackfillService_1 = require("./services/groupBackfillService");
+const classTeacherService_1 = require("./services/classTeacherService");
 const quotaService_1 = require("./services/quotaService");
 const quotaGroupResolver_1 = require("./services/quotaGroupResolver");
 const quotaAdminService_1 = require("./services/quotaAdminService");
@@ -281,6 +284,8 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         const auditService = new auditService_1.AuditService(auditLogModel);
         ctx.provide('auditService', auditService);
         ctx.provide('hydroGroupService', new hydroGroupService_1.HydroGroupService(db, groupMetaModel, auditService, ctx));
+        ctx.provide('groupBackfillService', new groupBackfillService_1.GroupBackfillService(db, auditService));
+        ctx.provide('classTeacherService', new classTeacherService_1.ClassTeacherService(db, groupMetaModel, aiConfigModel));
         ctx.provide('quotaUsageModel', quotaUsageModel);
         ctx.provide('quotaGroupModel', quotaGroupModel);
         ctx.provide('quotaOverrideModel', quotaOverrideModel);
@@ -504,6 +509,18 @@ const aiHelperPlugin = (0, hydrooj_1.definePlugin)({
         ctx.Route('ai_group_meta_domain', '/d/:domainId/ai-helper/groups/meta', groupAdminHandler_1.GroupMetaHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
         ctx.Route('ai_group_drift', '/ai-helper/groups/drift', groupAdminHandler_1.GroupDriftHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
         ctx.Route('ai_group_drift_domain', '/d/:domainId/ai-helper/groups/drift', groupAdminHandler_1.GroupDriftHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        // 历史会话小组回填（FR-057，仅系统管理员）
+        ctx.Route('ai_group_backfill', '/ai-helper/groups/backfill', groupAdminHandler_1.GroupBackfillHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        ctx.Route('ai_group_backfill_domain', '/d/:domainId/ai-helper/groups/backfill', groupAdminHandler_1.GroupBackfillHandler, groupAdminHandler_1.GroupAdminHandlerPriv);
+        // 负责老师只读视图（FR-058）：路由只要求登录，处理器内校验开关与负责关系
+        ctx.Route('ai_class_teacher', '/ai-helper/class', classTeacherHandler_1.ClassTeacherHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_teacher_domain', '/d/:domainId/ai-helper/class', classTeacherHandler_1.ClassTeacherHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_analytics', '/ai-helper/class/analytics', classTeacherHandler_1.ClassAnalyticsHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_analytics_domain', '/d/:domainId/ai-helper/class/analytics', classTeacherHandler_1.ClassAnalyticsHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_conversations', '/ai-helper/class/conversations', classTeacherHandler_1.ClassConversationListHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_conversations_domain', '/d/:domainId/ai-helper/class/conversations', classTeacherHandler_1.ClassConversationListHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_conversation_detail', '/ai-helper/class/conversations/:id', classTeacherHandler_1.ClassConversationDetailHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
+        ctx.Route('ai_class_conversation_detail_domain', '/d/:domainId/ai-helper/class/conversations/:id', classTeacherHandler_1.ClassConversationDetailHandler, classTeacherHandler_1.ClassTeacherHandlerPriv);
         ctx.Route('ai_admin_audit', '/ai-helper/admin/audit', auditHandler_1.AuditListHandler, auditHandler_1.AuditListHandlerPriv);
         ctx.Route('ai_admin_audit_domain', '/d/:domainId/ai-helper/admin/audit', auditHandler_1.AuditListHandler, auditHandler_1.AuditListHandlerPriv);
         // 学生端：今日剩余次数（跨域合计）

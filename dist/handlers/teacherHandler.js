@@ -5,11 +5,14 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ConversationDetailHandlerPriv = exports.ConversationListHandlerPriv = exports.ConversationDetailHandler = exports.ConversationListHandler = void 0;
+exports.summarizeConversations = summarizeConversations;
+exports.buildConversationDetail = buildConversationDetail;
 const hydrooj_1 = require("hydrooj");
 const mongo_1 = require("../utils/mongo");
 const httpHelpers_1 = require("../lib/httpHelpers");
 const queryHelpers_1 = require("../lib/queryHelpers");
 const domainHelper_1 = require("../utils/domainHelper");
+const groupFilter_1 = require("../utils/groupFilter");
 /**
  * 批量获取用户名映射
  * @param uids 用户 ID 数组
@@ -64,6 +67,95 @@ function buildProblemUrl(domainId, problemId) {
     return `/p/${problemId}`;
 }
 /**
+ * 列表行：用户名、首条学生消息摘要、题目链接。
+ * 系统管理员的对话列表与负责老师的班级视图共用。
+ */
+async function summarizeConversations(handler, conversations, domainId) {
+    // 批量获取用户名（避免 N+1 查询）
+    const uids = conversations.map(conv => conv.userId);
+    const deletedUserLabel = handler.translate('ai_helper_teacher_deleted_user');
+    const userNameMap = await getUserNameMap(uids, deletedUserLabel);
+    // T048: 批量获取每个会话的第一条学生消息
+    const messageModel = handler.ctx.get('messageModel');
+    const conversationIds = conversations.map(conv => conv._id);
+    const firstMessagesMap = await messageModel.findFirstStudentMessagesForConversations(conversationIds);
+    return conversations.map(conv => {
+        const convIdStr = conv._id.toString();
+        const firstMsg = firstMessagesMap.get(convIdStr);
+        // T048: 截取前100字作为摘要
+        let firstMessageSummary;
+        if (firstMsg?.content) {
+            firstMessageSummary = firstMsg.content.length > 100
+                ? firstMsg.content.substring(0, 100) + '...'
+                : firstMsg.content;
+        }
+        return {
+            _id: convIdStr,
+            userId: conv.userId,
+            userName: userNameMap.get(conv.userId) || deletedUserLabel,
+            groupNames: conv.groupNames,
+            groupSource: conv.groupSource,
+            problemId: conv.problemId,
+            problemUrl: buildProblemUrl(domainId, conv.problemId), // T031: 题目链接
+            startTime: conv.startTime.toISOString(),
+            endTime: conv.endTime.toISOString(),
+            messageCount: conv.messageCount,
+            isEffective: conv.isEffective,
+            metrics: conv.metrics ? {
+                ...conv.metrics,
+                backfilledAt: conv.metrics.backfilledAt?.toISOString() ?? null,
+            } : undefined,
+            metricsStatus: deriveMetricsStatus(conv.metrics),
+            tags: conv.tags,
+            teacherNote: conv.teacherNote,
+            metadata: conv.metadata,
+            firstMessageSummary, // T048: 学生问题摘要
+            questionType: firstMsg?.questionType,
+        };
+    });
+}
+/** 详情：会话信息 + 全部消息（按时间升序） */
+async function buildConversationDetail(handler, conversation, domainId) {
+    const messageModel = handler.ctx.get('messageModel');
+    const messages = await messageModel.findByConversationId(conversation._id.toString());
+    const messagesFormatted = messages.map(msg => ({
+        _id: msg._id.toString(),
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.timestamp.toISOString(),
+        questionType: msg.questionType,
+        attachedCode: msg.attachedCode,
+        attachedError: msg.attachedError,
+        metadata: msg.metadata
+    }));
+    const deletedLabel = handler.translate('ai_helper_teacher_deleted_user');
+    const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
+    const userName = userNameMap.get(conversation.userId) || deletedLabel;
+    // T032: 对话详情响应（包含 problemUrl + metrics）
+    const conversationData = {
+        _id: conversation._id.toString(),
+        userId: conversation.userId,
+        userName,
+        groupNames: conversation.groupNames,
+        groupSource: conversation.groupSource,
+        problemId: conversation.problemId,
+        problemUrl: buildProblemUrl(domainId, conversation.problemId), // T032: 题目链接
+        startTime: conversation.startTime.toISOString(),
+        endTime: conversation.endTime.toISOString(),
+        messageCount: conversation.messageCount,
+        isEffective: conversation.isEffective,
+        metrics: conversation.metrics ? {
+            ...conversation.metrics,
+            backfilledAt: conversation.metrics.backfilledAt?.toISOString() ?? null,
+        } : undefined,
+        metricsStatus: deriveMetricsStatus(conversation.metrics),
+        tags: conversation.tags,
+        teacherNote: conversation.teacherNote,
+        metadata: conversation.metadata
+    };
+    return { conversation: conversationData, messages: messagesFormatted };
+}
+/**
  * ConversationListHandler - 获取对话列表
  * GET /ai-helper/conversations
  * GET /d/:domainId/ai-helper/conversations
@@ -76,7 +168,8 @@ class ConversationListHandler extends hydrooj_1.Handler {
             // 获取当前域 ID（用于域隔离）
             const domainId = (0, domainHelper_1.getDomainId)(this);
             // 从查询参数读取筛选条件
-            const { startDate, endDate, problemId, classId, userId, page = '1', limit = '50' } = this.request.query;
+            const { startDate, endDate, problemId, userId, page = '1', limit = '50' } = this.request.query;
+            const group = (0, groupFilter_1.readGroupParam)(this.request.query);
             // 解析分页参数
             const { page: pageNum, limit: limitNum } = (0, queryHelpers_1.parsePaginationParams)(page, limit);
             // 构造筛选条件（始终包含 domainId 以实现域隔离）
@@ -92,57 +185,15 @@ class ConversationListHandler extends hydrooj_1.Handler {
             if (problemId) {
                 filters.problemId = problemId;
             }
-            if (classId) {
-                filters.classId = classId;
+            if (group) {
+                filters.group = group;
             }
             if (userId) {
                 filters.userId = parseInt(userId, 10);
             }
             // 查询对话列表（已通过 domainId 实现域隔离）
             const { conversations, total } = await conversationModel.findByFilters(filters, pageNum, limitNum);
-            // 批量获取用户名（避免 N+1 查询）
-            const uids = conversations.map(conv => conv.userId);
-            const deletedUserLabel = this.translate('ai_helper_teacher_deleted_user');
-            const userNameMap = await getUserNameMap(uids, deletedUserLabel);
-            // T048: 批量获取每个会话的第一条学生消息
-            const messageModel = this.ctx.get('messageModel');
-            const conversationIds = conversations.map(conv => conv._id);
-            const firstMessagesMap = await messageModel.findFirstStudentMessagesForConversations(conversationIds);
-            // T031: 转换为响应格式（包含 problemUrl 和 firstMessageSummary）
-            const conversationSummaries = conversations.map(conv => {
-                const convIdStr = conv._id.toString();
-                const firstMsg = firstMessagesMap.get(convIdStr);
-                // T048: 截取前100字作为摘要
-                let firstMessageSummary;
-                if (firstMsg?.content) {
-                    firstMessageSummary = firstMsg.content.length > 100
-                        ? firstMsg.content.substring(0, 100) + '...'
-                        : firstMsg.content;
-                }
-                const metricsStatus = deriveMetricsStatus(conv.metrics);
-                return {
-                    _id: convIdStr,
-                    userId: conv.userId,
-                    userName: userNameMap.get(conv.userId) || deletedUserLabel,
-                    classId: conv.classId,
-                    problemId: conv.problemId,
-                    problemUrl: buildProblemUrl(domainId, conv.problemId), // T031: 题目链接
-                    startTime: conv.startTime.toISOString(),
-                    endTime: conv.endTime.toISOString(),
-                    messageCount: conv.messageCount,
-                    isEffective: conv.isEffective,
-                    metrics: conv.metrics ? {
-                        ...conv.metrics,
-                        backfilledAt: conv.metrics.backfilledAt?.toISOString() ?? null,
-                    } : undefined,
-                    metricsStatus,
-                    tags: conv.tags,
-                    teacherNote: conv.teacherNote,
-                    metadata: conv.metadata,
-                    firstMessageSummary, // T048: 学生问题摘要
-                    questionType: firstMsg?.questionType,
-                };
-            });
+            const conversationSummaries = await summarizeConversations(this, conversations, domainId);
             if (wantJson) {
                 (0, httpHelpers_1.setJsonResponse)(this, {
                     conversations: conversationSummaries,
@@ -175,7 +226,6 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
         try {
             const wantJson = (0, httpHelpers_1.expectsJson)(this);
             const conversationModel = this.ctx.get('conversationModel');
-            const messageModel = this.ctx.get('messageModel');
             // 获取当前域 ID（用于域隔离验证）
             const domainId = (0, domainHelper_1.getDomainId)(this);
             if (!mongo_1.ObjectId.isValid(id)) {
@@ -197,44 +247,7 @@ class ConversationDetailHandler extends hydrooj_1.Handler {
                 (0, httpHelpers_1.setErrorResponse)(this, 'FORBIDDEN', this.translate('ai_helper_teacher_conversation_forbidden'), 403);
                 return;
             }
-            // 查询会话的所有消息 (按时间升序)
-            const messages = await messageModel.findByConversationId(id);
-            // 转换消息格式
-            const messagesFormatted = messages.map(msg => ({
-                _id: msg._id.toString(),
-                role: msg.role,
-                content: msg.content,
-                timestamp: msg.timestamp.toISOString(),
-                questionType: msg.questionType,
-                attachedCode: msg.attachedCode,
-                attachedError: msg.attachedError,
-                metadata: msg.metadata
-            }));
-            const deletedLabel = this.translate('ai_helper_teacher_deleted_user');
-            const userNameMap = await getUserNameMap([conversation.userId], deletedLabel);
-            const userName = userNameMap.get(conversation.userId) || deletedLabel;
-            // T032: 对话详情响应（包含 problemUrl + metrics）
-            const detailMetricsStatus = deriveMetricsStatus(conversation.metrics);
-            const conversationData = {
-                _id: conversation._id.toString(),
-                userId: conversation.userId,
-                userName,
-                classId: conversation.classId,
-                problemId: conversation.problemId,
-                problemUrl: buildProblemUrl(domainId, conversation.problemId), // T032: 题目链接
-                startTime: conversation.startTime.toISOString(),
-                endTime: conversation.endTime.toISOString(),
-                messageCount: conversation.messageCount,
-                isEffective: conversation.isEffective,
-                metrics: conversation.metrics ? {
-                    ...conversation.metrics,
-                    backfilledAt: conversation.metrics.backfilledAt?.toISOString() ?? null,
-                } : undefined,
-                metricsStatus: detailMetricsStatus,
-                tags: conversation.tags,
-                teacherNote: conversation.teacherNote,
-                metadata: conversation.metadata
-            };
+            const { conversation: conversationData, messages: messagesFormatted } = await buildConversationDetail(this, conversation, domainId);
             if (wantJson) {
                 (0, httpHelpers_1.setJsonResponse)(this, {
                     conversation: conversationData,

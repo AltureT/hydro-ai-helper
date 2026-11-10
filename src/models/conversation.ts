@@ -5,6 +5,7 @@
  */
 
 import type { Db, Collection, Filter, UpdateFilter } from 'mongodb';
+import { groupCondition } from '../utils/groupFilter';
 import { type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 
@@ -258,7 +259,7 @@ export class ConversationModel {
       startDate?: string;   // 开始日期 (ISO 8601)
       endDate?: string;     // 结束日期
       problemId?: string;   // 题目 ID
-      classId?: string;     // 班级 ID
+      group?: string;       // 小组（`__ungrouped__` 为未分组；旧参数 classId 由 handler 转换）
       userId?: number;      // 学生 ID
     },
     page: number = 1,
@@ -279,8 +280,8 @@ export class ConversationModel {
       query.problemId = filters.problemId;
     }
 
-    if (filters.classId) {
-      query.classId = filters.classId;
+    if (filters.group) {
+      Object.assign(query, groupCondition(filters.group));
     }
 
     // 时间范围筛选
@@ -303,7 +304,8 @@ export class ConversationModel {
       _id: 1,
       domainId: 1,
       userId: 1,
-      classId: 1,
+      groupNames: 1,
+      groupSource: 1,
       problemId: 1,
       startTime: 1,
       endTime: 1,

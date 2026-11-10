@@ -27,6 +27,7 @@ export type AuditAction =
   | 'group.drift_restore'
   | 'group.drift_dismiss'
   | 'group.meta'
+  | 'group.backfill'
   | 'quota.group_create'
   | 'quota.group_update'
   | 'quota.group_delete'
@@ -52,6 +53,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'group.drift_restore',
   'group.drift_dismiss',
   'group.meta',
+  'group.backfill',
   'quota.group_create',
   'quota.group_update',
   'quota.group_delete',
@@ -77,7 +79,7 @@ export function auditCategoryOf(action: AuditAction): AuditCategory {
 }
 
 export interface AuditTarget {
-  type: 'group' | 'user' | 'quota_group' | 'config' | 'review' | 'transfer';
+  type: 'group' | 'user' | 'quota_group' | 'config' | 'review' | 'transfer' | 'domain';
   id: string;
   label?: string;
 }

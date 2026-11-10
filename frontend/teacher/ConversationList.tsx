@@ -8,6 +8,8 @@ import React, { useState, useEffect } from 'react';
 import { i18n } from '../utils/i18n';
 import { ExportDialog } from './ExportDialog';
 import { ConversationDetailModal } from './ConversationDetailModal';
+import { GroupSelect } from './GroupSelect';
+import { groupNamesText, parseGroupOptions, readGroupFromSearch, type GroupFilterOptions } from './groupFilterLogic';
 import { buildApiUrl } from '../utils/domainUtils';
 import { formatDateTime } from '../utils/formatDate';
 import type { ConversationMetricsDTO, MetricsStatus } from './analyticsTypes';
@@ -40,7 +42,8 @@ interface ConversationSummary {
   _id: string;
   userId: number;
   userName?: string;
-  classId?: string;
+  groupNames?: string[];
+  groupSource?: 'snapshot' | 'backfill';
   problemId: string;
   problemUrl?: string;
   startTime: string;
@@ -137,14 +140,14 @@ interface ConversationListResponse {
 /**
  * 从 URL query 中解析初始筛选条件
  */
-function getInitialFiltersFromUrl(): { userId: string; classId: string; problemId: string } {
+function getInitialFiltersFromUrl(): { userId: string; group: string; problemId: string } {
   if (typeof window === 'undefined') {
-    return { userId: '', classId: '', problemId: '' };
+    return { userId: '', group: '', problemId: '' };
   }
   const params = new URLSearchParams(window.location.search);
   return {
     userId: params.get('userId') || '',
-    classId: params.get('classId') || '',
+    group: readGroupFromSearch(window.location.search),
     problemId: params.get('problemId') || '',
   };
 }
@@ -180,14 +183,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
     startDate: '',
     endDate: '',
     problemId: initialFilters.problemId,
-    classId: initialFilters.classId,
+    group: initialFilters.group,
     userId: initialFilters.userId
   });
 
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   // autocomplete 选项
-  const [classOptions, setClassOptions] = useState<string[]>([]);
+  const [groupOptions, setGroupOptions] = useState<GroupFilterOptions>({ groups: [], hasUngrouped: false });
   const [problemOptions, setProblemOptions] = useState<{ id: string; title: string }[]>([]);
   const [userOptions, setUserOptions] = useState<number[]>([]);
 
@@ -199,7 +202,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
         });
         if (res.ok) {
           const json = await res.json();
-          setClassOptions(json.classIds || []);
+          setGroupOptions(parseGroupOptions(json));
           setProblemOptions(json.problemOptions || []);
           setUserOptions(json.userIds || []);
         }
@@ -223,7 +226,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
       if (filters.startDate) params.append('startDate', filters.startDate);
       if (filters.endDate) params.append('endDate', filters.endDate);
       if (filters.problemId) params.append('problemId', filters.problemId);
-      if (filters.classId) params.append('classId', filters.classId);
+      if (filters.group) params.append('group', filters.group);
       if (filters.userId) params.append('userId', filters.userId);
 
       const response = await fetch(buildApiUrl(`/ai-helper/conversations?${params.toString()}`), {
@@ -356,18 +359,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
             </datalist>
           </div>
           <div>
-            <label style={labelStyle}>{i18n('ai_helper_teacher_filter_class_id')}</label>
-            <input
-              type="text"
-              value={filters.classId}
-              onChange={(e) => handleFilterChange('classId', e.target.value)}
-              placeholder={i18n('ai_helper_teacher_filter_class_id')}
-              list="conv-class-options"
-              style={getInputStyle()}
+            <label style={labelStyle} htmlFor="conv-group-filter">{i18n('ai_helper_teacher_conv_col_class')}</label>
+            <GroupSelect
+              id="conv-group-filter"
+              value={filters.group}
+              options={groupOptions}
+              onChange={(value) => handleFilterChange('group', value)}
             />
-            <datalist id="conv-class-options">
-              {classOptions.map(c => <option key={c} value={c} />)}
-            </datalist>
           </div>
           <div>
             <label style={labelStyle}>{i18n('ai_helper_teacher_filter_student_id')}</label>
@@ -468,7 +466,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
                           {conv.userName && <span style={{ color: COLORS.textMuted, fontSize: '12px', marginLeft: SPACING.xs }}>({conv.userId})</span>}
                         </td>
                         <td style={{ ...getTableCellStyle(), color: COLORS.textSecondary }}>
-                          {conv.classId || <span style={{ color: COLORS.textMuted }}>-</span>}
+                          {groupNamesText(conv.groupNames) || <span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_group_ungrouped')}</span>}
+                          {conv.groupSource === 'backfill' && (
+                            <span title={i18n('ai_helper_group_source_backfill_hint')} style={{ color: COLORS.textMuted, fontSize: '12px', marginLeft: SPACING.xs }}>
+                              {i18n('ai_helper_group_source_backfill')}
+                            </span>
+                          )}
                         </td>
                         <td style={getTableCellStyle()}>
                           {conv.problemUrl ? (
@@ -594,7 +597,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ embedded = f
         filters={{
           startDate: filters.startDate || undefined,
           endDate: filters.endDate || undefined,
-          classId: filters.classId || undefined,
+          group: filters.group || undefined,
           problemId: filters.problemId || undefined,
           userId: filters.userId || undefined,
         }}
