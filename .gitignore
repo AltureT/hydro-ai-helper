@@ -42,6 +42,8 @@ PHASE3_IMPLEMENTATION.md
 /docs/*
 !/docs/README.md
 !/docs/testdata-large-inputs.md
+!/docs/configuration.md
+!/docs/configuration_en.md
 DEPLOYMENT.md
 hydro-ai-helper.code-workspace
 specs/
