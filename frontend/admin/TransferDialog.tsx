@@ -219,9 +219,13 @@ export const TransferDialog: React.FC<TransferDialogProps> = ({
           setPreviewError(null);
           setJoinRole((prev) => (prev && res.joinRoles.includes(prev) ? prev : res.defaultJoinRole || res.joinRoles[0] || ''));
           if (res.users) {
+            // 先判断再更新 ref：setSelected 的回调要到下次渲染才执行，那时 ref 已是新值，
+            // 若在回调里比较，第一次预览就会被当成“同一源域”，默认勾选永远为空
             const key = `${res.source.id}`;
-            setSelected((prev) => (selectionSource.current === key ? sanitizeSelection(prev, res.users || [], res.mode) : defaultSelection(res.users || [], res.mode)));
+            const users = res.users;
+            const sameSource = selectionSource.current === key;
             selectionSource.current = key;
+            setSelected((prev) => (sameSource ? sanitizeSelection(prev, users, res.mode) : defaultSelection(users, res.mode)));
           }
         })
         .catch((err) => {
