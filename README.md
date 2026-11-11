@@ -15,230 +15,92 @@
 
 </div>
 
-一个以教学为优先的 [HydroOJ](https://github.com/hydro-dev/Hydro) AI 辅助学习插件 — 引导思考，不给答案。支持中英文界面。
+以教学为优先的 [HydroOJ](https://github.com/hydro-dev/Hydro) AI 插件：引导学生思考，不直接给答案。支持中英文界面，兼容 Hydro 4 和 Hydro 5。
 
-## 截图预览
+<img src="assets/screenshots/student-chat.png" alt="学生在题目页向 AI 学习助手提问" width="800">
 
-<img src="assets/screenshots/1.png" alt="学生端 - AI 对话" width="800">
+## 核心功能
+
+### 学生：会引导、不给答案的 AI 助手
+
+- 在题目页打开 AI 面板，按「看不懂题 / 没思路 / 调试代码 / 代码优化（通过后）」提问，回答实时流式显示。
+- AI 结合样例讲思路、指出问题所在，不给出完整代码；提示注入、越狱和偏题会被拦截。
+- 在成绩表查看老师发布的个人学习总结。
+
+### 教师：出题、学情分析和讲评
+
+- **AI 生成测试数据**：在题目文件页根据题面生成测试点、评测配置和标程。生成器和标程在判题沙箱中实际运行，经过暴力解对拍、输入校验和样例回归；预览、确认后才写入题目。
+- **教学分析**：从全班提交中找出共性问题，给出「下节课怎么讲」的建议和课后巩固练习。
+- **批量学习总结**：为每位学生生成个性化总结，审阅草稿后发布给学生。
+- **负责老师只读视图**（可选）：小组的负责老师只读查看本组学生的 AI 对话和统计。
 
 <details>
-<summary><b>AI 生成测试数据</b></summary>
+<summary><b>教师端截图</b></summary>
 
-<img src="assets/screenshots/10.png" alt="题目文件页 - AI 生成测试数据面板" width="800">
+<img src="assets/screenshots/testdata-generation.png" alt="题目文件页的 AI 生成测试数据面板" width="800">
+
+<img src="assets/screenshots/teaching-analysis.png" alt="作业成绩表中的 AI 教学分析" width="800">
+
+<img src="assets/screenshots/learning-summary.png" alt="比赛成绩表中的批量学习总结" width="800">
 
 </details>
 
-<details>
-<summary><b>批量 AI 学习总结</b></summary>
+### 管理员：用户、额度、安全和成本
 
-<img src="assets/screenshots/8.png" alt="学习总结 - 成绩表集成" width="800">
-
-<img src="assets/screenshots/9.png" alt="学习总结 - 生成结果" width="800">
-
-</details>
+- **用户管理**：按用户名前缀、正则或名单批量管理 Hydro 小组；跨域转移小组和学生；在学生总览中跨域查看每个学生的小组、额度、用量和信誉。所有成员变更可撤销。
+- **每日 AI 额度**：按提问次数计算、跨域合计，可按额度组或个人设置。违规会降低信誉系数和当日额度，之后逐日恢复。
+- **安全治理**：多层越狱与提示注入检测、AI 抽查、学生申诉与复核；成员、额度、信誉和开关的变更都留有审计记录。
+- **模型与成本**：多个 API 端点自动切换，可为对话、测试数据生成等场景分别指定模型；统计 Token 用量和费用，支持预算上限。
 
 <details>
-<summary><b>管理后台截图</b></summary>
+<summary><b>管理端截图</b></summary>
 
-<img src="assets/screenshots/4.png" alt="后台 - 对话记录" width="800">
+<img src="assets/screenshots/user-overview.png" alt="用户管理中的学生总览" width="800">
 
-<img src="assets/screenshots/5.png" alt="后台 - 使用统计" width="800">
-
-<img src="assets/screenshots/6.png" alt="后台 - AI 配置" width="800">
-
-<img src="assets/screenshots/7.png" alt="后台 - 成本看板" width="500">
-
-</details>
-
-## 功能特性
-
-### 学生端
-
-- 题目页 AI 对话面板，SSE 实时流式响应，LaTeX 公式自动渲染
-- 差异化问题类型：**理解题意** / **理清思路** / **分析错误** / **代码优化**（AC 后专属）
-- 多轮对话自动恢复；选中不理解的文字一键追问
-- 在成绩表页面查看教师发布的个性化 AI 学习总结
-
-### 教师端
-
-- **AI 生成测试数据** — 在题目文件页（`/p/:pid/files`）根据题面一键生成完整测试数据
-  - **沙箱实跑 + 双重验证**：数据生成器与标程在 Hydro 判题沙箱中实际运行产出 `.in`/`.out`，并经过独立暴力解对拍、输入校验、模板实跑与题面样例回归四道机器关卡；验证失败按生成器/标程/模板阶段定向修复
-  - 默认根据题面自动混合生成小、中、临界规模并交叉覆盖多项约束；也可定向选择单一规模。新增数据自动避开已有数字测试点并合并生成 `config.yaml`
-  - 支持传统题、LeetCode 风格函数题（自动生成 `template.py/java/cc` 与 `compile.sh`）与填空题（完善代码）
-  - 可粘贴已有标准答案作为输出的唯一权威；`config.yaml` 评测配置确定性生成，写入后评测设置自动同步
-  - 生成的每个代码文件（std.py、generator.py、validator.py 等）首行注明用途；全量预览、可编辑、勾选确认后才写入
-  - 使用统一的自适应生成流程，不按题目难度设置插件截止时间；任务会持续到完成、服务明确失败或用户主动取消。页面显示真实阶段、已用时间和后台心跳，可关闭或离开后再回来恢复进度或结果
-  - ⚠️ 对模型能力非常敏感：请在场景模型中为「测试数据生成」配置最强模型；另有骨架模式（不调用 AI）兜底
-- **教学分析** — 从全班提交数据发现教学问题，生成可操作的教学建议
-  - 8 维度规则引擎（常见错误 / 理解障碍 / 高危学生 / 进步趋势等）+ 错误签名聚类 + 时序行为模式分类
-  - LLM 生成 P0/P1/P2 优先级教学建议 — 具体课堂行动，非泛泛而谈；可从 AC 代码自动生成填空练习
-- **批量 AI 学习总结** — 成绩表页面一键为每位学生生成个性化学习总结
-  - 跨作业历史追踪 + 基于里程碑的智能提交采样；迟到学生可单独补充生成
-  - 草稿/发布工作流，SSE 实时进度，停止/继续/重试控制
-- 对话记录浏览（时间/题目/小组/学生筛选，自动补全）、有效性指标、CSV 导出（支持脱敏）
-- **负责老师只读视图**（默认关闭）— 系统管理员开启「负责老师访问」后，小组的负责老师可在 `/d/<域 ID>/ai-helper/class` 只读查看本组学生在该域的 AI 对话和近 7 天统计，看不到其他班、其他域的数据
-
-### 管理员端
-
-- 统一入口：对话记录/使用统计/安全治理/用户管理/AI 配置 Tab 切换
-- 多端点 API 管理，自动获取模型列表，拖拽排序优先级，自动 Failover
-- 场景模型分配：学生对话/学习总结/教学分析/测试数据生成可分别指定专属模型
-- 成本控制：Token 用量追踪、预算限制、成本看板
-- 频率限制、自定义系统提示词、一键更新
-
-<details>
-<summary><b>用户管理与 AI 额度</b>（仅系统管理员）</summary>
-
-- **小组**：按用户名前缀、正则或名单批量把学生加入或移出 Hydro 原生小组，可同时加入本域；每次操作可撤销。能发现被 Hydro 原生页面覆盖掉的成员并恢复；可记录小组类型、学年和负责老师
-- **跨域转移**：把小组（连同成员）复制或移动到另一个域，或把选中的学生移动到另一个域（站点中心除外），执行前预览影响，执行后可撤销。只想让学生同时加入其他域，用“加入小组”并勾选“同时加入本域”
-- **每日额度**：按提问次数计、跨域合计的每日上限，默认不限。额度组（授予型 / 限制型，可关联 Hydro 小组）和个人覆盖只有系统管理员能改
-- **信誉系数**：高置信度违规会降低信誉系数，从而降低当日额度；不违规时每天恢复，设有下限和保底次数。误判复核或学生申诉成功后撤销扣分，也可手动重置。冷却和信誉跨域生效
-- **偏题**：按学生跨会话计数，24 小时内再次偏题记为违规；附带极短代码不再能绕过检查
-- **AI 抽查**（默认关闭）：每天抽取可疑和随机会话，匿名后交给单独的审核模型。只有高置信度、且引用原文核对无误的结论才自动处罚；中、高置信度的结论都进入复核列表；自动处罚误判率过高时自动停用
-- **学生总览**：跨域查看学生的小组、额度组、今日用量、近 7 天违规和信誉，可批量加入小组或额度组
-- **按小组统计**：统计、对话记录和导出可按小组筛选；新会话记录学生当时所在的小组，升级前的会话可按当前成员手动回填
-- **操作审计**：成员变更、额度、信誉、抽查、转移和开关变化都留痕，保留 180 天
-
-</details>
-
-<details>
-<summary><b>安全特性</b></summary>
-
-- 多层级越狱检测（输入/提示词/输出），跨轮次防护
-- CSRF Token 校验、SSRF 防护、API Key AES-256-GCM 加密存储
-- AI 生成的代码只在 go-judge 沙箱中执行，不进入 Web 进程
-- 越狱记录分页审计
+<img src="assets/screenshots/cost-dashboard.png" alt="成本分析看板" width="800">
 
 </details>
 
 ## 安装
 
-```bash
-# 克隆（二选一）
-git clone https://github.com/AltureT/hydro-ai-helper.git   # GitHub
-git clone https://gitee.com/alture/hydro-ai-helper.git      # Gitee（镜像）
+需要 HydroOJ 4.x 或 5.x。AI 生成测试数据还需要 Hydro 判题沙箱（go-judge）可以访问。
 
+```bash
+git clone https://github.com/AltureT/hydro-ai-helper.git   # 或 Gitee 镜像：https://gitee.com/alture/hydro-ai-helper.git
 cd hydro-ai-helper
 npm install
 npm run build:plugin
-
-# 安装到 HydroOJ
-hydrooj addon add /path/to/hydro-ai-helper
-pm2 restart hydrooj
+hydrooj addon add "$(pwd)"
 ```
 
-验证：访问 `/ai-helper/hello` 返回 JSON 即表示成功。
-
-## 配置
-
-### 环境变量
-
-`ENCRYPTION_KEY`（必需，32 字符）— 加密 API Key：
+为 Hydro 进程设置加密密钥（用于加密保存 API Key，至少 16 个字符），然后重启：
 
 ```bash
-export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # 生成：openssl rand -base64 24 | head -c 32
+export ENCRYPTION_KEY="$(openssl rand -base64 24)"
+pm2 restart hydrooj --update-env && pm2 save
 ```
 
-`AI_HELPER_UPDATE_CHANNEL`（可选）— 应用内一键更新通道：
+请妥善保存这个密钥。更换密钥会导致已保存的 API Key 无法解密，更换方法见[配置说明](docs/configuration.md)。
 
-- `stable`（默认）— 只更新到正式发布版本（`vX.Y.Z` tag），经 GPG 签名校验。所有真实用户的服务器都应使用此通道。
-- `edge` — 跟踪 `main` 分支最新代码，**仅限维护者自己的测试服务器**。
+访问 `/ai-helper/hello`，返回 JSON 即表示插件已加载。
 
-`AI_HELPER_JAILBREAK_LOG_RETENTION_DAYS`（可选）— 安全策略拦截日志保留天数：
+## 首次配置
 
-- 默认 `180` 天，可设置范围 `7`–`3650` 天
-- 新日志从创建时起计算；历史日志从升级时起渐进过期，不会在部署时立即删除
+以系统管理员登录，进入 **控制面板 → AI 助手**（`/ai-helper`）→「AI 配置」：
 
-`AI_HELPER_TESTDATA_GENERATION_MODE`（可选）— 测试数据生成是否要求沙箱（`hydrojudge.sandbox_host`）：
+1. **添加 API 端点**：填写 API Base URL 和 API Key，点击「获取模型列表」。
+2. **选择模型**：勾选要用的模型并拖动排序，首选模型不可用时自动切换到下一个。
+3. **场景模型**（可选）：为「测试数据生成」等场景单独指定模型，建议使用最强的模型。
+4. 点击「保存配置」，再点击「检查接口连接」确认可用。
 
-- `auto`（默认）— 沙箱可达时实跑验证，不可达时降级直出并明确标注"未验证"
-- `sandbox` — 强制要求沙箱，不可用时安全失败
-- `direct` — 始终使用直出模式（不推荐）
+之后可以在「AI 配置」页一键更新插件。默认只更新到经过 GPG 签名验证的正式版本。
 
-`AI_HELPER_TESTDATA_MODEL_TIMEOUT_SECONDS`（可选）— AI 测试数据生成中单次模型调用的墙钟上限：
-
-- 默认 `300` 秒，可设置范围 `30`–`1800` 秒；非法值自动回退默认值
-- 只限制卡住的单次调用，不缩减模型输出 token、推理强度或验证步骤
-
-`AI_HELPER_TESTDATA_MUTATION_CONCURRENCY`（可选）— 变异测试的沙箱并发窗口大小：
-
-- 默认 `2`，可设置范围 `1`–`4`；非法值自动回退默认值
-- 候选仍按原始顺序记账；并发窗口里的首次超时会单独复跑确认，避免把瞬时拥塞误记为已杀死
-
-### 管理员配置
-
-登录后访问 **控制面板 → AI 助手**（`/ai-helper`）→「AI 配置」Tab：
-
-1. **添加 API 端点** — 填写端点名称、API Base URL、API Key → 点击「获取模型」
-2. **选择模型与优先级** — 选择模型，拖拽排序；首选不可用时自动切换
-3. **场景模型** — 为「测试数据生成」等场景指定专属模型（该场景建议配最强模型）
-4. **测试并保存** — 点击「测试连接」验证后保存
+可选环境变量（更新通道、日志保留天数、测试数据生成参数等）见[配置说明](docs/configuration.md)。
 
 ## 遥测与隐私
 
-收集**匿名统计数据**（安装数、活跃用户窗口、对话数、按日功能用量、版本），用于 GitHub 徽章和开发参考。完全匿名（随机 UUID，无个人信息，不存储 IP），不收集代码、对话内容或个人数据；仅记录 Cloudflare 粗粒度推断的国家/省份用于地区分布。
+插件会上报匿名统计数据（安装数、活跃用户数、对话数、功能用量和版本），用于项目徽章和改进开发。上报使用随机 ID，不包含代码、对话内容或任何个人信息，也不保存 IP；只记录由 Cloudflare 粗略推断的国家和省份。关闭方法见[配置说明](docs/configuration.md#关闭遥测)。
 
-<details>
-<summary><b>关闭遥测</b></summary>
+## 更新日志与许可证
 
-```javascript
-use your_hydro_db
-db.ai_plugin_install.updateOne(
-  { _id: 'install' },
-  { $set: { telemetryEnabled: false } }
-)
-```
-
-</details>
-
-## 更新日志
-
-完整版本记录见 [CHANGELOG.md](CHANGELOG.md)，GitHub Release 仅展示对应版本的更新内容。
-
-<details open>
-<summary><b>v3.0.0</b> — 测试数据生成：沙箱实跑 + 双重验证</summary>
-
-- 测试数据不再由 AI 直接给出：生成器与标程在 go-judge 沙箱中实际运行产出 `.in`/`.out`
-- 四道机器关卡：独立暴力解对拍、输入校验器逐点校验、函数题模板实跑比对、题面样例回归
-- 验证失败自动把失败阶段、出错测试点、输入与 traceback 关键行回喂 AI 修复一轮；教师取消不误报
-- 生成的代码文件首行自带用途注释；文件页与场景模型页醒目提示配置最强模型
-- 遥测增强：错误上报携带 AI 失败详情、启动失败金丝雀告警、功能用量累计与实例来源省份
-
-</details>
-
-<details>
-<summary><b>v2.5.0</b> — AI 生成测试数据（Beta）</summary>
-
-- 根据题面一键生成测试点、函数题评测模板、config.yaml 与参考标程（AI 直出模式）
-- 支持传统题、函数题与填空题；可粘贴标准答案作为唯一权威；骨架模式兜底
-- 新增「测试数据生成」AI 场景（可单独指定模型链）
-
-</details>
-
-<details>
-<summary><b>v2.0.0</b> — 教学分析系统 & 设计升级</summary>
-
-- 8 维度班级分析 + 错误签名聚类 + 时序行为模式（规则引擎优先，成本约为纯 LLM 方案的 1/30）
-- LLM 生成 P0/P1/P2 教学建议；从 AC 代码自动生成填空练习
-- 学习总结跨作业历史追踪与补充生成；前端统一设计 Token 系统
-
-</details>
-
-<details>
-<summary><b>更早版本</b></summary>
-
-- v1.21.0：批量 AI 学习总结（里程碑采样、SSE 进度、草稿/发布）
-- v1.19.0–v1.20.0：全面中英文国际化、多维有效性指标、筛选自动补全
-- v1.18.0：遥测看板 SPA、错误诊断增强
-- v1.14.x–v1.16.x：SSE 流式响应、成本控制、CSRF/SSRF/Prompt 注入防御、安全修复
-- v1.0.0–v1.12.0：初始发布、差异化问题类型、多端点 Failover、评测数据集成、竞赛模式
-
-</details>
-
-## 关于
-
-[HydroOJ](https://github.com/hydro-dev/Hydro) 开源在线评测系统的第三方插件。如有问题或建议，欢迎提交 Issue。
-
-## 许可证
-
-MIT License
+各版本的改动见 [CHANGELOG.md](CHANGELOG.md)。本项目是 HydroOJ 的第三方插件，以 MIT 许可证发布。欢迎提交 Issue 反馈问题和建议。

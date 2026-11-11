@@ -1,5 +1,6 @@
 # 使用文档 / User documentation
 
+- [配置说明](configuration.md) · [Configuration](configuration_en.md)
 - [大规模测试输入 / Large test inputs](testdata-large-inputs.md)
 - [插件使用说明](../README.md) · [English guide](../README_en.md)
 
