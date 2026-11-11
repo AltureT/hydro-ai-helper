@@ -50,6 +50,8 @@ export const TRANSFER_MAX_USERS = 2000;
 export const TRANSFER_MAX_GROUP_MEMBERS = 5000;
 export const TRANSFER_BATCH_SIZE = 200;
 export const PREVIEW_TTL_MS = 10 * 60 * 1000;
+/** Hydro 的全站默认域：学生移出后在站点中心变成游客，不允许作为“移动学生”的源域 */
+export const SYSTEM_DOMAIN_ID = 'system';
 const DOC_TYPE_CONTEST = 30;
 
 export type ConflictChoice = 'merge' | { renameTo: string };
@@ -231,6 +233,9 @@ export function normalizeTransferRequest(raw: Record<string, unknown>): Transfer
     uids = uniqueSorted(uids);
     if (uids.length > TRANSFER_MAX_USERS) throw invalid('TOO_MANY_USERS', 'ai_helper_group_too_many_users', [TRANSFER_MAX_USERS]);
     if (raw.targetGroup !== undefined && raw.targetGroup !== null && raw.targetGroup !== '') targetGroup = requireName(raw.targetGroup);
+    if (mode === 'move' && sourceDomainId === SYSTEM_DOMAIN_ID) {
+      throw invalid('SYSTEM_DOMAIN_SOURCE', 'ai_helper_transfer_system_source');
+    }
   }
   return { kind, mode, sourceDomainId, targetDomainId, groupNames, conflicts, uids, targetGroup };
 }
