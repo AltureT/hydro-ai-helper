@@ -10,7 +10,7 @@ import { QuotaOverrideModel } from '../../models/quotaOverride';
 import { QuotaUsageModel } from '../../models/quotaUsage';
 import { QuotaGroupResolver } from '../../services/quotaGroupResolver';
 import { QuotaService } from '../../services/quotaService';
-import { UserOverviewService } from '../../services/userOverviewService';
+import { UserOverviewService, resolveOverviewPageSize } from '../../services/userOverviewService';
 import { AuditLogModel } from '../../models/auditLog';
 import { CreditEventModel } from '../../models/creditEvent';
 import { AuditService } from '../../services/auditService';
@@ -286,9 +286,21 @@ describe('user overview', () => {
     }));
   });
 
+  it('lets the admin pick a page size from the allowed list', async () => {
+    const env = setup();
+    const small = await list(env, { pageSize: '20' });
+    expect(small.body).toEqual(expect.objectContaining({ pageSize: 20, pageCount: 1 }));
+    const two = await list(env, { pageSize: '20', page: '2' });
+    expect(two.body.rows).toEqual([]);
+    // 不在可选列表中的值按默认 50 处理，避免一次读出过多
+    expect((await list(env, { pageSize: '5000' })).body.pageSize).toBe(50);
+    expect((await list(env, { pageSize: '7' })).body.pageSize).toBe(50);
+    expect(resolveOverviewPageSize('100')).toBe(100);
+  });
+
   it('parses query filters defensively', () => {
     expect(parseOverviewFilters({ q: ' 23 ', mode: 'regex', status: 'nope', page: 'x' }))
-      .toEqual({ q: '23', mode: 'regex', domainId: undefined, group: undefined, quotaGroupId: undefined, status: undefined, page: 1 });
+      .toEqual({ q: '23', mode: 'regex', domainId: undefined, group: undefined, quotaGroupId: undefined, status: undefined, page: 1, pageSize: undefined });
     expect(parseOverviewFilters(undefined).mode).toBe('prefix');
     expect(parseOverviewFilters({ status: 'exhausted', page: '3' })).toEqual(expect.objectContaining({ status: 'exhausted', page: 3 }));
   });

@@ -18,9 +18,20 @@ import {
 } from '../utils/styles';
 import { errorMessage, getJson } from './userManagementApi';
 import { domainApiUrl, type GroupListResponse } from './userManagementLogic';
-import { Badge, TableScroll, linkButtonStyle, mutedTextStyle } from './userManagementUi';
+import {
+  Badge,
+  BusyLabel,
+  LoadingBar,
+  SkeletonRows,
+  TableScroll,
+  linkButtonStyle,
+  mutedTextStyle,
+  useDelayedFlag,
+} from './userManagementUi';
 import {
   EMPTY_OVERVIEW_FILTERS,
+  OVERVIEW_PAGE_SIZES,
+  normalizePageSize,
   overviewQuery,
   pageSelectionState,
   usageMeter,
@@ -39,6 +50,25 @@ import { CreditResetModal } from './CreditDialogs';
 import { formatMultiplier, recoveryDaysFrom } from './creditLogic';
 
 type ShowToast = (text: string, type?: 'success' | 'warning' | 'error' | 'info') => void;
+
+const PAGE_SIZE_KEY = 'ai-helper:um:overview:page-size';
+
+/** 每页人数按浏览器记住（读写失败时用默认值） */
+function readPageSize(): number {
+  try {
+    return normalizePageSize(window.localStorage.getItem(PAGE_SIZE_KEY));
+  } catch {
+    return normalizePageSize(null);
+  }
+}
+
+function savePageSize(size: number): void {
+  try {
+    window.localStorage.setItem(PAGE_SIZE_KEY, String(size));
+  } catch {
+    // 隐私模式等情况下无法保存，下次回到默认值即可
+  }
+}
 type Dialog = 'group' | 'quota' | 'override' | 'transfer' | 'credit' | null;
 
 const TONE_COLORS: Record<string, string> = {
@@ -118,8 +148,11 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
   const [draft, setDraft] = useState<OverviewFiltersState>(EMPTY_OVERVIEW_FILTERS);
   const [filters, setFilters] = useState<OverviewFiltersState>(EMPTY_OVERVIEW_FILTERS);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(readPageSize);
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  /** 由“查询”按钮发起的加载，按钮上显示转圈 */
+  const [querying, setQuerying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [meta, setMeta] = useState<QuotaGroupsResponse | null>(null);
   const [domainGroups, setDomainGroups] = useState<string[]>([]);
@@ -145,20 +178,30 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
     return () => { cancelled = true; };
   }, [draft.domainId]);
 
+  const requestSeq = useRef(0);
   const load = useCallback(async () => {
+    // 快速翻页或连续查询时只采用最后一次请求的结果
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      const query = overviewQuery(filters, page);
-      setData(await getJson<OverviewResponse>(`${QUOTA_API.users}${query ? `?${query}` : ''}`, i18n('ai_helper_overview_failed')));
+      const query = overviewQuery(filters, page, pageSize);
+      const res = await getJson<OverviewResponse>(`${QUOTA_API.users}${query ? `?${query}` : ''}`, i18n('ai_helper_overview_failed'));
+      if (seq !== requestSeq.current) return;
+      setData(res);
       setError(null);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setError(errorMessage(err, i18n('ai_helper_overview_failed')));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setQuerying(false);
+      }
     }
-  }, [filters, page]);
+  }, [filters, page, pageSize]);
 
   useEffect(() => { load(); }, [load]);
+  const refreshing = useDelayedFlag(loading && !!data);
 
   const rows = data?.rows || [];
   const selection = pageSelectionState(rows, new Set(selected.keys()));
@@ -180,8 +223,19 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
     setSelected(next);
   };
 
-  const apply = () => { setPage(1); setFilters({ ...draft }); };
+  const apply = () => {
+    setQuerying(true);
+    setPage(1);
+    // 条件没变时也重新查询（例如别人刚改过数据）
+    if (JSON.stringify(draft) === JSON.stringify(filters) && page === 1) load();
+    else setFilters({ ...draft });
+  };
   const reset = () => { setDraft(EMPTY_OVERVIEW_FILTERS); setFilters(EMPTY_OVERVIEW_FILTERS); setPage(1); };
+  const changePageSize = (size: number) => {
+    savePageSize(size);
+    setPageSize(size);
+    setPage(1);
+  };
   const selectedRows = useMemo(() => [...selected.values()], [selected]);
   const domains = meta?.domains || [];
 
@@ -269,7 +323,9 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
           </select>
           <span style={{ flex: 1 }} />
           <button type="button" style={getButtonStyle('ghost')} onClick={reset}>{i18n('ai_helper_um_overview_reset')}</button>
-          <button type="submit" style={getButtonStyle('primary')}>{i18n('ai_helper_um_overview_query')}</button>
+          <button type="submit" style={getButtonStyle('primary')} disabled={querying} aria-busy={querying}>
+            <BusyLabel busy={querying}>{querying ? i18n('ai_helper_um_overview_querying') : i18n('ai_helper_um_overview_query')}</BusyLabel>
+          </button>
         </form>
       </section>
 
@@ -297,7 +353,8 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
         )}
       </div>
 
-      <section style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}>
+      <section aria-busy={loading} style={{ ...cardStyle, padding: 0, overflow: 'hidden', position: 'relative' }}>
+        <LoadingBar active={refreshing} />
         {error && (
           <div style={{ ...getAlertStyle('error'), margin: SPACING.base, display: 'flex', gap: SPACING.sm, alignItems: 'center' }}>
             <span style={{ flex: 1 }}>{error}</span>
@@ -306,7 +363,7 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
         )}
         {data?.truncated && <div style={{ ...getAlertStyle('warning'), margin: SPACING.base }}>{i18n('ai_helper_um_overview_truncated')}</div>}
         <TableScroll>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', opacity: refreshing ? 0.55 : 1, transition: 'opacity 150ms' }}>
             <thead>
               <tr>
                 <th style={{ ...th, width: '36px' }}>
@@ -329,9 +386,7 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
               </tr>
             </thead>
             <tbody>
-              {loading && !data && (
-                <tr><td colSpan={columnCount} style={{ ...td, color: COLORS.textMuted, textAlign: 'center' }}>{i18n('ai_helper_um_loading')}</td></tr>
-              )}
+              {loading && !data && <SkeletonRows columns={columnCount} label={i18n('ai_helper_um_loading')} />}
               {data && rows.length === 0 && (
                 <tr><td colSpan={columnCount} style={{ ...td, color: COLORS.textMuted, textAlign: 'center' }}>{i18n('ai_helper_um_overview_empty')}</td></tr>
               )}
@@ -373,6 +428,16 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
         {data && (
           <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, padding: `${SPACING.sm} ${SPACING.base}`, borderTop: `1px solid ${COLORS.border}`, flexWrap: 'wrap' }}>
             <span style={mutedTextStyle}>{i18n('ai_helper_um_overview_pager', data.total, data.pageCount ? data.page : 0, data.pageCount)}</span>
+            <label style={{ ...mutedTextStyle, display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              {i18n('ai_helper_um_overview_page_size')}
+              <select
+                value={pageSize}
+                onChange={(event) => changePageSize(Number(event.target.value))}
+                style={{ ...getInputStyle(), width: 'auto', padding: '4px 8px', minHeight: 0 }}
+              >
+                {OVERVIEW_PAGE_SIZES.map((size) => <option key={size} value={size}>{i18n('ai_helper_um_overview_page_size_option', size)}</option>)}
+              </select>
+            </label>
             <span style={{ flex: 1 }} />
             <button type="button" style={getButtonStyle('secondary')} disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>
               {i18n('ai_helper_um_prev_page')}

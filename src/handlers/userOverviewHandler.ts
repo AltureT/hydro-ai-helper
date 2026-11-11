@@ -2,7 +2,7 @@
  * 跨域学生总览与用户详情（US6，FR-050–FR-054；FR-026）
  *
  * 仅限系统管理员：路由层校验之外，处理器内再校验一次（FR-054）。
- * GET /ai-helper/admin/users        ?q=&mode=prefix|regex&domainId=&group=&quotaGroupId=&status=&page=
+ * GET /ai-helper/admin/users        ?q=&mode=prefix|regex&domainId=&group=&quotaGroupId=&status=&page=&pageSize=
  * GET /ai-helper/admin/users/:uid   有效额度及来源、所属域与小组、近期安全记录（不含对话原文）
  */
 
@@ -41,6 +41,7 @@ export function parseOverviewFilters(query: Record<string, unknown> | undefined)
     quotaGroupId: str(q.quotaGroupId),
     status: status && OVERVIEW_STATUSES.includes(status as OverviewStatus) ? status as OverviewStatus : undefined,
     page: Number(q.page) || 1,
+    pageSize: Number(q.pageSize) || undefined,
   };
 }
 

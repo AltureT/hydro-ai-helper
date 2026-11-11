@@ -14,7 +14,7 @@ import {
   getInputStyle,
 } from '../utils/styles';
 import { errorMessage, getJson } from './userManagementApi';
-import { labelStyle, mutedTextStyle } from './userManagementUi';
+import { LoadingState, labelStyle, mutedTextStyle } from './userManagementUi';
 import { QuotaGroupsSection } from './QuotaGroupsSection';
 import { QuotaOverridesSection } from './QuotaOverridesSection';
 import { CreditRulesSection } from './CreditRulesSection';
@@ -156,7 +156,7 @@ export const QuotaPanel: React.FC<{
           </div>
         )}
 
-        {loading && !saved && <div style={mutedTextStyle}>{i18n('ai_helper_um_loading')}</div>}
+        {loading && !saved && <LoadingState label={i18n('ai_helper_um_loading')} />}
 
         {saved && (
           <>

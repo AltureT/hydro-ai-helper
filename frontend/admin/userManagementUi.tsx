@@ -1,8 +1,8 @@
 /**
- * 用户管理页面共用的小组件：徽标、弹窗、侧栏、二级导航、表格容器
+ * 用户管理页面共用的小组件：徽标、弹窗、侧栏、二级导航、表格容器、加载状态
  */
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import {
   COLORS,
@@ -270,3 +270,138 @@ export function PillGroup<T extends string>({ options, value, onChange, disabled
     </div>
   );
 }
+
+// ─── 加载状态 ─────────────────────────────────────────────────────────────────
+
+const LOADING_CSS = `
+@keyframes ai-um-spin { to { transform: rotate(360deg); } }
+@keyframes ai-um-bar { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
+@keyframes ai-um-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-um-anim { animation-duration: 2.4s !important; }
+}
+`;
+
+/** 动画样式只注入一次；放在 head 里，弹窗和面板都能用 */
+function useLoadingCss(): void {
+  useEffect(() => {
+    if (typeof document === 'undefined' || document.getElementById('ai-um-loading-css')) return;
+    const el = document.createElement('style');
+    el.id = 'ai-um-loading-css';
+    el.textContent = LOADING_CSS;
+    document.head.appendChild(el);
+  }, []);
+}
+
+/**
+ * active 持续超过 delay 毫秒才返回 true：请求很快完成时不闪一下加载提示
+ */
+export function useDelayedFlag(active: boolean, delay = 180): boolean {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (!active) { setShown(false); return undefined; }
+    const timer = window.setTimeout(() => setShown(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [active, delay]);
+  return shown;
+}
+
+/** 行内转圈（按钮、提示文字前） */
+export const Spinner: React.FC<{ size?: number; color?: string }> = ({ size = 14, color = 'currentColor' }) => {
+  useLoadingCss();
+  return (
+    <span
+      aria-hidden="true"
+      className="ai-um-anim"
+      style={{
+        display: 'inline-block',
+        width: `${size}px`,
+        height: `${size}px`,
+        boxSizing: 'border-box',
+        borderRadius: '50%',
+        border: `2px solid ${color}`,
+        borderRightColor: 'transparent',
+        opacity: 0.85,
+        verticalAlign: '-2px',
+        flexShrink: 0,
+        animation: 'ai-um-spin 0.75s linear infinite',
+      }}
+    />
+  );
+};
+
+/** 按钮内容：忙时在文字前加转圈（按钮本身仍由调用方禁用） */
+export const BusyLabel: React.FC<{ busy: boolean; children: React.ReactNode }> = ({ busy, children }) => (
+  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+    {busy && <Spinner size={13} />}
+    {children}
+  </span>
+);
+
+/** 卡片顶部的细进度条：已有数据、正在刷新时显示（父元素需 position: relative） */
+export const LoadingBar: React.FC<{ active: boolean }> = ({ active }) => {
+  useLoadingCss();
+  if (!active) return null;
+  return (
+    <div aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '3px', overflow: 'hidden', zIndex: 1, pointerEvents: 'none' }}>
+      <div
+        className="ai-um-anim"
+        style={{ width: '40%', height: '100%', borderRadius: RADIUS.full, background: COLORS.primary, animation: 'ai-um-bar 1.1s ease-in-out infinite' }}
+      />
+    </div>
+  );
+};
+
+/** 列表上方的刷新进度条：已有数据、重新加载超过片刻才显示；不占高度 */
+export const RefreshBar: React.FC<{ loading: boolean }> = ({ loading }) => {
+  const shown = useDelayedFlag(loading);
+  return (
+    <div style={{ position: 'relative', height: 0 }}>
+      <LoadingBar active={shown} />
+    </div>
+  );
+};
+
+/** 首次加载：转圈 + 文字，占住高度，避免内容出现时页面跳动 */
+export const LoadingState: React.FC<{ label: string; minHeight?: number }> = ({ label, minHeight = 120 }) => (
+  <div
+    role="status"
+    style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: SPACING.sm,
+      minHeight: `${minHeight}px`, color: COLORS.textMuted, fontSize: '14px',
+    }}
+  >
+    <Spinner size={16} />
+    <span>{label}</span>
+  </div>
+);
+
+/** 表格首次加载的骨架行 */
+export const SkeletonRows: React.FC<{ rows?: number; columns: number; label: string }> = ({ rows = 6, columns, label }) => {
+  useLoadingCss();
+  const widths = ['70%', '45%', '60%', '35%', '55%', '40%', '50%', '30%'];
+  return (
+    <>
+      {Array.from({ length: rows }, (_, row) => (
+        <tr key={row} aria-hidden={row > 0 ? 'true' : undefined}>
+          {Array.from({ length: columns }, (__, col) => (
+            <td key={col} style={{ padding: '14px 12px', borderBottom: `1px solid ${COLORS.border}` }}>
+              {row === 0 && col === 0 ? <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>{label}</span> : null}
+              <div
+                className="ai-um-anim"
+                style={{
+                  height: '12px',
+                  width: col === 0 ? '16px' : widths[(row + col) % widths.length],
+                  borderRadius: RADIUS.sm,
+                  background: COLORS.bgHover,
+                  animation: 'ai-um-pulse 1.4s ease-in-out infinite',
+                  animationDelay: `${row * 0.08}s`,
+                }}
+              />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+};

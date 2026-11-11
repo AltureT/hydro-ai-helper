@@ -18,7 +18,18 @@ import {
 import { Icon } from '../components/Icon';
 import { errorMessage, getJson, postJson } from './userManagementApi';
 import { domainApiUrl, type GroupListResponse } from './userManagementLogic';
-import { Badge, Drawer, Modal, PillGroup, TableScroll, labelStyle, linkButtonStyle, mutedTextStyle } from './userManagementUi';
+import {
+  Badge,
+  Drawer,
+  LoadingState,
+  Modal,
+  PillGroup,
+  RefreshBar,
+  TableScroll,
+  labelStyle,
+  linkButtonStyle,
+  mutedTextStyle,
+} from './userManagementUi';
 import { UserPicker, type PickedUser } from './UserPicker';
 import {
   QUOTA_GROUP_NAME_MAX,
@@ -420,7 +431,8 @@ export const QuotaGroupsSection: React.FC<{ domainId: string; showToast: ShowToa
           <button type="button" style={getButtonStyle('secondary')} onClick={load}>{i18n('ai_helper_um_retry')}</button>
         </div>
       )}
-      {loading && !data && <div style={mutedTextStyle}>{i18n('ai_helper_um_loading')}</div>}
+      {loading && !data && <LoadingState label={i18n('ai_helper_um_loading')} />}
+      <RefreshBar loading={loading && !!data} />
 
       {data && (
         <TableScroll>

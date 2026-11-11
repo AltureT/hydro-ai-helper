@@ -28,7 +28,18 @@ import {
 } from './userManagementLogic';
 import { describeGroupAudit } from './GroupManagerPanel';
 import { formatGroupLimit, formatOverrideSetting } from './quotaAdminUi';
-import { Badge, Drawer, TableScroll, labelStyle, linkButtonStyle, mutedTextStyle, type BadgeVariant } from './userManagementUi';
+import {
+  Badge,
+  BusyLabel,
+  Drawer,
+  LoadingState,
+  RefreshBar,
+  TableScroll,
+  labelStyle,
+  linkButtonStyle,
+  mutedTextStyle,
+  type BadgeVariant,
+} from './userManagementUi';
 
 interface AuditPanelProps {
   currentDomainId: string;
@@ -412,13 +423,14 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ currentDomainId, showToa
             {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
           </select>
         </label>
-        <button type="button" onClick={() => load(1)} disabled={loading} style={getButtonStyle('secondary')}>
-          {i18n('ai_helper_um_refresh')}
+        <button type="button" onClick={() => load(1)} disabled={loading} aria-busy={loading} style={getButtonStyle('secondary')}>
+          <BusyLabel busy={loading && !!data}>{i18n('ai_helper_um_refresh')}</BusyLabel>
         </button>
       </div>
 
       {error && <div style={{ ...getAlertStyle('error'), marginBottom: SPACING.base }}>{error}</div>}
-      {loading && !data && <div style={mutedTextStyle}>{i18n('ai_helper_um_loading')}</div>}
+      {loading && !data && <LoadingState label={i18n('ai_helper_um_loading')} />}
+      <RefreshBar loading={loading && !!data} />
       {data && data.logs.length === 0 && <div style={emptyStateStyle}>{i18n('ai_helper_um_audit_empty')}</div>}
 
       {data && data.logs.length > 0 && (
