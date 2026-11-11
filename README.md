@@ -41,8 +41,6 @@
 
 <img src="assets/screenshots/teaching-analysis.png" alt="作业成绩表中的 AI 教学分析" width="800">
 
-<img src="assets/screenshots/learning-summary.png" alt="比赛成绩表中的批量学习总结" width="800">
-
 </details>
 
 ### 管理员：用户、额度、安全和成本
