@@ -1,6 +1,7 @@
 import { DomainModel, UserModel } from 'hydrooj';
 import { setHydroMode } from '../__mocks__/hydrooj';
 import { createFakeCollection, createFakeDb } from '../helpers/fakeMongo';
+import { installRealisticDomainModel } from '../helpers/fakeHydroDomain';
 import { AuditLogModel } from '../../models/auditLog';
 import { GroupMetaModel } from '../../models/groupMeta';
 import { AuditService } from '../../services/auditService';
@@ -206,6 +207,40 @@ describe('HydroGroupService.apply', () => {
       target: { type: 'group', id: '2023级1班' },
     }));
     expect(audit?.detail).toEqual(expect.objectContaining({ added: [1031, 1032, 1034], joined: [1034], joinRole: 'student' }));
+  });
+
+  it('joins people with no record in the domain on Hydro 5, class after class', async () => {
+    const { db, service } = setup({ mode: 'v5' });
+    const domainUser = db.store['domain.user'];
+    installRealisticDomainModel(domainUser, { joinFlag: true });
+
+    const first = await service.apply({
+      domainId: 'oi2024', groupName: '2025级04班', action: 'add', uids: [1032, 1034], joinDomain: { role: 'student' }, actorUid: 2,
+    });
+    const second = await service.apply({
+      domainId: 'oi2024', groupName: '2025级07班', action: 'add', uids: [1041, 1007], joinDomain: { role: 'student' }, actorUid: 2,
+    });
+
+    expect(first.joined).toEqual([1032, 1034]);
+    expect(second.joined).toEqual([1041, 1007]);
+    const joined = domainUser.docs.filter((row: any) => row.domainId === 'oi2024' && row.join === true).map((row: any) => row.uid);
+    expect(joined.sort()).toEqual([1007, 1031, 1032, 1034, 1041]);
+    expect(domainUser.docs.filter((row: any) => row.uid === undefined)).toEqual([]);
+  });
+
+  it('joins everyone when only some of them already have a record in the domain', async () => {
+    const { db, service } = setup({ mode: 'v5' });
+    const domainUser = db.store['domain.user'];
+    installRealisticDomainModel(domainUser, { joinFlag: true });
+
+    // 1034 有记录但未加入；1099 在 oi2023 没有任何记录
+    const result = await service.apply({
+      domainId: 'oi2023', groupName: '2023级1班', action: 'add', uids: [1034, 1099], joinDomain: { role: 'student' }, actorUid: 2,
+    });
+
+    expect(result.joined).toEqual([1034, 1099]);
+    const rows = domainUser.docs.filter((row: any) => row.domainId === 'oi2023' && [1034, 1099].includes(row.uid));
+    expect(rows.map((row: any) => [row.uid, row.join, row.role]).sort()).toEqual([[1034, true, 'student'], [1099, true, 'student']]);
   });
 
   it('only reports members that were actually new', async () => {
