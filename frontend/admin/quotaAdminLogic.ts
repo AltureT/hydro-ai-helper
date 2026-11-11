@@ -255,7 +255,16 @@ export function usageMeter(quota: Pick<OverviewQuota, 'limit' | 'used' | 'disabl
   return { percent, tone: quota.used >= quota.limit * 0.8 ? 'warn' : 'normal' };
 }
 
-export function overviewQuery(filters: OverviewFiltersState, page: number): string {
+/** 与服务端 OVERVIEW_PAGE_SIZES 一致 */
+export const OVERVIEW_PAGE_SIZES = [20, 50, 100, 200] as const;
+export const OVERVIEW_DEFAULT_PAGE_SIZE = 50;
+
+export function normalizePageSize(raw: unknown): number {
+  const value = Number(raw);
+  return (OVERVIEW_PAGE_SIZES as readonly number[]).includes(value) ? value : OVERVIEW_DEFAULT_PAGE_SIZE;
+}
+
+export function overviewQuery(filters: OverviewFiltersState, page: number, pageSize: number = OVERVIEW_DEFAULT_PAGE_SIZE): string {
   const params = new URLSearchParams();
   if (filters.q.trim()) {
     params.set('q', filters.q.trim());
@@ -266,6 +275,7 @@ export function overviewQuery(filters: OverviewFiltersState, page: number): stri
   if (filters.quotaGroupId) params.set('quotaGroupId', filters.quotaGroupId);
   if (filters.status) params.set('status', filters.status);
   if (page > 1) params.set('page', String(page));
+  if (pageSize !== OVERVIEW_DEFAULT_PAGE_SIZE) params.set('pageSize', String(pageSize));
   return params.toString();
 }
 

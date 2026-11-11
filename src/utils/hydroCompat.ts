@@ -2,10 +2,12 @@
  * Hydro 4 / Hydro 5 兼容层
  *
  * 插件按特性检测而非版本号判断（plan R1）：
- * - Hydro 5：domain.user 以 `join === true` 判定成员；`setUserRole` 支持数组 + autojoin；
+ * - Hydro 5：domain.user 以 `join === true` 判定成员；`setUserRole` 支持 autojoin；
  *   提供 `DomainModel.setJoin` 与 `UserModel._deleteUserCache`。
- * - Hydro 4：以角色判定成员（不是 default / guest，也不为空）；`setUserRole` 数组形式
- *   用 updateMany + upsert，无法为新用户正确插入，只能逐个调用；用户缓存清理函数未导出。
+ * - Hydro 4：以角色判定成员（不是 default / guest，也不为空）；用户缓存清理函数未导出。
+ * - 两个版本 `setUserRole` 的数组形式都是 `updateMany({ uid: { $in } }, …, { upsert: true })`：
+ *   只更新已有 domain.user 记录的人，没有记录的人被跳过；一个都没有时还会插入一条不带 uid 的记录，
+ *   同一域再次这样调用就违反 {domainId, uid} 唯一索引。所以设置角色一律逐个调用（单个 uid 时会正确 upsert）。
  *
  * 小组集合 `user.group` 两个版本结构相同：{ _id, domainId, name, uids }。
  */
@@ -50,17 +52,23 @@ function uniqueUids(uids: number[]): number[] {
   return [...new Set(uids.filter((uid) => Number.isSafeInteger(uid)))];
 }
 
+/** 同时进行的单人 setUserRole 调用数（每次调用约 2–3 次数据库读写） */
+const ROLE_CONCURRENCY = 8;
+
+/** 逐个设置域角色（原因见文件开头）；autojoin 仅 Hydro 5 使用 */
+async function setRoleEach(domainId: string, uids: number[], role: string, autojoin = false): Promise<void> {
+  for (let i = 0; i < uids.length; i += ROLE_CONCURRENCY) {
+    await Promise.all(uids.slice(i, i + ROLE_CONCURRENCY).map((uid) => (
+      autojoin ? DomainModel.setUserRole(domainId, uid, role, true) : DomainModel.setUserRole(domainId, uid, role)
+    )));
+  }
+}
+
 /** 把用户加入域（设为成员并赋予角色） */
 export async function joinDomain(domainId: string, uids: number[], role: string): Promise<void> {
   const list = uniqueUids(uids);
   if (!list.length) return;
-  if (isJoinFlagMembership()) {
-    await DomainModel.setUserRole(domainId, list, role, true);
-    return;
-  }
-  for (const uid of list) {
-    await DomainModel.setUserRole(domainId, uid, role);
-  }
+  await setRoleEach(domainId, list, role, isJoinFlagMembership());
 }
 
 /** 把用户移出域，行为与 Hydro 自带的“移出成员”一致 */
@@ -68,13 +76,12 @@ export async function leaveDomain(domainId: string, uids: number[]): Promise<voi
   const list = uniqueUids(uids);
   if (!list.length) return;
   if (isJoinFlagMembership()) {
+    // setJoin 的数组形式不带 upsert，可以一次完成
     await DomainModel.setJoin(domainId, list, false);
-    await DomainModel.setUserRole(domainId, list, 'guest');
+    await setRoleEach(domainId, list, 'guest');
     return;
   }
-  for (const uid of list) {
-    await DomainModel.setUserRole(domainId, uid, 'default');
-  }
+  await setRoleEach(domainId, list, 'default');
 }
 
 export interface DomainMembershipRow {
@@ -94,7 +101,7 @@ export async function restoreDomainMembership(domainId: string, rows: DomainMemb
       const role = row.role || 'guest';
       byRole.set(role, [...(byRole.get(role) || []), row.uid]);
     }
-    for (const [role, uids] of byRole) await DomainModel.setUserRole(domainId, uniqueUids(uids), role);
+    for (const [role, uids] of byRole) await setRoleEach(domainId, uniqueUids(uids), role);
     const joined = uniqueUids(rows.filter((row) => row.join === true).map((row) => row.uid));
     const notJoined = uniqueUids(rows.filter((row) => row.join === false).map((row) => row.uid));
     if (joined.length) await DomainModel.setJoin(domainId, joined, true);

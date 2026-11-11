@@ -12,6 +12,7 @@ import {
   memberFilter,
   roleHasPerm,
 } from '../../utils/hydroCompat';
+import { installRealisticDomainModel } from '../helpers/fakeHydroDomain';
 
 const PERM_EDIT_DOMAIN = 1n << 1n;
 
@@ -69,16 +70,29 @@ describe('hydroCompat (Hydro 5 shape)', () => {
     expect(memberFilter()).toEqual({ join: true });
   });
 
-  it('joins users in one call with autojoin', async () => {
-    await joinDomain('oi2023', [1031, 1032], 'student');
-    expect(DomainModel.setUserRole).toHaveBeenCalledTimes(1);
-    expect(DomainModel.setUserRole).toHaveBeenCalledWith('oi2023', [1031, 1032], 'student', true);
+  it('joins users one by one with autojoin, because the array form only updates existing rows', async () => {
+    await joinDomain('oi2023', [1031, 1032, 1031], 'student');
+    expect(DomainModel.setUserRole).toHaveBeenCalledTimes(2);
+    expect(DomainModel.setUserRole).toHaveBeenNthCalledWith(1, 'oi2023', 1031, 'student', true);
+    expect(DomainModel.setUserRole).toHaveBeenNthCalledWith(2, 'oi2023', 1032, 'student', true);
   });
 
   it('leaves the domain the same way as Hydro kick', async () => {
     await leaveDomain('oi2023', [1031, 1032]);
     expect(DomainModel.setJoin).toHaveBeenCalledWith('oi2023', [1031, 1032], false);
-    expect(DomainModel.setUserRole).toHaveBeenCalledWith('oi2023', [1031, 1032], 'guest');
+    expect(DomainModel.setUserRole).toHaveBeenCalledWith('oi2023', 1031, 'guest');
+    expect(DomainModel.setUserRole).toHaveBeenCalledWith('oi2023', 1032, 'guest');
+    expect(DomainModel.setUserRole).not.toHaveBeenCalledWith('oi2023', expect.any(Array), 'guest');
+  });
+
+  it('joins people with no domain.user record against Hydro\'s real array semantics', async () => {
+    const domainUser = { docs: [{ domainId: 'oi2023', uid: 1031, role: 'student', join: true }] as any[] };
+    installRealisticDomainModel(domainUser, { joinFlag: true });
+    await joinDomain('oi2024', [1031, 1032], 'student');
+    await joinDomain('oi2024', [1033, 1034], 'student');
+    const rows = domainUser.docs.filter((row) => row.domainId === 'oi2024');
+    expect(rows.map((row) => row.uid).sort()).toEqual([1031, 1032, 1033, 1034]);
+    expect(rows.every((row) => row.join === true && row.role === 'student')).toBe(true);
   });
 
   it('allows default as a join role but still excludes guest and root', () => {

@@ -8,13 +8,21 @@
  * 需要按有效额度判断的状态（已用完、≥80%、AI 已关闭）只在候选集上计算后分页。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.UserOverviewService = exports.OVERVIEW_STATUSES = exports.OVERVIEW_SCAN_MAX = exports.OVERVIEW_PAGE_SIZE = void 0;
+exports.UserOverviewService = exports.OVERVIEW_STATUSES = exports.OVERVIEW_SCAN_MAX = exports.OVERVIEW_PAGE_SIZES = exports.OVERVIEW_PAGE_SIZE = void 0;
+exports.resolveOverviewPageSize = resolveOverviewPageSize;
 const hydrooj_1 = require("hydrooj");
 const hydroCompat_1 = require("../utils/hydroCompat");
 const timezone_1 = require("../utils/timezone");
 const configSections_1 = require("../models/configSections");
 const hydroGroupService_1 = require("./hydroGroupService");
 exports.OVERVIEW_PAGE_SIZE = 50;
+/** 可选的每页人数（一个班常在 40–60 人，选 100 就能一页全选） */
+exports.OVERVIEW_PAGE_SIZES = [20, 50, 100, 200];
+/** 只接受可选值，其余按默认每页人数 */
+function resolveOverviewPageSize(raw) {
+    const value = Number(raw);
+    return exports.OVERVIEW_PAGE_SIZES.includes(value) ? value : exports.OVERVIEW_PAGE_SIZE;
+}
 /** 需要逐个计算有效额度的筛选最多检查这么多人，超出时提示缩小范围 */
 exports.OVERVIEW_SCAN_MAX = 5000;
 const VIOLATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -151,6 +159,7 @@ class UserOverviewService {
     async list(filters) {
         const now = this.clock();
         const page = Math.max(1, Math.floor(Number(filters.page) || 1));
+        const pageSize = resolveOverviewPageSize(filters.pageSize);
         const candidateSet = await this.candidates(filters, now);
         const filter = {
             _id: { $gt: 1 },
@@ -159,7 +168,7 @@ class UserOverviewService {
         };
         if (candidateSet) {
             if (!candidateSet.size)
-                return { rows: [], total: 0, page, pageSize: exports.OVERVIEW_PAGE_SIZE, pageCount: 0, truncated: false };
+                return { rows: [], total: 0, page, pageSize, pageCount: 0, truncated: false };
             filter._id = { $gt: 1, $in: [...candidateSet] };
         }
         const computedStatus = filters.status && filters.status !== 'violations' && filters.status !== 'credit_reduced' ? filters.status : null;
@@ -177,13 +186,13 @@ class UserOverviewService {
                     const quota = quotas.get(doc._id);
                     return !!quota && matchesStatus(quota, computedStatus);
                 });
-                const pageDocs = matched.slice((page - 1) * exports.OVERVIEW_PAGE_SIZE, page * exports.OVERVIEW_PAGE_SIZE);
+                const pageDocs = matched.slice((page - 1) * pageSize, page * pageSize);
                 return {
                     rows: await this.annotate(pageDocs, now, quotas),
                     total: matched.length,
                     page,
-                    pageSize: exports.OVERVIEW_PAGE_SIZE,
-                    pageCount: Math.ceil(matched.length / exports.OVERVIEW_PAGE_SIZE),
+                    pageSize,
+                    pageCount: Math.ceil(matched.length / pageSize),
                     truncated,
                 };
             }
@@ -192,16 +201,16 @@ class UserOverviewService {
                 this.users
                     .find(filter, { projection: { _id: 1, uname: 1, unameLower: 1 }, maxTimeMS: hydroGroupService_1.SEARCH_MAX_TIME_MS })
                     .sort({ unameLower: 1 })
-                    .skip((page - 1) * exports.OVERVIEW_PAGE_SIZE)
-                    .limit(exports.OVERVIEW_PAGE_SIZE)
+                    .skip((page - 1) * pageSize)
+                    .limit(pageSize)
                     .toArray(),
             ]);
             return {
                 rows: await this.annotate(docs, now),
                 total,
                 page,
-                pageSize: exports.OVERVIEW_PAGE_SIZE,
-                pageCount: Math.ceil(total / exports.OVERVIEW_PAGE_SIZE),
+                pageSize,
+                pageCount: Math.ceil(total / pageSize),
                 truncated: false,
             };
         }

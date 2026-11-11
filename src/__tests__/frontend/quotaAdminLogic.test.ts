@@ -4,6 +4,7 @@ import {
   isoToDateInput,
   nonMembersOf,
   overviewQuery,
+  normalizePageSize,
   pageSelectionState,
   usageMeter,
   validateGroupForm,
@@ -55,6 +56,11 @@ describe('quota admin frontend logic', () => {
 
   it('builds the overview query, dropping a group without a domain', () => {
     expect(overviewQuery(EMPTY_OVERVIEW_FILTERS, 1)).toBe('');
+    expect(overviewQuery(EMPTY_OVERVIEW_FILTERS, 2, 100)).toBe('page=2&pageSize=100');
+    expect(overviewQuery(EMPTY_OVERVIEW_FILTERS, 1, 50)).toBe('');
+    expect(normalizePageSize('200')).toBe(200);
+    expect(normalizePageSize('37')).toBe(50);
+    expect(normalizePageSize(null)).toBe(50);
     expect(overviewQuery({ ...EMPTY_OVERVIEW_FILTERS, q: ' 2301 ', group: '2023级1班', status: 'exhausted' }, 2))
       .toBe('q=2301&mode=prefix&status=exhausted&page=2');
     expect(overviewQuery({ ...EMPTY_OVERVIEW_FILTERS, domainId: 'oi2023', group: '2023级1班', quotaGroupId: 'abc' }, 1))

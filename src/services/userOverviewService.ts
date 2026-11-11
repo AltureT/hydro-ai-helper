@@ -21,6 +21,14 @@ import type { QuotaService, QuotaUserQuota } from './quotaService';
 import type { CreditEventView, CreditSummary } from './creditService';
 
 export const OVERVIEW_PAGE_SIZE = 50;
+/** 可选的每页人数（一个班常在 40–60 人，选 100 就能一页全选） */
+export const OVERVIEW_PAGE_SIZES = [20, 50, 100, 200] as const;
+
+/** 只接受可选值，其余按默认每页人数 */
+export function resolveOverviewPageSize(raw: unknown): number {
+  const value = Number(raw);
+  return (OVERVIEW_PAGE_SIZES as readonly number[]).includes(value) ? value : OVERVIEW_PAGE_SIZE;
+}
 /** 需要逐个计算有效额度的筛选最多检查这么多人，超出时提示缩小范围 */
 export const OVERVIEW_SCAN_MAX = 5000;
 const VIOLATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -51,6 +59,7 @@ export interface OverviewFilters {
   quotaGroupId?: string;
   status?: OverviewStatus;
   page?: number;
+  pageSize?: number;
 }
 
 export interface OverviewQuota {
@@ -259,6 +268,7 @@ export class UserOverviewService {
   async list(filters: OverviewFilters): Promise<OverviewResult> {
     const now = this.clock();
     const page = Math.max(1, Math.floor(Number(filters.page) || 1));
+    const pageSize = resolveOverviewPageSize(filters.pageSize);
     const candidateSet = await this.candidates(filters, now);
     const filter: Record<string, unknown> = {
       _id: { $gt: 1 },
@@ -266,7 +276,7 @@ export class UserOverviewService {
       ...this.unameFilter(filters),
     };
     if (candidateSet) {
-      if (!candidateSet.size) return { rows: [], total: 0, page, pageSize: OVERVIEW_PAGE_SIZE, pageCount: 0, truncated: false };
+      if (!candidateSet.size) return { rows: [], total: 0, page, pageSize, pageCount: 0, truncated: false };
       filter._id = { $gt: 1, $in: [...candidateSet] };
     }
 
@@ -285,13 +295,13 @@ export class UserOverviewService {
           const quota = quotas.get(doc._id);
           return !!quota && matchesStatus(quota, computedStatus);
         });
-        const pageDocs = matched.slice((page - 1) * OVERVIEW_PAGE_SIZE, page * OVERVIEW_PAGE_SIZE);
+        const pageDocs = matched.slice((page - 1) * pageSize, page * pageSize);
         return {
           rows: await this.annotate(pageDocs, now, quotas),
           total: matched.length,
           page,
-          pageSize: OVERVIEW_PAGE_SIZE,
-          pageCount: Math.ceil(matched.length / OVERVIEW_PAGE_SIZE),
+          pageSize,
+          pageCount: Math.ceil(matched.length / pageSize),
           truncated,
         };
       }
@@ -300,16 +310,16 @@ export class UserOverviewService {
         this.users
           .find(filter, { projection: { _id: 1, uname: 1, unameLower: 1 }, maxTimeMS: SEARCH_MAX_TIME_MS })
           .sort({ unameLower: 1 })
-          .skip((page - 1) * OVERVIEW_PAGE_SIZE)
-          .limit(OVERVIEW_PAGE_SIZE)
+          .skip((page - 1) * pageSize)
+          .limit(pageSize)
           .toArray(),
       ]);
       return {
         rows: await this.annotate(docs, now),
         total,
         page,
-        pageSize: OVERVIEW_PAGE_SIZE,
-        pageCount: Math.ceil(total / OVERVIEW_PAGE_SIZE),
+        pageSize,
+        pageCount: Math.ceil(total / pageSize),
         truncated: false,
       };
     } catch (err) {

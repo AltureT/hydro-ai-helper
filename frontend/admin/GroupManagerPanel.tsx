@@ -34,7 +34,19 @@ import {
 } from './userManagementLogic';
 import { GroupBatchAddView } from './GroupBatchAddView';
 import { TransferDialog } from './TransferDialog';
-import { Badge, Drawer, Modal, TableScroll, labelStyle, linkButtonStyle, mutedTextStyle } from './userManagementUi';
+import {
+  Badge,
+  Drawer,
+  LoadingState,
+  Modal,
+  RefreshBar,
+  Spinner,
+  TableScroll,
+  labelStyle,
+  linkButtonStyle,
+  mutedTextStyle,
+  useDelayedFlag,
+} from './userManagementUi';
 
 interface GroupManagerPanelProps {
   initialDomainId: string;
@@ -325,7 +337,9 @@ const GroupDrawer: React.FC<{
       )}
 
       <div style={{ ...labelStyle, marginBottom: SPACING.sm }}>{i18n('ai_helper_um_recent_ops')}</div>
-      {recent === null && <div style={mutedTextStyle}>{i18n('ai_helper_um_loading')}</div>}
+      {recent === null && (
+        <div style={{ ...mutedTextStyle, display: 'flex', alignItems: 'center', gap: '6px' }}><Spinner size={12} />{i18n('ai_helper_um_loading')}</div>
+      )}
       {recent && recent.length === 0 && <div style={mutedTextStyle}>{i18n('ai_helper_um_recent_ops_empty')}</div>}
       {recent && recent.map((log) => (
         <div key={log.id} style={{ display: 'flex', gap: SPACING.sm, alignItems: 'baseline', padding: '6px 0', borderBottom: `1px solid ${COLORS.border}`, fontSize: '13px', flexWrap: 'wrap' }}>
@@ -381,6 +395,7 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
   }, [domainId, showArchived]);
 
   useEffect(() => { load(); }, [load]);
+  const refreshing = useDelayedFlag(loading && !!data);
 
   const groups = useMemo(() => filterGroups(data?.groups || [], keyword), [data, keyword]);
   const missingGroups = (data?.groups || []).filter((group) => !group.existsInHydro);
@@ -531,7 +546,8 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
         </div>
       )}
 
-      {loading && !data && <div style={mutedTextStyle}>{i18n('ai_helper_um_loading')}</div>}
+      {loading && !data && <LoadingState label={i18n('ai_helper_um_loading')} />}
+      <RefreshBar loading={loading && !!data} />
 
       {data && groups.length === 0 && (
         <div style={emptyStateStyle}>
@@ -545,6 +561,7 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
       )}
 
       {data && groups.length > 0 && (
+        <div style={{ opacity: refreshing ? 0.55 : 1, transition: 'opacity 150ms' }}>
         <TableScroll>
           <table style={tableRootStyle}>
             <thead>
@@ -606,6 +623,7 @@ export const GroupManagerPanel: React.FC<GroupManagerPanelProps> = ({ initialDom
             </tbody>
           </table>
         </TableScroll>
+        </div>
       )}
 
       {data && (

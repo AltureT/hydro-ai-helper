@@ -1,6 +1,7 @@
 import { DomainModel, UserModel } from 'hydrooj';
 import { setHydroMode } from '../__mocks__/hydrooj';
 import { createFakeCollection, createFakeDb } from '../helpers/fakeMongo';
+import { installRealisticDomainModel } from '../helpers/fakeHydroDomain';
 import { AuditLogModel } from '../../models/auditLog';
 import { GroupMetaModel } from '../../models/groupMeta';
 import { QuotaGroupModel } from '../../models/quotaGroup';
@@ -63,16 +64,7 @@ function setup(mode: Mode = 'v5') {
 
   const domainUser = db.store['domain.user'];
   DomainModel.get.mockImplementation(async (id: string) => domainDocs[id]);
-  DomainModel.setUserRole.mockImplementation(async (domainId: string, uid: number | number[], role: string, autojoin = false) => {
-    for (const u of Array.isArray(uid) ? uid : [uid]) {
-      await domainUser.updateOne({ domainId, uid: u }, { $set: { role, ...(autojoin ? { join: true } : {}) } }, { upsert: true });
-    }
-  });
-  if (mode === 'v5') {
-    DomainModel.setJoin.mockImplementation(async (domainId: string, uids: number[], join: boolean) => {
-      for (const u of uids) await domainUser.updateOne({ domainId, uid: u }, { $set: { join } });
-    });
-  }
+  installRealisticDomainModel(domainUser, { joinFlag: mode === 'v5' });
 
   let now = new Date('2026-11-10T08:00:00Z');
   const groupMeta = new GroupMetaModel(db as any);
@@ -285,6 +277,24 @@ describe('TransferService execute and undo', () => {
 
     await env.service.undo(result.auditId, 2);
     expect(state(env, 'v4')).toEqual(before);
+  });
+
+  it('copies two classes into a domain where none of them has a record yet (Hydro 5)', async () => {
+    const env = setup('v5');
+    const copy = async (uids: number[], targetGroup: string) => {
+      const request = { kind: 'users', mode: 'copy', sourceDomainId: 'oi2023', targetDomainId: 'oi2024', uids, targetGroup };
+      const preview = await env.service.preview(request);
+      return env.service.execute({ ...request, previewToken: preview.previewToken }, 2);
+    };
+    expect((await copy([2001, 2002, 2003], '2025级04班')).status).toBe('done');
+    expect((await copy([2004, 2005], '2025级07班')).status).toBe('done');
+
+    const rows = env.db.store['domain.user'].docs;
+    const joined = rows.filter((row: any) => row.domainId === 'oi2024' && row.join === true).map((row: any) => row.uid);
+    expect(joined).toEqual(expect.arrayContaining([2001, 2002, 2003, 2004, 2005]));
+    expect(rows.filter((row: any) => row.uid === undefined)).toEqual([]);
+    const groups = env.db.store['user.group'].docs.filter((doc: any) => doc.domainId === 'oi2024');
+    expect(groups.find((doc: any) => doc.name === '2025级07班')?.uids).toEqual([2004, 2005]);
   });
 
   it('validates the user selection and join role', async () => {

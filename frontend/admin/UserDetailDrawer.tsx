@@ -9,7 +9,7 @@ import { i18n } from '../utils/i18n';
 import { COLORS, RADIUS, SPACING, getAlertStyle, getButtonStyle } from '../utils/styles';
 import { formatResetText } from '../student/QuotaBar';
 import { errorMessage, getJson, postJson } from './userManagementApi';
-import { Badge, Drawer, linkButtonStyle, mutedTextStyle } from './userManagementUi';
+import { Badge, Drawer, LoadingState, linkButtonStyle, mutedTextStyle } from './userManagementUi';
 import type { CreditEventView, QuotaGroupMembership, UserDetailResponse } from './quotaAdminLogic';
 import { formatMultiplier, recoveryDaysFrom } from './creditLogic';
 import { CreditResetModal } from './CreditDialogs';
@@ -203,6 +203,7 @@ export const UserDetailDrawer: React.FC<{
       onClose={onClose}
     >
       {error && <div style={getAlertStyle('error')}>{error}</div>}
+      {!detail && !error && <LoadingState label={i18n('ai_helper_um_loading')} minHeight={200} />}
       {detail && quota && (
         <div style={{ display: 'grid', gap: SPACING.lg }}>
           <section style={{ background: COLORS.bgPage, border: `1px solid ${COLORS.border}`, borderRadius: RADIUS.lg, padding: SPACING.base }}>
