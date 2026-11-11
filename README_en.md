@@ -43,8 +43,6 @@ A teaching-first AI plugin for [HydroOJ](https://github.com/hydro-dev/Hydro): it
 
 <img src="assets/screenshots/teaching-analysis.png" alt="AI teaching analysis on a homework scoreboard" width="800">
 
-<img src="assets/screenshots/learning-summary.png" alt="Batch learning summaries on a contest scoreboard" width="800">
-
 </details>
 
 ### Admins: users, quotas, safety and cost
