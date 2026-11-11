@@ -1,7 +1,9 @@
 /**
  * 跨域复制或移动（设计稿“跨域转移”，US9）
  *
- * 两个入口：小组列表对选中的小组操作（kind = groups）；学生总览对选中的学生操作（kind = users）。
+ * 两个入口：小组列表对选中的小组复制或移动（kind = groups）；学生总览对选中的学生只做移动（kind = users）——
+ * 只想让学生加入其他域（保留原来的域），用“加入 / 移出小组”并勾选“同时加入本域”。
+ * 站点中心（system）不能作为移动学生的源域：移出后学生在站点中心变成游客。
  * 表单每次变化都会重新预览（只读），确认时带上 previewToken；预览过期或数据变化时自动重新预览。
  * 执行后展示每一步的结果，部分完成时可继续完成剩余部分，也可撤销已完成部分。
  */
@@ -27,6 +29,7 @@ import {
   type TransferRunResult,
   type TransferSummaryItem,
 } from './transferLogic';
+import { SYSTEM_DOMAIN_ID } from './quotaAdminLogic';
 
 export const TRANSFER_API = {
   preview: '/ai-helper/admin/transfer/preview',
@@ -42,7 +45,7 @@ interface DomainOption { id: string; name: string }
 export interface TransferDialogProps {
   kind: TransferKind;
   domains: DomainOption[];
-  /** 小组模式：固定为当前域；学生模式：默认源域，可改 */
+  /** 小组模式：固定为当前域；学生模式：默认源域（可为空，由管理员选择），可改 */
   sourceDomainId: string;
   groupNames?: string[];
   users?: Array<{ uid: number; uname: string }>;
@@ -52,6 +55,8 @@ export interface TransferDialogProps {
   /** 关闭对话框时调用；changed 表示执行过写操作，父组件应刷新 */
   onFinished: (changed: boolean) => void;
   onOpenAudit?: () => void;
+  /** 学生模式：改用“加入 / 移出小组”（不退出原来的域） */
+  onUseGroupDialog?: () => void;
 }
 
 type ConflictDraft = { type: 'merge' | 'rename' | ''; renameTo: string };
@@ -145,12 +150,14 @@ function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; 
 }
 
 export const TransferDialog: React.FC<TransferDialogProps> = ({
-  kind, domains, sourceDomainId, groupNames = [], users = [], sourceNote, onClose, onFinished, onOpenAudit,
+  kind, domains, sourceDomainId, groupNames = [], users = [], sourceNote, onClose, onFinished, onOpenAudit, onUseGroupDialog,
 }) => {
-  const [sourceId, setSourceId] = useState(sourceDomainId);
+  const [sourceId, setSourceId] = useState(kind === 'users' && sourceDomainId === SYSTEM_DOMAIN_ID ? '' : sourceDomainId);
+  const sourceOptions = kind === 'users' ? domains.filter((domain) => domain.id !== SYSTEM_DOMAIN_ID) : domains;
   const targetOptions = domains.filter((domain) => domain.id !== sourceId);
   const [targetId, setTargetId] = useState(targetOptions[0]?.id || '');
-  const [mode, setMode] = useState<TransferMode>('copy');
+  // 学生只能移动；复制（保留原域）交给“加入 / 移出小组”
+  const [mode, setMode] = useState<TransferMode>(kind === 'users' ? 'move' : 'copy');
   const [conflictDrafts, setConflictDrafts] = useState<Record<string, ConflictDraft>>({});
   const [removeMembers, setRemoveMembers] = useState(false);
   const [putInGroup, setPutInGroup] = useState(false);
@@ -190,7 +197,7 @@ export const TransferDialog: React.FC<TransferDialogProps> = ({
   const targetGroupError = putInGroup ? validateGroupNameClient(targetGroupName) : null;
 
   const request = useMemo(() => {
-    if (!targetId) return null;
+    if (!targetId || !sourceId) return null;
     const base = { kind, mode, sourceDomainId: sourceId, targetDomainId: targetId };
     if (kind === 'groups') {
       const conflicts: Record<string, ConflictChoice> = {};
@@ -390,7 +397,7 @@ export const TransferDialog: React.FC<TransferDialogProps> = ({
   const confirmLabel = running
     ? i18n('ai_helper_transfer_executing')
     : kind === 'users'
-      ? i18n(mode === 'move' ? 'ai_helper_transfer_confirm_move_users' : 'ai_helper_transfer_confirm_copy_users', counts?.selected || 0)
+      ? i18n('ai_helper_transfer_confirm_move_users', counts?.selected || 0)
       : i18n(mode === 'move' ? 'ai_helper_transfer_confirm_move' : 'ai_helper_transfer_confirm_copy');
 
   const roleSelect = preview && joinCount > 0 && (
@@ -447,7 +454,8 @@ export const TransferDialog: React.FC<TransferDialogProps> = ({
           <Field label={i18n('ai_helper_transfer_source')} htmlFor={kind === 'users' ? 'ai-transfer-source' : undefined}>
             {kind === 'users' ? (
               <select id="ai-transfer-source" value={sourceId} onChange={(event) => setSourceId(event.target.value)} style={getInputStyle()}>
-                {domains.map((domain) => <option key={domain.id} value={domain.id}>{domainLabel(domains, domain.id)}</option>)}
+                {!sourceId && <option value="">{i18n('ai_helper_transfer_choose_source')}</option>}
+                {sourceOptions.map((domain) => <option key={domain.id} value={domain.id}>{domainLabel(domains, domain.id)}</option>)}
               </select>
             ) : (
               <div style={{ fontSize: '14px', paddingTop: '2px' }}>{domainLabel(domains, sourceId, preview?.source.name)}</div>
@@ -464,24 +472,41 @@ export const TransferDialog: React.FC<TransferDialogProps> = ({
           </Field>
         </div>
 
-        {/* 方式 */}
+        {/* 学生：只能移动；需要保留原域时改用“加入 / 移出小组” */}
+        {kind === 'users' && (
+          <div style={{ ...getAlertStyle('info'), display: 'grid', gap: '4px' }}>
+            <div>{i18n('ai_helper_transfer_move_only_hint')}</div>
+            {onUseGroupDialog && (
+              <div>
+                {i18n('ai_helper_transfer_copy_elsewhere')}
+                <button type="button" style={{ ...linkButtonStyle, padding: '0 4px' }} onClick={onUseGroupDialog}>
+                  {i18n('ai_helper_transfer_use_group_dialog')}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 方式（仅小组） */}
+        {kind === 'groups' && (
         <div>
           <div style={{ ...labelStyle, marginBottom: '6px' }}>{i18n('ai_helper_transfer_mode')}</div>
           <div role="radiogroup" aria-label={i18n('ai_helper_transfer_mode')} style={{ display: 'flex', gap: SPACING.sm, flexWrap: 'wrap' }}>
             <ModeOption
               active={mode === 'copy'}
               title={i18n('ai_helper_transfer_copy')}
-              hint={kind === 'groups' ? i18n('ai_helper_transfer_copy_groups_hint') : i18n('ai_helper_transfer_copy_users_hint')}
+              hint={i18n('ai_helper_transfer_copy_groups_hint')}
               onClick={() => setMode('copy')}
             />
             <ModeOption
               active={mode === 'move'}
               title={i18n('ai_helper_transfer_move')}
-              hint={kind === 'groups' ? i18n('ai_helper_transfer_move_groups_hint') : i18n('ai_helper_transfer_move_users_hint')}
+              hint={i18n('ai_helper_transfer_move_groups_hint')}
               onClick={() => setMode('move')}
             />
           </div>
         </div>
+        )}
 
         {/* 小组模式：同名冲突 */}
         {kind === 'groups' && preview?.groups?.filter((group) => group.conflict).map((group) => {

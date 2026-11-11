@@ -1,6 +1,6 @@
 /**
  * 学生总览（设计稿“学生总览”，US6）：跨域查看学生的小组、额度与用量、近 7 天违规，并批量操作
- * 仅系统管理员可见；不展示对话原文（FR-053）。批量栏可打开跨域复制或移动（TransferDialog）、重置信誉。
+ * 仅系统管理员可见；不展示对话原文（FR-053）。批量栏可加入 / 移出小组（可同时入域）、移动到其他域（TransferDialog）、重置信誉。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -34,6 +34,7 @@ import {
   normalizePageSize,
   overviewQuery,
   pageSelectionState,
+  suggestMoveSource,
   usageMeter,
   type OverviewFiltersState,
   type OverviewQuota,
@@ -474,12 +475,13 @@ export const UserOverviewPanel: React.FC<{ domainId: string; showToast: ShowToas
         <TransferDialog
           kind="users"
           domains={domains}
-          sourceDomainId={domains.some((domain) => domain.id === filters.domainId) ? filters.domainId : domainId}
+          sourceDomainId={suggestMoveSource(selectedRows, filters.domainId, domains.map((domain) => domain.id))}
           users={selectedRows.map((row) => ({ uid: row.uid, uname: row.uname }))}
           sourceNote={transferSourceNote}
           onClose={() => setDialog(null)}
           onFinished={() => { setDialog(null); setSelected(new Map()); load(); loadMeta(); }}
           onOpenAudit={onOpenAudit}
+          onUseGroupDialog={() => setDialog('group')}
         />
       )}
       {dialog === 'credit' && (

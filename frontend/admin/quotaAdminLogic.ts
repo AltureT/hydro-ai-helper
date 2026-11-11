@@ -255,6 +255,33 @@ export function usageMeter(quota: Pick<OverviewQuota, 'limit' | 'used' | 'disabl
   return { percent, tone: quota.used >= quota.limit * 0.8 ? 'warn' : 'normal' };
 }
 
+/** Hydro 的全站默认域；学生不能从这里“移动”出去（移出后在站点中心变成游客） */
+export const SYSTEM_DOMAIN_ID = 'system';
+
+/**
+ * “移动到其他域”的默认源域：优先用总览当前筛选的域；否则取所选学生中最多人所在的域。
+ * 站点中心不作为源域；找不到时返回空串，由管理员手动选择。
+ */
+export function suggestMoveSource(
+  rows: Array<Pick<OverviewRow, 'domains'>>,
+  preferred: string,
+  domainIds: string[],
+): string {
+  const allowed = domainIds.filter((id) => id !== SYSTEM_DOMAIN_ID);
+  if (preferred && allowed.includes(preferred)) return preferred;
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    for (const domain of row.domains) {
+      if (allowed.includes(domain.id)) counts.set(domain.id, (counts.get(domain.id) || 0) + 1);
+    }
+  }
+  let best = '';
+  for (const id of allowed) {
+    if ((counts.get(id) || 0) > (counts.get(best) || 0)) best = id;
+  }
+  return best;
+}
+
 /** 与服务端 OVERVIEW_PAGE_SIZES 一致 */
 export const OVERVIEW_PAGE_SIZES = [20, 50, 100, 200] as const;
 export const OVERVIEW_DEFAULT_PAGE_SIZE = 50;

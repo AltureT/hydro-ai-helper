@@ -4,6 +4,7 @@ import {
   isoToDateInput,
   nonMembersOf,
   overviewQuery,
+  suggestMoveSource,
   normalizePageSize,
   pageSelectionState,
   usageMeter,
@@ -78,5 +79,24 @@ describe('quota admin frontend logic', () => {
     expect(pageSelectionState(rows, new Set([1, 2, 3]))).toBe('all');
     expect(pageSelectionState([], new Set([1]))).toBe('none');
     expect(nonMembersOf(rows, 'oi2023')).toEqual([2, 3]);
+  });
+});
+
+describe('suggestMoveSource', () => {
+  const row = (...ids: string[]) => ({ domains: ids.map((id) => ({ id, name: id })) });
+  const domains = ['system', 'oi2023', 'oi2024', 'club'];
+
+  it('uses the filtered domain when it is a valid source', () => {
+    expect(suggestMoveSource([row('system', 'oi2024')], 'oi2023', domains)).toBe('oi2023');
+  });
+
+  it('otherwise picks the domain most of the selected students are in, never the site-wide domain', () => {
+    expect(suggestMoveSource([row('system', 'oi2024'), row('system', 'oi2024'), row('system', 'club')], '', domains)).toBe('oi2024');
+    expect(suggestMoveSource([row('system', 'oi2024')], 'system', domains)).toBe('oi2024');
+  });
+
+  it('returns an empty string when the students are only in the site-wide domain', () => {
+    expect(suggestMoveSource([row('system'), row('system')], '', domains)).toBe('');
+    expect(suggestMoveSource([row('gone')], 'gone', domains)).toBe('');
   });
 });

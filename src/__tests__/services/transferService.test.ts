@@ -177,6 +177,9 @@ describe('TransferService preview', () => {
     expect(() => normalizeTransferRequest({ ...groupMove, groupNames: Array.from({ length: 21 }, (_, i) => `组${i}`) })).toThrow('TOO_MANY_GROUPS');
     expect(() => normalizeTransferRequest({ kind: 'users', mode: 'copy', sourceDomainId: 'a', targetDomainId: 'b', uids: [1] })).toThrow('INVALID_UIDS');
     expect(normalizeTransferRequest({ kind: 'users', mode: 'copy', sourceDomainId: 'a', targetDomainId: 'b', uids: [5, '3', 5] }).uids).toEqual([3, 5]);
+    // 学生不能从站点中心移出（移出后在站点中心变成游客）
+    expect(() => normalizeTransferRequest({ kind: 'users', mode: 'move', sourceDomainId: 'system', targetDomainId: 'b', uids: [5] })).toThrow('SYSTEM_DOMAIN_SOURCE');
+    expect(normalizeTransferRequest({ kind: 'users', mode: 'move', sourceDomainId: 'b', targetDomainId: 'system', uids: [5] }).mode).toBe('move');
   });
 });
 

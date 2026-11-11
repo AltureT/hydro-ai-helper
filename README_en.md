@@ -90,7 +90,7 @@ A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/H
 <summary><b>User management and AI quota</b> (system admins only)</summary>
 
 - **Groups**: add or remove students in Hydro's own groups in bulk, by username prefix, regex or a list, optionally joining them to the domain; every change can be undone. Finds members that Hydro's own group page overwrote and restores them, and records each group's type, academic year and teachers
-- **Cross-domain transfer**: copy or move groups or selected students to another domain, with a preview before and undo after
+- **Cross-domain transfer**: copy or move groups (with their members) to another domain, or move selected students to another domain (not out of the site-wide default domain), with a preview before and undo after. To add students to another domain while keeping their current one, add them to a group there with "also join the domain" checked
 - **Daily quota**: a daily limit on AI questions, counted across all domains, unlimited by default. Quota groups (grant or cap, optionally linked to Hydro groups) and personal overrides can only be changed by system admins
 - **Credit**: high-confidence violations lower a student's credit and with it their daily quota; credit recovers each day without violations, with a floor and a minimum number of questions. A deduction is reversed when a review or appeal finds a false positive, and admins can reset credit by hand. Cooldowns and credit apply in every domain
 - **Off-topic**: counted per student across conversations; a second off-topic message within 24 hours counts as a violation, and a few characters of "code" no longer skip the check

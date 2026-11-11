@@ -10,7 +10,7 @@
  * - 提交记录、AI 对话、安全记录都不动（FR-074）。
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TransferService = exports.PREVIEW_TTL_MS = exports.TRANSFER_BATCH_SIZE = exports.TRANSFER_MAX_GROUP_MEMBERS = exports.TRANSFER_MAX_USERS = exports.TRANSFER_MAX_GROUPS = void 0;
+exports.TransferService = exports.SYSTEM_DOMAIN_ID = exports.PREVIEW_TTL_MS = exports.TRANSFER_BATCH_SIZE = exports.TRANSFER_MAX_GROUP_MEMBERS = exports.TRANSFER_MAX_USERS = exports.TRANSFER_MAX_GROUPS = void 0;
 exports.normalizeTransferRequest = normalizeTransferRequest;
 exports.summarizeTransfer = summarizeTransfer;
 const crypto_1 = require("crypto");
@@ -24,6 +24,8 @@ exports.TRANSFER_MAX_USERS = 2000;
 exports.TRANSFER_MAX_GROUP_MEMBERS = 5000;
 exports.TRANSFER_BATCH_SIZE = 200;
 exports.PREVIEW_TTL_MS = 10 * 60 * 1000;
+/** Hydro 的全站默认域：学生移出后在站点中心变成游客，不允许作为“移动学生”的源域 */
+exports.SYSTEM_DOMAIN_ID = 'system';
 const DOC_TYPE_CONTEST = 30;
 function invalid(code, key, params = []) {
     return new hydroGroupService_1.GroupServiceError(code, 400, key, params);
@@ -102,6 +104,9 @@ function normalizeTransferRequest(raw) {
             throw invalid('TOO_MANY_USERS', 'ai_helper_group_too_many_users', [exports.TRANSFER_MAX_USERS]);
         if (raw.targetGroup !== undefined && raw.targetGroup !== null && raw.targetGroup !== '')
             targetGroup = requireName(raw.targetGroup);
+        if (mode === 'move' && sourceDomainId === exports.SYSTEM_DOMAIN_ID) {
+            throw invalid('SYSTEM_DOMAIN_SOURCE', 'ai_helper_transfer_system_source');
+        }
     }
     return { kind, mode, sourceDomainId, targetDomainId, groupNames, conflicts, uids, targetGroup };
 }
