@@ -19,6 +19,7 @@ jest.mock('../../services/telemetryService', () => ({
   buildTelemetryUrl: jest.fn().mockImplementation((base, path) => `${base}${path}`),
   getTelemetryToken: jest.fn().mockReturnValue(''),
   sendToEndpoint: jest.fn().mockResolvedValue(undefined),
+  computeDomainHash: jest.requireActual('../../services/telemetryService').computeDomainHash,
 }));
 
 describe('ErrorReporter', () => {

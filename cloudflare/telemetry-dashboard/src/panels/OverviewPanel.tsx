@@ -22,9 +22,16 @@ export function OverviewPanel() {
   const fmtMs = (ms: number | null) => (ms == null ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`);
   const latencyColor = (ms: number | null) => (ms == null ? '#6b7280' : ms > 10000 ? '#ef4444' : ms > 5000 ? '#d97706' : '#059669');
 
-  const cards: { label: string; value: string | number; color: string }[] = [
-    { label: '部署实例（90天内上报）', value: data.instances, color: '#2563eb' },
-    { label: `当前上报实例（${data.health_freshness_hours ?? 48}h）`, value: data.reporting_instances ?? '—', color: '#2563eb' },
+  const cards: { label: string; value: string | number; color: string; sub?: string }[] = [
+    { label: `在线实例（${data.health_freshness_hours ?? 72}h 内上报）`, value: data.active_instances ?? data.reporting_instances ?? '—', color: '#2563eb' },
+    {
+      label: '90天内出现过的实例 ID',
+      value: data.instances,
+      color: '#6b7280',
+      sub: data.active_instances != null
+        ? `其中已停报 ${data.stale_instances ?? 0} · 仅安装 ${data.one_shot_instances ?? 0}`
+        : undefined,
+    },
     { label: '活跃用户 (7天)', value: data.active_users_7d, color: '#059669' },
     // 30/90 天窗口：学生寒暑假后返校仍计入活跃，避免假期把统计清零
     { label: '活跃用户 (30天)', value: data.active_users_30d ?? '—', color: '#059669' },
@@ -43,12 +50,15 @@ export function OverviewPanel() {
           <div key={c.label} style={cardStyle}>
             <div style={{ fontSize: '13px', color: '#6b7280', marginBottom: 8 }}>{c.label}</div>
             <div style={{ fontSize: '32px', fontWeight: 700, color: c.color }}>{c.value}</div>
+            {c.sub && <div style={{ fontSize: '12px', color: '#6b7280', marginTop: 4 }}>{c.sub}</div>}
           </div>
         ))}
       </div>
       <p style={{ margin: '12px 4px 0', color: '#6b7280', fontSize: '12px' }}>
         AI 接口错误率只统计模型端点请求失败；生成结果未通过沙箱等业务失败请查看“功能健康”和“错误”页。
-        延迟与错误率仅合并最近 {data.health_freshness_hours ?? 48} 小时仍有心跳实例的最新日快照。
+        延迟与错误率仅合并最近 {data.health_freshness_hours ?? 72} 小时仍有心跳实例的最新日快照。
+        活跃用户只累加在线实例；已停报实例（含重置数据库后留下的旧 ID）的用户数是停报时的快照，不计入。
+        {(data.legacy_shared_ids ?? 0) > 0 && ' 「旧版共享 ID」代表所有仍在用 v2.0.5 及更早版本的站点，只显示其中最后上报的那一个。'}
       </p>
     </div>
   );

@@ -1,5 +1,9 @@
 export interface Overview {
   instances: number;
+  active_instances?: number;
+  stale_instances?: number;
+  one_shot_instances?: number;
+  legacy_shared_ids?: number;
   reporting_instances?: number;
   active_users_7d: number;
   active_users_30d?: number;
@@ -29,7 +33,12 @@ export interface Instance {
   geo_country?: string | null;
   geo_region?: string | null;
   degraded_features?: number;
+  status?: InstanceStatus;
+  legacy_shared?: boolean;
 }
+
+export type InstanceStatus = 'active' | 'stale' | 'one_shot';
+export type InstanceStatusFilter = InstanceStatus | 'all';
 
 export interface VersionDistribution {
   version: string;
@@ -41,6 +50,9 @@ export interface InstancesResponse {
   total: number;
   limit: number;
   offset: number;
+  status?: InstanceStatusFilter;
+  status_counts?: Record<InstanceStatus, number>;
+  alive_hours?: number;
   version_distribution: VersionDistribution[];
 }
 

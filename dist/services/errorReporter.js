@@ -150,10 +150,7 @@ class ErrorReporter {
             const entries = this.buildEntries();
             if (entries.length === 0)
                 return;
-            const domainHash = (0, crypto_1.createHash)('sha256')
-                .update(config.domainsSeen.sort().join(','))
-                .digest('hex')
-                .substring(0, 16);
+            const domainHash = (0, telemetryService_1.computeDomainHash)(config.domainsSeen);
             const payload = {
                 instance_id: config.instanceId,
                 event: 'error',

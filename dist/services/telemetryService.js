@@ -11,6 +11,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TelemetryService = void 0;
 exports.serializeRemoteModelStats = serializeRemoteModelStats;
+exports.computeDomainHash = computeDomainHash;
 exports.getTelemetryToken = getTelemetryToken;
 exports.sendToEndpoint = sendToEndpoint;
 exports.getTelemetryBases = getTelemetryBases;
@@ -47,6 +48,11 @@ class TelemetryService {
         this.errorReporter = errorReporter;
         this.featureStatsModel = featureStatsModel;
         this.HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
+        // 定时器每小时检查一次，且允许 10 分钟提前量：lastReportAt 在发送完成后才写入，
+        // 若定时器周期恰好 24h，下次检查时只过去「24h − 发送耗时」，会把每隔一次心跳跳过，
+        // 实际变成 48h 一报（2026-11 线上数据证实）。
+        this.HEARTBEAT_CHECK_INTERVAL = 60 * 60 * 1000; // 1 小时
+        this.HEARTBEAT_SLACK = 10 * 60 * 1000; // 10 分钟
         this.REQUEST_TIMEOUT = 8000; // 8 秒
     }
     /**
@@ -92,7 +98,7 @@ class TelemetryService {
         const now = Date.now();
         const lastReport = lastReportAt.getTime();
         const elapsed = now - lastReport;
-        return elapsed >= this.HEARTBEAT_INTERVAL;
+        return elapsed >= this.HEARTBEAT_INTERVAL - this.HEARTBEAT_SLACK;
     }
     /**
      * 启动心跳定时器
@@ -102,7 +108,7 @@ class TelemetryService {
         if (this.timer) {
             clearInterval(this.timer);
         }
-        // 每 24 小时检查一次
+        // 每小时检查一次是否到期
         this.timer = setInterval(async () => {
             try {
                 const config = await this.pluginInstallModel.getInstall();
@@ -116,7 +122,24 @@ class TelemetryService {
             catch (error) {
                 console.error('[TelemetryService] Heartbeat failed:', error);
             }
-        }, this.HEARTBEAT_INTERVAL);
+        }, this.HEARTBEAT_CHECK_INTERVAL);
+    }
+    /**
+     * 从对话集合补全 domainsSeen / firstUsedAt（零侵入：不在业务路径里打点）。
+     * 失败不影响上报。
+     */
+    async syncUsage() {
+        try {
+            const [domains, firstUsedAt] = await Promise.all([
+                this.conversationModel.getDistinctDomainIds(),
+                this.conversationModel.getFirstConversationTime(),
+            ]);
+            return await this.pluginInstallModel.syncUsage(domains, firstUsedAt);
+        }
+        catch (error) {
+            console.error('[TelemetryService] Usage sync failed:', error);
+            return null;
+        }
     }
     /**
      * 收集遥测数据（零侵入式：查询现有数据）
@@ -174,16 +197,14 @@ class TelemetryService {
      */
     async report(eventType) {
         try {
-            const config = await this.pluginInstallModel.getInstall();
+            let config = await this.pluginInstallModel.getInstall();
             if (!config) {
                 console.error('[TelemetryService] Install record not found');
                 return;
             }
+            config = (await this.syncUsage()) ?? config;
             const stats = await this.collect();
-            const domainHash = (0, crypto_1.createHash)('sha256')
-                .update(config.domainsSeen.sort().join(','))
-                .digest('hex')
-                .substring(0, 16);
+            const domainHash = computeDomainHash(config.domainsSeen);
             let aiConfig = null;
             try {
                 aiConfig = await this.aiConfigModel?.getConfig() ?? null;
@@ -250,10 +271,7 @@ class TelemetryService {
             if (!config) {
                 return false;
             }
-            const domainHash = (0, crypto_1.createHash)('sha256')
-                .update(config.domainsSeen.sort().join(','))
-                .digest('hex')
-                .substring(0, 16);
+            const domainHash = computeDomainHash(config.domainsSeen);
             const payload = {
                 instance_id: config.instanceId,
                 event: 'feedback',
@@ -319,6 +337,15 @@ TelemetryService.DEFAULT_FEATURES = {
 };
 // ─── 导出的共享工具函数 ─────────────────────────────
 const DEFAULT_BASE = 'https://stats.how2learns.com';
+/**
+ * 域集合的粗粒度指纹（sha256 前 16 位）。排序后拼接，不修改入参。
+ */
+function computeDomainHash(domains) {
+    return (0, crypto_1.createHash)('sha256')
+        .update([...(domains ?? [])].sort().join(','))
+        .digest('hex')
+        .substring(0, 16);
+}
 /**
  * 获取遥测 token。
  *

@@ -9,6 +9,7 @@ function createChainMock() {
     sort: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
+    project: jest.fn().mockReturnThis(),
     toArray: jest.fn().mockResolvedValue([]),
   };
   return mock;
@@ -434,6 +435,31 @@ describe('ConversationModel', () => {
       const result = await model.getTotalConversations('my-domain');
       expect(result).toBe(10);
       expect(mockColl.countDocuments).toHaveBeenCalledWith({ domainId: 'my-domain' });
+    });
+  });
+
+  // ─── getDistinctDomainIds / getFirstConversationTime ─
+
+  describe('getDistinctDomainIds', () => {
+    it('returns non-empty string domain ids only', async () => {
+      mockColl.distinct.mockResolvedValue(['system', '', null, 'dashu']);
+      await expect(model.getDistinctDomainIds()).resolves.toEqual(['system', 'dashu']);
+      expect(mockColl.distinct).toHaveBeenCalledWith('domainId');
+    });
+  });
+
+  describe('getFirstConversationTime', () => {
+    it('returns startTime of the oldest conversation', async () => {
+      const startTime = new Date('2026-02-01');
+      mockColl._chain.toArray.mockResolvedValue([{ startTime }]);
+      await expect(model.getFirstConversationTime()).resolves.toEqual(startTime);
+      expect(mockColl._chain.sort).toHaveBeenCalledWith({ startTime: 1 });
+      expect(mockColl._chain.limit).toHaveBeenCalledWith(1);
+    });
+
+    it('returns null when there are no conversations', async () => {
+      mockColl._chain.toArray.mockResolvedValue([]);
+      await expect(model.getFirstConversationTime()).resolves.toBeNull();
     });
   });
 

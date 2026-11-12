@@ -7,7 +7,7 @@
 
 import { createHash } from 'crypto';
 import axios from 'axios';
-import type { PluginInstallModel } from '../models/pluginInstall';
+import type { PluginInstall, PluginInstallModel } from '../models/pluginInstall';
 import type { ConversationModel } from '../models/conversation';
 import type { AIConfigModel } from '../models/aiConfig';
 import type { RequestStatsModel } from '../models/requestStats';
@@ -149,6 +149,11 @@ export interface FeedbackPayload {
  */
 export class TelemetryService {
   private readonly HEARTBEAT_INTERVAL = 24 * 60 * 60 * 1000; // 24 小时
+  // 定时器每小时检查一次，且允许 10 分钟提前量：lastReportAt 在发送完成后才写入，
+  // 若定时器周期恰好 24h，下次检查时只过去「24h − 发送耗时」，会把每隔一次心跳跳过，
+  // 实际变成 48h 一报（2026-11 线上数据证实）。
+  private readonly HEARTBEAT_CHECK_INTERVAL = 60 * 60 * 1000; // 1 小时
+  private readonly HEARTBEAT_SLACK = 10 * 60 * 1000; // 10 分钟
   private readonly REQUEST_TIMEOUT = 8000; // 8 秒
   private timer?: NodeJS.Timeout;
 
@@ -209,7 +214,7 @@ export class TelemetryService {
     const lastReport = lastReportAt.getTime();
     const elapsed = now - lastReport;
 
-    return elapsed >= this.HEARTBEAT_INTERVAL;
+    return elapsed >= this.HEARTBEAT_INTERVAL - this.HEARTBEAT_SLACK;
   }
 
   /**
@@ -221,7 +226,7 @@ export class TelemetryService {
       clearInterval(this.timer);
     }
 
-    // 每 24 小时检查一次
+    // 每小时检查一次是否到期
     this.timer = setInterval(async () => {
       try {
         const config = await this.pluginInstallModel.getInstall();
@@ -235,7 +240,24 @@ export class TelemetryService {
       } catch (error) {
         console.error('[TelemetryService] Heartbeat failed:', error);
       }
-    }, this.HEARTBEAT_INTERVAL);
+    }, this.HEARTBEAT_CHECK_INTERVAL);
+  }
+
+  /**
+   * 从对话集合补全 domainsSeen / firstUsedAt（零侵入：不在业务路径里打点）。
+   * 失败不影响上报。
+   */
+  private async syncUsage(): Promise<PluginInstall | null> {
+    try {
+      const [domains, firstUsedAt] = await Promise.all([
+        this.conversationModel.getDistinctDomainIds(),
+        this.conversationModel.getFirstConversationTime(),
+      ]);
+      return await this.pluginInstallModel.syncUsage(domains, firstUsedAt);
+    } catch (error) {
+      console.error('[TelemetryService] Usage sync failed:', error);
+      return null;
+    }
   }
 
   /**
@@ -304,17 +326,15 @@ export class TelemetryService {
    */
   private async report(eventType: 'install' | 'heartbeat'): Promise<void> {
     try {
-      const config = await this.pluginInstallModel.getInstall();
+      let config = await this.pluginInstallModel.getInstall();
       if (!config) {
         console.error('[TelemetryService] Install record not found');
         return;
       }
+      config = (await this.syncUsage()) ?? config;
 
       const stats = await this.collect();
-      const domainHash = createHash('sha256')
-        .update(config.domainsSeen.sort().join(','))
-        .digest('hex')
-        .substring(0, 16);
+      const domainHash = computeDomainHash(config.domainsSeen);
 
       let aiConfig = null;
       try { aiConfig = await this.aiConfigModel?.getConfig() ?? null; } catch { /* */ }
@@ -383,10 +403,7 @@ export class TelemetryService {
         return false;
       }
 
-      const domainHash = createHash('sha256')
-        .update(config.domainsSeen.sort().join(','))
-        .digest('hex')
-        .substring(0, 16);
+      const domainHash = computeDomainHash(config.domainsSeen);
 
       const payload = {
         instance_id: config.instanceId,
@@ -454,6 +471,16 @@ export class TelemetryService {
 // ─── 导出的共享工具函数 ─────────────────────────────
 
 const DEFAULT_BASE = 'https://stats.how2learns.com';
+
+/**
+ * 域集合的粗粒度指纹（sha256 前 16 位）。排序后拼接，不修改入参。
+ */
+export function computeDomainHash(domains: readonly string[] | undefined): string {
+  return createHash('sha256')
+    .update([...(domains ?? [])].sort().join(','))
+    .digest('hex')
+    .substring(0, 16);
+}
 
 /**
  * 获取遥测 token。
