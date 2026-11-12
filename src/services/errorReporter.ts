@@ -5,6 +5,7 @@ import {
   buildTelemetryUrl,
   getTelemetryToken,
   sendToEndpoint,
+  computeDomainHash,
 } from './telemetryService';
 import {
   TESTDATA_FAILURE_CODES,
@@ -222,10 +223,7 @@ export class ErrorReporter {
       const entries = this.buildEntries();
       if (entries.length === 0) return;
 
-      const domainHash = createHash('sha256')
-        .update(config.domainsSeen.sort().join(','))
-        .digest('hex')
-        .substring(0, 16);
+      const domainHash = computeDomainHash(config.domainsSeen);
 
       const payload = {
         instance_id: config.instanceId,

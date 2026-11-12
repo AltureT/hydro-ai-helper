@@ -1,6 +1,6 @@
 import type {
   Overview, InstancesResponse, ErrorsResponse, FeedbackItem, FeatureHealthResponse,
-  Alert, TelegramConfig, TelegramConfigInput, TestdataQualityResponse,
+  Alert, TelegramConfig, TelegramConfigInput, TestdataQualityResponse, InstanceStatusFilter,
 } from './types';
 
 let apiBase = '';
@@ -38,8 +38,8 @@ async function postApi<T>(path: string, body?: unknown): Promise<T> {
 
 export const getOverview = () => fetchApi<Overview>('/api/dashboard/overview');
 
-export const getInstances = (limit = 50, offset = 0) =>
-  fetchApi<InstancesResponse>(`/api/dashboard/instances?limit=${limit}&offset=${offset}`);
+export const getInstances = (limit = 50, offset = 0, status: InstanceStatusFilter = 'all') =>
+  fetchApi<InstancesResponse>(`/api/dashboard/instances?limit=${limit}&offset=${offset}&status=${status}`);
 
 export const getErrors = (limit = 50, offset = 0, sort: 'last_seen' | 'count' | 'instances' = 'last_seen') =>
   fetchApi<ErrorsResponse>(`/api/dashboard/errors?limit=${limit}&offset=${offset}&sort=${sort}`);

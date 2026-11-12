@@ -13,6 +13,13 @@ import {
   buildFeatureDegradationCandidates,
   buildTestdataBurstCandidates,
 } from './alertRules.mjs';
+import {
+  ALIVE_HOURS,
+  aliveCutoffIso,
+  instanceStatusSql,
+  legacySharedIdSql,
+  parseStatusFilter,
+} from './instanceStatus.mjs';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -1588,19 +1595,25 @@ async function handleDashboardOverview(request, env) {
   }
 
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  // API 请求统计和延迟桶都是实例上报的“最近 24h 快照”。只纳入最近
-  // 48h 仍有心跳的实例，避免把数周前离线实例的旧快照混进当前健康度。
-  const healthFreshnessHours = 48;
-  const cutoffFresh = new Date(Date.now() - healthFreshnessHours * 60 * 60 * 1000).toISOString();
+  // API 请求统计和延迟桶都是实例上报的“最近 24h 快照”。只纳入仍有心跳的
+  // 实例（ALIVE_HOURS 内上报过），避免把已离线实例的旧快照混进当前健康度。
+  const healthFreshnessHours = ALIVE_HOURS;
+  const cutoffFresh = aliveCutoffIso();
+  // 活跃用户只累加仍在上报的实例：已停报实例（含重装后留下的旧 ID）的
+  // active_users_* 是停报那天的快照，累加会虚高。累计对话数仍按 90 天窗口。
   const activityRow = await env.DB.prepare(
     `SELECT COUNT(*) AS instance_count,
-            COALESCE(SUM(active_users_7d), 0) AS active_users_7d,
-            COALESCE(SUM(active_users_30d), 0) AS active_users_30d,
-            COALESCE(SUM(active_users_90d), 0) AS active_users_90d,
+            COALESCE(SUM(CASE WHEN last_report_at >= ? THEN 1 ELSE 0 END), 0) AS active_instances,
+            COALESCE(SUM(CASE WHEN ${instanceStatusSql()} = 'stale' THEN 1 ELSE 0 END), 0) AS stale_instances,
+            COALESCE(SUM(CASE WHEN ${instanceStatusSql()} = 'one_shot' THEN 1 ELSE 0 END), 0) AS one_shot_instances,
+            COALESCE(SUM(CASE WHEN ${legacySharedIdSql()} THEN 1 ELSE 0 END), 0) AS legacy_shared_ids,
+            COALESCE(SUM(CASE WHEN last_report_at >= ? THEN active_users_7d ELSE 0 END), 0) AS active_users_7d,
+            COALESCE(SUM(CASE WHEN last_report_at >= ? THEN active_users_30d ELSE 0 END), 0) AS active_users_30d,
+            COALESCE(SUM(CASE WHEN last_report_at >= ? THEN active_users_90d ELSE 0 END), 0) AS active_users_90d,
             COALESCE(SUM(total_conversations), 0) AS total_conversations
      FROM plugin_stats
      WHERE last_report_at >= ?`,
-  ).bind(cutoff90d).first();
+  ).bind(cutoffFresh, cutoffFresh, cutoffFresh, cutoffFresh, cutoffFresh, cutoffFresh, cutoff90d).first();
   const healthRow = await env.DB.prepare(
     `SELECT COUNT(*) AS reporting_instances,
             COALESCE(SUM(api_failure_count_24h), 0) AS failures,
@@ -1632,6 +1645,10 @@ async function handleDashboardOverview(request, env) {
 
   return json({
     instances: activityRow?.instance_count || 0,
+    active_instances: activityRow?.active_instances || 0,
+    stale_instances: activityRow?.stale_instances || 0,
+    one_shot_instances: activityRow?.one_shot_instances || 0,
+    legacy_shared_ids: activityRow?.legacy_shared_ids || 0,
     reporting_instances: healthRow?.reporting_instances || 0,
     active_users_7d: activityRow?.active_users_7d || 0,
     active_users_30d: activityRow?.active_users_30d || 0,
@@ -1685,9 +1702,15 @@ async function handleDashboardInstances(request, env) {
   const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 100)) : 50;
   const offset = Number.isFinite(requestedOffset) ? Math.max(0, requestedOffset) : 0;
 
+  const status = parseStatusFilter(url.searchParams.get('status'));
+
   const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  const cutoffFresh = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
-  const [rows, totalRows, versionRows] = await env.DB.batch([
+  const cutoffFresh = aliveCutoffIso();
+  // 状态筛选：active = ALIVE_HOURS 内上报；one_shot = 只在安装后一天内报过；
+  // stale = 曾正常上报但已停报（常见于重置数据库后以新 ID 继续上报的站点）
+  const statusFilter = status === 'all' ? '' : ` AND ${instanceStatusSql('ps')} = ?`;
+  const statusBinds = status === 'all' ? [] : [cutoffFresh, status];
+  const [rows, totalRows, versionRows, statusRows] = await env.DB.batch([
     env.DB.prepare(
       `SELECT ps.instance_id, ps.version, ps.active_users_7d, ps.active_users_30d,
               ps.active_users_90d, ps.total_conversations, ps.error_count_24h,
@@ -1699,26 +1722,41 @@ async function handleDashboardInstances(request, env) {
                   AND pfs.report_at >= ?
                   AND pfs.attempts >= 10
                   AND (pfs.successes * 1.0 / pfs.attempts) < 0.8
-              ), 0) AS degraded_features
+              ), 0) AS degraded_features,
+              ${instanceStatusSql('ps')} AS status,
+              ${legacySharedIdSql('ps')} AS legacy_shared
        FROM plugin_stats ps
-       WHERE ps.last_report_at >= ?
+       WHERE ps.last_report_at >= ?${statusFilter}
        ORDER BY ps.last_report_at DESC LIMIT ? OFFSET ?`,
-    ).bind(cutoffFresh, cutoff90d, limit, offset),
+    ).bind(cutoffFresh, cutoffFresh, cutoff90d, ...statusBinds, limit, offset),
     env.DB.prepare(
-      `SELECT COUNT(*) AS total FROM plugin_stats WHERE last_report_at >= ?`,
-    ).bind(cutoff90d),
+      `SELECT COUNT(*) AS total FROM plugin_stats ps WHERE ps.last_report_at >= ?${statusFilter}`,
+    ).bind(cutoff90d, ...statusBinds),
     env.DB.prepare(
-      `SELECT version, COUNT(*) AS count
-       FROM plugin_stats WHERE last_report_at >= ?
-       GROUP BY version ORDER BY count DESC, version DESC`,
-    ).bind(cutoff90d),
+      `SELECT ps.version, COUNT(*) AS count
+       FROM plugin_stats ps WHERE ps.last_report_at >= ?${statusFilter}
+       GROUP BY ps.version ORDER BY count DESC, ps.version DESC`,
+    ).bind(cutoff90d, ...statusBinds),
+    env.DB.prepare(
+      `SELECT ${instanceStatusSql('ps')} AS status, COUNT(*) AS count
+       FROM plugin_stats ps WHERE ps.last_report_at >= ?
+       GROUP BY 1`,
+    ).bind(cutoffFresh, cutoff90d),
   ]);
 
+  const statusCounts = { active: 0, stale: 0, one_shot: 0 };
+  for (const r of statusRows?.results || []) {
+    if (r.status in statusCounts) statusCounts[r.status] = r.count;
+  }
+
   return json({
-    instances: rows?.results || [],
+    instances: (rows?.results || []).map((r) => ({ ...r, legacy_shared: !!r.legacy_shared })),
     total: totalRows?.results?.[0]?.total || 0,
     limit,
     offset,
+    status,
+    status_counts: statusCounts,
+    alive_hours: ALIVE_HOURS,
     version_distribution: versionRows?.results || [],
   });
 }
