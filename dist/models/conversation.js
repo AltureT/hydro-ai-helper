@@ -230,6 +230,25 @@ class ConversationModel {
         return this.collection.countDocuments(filter);
     }
     /**
+     * 列出出现过对话的全部 domainId（走 idx_domainId）
+     */
+    async getDistinctDomainIds() {
+        const ids = await this.collection.distinct('domainId');
+        return ids.filter((id) => typeof id === 'string' && id.length > 0);
+    }
+    /**
+     * 获取最早一次对话的开始时间（走 idx_startTime）
+     */
+    async getFirstConversationTime() {
+        const result = await this.collection
+            .find({})
+            .sort({ startTime: 1 })
+            .limit(1)
+            .project({ startTime: 1 })
+            .toArray();
+        return result[0]?.startTime || null;
+    }
+    /**
      * 获取最近一次对话的结束时间
      * @param domainId 可选的域 ID 筛选
      * @returns 最近对话时间或 null
