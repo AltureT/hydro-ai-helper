@@ -4,8 +4,6 @@ import { buildApiUrl } from '../utils/domainUtils';
 import { Toast, useToast } from '../components/Toast';
 import { JailbreakAnalyticsPanel } from './JailbreakAnalyticsPanel';
 import { JailbreakLogsViewer } from './JailbreakLogsViewer';
-import { OffTopicRulesCard } from './OffTopicRulesCard';
-import { ReviewPanel } from './ReviewPanel';
 import {
   COLORS,
   FONT_FAMILY,
@@ -24,7 +22,7 @@ import type {
   JailbreakLogPagination,
 } from './configTypes';
 
-type SafetySection = 'records' | 'analytics' | 'review' | 'rules';
+type SafetySection = 'records' | 'analytics' | 'rules';
 
 const EMPTY_LOG_PAGINATION: JailbreakLogPagination = {
   logs: [],
@@ -408,17 +406,6 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
           {i18n('ai_helper_safety_section_analytics')}
         </button>
         <button
-          id="ai-safety-tab-review"
-          type="button"
-          role="tab"
-          aria-selected={activeSection === 'review'}
-          aria-controls="ai-safety-panel-review"
-          onClick={() => setActiveSection('review')}
-          style={getPillStyle(activeSection === 'review')}
-        >
-          {i18n('ai_helper_safety_section_review')}
-        </button>
-        <button
           id="ai-safety-tab-rules"
           type="button"
           role="tab"
@@ -504,12 +491,6 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
             />
           )}
         </>
-      )}
-
-      {activeSection === 'review' && (
-        <div id="ai-safety-panel-review" role="tabpanel" aria-labelledby="ai-safety-tab-review">
-          <ReviewPanel showToast={showToast} />
-        </div>
       )}
 
       {activeSection === 'rules' && (
@@ -632,8 +613,6 @@ export const SafetyGovernancePanel: React.FC<SafetyGovernancePanelProps> = ({ em
               </button>
             </div>
           </div>
-
-          <OffTopicRulesCard showToast={showToast} />
         </div>
       )}
     </div>

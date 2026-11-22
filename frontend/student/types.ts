@@ -32,8 +32,6 @@ export interface ChatApiErrorPayload {
   safetyEventId?: string;
   appealAllowed?: boolean;
   safetyProgress?: SafetyProgress;
-  /** QUOTA_EXHAUSTED 时附带当日用量 */
-  quota?: { limit: number | null; used: number; remaining: number | null; resetAt: string };
 }
 
 export interface SafetyProgress {
@@ -71,11 +69,13 @@ export interface ChatState {
   scratchpadAvailable: boolean;
   hasAccepted: boolean;
   acCode: string | null;
+  lastCode: string | null;
   showLoadCodeConfirm: boolean;
   problemInfo: ProblemInfo | null;
   problemInfoError: string;
   manualTitle: string;
   isContestRestricted: boolean;
+  toolStatus: string | null;
 }
 
 export type ChatAction =
@@ -94,8 +94,10 @@ export type ChatAction =
   | { type: 'SET_SAFETY_APPEAL'; payload: { status: ChatState['safetyAppealStatus']; message?: string } }
   | { type: 'CLEAR_ERROR' }
   | { type: 'SET_SCRATCHPAD_AVAILABLE'; payload: boolean }
+  | { type: 'SET_TOOL_STATUS'; payload: string | null }
   | { type: 'SET_HAS_ACCEPTED'; payload: boolean }
   | { type: 'SET_AC_CODE'; payload: string | null }
+  | { type: 'SET_LAST_CODE'; payload: string | null }
   | { type: 'SET_SHOW_LOAD_CODE_CONFIRM'; payload: boolean }
   | { type: 'SET_PROBLEM_INFO'; payload: ProblemInfo | null }
   | { type: 'SET_PROBLEM_INFO_ERROR'; payload: string }
@@ -140,8 +142,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       safetyAppealStatus: 'idle', safetyAppealMessage: '',
     };
     case 'SET_SCRATCHPAD_AVAILABLE': return { ...state, scratchpadAvailable: action.payload };
+    case 'SET_TOOL_STATUS': return { ...state, toolStatus: action.payload };
     case 'SET_HAS_ACCEPTED': return { ...state, hasAccepted: action.payload };
     case 'SET_AC_CODE': return { ...state, acCode: action.payload };
+    case 'SET_LAST_CODE': return { ...state, lastCode: action.payload };
     case 'SET_SHOW_LOAD_CODE_CONFIRM': return { ...state, showLoadCodeConfirm: action.payload };
     case 'SET_PROBLEM_INFO': return { ...state, problemInfo: action.payload, problemInfoError: '' };
     case 'SET_PROBLEM_INFO_ERROR': return { ...state, problemInfoError: action.payload };
@@ -190,9 +194,11 @@ export const initialChatState: ChatState = {
   scratchpadAvailable: false,
   hasAccepted: false,
   acCode: null,
+  lastCode: null,
   showLoadCodeConfirm: false,
   problemInfo: null,
   problemInfoError: '',
   manualTitle: '',
   isContestRestricted: false,
+  toolStatus: null,
 };

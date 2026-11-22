@@ -10,11 +10,10 @@ import { ExportService, ConversationExportFilters, ConversationExportOptions } f
 import { getDomainId } from '../utils/domainHelper';
 import { applyRateLimit } from '../lib/rateLimitHelper';
 import { translateWithParams } from '../utils/i18nHelper';
-import { readGroupParam } from '../utils/groupFilter';
 
 /**
  * ExportHandler - 导出会话数据为 CSV 文件
- * GET /ai-helper/export?format=csv&startDate=...&endDate=...&group=...&problemId=...&userId=...&includeSensitive=false
+ * GET /ai-helper/export?format=csv&startDate=...&endDate=...&classId=...&problemId=...&userId=...&includeSensitive=false
  * GET /d/:domainId/ai-helper/export?format=csv&...
  */
 export class ExportHandler extends Handler {
@@ -35,6 +34,7 @@ export class ExportHandler extends Handler {
         format = 'csv',
         startDate,
         endDate,
+        classId,
         problemId,
         userId,
         includeSensitive = 'false',
@@ -91,9 +91,8 @@ export class ExportHandler extends Handler {
         }
       }
 
-      const group = readGroupParam(this.request.query as Record<string, unknown>);
-      if (group) {
-        filters.group = group;
+      if (classId) {
+        filters.classId = String(classId);
       }
 
       if (problemId) {

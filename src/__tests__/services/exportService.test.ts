@@ -4,7 +4,7 @@ const mockConversations = [
   {
     _id: { toString: () => 'conv1' },
     userId: 1001,
-    groupNames: ['2023级1班', '竞赛组'],
+    classId: 'class-A',
     problemId: 'P1000',
     startTime: new Date('2024-01-01T10:00:00Z'),
     endTime: new Date('2024-01-01T10:30:00Z'),
@@ -17,6 +17,7 @@ const mockConversations = [
   {
     _id: { toString: () => 'conv2' },
     userId: 1002,
+    classId: 'class-B',
     problemId: 'P1001',
     startTime: new Date('2024-01-02T14:00:00Z'),
     endTime: new Date('2024-01-02T14:45:00Z'),
@@ -64,7 +65,7 @@ describe('ExportService', () => {
 
       expect(csv).toContain('conversationId');
       expect(csv).toContain('anonymousId');
-      expect(csv).toContain('groups');
+      expect(csv).toContain('classId');
       expect(csv).toContain('problemId');
     });
 
@@ -73,8 +74,7 @@ describe('ExportService', () => {
       const headers = csv.split('\n')[0];
 
       expect(headers).toContain('conversationId');
-      expect(headers).toContain('groups');
-      expect(headers).not.toContain('classId');
+      expect(headers).toContain('classId');
       expect(headers).toContain('problemId');
       expect(headers).toContain('problemTitle');
       expect(headers).toContain('startTime');
@@ -132,27 +132,6 @@ describe('ExportService', () => {
         }),
         expect.anything()
       );
-    });
-
-    it('should apply the group filter, including ungrouped (FR-057)', async () => {
-      const collection = mockCtx.db.collection();
-      await service.exportConversations({ domainId: 'oi2023', group: '2023级1班' });
-      expect(collection.find).toHaveBeenLastCalledWith(
-        { domainId: 'oi2023', groupNames: '2023级1班' },
-        expect.anything()
-      );
-      await service.exportConversations({ domainId: 'oi2023', group: '__ungrouped__' });
-      expect(collection.find).toHaveBeenLastCalledWith(
-        { domainId: 'oi2023', $or: [{ groupNames: { $exists: false } }, { groupNames: { $size: 0 } }] },
-        expect.anything()
-      );
-    });
-
-    it('should write group names joined with | and leave ungrouped empty', async () => {
-      const lines = (await service.exportConversations({})).split('\n');
-      const groupsCol = lines[0].split(',').indexOf('groups');
-      expect(lines[1].split(',')[groupsCol]).toBe('2023级1班|竞赛组');
-      expect(lines[2].split(',')[groupsCol]).toBe('');
     });
 
     it('should escape CSV fields with special characters', async () => {

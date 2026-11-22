@@ -65,10 +65,10 @@ export const reportMarkdownStyles = `
   .ai-report-content .markdown-body { overflow-wrap: anywhere; }
   .ai-report-content .markdown-body > :first-child { margin-top: 0; }
   .ai-report-content .report-table-scroll { max-width: 100%; overflow-x: auto; margin: 12px 0; }
-  .ai-report-content .report-table-scroll:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+  .ai-report-content .report-table-scroll:focus-visible { outline: 2px solid #5f9fd6; outline-offset: 2px; }
   .ai-report-content .markdown-body table { display: table; width: 100%; margin: 0; border: 0; }
-  .ai-report-content .markdown-body th, .ai-report-content .markdown-body td { border: 0; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-  .ai-report-content .markdown-body th { white-space: nowrap; background: #f6f8fb; letter-spacing: 0; }
+  .ai-report-content .markdown-body th, .ai-report-content .markdown-body td { border: 0; border-bottom: 1px solid #dddddd; vertical-align: top; }
+  .ai-report-content .markdown-body th { white-space: nowrap; background: #f5f7f9; letter-spacing: 0; }
   .ai-report-content .markdown-body td { min-width: 112px; line-height: 1.7; }
   .ai-report-content .markdown-body td:last-child { min-width: 220px; width: 60%; }
   .ai-report-content .markdown-body :not(pre) > code { color: #334155; }

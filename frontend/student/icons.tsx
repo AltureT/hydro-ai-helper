@@ -17,7 +17,7 @@ export const AIMark: React.FC<{ size?: number; radius?: number; fontSize?: numbe
 }) => (
   <div style={{
     width: size, height: size, borderRadius: radius,
-    background: '#2563eb',
+    background: '#5f9fd6',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontFamily: "'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace",
     fontSize, fontWeight: 700, color: '#ffffff', letterSpacing: '-0.5px',

@@ -15,92 +15,214 @@
 
 </div>
 
-A teaching-first AI plugin for [HydroOJ](https://github.com/hydro-dev/Hydro): it guides students to think instead of handing out answers. Chinese and English UI, works with Hydro 4 and Hydro 5.
+A teaching-first AI tutoring plugin for [HydroOJ](https://github.com/hydro-dev/Hydro) — guided hints and thought-provoking questions, never complete solutions. Supports English and Chinese (i18n).
 
-<img src="assets/screenshots/student-chat.png" alt="A student asking the AI helper on a problem page" width="800">
+## Screenshots
 
-> Screenshots show the Chinese UI with sample data.
-
-## Features
-
-### Students: an AI tutor that guides instead of answering
-
-- Open the AI panel on a problem page and ask by type: Don't understand / No idea / Debug code / Optimize code (after AC). Replies stream in real time.
-- The AI explains ideas with the samples and points at what is wrong, without giving complete code. Prompt injection, jailbreak attempts and off-topic chat are blocked.
-- Read the personal learning summary the teacher published on the scoreboard.
-
-### Teachers: problem setting, class insight and review
-
-- **AI test data generation**: on the problem files page, generate test cases, judge config and a reference solution from the statement. The generator and solution actually run in the judge sandbox and are checked by brute-force comparison, input validation and sample regression. Nothing is written until you preview and confirm.
-- **Teaching analysis**: finds common problems across the class's submissions and suggests what to cover next lesson, plus follow-up exercises.
-- **Batch learning summaries**: a personal summary for every student, published after you review the drafts.
-- **Read-only view for group teachers** (optional): a group's teacher can read their students' AI conversations and stats.
+<img src="assets/screenshots/1.png" alt="Student panel - AI chat" width="800">
 
 <details>
-<summary><b>Teacher screenshots</b></summary>
+<summary><b>AI Test Data Generation</b></summary>
 
-<img src="assets/screenshots/testdata-generation.png" alt="AI test data generation panel on the problem files page" width="800">
-
-<img src="assets/screenshots/teaching-analysis.png" alt="AI teaching analysis on a homework scoreboard" width="800">
+<img src="assets/screenshots/10.png" alt="Problem files page - AI test data generation panel" width="800">
 
 </details>
 
-### Admins: users, quotas, safety and cost
+<details>
+<summary><b>Batch AI Learning Summary</b></summary>
 
-- **User management**: batch-manage Hydro groups by username prefix, regex or list; move groups and students between domains; see every student's groups, quota, usage and credit across domains in the student overview. Every membership change can be undone.
-- **Daily AI quota**: counted per question and summed across domains, set by quota group or per person. Violations lower a student's credit and daily quota, which then recover day by day.
-- **Safety**: layered jailbreak and prompt-injection detection, AI spot checks, student appeals and review; changes to membership, quotas, credit and settings are audited.
-- **Models and cost**: multiple API endpoints with automatic failover, a separate model per scenario (chat, test data generation, …), token and cost tracking with budget limits.
+<img src="assets/screenshots/8.png" alt="Batch summary - scoreboard integration" width="800">
+
+<img src="assets/screenshots/9.png" alt="Batch summary - generated results" width="800">
+
+</details>
 
 <details>
 <summary><b>Admin screenshots</b></summary>
 
-<img src="assets/screenshots/user-overview.png" alt="Student overview in user management" width="800">
+<img src="assets/screenshots/4.png" alt="Admin - conversation records" width="800">
 
-<img src="assets/screenshots/cost-dashboard.png" alt="Cost dashboard" width="800">
+<img src="assets/screenshots/5.png" alt="Admin - usage analytics" width="800">
+
+<img src="assets/screenshots/6.png" alt="Admin - AI configuration" width="800">
+
+<img src="assets/screenshots/7.png" alt="Admin - cost dashboard" width="500">
+
+</details>
+
+## Features
+
+### Students
+
+- AI chat panel on problem pages with real-time streaming (SSE) and LaTeX rendering
+- Choose question type: **Understand** / **Approach** / **Debug** / **Optimize** (AC-only)
+- Multi-turn conversations with history; select confusing text for instant clarification
+- View personalized AI learning summaries on scoreboard pages
+
+### Teachers
+
+- **AI Test Data Generation** — generate a full test data set from the statement on the problem files page (`/p/:pid/files`)
+  - **Sandbox execution + double verification**: the generator and reference solution actually run in Hydro's judge sandbox to produce `.in`/`.out`, then pass four machine gates — independent brute-force cross-check, input validation, template execution, and statement-sample regression; failures trigger targeted generator/oracle/template repair
+  - Automatically mixes small, medium, and boundary cases from statement constraints by default, with explicit single-scale modes still available. New numeric cases avoid existing files and are merged into `config.yaml`
+  - Supports traditional problems, LeetCode-style function problems (auto-generates `template.py/java/cc` and `compile.sh`) and fill-in-the-blank problems
+  - Paste an existing reference solution as the single source of truth; `config.yaml` is built deterministically and judge settings sync automatically
+  - Every generated code file (std.py, generator.py, validator.py, …) starts with a purpose comment; everything is previewed, editable and opt-in before writing
+  - Uses one adaptive generation pipeline with no plugin-imposed deadline based on problem difficulty. A task runs until completion, an explicit service failure, or user cancellation; the page shows real stages, elapsed time, and a background heartbeat, and restores progress or results when revisited
+  - ⚠️ Highly sensitive to model capability: assign your strongest model to the Test Data Generation scenario; a skeleton mode (no AI) is available as fallback
+- **Teaching Analysis** — class-level insights from collective submission data
+  - 8-dimension rule engine (common errors / comprehension gaps / at-risk students / progress trends, …) + error-signature clustering + temporal behavior patterns
+  - LLM-powered P0/P1/P2 prioritized suggestions — specific classroom actions, not generic advice; auto-generates fill-in exercises from AC code
+- **Batch AI Summary** — one-click personalized learning summaries for all students on scoreboard pages
+  - Longitudinal history tracking + milestone-based submission sampling; supplemental generation for late-arriving students
+  - Draft/publish workflow with real-time SSE progress and stop/continue/retry controls
+- Conversation browsing (time / problem / class / student filters with autocomplete), effectiveness metrics, CSV export with optional anonymization
+
+### Admins
+
+- Unified portal: Conversations / Analytics / Configuration tabs
+- Multi-endpoint API management with model auto-discovery, drag-to-reorder priority, and automatic failover
+- Per-scenario model assignment: student chat / learning summary / teaching analysis / test data generation
+- Cost control: token usage tracking, budget limits, cost dashboard
+- Rate limiting, custom system prompt, one-click plugin update
+
+<details>
+<summary><b>Security</b></summary>
+
+- Multi-layer jailbreak detection (input / prompt / output) with cross-turn protection
+- CSRF token validation, SSRF prevention, AES-256-GCM encrypted API key storage
+- AI-generated code runs only inside the go-judge sandbox, never in the web process
+- Paginated jailbreak audit logs
 
 </details>
 
 ## Installation
 
-Requires HydroOJ 4.x or 5.x. AI test data generation also needs the Hydro judge sandbox (go-judge) to be reachable.
-
 ```bash
-git clone https://github.com/AltureT/hydro-ai-helper.git   # or the Gitee mirror: https://gitee.com/alture/hydro-ai-helper.git
+# Clone (choose one)
+git clone https://github.com/AltureT/hydro-ai-helper.git   # GitHub
+git clone https://gitee.com/alture/hydro-ai-helper.git      # Gitee (mirror)
+
 cd hydro-ai-helper
 npm install
 npm run build:plugin
-hydrooj addon add "$(pwd)"
+
+# Install into HydroOJ
+hydrooj addon add /path/to/hydro-ai-helper
+pm2 restart hydrooj
 ```
 
-Give the Hydro process an encryption key (used to encrypt stored API keys, at least 16 characters), then restart:
+Verify: visit `/ai-helper/hello` — a JSON response means success.
+
+## Configuration
+
+### Environment Variables
+
+`ENCRYPTION_KEY` (required, 32 characters) — encrypts API keys:
 
 ```bash
-export ENCRYPTION_KEY="$(openssl rand -base64 24)"
-pm2 restart hydrooj --update-env && pm2 save
+export ENCRYPTION_KEY="your-32-character-secret-key!!!"   # generate: openssl rand -base64 24 | head -c 32
 ```
 
-Keep this key safe. Changing it makes stored API keys unreadable; see [Configuration](docs/configuration_en.md) for how to rotate it.
+`AI_HELPER_UPDATE_CHANNEL` (optional) — in-app update channel:
 
-Open `/ai-helper/hello`: a JSON response means the plugin is loaded.
+- `stable` (default) — updates only to official releases (`vX.Y.Z` tags), GPG-verified. Use on all real-user servers.
+- `edge` — tracks the latest `main` branch code; for the maintainer's own test server only.
 
-## First-time setup
+`AI_HELPER_JAILBREAK_LOG_RETENTION_DAYS` (optional) — safety-interception log retention:
 
-Sign in as a system administrator and go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Config":
+- Defaults to `180` days; accepted range is `7`–`3650` days
+- New logs expire from creation time; legacy logs expire gradually from upgrade time instead of being deleted immediately during deployment
 
-1. **Add an API endpoint**: enter the API base URL and API key, then click "Fetch Model List".
-2. **Choose models**: tick the models to use and drag to order them. If the first one is unavailable, the next is used.
-3. **Scenario models** (optional): pick a separate model for scenarios such as test data generation. Use your strongest model there.
-4. Click "Save Configuration", then "Check API connection".
+`AI_HELPER_TESTDATA_GENERATION_MODE` (optional) — whether test data generation requires the sandbox (`hydrojudge.sandbox_host`):
 
-You can update the plugin from the "AI Config" page later. By default it only installs GPG-signed releases.
+- `auto` (default) — verify in the sandbox when reachable; otherwise fall back to direct output clearly marked "unverified"
+- `sandbox` — require the sandbox and fail safely when unavailable
+- `direct` — always use direct output (not recommended)
 
-Optional environment variables (update channel, log retention, test data generation settings, …) are listed in [Configuration](docs/configuration_en.md).
+`AI_HELPER_TESTDATA_MODEL_TIMEOUT_SECONDS` (optional) — wall-clock limit for each model call during AI testdata generation:
 
-## Telemetry and privacy
+- Defaults to `300` seconds; accepts `30`–`1800`; invalid values fall back to the default
+- Only bounds a stuck call; it does not reduce output tokens, reasoning effort, or verification stages
 
-The plugin reports anonymous statistics (installs, active users, conversation count, feature usage and version) for the project badges and to guide development. Reports use a random ID and contain no code, conversation content or personal data, and no IP address is stored; only the country and province that Cloudflare roughly infers are recorded. See [Configuration](docs/configuration_en.md#disabling-telemetry) to turn it off.
+`AI_HELPER_TESTDATA_MUTATION_CONCURRENCY` (optional) — sandbox window size for mutation testing:
 
-## Changelog and license
+- Defaults to `2`; accepts `1`–`4`; invalid values fall back to the default
+- Candidates are still accounted for in source order; a first timeout in a concurrent window is rerun alone before it can count as killed
 
-See [CHANGELOG.md](CHANGELOG.md) for what changed in each version. This is a third-party HydroOJ plugin released under the MIT License. Issues with bugs and suggestions are welcome.
+### Admin Setup
+
+Go to **Control Panel → AI Assistant** (`/ai-helper`) → "AI Configuration" tab:
+
+1. **Add API endpoints** — endpoint name, API Base URL, API Key → click "Fetch Models"
+2. **Select models & priority** — pick models, drag to reorder; failover is automatic
+3. **Scenario models** — assign dedicated models per scenario (use your strongest model for Test Data Generation)
+4. **Test & save** — "Test Connection" to verify, then save
+
+## Telemetry & Privacy
+
+Collects **anonymous statistics** (installations, active-user windows, conversations, per-day feature usage, version) for GitHub badges and development. Fully anonymous (random UUID, no PII, IPs never stored); no code, conversations or personal data — only a coarse country/region inferred by Cloudflare for distribution stats.
+
+<details>
+<summary><b>Disable telemetry</b></summary>
+
+```javascript
+use your_hydro_db
+db.ai_plugin_install.updateOne(
+  { _id: 'install' },
+  { $set: { telemetryEnabled: false } }
+)
+```
+
+</details>
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete version history. Each GitHub Release contains notes for that version only.
+
+<details open>
+<summary><b>v3.0.0</b> — Test data generation: sandbox execution + double verification</summary>
+
+- Test data is no longer emitted directly by the AI: the generator and reference solution actually run in the go-judge sandbox to produce `.in`/`.out`
+- Four machine gates: independent brute-force cross-check, per-case input validation, function-template execution, statement-sample regression
+- On failure, the failing stage, test case, input and traceback tail are fed back to the AI for one automatic repair round; teacher cancellation is no longer misreported
+- Generated code files start with purpose comments; prominent strongest-model reminders on both the files page and the scenario-model page
+- Telemetry: error reports carry AI failure details, startup-failure canary alerts, cumulative feature usage and instance region
+
+</details>
+
+<details>
+<summary><b>v2.5.0</b> — AI Test Data Generation (Beta)</summary>
+
+- One-click generation of test cases, judge templates, config.yaml and a reference solution from the statement (direct-output mode)
+- Traditional / function / fill-in-the-blank problems; paste a reference solution as the single source of truth; skeleton-mode fallback
+- New "Test Data Generation" AI scenario with its own model chain
+
+</details>
+
+<details>
+<summary><b>v2.0.0</b> — Teaching Analysis & Design Overhaul</summary>
+
+- 8-dimension class analysis + error-signature clustering + temporal behavior patterns (rule-engine first, ~1/30 the cost of pure LLM)
+- LLM-generated P0/P1/P2 teaching suggestions; auto-generated fill-in exercises from AC code
+- Longitudinal summary tracking with supplemental generation; unified frontend design tokens
+
+</details>
+
+<details>
+<summary><b>Earlier versions</b></summary>
+
+- v1.21.0: batch AI learning summaries (milestone sampling, SSE progress, draft/publish)
+- v1.19.0–v1.20.0: full i18n, multi-dimensional effectiveness metrics, filter autocomplete
+- v1.18.0: telemetry dashboard SPA, richer error diagnostics
+- v1.14.x–v1.16.x: SSE streaming, cost control, CSRF/SSRF/prompt-injection defenses, security fixes
+- v1.0.0–v1.12.0: initial release, question types, multi-endpoint failover, judge-data integration, contest mode
+
+</details>
+
+## About
+
+A third-party plugin for the [HydroOJ](https://github.com/hydro-dev/Hydro) open-source online judge. Issues and suggestions welcome.
+
+## License
+
+MIT License

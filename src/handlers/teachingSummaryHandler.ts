@@ -5,10 +5,9 @@ import { studentPatternGroups } from '../services/analyzers/temporalPatternAnaly
  * 提供竞赛教学分析总结的生成、查询、列表和反馈功能
  */
 
-import { Handler, PRIV, db } from 'hydrooj';
+import { ContestModel, ForbiddenError, Handler, PERM, PRIV, db } from 'hydrooj';
 import { ObjectId, ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
-import { resolveProblemContents } from '../utils/problemStatement';
 import { AIServiceError, USER_ERROR_MESSAGE_KEYS, createMultiModelClientFromConfig, extractAiErrorMetadata } from '../services/openaiClient';
 import { TeachingSummaryModel } from '../models/teachingSummary';
 import { TeachingAnalysisService } from '../services/teachingAnalysisService';
@@ -50,6 +49,13 @@ export class TeachingSummaryHandler extends Handler {
       }
 
       const model: TeachingSummaryModel = this.ctx.get('teachingSummaryModel');
+
+      // 教学总结是敏感数据：仅比赛编辑者（组织者或持比赛编辑权限）可查看
+      const _ctdoc = await ContestModel.get(domainId, contestObjId as any);
+      if (!_ctdoc || (!this.user.own(_ctdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
+      }
+
       const summary = await model.findByContest(domainId, contestObjId);
 
       if (!summary) {
@@ -86,6 +92,11 @@ export class TeachingSummaryHandler extends Handler {
         return;
       }
 
+      // 权限预检（fail-closed）：生成教学总结前先要求比赛编辑权限
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
+
       const model: TeachingSummaryModel = this.ctx.get('teachingSummaryModel');
 
       // Check for existing summary
@@ -109,6 +120,10 @@ export class TeachingSummaryHandler extends Handler {
         this.response.body = { error: { code: 'CONTEST_NOT_FOUND', message: 'Contest not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      // 精确校验当前用户对该比赛的编辑权限
+      if (!this.user.own(tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST)) {
+        throw new ForbiddenError('not contest editor');
       }
 
       // Get attendees
@@ -211,9 +226,9 @@ export class TeachingSummaryHandler extends Handler {
 
       // Fetch problem docs early — needed for both analyzer titles and LLM context
       const documentColl = db.collection('document');
-      const problemDocs = await resolveProblemContents(await documentColl
+      const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: pids } })
-        .toArray(), domainId);
+        .toArray();
 
       const pidTitles = new Map<number, string>();
       const pidAliases = new Map<number, string[]>();

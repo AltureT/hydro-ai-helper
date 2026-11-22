@@ -7,15 +7,15 @@ import { TypeIcon, SendIcon, AttachIcon, RefreshIcon, RemoveIcon } from './icons
 const A = {
   border: '#eef1f5',
   cardBorder: '#e3e8ef',
-  inputBg: '#f8fafc',
-  primary: '#2563eb',
-  gradient: 'linear-gradient(135deg, #2563eb, #5b8def)',
+  inputBg: '#edf0f2',
+  primary: '#5f9fd6',
+  gradient: 'linear-gradient(135deg, #5f9fd6, #7fb4e0)',
   textPrimary: '#1e2536',
-  textSecondary: '#475569',
-  textMuted: '#64748b',
+  textSecondary: '#555555',
+  textMuted: '#999999',
   textFaint: '#94a3b8',
   placeholder: '#aab4c2',
-  selBorder: '#2563eb',
+  selBorder: '#5f9fd6',
   selBg: '#f3f7ff',
   idleBorder: '#eef1f5',
   idleBg: '#fafbfd',
@@ -50,8 +50,6 @@ interface ChatInputProps {
   onRefreshCode: () => void;
   onNewConversation: () => void;
   errorBanner?: React.ReactNode;
-  /** 额度用完或 AI 被关闭时禁用输入 */
-  disabled?: boolean;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -59,7 +57,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   questionType, onQuestionTypeChange, questionTypes,
   includeCode, onIncludeCodeChange, code, onCodeClear,
   isLoading, conversationHistoryLength,
-  onSubmit, onCancel, onRefreshCode, onNewConversation, disabled = false,
+  onSubmit, onCancel, onRefreshCode, onNewConversation,
   errorBanner,
 }) => {
   const isFirstConversation = conversationHistoryLength === 0;
@@ -127,7 +125,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const renderTextarea = (minHeight: string, maxHeight: string) => (
     <textarea
       value={userThinking}
-      disabled={disabled}
       onChange={(e) => onUserThinkingChange(e.target.value)}
       placeholder={isFirstConversation ? i18n('ai_helper_student_placeholder_first') : i18n('ai_helper_student_placeholder_followup')}
       style={{
@@ -137,12 +134,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         flex: 1, minHeight, maxHeight, resize: 'none', boxSizing: 'border-box', padding: 0,
       }}
       onKeyDown={(e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (!disabled) onSubmit(); }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onSubmit(); }
       }}
     />
   );
 
-  const disabledSubmit = disabled || isLoading || !canSubmit;
+  const disabledSubmit = isLoading || !canSubmit;
   const submitStyle: React.CSSProperties = {
     width: '32px', height: '32px', borderRadius: '50%',
     background: disabledSubmit ? A.disabledBg : A.gradient,
@@ -161,7 +158,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   return (
     <div style={{ background: '#fff', flexShrink: 0 }}>
-      <style>{`.ai-type-card:hover{border-color:#c5d4f5 !important}.ai-input-card:focus-within{border-color:#2563eb !important;box-shadow:0 0 0 3px rgba(37,99,235,.18)}`}</style>
+      <style>{`.ai-type-card:hover{border-color:#bcd7f0 !important}.ai-input-card:focus-within{border-color:#5f9fd6 !important;box-shadow:0 0 0 3px rgba(37,99,235,.18)}`}</style>
       {errorBanner}
 
       {/* 问题类型卡片 — 首次对话 */}

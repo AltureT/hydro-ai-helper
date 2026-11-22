@@ -136,28 +136,52 @@ describe('PluginInstallModel', () => {
     });
   });
 
-  describe('syncUsage', () => {
-    it('adds new domains and sets firstUsedAt only where it is unset', async () => {
-      const first = new Date('2026-02-01T00:00:00Z');
-      mockColl.findOne.mockResolvedValue({ _id: 'install', domainsSeen: ['system'] });
+  describe('markFirstUse', () => {
+    it('should set firstUsedAt when not already set', async () => {
+      mockColl.findOne.mockResolvedValue({ _id: 'install' });
 
-      const result = await model.syncUsage(['system', '', 'dashu', 'system'], first);
+      await model.markFirstUse();
 
       expect(mockColl.updateOne).toHaveBeenCalledWith(
         { _id: 'install' },
-        { $addToSet: { domainsSeen: { $each: ['system', 'dashu'] } } },
+        { $set: { firstUsedAt: expect.any(Date) } },
       );
-      expect(mockColl.updateOne).toHaveBeenCalledWith(
-        { _id: 'install', firstUsedAt: null },
-        { $set: { firstUsedAt: first } },
-      );
-      expect(result).toEqual({ _id: 'install', domainsSeen: ['system'] });
     });
 
-    it('writes nothing when there are no conversations', async () => {
-      mockColl.findOne.mockResolvedValue({ _id: 'install' });
-      await model.syncUsage([], null);
+    it('should skip when firstUsedAt already set', async () => {
+      mockColl.findOne.mockResolvedValue({ _id: 'install', firstUsedAt: new Date() });
+
+      await model.markFirstUse();
+
       expect(mockColl.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('should skip when no record exists', async () => {
+      mockColl.findOne.mockResolvedValue(null);
+
+      await model.markFirstUse();
+
+      expect(mockColl.updateOne).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('markLastUse', () => {
+    it('should update lastUsedAt', async () => {
+      await model.markLastUse();
+      expect(mockColl.updateOne).toHaveBeenCalledWith(
+        { _id: 'install' },
+        { $set: { lastUsedAt: expect.any(Date) } },
+      );
+    });
+  });
+
+  describe('addDomain', () => {
+    it('should $addToSet domainId', async () => {
+      await model.addDomain('test-domain');
+      expect(mockColl.updateOne).toHaveBeenCalledWith(
+        { _id: 'install' },
+        { $addToSet: { domainsSeen: 'test-domain' } },
+      );
     });
   });
 

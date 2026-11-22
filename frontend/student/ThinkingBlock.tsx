@@ -13,12 +13,12 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ isStreaming }) => 
   if (!isStreaming) return null;
 
   const dot = (delay: string): React.CSSProperties => ({
-    width: '5px', height: '5px', borderRadius: '50%', background: '#2563eb',
+    width: '5px', height: '5px', borderRadius: '50%', background: '#5f9fd6',
     animation: `dotpulse 1.2s infinite ${delay}`,
   });
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', fontSize: '12.5px', color: '#64748b' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0', fontSize: '12.5px', color: '#999999' }}>
       <span>{i18n('ai_helper_student_thinking')}</span>
       <span style={{ display: 'inline-flex', gap: '3px' }}>
         <span style={dot('0s')} />

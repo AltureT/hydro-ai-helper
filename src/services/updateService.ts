@@ -9,7 +9,7 @@
  * - 执行 pm2 restart hydrooj 重启服务
  */
 
-import { spawn, exec, ChildProcess } from 'child_process';
+import { spawn, execFile, ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -1149,17 +1149,19 @@ export class UpdateService {
               }
             } else {
               // Windows 无法通过负 PID 杀进程组：先尝试 taskkill /T，失败再退回 kill 单进程
-              try {
-                spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
-                  cwd,
-                  shell: false,
-                  env
-                });
-              } catch {
+              if (/^\d+$/.test(String(pid))) {
                 try {
-                  proc.kill('SIGTERM');
+                  spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
+                    cwd,
+                    shell: false,
+                    env
+                  });
                 } catch {
-                  // ignore
+                  try {
+                    proc.kill('SIGTERM');
+                  } catch {
+                    // ignore
+                  }
                 }
               }
             }
@@ -1776,7 +1778,8 @@ export class UpdateService {
           const processName = process.env.name || 'hydrooj';
           log('restarting', 'ai_helper_update_running_pm2_reload', processName);
 
-          exec(`pm2 reload "${processName}"`, async (error, stdout, stderr) => {
+          // 参数数组调用，避免任何 shell 字符串拼接
+          execFile('pm2', ['reload', processName], async (error, stdout, stderr) => {
             if (error) {
               const detail = (stderr || stdout || error.message || '').trim();
               log('restarting', 'ai_helper_update_pm2_reload_failed', detail || 'unknown error');

@@ -103,27 +103,37 @@ export class PluginInstallModel {
   }
 
   /**
-   * 用现有对话数据补全使用信息（零侵入：不在业务路径里打点，上报前从对话集合推导）。
-   * - domainsSeen：合并出现过对话的 domainId（只增不减）
-   * - firstUsedAt：仅在尚未记录时写入最早一次对话的开始时间
-   * @returns 更新后的安装记录
+   * 标记首次使用时间
    */
-  async syncUsage(domains: readonly string[], firstUsedAt: Date | null): Promise<PluginInstall | null> {
-    const cleanDomains = [...new Set(domains.filter((d): d is string => typeof d === 'string' && d.length > 0))];
-    if (cleanDomains.length > 0) {
+  async markFirstUse(): Promise<void> {
+    const existing = await this.getInstall();
+    if (existing && !existing.firstUsedAt) {
       await this.collection.updateOne(
         { _id: this.FIXED_ID },
-        { $addToSet: { domainsSeen: { $each: cleanDomains } } },
+        { $set: { firstUsedAt: new Date() } }
       );
     }
-    if (firstUsedAt) {
-      // firstUsedAt: null 同时匹配字段缺失与显式 null
-      await this.collection.updateOne(
-        { _id: this.FIXED_ID, firstUsedAt: null } as never,
-        { $set: { firstUsedAt } },
-      );
-    }
-    return this.getInstall();
+  }
+
+  /**
+   * 更新最近使用时间
+   */
+  async markLastUse(): Promise<void> {
+    await this.collection.updateOne(
+      { _id: this.FIXED_ID },
+      { $set: { lastUsedAt: new Date() } }
+    );
+  }
+
+  /**
+   * 添加 domainId（如果不存在）
+   * @param domainId 域 ID
+   */
+  async addDomain(domainId: string): Promise<void> {
+    await this.collection.updateOne(
+      { _id: this.FIXED_ID },
+      { $addToSet: { domainsSeen: domainId } }
+    );
   }
 
   /**

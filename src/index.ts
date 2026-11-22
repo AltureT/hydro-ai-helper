@@ -23,6 +23,8 @@ import {
   ChatHandlerPriv,
   ProblemStatusHandler,
   ProblemStatusHandlerPriv,
+  ProblemInfoHandler,
+  ProblemInfoHandlerPriv,
   SafetyAppealHandler,
   SafetyAppealHandlerPriv,
 } from './handlers/studentHandler';
@@ -95,42 +97,6 @@ import { UpdateInfoHandler, UpdateInfoHandlerPriv, UpdateHandler, UpdateHandlerP
 console.log('[AI-Helper] updateHandler OK');
 
 import {
-  GroupListHandler,
-  GroupSearchHandler,
-  GroupApplyHandler,
-  GroupUndoHandler,
-  GroupMetaHandler,
-  GroupDriftHandler,
-  GroupBackfillHandler,
-  GroupAdminHandlerPriv,
-} from './handlers/groupAdminHandler';
-import {
-  ClassTeacherHandler,
-  ClassAnalyticsHandler,
-  ClassConversationListHandler,
-  ClassConversationDetailHandler,
-  ClassTeacherHandlerPriv,
-} from './handlers/classTeacherHandler';
-import { AuditListHandler, AuditListHandlerPriv } from './handlers/auditHandler';
-import { QuotaNoticeAckHandler, QuotaStatusHandler, QuotaStatusHandlerPriv } from './handlers/quotaStatusHandler';
-import {
-  QuotaAdminHandlerPriv,
-  QuotaGroupDetailHandler,
-  QuotaGroupsHandler,
-  QuotaOverridesHandler,
-  CreditResetHandler,
-} from './handlers/quotaAdminHandler';
-import { UserDetailHandler, UserOverviewHandler, UserOverviewHandlerPriv } from './handlers/userOverviewHandler';
-import {
-  TransferExecuteHandler,
-  TransferHandlerPriv,
-  TransferPreviewHandler,
-  TransferResumeHandler,
-  TransferUndoHandler,
-} from './handlers/transferHandler';
-console.log('[AI-Helper] groupAdminHandler OK');
-
-import {
   TestdataGenContextHandler,
   TestdataGenGenerateHandler,
   TestdataGenJobStartHandler,
@@ -155,12 +121,8 @@ import { BatchSummaryJobModel } from './models/batchSummaryJob';
 import { TestdataGenerationJobModel } from './models/testdataGenerationJob';
 import { StudentSummaryModel } from './models/studentSummary';
 import { StudentHistoryModel } from './models/studentHistory';
-import { AuditLogModel } from './models/auditLog';
-import { GroupMetaModel } from './models/groupMeta';
-import { QuotaUsageModel } from './models/quotaUsage';
-import { QuotaGroupModel } from './models/quotaGroup';
-import { QuotaOverrideModel } from './models/quotaOverride';
-import { TransferJobModel } from './models/transferJob';
+import { KnowledgeModel } from './models/knowledge';
+import { KnowledgeAdminHandler, KnowledgeAdminHandlerPriv } from './handlers/knowledgeHandler';
 console.log('[AI-Helper] models OK');
 
 import { MigrationService } from './services/migrationService';
@@ -171,23 +133,6 @@ import { ErrorReporter } from './services/errorReporter';
 import { TestdataRunTelemetryService } from './services/testdata/runTelemetry';
 import { RequestStatsModel } from './models/requestStats';
 import { FeatureStatsModel } from './models/featureStats';
-import { AuditService } from './services/auditService';
-import { HydroGroupService } from './services/hydroGroupService';
-import { GroupBackfillService } from './services/groupBackfillService';
-import { ClassTeacherService } from './services/classTeacherService';
-import { QuotaService } from './services/quotaService';
-import { QuotaGroupResolver } from './services/quotaGroupResolver';
-import { QuotaAdminService } from './services/quotaAdminService';
-import { UserOverviewService } from './services/userOverviewService';
-import { CreditService } from './services/creditService';
-import { CreditEventModel } from './models/creditEvent';
-import { ReviewRunModel } from './models/reviewRun';
-import { AIReviewService } from './services/aiReviewService';
-import { AIReviewScheduler, REVIEW_TICK_MS } from './services/aiReviewScheduler';
-import { createMultiModelClientFromConfig } from './services/openaiClient';
-import { ReviewAdminHandler, ReviewAdminHandlerPriv, ReviewAutoPenaltyHandler, ReviewRunHandler } from './handlers/reviewAdminHandler';
-import { hostname } from 'os';
-import { TransferService } from './services/transferService';
 console.log('[AI-Helper] services OK');
 
 console.log('[AI-Helper] All imports completed successfully');
@@ -247,14 +192,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     const studentSummaryModel = new StudentSummaryModel(db);
     const studentHistoryModel = new StudentHistoryModel(db);
     const teachingSummaryModel = new TeachingSummaryModel(db);
-    const auditLogModel = new AuditLogModel(db);
-    const groupMetaModel = new GroupMetaModel(db);
-    const quotaUsageModel = new QuotaUsageModel(db);
-    const quotaGroupModel = new QuotaGroupModel(db);
-    const quotaOverrideModel = new QuotaOverrideModel(db);
-    const transferJobModel = new TransferJobModel(db);
-    const creditEventModel = new CreditEventModel(db);
-    const reviewRunModel = new ReviewRunModel(db);
+    const knowledgeModel = new KnowledgeModel(db);
 
     // ErrorReporter 需要在索引创建之前实例化，以便捕获启动错误
     const errorReporter = new ErrorReporter(pluginInstallModel);
@@ -305,14 +243,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     await safeEnsureIndexes(studentSummaryModel, 'studentSummaryModel');
     await safeEnsureIndexes(studentHistoryModel, 'studentHistoryModel');
     await safeEnsureIndexes(teachingSummaryModel, 'teachingSummaryModel');
-    await safeEnsureIndexes(auditLogModel, 'auditLogModel');
-    await safeEnsureIndexes(groupMetaModel, 'groupMetaModel');
-    await safeEnsureIndexes(quotaUsageModel, 'quotaUsageModel');
-    await safeEnsureIndexes(quotaGroupModel, 'quotaGroupModel');
-    await safeEnsureIndexes(quotaOverrideModel, 'quotaOverrideModel');
-    await safeEnsureIndexes(transferJobModel, 'transferJobModel');
-    await safeEnsureIndexes(creditEventModel, 'creditEventModel');
-    await safeEnsureIndexes(reviewRunModel, 'reviewRunModel');
+    await safeEnsureIndexes(knowledgeModel, 'knowledgeModel');
 
     try {
       const interruptedJobs = await testdataGenerationJobModel.markAllExpiredLeasesInterrupted();
@@ -388,77 +319,7 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.provide('studentSummaryModel', studentSummaryModel);
     ctx.provide('studentHistoryModel', studentHistoryModel);
     ctx.provide('teachingSummaryModel', teachingSummaryModel);
-    ctx.provide('auditLogModel', auditLogModel);
-    ctx.provide('groupMetaModel', groupMetaModel);
-    const auditService = new AuditService(auditLogModel);
-    ctx.provide('auditService', auditService);
-    ctx.provide('hydroGroupService', new HydroGroupService(db, groupMetaModel, auditService, ctx));
-    ctx.provide('groupBackfillService', new GroupBackfillService(db, auditService));
-    ctx.provide('classTeacherService', new ClassTeacherService(db, groupMetaModel, aiConfigModel));
-    ctx.provide('quotaUsageModel', quotaUsageModel);
-    ctx.provide('quotaGroupModel', quotaGroupModel);
-    ctx.provide('quotaOverrideModel', quotaOverrideModel);
-    // 额度组解析缓存（60 秒）：插件写入时本地失效并广播，其他进程收到广播后失效
-    const quotaGroupResolver = new QuotaGroupResolver(db, quotaGroupModel, quotaOverrideModel, ctx);
-    quotaGroupResolver.listen(ctx);
-    // 信誉系数：由信誉事件推导，跨域生效（US4）
-    ctx.provide('creditEventModel', creditEventModel);
-    const creditService = new CreditService(db, creditEventModel, aiConfigModel, auditService, {
-      findForUser: (ids, userId) => jailbreakLogModel.findForUser(ids, userId),
-    });
-    ctx.provide('creditService', creditService);
-    const quotaService = new QuotaService(quotaUsageModel, aiConfigModel, {
-      getOverride: (uid) => quotaGroupResolver.getOverride(uid),
-      getOverrides: (uids) => quotaGroupResolver.getOverrides(uids),
-      getGroupMemberships: (uid) => quotaGroupResolver.getGroupMemberships(uid),
-      getCreditMultiplier: (uid, now) => creditService.getMultiplier(uid, now),
-      getCreditMultipliers: async (uids, now) => {
-        const summaries = await creditService.getSummaries(uids, now);
-        return new Map([...summaries].map(([uid, summary]) => [uid, summary.m]));
-      },
-    });
-    ctx.provide('quotaService', quotaService);
-    ctx.provide('quotaAdminService', new QuotaAdminService(db, quotaGroupModel, quotaOverrideModel, quotaGroupResolver, auditService));
-    ctx.provide('userOverviewService', new UserOverviewService(
-      db, quotaService, quotaGroupResolver, quotaOverrideModel, quotaUsageModel, aiConfigModel, undefined, creditService,
-    ));
-    // AI 定期抽查（US7）：审核模型使用场景 aiReview；调度不用 Hydro worker（plan R9）
-    ctx.provide('reviewRunModel', reviewRunModel);
-    const aiReviewService = new AIReviewService({
-      db,
-      runs: reviewRunModel,
-      messages: messageModel,
-      safetyLogs: jailbreakLogModel,
-      creditEvents: creditEventModel,
-      credit: creditService,
-      configModel: aiConfigModel,
-      audit: auditService,
-      quotaUsage: quotaUsageModel,
-      quota: quotaService,
-      createClient: () => createMultiModelClientFromConfig(ctx, undefined, 'aiReview'),
-      estimateCost: (modelName, promptTokens, completionTokens) => TokenUsageModel.estimateCost(modelName, promptTokens, completionTokens),
-    });
-    ctx.provide('aiReviewService', aiReviewService);
-    const aiReviewScheduler = new AIReviewScheduler(
-      aiReviewService, reviewRunModel, aiConfigModel,
-      `${hostname()}:${process.pid}:${Math.random().toString(36).slice(2, 8)}`,
-    );
-    ctx.provide('aiReviewScheduler', aiReviewScheduler);
-    const reviewTick = () => { aiReviewScheduler.tick().catch(() => undefined); };
-    const timerCtx = ctx as unknown as { setInterval?: (fn: () => void, ms: number) => unknown; setTimeout?: (fn: () => void, ms: number) => unknown };
-    if (typeof timerCtx.setInterval === 'function' && typeof timerCtx.setTimeout === 'function') {
-      // 随插件卸载自动清理
-      timerCtx.setTimeout(reviewTick, 60 * 1000);
-      timerCtx.setInterval(reviewTick, REVIEW_TICK_MS);
-    } else {
-      setTimeout(reviewTick, 60 * 1000).unref?.();
-      setInterval(reviewTick, REVIEW_TICK_MS).unref?.();
-    }
-
-    ctx.provide('transferJobModel', transferJobModel);
-    ctx.provide('transferService', new TransferService(
-      db, groupMetaModel, quotaGroupModel, transferJobModel, auditService, quotaGroupResolver, ctx,
-    ));
+    ctx.provide('knowledgeModel', knowledgeModel);
     ctx.provide('errorReporter', errorReporter);
     ctx.provide('testdataRunTelemetry', testdataRunTelemetry);
 
@@ -505,6 +366,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_helper_problem_status', '/ai-helper/problem-status/:problemId', ProblemStatusHandler, ProblemStatusHandlerPriv);
     ctx.Route('ai_helper_problem_status_domain', '/d/:domainId/ai-helper/problem-status/:problemId', ProblemStatusHandler, ProblemStatusHandlerPriv);
 
+    // GET /ai-helper/problem-info/:problemId - 按题目 ID 自动获取题目标题与题面
+    ctx.Route('ai_helper_problem_info', '/ai-helper/problem-info/:problemId', ProblemInfoHandler, ProblemInfoHandlerPriv);
+    ctx.Route('ai_helper_problem_info_domain', '/d/:domainId/ai-helper/problem-info/:problemId', ProblemInfoHandler, ProblemInfoHandlerPriv);
+
     // 注册教师端路由 (支持域前缀)
     // 当前设计：AI 学习助手对话统计非常敏感，仅允许 root 访问。
     // 注意：这里使用的是 root-only 的系统权限（PRIV.PRIV_EDIT_SYSTEM），普通老师也无权访问。
@@ -535,6 +400,10 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
 
     // GET /ai-helper/admin/config - AI 配置页面 & JSON API（通过 Accept 头区分）
     ctx.Route('ai_helper_admin_config', '/ai-helper/admin/config', AdminConfigHandler, AdminConfigHandlerPriv);
+
+    // GET/POST /ai-helper/admin/knowledge - 知识库管理与检索测试（HTML/JSON 按 Accept 区分）
+    ctx.Route('ai_helper_admin_knowledge', '/ai-helper/admin/knowledge', KnowledgeAdminHandler, KnowledgeAdminHandlerPriv);
+    ctx.Route('ai_helper_admin_knowledge_domain', '/d/:domainId/ai-helper/admin/knowledge', KnowledgeAdminHandler, KnowledgeAdminHandlerPriv);
 
     // GET /ai-helper/admin/jailbreak-logs - 越狱日志独立分页端点
     ctx.Route('ai_helper_admin_jailbreak_logs', '/ai-helper/admin/jailbreak-logs', JailbreakLogsHandler, JailbreakLogsHandlerPriv);
@@ -652,55 +521,6 @@ const aiHelperPlugin = definePlugin<AIHelperConfig>({
     ctx.Route('ai_teaching_review_domain', '/d/:domainId/ai-helper/teaching-review', TeachingReviewHandler, TeachingSummaryHandlerPriv);
     ctx.Route('ai_teaching_summary_feedback', '/ai-helper/teaching-summary/:summaryId/feedback', TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv);
     ctx.Route('ai_teaching_summary_feedback_domain', '/d/:domainId/ai-helper/teaching-summary/:summaryId/feedback', TeachingSummaryFeedbackHandler, TeachingSummaryHandlerPriv);
-    // 用户管理：Hydro 小组批量管理与操作审计（仅系统管理员）
-    ctx.Route('ai_group_list', '/ai-helper/groups', GroupListHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_list_domain', '/d/:domainId/ai-helper/groups', GroupListHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_search', '/ai-helper/groups/search', GroupSearchHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_search_domain', '/d/:domainId/ai-helper/groups/search', GroupSearchHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_apply', '/ai-helper/groups/apply', GroupApplyHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_apply_domain', '/d/:domainId/ai-helper/groups/apply', GroupApplyHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_undo', '/ai-helper/groups/undo', GroupUndoHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_undo_domain', '/d/:domainId/ai-helper/groups/undo', GroupUndoHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_meta', '/ai-helper/groups/meta', GroupMetaHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_meta_domain', '/d/:domainId/ai-helper/groups/meta', GroupMetaHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_drift', '/ai-helper/groups/drift', GroupDriftHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_drift_domain', '/d/:domainId/ai-helper/groups/drift', GroupDriftHandler, GroupAdminHandlerPriv);
-    // 历史会话小组回填（FR-057，仅系统管理员）
-    ctx.Route('ai_group_backfill', '/ai-helper/groups/backfill', GroupBackfillHandler, GroupAdminHandlerPriv);
-    ctx.Route('ai_group_backfill_domain', '/d/:domainId/ai-helper/groups/backfill', GroupBackfillHandler, GroupAdminHandlerPriv);
-    // 负责老师只读视图（FR-058）：路由只要求登录，处理器内校验开关与负责关系
-    ctx.Route('ai_class_teacher', '/ai-helper/class', ClassTeacherHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_teacher_domain', '/d/:domainId/ai-helper/class', ClassTeacherHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_analytics', '/ai-helper/class/analytics', ClassAnalyticsHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_analytics_domain', '/d/:domainId/ai-helper/class/analytics', ClassAnalyticsHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_conversations', '/ai-helper/class/conversations', ClassConversationListHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_conversations_domain', '/d/:domainId/ai-helper/class/conversations', ClassConversationListHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_conversation_detail', '/ai-helper/class/conversations/:id', ClassConversationDetailHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_class_conversation_detail_domain', '/d/:domainId/ai-helper/class/conversations/:id', ClassConversationDetailHandler, ClassTeacherHandlerPriv);
-    ctx.Route('ai_admin_audit', '/ai-helper/admin/audit', AuditListHandler, AuditListHandlerPriv);
-    ctx.Route('ai_admin_audit_domain', '/d/:domainId/ai-helper/admin/audit', AuditListHandler, AuditListHandlerPriv);
-    // 学生端：今日剩余次数（跨域合计）
-    ctx.Route('ai_quota_status', '/ai-helper/quota-status', QuotaStatusHandler, QuotaStatusHandlerPriv);
-    ctx.Route('ai_quota_status_domain', '/d/:domainId/ai-helper/quota-status', QuotaStatusHandler, QuotaStatusHandlerPriv);
-    // 学生确认 AI 抽查处罚通知
-    ctx.Route('ai_quota_notice_ack', '/ai-helper/quota-status/notices/:id/ack', QuotaNoticeAckHandler, QuotaStatusHandlerPriv);
-    ctx.Route('ai_quota_notice_ack_domain', '/d/:domainId/ai-helper/quota-status/notices/:id/ack', QuotaNoticeAckHandler, QuotaStatusHandlerPriv);
-    // 额度组、个人覆盖、学生总览：插件级（不属于任何域），仅系统管理员
-    ctx.Route('ai_admin_quota_groups', '/ai-helper/admin/quota/groups', QuotaGroupsHandler, QuotaAdminHandlerPriv);
-    ctx.Route('ai_admin_quota_group_detail', '/ai-helper/admin/quota/groups/detail', QuotaGroupDetailHandler, QuotaAdminHandlerPriv);
-    ctx.Route('ai_admin_quota_overrides', '/ai-helper/admin/quota/overrides', QuotaOverridesHandler, QuotaAdminHandlerPriv);
-    ctx.Route('ai_admin_credit_reset', '/ai-helper/admin/credit/reset', CreditResetHandler, QuotaAdminHandlerPriv);
-    // AI 抽查：状态、手动触发、停用或恢复自动处罚（仅系统管理员）
-    ctx.Route('ai_admin_review', '/ai-helper/admin/review', ReviewAdminHandler, ReviewAdminHandlerPriv);
-    ctx.Route('ai_admin_review_run', '/ai-helper/admin/review/run', ReviewRunHandler, ReviewAdminHandlerPriv);
-    ctx.Route('ai_admin_review_auto_penalty', '/ai-helper/admin/review/auto-penalty', ReviewAutoPenaltyHandler, ReviewAdminHandlerPriv);
-    ctx.Route('ai_admin_users', '/ai-helper/admin/users', UserOverviewHandler, UserOverviewHandlerPriv);
-    ctx.Route('ai_admin_user_detail', '/ai-helper/admin/users/:uid', UserDetailHandler, UserOverviewHandlerPriv);
-    // 跨域转移：预览 → 执行 → 继续 / 撤销（仅系统管理员）
-    ctx.Route('ai_admin_transfer_preview', '/ai-helper/admin/transfer/preview', TransferPreviewHandler, TransferHandlerPriv);
-    ctx.Route('ai_admin_transfer_execute', '/ai-helper/admin/transfer/execute', TransferExecuteHandler, TransferHandlerPriv);
-    ctx.Route('ai_admin_transfer_resume', '/ai-helper/admin/transfer/resume', TransferResumeHandler, TransferHandlerPriv);
-    ctx.Route('ai_admin_transfer_undo', '/ai-helper/admin/transfer/undo', TransferUndoHandler, TransferHandlerPriv);
   }
 });
 
