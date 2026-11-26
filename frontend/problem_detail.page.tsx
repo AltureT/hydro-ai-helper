@@ -35,8 +35,17 @@ const extractProblemIdFromRecordPage = (): string => {
 
 /** 记录页：提取本次提交的代码文本 */
 const extractCodeFromRecordPage = (): string => {
-  const pre = document.querySelector('.record-code pre code, .record-code pre, [id*=code] pre code, [id*=code] pre');
+  // 核心模板结构：.section__body > pre.line-numbers > code.language-*
+  const pre = document.querySelector('.record-code pre code, .record-code pre, pre.line-numbers code, pre.line-numbers, [id*=code] pre code, [id*=code] pre');
   return pre ? (pre.textContent || '').trim() : '';
+};
+
+/** 记录页：从提交记录代码块的语言类名推断 lang（如 language-cpp → cpp） */
+const extractLangFromRecordPage = (): string => {
+  const codeEl = document.querySelector('.record-code code[class*=language-], pre.line-numbers code[class*=language-], [id*=code] pre code[class*=language-]');
+  const cls = codeEl?.getAttribute('class') || '';
+  const m = cls.match(/language-([\w-]+)/);
+  return m ? m[1] : '';
 };
 
 // AI 面板宽度范围
@@ -73,7 +82,7 @@ const extractProblemId = (): string => {
  * 题目页：学生至少提交过一次后显示边缘把手；草稿模式下展开为四列布局
  * 记录页：直接显示把手，面板自动携带本次提交代码
  */
-const AIAssistantTrigger: React.FC<{ problemId: string; initialCode?: string; fromRecord?: boolean }> = ({ problemId, initialCode, fromRecord }) => {
+const AIAssistantTrigger: React.FC<{ problemId: string; initialCode?: string; initialLang?: string; fromRecord?: boolean }> = ({ problemId, initialCode, initialLang, fromRecord }) => {
   const [isScratchpadActive, setIsScratchpadActive] = useState(false);
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
@@ -353,6 +362,7 @@ const AIAssistantTrigger: React.FC<{ problemId: string; initialCode?: string; fr
             <AIAssistantPanel
               problemId={problemId}
               initialCode={initialCode}
+              initialLang={initialLang}
             />
           </div>
         </div>
@@ -374,7 +384,7 @@ const initAIAssistant = () => {
     container.id = 'ai-assistant-trigger-container';
     document.body.appendChild(container);
     renderComponent(
-      <ErrorBoundary><AIAssistantTrigger problemId={pid} initialCode={extractCodeFromRecordPage()} fromRecord /></ErrorBoundary>,
+      <ErrorBoundary><AIAssistantTrigger problemId={pid} initialCode={extractCodeFromRecordPage()} initialLang={extractLangFromRecordPage()} fromRecord /></ErrorBoundary>,
       container,
     );
     return;

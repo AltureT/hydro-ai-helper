@@ -70,6 +70,7 @@ export interface ChatState {
   hasAccepted: boolean;
   acCode: string | null;
   lastCode: string | null;
+  codeLang: string;
   showLoadCodeConfirm: boolean;
   problemInfo: ProblemInfo | null;
   problemInfoError: string;
@@ -98,6 +99,7 @@ export type ChatAction =
   | { type: 'SET_HAS_ACCEPTED'; payload: boolean }
   | { type: 'SET_AC_CODE'; payload: string | null }
   | { type: 'SET_LAST_CODE'; payload: string | null }
+  | { type: 'SET_CODE_LANG'; payload: string }
   | { type: 'SET_SHOW_LOAD_CODE_CONFIRM'; payload: boolean }
   | { type: 'SET_PROBLEM_INFO'; payload: ProblemInfo | null }
   | { type: 'SET_PROBLEM_INFO_ERROR'; payload: string }
@@ -146,6 +148,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'SET_HAS_ACCEPTED': return { ...state, hasAccepted: action.payload };
     case 'SET_AC_CODE': return { ...state, acCode: action.payload };
     case 'SET_LAST_CODE': return { ...state, lastCode: action.payload };
+    case 'SET_CODE_LANG': return { ...state, codeLang: action.payload };
     case 'SET_SHOW_LOAD_CODE_CONFIRM': return { ...state, showLoadCodeConfirm: action.payload };
     case 'SET_PROBLEM_INFO': return { ...state, problemInfo: action.payload, problemInfoError: '' };
     case 'SET_PROBLEM_INFO_ERROR': return { ...state, problemInfoError: action.payload };
@@ -195,6 +198,7 @@ export const initialChatState: ChatState = {
   hasAccepted: false,
   acCode: null,
   lastCode: null,
+  codeLang: '',
   showLoadCodeConfirm: false,
   problemInfo: null,
   problemInfoError: '',

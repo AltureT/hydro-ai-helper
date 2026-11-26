@@ -57,6 +57,8 @@ interface ChatRequest {
   userThinking: string;
   includeCode: boolean;
   code?: string;
+  /** 记录页场景：当前这条提交的语言标识 */
+  codeLang?: string;
   attachErrorInfo?: boolean;
   contestId?: string;  // 比赛 ID（用于后端校验比赛模式）
   clarifyContext?: {
@@ -95,6 +97,7 @@ interface PrepareChatResult {
   questionType: QuestionType;
   userThinking: string;
   includeCode: boolean;
+  codeLang: string | undefined;
   processedCode: string | undefined;
   codeWarning: string | undefined;
   problemTitleStr: string;
@@ -414,6 +417,7 @@ export class ChatHandler extends Handler {
       userThinking,
       includeCode,
       code,
+      codeLang,
       conversationId,
       clarifyContext
     } = this.request.body as ChatRequest;
@@ -969,6 +973,7 @@ export class ChatHandler extends Handler {
       questionType: questionType as QuestionType,
       userThinking,
       includeCode,
+      codeLang,
       processedCode,
       codeWarning,
       problemTitleStr,
@@ -1133,6 +1138,8 @@ export class ChatHandler extends Handler {
             domainId: p.domainId,
             problemId: p.problemId,
             userId: p.userId,
+            codeLang: p.codeLang,
+            code: p.includeCode ? p.processedCode : undefined,
           });
           agentMessages.push({ role: 'tool' as const, tool_call_id: call.id, content: resultText });
           sse.writeEvent('tool_status', { tool: call.function.name, state: 'done' });

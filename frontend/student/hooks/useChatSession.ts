@@ -23,9 +23,10 @@ import {
 interface UseChatSessionOptions {
   problemId: string;
   initialCode?: string;
+  initialLang?: string;
 }
 
-export function useChatSession({ problemId, initialCode }: UseChatSessionOptions) {
+export function useChatSession({ problemId, initialCode, initialLang }: UseChatSessionOptions) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
   const {
     questionType,
@@ -40,6 +41,7 @@ export function useChatSession({ problemId, initialCode }: UseChatSessionOptions
     acCode,
     lastCode,
   } = state;
+  const { codeLang } = state;
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -154,6 +156,9 @@ export function useChatSession({ problemId, initialCode }: UseChatSessionOptions
         if (data.lastCode) {
           dispatch({ type: 'SET_LAST_CODE', payload: data.lastCode });
         }
+        if (data.lastLang || data.acLang) {
+          dispatch({ type: 'SET_CODE_LANG', payload: data.lastLang || data.acLang });
+        }
       }
     } catch (error) {
       console.error('Failed to fetch submission status:', error);
@@ -239,6 +244,7 @@ export function useChatSession({ problemId, initialCode }: UseChatSessionOptions
             userThinking: savedUserThinking,
             includeCode,
             code: savedCode,
+            codeLang: codeLang || undefined,
             conversationId: activeConversationId || undefined,
             contestId: currentTid,
             stream: supportsStream ? true : undefined,
@@ -470,6 +476,7 @@ export function useChatSession({ problemId, initialCode }: UseChatSessionOptions
     if (initialCode && !readFromScratchpad()) {
       dispatch({ type: 'SET_CODE', payload: initialCode });
       dispatch({ type: 'SET_INCLUDE_CODE', payload: true });
+      if (initialLang) dispatch({ type: 'SET_CODE_LANG', payload: initialLang });
     }
   }, [initialCode]);
 

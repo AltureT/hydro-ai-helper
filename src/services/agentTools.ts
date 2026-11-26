@@ -48,15 +48,14 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'run_pretest',
-      description: '在服务器沙箱中实际运行一段代码（使用样例输入），返回真实的编译输出、运行输出与错误。用于验证你对学生代码行为的具体猜测。只能运行当前学生提交的代码，不能访问网络。',
+      description: '在服务器沙箱中实际运行一段代码（使用样例输入），返回真实的编译输出、运行输出与错误。用于验证你对学生代码行为的具体猜测。省略 code/lang 参数时默认运行当前对话附带的那份提交代码（记录页即本次提交的代码）。只能运行当前学生自己的代码，不能访问网络。',
       parameters: {
         type: 'object',
         properties: {
-          code: { type: 'string', description: '要运行的完整源代码' },
-          lang: { type: 'string', description: '语言标识，如 cpp、java、python3' },
+          code: { type: 'string', description: '要运行的完整源代码；省略时使用当前附带的提交代码' },
+          lang: { type: 'string', description: '语言标识，如 cpp、java、python3；省略时使用当前提交的语言' },
           inputs: { type: 'array', items: { type: 'string' }, description: `可选：自定义测试输入（最多 ${MAX_INPUTS} 组）。省略时自动使用题面中的样例输入。` },
         },
-        required: ['code', 'lang'],
       },
     },
   },
@@ -81,6 +80,10 @@ export interface AgentToolContext {
   domainId: string;
   problemId: string;
   userId: number;
+  /** 记录页场景：当前这条提交的语言（前端随请求传入，工具兜底用） */
+  codeLang?: string;
+  /** 记录页场景：当前这条提交的代码 */
+  code?: string;
 }
 
 function truncate(s: string, n: number): string {
@@ -126,8 +129,9 @@ async function getProblemDetail(tc: AgentToolContext): Promise<string> {
 }
 
 async function runPretest(tc: AgentToolContext, args: { code?: string; lang?: string; inputs?: unknown }): Promise<string> {
-  const code = String(args.code || '');
-  const lang = String(args.lang || '').trim();
+  // 记录页场景：模型可省略 code/lang，默认使用当前这条提交的代码与语言
+  const code = String(args.code || tc.code || '');
+  const lang = String(args.lang || tc.codeLang || '').trim();
   if (!code || code.length > MAX_CODE_LENGTH) return '代码为空或过长，无法运行。';
   if (!lang) return '缺少语言参数。';
 
