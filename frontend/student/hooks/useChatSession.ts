@@ -19,24 +19,15 @@ import {
   type ChatApiErrorPayload,
   type ProblemInfo,
 } from '../types';
-import type { QuotaSnapshotView } from '../quotaView';
-
-export type QuotaBlockedCode = 'QUOTA_EXHAUSTED' | 'AI_DISABLED_BY_ADMIN';
 
 interface UseChatSessionOptions {
   problemId: string;
-  /** 聊天成功后服务端返回的最新次数 */
-  onQuota?: (quota: QuotaSnapshotView) => void;
-  /** 因额度用完或被管理员关闭而被拒 */
-  onQuotaBlocked?: (code: QuotaBlockedCode, quota?: QuotaSnapshotView) => void;
-  /** 本次请求记了安全记录（可能扣了信誉），需要刷新额度与信誉状态 */
-  onSafetyEvent?: () => void;
+  initialCode?: string;
+  initialLang?: string;
 }
 
-export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEvent }: UseChatSessionOptions) {
+export function useChatSession({ problemId, initialCode, initialLang }: UseChatSessionOptions) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
-  const quotaHandlersRef = useRef({ onQuota, onQuotaBlocked, onSafetyEvent });
-  quotaHandlersRef.current = { onQuota, onQuotaBlocked, onSafetyEvent };
   const {
     questionType,
     userThinking,
@@ -48,7 +39,9 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
     isLoading,
     hasAccepted,
     acCode,
+    lastCode,
   } = state;
+  const { codeLang } = state;
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -160,6 +153,12 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
         if (data.acCode) {
           dispatch({ type: 'SET_AC_CODE', payload: data.acCode });
         }
+        if (data.lastCode) {
+          dispatch({ type: 'SET_LAST_CODE', payload: data.lastCode });
+        }
+        if (data.lastLang || data.acLang) {
+          dispatch({ type: 'SET_CODE_LANG', payload: data.lastLang || data.acLang });
+        }
       }
     } catch (error) {
       console.error('Failed to fetch submission status:', error);
@@ -245,6 +244,7 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
             userThinking: savedUserThinking,
             includeCode,
             code: savedCode,
+            codeLang: codeLang || undefined,
             conversationId: activeConversationId || undefined,
             contestId: currentTid,
             stream: supportsStream ? true : undefined,
@@ -283,12 +283,6 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
       let response = await sendChatRequest(conversationId);
       if (!response.ok) {
         let errorData = await parseErrorPayload(response);
-        if (errorData.safetyEventId) quotaHandlersRef.current.onSafetyEvent?.();
-
-        if (errorData.code === 'QUOTA_EXHAUSTED' || errorData.code === 'AI_DISABLED_BY_ADMIN') {
-          quotaHandlersRef.current.onQuotaBlocked?.(errorData.code, errorData.quota);
-          throw createCategorizedError(errorData.error || i18n('ai_helper_student_err_request_failed'), 'quota', false);
-        }
 
         if (response.status === 403 && errorData.code === 'CONTEST_MODE_RESTRICTED') {
           dispatch({ type: 'SET_CONTEST_RESTRICTED', payload: true });
@@ -345,14 +339,19 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
           },
           onChunk: (data) => pacer.append(data.content),
           onReplace: (data) => pacer.replace(data.content),
-          onDone: (data) => {
-            doneMessageId = data.messageId;
-            if (data.quota) quotaHandlersRef.current.onQuota?.(data.quota);
+          onToolStatus: (data) => {
+            if (data.state === 'running') {
+              dispatch({ type: 'SET_TOOL_STATUS', payload: data.tool });
+            } else {
+              dispatch({ type: 'SET_TOOL_STATUS', payload: null });
+            }
           },
+          onDone: (data) => { doneMessageId = data.messageId; },
           onError: (data) => {
             pacer.cancel();
             dispatch({ type: 'SET_IS_STREAMING', payload: false });
             dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
+            dispatch({ type: 'SET_TOOL_STATUS', payload: null });
             throw createCategorizedError(data.error || i18n('ai_helper_student_err_ai_service'), data.category, data.retryable);
           },
         };
@@ -363,17 +362,28 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
         // Let the typewriter catch up before the bubble becomes a stored message.
         // An abort (new conversation, unmount) during the catch-up drops the bubble.
         if (!ac.signal.aborted) await pacer.finish();
-        if (pacer.text && !ac.signal.aborted) {
+        const finalText = pacer.text.replace(/<\/?think>\(thinking\.\.\.\)/g, '').trim();
+        if (finalText && !ac.signal.aborted) {
           const aiMessage: Message = {
             role: 'ai',
-            content: pacer.text,
+            content: finalText,
             timestamp: new Date(),
             ...(doneMessageId ? { id: doneMessageId } : {}),
           };
           dispatch({ type: 'ADD_MESSAGE', payload: aiMessage });
+        } else if (!ac.signal.aborted) {
+          dispatch({
+            type: 'ADD_MESSAGE',
+            payload: {
+              role: 'ai',
+              content: i18n('ai_helper_student_err_empty_answer'),
+              timestamp: new Date(),
+            },
+          });
         }
         dispatch({ type: 'SET_STREAMING_CONTENT', payload: '' });
         dispatch({ type: 'SET_IS_STREAMING', payload: false });
+        dispatch({ type: 'SET_TOOL_STATUS', payload: null });
         scrollToBottom();
       } else {
         let data: any;
@@ -399,8 +409,6 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
           dispatch({ type: 'SET_CONVERSATION_ID', payload: data.conversationId });
           saveConversationId(problemId, data.conversationId);
         }
-        if (data.quota) quotaHandlersRef.current.onQuota?.(data.quota);
-        if (data.offTopicViolation) quotaHandlersRef.current.onSafetyEvent?.();
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -463,6 +471,15 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
     fetchSubmissionStatus();
   }, [fetchSubmissionStatus]);
 
+  // 记录页场景：无草稿编辑器时，用传入的提交代码初始化
+  useEffect(() => {
+    if (initialCode && !readFromScratchpad()) {
+      dispatch({ type: 'SET_CODE', payload: initialCode });
+      dispatch({ type: 'SET_INCLUDE_CODE', payload: true });
+      if (initialLang) dispatch({ type: 'SET_CODE_LANG', payload: initialLang });
+    }
+  }, [initialCode]);
+
   // Redux store subscribe: watch for AC status changes (STATUS_ACCEPTED=1)
   useEffect(() => {
     const STATUS_ACCEPTED = 1;
@@ -496,42 +513,76 @@ export function useChatSession({ problemId, onQuota, onQuotaBlocked, onSafetyEve
     return () => unsubscribe();
   }, [hasAccepted, fetchSubmissionStatus]);
 
-  // Auto-read scratchpad when includeCode toggled on and no code
+  // Auto-read scratchpad when includeCode toggled on and no code;
+  // 非 IDE 题目页没有编辑器时，回退到最近一次提交的代码（problem-status 下发）
   useEffect(() => {
     if (includeCode && !code) {
       const scratchpadCode = readFromScratchpad();
       if (scratchpadCode !== null) {
         dispatch({ type: 'SET_CODE', payload: scratchpadCode });
         dispatch({ type: 'SET_SCRATCHPAD_AVAILABLE', payload: true });
+      } else if (lastCode) {
+        dispatch({ type: 'SET_CODE', payload: lastCode });
       }
     }
   }, [includeCode]);
 
-  // Read problem info from DOM
+  // Read problem info: prefer backend API by problem id, fall back to DOM
   useEffect(() => {
-    try {
-      const titleElement = document.querySelector('.section__title');
-      const title = titleElement?.textContent?.trim() || '';
+    const fromDom = () => {
+      try {
+        const titleElement = document.querySelector('.section__title');
+        const title = titleElement?.textContent?.trim() || '';
 
-      const match = window.location.pathname.match(/\/p\/([A-Z0-9]+)/i);
-      const problemIdFromUrl = match ? match[1] : problemId;
+        const match = window.location.pathname.match(/\/p\/([A-Z0-9]+)/i);
+        const problemIdFromUrl = match ? match[1] : problemId;
 
-      const descElement = document.querySelector('.section__body.typo[data-fragment-id="problem-description"]');
-      const fullText = descElement?.textContent?.trim() || '';
-      const content = fullText.substring(0, 500) + (fullText.length > 500 ? '...' : '');
+        const descElement = document.querySelector('.section__body.typo[data-fragment-id="problem-description"]');
+        const fullText = descElement?.textContent?.trim() || '';
+        const content = fullText.substring(0, 8000) + (fullText.length > 8000 ? '...' : '');
 
-      if (title && content) {
-        dispatch({
-          type: 'SET_PROBLEM_INFO',
-          payload: { title, problemId: problemIdFromUrl, content },
-        });
-      } else {
-        dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: i18n('ai_helper_student_err_read_problem') });
+        if (title && content) {
+          dispatch({
+            type: 'SET_PROBLEM_INFO',
+            payload: { title, problemId: problemIdFromUrl, content },
+          });
+        } else {
+          dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: i18n('ai_helper_student_err_read_problem') });
+        }
+      } catch (err) {
+        console.error('[AI Helper] Failed to read problem info:', err);
+        dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: i18n('ai_helper_student_err_read_problem_failed') });
       }
-    } catch (err) {
-      console.error('[AI Helper] Failed to read problem info:', err);
-      dispatch({ type: 'SET_PROBLEM_INFO_ERROR', payload: i18n('ai_helper_student_err_read_problem_failed') });
-    }
+    };
+
+    const load = async () => {
+      try {
+        const match = window.location.pathname.match(/^(?:\/d\/([^/]+))?\/p\/([A-Za-z0-9-]+)/i);
+        const pid = (match ? match[2] : problemId) || '';
+        if (!pid) { fromDom(); return; }
+        const domainPrefix = match?.[1] ? `/d/${encodeURIComponent(match[1])}` : '';
+        const res = await fetch(`${domainPrefix}/ai-helper/problem-info/${encodeURIComponent(pid)}`, {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+        });
+        if (!res.ok) { fromDom(); return; }
+        const data = await res.json();
+        if (data && data.title) {
+          const content = String(data.content || '');
+          dispatch({
+            type: 'SET_PROBLEM_INFO',
+            payload: { title: data.title, problemId: pid, content },
+          });
+        } else {
+          fromDom();
+        }
+      } catch (err) {
+        console.error('[AI Helper] problem-info API failed, fallback to DOM:', err);
+        fromDom();
+      }
+    };
+
+    load();
   }, [problemId]);
 
   // Cleanup abort controller on unmount

@@ -1,11 +1,11 @@
 import type { JailbreakLogModel } from '../models/jailbreakLog';
-import type { RealtimeSafetyAction, SafetyViolationCategory } from '../types/safety';
+import type { SafetyAction, SafetyViolationCategory } from '../types/safety';
 
 const PENALTY_WINDOW_MS = 10 * 60 * 1000;
 export const SAFETY_PENALTY_WINDOW_MS = PENALTY_WINDOW_MS;
 
 export interface SafetyPenaltyDecision {
-  action: RealtimeSafetyAction;
+  action: SafetyAction;
   blockedUntil?: Date;
   retryAfterSeconds?: number;
   currentCount: number;
@@ -15,24 +15,23 @@ export interface SafetyPenaltyDecision {
 }
 
 /**
- * 渐进式、会自动衰减的 AI 对话限制（按用户跨域生效，FR-033）。
+ * 渐进式、会自动衰减的 AI 对话限制。
  * - 普通索要答案：10 分钟内第 3 次才冷却 60 秒。
  * - 明确注入/提示词泄露/编码绕过：10 分钟内第 2 次冷却 5 分钟。
- * - 偏题：只拦截，不冷却（扣信誉由调用方处理）。
  * 限制只作用于 AI 对话，不影响做题或提交。
  */
 export async function decideSafetyPenalty(
   model: JailbreakLogModel,
+  domainId: string,
   userId: number,
   category: SafetyViolationCategory,
   now: Date = new Date()
 ): Promise<SafetyPenaltyDecision> {
   const since = new Date(now.getTime() - PENALTY_WINDOW_MS);
 
-  if (category === 'off_topic') return decideSafetyPenaltyFromCount(category, 1, now);
-
   if (category === 'answer_seeking') {
     const recentCount = await model.countRecentByCategories(
+      domainId,
       userId,
       ['answer_seeking'],
       since
@@ -59,6 +58,7 @@ export async function decideSafetyPenalty(
   }
 
   const recentHighRiskCount = await model.countRecentByCategories(
+    domainId,
     userId,
     ['prompt_injection', 'prompt_exfiltration', 'obfuscated_injection'],
     since
@@ -94,15 +94,6 @@ export function decideSafetyPenaltyFromCount(
   now: Date = new Date()
 ): SafetyPenaltyDecision {
   const normalizedCount = Math.max(1, Math.floor(currentCount));
-  if (category === 'off_topic') {
-    return {
-      action: 'blocked',
-      currentCount: normalizedCount,
-      threshold: 0,
-      remainingBeforeCooldown: 0,
-      windowSeconds: PENALTY_WINDOW_MS / 1000,
-    };
-  }
   const threshold = category === 'answer_seeking' ? 3 : 2;
   const retryAfterSeconds = normalizedCount >= threshold
     ? category === 'answer_seeking' ? 60 : 5 * 60

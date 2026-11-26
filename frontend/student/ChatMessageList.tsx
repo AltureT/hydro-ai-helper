@@ -12,14 +12,14 @@ const A = {
   border: '#eef1f5',
   problemBg: '#f7f9fc',
   pillBg: '#e7eeff',
-  pillText: '#2563eb',
+  pillText: '#5f9fd6',
   textPrimary: '#1e2536',
-  textSecondary: '#64748b',
+  textSecondary: '#999999',
   textMuted: '#94a3b8',
   textFaint: '#aab4c2',
   aiBubbleBg: '#f4f8ff',
   aiBubbleBorder: '#e2ecfb',
-  userBubbleBg: '#2563eb',
+  userBubbleBg: '#5f9fd6',
   mono: "'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace",
 };
 
@@ -56,11 +56,20 @@ interface ChatMessageListProps {
   manualTitle: string;
   onManualTitleChange: (value: string) => void;
   onNewConversation: () => void;
+  toolStatus?: string | null;
   children?: React.ReactNode;
 }
 
-const renderMarkdown = (text: string, streaming?: boolean) => {
-  const html = streaming ? renderStreamingMarkdown(text) : renderMarkdownSafe(text);
+const toolStatusText = (tool: string): string => {
+  switch (tool) {
+    case 'get_problem_detail': return i18n('ai_helper_tool_reading_problem');
+    case 'run_pretest': return i18n('ai_helper_tool_running_code');
+    case 'search_knowledge': return i18n('ai_helper_tool_searching_kb');
+    default: return '';
+  }
+};
+
+const renderMarkdown = (text: string, streaming?: boolean) => {  const html = streaming ? renderStreamingMarkdown(text) : renderMarkdownSafe(text);
   return (
     <div
       className="markdown-body"
@@ -74,7 +83,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
   messages, streamingContent, isStreaming, isLoading,
   chatContainerRef, onTextSelection, popupPosition, onDontUnderstand,
   problemInfo, problemInfoError, manualTitle, onManualTitleChange,
-  onNewConversation, children,
+  onNewConversation, toolStatus, children,
 }) => {
   const renderProblemInfoCard = () => {
     if (problemInfo) {
@@ -110,7 +119,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '40px 24px', textAlign: 'center' }}>
       <div style={{
         width: '64px', height: '64px', borderRadius: '18px',
-        background: 'linear-gradient(135deg, #2563eb, #5b8def)',
+        background: 'linear-gradient(135deg, #5f9fd6, #7fb4e0)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         fontFamily: A.mono, fontSize: '24px', fontWeight: 700, color: '#fff',
         letterSpacing: '-1px', marginBottom: '18px',
@@ -162,7 +171,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
           </div>
           {/* Attached code (student) */}
           {isStudent && msg.code && (
-            <div style={{ background: '#f8fafc', border: `1px solid ${A.border}`, borderRadius: '10px', padding: '8px', fontSize: '12px', maxWidth: '100%', overflow: 'hidden' }}>
+            <div style={{ background: '#edf0f2', border: `1px solid ${A.border}`, borderRadius: '10px', padding: '8px', fontSize: '12px', maxWidth: '100%', overflow: 'hidden' }}>
               <div style={{ fontSize: '11px', color: A.textMuted, marginBottom: '4px' }}><Icon name="code" size={14} /> {i18n('ai_helper_student_attached_code')}</div>
               <div className="markdown-body" dangerouslySetInnerHTML={{
                 __html: renderMarkdownSafe(`\`\`\`\n${msg.code.length > 500 ? msg.code.substring(0, 500) + `\n// ... ${i18n('ai_helper_student_code_truncated')}` : msg.code}\n\`\`\``),
@@ -230,12 +239,12 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({
         );
       })()}
 
-      {/* Loading (pre-stream) */}
-      {isLoading && !isStreaming && (
+      {/* Loading / pre-first-token thinking (covers the gap after SSE opens but before content arrives) */}
+      {(isLoading || (isStreaming && !streamingContent)) && (
         <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
           <AIMark size={28} radius={8} fontSize={10} />
           <div style={{ padding: '12px 14px', borderRadius: '14px 14px 14px 4px', background: A.aiBubbleBg, border: `1px solid ${A.aiBubbleBorder}`, color: A.textSecondary, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span>{i18n('ai_helper_student_loading')}</span>
+            <span>{(toolStatus && toolStatusText(toolStatus)) || i18n('ai_helper_student_loading')}</span>
             <span style={{ display: 'inline-flex', gap: '3px' }}>
               <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: A.pillText, animation: 'dotpulse 1.2s infinite' }} />
               <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: A.pillText, animation: 'dotpulse 1.2s infinite 0.2s' }} />

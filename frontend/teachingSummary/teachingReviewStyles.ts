@@ -1,8 +1,8 @@
 export const teachingReviewStyles = `
   .ai-teaching-review { padding: 24px; color: #233247; }
-  .ai-teaching-review .teaching-review-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; padding: 22px 8px; color: inherit; text-decoration: none; border-bottom: 1px solid #e2e8f0; }
-  .ai-teaching-review .teaching-review-row:hover { background: #f6f8fb; }
-  .ai-teaching-review a:focus-visible, .ai-teaching-review button:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+  .ai-teaching-review .teaching-review-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; padding: 22px 8px; color: inherit; text-decoration: none; border-bottom: 1px solid #dddddd; }
+  .ai-teaching-review .teaching-review-row:hover { background: #f5f7f9; }
+  .ai-teaching-review a:focus-visible, .ai-teaching-review button:focus-visible { outline: 2px solid #5f9fd6; outline-offset: 3px; }
   .ai-teaching-review .review-row-content { min-width: 0; }
   .ai-teaching-review .review-row-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; font-size: 16px; line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
   .ai-teaching-review .review-row-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 6px; color: #526174; font-size: 12px; }

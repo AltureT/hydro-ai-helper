@@ -6,7 +6,9 @@
 import type { ServerResponse } from 'http';
 import { Handler, PRIV, ProblemModel, STATUS, db, ContestModel } from 'hydrooj';
 import { formatJudgeInfo } from '../services/judgeInfoService';
-import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, TokenUsage } from '../services/openaiClient';
+import { ChatMessage, createMultiModelClientFromConfig, MultiModelClient, AIServiceError, MultiModelChatResult, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, TokenUsage, ToolCall } from '../services/openaiClient';
+import { AGENT_TOOLS, collectStatementImages, executeAgentTool, type ProblemImage } from '../services/agentTools';
+import { isProblemInOngoingContest } from '../lib/contestGuard';
 import { PromptService, QuestionType, type ValidateInputResult } from '../services/promptService';
 import { PROMPT_LIMITS, API_DEFAULTS } from '../constants/limits';
 import { applyRateLimit } from '../lib/rateLimitHelper';
@@ -20,18 +22,13 @@ import { ConversationModel } from '../models/conversation';
 import { MessageModel } from '../models/message';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { JailbreakLogModel } from '../models/jailbreakLog';
+import { KnowledgeService } from '../services/knowledgeService';
 import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
 import { translateWithParams } from '../utils/i18nHelper';
-import { resolveProblemContent } from '../utils/problemStatement';
 import { TokenUsageModel } from '../models/tokenUsage';
 import { BudgetService } from '../services/budgetService';
 import { createSSEWriter } from '../lib/sseHelper';
-import { snapshotGroupNames } from '../services/hydroGroupService';
-import type { QuotaReservation, QuotaService, QuotaSnapshot } from '../services/quotaService';
-import type { CreditService } from '../services/creditService';
-import { normalizeTopicGuardConfig } from '../models/configSections';
-import type { SafetyConfidence } from '../types/safety';
 
 function extractContestIdFromReferer(referer: unknown): string | undefined {
   if (typeof referer !== 'string') return undefined;
@@ -60,6 +57,8 @@ interface ChatRequest {
   userThinking: string;
   includeCode: boolean;
   code?: string;
+  /** 记录页场景：当前这条提交的语言标识 */
+  codeLang?: string;
   attachErrorInfo?: boolean;
   contestId?: string;  // 比赛 ID（用于后端校验比赛模式）
   clarifyContext?: {
@@ -80,7 +79,7 @@ interface ChatResponse {
     content: string;
     timestamp: string;
   };
-  quota?: QuotaSnapshot;
+  remainingRequests?: number;
   codeWarning?: string;
   hasJudgeInfo?: boolean;
   tokenUsage?: {
@@ -89,16 +88,16 @@ interface ChatResponse {
     totalTokens: number;
   };
   budgetWarning?: string;
-  /** 偏题第 2 次起记为违规：返回固定回复，不计次数，可申诉（FR-037） */
-  offTopicViolation?: { safetyEventId?: string; appealAllowed: boolean };
 }
 
 interface PrepareChatResult {
   userId: number;
   domainId: string;
+  problemId: string;
   questionType: QuestionType;
   userThinking: string;
   includeCode: boolean;
+  codeLang: string | undefined;
   processedCode: string | undefined;
   codeWarning: string | undefined;
   problemTitleStr: string;
@@ -120,9 +119,6 @@ interface PrepareChatResult {
  * POST /ai-helper/chat
  */
 export class ChatHandler extends Handler {
-  /** 本次请求的次数预占：成功回复后确认，其余情况在 post() 结束时退还 */
-  private quotaReservation: QuotaReservation | null = null;
-
   async post() {
     try {
       if (rejectIfCsrfInvalid(this)) return;
@@ -142,155 +138,7 @@ export class ChatHandler extends Handler {
       this.response.status = 500;
       this.response.body = { error: this.translate('ai_helper_err_internal') };
       this.response.type = 'application/json';
-    } finally {
-      // 输入校验失败、安全拦截、偏题固定回复、模型调用失败等：预占都未确认，在此退还
-      await this.releaseQuota();
     }
-  }
-
-  private getQuotaService(): QuotaService | undefined {
-    const service = this.ctx.get('quotaService') as QuotaService | undefined;
-    return service && typeof service.reserve === 'function' ? service : undefined;
-  }
-
-  /**
-   * 预占一次每日次数。返回 true 表示已拒绝（响应已写入）。
-   * 发生在创建会话、保存消息之前，被拒请求不留下数据；数据库异常时放行。
-   */
-  private async reserveQuota(userId: number, aiConfig: AIConfig | null): Promise<boolean> {
-    const quotaService = this.getQuotaService();
-    if (!quotaService) return false;
-    try {
-      const result = await quotaService.reserve(userId, aiConfig);
-      if ('reservation' in result) {
-        this.quotaReservation = result.reservation;
-        return false;
-      }
-      if (result.code === 'AI_DISABLED_BY_ADMIN') {
-        this.response.status = 403;
-        this.response.body = {
-          error: this.translate('ai_helper_err_ai_disabled_by_admin'),
-          code: 'AI_DISABLED_BY_ADMIN',
-          category: 'quota',
-          retryable: false,
-        };
-      } else {
-        this.response.status = 429;
-        this.response.body = {
-          error: translateWithParams(this, 'ai_helper_err_quota_exhausted', result.used, result.limit),
-          code: 'QUOTA_EXHAUSTED',
-          category: 'quota',
-          retryable: false,
-          quota: {
-            limit: result.limit,
-            used: result.used,
-            remaining: 0,
-            resetAt: result.resetAt.toISOString(),
-          },
-        };
-      }
-      this.response.type = 'application/json';
-      return true;
-    } catch (err) {
-      console.warn('[ChatHandler] 次数预占失败，放行请求:', err instanceof Error ? err.message : err);
-      return false;
-    }
-  }
-
-  /** 拿到 AI 回复后确认计次，返回最新用量；失败不影响已生成的回复 */
-  private async confirmQuota(): Promise<QuotaSnapshot | undefined> {
-    const quotaService = this.getQuotaService();
-    if (!quotaService || !this.quotaReservation) return undefined;
-    try {
-      return (await quotaService.confirm(this.quotaReservation)) || undefined;
-    } catch (err) {
-      console.error('[ChatHandler] 次数确认失败:', err instanceof Error ? err.message : err);
-      return undefined;
-    }
-  }
-
-  private async releaseQuota(): Promise<void> {
-    const reservation = this.quotaReservation;
-    this.quotaReservation = null;
-    const quotaService = this.getQuotaService();
-    if (!quotaService || !reservation) return;
-    try {
-      await quotaService.release(reservation);
-    } catch (err) {
-      console.warn('[ChatHandler] 次数退还失败（预占将自动过期）:', err instanceof Error ? err.message : err);
-    }
-  }
-
-  /** 高置信度违规扣信誉（跨域生效）；信誉服务不可用或写入失败时只记录日志 */
-  private async recordCreditDeduction(
-    userId: number,
-    category: NonNullable<ValidateInputResult['category']>,
-    safetyLogId: ObjectIdType,
-    domainId: string,
-    conversationId?: string | ObjectIdType,
-  ): Promise<void> {
-    const creditService = this.ctx.get('creditService') as CreditService | undefined;
-    if (!creditService || typeof creditService.recordRealtimeDeduction !== 'function') return;
-    try {
-      await creditService.recordRealtimeDeduction({
-        uid: userId,
-        category,
-        safetyLogId,
-        domainId,
-        ...(conversationId ? { conversationId: typeof conversationId === 'string' ? new ObjectId(conversationId) : conversationId } : {}),
-      });
-    } catch (err) {
-      console.error('[ChatHandler] 信誉扣分失败:', err instanceof Error ? err.message : err);
-    }
-  }
-
-  /**
-   * 偏题违规（第 2 次起）：写安全记录（类别 off_topic、高置信度、来源 topic_guard、只拦截不冷却）并扣信誉。
-   * 记录失败时回滚计数，避免下一次被误判为“又一次偏题”。
-   */
-  private async recordOffTopicViolation(params: {
-    jailbreakLogModel: JailbreakLogModel;
-    domainId: string;
-    userId: number;
-    conversationId: ObjectIdType;
-    problemId: string;
-    questionType: QuestionType;
-    matchedKeyword: string;
-    userThinking: string;
-    penaltyCounterId?: string;
-    penaltyEventId?: string;
-  }): Promise<string | undefined> {
-    const { jailbreakLogModel, domainId, userId, conversationId, penaltyCounterId, penaltyEventId } = params;
-    let logId: ObjectIdType | undefined;
-    try {
-      logId = await new EffectivenessService(this.ctx).logJailbreakAttempt({
-        domainId,
-        userId,
-        conversationId,
-        problemId: params.problemId,
-        questionType: params.questionType,
-        matchedPattern: `off_topic:${params.matchedKeyword}`,
-        matchedText: params.userThinking.substring(0, 120),
-        category: 'off_topic',
-        confidence: 'high',
-        detectionSource: 'topic_guard',
-        actionTaken: 'blocked',
-        penaltyCounterId,
-        penaltyEventId,
-      });
-    } catch (err) {
-      console.error('[ChatHandler] 记录偏题违规失败', err);
-    }
-    if (!logId) {
-      if (penaltyCounterId && penaltyEventId) {
-        await jailbreakLogModel.rollbackPenaltySequence(penaltyCounterId, penaltyEventId).catch((err) => {
-          console.error('[ChatHandler] 回滚偏题计数失败', err);
-        });
-      }
-      return undefined;
-    }
-    await this.recordCreditDeduction(userId, 'off_topic', logId, domainId, conversationId);
-    return logId.toHexString();
   }
 
   private async rejectSafetyViolation(params: {
@@ -328,6 +176,7 @@ export class ChatHandler extends Handler {
     if (validation.category) {
       try {
         const sequence = await jailbreakLogModel.nextPenaltySequence(
+          domainId,
           userId,
           validation.category
         );
@@ -348,6 +197,7 @@ export class ChatHandler extends Handler {
         try {
           const penalty = await decideSafetyPenalty(
             jailbreakLogModel,
+            domainId,
             userId,
             validation.category
           );
@@ -366,10 +216,6 @@ export class ChatHandler extends Handler {
       }
     }
 
-    // 置信度（FR-028a）：由规则风险分决定；索要答案达到冷却阈值的那一次记为高
-    let confidence: SafetyConfidence | undefined = validation.confidence;
-    if (validation.category === 'answer_seeking' && actionTaken !== 'blocked') confidence = 'high';
-
     let safetyEventId: string | undefined;
     try {
       const effectivenessService = new EffectivenessService(this.ctx);
@@ -382,7 +228,7 @@ export class ChatHandler extends Handler {
         matchedPattern: validation.matchedPattern,
         matchedText: validation.matchedText || fallbackMatchedText.substring(0, 120),
         category: validation.category,
-        confidence,
+        confidence: validation.confidence,
         riskScore: validation.riskScore,
         detectionSource: validation.detectionSource,
         actionTaken,
@@ -391,10 +237,6 @@ export class ChatHandler extends Handler {
         penaltyEventId,
       });
       safetyEventId = logId?.toHexString();
-      // 只有高置信度违规扣信誉（FR-028）；扣分失败不影响拦截
-      if (logId && confidence === 'high' && validation.category) {
-        await this.recordCreditDeduction(userId, validation.category, logId, domainId, conversationId);
-      }
       if (!logId && penaltyCounterId && penaltyEventId) {
         const counterToRollback = penaltyCounterId;
         const eventToRollback = penaltyEventId;
@@ -473,6 +315,7 @@ export class ChatHandler extends Handler {
       }
     }
 
+
     // 获取 AI 配置（用于频率限制和其他设置）
     const aiConfigModel: AIConfigModel = this.ctx.get('aiConfigModel');
     const aiConfig: AIConfig | null = await aiConfigModel.getConfig();
@@ -542,7 +385,7 @@ export class ChatHandler extends Handler {
 
     // 渐进式冷却仅限制 AI 对话；数据库不可用时保持主流程可用。
     try {
-      const activeCooldown = await jailbreakLogModel.findActiveCooldown(userId);
+      const activeCooldown = await jailbreakLogModel.findActiveCooldown(domainId, userId);
       if (activeCooldown?.blockedUntil) {
         const retryAfterSeconds = Math.max(
           1,
@@ -557,8 +400,6 @@ export class ChatHandler extends Handler {
           retryAfterSeconds,
           safetyEventId: activeCooldown._id.toHexString(),
           appealAllowed: activeCooldown.reviewStatus !== 'confirmed',
-          // 冷却按用户跨域生效：记录可能来自其他域，复核时按该域查看（plan R12）
-          ...(activeCooldown.domainId ? { domainId: activeCooldown.domainId } : {}),
         };
         this.response.type = 'application/json';
         return null;
@@ -566,9 +407,6 @@ export class ChatHandler extends Handler {
     } catch (err) {
       console.warn('[ChatHandler] 安全冷却检查失败，放行请求:', err);
     }
-
-    // 每日次数：预占一次（比赛模式、频率限制、预算、冷却之后；创建会话之前）
-    if (await this.reserveQuota(userId, aiConfig)) return null;
 
     // 从请求体获取参数
     const {
@@ -579,6 +417,7 @@ export class ChatHandler extends Handler {
       userThinking,
       includeCode,
       code,
+      codeLang,
       conversationId,
       clarifyContext
     } = this.request.body as ChatRequest;
@@ -587,6 +426,28 @@ export class ChatHandler extends Handler {
     const validQuestionTypes: QuestionType[] = ['understand', 'think', 'debug', 'clarify', 'optimize'];
     if (!validQuestionTypes.includes(questionType as QuestionType)) {
       throw new Error(this.translate('ai_helper_err_invalid_question_type'));
+    }
+
+    // 服务端强制反查：题目若被任何进行中的比赛（非 homework）引用，禁止使用 AI。
+    // 堵住不带 tid 直接打开比赛题、或伪造 body/referer 的绕过路径。
+    if (problemId) {
+      try {
+        if (await isProblemInOngoingContest(domainId, problemId)) {
+          this.response.status = 403;
+          this.response.body = {
+            error: this.translate('ai_helper_err_contest_restricted'),
+            code: 'CONTEST_MODE_RESTRICTED',
+          };
+          this.response.type = 'application/json';
+          return null;
+        }
+      } catch (err) {
+        console.warn('[ChatHandler] 比赛题目反查校验失败:', err);
+        this.response.status = 503;
+        this.response.body = { error: this.translate('ai_helper_err_contest_check_failed'), code: 'CONTEST_CHECK_FAILED' };
+        this.response.type = 'application/json';
+        return null;
+      }
     }
 
     // Clarify 预校验：先拒绝无效请求，避免创建空会话
@@ -691,24 +552,43 @@ export class ChatHandler extends Handler {
     let trustedProblemContent: string | undefined;
     let trustedProblemDocId: number | undefined;
     try {
-      const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content', 'html', 'reference', 'docId']);
+      const pdoc = await ProblemModel.get(domainId, problemId, ['title', 'content', 'docId']);
       if (pdoc) {
         trustedProblemTitle = pdoc.title;
         trustedProblemDocId = pdoc.docId;
-        // Hydro 5 新题面存于 problem.statement，document.content 为空时回退读取
-        const content = await resolveProblemContent(pdoc, domainId);
         // 题目内容可能是字符串或 JSON 对象（多语言支持）
-        if (typeof content === 'string') {
-          trustedProblemContent = content;
-        } else if (content && typeof content === 'object') {
+        if (typeof pdoc.content === 'string') {
+          trustedProblemContent = pdoc.content;
+        } else if (pdoc.content && typeof pdoc.content === 'object') {
           // 多语言内容，取第一个可用的值
-          const values = Object.values(content as Record<string, string>);
+          const values = Object.values(pdoc.content as Record<string, string>);
           trustedProblemContent = values[0] || '';
         }
       }
     } catch (err) {
       // 题目获取失败不阻塞主流程，但不使用白名单
       console.warn('[ChatHandler] 获取题目内容失败，白名单将为空:', err);
+    }
+
+    // 题面图片（多模态）：解析题面 markdown 中的图片引用，加载本地 additional_file 图片。
+    // 失败不阻塞主流程；外链图片不代抓（SSRF 防护），由模型侧提示学生描述。
+    let problemImages: ProblemImage[] = [];
+    try {
+      const imgPdoc = await ProblemModel.get(domainId, problemId, ['docId', 'domainId', 'pid', 'content', 'additional_file']);
+      if (imgPdoc) {
+        let statementText = '';
+        try {
+          const statements = await ProblemModel.getStatements(imgPdoc);
+          statementText = statements.map((st) => String(st.content || '')).join(String.fromCharCode(10));
+        } catch {
+          statementText = typeof imgPdoc.content === 'string' ? imgPdoc.content : '';
+        }
+        if (statementText) {
+          problemImages = await collectStatementImages(domainId, imgPdoc, statementText);
+        }
+      }
+    } catch (err) {
+      console.warn('[ChatHandler] 题面图片收集失败，降级为纯文本:', err);
     }
 
     // 题目内容截断(超过 500 字符) - 用于白名单和 System Prompt
@@ -762,12 +642,21 @@ export class ChatHandler extends Handler {
     // 优先使用服务端获取的可信题目标题，其次使用前端传入的，最后使用题目ID
     const problemTitleStr = trustedProblemTitle || problemTitle || translateWithParams(this, 'ai_helper_problem_fallback_title', problemId);
     const userLang = this.user?.viewLang || this.session?.viewLang || undefined;
-    const systemPrompt = promptService.buildSystemPrompt(
+    let systemPrompt = promptService.buildSystemPrompt(
       problemTitleStr,
       processedProblemContent,
       customSystemPromptTemplate,
       userLang
     );
+
+    // 知识库检索: 命中参考资料时注入 System Prompt（仅作引导素材，禁止直接转述答案代码）
+    const knowledgeBlock = await new KnowledgeService(this.ctx).retrieveBlock(
+      `${problemTitleStr}\n${userThinking}`,
+      { problemPid: problemId ? String(problemId) : undefined },
+    );
+    if (knowledgeBlock) {
+      systemPrompt = `${systemPrompt}\n\n${knowledgeBlock}`;
+    }
 
     // 处理对话会话 (新建或复用)
     let currentConversationId: ObjectIdType;
@@ -806,16 +695,13 @@ export class ChatHandler extends Handler {
       }
       currentConversationId = conversation._id;
     } else {
-      // 创建新会话（记录学生当时在该域所属的小组，用于按班级统计）
+      // 创建新会话
       const now = new Date();
-      const groupNames = await snapshotGroupNames(this.ctx.db, domainId, userId);
       currentConversationId = await conversationModel.create({
         domainId,
         userId,
         problemId,
         classId: undefined,
-        groupNames,
-        groupSource: 'snapshot',
         startTime: now,
         endTime: now,
         messageCount: 0,
@@ -889,47 +775,17 @@ export class ChatHandler extends Handler {
       }
     }
 
-    // P1-2: 偏题检测（在 LLM 调用前执行）。按用户跨会话计数（窗口默认 24 小时，FR-037）：
-    // 第 1 次照常回答并计次；第 2 次起记为偏题违规、扣信誉，返回固定回复且不计次。
-    const topicGuardConfig = normalizeTopicGuardConfig(aiConfig?.topicGuardConfig);
+    // P1-2: 偏题检测（在 LLM 调用前执行）
     const topicGuardService = new TopicGuardService();
     const topicResult = topicGuardService.evaluate(userThinking, {
       code: processedCode,
       problemTitle: problemTitleStr,
-      problemContent: processedProblemContent,
-      codeExemptMinChars: topicGuardConfig.codeExemptMinChars,
-      customKeywords: topicGuardConfig.customOffTopicKeywords,
+      problemContent: processedProblemContent
     });
     if (topicResult.isOffTopic) {
-      let strikeCount = 1;
-      let penaltyCounterId: string | undefined;
-      let penaltyEventId: string | undefined;
-      try {
-        const sequence = await jailbreakLogModel.nextPenaltySequence(
-          userId,
-          'off_topic',
-          new Date(),
-          topicGuardConfig.strikeWindowHours * 60 * 60 * 1000
-        );
-        strikeCount = sequence.currentCount;
-        penaltyCounterId = sequence.counterId;
-        penaltyEventId = sequence.eventId;
-      } catch (err) {
-        console.warn('[ChatHandler] 偏题计数失败，本次按第 1 次处理:', err instanceof Error ? err.message : err);
-      }
+      const strikeCount = await conversationModel.incrementOffTopicStrike(currentConversationId);
       if (strikeCount >= 2) {
-        const safetyEventId = await this.recordOffTopicViolation({
-          jailbreakLogModel,
-          domainId,
-          userId,
-          conversationId: currentConversationId,
-          problemId,
-          questionType,
-          matchedKeyword: topicResult.matchedKeyword || '',
-          userThinking,
-          penaltyCounterId,
-          penaltyEventId,
-        });
+        // 连续偏题 >= 2 次，直接返回固定模板，不调 LLM
         const fixedReply = this.translate('ai_helper_err_off_topic_reply');
         // 先保存学生消息，确保会话消息顺序与实际轮次一致
         const studentMessageTimestamp = new Date();
@@ -962,13 +818,15 @@ export class ChatHandler extends Handler {
             role: 'ai',
             content: fixedReply,
             timestamp: aiMessageTimestamp.toISOString()
-          },
-          offTopicViolation: { ...(safetyEventId ? { safetyEventId } : {}), appealAllowed: !!safetyEventId },
+          }
         };
         this.response.body = response;
         this.response.type = 'application/json';
         return null;
       }
+    } else {
+      // 正常对话，重置偏题计数
+      await conversationModel.resetOffTopicStrike(currentConversationId);
     }
 
     // 查询评测数据（debug 类型时自动附带）
@@ -1081,9 +939,18 @@ export class ChatHandler extends Handler {
       clarifySelectedTextRaw || undefined
     );
 
-    // 准备消息数组
+    // 准备消息数组（题面含本地图片时以多模态 parts 注入，视觉模型可直接读图）
     const messages: ChatMessage[] = [
-      { role: 'user', content: userPrompt }
+      problemImages.length
+        ? {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: userPrompt },
+              { type: 'text' as const, text: `以下是题面中的图片（共 ${problemImages.length} 张，按题面出现顺序）：` },
+              ...problemImages.map((img) => ({ type: 'image_url' as const, image_url: { url: img.dataUrl } })),
+            ],
+          }
+        : { role: 'user', content: userPrompt },
     ];
 
     // 从数据库配置创建多模型 AI 客户端（支持 fallback）
@@ -1102,9 +969,11 @@ export class ChatHandler extends Handler {
     return {
       userId,
       domainId,
+      problemId,
       questionType: questionType as QuestionType,
       userThinking,
       includeCode,
+      codeLang,
       processedCode,
       codeWarning,
       problemTitleStr,
@@ -1184,37 +1053,109 @@ export class ChatHandler extends Handler {
 
     try {
       const aiStart = Date.now();
-      const streamResult = await p.multiModelClient.chatStream(p.messages, p.systemPrompt, {
-        signal: requestAc.signal,
-        callbacks: {
-          onChunk: (content: string) => {
-            fullContent += content;
-            const checked = safeStream.push(content);
-            if (checked !== undefined) publish(checked);
-          },
-          onReset: () => {
-            fullContent = '';
-            streamUsage = undefined;
-            safeStream.reset();
-            publish('');
-          },
-          onDone: (result) => {
-            fullContent = result.content;
-            streamUsage = result.usage;
-          },
-          onError: (error: AIServiceError) => {
-            sse.writeEvent('error', {
-              error: this.translate(USER_ERROR_MESSAGE_KEYS[error.category]),
-              category: error.category,
-              retryable: error.isRetryable,
-            });
-            try {
-              this.ctx.get('errorReporter')?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack, error.context as Record<string, unknown>);
-              this.ctx.get('requestStatsModel')?.recordFailure(error.category);
-            } catch { /* non-critical */ }
-          },
+      const baseCallbacks = {
+        onChunk: (content: string) => {
+          fullContent += content;
+          const checked = safeStream.push(content);
+          if (checked !== undefined) publish(checked);
         },
-      });
+        onReset: () => {
+          fullContent = '';
+          streamUsage = undefined;
+          safeStream.reset();
+          publish('');
+        },
+        onDone: (result) => {
+          fullContent = result.content;
+          streamUsage = result.usage;
+        },
+        onError: (error: AIServiceError) => {
+          sse.writeEvent('error', {
+            error: this.translate(USER_ERROR_MESSAGE_KEYS[error.category]),
+            category: error.category,
+            retryable: error.isRetryable,
+          });
+          try {
+            this.ctx.get('errorReporter')?.capture('api_failure', error.category, error.message, error.httpStatus, error.stack, error.context as Record<string, unknown>);
+            this.ctx.get('requestStatsModel')?.recordFailure(error.category);
+          } catch { /* non-critical */ }
+        },
+      };
+
+      // ─── Agent 工具循环 ───
+      // 模型可通过 function calling 主动查询题面详情、沙箱运行代码、检索知识库。
+      // 端点不支持 tools（HTTP 400）时自动降级为原有注入模式，对话不中断。
+      // 最多 3 轮，防止循环调用；每轮工具结果截断，控制内存占用。
+      let agentMessages = p.messages;
+      let agentTools: unknown[] | undefined = AGENT_TOOLS;
+      let streamResult: {
+        usedModel: MultiModelChatResult['usedModel'];
+        fallbackErrors?: MultiModelChatResult['fallbackErrors'];
+        toolCalls?: ToolCall[];
+      };
+      for (let agentRound = 0; agentRound < 3; agentRound++) {
+        let roundToolCalls: ToolCall[] | undefined;
+        const callbacks = {
+          ...baseCallbacks,
+          onToolCalls: (calls: ToolCall[]) => {
+            roundToolCalls = calls;
+          },
+        };
+        const runOnce = (tools: unknown[] | undefined) => p.multiModelClient.chatStream(
+          agentMessages, p.systemPrompt, { signal: requestAc.signal, callbacks, tools },
+        );
+        try {
+          streamResult = await runOnce(agentTools);
+        } catch (err) {
+          if (err instanceof AIServiceError && err.category === 'client' && err.httpStatus === 400) {
+            // 端点能力不足时逐级降级：先剥离图片（保留工具），仍失败再去掉工具
+            if (agentMessages.some((m) => Array.isArray(m.content))) {
+              const NL2 = String.fromCharCode(10) + String.fromCharCode(10);
+              agentMessages = agentMessages.map((m) => (Array.isArray(m.content)
+                ? { ...m, content: m.content.filter((part) => part.type === 'text').map((part) => (part as { type: 'text'; text: string }).text).join(NL2) }
+                : m));
+              streamResult = await runOnce(agentTools);
+            } else if (agentTools) {
+              agentTools = undefined;
+              streamResult = await runOnce(undefined);
+            } else {
+              throw err;
+            }
+          } else {
+            throw err;
+          }
+        }
+        if (!streamResult.toolCalls?.length) break;
+        roundToolCalls = streamResult.toolCalls;
+        agentMessages = [
+          ...agentMessages,
+          { role: 'assistant' as const, content: '', tool_calls: roundToolCalls },
+        ];
+        for (const call of roundToolCalls) {
+          sse.writeEvent('tool_status', { tool: call.function.name, state: 'running' });
+          const resultText = await executeAgentTool(call.function.name, call.function.arguments, {
+            ctx: this.ctx,
+            domainId: p.domainId,
+            problemId: p.problemId,
+            userId: p.userId,
+            codeLang: p.codeLang,
+            code: p.includeCode ? p.processedCode : undefined,
+          });
+          agentMessages.push({ role: 'tool' as const, tool_call_id: call.id, content: resultText });
+          sse.writeEvent('tool_status', { tool: call.function.name, state: 'done' });
+        }
+        // 工具轮结束后清空可能的部分输出，为最终回答让路
+        fullContent = '';
+        safeStream.reset();
+        publish('');
+      }
+      // 若 3 轮全部用于工具调用仍未产出答案，追加一轮无工具的强制回答，避免空回复
+      if (streamResult.toolCalls?.length) {
+        streamResult = await p.multiModelClient.chatStream(agentMessages, p.systemPrompt, {
+          signal: requestAc.signal,
+          callbacks: baseCallbacks,
+        });
+      }
       usedModel = streamResult.usedModel;
       const aiLatencyMs = Date.now() - aiStart;
       console.log(`[Perf] AI Stream Response: ${aiLatencyMs}ms`);
@@ -1263,9 +1204,6 @@ export class ChatHandler extends Handler {
       await p.conversationModel.incrementMessageCount(p.currentConversationId);
       await p.conversationModel.updateEndTime(p.currentConversationId, aiMessageTimestamp);
 
-      // 拿到 AI 回复：确认计次
-      const quota = await this.confirmQuota();
-
       // Send done event
       sse.writeEvent('done', {
         messageId: aiMessageId.toHexString(),
@@ -1275,7 +1213,6 @@ export class ChatHandler extends Handler {
           totalTokens: streamUsage.totalTokens,
         } : undefined,
         budgetWarning: p.budgetWarning || null,
-        ...(quota ? { quota } : {}),
       });
 
       // Async: record token usage
@@ -1320,10 +1257,6 @@ export class ChatHandler extends Handler {
         this.ctx.logger.error('Schedule effectiveness analyze failed', err);
       }
     } catch (error) {
-      // 学生中途停止但已产生回复内容：计 1 次（FR-012）；其余失败在 post() 结束时退还
-      if (error instanceof AIServiceError && error.category === 'aborted' && fullContent.trim()) {
-        await this.confirmQuota();
-      }
       try {
         const er = this.ctx.get('errorReporter');
         const rsm = this.ctx.get('requestStatsModel');
@@ -1491,9 +1424,6 @@ export class ChatHandler extends Handler {
     await p.conversationModel.incrementMessageCount(p.currentConversationId);
     await p.conversationModel.updateEndTime(p.currentConversationId, aiMessageTimestamp);
 
-    // 拿到 AI 回复：确认计次
-    const quota = await this.confirmQuota();
-
     // 异步记录 token 用量（不阻塞主流程）
     if (aiResult?.usage && aiResult.usedModel && aiResult.usage.totalTokens > 0) {
       const { usedModel: um, usage: usg } = aiResult;
@@ -1545,8 +1475,7 @@ export class ChatHandler extends Handler {
         role: 'ai',
         content: aiResponse,
         timestamp: aiMessageTimestamp.toISOString()
-      },
-      ...(quota ? { quota } : {}),
+      }
     };
 
     // 如果代码被截断,添加警告信息
@@ -1611,6 +1540,7 @@ export class SafetyAppealHandler extends Handler {
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
       const appealResult = await jailbreakLogModel.appealByStudent(
         id,
+        getDomainId(this),
         Number(this.user._id),
         reason || undefined
       );
@@ -1750,6 +1680,28 @@ export function parseExtraJailbreakPatterns(raw?: string | null): RegExp[] {
  */
 export class ProblemStatusHandler extends Handler {
   async get({ problemId }: { problemId: string }) {
+    // 比赛进行中：最早检查并 fail-closed（反查异常时拒绝服务而非放行），
+    // 保证受限状态下不泄露任何提交/代码信息。
+    if (problemId) {
+      try {
+        if (await isProblemInOngoingContest(getDomainId(this), problemId)) {
+          this.response.status = 403;
+          this.response.body = {
+            error: this.translate('ai_helper_err_contest_restricted'),
+            code: 'CONTEST_MODE_RESTRICTED',
+          };
+          this.response.type = 'application/json';
+          return;
+        }
+      } catch (err) {
+        console.warn('[ProblemStatusHandler] 比赛反查失败，fail-closed:', err);
+        this.response.status = 503;
+        this.response.body = { error: this.translate('ai_helper_err_contest_check_failed'), code: 'CONTEST_CHECK_FAILED' };
+        this.response.type = 'application/json';
+        return;
+      }
+    }
+
     // 限流：30 次/60秒，fail-open（只读端点）
     if (await applyRateLimit(this, {
       op: 'ai_problem_status', periodSecs: 60, maxOps: 30,
@@ -1794,13 +1746,89 @@ export class ProblemStatusHandler extends Handler {
     const acCode = acRecordDoc?.code;
     const acLang = acRecordDoc?.lang;
 
+    // 最近一次提交（任意状态）：既用于"至少提交一次"的把手显示条件，
+    // 也让"附带代码"在 IDE 外自动带上学生最新提交的代码，不再要求手动粘贴
+    const lastRecordDoc = hasAccepted ? acRecordDoc : await db.collection('record').findOne(
+      { domainId, uid: userId, pid: pdoc.docId },
+      { sort: { _id: -1 }, projection: { code: 1, lang: 1 } },
+    );
+    const hasSubmitted = !!lastRecordDoc;
+
+    // 比赛进行中：前端据此隐藏 AI 把手（与 chat 的服务端反查同源判定）
+    let contestRestricted = false;
+    try {
+      contestRestricted = await isProblemInOngoingContest(domainId, problemId);
+    } catch (err) {
+      console.warn('[ProblemStatusHandler] 比赛反查失败，fail-closed 隐藏把手:', err);
+      contestRestricted = true;
+    }
+
     this.response.body = {
       hasAccepted,
+      hasSubmitted,
+      contestRestricted,
       acCode,    // 最近一次 AC 的代码
-      acLang     // 代码语言
+      acLang,    // 代码语言
+      lastCode: lastRecordDoc?.code,   // 最近一次提交的代码（不限状态）
+      lastLang: lastRecordDoc?.lang,
     };
     this.response.type = 'application/json';
   }
 }
 
 export const ProblemStatusHandlerPriv = PRIV.PRIV_USER_PROFILE;
+
+/**
+ * GET /ai-helper/problem-info/:problemId
+ * 按题目 ID 自动获取题目标题与题面内容（供前端面板展示题目上下文）
+ */
+export class ProblemInfoHandler extends Handler {
+  async get({ problemId }: { problemId: string }) {
+    if (await applyRateLimit(this, {
+      op: 'ai_problem_info', periodSecs: 60, maxOps: 30,
+      failOpen: true,
+      errorMessage: 'ai_helper_err_rate_limited',
+    })) return;
+
+    if (!problemId || typeof problemId !== 'string' || problemId.length > 50) {
+      this.response.status = 400;
+      this.response.body = { error: this.translate('ai_helper_err_invalid_problem_id') };
+      this.response.type = 'application/json';
+      return;
+    }
+
+    const domainId = getDomainId(this);
+    const pdoc = await ProblemModel.get(domainId, problemId, ['docId', 'domainId', 'title', 'content', 'reference']);
+    if (!pdoc) {
+      this.response.status = 404;
+      this.response.body = { error: this.translate('ai_helper_err_invalid_problem_id') };
+      this.response.type = 'application/json';
+      return;
+    }
+
+    let content = '';
+    try {
+      const statements = await ProblemModel.getStatements(pdoc);
+      content = statements.map((s) => String(s.content || '')).join('\n');
+    } catch {
+      content = String(pdoc.content || '');
+    }
+    if (!content && pdoc.reference) {
+      const source = await ProblemModel.get(pdoc.reference.domainId, pdoc.reference.pid, ['docId', 'domainId', 'title', 'content']);
+      if (source) {
+        try {
+          const statements = await ProblemModel.getStatements(source);
+          content = statements.map((s) => String(s.content || '')).join('\n');
+        } catch { /* keep empty */ }
+      }
+    }
+
+    this.response.body = {
+      title: pdoc.title,
+      content: content.substring(0, 8000),
+    };
+    this.response.type = 'application/json';
+  }
+}
+
+export const ProblemInfoHandlerPriv = PRIV.PRIV_USER_PROFILE;

@@ -2,13 +2,9 @@ export interface SSEHandlers {
   onMeta?: (data: { conversationId: string }) => void;
   onChunk?: (data: { content: string }) => void;
   onReplace?: (data: { content: string }) => void;
-  onDone?: (data: {
-    messageId: string;
-    usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
-    budgetWarning?: string | null;
-    quota?: { limit: number | null; used: number; remaining: number | null; resetAt: string };
-  }) => void;
+  onDone?: (data: { messageId: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number }; budgetWarning?: string | null }) => void;
   onError?: (data: { error: string; category?: string; retryable?: boolean }) => void;
+  onToolStatus?: (data: { tool: string; state: 'running' | 'done' }) => void;
 }
 
 export async function consumeSSEStream(
@@ -36,6 +32,7 @@ export async function consumeSSEStream(
         case 'replace': handlers.onReplace?.(data); break;
         case 'done':    handlers.onDone?.(data); break;
         case 'error':   handlers.onError?.(data); break;
+        case 'tool_status': handlers.onToolStatus?.(data); break;
       }
       currentEvent = '';
       return;

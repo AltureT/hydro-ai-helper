@@ -52,11 +52,6 @@ const SCENARIO_META: Record<AIScenarioKey, { labelKey: string; descKey: string; 
     icon: 'flask',
     warnKey: 'ai_helper_admin_scenario_testdata_strong_model_warning',
   },
-  aiReview: {
-    labelKey: 'ai_helper_admin_scenario_ai_review',
-    descKey: 'ai_helper_admin_scenario_ai_review_desc',
-    icon: 'shield',
-  },
 };
 
 const OPTION_SEPARATOR = '::';

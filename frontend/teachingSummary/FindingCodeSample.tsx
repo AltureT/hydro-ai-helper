@@ -21,8 +21,8 @@ export const FindingCodeSample: React.FC<{ finding: TeachingFinding; domainId: s
         {recordUrl && <> · <a href={recordUrl} target="_blank" rel="noopener noreferrer">查看原提交</a></>}
       </div>}
     </div>
-    <pre style={{ margin: 0, fontSize: 13, overflowX: 'auto', backgroundColor: '#1e293b', borderRadius: 8,
-      padding: 16, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: '#e2e8f0', lineHeight: 1.6 }}>
+    <pre style={{ margin: 0, fontSize: 13, overflowX: 'auto', backgroundColor: '#3d3d3d', borderRadius: 8,
+      padding: 16, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: '#dddddd', lineHeight: 1.6 }}>
       {code}
     </pre>
   </div>;

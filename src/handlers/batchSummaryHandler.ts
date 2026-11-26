@@ -4,11 +4,10 @@
  * 提供竞赛批量摘要的生成、查看、重试、发布、导出、编辑、停止和继续功能
  */
 
-import { Handler, PRIV, db } from 'hydrooj';
+import { ContestModel, ForbiddenError, Handler, PERM, PRIV, db } from 'hydrooj';
 import type { ServerResponse } from 'http';
 import { ObjectId } from '../utils/mongo';
 import { getDomainId } from '../utils/domainHelper';
-import { resolveProblemContents } from '../utils/problemStatement';
 import { createSSEWriter } from '../lib/sseHelper';
 import { createMultiModelClientFromConfig } from '../services/openaiClient';
 import { BatchSummaryJobModel, BatchSummaryJob } from '../models/batchSummaryJob';
@@ -23,6 +22,14 @@ function escapeCsv(value: string): string {
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
+
+// ─── Access control ──────────────────────────────────────────────────────────
+
+/**
+ * 批量摘要的所有任务级操作都必须校验当前用户是对应比赛的编辑者
+ * (组织者或拥有 PERM_EDIT_CONTEST),否则任何登录用户都能通过 jobId
+ * 越权读取/修改/导出他人比赛的摘要 (IDOR)。
+ */
 
 /**
  * BatchSummaryGenerateHandler - 触发批量生成任务
@@ -66,6 +73,10 @@ export class BatchSummaryGenerateHandler extends Handler {
         this.response.body = { error: { code: 'CONTEST_NOT_FOUND', message: 'Contest not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(domainId, contestObjId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       // Get all current attendees
@@ -140,12 +151,23 @@ export class BatchSummaryGenerateHandler extends Handler {
           await summaryModel.createBatch(jobId, domainId, contestObjId, allAttendees);
         }
 
+        // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+        // 具体比赛归属在取到 job 后再精确校验。
+        if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+          throw new ForbiddenError('not contest editor');
+        }
         job = await jobModel.findById(jobId);
         if (!job) {
           this.response.status = 500;
           this.response.body = { error: { code: 'JOB_CREATE_FAILED', message: 'Failed to create job' } };
           this.response.type = 'application/json';
           return;
+        }
+
+        // 复用既有任务时同样校验归属（job 属于本比赛）
+        const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+        if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+          throw new ForbiddenError('not contest editor');
         }
       }
 
@@ -162,9 +184,9 @@ export class BatchSummaryGenerateHandler extends Handler {
       // Fetch problem info
       const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
       const numericPids = pids.map(p => parseInt(p.replace(/^P/i, ''), 10)).filter(n => !isNaN(n));
-      const problemDocs = await resolveProblemContents(await documentColl
+      const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
-        .toArray(), domainId);
+        .toArray();
       const problems: ProblemInfo[] = problemDocs.map((doc: { docId?: unknown; title?: unknown; content?: unknown }) => ({
         pid: String(doc.docId),
         title: doc.title as string || `Problem ${doc.docId}`,
@@ -269,12 +291,21 @@ export class BatchSummaryResultHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       const isTeacher = this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM);
@@ -313,12 +344,21 @@ export class BatchSummaryRetryHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       const summary = await summaryModel.findByJobAndUser(job._id, parseInt(userId, 10));
@@ -353,12 +393,21 @@ export class BatchSummaryRetryFailedHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       const count = await summaryModel.resetFailedToPending(job._id);
@@ -387,12 +436,21 @@ export class BatchSummaryPublishHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       if (userId) {
@@ -439,12 +497,21 @@ export class BatchSummaryExportHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       const summaries = await summaryModel.findAllByJob(job._id);
@@ -499,12 +566,21 @@ export class BatchSummaryEditHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       const summaryDoc = await summaryModel.findByJobAndUser(job._id, parseInt(userId, 10));
@@ -625,12 +701,21 @@ export class BatchSummaryStopHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       // Mark job as stopped — the service loop checks this between batches
@@ -661,12 +746,21 @@ export class BatchSummaryContinueHandler extends Handler {
       const jobModel: BatchSummaryJobModel = this.ctx.get('batchSummaryJobModel');
       const summaryModel: StudentSummaryModel = this.ctx.get('studentSummaryModel');
 
+      // 权限预检（fail-closed）：访问 job 数据前先要求比赛编辑权限，
+      // 具体比赛归属在取到 job 后再精确校验。
+      if (!this.user.hasPerm(PERM.PERM_EDIT_CONTEST) && !this.user.hasPriv(PRIV.PRIV_EDIT_SYSTEM)) {
+        throw new ForbiddenError('not contest editor');
+      }
       const job = await jobModel.findById(jobId);
       if (!job) {
         this.response.status = 404;
         this.response.body = { error: { code: 'JOB_NOT_FOUND', message: 'Job not found' } };
         this.response.type = 'application/json';
         return;
+      }
+      const _tdoc = await ContestModel.get(job.domainId, job.contestId as any);
+      if (!_tdoc || (!this.user.own(_tdoc) && !this.user.hasPerm(PERM.PERM_EDIT_CONTEST))) {
+        throw new ForbiddenError('not contest editor');
       }
 
       // Fetch problem info (same as generate handler)
@@ -681,9 +775,9 @@ export class BatchSummaryContinueHandler extends Handler {
 
       const pids: string[] = (tdoc.pids || []).map((p: unknown) => String(p));
       const numericPids = pids.map((p) => parseInt(p.replace(/^P/i, ''), 10)).filter((n) => !isNaN(n));
-      const problemDocs = await resolveProblemContents(await documentColl
+      const problemDocs = await documentColl
         .find({ domainId, docType: 10, docId: { $in: numericPids } })
-        .toArray(), domainId);
+        .toArray();
       const problems: ProblemInfo[] = problemDocs.map((doc: { docId?: unknown; title?: unknown; content?: unknown }) => ({
         pid: String(doc.docId),
         title: doc.title as string || `Problem ${doc.docId}`,

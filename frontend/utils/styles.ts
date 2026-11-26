@@ -2,74 +2,77 @@ import React from 'react';
 
 // ─── Design Tokens ───────────────────────────────────────────────────────────
 
+// Design tokens aligned with Hydro ui-default (misc/color.inc.styl,
+// common/variables.inc.styl, section/button styl). Do not invent new values.
 export const COLORS = {
-  primary: '#2563eb',
-  primaryHover: '#1d4ed8',
-  primaryLight: '#dbeafe',
-  secondary: '#64748b',
-  accent: '#f59e0b',
-  textPrimary: '#1e293b',
-  textSecondary: '#475569',
-  textMuted: '#64748b',
-  textDisabled: '#cbd5e1',
-  bgPage: '#f8fafc',
+  primary: '#5f9fd6',
+  primaryHover: '#4a8ecb',
+  primaryLight: '#e8f1fa',
+  secondary: '#7f8c99',
+  accent: '#f39800',
+  textPrimary: '#3d3d3d',
+  textSecondary: '#555555',
+  textMuted: '#999999',
+  textDisabled: '#cccccc',
+  bgPage: '#edf0f2',
   bgCard: '#ffffff',
-  bgHover: '#f1f5f9',
-  bgDisabled: '#f1f5f9',
+  bgHover: '#f5f7f9',
+  bgDisabled: '#f0f1f2',
   overlay: 'rgba(0, 0, 0, 0.5)',
-  border: '#e2e8f0',
-  borderFocus: '#2563eb',
-  shadowFocus: 'rgba(37, 99, 235, 0.25)',
-  success: '#10b981',
-  successBg: '#ecfdf5',
-  successBorder: '#a7f3d0',
-  successText: '#065f46',
-  warning: '#f59e0b',
-  warningBg: '#fffbeb',
-  warningBorder: '#fde68a',
-  warningText: '#92400e',
-  error: '#ef4444',
-  errorBg: '#fef2f2',
-  errorBorder: '#fecaca',
-  errorText: '#991b1b',
-  info: '#0ea5e9',
-  infoBg: '#f0f9ff',
-  infoBorder: '#bae6fd',
-  infoText: '#0c4a6e',
+  border: '#dddddd',
+  borderFocus: '#5f9fd6',
+  shadowFocus: 'rgba(95, 159, 214, 0.25)',
+  success: '#25ad40',
+  successBg: '#eef8f0',
+  successBorder: '#bfe6c9',
+  successText: '#1a7a2e',
+  warning: '#f39800',
+  warningBg: '#fef7ec',
+  warningBorder: '#f6dfa8',
+  warningText: '#8a5a00',
+  error: '#fb5555',
+  errorBg: '#fdf1f1',
+  errorBorder: '#f6c2c2',
+  errorText: '#b83c3c',
+  info: '#5f9fd6',
+  infoBg: '#e8f1fa',
+  infoBorder: '#bcd7f0',
+  infoText: '#2d5f8f',
   codeBg: '#f6f8fa',
-  codeBorder: '#e2e8f0',
+  codeBorder: '#dddddd',
   // HydroOJ native integration colors
   hydroGreen: '#21ba45',
   hydroGreenLight: '#f0fdf4',
   hydroGreenDark: '#1a9c39',
-  nativeText: '#333333',
+  nativeText: '#555555',
   nativeBorder: '#dddddd',
   nativeHeaderBg: '#f9fafb',
-  blockquoteBorder: '#2563eb',
-  blockquoteBg: '#f0f9ff',
-  gradient: 'linear-gradient(135deg, #2563eb, #3b82f6)',
-  chartScale: ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd'],
+  blockquoteBorder: '#5f9fd6',
+  blockquoteBg: '#e8f1fa',
+  gradient: 'linear-gradient(135deg, #5f9fd6, #7fb4e0)',
+  chartScale: ['#5f9fd6', '#7fb4e0', '#a3ccec', '#c9def4'],
 };
 
-export const FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+// Inherit the site theme's font configuration instead of hard-coding a stack.
+export const FONT_FAMILY = 'var(--font-family)';
 
 export const TYPOGRAPHY: Record<string, React.CSSProperties> = {
-  xs:    { fontSize: '12px', fontWeight: 400, lineHeight: 1.25 },
+  xs:    { fontSize: '13px', fontWeight: 400, lineHeight: 1.25 },
   sm:    { fontSize: '14px', fontWeight: 400, lineHeight: 1.5 },
   base:  { fontSize: '16px', fontWeight: 400, lineHeight: 1.5 },
-  md:    { fontSize: '18px', fontWeight: 500, lineHeight: 1.5 },
-  lg:    { fontSize: '20px', fontWeight: 600, lineHeight: 1.4 },
-  xl:    { fontSize: '24px', fontWeight: 700, lineHeight: 1.3 },
-  '3xl': { fontSize: '32px', fontWeight: 800, lineHeight: 1.2 },
+  md:    { fontSize: '16px', fontWeight: 500, lineHeight: 1.5 },
+  lg:    { fontSize: '18px', fontWeight: 500, lineHeight: 1.4 },
+  xl:    { fontSize: '20px', fontWeight: 600, lineHeight: 1.3 },
+  '3xl': { fontSize: '20px', fontWeight: 600, lineHeight: 1.3 },
 };
 
 export const SPACING = { xs: '4px', sm: '8px', md: '12px', base: '16px', lg: '24px', xl: '32px', xxl: '48px', huge: '64px' };
-export const RADIUS = { sm: '4px', md: '8px', lg: '12px', xl: '16px', full: '9999px' };
+export const RADIUS = { sm: '2px', md: '4px', lg: '8px', xl: '8px', full: '9999px' };
 export const SHADOWS = {
-  sm: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
-  md: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
-  lg: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
-  focus: '0 0 0 3px rgba(37, 99, 235, 0.25)',
+  sm: '0 1px 2px rgba(175, 194, 201, 0.25)',
+  md: '0 6px 22px rgba(175, 194, 201, 0.5)',
+  lg: '0 6px 22px rgba(175, 194, 201, 0.5)',
+  focus: '0 0 0 3px rgba(95, 159, 214, 0.25)',
 };
 export const ZINDEX = { dropdown: 10000, sticky: 10100, drawer: 10200, modal: 10300, toast: 10400, tooltip: 10500 };
 export const TRANSITIONS = {
@@ -219,23 +222,6 @@ export const getPillStyle = (isActive: boolean): React.CSSProperties => ({
   transition: 'all 200ms cubic-bezier(0.4, 0, 0.2, 1)',
 });
 
-/** 二级导航（用户管理等页面内的分区切换） */
-export const getSubNavStyle = (isActive: boolean): React.CSSProperties => ({
-  display: 'inline-flex',
-  alignItems: 'center',
-  padding: '7px 16px',
-  fontSize: '14px',
-  fontWeight: isActive ? 600 : 400,
-  fontFamily: FONT_FAMILY,
-  color: isActive ? COLORS.primaryHover : COLORS.textSecondary,
-  backgroundColor: isActive ? COLORS.primaryLight : 'transparent',
-  border: '1px solid transparent',
-  borderRadius: RADIUS.full,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-  transition: `all ${TRANSITIONS.fast}`,
-});
-
 export const modalOverlayStyle: React.CSSProperties = {
   position: 'fixed',
   top: 0,
@@ -354,17 +340,17 @@ export const markdownTheme = `
   .markdown-body p { margin: 0.5em 0; line-height: 1.7; }
   .markdown-body a { color: ${COLORS.primary}; text-decoration: none; }
   .markdown-body a:hover { text-decoration: underline; }
-  .markdown-body pre { background: #1e293b; border: none; border-radius: ${RADIUS.md}; padding: ${SPACING.base}; overflow-x: auto; margin: 0.75em 0; }
+  .markdown-body pre { background: #3d3d3d; border: none; border-radius: ${RADIUS.md}; padding: ${SPACING.base}; overflow-x: auto; margin: 0.75em 0; }
   .markdown-body code { font-family: 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace; font-size: 13px; }
   .markdown-body :not(pre) > code { background: ${COLORS.codeBg}; border: 1px solid ${COLORS.codeBorder}; border-radius: ${RADIUS.sm}; padding: 2px 6px; color: #c7254e; }
-  .markdown-body pre code { background: none; padding: 0; border: none; border-radius: 0; color: #e2e8f0; font-size: 13px; line-height: 1.6; }
+  .markdown-body pre code { background: none; padding: 0; border: none; border-radius: 0; color: #dddddd; font-size: 13px; line-height: 1.6; }
   .markdown-body blockquote { border-left: 4px solid ${COLORS.blockquoteBorder}; background: ${COLORS.blockquoteBg}; margin: 0.5em 0; padding: ${SPACING.sm} ${SPACING.base}; color: ${COLORS.textSecondary}; }
   .markdown-body ul, .markdown-body ol { padding-left: 2em; margin: 0.5em 0; }
   .markdown-body li { margin: 0.3em 0; line-height: 1.7; }
   .markdown-body li > strong:first-child { color: ${COLORS.textPrimary}; }
   .markdown-body table { border-collapse: collapse; width: 100%; margin: 0.75em 0; font-size: 13px; }
   .markdown-body th, .markdown-body td { border: 1px solid ${COLORS.border}; padding: 10px 14px; text-align: left; }
-  .markdown-body th { background: #f8fafc; font-weight: 600; color: ${COLORS.textSecondary}; text-transform: none; font-size: 12px; letter-spacing: 0.02em; }
+  .markdown-body th { background: #edf0f2; font-weight: 600; color: ${COLORS.textSecondary}; text-transform: none; font-size: 12px; letter-spacing: 0.02em; }
   .markdown-body td { color: ${COLORS.textPrimary}; }
   .markdown-body tr:hover td { background: #fafbfc; }
   .markdown-body hr { border: none; border-top: 1px solid ${COLORS.border}; margin: 1.2em 0; }

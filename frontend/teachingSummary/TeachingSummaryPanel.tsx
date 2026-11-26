@@ -198,7 +198,7 @@ const SkeletonBlock: React.FC<{ lines?: number }> = ({ lines = 8 }) => (
     {Array.from({ length: lines }, (_, i) => (
       <div key={i} style={{
         height: '14px',
-        backgroundColor: '#e2e8f0',
+        backgroundColor: '#dddddd',
         borderRadius: '4px',
         marginBottom: '10px',
         width: i === 0 ? '70%' : i === lines - 1 ? '40%' : `${75 + (i * 3) % 20}%`,

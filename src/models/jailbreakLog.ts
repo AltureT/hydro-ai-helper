@@ -3,24 +3,22 @@
  */
 
 import type { Collection, Db, Filter, UpdateFilter } from 'mongodb';
-import { ObjectId, createIndexReusingExisting, type ObjectIdType } from '../utils/mongo';
+import { ObjectId, type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 import type {
   SafetyAction,
   SafetyConfidence,
   SafetyDetectionSource,
-  SafetyEvidence,
   SafetyReviewStatus,
   SafetyViolationCategory,
 } from '../types/safety';
 import { SAFETY_PENALTY_WINDOW_MS } from '../services/safetyPenaltyService';
 
-type SafetyPenaltyGroup = 'answer_seeking' | 'high_risk' | 'off_topic';
+type SafetyPenaltyGroup = 'answer_seeking' | 'high_risk';
 
-/** 计数器按用户跨域（plan R12）：`${userId}:${group}`。旧的带域计数器在 20 分钟内自然过期 */
 interface SafetyPenaltyCounter {
   _id: string;
-  domainId?: string;
+  domainId: string;
   userId: number;
   group: SafetyPenaltyGroup;
   events: Array<{ id: string; at: Date }>;
@@ -58,12 +56,6 @@ export interface JailbreakLog {
   studentAppealReason?: string;
   penaltyCounterId?: string;
   penaltyEventId?: string;
-  /** AI 抽查（PR5）：所属批次、证据、证据是否全部通过核对、是否已自动处罚、审核模型给出的理由 */
-  reviewRunId?: string;
-  evidence?: SafetyEvidence[];
-  evidenceVerified?: boolean;
-  autoPenalized?: boolean;
-  reviewReason?: string;
   expiresAt?: Date;
   createdAt: Date;
 }
@@ -85,17 +77,7 @@ export interface JailbreakLogCreateInput {
   createdAt?: Date;
   penaltyCounterId?: string;
   penaltyEventId?: string;
-  reviewRunId?: string;
-  evidence?: SafetyEvidence[];
-  evidenceVerified?: boolean;
-  autoPenalized?: boolean;
-  reviewReason?: string;
 }
-
-/** AI 抽查证据最多保存的条数与每条片段长度（FR-060：只保存必要的短片段） */
-export const MAX_REVIEW_EVIDENCE_ITEMS = 5;
-export const MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH = 120;
-export const MAX_REVIEW_REASON_LENGTH = 300;
 
 export interface JailbreakLogListFilters {
   reviewStatus?: SafetyReviewStatus;
@@ -159,8 +141,6 @@ export interface JailbreakLogExportResult {
 export interface JailbreakBulkReviewResult {
   matchedCount: number;
   modifiedCount: number;
-  /** 本次实际改变了复核结论的记录（用于撤销对应的信誉扣分） */
-  reviewedIds: string[];
 }
 
 export const DEFAULT_JAILBREAK_LOG_RETENTION_DAYS = 180;
@@ -224,61 +204,36 @@ export class JailbreakLogModel {
   }
 
   async ensureIndexes(): Promise<void> {
-    await createIndexReusingExisting(this.collection, { createdAt: -1 }, { name: 'idx_createdAt' });
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex({ createdAt: -1 }, { name: 'idx_createdAt' });
+    await this.collection.createIndex(
       { domainId: 1, userId: 1, createdAt: -1 },
       { name: 'idx_domain_user_createdAt' }
     );
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex(
       { domainId: 1, createdAt: -1 },
       { name: 'idx_domain_createdAt' }
     );
-    await createIndexReusingExisting(
-      this.penaltyCounterCollection,
+    await this.penaltyCounterCollection.createIndex(
       { expiresAt: 1 },
       { name: 'idx_safety_penalty_counter_ttl', expireAfterSeconds: 0 }
     );
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex(
       { domainId: 1, userId: 1, blockedUntil: -1 },
       { name: 'idx_domain_user_blockedUntil' }
     );
-    // 跨域冷却与回退计数按用户查询（plan R12）
-    await createIndexReusingExisting(
-      this.collection,
-      { userId: 1, blockedUntil: -1 },
-      { name: 'idx_user_blockedUntil' }
-    );
-    await createIndexReusingExisting(
-      this.collection,
-      { userId: 1, createdAt: -1 },
-      { name: 'idx_user_createdAt' }
-    );
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex(
       { domainId: 1, reviewStatus: 1, category: 1, createdAt: -1 },
       { name: 'idx_domain_review_category_createdAt' }
     );
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex(
       { domainId: 1, studentAppealedAt: -1, createdAt: -1 },
       { name: 'idx_domain_appealed_createdAt' }
     );
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex(
       { domainId: 1, problemId: 1, createdAt: -1 },
       { name: 'idx_domain_problem_createdAt' }
     );
-    // AI 抽查：最近发现、熔断样本、处罚去重（PR5）
-    await createIndexReusingExisting(
-      this.collection,
-      { detectionSource: 1, createdAt: -1 },
-      { name: 'idx_source_createdAt' }
-    );
-    await createIndexReusingExisting(
-      this.collection,
+    await this.collection.createIndex(
       { expiresAt: 1 },
       { name: 'idx_expiresAt_ttl', expireAfterSeconds: 0 }
     );
@@ -307,17 +262,6 @@ export class JailbreakLogModel {
       reviewStatus: 'pending',
       penaltyCounterId: data.penaltyCounterId,
       penaltyEventId: data.penaltyEventId,
-      ...(data.reviewRunId ? { reviewRunId: data.reviewRunId } : {}),
-      ...(data.evidence ? {
-        evidence: data.evidence.slice(0, MAX_REVIEW_EVIDENCE_ITEMS).map((item) => ({
-          ref: String(item.ref).slice(0, 16),
-          snippet: sanitizeSafetyLogSnippet(item.snippet).slice(0, MAX_REVIEW_EVIDENCE_SNIPPET_LENGTH),
-          verified: !!item.verified,
-        })),
-      } : {}),
-      ...(data.evidenceVerified !== undefined ? { evidenceVerified: data.evidenceVerified } : {}),
-      ...(data.autoPenalized !== undefined ? { autoPenalized: data.autoPenalized } : {}),
-      ...(data.reviewReason ? { reviewReason: sanitizeSafetyLogSnippet(data.reviewReason).slice(0, MAX_REVIEW_REASON_LENGTH) } : {}),
       expiresAt: this.getExpiryDate(createdAt),
       createdAt
     };
@@ -326,27 +270,23 @@ export class JailbreakLogModel {
     return result.insertedId;
   }
 
-  /**
-   * 原子递增用户在窗口内的违规序号（跨域）。偏题使用单独的分组和更长的窗口（plan R14）。
-   */
   async nextPenaltySequence(
+    domainId: string,
     userId: number,
     category: SafetyViolationCategory,
-    now: Date = new Date(),
-    windowMs: number = SAFETY_PENALTY_WINDOW_MS
+    now: Date = new Date()
   ): Promise<SafetyPenaltySequence> {
-    const group: SafetyPenaltyGroup = category === 'answer_seeking'
-      ? 'answer_seeking'
-      : category === 'off_topic' ? 'off_topic' : 'high_risk';
-    const counterId = `${userId}:${group}`;
+    const group: SafetyPenaltyGroup = category === 'answer_seeking' ? 'answer_seeking' : 'high_risk';
+    const counterId = [encodeURIComponent(domainId), userId, group].join(':');
     const eventId = new ObjectId().toHexString();
-    const since = new Date(now.getTime() - windowMs);
-    const expiresAt = new Date(now.getTime() + windowMs * 2);
+    const since = new Date(now.getTime() - SAFETY_PENALTY_WINDOW_MS);
+    const expiresAt = new Date(now.getTime() + SAFETY_PENALTY_WINDOW_MS * 2);
     const rawResult = await this.penaltyCounterCollection.findOneAndUpdate(
       { _id: counterId },
       [
         {
           $set: {
+            domainId,
             userId,
             group,
             expiresAt,
@@ -403,30 +343,30 @@ export class JailbreakLogModel {
     return this.collection.find(filter).sort({ createdAt: -1 }).limit(limit).toArray();
   }
 
-  /**
-   * 计数器不可用时的回退计数（跨域）。不按置信度过滤：索要答案的前两次是中置信度，
-   * 若只数高置信度，回退路径会漏数（plan R7）。
-   */
   async countRecentByCategories(
+    domainId: string,
     userId: number,
     categories: SafetyViolationCategory[],
     since: Date
   ): Promise<number> {
     return this.collection.countDocuments({
+      domainId,
       userId,
       category: { $in: categories },
+      confidence: 'high',
       reviewStatus: { $ne: 'false_positive' },
       createdAt: { $gte: since },
     });
   }
 
-  /** 用户当前生效的冷却（跨域，plan R12） */
   async findActiveCooldown(
+    domainId: string,
     userId: number,
     now: Date = new Date()
   ): Promise<JailbreakLog | null> {
     return this.collection.findOne(
       {
+        domainId,
         userId,
         blockedUntil: { $gt: now },
         reviewStatus: { $ne: 'false_positive' },
@@ -478,31 +418,17 @@ export class JailbreakLogModel {
     reviewedBy: number,
     reviewedAt: Date = new Date()
   ): Promise<JailbreakBulkReviewResult> {
-    if (ids.length === 0) return { matchedCount: 0, modifiedCount: 0, reviewedIds: [] };
+    if (ids.length === 0) return { matchedCount: 0, modifiedCount: 0 };
     const results = await Promise.all(
       ids.map((id) => this.review(id, domainId, reviewStatus, reviewedBy, reviewedAt))
     );
-    const reviewedIds = ids.filter((_, index) => results[index]).map((id) => String(id));
-    return { matchedCount: reviewedIds.length, modifiedCount: reviewedIds.length, reviewedIds };
+    const matchedCount = results.filter(Boolean).length;
+    return { matchedCount, modifiedCount: matchedCount };
   }
 
-  /** 学生本人的若干安全记录的复核与申诉状态（学生端信誉说明） */
-  async findForUser(
-    ids: Array<string | ObjectIdType>,
-    userId: number
-  ): Promise<Array<Pick<JailbreakLog, '_id' | 'domainId' | 'problemId' | 'reviewStatus' | 'studentAppealedAt'>>> {
-    if (!ids.length) return [];
-    return this.collection
-      .find(
-        { _id: { $in: ids.map((id) => ensureObjectId(id)) }, userId },
-        { projection: { _id: 1, domainId: 1, problemId: 1, reviewStatus: 1, studentAppealedAt: 1 } }
-      )
-      .toArray();
-  }
-
-  /** 学生申诉：按 `{ _id, userId }` 查找本人的记录，不要求与当前域一致（plan R12） */
   async appealByStudent(
     id: string | ObjectIdType,
+    domainId: string,
     userId: number,
     reason?: string,
     appealedAt: Date = new Date()
@@ -516,6 +442,7 @@ export class JailbreakLogModel {
     const result = await this.collection.updateOne(
       {
         _id: ensureObjectId(id),
+        domainId,
         userId,
         ...pendingReviewFilter,
         studentAppealedAt: { $exists: false },
@@ -531,102 +458,12 @@ export class JailbreakLogModel {
 
     const existingAppeal = await this.collection.findOne({
       _id: ensureObjectId(id),
+      domainId,
       userId,
       ...pendingReviewFilter,
       studentAppealedAt: { $exists: true },
     });
     return existingAppeal ? 'already_submitted' : 'unavailable';
-  }
-
-  // ─── AI 抽查（PR5） ────────────────────────────────────────
-
-  /** 过去一段时间内规则中置信度命中所在的会话（候选来源 1，FR-041） */
-  async conversationsWithConfidenceSince(
-    confidence: SafetyConfidence,
-    since: Date,
-    limit = 2000
-  ): Promise<Array<{ conversationId: ObjectIdType; domainId?: string; userId?: number }>> {
-    const docs = await this.collection
-      .find(
-        { confidence, createdAt: { $gte: since }, conversationId: { $exists: true }, detectionSource: { $ne: 'ai_review' } },
-        { projection: { conversationId: 1, domainId: 1, userId: 1 } }
-      )
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .toArray();
-    return docs
-      .filter((doc) => !!doc.conversationId)
-      .map((doc) => ({ conversationId: doc.conversationId as ObjectIdType, domainId: doc.domainId, userId: doc.userId }));
-  }
-
-  /** 计数窗口内有过某类计数事件的用户（候选来源 2：出现过偏题提醒） */
-  async usersWithPenaltyEventsSince(group: SafetyPenaltyGroup, since: Date, limit = 5000): Promise<number[]> {
-    const docs = await this.penaltyCounterCollection
-      .find({ group, 'events.at': { $gte: since } }, { projection: { userId: 1 } })
-      .limit(limit)
-      .toArray();
-    return [...new Set(docs.map((doc) => doc.userId).filter((uid) => Number.isSafeInteger(uid)))];
-  }
-
-  /** 该会话是否已因 AI 抽查被处罚过（FR-044） */
-  async hasAutoPenaltyForConversation(conversationId: string | ObjectIdType): Promise<boolean> {
-    const doc = await this.collection.findOne(
-      { conversationId: ensureObjectId(conversationId), detectionSource: 'ai_review', autoPenalized: true },
-      { projection: { _id: 1 } }
-    );
-    return !!doc;
-  }
-
-  /** 该学生从某时刻起是否被 AI 抽查处罚过（FR-044：当天只处罚一次） */
-  async hasAutoPenaltyForUserSince(userId: number, since: Date): Promise<boolean> {
-    const doc = await this.collection.findOne(
-      { userId, detectionSource: 'ai_review', autoPenalized: true, createdAt: { $gte: since } },
-      { projection: { _id: 1 } }
-    );
-    return !!doc;
-  }
-
-  /** 熔断样本：最近已复核的自动处罚（只看恢复时间之后产生的处罚，FR-047） */
-  async recentReviewedAutoPenalties(
-    limit: number,
-    createdAfter?: Date
-  ): Promise<Array<Pick<JailbreakLog, '_id' | 'reviewStatus' | 'reviewedAt' | 'createdAt'>>> {
-    return this.collection
-      .find(
-        {
-          detectionSource: 'ai_review',
-          autoPenalized: true,
-          reviewStatus: { $in: ['confirmed', 'false_positive'] },
-          ...(createdAfter ? { createdAt: { $gt: createdAfter } } : {}),
-        },
-        { projection: { _id: 1, reviewStatus: 1, reviewedAt: 1, createdAt: 1 } }
-      )
-      .sort({ reviewedAt: -1 })
-      .limit(limit)
-      .toArray();
-  }
-
-  /** 抽查标签页的“最近发现” */
-  async listAIReviewFindings(limit = 20): Promise<JailbreakLog[]> {
-    return this.collection
-      .find({ detectionSource: 'ai_review' })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .toArray();
-  }
-
-  /** 自动处罚的扣分没有写成功：改回“标记待复核”，避免记录与信誉不一致 */
-  async downgradeAutoPenalty(id: string | ObjectIdType): Promise<void> {
-    await this.collection.updateOne(
-      { _id: ensureObjectId(id), autoPenalized: true },
-      { $set: { autoPenalized: false, actionTaken: 'flagged' } }
-    );
-  }
-
-  /** 若干安全记录的复核状态（判断复核是否涉及 AI 抽查的自动处罚） */
-  async findByIds(ids: Array<string | ObjectIdType>): Promise<JailbreakLog[]> {
-    if (!ids.length) return [];
-    return this.collection.find({ _id: { $in: ids.map((id) => ensureObjectId(id)) } }).toArray();
   }
 
   async backfillExpiry(now: Date = new Date()): Promise<number> {

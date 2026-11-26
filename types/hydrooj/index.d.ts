@@ -23,6 +23,14 @@ declare module 'hydrooj' {
   // 域权限位（BigInt），如 PERM_EDIT_PROBLEM / PERM_EDIT_PROBLEM_SELF
   export const PERM: Record<string, any>;
 
+  export class ForbiddenError extends Error {
+    constructor(message?: any, ...args: any[]);
+  }
+
+  export class NotFoundError extends Error {
+    constructor(message?: any, ...args: any[]);
+  }
+
   export function definePlugin<TConfig = any>(options: {
     name?: string;
     using?: (keyof Context)[];
@@ -35,6 +43,8 @@ declare module 'hydrooj' {
   };
 
   export const Schema: any;
+
+  export const superagent: any;
 
   export interface DbService {
     collection<T = any>(name: string): Collection<T>;
@@ -55,12 +65,6 @@ declare module 'hydrooj' {
   };
 
   export const ProblemModel: any;
-
-  // Hydro 4.19 与 5.x 的形态不同（setJoin / _deleteUserCache 仅 5.x 有），
-  // 统一经 src/utils/hydroCompat.ts 做特性检测后再调用。
-  export const UserModel: any;
-  export const DomainModel: any;
-  export const BUILTIN_ROLES: Record<string, bigint>;
 
   export const StorageModel: {
     get(path: string): Promise<NodeJS.ReadableStream | Buffer | string>;

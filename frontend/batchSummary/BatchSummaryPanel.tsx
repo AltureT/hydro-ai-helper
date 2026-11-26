@@ -408,7 +408,7 @@ export const BatchSummaryPanel: React.FC<BatchSummaryPanelProps> = ({
           borderRadius: RADIUS.md, padding: SPACING.base, marginBottom: SPACING.base,
         }}>
           <div style={{
-            width: '100%', height: '6px', backgroundColor: '#dbeafe',
+            width: '100%', height: '6px', backgroundColor: '#e8f1fa',
             borderRadius: RADIUS.full, overflow: 'hidden', marginBottom: SPACING.sm,
           }}>
             <div style={{

@@ -6,7 +6,6 @@
 import { getBuiltinJailbreakRules } from '../constants/jailbreakRules';
 import { PROMPT_LIMITS } from '../constants/limits';
 import { sanitizeForPrompt, normalizeUnicode } from '../lib/promptSanitizer';
-import { HIGH_CONFIDENCE_RISK_SCORE } from '../types/safety';
 import type {
   SafetyConfidence,
   SafetyDetectionSource,
@@ -94,11 +93,6 @@ interface DetectionCandidate {
 /**
  * Prompt 服务类
  */
-/** 规则命中的置信度由风险分推导：≥ 70 为高，其余为中（FR-028a）。拦截不看置信度 */
-export function confidenceFromRiskScore(riskScore: number | undefined): SafetyConfidence {
-  return (riskScore ?? 0) >= HIGH_CONFIDENCE_RISK_SCORE ? 'high' : 'medium';
-}
-
 export class PromptService {
   /**
    * 构造 System Prompt
@@ -493,14 +487,12 @@ ${sanitizeForPrompt(clarifySelectedText)}
       );
       if (combinedValidation.valid || !combinedValidation.matchedPattern) continue;
 
-      const riskScore = combinedValidation.category === 'answer_seeking'
-        ? Math.max(60, combinedValidation.riskScore ?? 0)
-        : Math.max(90, combinedValidation.riskScore ?? 0);
       return {
         ...combinedValidation,
         detectionSource: 'conversation',
-        riskScore,
-        confidence: confidenceFromRiskScore(riskScore),
+        riskScore: combinedValidation.category === 'answer_seeking'
+          ? Math.max(60, combinedValidation.riskScore ?? 0)
+          : Math.max(90, combinedValidation.riskScore ?? 0),
       };
     }
 
@@ -585,12 +577,6 @@ ${sanitizeForPrompt(clarifySelectedText)}
             ? 'answer_seeking'
             : 'obfuscated_injection';
 
-        const riskScore = candidate.source === 'plain'
-          ? rule.riskScore
-          : category === 'answer_seeking'
-            ? Math.max(60, rule.riskScore)
-            : Math.max(95, rule.riskScore);
-
         return {
           valid: false,
           error: category === 'answer_seeking'
@@ -602,8 +588,12 @@ ${sanitizeForPrompt(clarifySelectedText)}
           matchedPattern: rule.pattern.source,
           matchedText: this.buildMatchedSnippet(candidate.text, match.index ?? 0, match[0]),
           category,
-          confidence: confidenceFromRiskScore(riskScore),
-          riskScore,
+          confidence: 'high',
+          riskScore: candidate.source === 'plain'
+            ? rule.riskScore
+            : category === 'answer_seeking'
+              ? Math.max(60, rule.riskScore)
+              : Math.max(95, rule.riskScore),
           detectionSource,
         };
       }
@@ -695,7 +685,8 @@ ${sanitizeForPrompt(clarifySelectedText)}
 
 ## 一、核心原则
 ${languageAndStyleRule}
-- 严格禁止输出可直接 AC 或接近完整的代码。"伪代码"仅限自然语言步骤描述（如"第1步：统计频次 → 第2步：查找目标"），不得含函数定义、循环体或条件语法。
+- 【最高优先级·严禁代码】任何情况下都不得输出可执行代码：完整程序、函数、循环体、条件语句、单行语句、"改一行就行"的补丁、可直接抄写的代码块（\`\`\` 围栏）一律禁止。只允许用自然语言描述思路（如"在循环里把每个数累加到 sum"），可提及变量名/关键字（如 \`sum\`、\`%\`）但不得组成语句。学生反复索要时明确拒绝并说明：你的职责是引导他学会思考和编码，不是代写。
+- "伪代码"仅限自然语言步骤描述（如"第1步：统计频次 → 第2步：查找目标"），不得含函数定义、循环体或条件语法。
 - 学生索要完整答案时明确拒绝，说明你的职责是帮他学会思考和编码。
 - 填空/补全类题目只讲规则与思路，不得给出可直接填入的表达式、条件或常量；学生反复追问时礼貌说明需要他亲自验证。
 

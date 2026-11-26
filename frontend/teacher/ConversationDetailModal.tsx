@@ -9,7 +9,6 @@ import { i18n } from '../utils/i18n';
 import 'highlight.js/styles/github.css';
 import { renderMarkdown } from '../utils/markdown';
 import { buildApiUrl } from '../utils/domainUtils';
-import { groupNamesText } from './groupFilterLogic';
 import { formatDateTime } from '../utils/formatDate';
 import type { ConversationMetricsDTO, MetricsStatus } from './analyticsTypes';
 import { MetricsPanel } from './MetricsPanel';
@@ -22,8 +21,7 @@ interface Conversation {
   _id: string;
   userId: number;
   userName?: string;
-  groupNames?: string[];
-  groupSource?: 'snapshot' | 'backfill';
+  classId?: string;
   problemId: string;
   startTime: string;
   endTime: string;
@@ -60,7 +58,7 @@ interface ConversationDetailResponse {
 }
 
 const questionTypeBadgeMap: Record<string, { bg: string; color: string; labelKey: string }> = {
-  understand: { bg: '#dbeafe', color: '#1e40af', labelKey: 'ai_helper_teacher_qtype_understand' },
+  understand: { bg: '#e8f1fa', color: '#1e40af', labelKey: 'ai_helper_teacher_qtype_understand' },
   think: { bg: '#f3e8ff', color: '#6b21a8', labelKey: 'ai_helper_teacher_qtype_think' },
   debug: { bg: '#fee2e2', color: '#991b1b', labelKey: 'ai_helper_teacher_qtype_debug' },
 };
@@ -99,8 +97,6 @@ export interface ConversationDetailModalProps {
   conversationId: string | null;
   conversationIds: string[];
   onNavigate: (id: string) => void;
-  /** 详情接口；默认是系统管理员的 /ai-helper/conversations/:id，负责老师视图传入自己的只读接口 */
-  detailUrl?: (id: string) => string;
 }
 
 export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = ({
@@ -109,7 +105,6 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
   conversationId,
   conversationIds,
   onNavigate,
-  detailUrl,
 }) => {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -146,8 +141,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
       setLoading(true);
       setError(null);
       try {
-        const url = detailUrl ? detailUrl(conversationId) : buildApiUrl(`/ai-helper/conversations/${conversationId}`);
-        const resp = await fetch(url, {
+        const resp = await fetch(buildApiUrl(`/ai-helper/conversations/${conversationId}`), {
           headers: { Accept: 'application/json' },
         });
         if (cancelled) return;
@@ -173,7 +167,6 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
     };
     load();
     return () => { cancelled = true; };
-    // detailUrl 由调用方按固定接口传入，不随渲染变化
   }, [isOpen, conversationId]);
 
   if (!isOpen) return null;
@@ -215,7 +208,7 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
         {/* Header */}
         <div style={{
           padding: '16px 24px',
-          borderBottom: '1px solid #e2e8f0',
+          borderBottom: '1px solid #dddddd',
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
@@ -273,21 +266,15 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
         {conversation && (
           <div style={{
             padding: '12px 24px',
-            backgroundColor: '#f8fafc',
+            backgroundColor: '#edf0f2',
             display: 'flex',
             flexWrap: 'wrap',
             gap: '20px',
             fontSize: '13px',
-            color: '#64748b',
-            borderBottom: '1px solid #e2e8f0',
+            color: '#999999',
+            borderBottom: '1px solid #dddddd',
           }}>
-            <div>
-              <span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_col_class')} </span>
-              <span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{groupNamesText(conversation.groupNames) || i18n('ai_helper_group_ungrouped')}</span>
-              {conversation.groupSource === 'backfill' && (
-                <span title={i18n('ai_helper_group_source_backfill_hint')} style={{ color: COLORS.textMuted, marginLeft: '4px' }}>{i18n('ai_helper_group_source_backfill')}</span>
-              )}
-            </div>
+            <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_col_class')} </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.classId || '-'}</span></div>
             <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_col_messages')} </span><span style={{ color: COLORS.textPrimary, fontWeight: 500 }}>{conversation.messageCount}</span></div>
             <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_start')} </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.startTime)}</span></div>
             <div><span style={{ color: COLORS.textMuted }}>{i18n('ai_helper_teacher_conv_end')} </span><span style={{ color: COLORS.textPrimary }}>{formatDateTime(conversation.endTime)}</span></div>
@@ -341,8 +328,8 @@ export const ConversationDetailModal: React.FC<ConversationDetailModalProps> = (
                 {(!isStudent || !hasCode || msg.content.trim()) && (
                   <div style={{
                     backgroundColor: isStudent ? '#f1f5f9' : '#eff6ff',
-                    border: isStudent ? 'none' : '1px solid #dbeafe',
-                    color: '#1e293b',
+                    border: isStudent ? 'none' : '1px solid #e8f1fa',
+                    color: '#3d3d3d',
                     borderRadius: '12px',
                     borderTopLeftRadius: isStudent ? '12px' : '2px',
                     borderTopRightRadius: isStudent ? '2px' : '12px',

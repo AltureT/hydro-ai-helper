@@ -154,7 +154,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   </div>
                   <div>
                     <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-                      {i18n('ai_helper_config_current_api_key')}
+                      {i18n('ai_helper_config_current_key_status')}
                     </label>
                     <div style={{
                       padding: SPACING.md,
@@ -167,7 +167,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                   </div>
                   <div>
                     <label style={{ display: 'block', marginBottom: SPACING.xs, fontWeight: 500, fontSize: '14px', color: COLORS.textPrimary }}>
-                      {i18n('ai_helper_config_new_api_key')}
+                      {i18n('ai_helper_config_new_key_value')}
                     </label>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <input

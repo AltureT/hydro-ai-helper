@@ -349,7 +349,7 @@ ${codeSamples}${conversationSamples}`;
 
 export class TeachingSuggestionService {
   private aiClient: {
-    chat: (messages: Array<{ role: string; content: string }>, system: string, options?: ChatCallOptions) => Promise<{
+    chat: (messages: Array<{ role: 'user' | 'assistant' | 'system' | 'tool'; content: string }>, system: string, options?: ChatCallOptions) => Promise<{
       content: string;
       usage?: { promptTokens?: number; completionTokens?: number; prompt_tokens?: number; completion_tokens?: number };
     }>;

@@ -16,7 +16,6 @@ import type { ServerResponse } from 'http';
 import { createHash } from 'crypto';
 import { open as openFile } from 'fs/promises';
 import { testdataFileByteLimit } from '../services/testdata/fileBudget';
-import { resolveProblemContent } from '../utils/problemStatement';
 import { posix as pathPosix } from 'path';
 import { createMultiModelClientFromConfig, AIServiceError, USER_ERROR_MESSAGE_KEYS, getHttpStatusForCategory, extractAiErrorMetadata } from '../services/openaiClient';
 import { createTestdataRoleClientsFromConfig } from '../services/testdata/modelRoles';
@@ -543,7 +542,7 @@ export class TestdataGenContextHandler extends Handler {
       }
       if (!checkEditPermission(this, pdoc)) return;
 
-      const statement = extractStatementMarkdown(await resolveProblemContent(pdoc, domainId));
+      const statement = extractStatementMarkdown(pdoc.content);
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
@@ -1138,7 +1137,7 @@ export class TestdataGenGenerateHandler extends Handler {
         return;
       }
 
-      const statement = extractStatementMarkdown(await resolveProblemContent(pdoc, domainId));
+      const statement = extractStatementMarkdown(pdoc.content);
       if (!statement.trim()) {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
@@ -1416,7 +1415,7 @@ export class TestdataGenJobStartHandler extends Handler {
         sendError(this, 400, 'INVALID_OPTIONS', optionError);
         return;
       }
-      const statement = extractStatementMarkdown(await resolveProblemContent(pdoc, domainId));
+      const statement = extractStatementMarkdown(pdoc.content);
       if (!statement.trim()) {
         sendError(this, 400, 'EMPTY_STATEMENT', 'ai_helper_testdata_err_empty_statement');
         return;
@@ -1728,7 +1727,7 @@ export class TestdataGenSkeletonHandler extends Handler {
       const existingFiles = (pdoc.data || [])
         .map(f => String(f._id ?? f.name ?? ''))
         .filter(Boolean);
-      const plan = buildSkeletonPlan(options, extractStatementMarkdown(await resolveProblemContent(pdoc, domainId)), existingFiles, pdoc.config);
+      const plan = buildSkeletonPlan(options, extractStatementMarkdown(pdoc.content), existingFiles, pdoc.config);
       this.ctx.get('featureStatsModel')?.recordSuccess('testdata_skeleton').catch(() => { /* best-effort */ });
 
       this.response.body = { plan: serializeGenerationPlan(plan) };

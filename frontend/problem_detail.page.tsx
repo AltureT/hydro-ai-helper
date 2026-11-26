@@ -17,6 +17,37 @@ const PROBLEM_DETAIL_PATTERNS: RegExp[] = [
   /^\/d\/[^/]+\/p\/([^/]+)/, // 域下题目：/d/:domain/p/:pid
 ];
 
+// 评测记录页 URL 模式：/record/:rid
+const RECORD_PATTERNS: RegExp[] = [
+  /^\/record\/([0-9a-f]{24})$/,
+  /^\/d\/[^/]+\/record\/([0-9a-f]{24})$/,
+];
+
+/** 记录页：从"题目"链接提取题号 */
+const extractProblemIdFromRecordPage = (): string => {
+  const link = Array.from(document.querySelectorAll('a'))
+    .map(a => a.getAttribute('href') || '')
+    .find(href => /^\/(d\/[^/]+)?p\/[^/]+/.test(href));
+  if (!link) return '';
+  const m = link.match(/\/p\/([^/?#]+)/);
+  return m ? m[1] : '';
+};
+
+/** 记录页：提取本次提交的代码文本 */
+const extractCodeFromRecordPage = (): string => {
+  // 核心模板结构：.section__body > pre.line-numbers > code.language-*
+  const pre = document.querySelector('.record-code pre code, .record-code pre, pre.line-numbers code, pre.line-numbers, [id*=code] pre code, [id*=code] pre');
+  return pre ? (pre.textContent || '').trim() : '';
+};
+
+/** 记录页：从提交记录代码块的语言类名推断 lang（如 language-cpp → cpp） */
+const extractLangFromRecordPage = (): string => {
+  const codeEl = document.querySelector('.record-code code[class*=language-], pre.line-numbers code[class*=language-], [id*=code] pre code[class*=language-]');
+  const cls = codeEl?.getAttribute('class') || '';
+  const m = cls.match(/language-([\w-]+)/);
+  return m ? m[1] : '';
+};
+
 // AI 面板宽度范围
 const AI_PANEL_MIN_WIDTH = 300;
 const AI_PANEL_MAX_WIDTH = 900;
@@ -48,15 +79,39 @@ const extractProblemId = (): string => {
 
 /**
  * AI 助手触发器组件
- * 只在 Scratchpad 模式下显示边缘图标
+ * 题目页：学生至少提交过一次后显示边缘把手；草稿模式下展开为四列布局
+ * 记录页：直接显示把手，面板自动携带本次提交代码
  */
-const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
+const AIAssistantTrigger: React.FC<{ problemId: string; initialCode?: string; initialLang?: string; fromRecord?: boolean }> = ({ problemId, initialCode, initialLang, fromRecord }) => {
   const [isScratchpadActive, setIsScratchpadActive] = useState(false);
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [panelWidth, setPanelWidth] = useState(AI_PANEL_DEFAULT_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
+  // 题目页需确认"至少提交过一次"才出现把手；记录页天然已提交
+  const [submitChecked, setSubmitChecked] = useState(!!fromRecord);
+  const [hasSubmitted, setHasSubmitted] = useState(!!fromRecord);
+  const [contestRestricted, setContestRestricted] = useState(false);
   const resizeStartRef = useRef({ mouseX: 0, width: 0 });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const prefix = (window.location.pathname.match(/^\/d\/[^/]+/) || [''])[0];
+        const r = await fetch(`${prefix}/ai-helper/problem-status/${encodeURIComponent(problemId)}`, { credentials: 'include' });
+        if (r.ok) {
+          const data = await r.json();
+          if (!cancelled) {
+            if (!fromRecord) setHasSubmitted(!!data.hasSubmitted || !!data.hasAccepted);
+            setContestRestricted(!!data.contestRestricted);
+          }
+        }
+      } catch { /* fail-open: 查询失败时不显示把手 */ }
+      if (!cancelled) setSubmitChecked(true);
+    })();
+    return () => { cancelled = true; };
+  }, [problemId, fromRecord]);
 
   // 调整 Scratchpad 容器宽度
   const adjustScratchpadLayout = useCallback((panelOpen: boolean, width?: number) => {
@@ -85,12 +140,6 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
 
       if (isActive !== isScratchpadActive) {
         setIsScratchpadActive(isActive);
-
-        // Scratchpad 关闭时自动关闭面板并恢复布局
-        if (!isActive && isPanelOpen) {
-          setIsPanelOpen(false);
-          adjustScratchpadLayout(false);
-        }
       }
     };
 
@@ -162,8 +211,8 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
     };
   }, [isResizing, adjustScratchpadLayout]);
 
-  // 不在 Scratchpad 模式下，不显示任何内容
-  if (!isScratchpadActive) return null;
+  // 面板不依赖草稿模式：题目页提交过即显示把手（草稿模式下额外收缩布局）
+  if (!submitChecked || !hasSubmitted || contestRestricted) return null;
 
   return (
     <>
@@ -181,8 +230,8 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
             width: isHovered ? '44px' : '32px',
             height: '100px',
             background: isHovered
-              ? 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)'
-              : 'linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%)',
+              ? 'linear-gradient(135deg, #5f9fd6 0%, #7fb4e0 100%)'
+              : 'linear-gradient(135deg, #7fb4e0 0%, #a3ccec 100%)',
             borderRadius: '10px 0 0 10px',
             display: 'flex',
             flexDirection: 'column',
@@ -278,13 +327,13 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
               alignItems: 'center',
               justifyContent: 'space-between',
               padding: '12px 16px',
-              background: '#f8fafc',
+              background: '#edf0f2',
               borderBottom: '1px solid #e5e7eb',
               flexShrink: 0
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Icon name="message" size={18} style={{ color: '#2563eb' }} />
+              <Icon name="message" size={18} style={{ color: '#5f9fd6' }} />
               <span style={{ fontWeight: 600, fontSize: '14px', color: '#1f2937' }}>{i18n('ai_helper_student_panel_title')}</span>
             </div>
             <button
@@ -312,6 +361,8 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
           <div style={{ flex: 1, overflow: 'hidden' }}>
             <AIAssistantPanel
               problemId={problemId}
+              initialCode={initialCode}
+              initialLang={initialLang}
             />
           </div>
         </div>
@@ -324,6 +375,21 @@ const AIAssistantTrigger: React.FC<{ problemId: string }> = ({ problemId }) => {
  * 初始化 AI 助手
  */
 const initAIAssistant = () => {
+  // 评测记录页：把手直接出现，面板自动携带本次提交代码
+  const recordMatch = RECORD_PATTERNS.some(p => p.test(window.location.pathname));
+  if (recordMatch) {
+    const pid = extractProblemIdFromRecordPage();
+    if (!pid) return;
+    const container = document.createElement('div');
+    container.id = 'ai-assistant-trigger-container';
+    document.body.appendChild(container);
+    renderComponent(
+      <ErrorBoundary><AIAssistantTrigger problemId={pid} initialCode={extractCodeFromRecordPage()} initialLang={extractLangFromRecordPage()} fromRecord /></ErrorBoundary>,
+      container,
+    );
+    return;
+  }
+
   if (!isProblemDetailPage()) {
     return;
   }

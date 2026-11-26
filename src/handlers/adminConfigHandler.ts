@@ -11,16 +11,6 @@ import {
 } from '../models/aiConfig';
 import { decrypt, encrypt, maskApiKey } from '../lib/crypto';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
-import {
-  applyAIReviewConfigPatch,
-  applyQuotaConfigPatch,
-  applyTopicGuardConfigPatch,
-  normalizeV4Sections,
-  type PatchResult,
-} from '../models/configSections';
-import type { AuditService } from '../services/auditService';
-import type { CreditService } from '../services/creditService';
-import type { AIReviewService } from '../services/aiReviewService';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog, JailbreakLogListFilters } from '../models/jailbreakLog';
 import { rejectIfCsrfInvalid } from '../lib/csrfHelper';
@@ -66,38 +56,6 @@ interface UpdateConfigRequest {
   extraJailbreakPatternsText?: string;
   budgetConfig?: BudgetConfig;
   telemetryEnabled?: boolean;
-  // v4 配置段（白名单 + 校验见 configSections.apply*Patch）
-  quotaConfig?: unknown;
-  topicGuardConfig?: unknown;
-  aiReviewConfig?: unknown;
-  groupTeacherAccessEnabled?: unknown;
-}
-
-/** 校验 v4 配置段并写入 partial；返回第一个非法字段 */
-function applyV4SectionPatches(
-  body: UpdateConfigRequest,
-  current: ReturnType<typeof normalizeV4Sections>,
-  partial: Partial<Omit<AIConfig, '_id' | 'updatedAt'>>,
-): { field: string; code?: string } | null {
-  const steps: Array<[unknown, () => PatchResult<unknown>, (value: unknown) => void]> = [
-    [body.quotaConfig, () => applyQuotaConfigPatch(current.quotaConfig, body.quotaConfig),
-      (value) => { partial.quotaConfig = value as AIConfig['quotaConfig']; }],
-    [body.topicGuardConfig, () => applyTopicGuardConfigPatch(current.topicGuardConfig, body.topicGuardConfig),
-      (value) => { partial.topicGuardConfig = value as AIConfig['topicGuardConfig']; }],
-    [body.aiReviewConfig, () => applyAIReviewConfigPatch(current.aiReviewConfig, body.aiReviewConfig),
-      (value) => { partial.aiReviewConfig = value as AIConfig['aiReviewConfig']; }],
-  ];
-  for (const [provided, run, assign] of steps) {
-    if (provided === undefined) continue;
-    const result = run();
-    if ('field' in result) return { field: result.field, code: result.code };
-    assign(result.value);
-  }
-  if (body.groupTeacherAccessEnabled !== undefined) {
-    if (typeof body.groupTeacherAccessEnabled !== 'boolean') return { field: 'groupTeacherAccessEnabled' };
-    partial.groupTeacherAccessEnabled = body.groupTeacherAccessEnabled;
-  }
-  return null;
 }
 
 /**
@@ -199,7 +157,6 @@ export class AdminConfigHandler extends Handler {
           systemPromptTemplate: config.systemPromptTemplate,
           extraJailbreakPatternsText: config.extraJailbreakPatternsText || '',
           budgetConfig: config.budgetConfig || {},
-          ...normalizeV4Sections(config),
           apiKeyMasked,
           hasApiKey,
           updatedAt: config.updatedAt.toISOString()
@@ -227,25 +184,6 @@ export class AdminConfigHandler extends Handler {
       const body = this.request.body as UpdateConfigRequest;
 
       const partial: Partial<Omit<AIConfig, '_id' | 'updatedAt'>> = {};
-
-      // v4 配置段：先整体校验，非法时在任何副作用（遥测开关、加密）之前拒绝
-      let previousTeacherAccess: boolean | undefined;
-      if (body.quotaConfig !== undefined || body.topicGuardConfig !== undefined
-        || body.aiReviewConfig !== undefined || body.groupTeacherAccessEnabled !== undefined) {
-        const current = normalizeV4Sections(await aiConfigModel.getConfig());
-        previousTeacherAccess = current.groupTeacherAccessEnabled;
-        const invalid = applyV4SectionPatches(body, current, partial);
-        if (invalid) {
-          this.response.status = 400;
-          this.response.body = {
-            error: translateWithParams(this, 'ai_helper_config_field_invalid', invalid.field),
-            code: invalid.code || 'INVALID_CONFIG_FIELD',
-            field: invalid.field,
-          };
-          this.response.type = 'application/json';
-          return;
-        }
-      }
 
       // 处理新版多端点配置
       if (body.endpoints !== undefined) {
@@ -443,23 +381,6 @@ export class AdminConfigHandler extends Handler {
 
       await aiConfigModel.updateConfig(partial);
 
-      if (partial.groupTeacherAccessEnabled !== undefined
-        && partial.groupTeacherAccessEnabled !== previousTeacherAccess) {
-        try {
-          const auditService = this.ctx.get('auditService') as AuditService | undefined;
-          if (typeof auditService?.record === 'function') {
-            await auditService.record({
-              actorUid: Number(this.user?._id),
-              action: 'settings.teacher_access',
-              target: { type: 'config', id: 'groupTeacherAccessEnabled' },
-              detail: { from: !!previousTeacherAccess, to: partial.groupTeacherAccessEnabled },
-            });
-          }
-        } catch (err) {
-          console.warn('[AdminConfigHandler] 记录审计失败:', err instanceof Error ? err.message : 'unknown');
-        }
-      }
-
       const updatedConfig = await aiConfigModel.getConfig();
       if (!updatedConfig) {
         throw new Error('配置更新后读取失败');
@@ -518,7 +439,6 @@ export class AdminConfigHandler extends Handler {
           systemPromptTemplate: updatedConfig.systemPromptTemplate,
           extraJailbreakPatternsText: updatedConfig.extraJailbreakPatternsText || '',
           budgetConfig: updatedConfig.budgetConfig || {},
-          ...normalizeV4Sections(updatedConfig),
           apiKeyMasked,
           hasApiKey,
           updatedAt: updatedConfig.updatedAt.toISOString()
@@ -776,11 +696,6 @@ export class JailbreakLogReviewHandler extends Handler {
         return;
       }
 
-      if (reviewStatus === 'false_positive') {
-        await revokeCreditForFalsePositives(this, [id], Number(this.user._id), getDomainId(this));
-      }
-      await checkReviewBreaker(this);
-
       this.response.body = { success: true, reviewStatus };
       this.response.type = 'application/json';
     } catch (err) {
@@ -829,17 +744,13 @@ export class JailbreakLogBulkReviewHandler extends Handler {
 
       const uniqueIds = [...new Set(ids as string[])];
       const jailbreakLogModel: JailbreakLogModel = this.ctx.get('jailbreakLogModel');
-      const { reviewedIds, ...counts } = await jailbreakLogModel.reviewMany(
+      const result = await jailbreakLogModel.reviewMany(
         uniqueIds,
         getDomainId(this),
         reviewStatus,
         Number(this.user._id)
       );
-      if (reviewStatus === 'false_positive') {
-        await revokeCreditForFalsePositives(this, reviewedIds || [], Number(this.user._id), getDomainId(this));
-      }
-      if (reviewedIds?.length) await checkReviewBreaker(this);
-      this.response.body = { success: true, ...counts, reviewStatus };
+      this.response.body = { success: true, ...result, reviewStatus };
       this.response.type = 'application/json';
     } catch (err) {
       console.error('[AI Helper] JailbreakLogBulkReviewHandler error:', err instanceof Error ? err.message : 'unknown');
@@ -882,11 +793,6 @@ function formatJailbreakLog(log: JailbreakLog) {
     reviewedBy: log.reviewedBy,
     studentAppealedAt: log.studentAppealedAt?.toISOString(),
     studentAppealReason: log.studentAppealReason,
-    ...(log.reviewRunId ? { reviewRunId: log.reviewRunId } : {}),
-    ...(log.evidence ? { evidence: log.evidence } : {}),
-    ...(log.evidenceVerified !== undefined ? { evidenceVerified: log.evidenceVerified } : {}),
-    ...(log.autoPenalized ? { autoPenalized: true } : {}),
-    ...(log.reviewReason ? { reviewReason: log.reviewReason } : {}),
     expiresAt: log.expiresAt?.toISOString(),
     createdAt: log.createdAt.toISOString()
   };
@@ -898,9 +804,8 @@ const VALID_CATEGORIES: SafetyViolationCategory[] = [
   'prompt_injection',
   'prompt_exfiltration',
   'obfuscated_injection',
-  'off_topic',
 ];
-const VALID_ACTIONS: SafetyAction[] = ['blocked', 'cooldown_60s', 'cooldown_5m', 'flagged', 'ai_review_penalty'];
+const VALID_ACTIONS: SafetyAction[] = ['blocked', 'cooldown_60s', 'cooldown_5m'];
 const VALID_DETECTION_SOURCES: SafetyDetectionSource[] = [
   'plain',
   'compacted',
@@ -908,33 +813,7 @@ const VALID_DETECTION_SOURCES: SafetyDetectionSource[] = [
   'hex',
   'conversation',
   'custom',
-  'topic_guard',
-  'ai_review',
 ];
-
-/** 复核为误判后撤销对应的信誉扣分（FR-031）；失败只记日志，复核结论已经生效 */
-async function revokeCreditForFalsePositives(handler: Handler, ids: string[], reviewerUid: number, domainId: string): Promise<void> {
-  const creditService = handler.ctx.get('creditService') as CreditService | undefined;
-  if (!creditService || typeof creditService.revokeBySafetyLog !== 'function') return;
-  for (const id of ids) {
-    try {
-      await creditService.revokeBySafetyLog(new ObjectId(id), reviewerUid, domainId);
-    } catch (err) {
-      console.error('[AI Helper] 撤销信誉扣分失败:', err instanceof Error ? err.message : 'unknown');
-    }
-  }
-}
-
-/** 复核后检查 AI 抽查熔断（FR-047）：复核结论改变了自动处罚的误判比例。失败只记日志 */
-async function checkReviewBreaker(handler: Handler): Promise<void> {
-  const reviewService = handler.ctx.get('aiReviewService') as AIReviewService | undefined;
-  if (!reviewService || typeof reviewService.checkBreaker !== 'function') return;
-  try {
-    await reviewService.checkBreaker();
-  } catch (err) {
-    console.error('[AI Helper] AI 抽查熔断检查失败:', err instanceof Error ? err.message : 'unknown');
-  }
-}
 
 function parseDateFilter(value: string, endOfDay: boolean): Date | undefined | null {
   if (!value) return undefined;

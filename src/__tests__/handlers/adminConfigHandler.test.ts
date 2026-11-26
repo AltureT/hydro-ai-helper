@@ -189,7 +189,7 @@ function createLogsHandler(query: Record<string, string> = {}) {
   return { handler, listWithPagination, getReviewSummary, getRuleMetrics, getOperationalMetrics };
 }
 
-function createReviewHandler(creditService?: { revokeBySafetyLog: jest.Mock }, aiReviewService?: { checkBreaker: jest.Mock }) {
+function createReviewHandler() {
   const handler = new JailbreakLogReviewHandler();
   const review = jest.fn().mockResolvedValue(true);
   handler.user = { _id: 7 };
@@ -202,9 +202,7 @@ function createReviewHandler(creditService?: { revokeBySafetyLog: jest.Mock }, a
   handler.translate = jest.fn((key: string) => key);
   handler.ctx = {
     Route: jest.fn(),
-    get: jest.fn((name: string) => (name === 'jailbreakLogModel' ? { review }
-      : name === 'creditService' ? creditService
-        : name === 'aiReviewService' ? aiReviewService : undefined)),
+    get: jest.fn((name: string) => name === 'jailbreakLogModel' ? { review } : undefined),
   };
   return { handler, review };
 }
@@ -250,63 +248,6 @@ describe('JailbreakLogReviewHandler', () => {
 
     expect(handler.response.status).toBe(404);
     expect(handler.response.body.code).toBe('JAILBREAK_LOG_NOT_FOUND');
-  });
-
-  it('revokes the credit deduction when a log is marked false positive (FR-031)', async () => {
-    const creditService = { revokeBySafetyLog: jest.fn().mockResolvedValue(1) };
-    const { handler } = createReviewHandler(creditService);
-    const id = new ObjectId().toHexString();
-
-    await handler.post({ id });
-
-    expect(creditService.revokeBySafetyLog).toHaveBeenCalledWith(new ObjectId(id), 7, 'domain-a');
-    expect(handler.response.body).toEqual({ success: true, reviewStatus: 'false_positive' });
-  });
-
-  it('leaves credit alone when confirming, or when the review did not change anything', async () => {
-    const creditService = { revokeBySafetyLog: jest.fn() };
-    const confirm = createReviewHandler(creditService);
-    confirm.handler.request.body = { reviewStatus: 'confirmed' };
-    await confirm.handler.post({ id: new ObjectId().toHexString() });
-
-    const missing = createReviewHandler(creditService);
-    missing.review.mockResolvedValue(false);
-    await missing.handler.post({ id: new ObjectId().toHexString() });
-
-    expect(creditService.revokeBySafetyLog).not.toHaveBeenCalled();
-  });
-
-  it('checks the AI review breaker after every successful review (FR-047)', async () => {
-    const aiReviewService = { checkBreaker: jest.fn().mockResolvedValue(false) };
-    const falsePositive = createReviewHandler(undefined, aiReviewService);
-    await falsePositive.handler.post({ id: new ObjectId().toHexString() });
-    const confirm = createReviewHandler(undefined, aiReviewService);
-    confirm.handler.request.body = { reviewStatus: 'confirmed' };
-    await confirm.handler.post({ id: new ObjectId().toHexString() });
-    expect(aiReviewService.checkBreaker).toHaveBeenCalledTimes(2);
-
-    const missing = createReviewHandler(undefined, aiReviewService);
-    missing.review.mockResolvedValue(false);
-    await missing.handler.post({ id: new ObjectId().toHexString() });
-    expect(aiReviewService.checkBreaker).toHaveBeenCalledTimes(2);
-  });
-
-  it('keeps the review result when the breaker check fails', async () => {
-    jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    const aiReviewService = { checkBreaker: jest.fn().mockRejectedValue(new Error('Synthetic breaker failure')) };
-    const { handler } = createReviewHandler(undefined, aiReviewService);
-    await handler.post({ id: new ObjectId().toHexString() });
-    expect(handler.response.body).toEqual({ success: true, reviewStatus: 'false_positive' });
-  });
-
-  it('keeps the review result when revoking the deduction fails', async () => {
-    jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    const creditService = { revokeBySafetyLog: jest.fn().mockRejectedValue(new Error('Synthetic credit failure')) };
-    const { handler } = createReviewHandler(creditService);
-
-    await handler.post({ id: new ObjectId().toHexString() });
-
-    expect(handler.response.body).toEqual({ success: true, reviewStatus: 'false_positive' });
   });
 });
 
@@ -619,22 +560,6 @@ describe('JailbreakLogBulkReviewHandler', () => {
     expect(handler.response.body).toEqual(expect.objectContaining({ success: true, modifiedCount: 2 }));
   });
 
-  it('revokes deductions only for the logs whose review actually changed to false positive', async () => {
-    const { handler, reviewMany } = createBulkReviewHandler();
-    const [changed, unchanged] = handler.request.body.ids;
-    handler.request.body.reviewStatus = 'false_positive';
-    reviewMany.mockResolvedValue({ matchedCount: 1, modifiedCount: 1, reviewedIds: [changed] });
-    const creditService = { revokeBySafetyLog: jest.fn().mockResolvedValue(1) };
-    handler.ctx.get = jest.fn((name: string) => (name === 'creditService' ? creditService : { reviewMany }));
-
-    await handler.post();
-
-    expect(creditService.revokeBySafetyLog).toHaveBeenCalledTimes(1);
-    expect(creditService.revokeBySafetyLog).toHaveBeenCalledWith(new ObjectId(changed), 7, 'domain-a');
-    expect(creditService.revokeBySafetyLog).not.toHaveBeenCalledWith(new ObjectId(unchanged), 7, 'domain-a');
-    expect(handler.response.body).toEqual({ success: true, matchedCount: 1, modifiedCount: 1, reviewStatus: 'false_positive' });
-  });
-
   it('rejects invalid or oversized ID batches', async () => {
     const { handler, reviewMany } = createBulkReviewHandler();
     handler.request.body.ids = ['invalid-id'];
@@ -654,96 +579,5 @@ describe('JailbreakLogBulkReviewHandler', () => {
 
     expect(handler.response.status).toBe(403);
     expect(reviewMany).not.toHaveBeenCalled();
-  });
-});
-
-describe('AdminConfigHandler v4 sections', () => {
-  function makeHandler(body: Record<string, unknown>, initial: Record<string, unknown> = {}) {
-    let config: any = { endpoints: [], selectedModels: [], updatedAt: new Date('2026-11-10T00:00:00Z'), ...initial };
-    const configModel = {
-      getConfig: jest.fn(async () => config),
-      updateConfig: jest.fn(async (partial) => { config = { ...config, ...partial }; }),
-    };
-    const auditService = { record: jest.fn().mockResolvedValue('audit-id') };
-    const pluginInstallModel = { updateTelemetryEnabled: jest.fn(), getInstall: jest.fn().mockResolvedValue(null) };
-    const handler = new AdminConfigHandler();
-    handler.request = { headers: { 'x-requested-with': 'XMLHttpRequest' }, body };
-    handler.response = {};
-    handler.user = { _id: 2 };
-    handler.translate = (key: string) => key;
-    handler.ctx = {
-      Route: jest.fn(),
-      get: (name: string) => ({ aiConfigModel: configModel, auditService, pluginInstallModel } as any)[name],
-    };
-    return { handler, configModel, auditService, getConfig: () => config, pluginInstallModel };
-  }
-
-  it('returns normalized v4 sections from GET even for an older document', async () => {
-    const { handler } = makeHandler({});
-    handler.request = { headers: { accept: 'application/json' }, query: {} };
-    await handler.get();
-    const body = handler.response.body.config;
-    expect(body.quotaConfig).toEqual(expect.objectContaining({ dailyMessageLimit: 0, timezone: 'Asia/Shanghai' }));
-    expect(body.topicGuardConfig.strikeWindowHours).toBe(24);
-    expect(body.aiReviewConfig.enabled).toBe(false);
-    expect(body.groupTeacherAccessEnabled).toBe(false);
-  });
-
-  it('merges partial section updates with the stored values', async () => {
-    const { handler, getConfig } = makeHandler(
-      { quotaConfig: { dailyMessageLimit: 30, credit: { weights: { off_topic: 0.1 } } } },
-      { quotaConfig: { dailyMessageLimit: 10, timezone: 'UTC', guaranteeCount: 5 } },
-    );
-    await handler.put();
-    expect(handler.response.status).toBeUndefined();
-    const stored = getConfig().quotaConfig;
-    expect(stored).toEqual(expect.objectContaining({ dailyMessageLimit: 30, timezone: 'UTC', guaranteeCount: 5 }));
-    expect(stored.credit.weights.off_topic).toBe(0.1);
-    expect(stored.credit.weights.answer_seeking).toBe(0.1);
-    expect(handler.response.body.config.quotaConfig.dailyMessageLimit).toBe(30);
-  });
-
-  it.each([
-    [{ quotaConfig: { dailyMessageLimit: -1 } }, 'quotaConfig.dailyMessageLimit', 'INVALID_CONFIG_FIELD'],
-    [{ quotaConfig: { dailyMessageLimit: 2.5 } }, 'quotaConfig.dailyMessageLimit', 'INVALID_CONFIG_FIELD'],
-    [{ quotaConfig: { timezone: 'Mars/Olympus' } }, 'quotaConfig.timezone', 'INVALID_TIMEZONE'],
-    [{ quotaConfig: { credit: { floor: 1.5 } } }, 'quotaConfig.credit.floor', 'INVALID_CONFIG_FIELD'],
-    [{ quotaConfig: { credit: { weights: { off_topic: -0.1 } } } }, 'quotaConfig.credit.weights.off_topic', 'INVALID_CONFIG_FIELD'],
-    [{ aiReviewConfig: { sampleRate: 2 } }, 'aiReviewConfig.sampleRate', 'INVALID_CONFIG_FIELD'],
-    [{ aiReviewConfig: { runAt: '25:00' } }, 'aiReviewConfig.runAt', 'INVALID_CONFIG_FIELD'],
-    [{ aiReviewConfig: { breakerWindow: 20, breakerMinSample: 30 } }, 'aiReviewConfig.breakerMinSample', 'INVALID_CONFIG_FIELD'],
-    [{ topicGuardConfig: { customOffTopicKeywords: 'game' } }, 'topicGuardConfig.customOffTopicKeywords', 'INVALID_CONFIG_FIELD'],
-    [{ groupTeacherAccessEnabled: 'yes' }, 'groupTeacherAccessEnabled', 'INVALID_CONFIG_FIELD'],
-  ])('rejects invalid input %j before any side effect', async (body, field, code) => {
-    const { handler, configModel, pluginInstallModel } = makeHandler({ ...body, telemetryEnabled: false });
-    await handler.put();
-    expect(handler.response.status).toBe(400);
-    expect(handler.response.body).toEqual(expect.objectContaining({ code, field }));
-    expect(configModel.updateConfig).not.toHaveBeenCalled();
-    expect(pluginInstallModel.updateTelemetryEnabled).not.toHaveBeenCalled();
-  });
-
-  it('dedupes off-topic keywords and ignores unknown section fields', async () => {
-    const { handler, getConfig } = makeHandler({
-      topicGuardConfig: { customOffTopicKeywords: [' 王者 ', '王者', '原神'], unknownField: 1 },
-    });
-    await handler.put();
-    expect(getConfig().topicGuardConfig).toEqual({
-      customOffTopicKeywords: ['王者', '原神'], codeExemptMinChars: 30, strikeWindowHours: 24,
-    });
-  });
-
-  it('records an audit entry only when teacher access actually changes', async () => {
-    const changed = makeHandler({ groupTeacherAccessEnabled: true });
-    await changed.handler.put();
-    expect(changed.auditService.record).toHaveBeenCalledWith(expect.objectContaining({
-      actorUid: 2,
-      action: 'settings.teacher_access',
-      detail: { from: false, to: true },
-    }));
-
-    const unchanged = makeHandler({ groupTeacherAccessEnabled: true }, { groupTeacherAccessEnabled: true });
-    await unchanged.handler.put();
-    expect(unchanged.auditService.record).not.toHaveBeenCalled();
   });
 });

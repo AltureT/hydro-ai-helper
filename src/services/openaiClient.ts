@@ -143,6 +143,14 @@ function normalizeTokenUsage(rawUsage?: {
 export interface ChatResult {
   content: string;
   usage?: TokenUsage;
+  /** 模型请求调用工具时返回（此时 content 通常为空） */
+  toolCalls?: ToolCall[];
+}
+
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
 }
 
 export interface StreamCallbacks {
@@ -150,6 +158,8 @@ export interface StreamCallbacks {
   onChunk: (content: string) => void;
   onDone: (result: ChatResult) => void;
   onError: (error: AIServiceError) => void;
+  /** 流式响应以 tool_calls 结束时回调（此时不调用 onDone） */
+  onToolCalls?: (calls: ToolCall[]) => void;
 }
 
 export interface ChatAttemptEvent {
@@ -180,12 +190,12 @@ export interface ChatCallOptions {
    * - null：不设置客户端截止时间，仅响应上游失败或 AbortSignal 取消
    */
   timeoutMs?: number | null;
-  /** 覆盖本次请求的 temperature（仅非流式调用）；AI 抽查用 0 以便结果稳定。 */
-  temperature?: number;
   /** 是否对单次超时重试同一模型；默认 true，长推理任务可关闭并直接尝试后备模型。 */
   retryTimeouts?: boolean;
   /** 模型请求开始、重试或切换后备模型时的可观测事件。 */
   onAttempt?: (event: ChatAttemptEvent) => void;
+  /** OpenAI function calling 工具定义；模型不支持时上游返回 400，调用方应降级重试。 */
+  tools?: unknown[];
 }
 
 // ─── 接口定义 ─────────────────────────────────────────
@@ -205,11 +215,22 @@ export interface AIClientConfig {
 }
 
 /**
+ * 多模态内容片段（OpenAI content parts 格式）
+ */
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/**
  * 对话消息接口
  */
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string | ChatContentPart[];
+  /** role='tool' 时：对应的工具调用 ID */
+  tool_call_id?: string;
+  /** role='assistant' 且模型请求调用工具时：工具调用列表 */
+  tool_calls?: ToolCall[];
 }
 
 /**
@@ -375,8 +396,12 @@ export class OpenAIClient {
         { role: 'system', content: systemPrompt },
         ...messages
       ],
-      temperature: options?.temperature ?? API_DEFAULTS.DEFAULT_TEMPERATURE,
+      temperature: API_DEFAULTS.DEFAULT_TEMPERATURE,
     };
+    if (options?.tools?.length) {
+      payload.tools = options.tools;
+      payload.tool_choice = 'auto';
+    }
     if (options?.maxTokens !== null) {
       payload.max_tokens = options?.maxTokens ?? API_DEFAULTS.MAX_COMPLETION_TOKENS;
     }
@@ -406,6 +431,11 @@ export class OpenAIClient {
       const msgAny = message as Record<string, unknown> | undefined;
       const reasoning = (msgAny?.reasoning_content ?? msgAny?.reasoning) as string | undefined;
       const content = message?.content;
+      // 模型请求调用工具：直接返回 toolCalls，content 校验不适用
+      const toolCalls = msgAny?.tool_calls as ToolCall[] | undefined;
+      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+        return { content: typeof content === 'string' ? content : '', usage: normalizeTokenUsage(response.data?.usage), toolCalls };
+      }
       // Provider reasoning is not a final answer. Validate before adding display markers
       // so empty answers enter MultiModelClient's bounded retry/fallback chain.
       if (typeof content !== 'string' || !content.trim()) {
@@ -421,8 +451,8 @@ export class OpenAIClient {
         if (!aiMessage.trim()) {
           throw new AIServiceError('AI returned an empty report after removing provider metadata', 'server');
         }
-      } else if (reasoning && options?.contentMode !== 'raw') {
-        aiMessage = `<think>(thinking...)</think>${content}`;
+      } else {
+        aiMessage = content;
       }
 
       // 提取 token 用量
@@ -494,9 +524,9 @@ export class OpenAIClient {
   async chatStream(
     messages: ChatMessage[],
     systemPrompt: string,
-    options: { signal?: AbortSignal; callbacks: StreamCallbacks },
+    options: { signal?: AbortSignal; callbacks: StreamCallbacks; tools?: unknown[] },
   ): Promise<void> {
-    const payload = {
+    const payload: Record<string, unknown> = {
       model: this.config.modelName,
       messages: [
         { role: 'system', content: systemPrompt },
@@ -507,6 +537,10 @@ export class OpenAIClient {
       stream: true,
       stream_options: { include_usage: true },
     };
+    if (options.tools?.length) {
+      payload.tools = options.tools;
+      payload.tool_choice = 'auto';
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let response: any;
@@ -577,6 +611,7 @@ export class OpenAIClient {
       let usage: TokenUsage | undefined;
       let chunkTimer: ReturnType<typeof setTimeout> | null = null;
       let inThinking = false;
+      const toolCallsAccum: ToolCall[] = [];
 
       const resetChunkTimer = () => {
         if (chunkTimer) clearTimeout(chunkTimer);
@@ -624,24 +659,34 @@ export class OpenAIClient {
             const contentDelta = choiceDelta?.content as string | undefined;
 
             if (reasoningDelta) {
-              if (!inThinking) {
-                inThinking = true;
-                const openTag = '<think>(thinking...)';
-                fullContent += openTag;
-                callbacks.onChunk(openTag);
-              }
-              // reasoning 内容不发送给客户端
+              // reasoning 内容不发送给客户端，也不再下发占位标记
+              inThinking = true;
             }
 
             if (contentDelta) {
-              if (inThinking) {
-                inThinking = false;
-                const tag = '</think>';
-                fullContent += tag;
-                callbacks.onChunk(tag);
-              }
+              inThinking = false;
               fullContent += contentDelta;
               callbacks.onChunk(contentDelta);
+            }
+
+            // 累积流式 tool_calls 增量（arguments 分片到达）
+            const toolCallDeltas = choiceDelta?.tool_calls as Array<{
+                index?: number; id?: string; function?: { name?: string; arguments?: string };
+            }> | undefined;
+            if (Array.isArray(toolCallDeltas)) {
+              for (const d of toolCallDeltas) {
+                const idx = d.index ?? toolCallsAccum.length;
+                if (!toolCallsAccum[idx]) {
+                  toolCallsAccum[idx] = {
+                    id: d.id || `call_${idx}`,
+                    type: 'function',
+                    function: { name: '', arguments: '' },
+                  };
+                }
+                if (d.id) toolCallsAccum[idx].id = d.id;
+                if (d.function?.name) toolCallsAccum[idx].function.name += d.function.name;
+                if (d.function?.arguments) toolCallsAccum[idx].function.arguments += d.function.arguments;
+              }
             }
           } catch {
             // Skip malformed JSON lines
@@ -651,11 +696,10 @@ export class OpenAIClient {
 
       stream.on('end', () => {
         cleanup();
-        if (inThinking) {
-          const tag = '</think>';
-          fullContent += tag;
-          callbacks.onChunk(tag);
-          inThinking = false;
+        if (toolCallsAccum.length > 0) {
+          callbacks.onToolCalls?.(toolCallsAccum);
+          resolve();
+          return;
         }
         if (!fullContent) {
           reject(new AIServiceError('AI 返回内容为空', 'server'));
@@ -761,6 +805,7 @@ export interface ResolvedModelConfig {
 export interface MultiModelChatResult {
   content: string;
   usage?: TokenUsage;
+  toolCalls?: ToolCall[];
   usedModel: {
     endpointId: string;
     endpointName: string;
@@ -896,6 +941,7 @@ export class MultiModelClient {
               maxTokens: options?.maxTokens,
               timeoutMs: options?.timeoutMs,
               contentMode: options?.contentMode,
+              tools: options?.tools,
             });
             const fallbackErrors = errors.length > 0 ? errors.map(e => ({
               endpoint: e.endpointId, model: e.modelName,
@@ -905,6 +951,7 @@ export class MultiModelClient {
             return {
               content: chatResult.content,
               usage: chatResult.usage,
+              toolCalls: chatResult.toolCalls,
               usedModel: {
                 endpointId: config.endpointId,
                 endpointName: config.endpointName,
@@ -1022,8 +1069,12 @@ export class MultiModelClient {
   async chatStream(
     messages: ChatMessage[],
     systemPrompt: string,
-    options: { signal?: AbortSignal; callbacks: StreamCallbacks },
-  ): Promise<{ usedModel: MultiModelChatResult['usedModel']; fallbackErrors?: ErrorContext['attempts'] }> {
+    options: { signal?: AbortSignal; callbacks: StreamCallbacks; tools?: unknown[] },
+  ): Promise<{
+    usedModel: MultiModelChatResult['usedModel'];
+    fallbackErrors?: ErrorContext['attempts'];
+    toolCalls?: ToolCall[];
+  }> {
     if (options.signal?.aborted) {
       throw new AIServiceError('请求已取消', 'aborted');
     }
@@ -1034,6 +1085,7 @@ export class MultiModelClient {
       endpointId: string; endpointName: string; modelName: string;
     }> = [];
     const skippedEndpoints = new Set<string>();
+    let collectedToolCalls: ToolCall[] | undefined;
 
     for (const { config, client } of this.clients) {
       if (skippedEndpoints.has(config.endpointId)) continue;
@@ -1042,7 +1094,14 @@ export class MultiModelClient {
         if (errors.length > 0) options.callbacks.onReset?.();
         await client.chatStream(messages, systemPrompt, {
           signal: options.signal,
-          callbacks: options.callbacks,
+          tools: options.tools,
+          callbacks: {
+            ...options.callbacks,
+            onToolCalls: (calls) => {
+              collectedToolCalls = calls;
+              options.callbacks.onToolCalls?.(calls);
+            },
+          },
         });
         const fallbackErrors = errors.length > 0 ? errors.map(e => ({
           endpoint: e.endpointId, model: e.modelName,
@@ -1056,6 +1115,7 @@ export class MultiModelClient {
             modelName: config.modelName,
           },
           fallbackErrors,
+          toolCalls: collectedToolCalls,
         };
       } catch (error) {
         const aiError = error instanceof AIServiceError

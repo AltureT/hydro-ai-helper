@@ -5,7 +5,6 @@
  */
 
 import type { Db, Collection, Filter, UpdateFilter } from 'mongodb';
-import { groupCondition } from '../utils/groupFilter';
 import { type ObjectIdType } from '../utils/mongo';
 import { ensureObjectId } from '../utils/ensureObjectId';
 
@@ -39,9 +38,7 @@ export interface Conversation {
   domainId: string;        // 域 ID (用于多租户隔离)
   userId: number;          // 学生用户 ID
   problemId: string;       // 题目 ID
-  classId?: string;        // 班级 ID (可选，历史字段，从未写入；按班级统计请用 groupNames)
-  groupNames?: string[];   // 新建会话时学生在该域所属的 Hydro 小组（FR-055）
-  groupSource?: 'snapshot' | 'backfill'; // groupNames 来源：建会话时快照 / 管理员按当前成员回填
+  classId?: string;        // 班级 ID (可选)
   startTime: Date;         // 会话开始时间
   endTime: Date;           // 会话最后更新时间
   messageCount: number;    // 消息总数
@@ -144,12 +141,6 @@ export class ConversationModel {
     await this.collection.createIndex(
       { userId: 1, problemId: 1, startTime: -1 },
       { name: 'idx_userId_problemId_startTime' }
-    );
-
-    // 创建复合索引: 域 ID + 小组 + 开始时间 (按班级筛选与统计)
-    await this.collection.createIndex(
-      { domainId: 1, groupNames: 1, startTime: -1 },
-      { name: 'idx_domainId_groupNames_startTime' }
     );
 
     // 创建稀疏索引: 待回填文档扫描 (启动补偿用)
@@ -259,7 +250,7 @@ export class ConversationModel {
       startDate?: string;   // 开始日期 (ISO 8601)
       endDate?: string;     // 结束日期
       problemId?: string;   // 题目 ID
-      group?: string;       // 小组（`__ungrouped__` 为未分组；旧参数 classId 由 handler 转换）
+      classId?: string;     // 班级 ID
       userId?: number;      // 学生 ID
     },
     page: number = 1,
@@ -280,8 +271,8 @@ export class ConversationModel {
       query.problemId = filters.problemId;
     }
 
-    if (filters.group) {
-      Object.assign(query, groupCondition(filters.group));
+    if (filters.classId) {
+      query.classId = filters.classId;
     }
 
     // 时间范围筛选
@@ -304,8 +295,7 @@ export class ConversationModel {
       _id: 1,
       domainId: 1,
       userId: 1,
-      groupNames: 1,
-      groupSource: 1,
+      classId: 1,
       problemId: 1,
       startTime: 1,
       endTime: 1,
@@ -405,27 +395,6 @@ export class ConversationModel {
   async getTotalConversations(domainId?: string): Promise<number> {
     const filter = domainId ? { domainId } : {};
     return this.collection.countDocuments(filter);
-  }
-
-  /**
-   * 列出出现过对话的全部 domainId（走 idx_domainId）
-   */
-  async getDistinctDomainIds(): Promise<string[]> {
-    const ids = await this.collection.distinct('domainId');
-    return ids.filter((id): id is string => typeof id === 'string' && id.length > 0);
-  }
-
-  /**
-   * 获取最早一次对话的开始时间（走 idx_startTime）
-   */
-  async getFirstConversationTime(): Promise<Date | null> {
-    const result = await this.collection
-      .find({})
-      .sort({ startTime: 1 })
-      .limit(1)
-      .project<{ startTime?: Date }>({ startTime: 1 })
-      .toArray();
-    return result[0]?.startTime || null;
   }
 
   /**

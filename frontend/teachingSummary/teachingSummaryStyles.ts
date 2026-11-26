@@ -2,7 +2,7 @@ import { COLORS } from '../utils/styles';
 
 // Scoped to this report; other plugin pages retain their existing Markdown theme.
 export const teachingSummaryStyles = `
-  .ai-teaching-summary { --report-muted: #64748b; }
+  .ai-teaching-summary { --report-muted: #999999; }
   .ai-teaching-summary .report-failure-header { font-size: 18px; font-weight: 700; padding-bottom: 16px; border-bottom: 1px solid ${COLORS.border}; }
   .ai-teaching-summary .report-failure { display: flex; align-items: flex-start; gap: 16px; padding: 32px 0; }
   .ai-teaching-summary .report-failure-icon { display: flex; padding: 12px; background: ${COLORS.bgPage}; color: ${COLORS.textSecondary}; border-radius: 8px; }
