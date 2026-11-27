@@ -6,6 +6,7 @@
 import http from 'http';
 import https from 'https';
 import { Readable } from 'stream';
+import { StringDecoder } from 'string_decoder';
 import axios, { AxiosError } from 'axios';
 import type { Context } from 'hydrooj';
 import { AIConfigModel, AIConfig, AIScenario, SelectedModel } from '../models/aiConfig';
@@ -63,6 +64,8 @@ export class AIServiceError extends Error {
 }
 
 const UPSTREAM_MESSAGE_MAX_LENGTH = 300;
+const RAW_STREAM_HEAD_LENGTH = 2000;
+const PLAIN_BODY_MAX_LENGTH = 1_000_000;
 
 /**
  * Pull a human-readable error out of a provider's error body. OpenAI-compatible
@@ -91,6 +94,37 @@ export function extractUpstreamErrorMessage(data: unknown): string | undefined {
   return trimmed.length > UPSTREAM_MESSAGE_MAX_LENGTH
     ? `${trimmed.slice(0, UPSTREAM_MESSAGE_MAX_LENGTH)}…`
     : trimmed;
+}
+
+/** Read (at most 8 KB of) an error body that axios delivered as a stream. */
+async function readStreamErrorBody(data: unknown): Promise<unknown> {
+  if (!data || typeof (data as Readable).on !== 'function') return data;
+  const stream = data as Readable;
+  const text = await new Promise<string>((resolve) => {
+    let body = '';
+    const finish = () => {
+      clearTimeout(timer);
+      resolve(body);
+    };
+    const timer = setTimeout(() => {
+      stream.destroy();
+      finish();
+    }, 3000);
+    stream.on('data', (chunk: Buffer | string) => {
+      body += chunk.toString();
+      if (body.length > 8192) {
+        stream.destroy();
+        finish();
+      }
+    });
+    stream.on('end', finish);
+    stream.on('error', finish);
+  });
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 export const USER_ERROR_MESSAGE_KEYS: Record<ErrorCategory, string> = {
@@ -572,29 +606,36 @@ export class OpenAIClient {
         const ae = error as AxiosError;
         if (ae.response) {
           const status = ae.response.status;
-          if (status === 401 || status === 403) throw new AIServiceError('API Key 无效或已过期', 'auth', status);
+          // With responseType 'stream' the error body is itself a stream.
+          const upstreamMessage = extractUpstreamErrorMessage(await readStreamErrorBody(ae.response.data));
+          if (status === 401 || status === 403) throw new AIServiceError('API Key 无效或已过期', 'auth', status, { upstreamMessage });
           if (status === 429) {
             const retryAfterRaw = ae.response.headers['retry-after'];
             const retryAfterSec = retryAfterRaw ? parseFloat(String(retryAfterRaw)) : undefined;
             throw new AIServiceError('API 调用频率超限', 'rate_limit', status, {
               retryAfterSec: Number.isFinite(retryAfterSec) ? retryAfterSec : undefined,
+              upstreamMessage,
             });
           }
-          if (status >= 500) throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
-          throw new AIServiceError(`AI API 错误 (HTTP ${status})`, 'client', status);
+          if (status >= 500) throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status, { upstreamMessage });
+          throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${upstreamMessage || '未知错误'}`, 'client', status, { upstreamMessage });
         }
-        if (ae.code === 'ECONNABORTED' || ae.code === 'ETIMEDOUT') throw new AIServiceError('请求超时', 'timeout');
-        if (ae.code === 'ENOTFOUND' || ae.code === 'ECONNREFUSED') throw new AIServiceError('无法连接到 AI 服务', 'network');
-        throw new AIServiceError('网络错误', 'network');
+        const networkDetail = { upstreamMessage: ae.code || ae.message || undefined };
+        if (ae.code === 'ECONNABORTED' || ae.code === 'ETIMEDOUT') throw new AIServiceError('请求超时', 'timeout', undefined, networkDetail);
+        if (ae.code === 'ENOTFOUND' || ae.code === 'ECONNREFUSED') throw new AIServiceError('无法连接到 AI 服务', 'network', undefined, networkDetail);
+        throw new AIServiceError('网络错误', 'network', undefined, networkDetail);
       }
       throw new AIServiceError(error instanceof Error ? error.message : String(error), 'unknown');
     }
 
     // Verify streaming response
     const contentType = response.headers?.['content-type'] || '';
-    if (!contentType.includes('text/event-stream') && !contentType.includes('application/octet-stream')) {
+    // Plain JSON is accepted too: some gateways ignore stream:true, and parseSSEStream
+    // reads a single JSON body as the whole answer.
+    if (!contentType.includes('text/event-stream') && !contentType.includes('application/octet-stream')
+      && !contentType.includes('json')) {
       response.data?.destroy?.();
-      throw new AIServiceError('端点不支持流式响应', 'client');
+      throw new AIServiceError(`端点不支持流式响应 (Content-Type: ${contentType || '无'})`, 'client');
     }
 
     const stream: Readable = response.data;
@@ -616,10 +657,12 @@ export class OpenAIClient {
       let usage: TokenUsage | undefined;
       let chunkTimer: ReturnType<typeof setTimeout> | null = null;
       let inThinking = false;
+      let settled = false;
 
       const resetChunkTimer = () => {
         if (chunkTimer) clearTimeout(chunkTimer);
         chunkTimer = setTimeout(() => {
+          settled = true;
           stream.destroy();
           reject(new AIServiceError('流式响应 chunk 超时', 'timeout'));
         }, effectiveChunkTimeout);
@@ -631,6 +674,7 @@ export class OpenAIClient {
       };
 
       const onAbort = () => {
+        settled = true;
         cleanup();
         stream.destroy();
         reject(new AIServiceError('请求已取消', 'aborted'));
@@ -639,56 +683,117 @@ export class OpenAIClient {
       signal?.addEventListener('abort', onAbort, { once: true });
       resetChunkTimer();
 
-      stream.on('data', (chunk: Buffer) => {
+      // Bytes can split a multi-byte UTF-8 character across chunks; decode statefully.
+      const decoder = new StringDecoder('utf8');
+      // Start of the raw body, kept only to explain an empty or unparseable stream.
+      let rawHead = '';
+      let dataLines = 0;
+      // Whole body while no SSE event has been seen, for gateways that answer with plain JSON.
+      let plainBody = '';
+      const fail = (error: AIServiceError) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        stream.destroy();
+        reject(error);
+      };
+
+      const appendContent = (contentDelta: string) => {
+        if (inThinking) {
+          inThinking = false;
+          const tag = '</think>';
+          fullContent += tag;
+          callbacks.onChunk(tag);
+        }
+        fullContent += contentDelta;
+        callbacks.onChunk(contentDelta);
+      };
+
+      // Handles one parsed JSON event. Gateways differ: OpenAI sends choices[].delta, some send a
+      // whole choices[].message (or legacy text) per event, and errors can arrive inside the stream.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handleEvent = (parsed: Record<string, any>) => {
+        if (parsed.error) {
+          const upstreamMessage = extractUpstreamErrorMessage(parsed);
+          fail(new AIServiceError(`AI 流式响应返回错误: ${upstreamMessage || '未知错误'}`, 'server', undefined, { upstreamMessage }));
+          return;
+        }
+        if (parsed.usage) {
+          usage = normalizeTokenUsage(parsed.usage);
+        }
+        const choice = parsed.choices?.[0];
+        const choiceDelta = choice?.delta ?? choice?.message;
+        const reasoningDelta = (choiceDelta?.reasoning_content ?? choiceDelta?.reasoning) as string | undefined;
+        const contentDelta = (typeof choiceDelta?.content === 'string' ? choiceDelta.content : choice?.text) as string | undefined;
+
+        if (reasoningDelta && typeof reasoningDelta === 'string') {
+          if (!inThinking) {
+            inThinking = true;
+            const openTag = '<think>(thinking...)';
+            fullContent += openTag;
+            callbacks.onChunk(openTag);
+          }
+          // reasoning 内容不发送给客户端
+        }
+
+        if (contentDelta && typeof contentDelta === 'string') {
+          appendContent(contentDelta);
+        }
+      };
+
+      const handleLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) return;
+        // The SSE spec allows "data:" with or without a space after the colon.
+        if (!trimmed.startsWith('data:')) return;
+        const payload = trimmed.slice(5).trim();
+        if (!payload || payload === '[DONE]') return;
+        dataLines += 1;
+        try {
+          handleEvent(JSON.parse(payload));
+        } catch {
+          // Skip malformed JSON lines
+        }
+      };
+
+      stream.on('data', (chunk: Buffer | string) => {
+        if (settled) return;
         resetChunkTimer();
-        buffer += chunk.toString();
+        const text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
+        if (rawHead.length < RAW_STREAM_HEAD_LENGTH) rawHead += text.slice(0, RAW_STREAM_HEAD_LENGTH - rawHead.length);
+        if (dataLines === 0 && plainBody.length < PLAIN_BODY_MAX_LENGTH) plainBody += text;
+        buffer += text;
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith(':')) continue;
-          if (!trimmed.startsWith('data: ')) continue;
-          const payload = trimmed.slice(6);
-          if (payload === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(payload);
-            // Extract usage from final chunk
-            if (parsed.usage) {
-              usage = normalizeTokenUsage(parsed.usage);
-            }
-            const choiceDelta = parsed.choices?.[0]?.delta;
-            const reasoningDelta = (choiceDelta?.reasoning_content ?? choiceDelta?.reasoning) as string | undefined;
-            const contentDelta = choiceDelta?.content as string | undefined;
-
-            if (reasoningDelta) {
-              if (!inThinking) {
-                inThinking = true;
-                const openTag = '<think>(thinking...)';
-                fullContent += openTag;
-                callbacks.onChunk(openTag);
-              }
-              // reasoning 内容不发送给客户端
-            }
-
-            if (contentDelta) {
-              if (inThinking) {
-                inThinking = false;
-                const tag = '</think>';
-                fullContent += tag;
-                callbacks.onChunk(tag);
-              }
-              fullContent += contentDelta;
-              callbacks.onChunk(contentDelta);
-            }
-          } catch {
-            // Skip malformed JSON lines
-          }
+          handleLine(line);
+          if (settled) return;
         }
       });
 
       stream.on('end', () => {
+        if (settled) return;
+        const tail = decoder.end();
+        buffer += tail;
+        if (dataLines === 0) plainBody += tail;
+        // A final event without a trailing newline is still an event.
+        if (buffer.trim()) {
+          handleLine(buffer);
+          buffer = '';
+          if (settled) return;
+        }
+        if (dataLines === 0 && plainBody.trim().startsWith('{')) {
+          // Some gateways ignore stream:true and send one plain JSON body under an
+          // event-stream content type.
+          try {
+            handleEvent(JSON.parse(plainBody));
+          } catch {
+            // not JSON either; reported below
+          }
+          if (settled) return;
+        }
+        settled = true;
         cleanup();
         if (inThinking) {
           const tag = '</think>';
@@ -697,7 +802,11 @@ export class OpenAIClient {
           inThinking = false;
         }
         if (!fullContent) {
-          reject(new AIServiceError('AI 返回内容为空', 'server'));
+          const head = rawHead.replace(/\s+/g, ' ').trim().slice(0, 200);
+          console.warn(`[OpenAIClient] Empty stream (${dataLines} data events). Start of body: ${head || '(empty)'}`);
+          reject(new AIServiceError('AI 返回内容为空', 'server', undefined, {
+            upstreamMessage: `收到 ${dataLines} 个数据事件，响应开头: ${head || '(空)'}`,
+          }));
           return;
         }
         callbacks.onDone({ content: fullContent, usage });
@@ -705,6 +814,8 @@ export class OpenAIClient {
       });
 
       stream.on('error', (err) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         reject(new AIServiceError(err.message || '流式传输错误', 'network'));
       });
@@ -1119,13 +1230,10 @@ export class MultiModelClient {
           console.warn(`[MultiModelClient] Stream: 端点 "${config.endpointName}" 认证失败，跳过`);
           continue;
         }
-        if (aiError.category === 'client') {
-          console.warn(`[MultiModelClient] Stream: 模型 "${config.modelName}" 不支持流式，尝试下一个`);
-          continue;
-        }
-
-        // Non-retryable or only one endpoint — no retry for streaming
-        console.warn(`[MultiModelClient] Stream: ${config.modelName} 失败: ${aiError.message}`);
+        // No retry for streaming: move on to the next model.
+        const upstream = aiError.context?.upstreamMessage;
+        const detail = upstream && !aiError.message.includes(upstream) ? ` | ${upstream}` : '';
+        console.warn(`[MultiModelClient] Stream: ${config.endpointName}/${config.modelName} 失败 (${aiError.category}): ${aiError.message}${detail}`);
         continue;
       }
     }

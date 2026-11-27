@@ -58,10 +58,12 @@ describe('Model discovery and connection handlers', () => {
       selectedModels: [{ endpointId: 'ep-1', modelName: 'Manual/Custom-V3' }],
     }) }) };
     const chat = jest.fn().mockResolvedValue({ content: 'OK' });
-    (OpenAIClient as jest.Mock).mockImplementation(() => ({ chat }));
+    const chatStream = jest.fn().mockResolvedValue(undefined);
+    (OpenAIClient as jest.Mock).mockImplementation(() => ({ chat, chatStream }));
     await handler.post();
     expect(OpenAIClient).toHaveBeenCalledWith(expect.objectContaining({ modelName: 'Manual/Custom-V3' }));
     expect(chat).toHaveBeenCalled();
+    expect(chatStream).toHaveBeenCalled();
     expect(handler.response.body.success).toBe(true);
   });
 
@@ -109,8 +111,29 @@ describe('Model discovery and connection handlers', () => {
   it('names the tested model on success', async () => {
     const handler = makeHandler(TestConnectionHandler);
     handler.ctx = { Route: jest.fn(), get: () => ({ getConfig: async () => savedConfig }) };
-    (OpenAIClient as jest.Mock).mockImplementation(() => ({ chat: jest.fn().mockResolvedValue({ content: 'pong' }) }));
+    (OpenAIClient as jest.Mock).mockImplementation(() => ({
+      chat: jest.fn().mockResolvedValue({ content: 'pong' }),
+      chatStream: jest.fn().mockResolvedValue(undefined),
+    }));
     await handler.post();
     expect(handler.response.body).toEqual({ success: true, message: 'ai_helper_admin_test_success_detail:New / new-model|{1}' });
+  });
+
+  it('fails when regular calls work but the streaming call that student chat uses does not', async () => {
+    const handler = makeHandler(TestConnectionHandler);
+    handler.ctx = { Route: jest.fn(), get: () => ({ getConfig: async () => savedConfig }) };
+    (OpenAIClient as jest.Mock).mockImplementation(() => ({
+      chat: jest.fn().mockResolvedValue({ content: 'pong' }),
+      chatStream: jest.fn().mockRejectedValue(new AIServiceError('AI 返回内容为空', 'server', undefined, {
+        upstreamMessage: '收到 0 个数据事件，响应开头: event: x',
+      })),
+    }));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await handler.post();
+    warn.mockRestore();
+    expect(handler.response.body).toEqual({
+      success: false,
+      message: 'ai_helper_admin_test_stream_failed_detail:New / new-model|AI 返回内容为空：收到 0 个数据事件，响应开头: event: x',
+    });
   });
 });
