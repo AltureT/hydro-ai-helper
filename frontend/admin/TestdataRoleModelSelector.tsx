@@ -6,6 +6,8 @@ import {
 } from '../utils/styles';
 import {
   TESTDATA_MODEL_ROLES,
+  isModelUsable,
+  usableModels,
   type Endpoint,
   type SelectedModel,
   type TestdataModelRole,
@@ -82,7 +84,10 @@ export const TestdataRoleModelSelector: React.FC<TestdataRoleModelSelectorProps>
 
   const roleElements = TESTDATA_MODEL_ROLES.map(role => {
     const chain = roleModels[role] || [];
-    const inherited = chain.length === 0;
+    const activeChain = usableModels(chain, endpoints);
+    // 角色链的端点全部停用时，后端回退到测试数据生成场景链 / 全局链
+    const unavailable = chain.length > 0 && activeChain.length === 0;
+    const inherited = activeChain.length === 0;
     const chainElements = chain.map((item, index) => React.createElement('div', {
       key: `${role}-${item.endpointId}-${item.modelName}`,
       style: {
@@ -90,7 +95,18 @@ export const TestdataRoleModelSelector: React.FC<TestdataRoleModelSelectorProps>
         marginTop: SPACING.xs, fontSize: '12px', color: COLORS.textPrimary,
       },
     },
-    React.createElement('span', { style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere' } }, `${index + 1}. ${item.modelName}`),
+    React.createElement('span', {
+      style: {
+        flex: 1, minWidth: 0, overflowWrap: 'anywhere',
+        ...(isModelUsable(item, endpoints) ? {} : { color: COLORS.textMuted }),
+      },
+    },
+    React.createElement('span', {
+      style: isModelUsable(item, endpoints) ? undefined : { textDecoration: 'line-through' },
+    }, `${index + 1}. ${item.modelName}`),
+    isModelUsable(item, endpoints) ? null : React.createElement('span', {
+      style: { marginLeft: SPACING.sm, color: COLORS.warningText },
+    }, i18n('ai_helper_admin_model_endpoint_disabled'))),
     ...(['up', 'down', 'remove'] as const).map(action => React.createElement('button', {
       key: action,
       type: 'button',
@@ -126,16 +142,21 @@ export const TestdataRoleModelSelector: React.FC<TestdataRoleModelSelectorProps>
         React.createElement('span', { className: 'role-model-recommendation' },
           i18n(`ai_helper_admin_testdata_recommend_${ROLE_RECOMMENDATIONS[role]}`))),
       React.createElement('span', { className: 'role-model-summary' },
-        summarize(inherited ? fallbackModels : chain) || i18n('ai_helper_admin_testdata_role_no_model'),
-        React.createElement('span', { className: 'role-model-source' },
-      inherited
-        ? i18n('ai_helper_admin_testdata_role_inherited')
-        : i18n('ai_helper_admin_scenario_custom'))),
+        summarize(inherited ? fallbackModels : activeChain) || i18n('ai_helper_admin_testdata_role_no_model'),
+        React.createElement('span', {
+          className: 'role-model-source',
+          style: unavailable ? { color: COLORS.warningText } : undefined,
+        },
+      unavailable
+        ? i18n('ai_helper_admin_testdata_role_custom_unavailable')
+        : inherited
+          ? i18n('ai_helper_admin_testdata_role_inherited')
+          : i18n('ai_helper_admin_scenario_custom'))),
       React.createElement('span', { className: 'role-model-edit' }, i18n('ai_helper_admin_testdata_role_configure'))),
     React.createElement('div', { className: 'role-model-editor' },
     React.createElement('p', { style: { margin: '4px 0 8px', fontSize: '13px', color: COLORS.textSecondary } },
       i18n(`ai_helper_admin_testdata_role_${LABEL_SUFFIX[role]}_purpose`)),
-    !inherited ? React.createElement('button', {
+    chain.length > 0 ? React.createElement('button', {
       type: 'button',
       onClick: () => onChange(role, []),
       disabled,

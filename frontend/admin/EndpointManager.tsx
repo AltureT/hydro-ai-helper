@@ -470,6 +470,7 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.sm }}>
               {selectedModels.map((sm, index) => {
                 const ep = endpoints.find(e => e.id === sm.endpointId);
+                const usable = !!ep && ep.enabled !== false;
                 return (
                   <div
                     key={`${sm.endpointId}-${sm.modelName}`}
@@ -487,8 +488,19 @@ export const EndpointManager: React.FC<EndpointManagerProps> = ({
                       {index + 1}
                     </span>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: '14px', fontWeight: 500, color: COLORS.textPrimary }}>{sm.modelName}</div>
-                      <div style={{ fontSize: '12px', color: COLORS.textMuted }}>{ep?.name || i18n('ai_helper_admin_endpoint_unknown')}</div>
+                      <div style={{
+                        fontSize: '14px', fontWeight: 500,
+                        color: usable ? COLORS.textPrimary : COLORS.textMuted,
+                        textDecoration: usable ? 'none' : 'line-through',
+                      }}>{sm.modelName}</div>
+                      <div style={{ fontSize: '12px', color: COLORS.textMuted }}>
+                        {ep?.name || i18n('ai_helper_admin_endpoint_unknown')}
+                        {!usable && (
+                          <span style={{ color: COLORS.warningText, marginLeft: SPACING.sm }}>
+                            {i18n('ai_helper_admin_model_endpoint_disabled')}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <div style={{ display: 'flex', gap: '4px' }}>
                       <button
