@@ -18,6 +18,7 @@ import {
   createOpenAIClientFromConfig,
   getHttpStatusForCategory,
   extractAiErrorMetadata,
+  extractUpstreamErrorMessage,
 } from '../../services/openaiClient';
 
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -147,6 +148,25 @@ describe('OpenAIClient', () => {
   });
 
   describe('chat()', () => {
+    it('keeps the provider error text for admin diagnostics on auth failures', async () => {
+      mockedAxios.post.mockRejectedValueOnce(createAxiosError(401, '余额不足'));
+      const err = await client.chat([], 'System').catch(e => e);
+      expect(err).toBeInstanceOf(AIServiceError);
+      expect(err.category).toBe('auth');
+      expect(err.context?.upstreamMessage).toBe('余额不足');
+      expect(extractAiErrorMetadata(err)).not.toHaveProperty('upstreamMessage');
+    });
+
+    it('keeps the network error code when no response arrives', async () => {
+      const error: any = new Error('getaddrinfo ENOTFOUND api.example.com');
+      error.isAxiosError = true;
+      error.code = 'ENOTFOUND';
+      mockedAxios.post.mockRejectedValueOnce(error);
+      const err = await client.chat([], 'System').catch(e => e);
+      expect(err.category).toBe('network');
+      expect(err.context?.upstreamMessage).toBe('ENOTFOUND');
+    });
+
     it.each([
       [{ prompt_tokens: 10, completion_tokens: 5 }, 15],
       [{ prompt_tokens: 10, completion_tokens: 5, total_tokens: 0 }, 15],
@@ -1425,5 +1445,25 @@ describe('extractAiErrorMetadata', () => {
     });
     const meta = extractAiErrorMetadata(err);
     expect((meta!.attempts as unknown[]).length).toBe(5);
+  });
+});
+
+describe('extractUpstreamErrorMessage', () => {
+  it.each([
+    [{ error: { message: 'model not found' } }, 'model not found'],
+    [{ error: 'bad request' }, 'bad request'],
+    [{ message: 'quota exceeded' }, 'quota exceeded'],
+    [{ code: 1, msg: '令牌额度不足' }, '令牌额度不足'],
+    [{ detail: 'Not Found' }, 'Not Found'],
+    ['  upstream\n  timeout ', 'upstream timeout'],
+    [{ error: { code: 'x' } }, undefined],
+    [undefined, undefined],
+  ])('reads %j', (data, expected) => {
+    expect(extractUpstreamErrorMessage(data)).toBe(expected);
+  });
+
+  it('truncates very long bodies', () => {
+    const result = extractUpstreamErrorMessage('x'.repeat(1000));
+    expect(result).toHaveLength(301);
   });
 });

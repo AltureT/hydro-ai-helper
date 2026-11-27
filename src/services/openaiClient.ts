@@ -37,6 +37,11 @@ export interface ErrorContext {
   }>;
   totalAttempts?: number;
   skippedEndpoints?: string[];
+  /**
+   * Raw error text from the upstream provider (or the low-level network error code).
+   * Admin diagnostics only: never shown to students and not copied into telemetry.
+   */
+  upstreamMessage?: string;
 }
 
 const RETRYABLE_CATEGORIES = new Set<ErrorCategory>(['rate_limit', 'server', 'timeout', 'network']);
@@ -55,6 +60,37 @@ export class AIServiceError extends Error {
     this.isRetryable = RETRYABLE_CATEGORIES.has(category);
     this.context = context;
   }
+}
+
+const UPSTREAM_MESSAGE_MAX_LENGTH = 300;
+
+/**
+ * Pull a human-readable error out of a provider's error body. OpenAI-compatible
+ * gateways disagree on the shape: {error:{message}}, {error:"..."}, {message}, {msg},
+ * {detail}, or plain text.
+ */
+export function extractUpstreamErrorMessage(data: unknown): string | undefined {
+  let text: unknown;
+  if (typeof data === 'string') {
+    text = data;
+  } else if (data && typeof data === 'object') {
+    const body = data as Record<string, unknown>;
+    const err = body.error;
+    if (err && typeof err === 'object') {
+      text = (err as Record<string, unknown>).message;
+    } else if (typeof err === 'string') {
+      text = err;
+    }
+    if (typeof text !== 'string' || !text.trim()) {
+      text = [body.message, body.msg, body.detail].find(v => typeof v === 'string' && v.trim());
+    }
+  }
+  if (typeof text !== 'string') return undefined;
+  const trimmed = text.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > UPSTREAM_MESSAGE_MAX_LENGTH
+    ? `${trimmed.slice(0, UPSTREAM_MESSAGE_MAX_LENGTH)}…`
+    : trimmed;
 }
 
 export const USER_ERROR_MESSAGE_KEYS: Record<ErrorCategory, string> = {
@@ -453,33 +489,36 @@ export class OpenAIClient {
         }
         if (axiosError.response) {
           const status = axiosError.response.status;
-          const data = axiosError.response.data as { error?: { message?: string } };
+          const upstreamMessage = extractUpstreamErrorMessage(axiosError.response.data);
 
           if (status === 401 || status === 403) {
-            throw new AIServiceError('API Key 无效或已过期', 'auth', status);
+            throw new AIServiceError('API Key 无效或已过期', 'auth', status, { upstreamMessage });
           } else if (status === 429) {
             const retryAfterRaw = axiosError.response.headers['retry-after'];
             const retryAfterSec = retryAfterRaw ? parseFloat(String(retryAfterRaw)) : undefined;
             throw new AIServiceError('API 调用频率超限', 'rate_limit', status, {
               retryAfterSec: Number.isFinite(retryAfterSec) ? retryAfterSec : undefined,
+              upstreamMessage,
             });
           } else if (status >= 500) {
-            throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status);
+            throw new AIServiceError(`AI 服务暂时不可用 (HTTP ${status})`, 'server', status, { upstreamMessage });
           } else {
-            const errorMsg = data?.error?.message || '未知错误';
-            throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${errorMsg}`, 'client', status);
+            const errorMsg = upstreamMessage || '未知错误';
+            throw new AIServiceError(`AI API 错误 (HTTP ${status}): ${errorMsg}`, 'client', status, { upstreamMessage });
           }
-        } else if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
+        }
+        const networkDetail = { upstreamMessage: axiosError.code || axiosError.message || undefined };
+        if (axiosError.code === 'ECONNABORTED' || axiosError.code === 'ETIMEDOUT') {
           const timeoutMessage = timeoutMs > 0
             ? `请求超时 (超过 ${Math.round(timeoutMs / 1000)} 秒)`
             : '上游 AI 服务请求超时';
-          throw new AIServiceError(timeoutMessage, 'timeout');
+          throw new AIServiceError(timeoutMessage, 'timeout', undefined, networkDetail);
         } else if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED') {
-          throw new AIServiceError('无法连接到 AI 服务', 'network');
+          throw new AIServiceError('无法连接到 AI 服务', 'network', undefined, networkDetail);
         } else if (axiosError.code === 'ECONNRESET' || axiosError.code === 'EPIPE') {
-          throw new AIServiceError('与 AI 服务的连接被中断', 'network');
+          throw new AIServiceError('与 AI 服务的连接被中断', 'network', undefined, networkDetail);
         } else {
-          throw new AIServiceError('网络错误，请稍后重试', 'network');
+          throw new AIServiceError('网络错误，请稍后重试', 'network', undefined, networkDetail);
         }
       }
 

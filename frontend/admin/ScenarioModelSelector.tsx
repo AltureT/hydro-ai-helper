@@ -9,7 +9,7 @@ import type {
   Endpoint, SelectedModel, AIScenarioKey, ScenarioModelsState,
   TestdataModelRole, TestdataRoleModelsState,
 } from './configTypes';
-import { AI_SCENARIO_KEYS } from './configTypes';
+import { AI_SCENARIO_KEYS, isModelUsable, usableModels } from './configTypes';
 import { TestdataRoleModelSelector } from './TestdataRoleModelSelector';
 
 interface ScenarioModelSelectorProps {
@@ -74,6 +74,9 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
     }
   }
 
+  // 全局链里停用端点的模型调用时会被跳过，展示"实际生效"时也要剔除
+  const effectiveGlobal = usableModels(globalModels, endpoints);
+
   const endpointName = (endpointId: string) =>
     endpoints.find(e => e.id === endpointId)?.name || i18n('ai_helper_admin_endpoint_unknown');
 
@@ -114,6 +117,10 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
           const meta = SCENARIO_META[scenario];
           const chain = scenarioModels[scenario];
           const isDefault = chain.length === 0;
+          const activeChain = usableModels(chain, endpoints);
+          // 自定义链的端点全部停用时，后端回退到全局模型链
+          const fallsBackToGlobal = !isDefault && activeChain.length === 0;
+          const followsGlobal = isDefault || fallsBackToGlobal;
 
           return (
             <div
@@ -125,8 +132,12 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: '15px', fontWeight: 600, color: COLORS.textPrimary }}><Icon name={meta.icon} size={18} /> {i18n(meta.labelKey)}</span>
-                <span style={{ fontSize: '12px', color: COLORS.textSecondary }}>
-                  {i18n(isDefault ? 'ai_helper_admin_scenario_follow_global' : 'ai_helper_admin_scenario_custom')}
+                <span style={{ fontSize: '12px', color: fallsBackToGlobal ? COLORS.warningText : COLORS.textSecondary }}>
+                  {i18n(isDefault
+                    ? 'ai_helper_admin_scenario_follow_global'
+                    : fallsBackToGlobal
+                      ? 'ai_helper_admin_scenario_custom_unavailable'
+                      : 'ai_helper_admin_scenario_custom')}
                 </span>
                 {!isDefault && (
                   <button
@@ -154,20 +165,22 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                 </div>
               )}
 
-              {isDefault && (
+              {followsGlobal && (
                 <div style={{
                   fontSize: '12px', marginBottom: SPACING.sm,
-                  color: globalModels.length > 0 ? COLORS.textSecondary : COLORS.warningText,
+                  color: effectiveGlobal.length > 0 ? COLORS.textSecondary : COLORS.warningText,
                 }}>
-                  {globalModels.length > 0
-                    ? i18n('ai_helper_admin_scenario_effective_global', summarizeChain(globalModels))
+                  {effectiveGlobal.length > 0
+                    ? i18n('ai_helper_admin_scenario_effective_global', summarizeChain(effectiveGlobal))
                     : i18n('ai_helper_admin_scenario_global_empty')}
                 </div>
               )}
 
               {!isDefault && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs, marginBottom: SPACING.sm }}>
-                  {chain.map((sm, index) => (
+                  {chain.map((sm, index) => {
+                    const usable = isModelUsable(sm, endpoints);
+                    return (
                     <div
                       key={`${sm.endpointId}-${sm.modelName}`}
                       style={{
@@ -184,8 +197,17 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                         {index + 1}
                       </span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ fontSize: '13px', fontWeight: 500, color: COLORS.textPrimary, overflowWrap: 'anywhere' }}>{sm.modelName}</span>
+                        <span style={{
+                          fontSize: '13px', fontWeight: 500, overflowWrap: 'anywhere',
+                          color: usable ? COLORS.textPrimary : COLORS.textMuted,
+                          textDecoration: usable ? 'none' : 'line-through',
+                        }}>{sm.modelName}</span>
                         <span style={{ fontSize: '12px', color: COLORS.textSecondary, marginLeft: SPACING.sm }}>{endpointName(sm.endpointId)}</span>
+                        {!usable && (
+                          <span style={{ fontSize: '12px', color: COLORS.warningText, marginLeft: SPACING.sm }}>
+                            {i18n('ai_helper_admin_model_endpoint_disabled')}
+                          </span>
+                        )}
                       </div>
                       <div style={{ display: 'flex', gap: '4px' }}>
                         <button
@@ -228,7 +250,8 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
                         </button>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -263,7 +286,7 @@ export const ScenarioModelSelector: React.FC<ScenarioModelSelectorProps> = ({
               {scenario === 'testdataGeneration' && (
                 <TestdataRoleModelSelector
                   endpoints={endpoints}
-                  fallbackModels={chain.length > 0 ? chain : globalModels}
+                  fallbackModels={activeChain.length > 0 ? activeChain : effectiveGlobal}
                   roleModels={testdataRoleModels}
                   onChange={onTestdataRoleChange}
                   disabled={disabled}

@@ -39,6 +39,19 @@ export const TESTDATA_MODEL_ROLES: readonly TestdataModelRole[] = [
 /** Empty role chains inherit from the test-data scenario, then the global chain. */
 export type TestdataRoleModelsState = Record<TestdataModelRole, SelectedModel[]>;
 
+/**
+ * A chained model is only called when its endpoint still exists and is enabled; the
+ * backend skips the rest and falls back to the next level (role → scenario → global).
+ */
+export function isModelUsable(model: SelectedModel, endpoints: Endpoint[]): boolean {
+  const endpoint = endpoints.find(e => e.id === model.endpointId);
+  return !!endpoint && endpoint.enabled !== false;
+}
+
+export function usableModels(chain: SelectedModel[], endpoints: Endpoint[]): SelectedModel[] {
+  return chain.filter(model => isModelUsable(model, endpoints));
+}
+
 export interface BudgetConfigState {
   dailyTokenLimitPerUser: number | '';
   dailyTokenLimitPerDomain: number | '';

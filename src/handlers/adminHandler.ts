@@ -6,7 +6,7 @@
 import { Handler, PRIV } from 'hydrooj';
 import { AIConfigModel, AIConfig } from '../models/aiConfig';
 import { encrypt, decrypt, maskApiKey } from '../lib/crypto';
-import { OpenAIClient, fetchAvailableModels } from '../services/openaiClient';
+import { OpenAIClient, AIServiceError, fetchAvailableModels } from '../services/openaiClient';
 import { builtinJailbreakPatternSources } from '../constants/jailbreakRules';
 import { JailbreakLogModel } from '../models/jailbreakLog';
 import type { JailbreakLog } from '../models/jailbreakLog';
@@ -268,6 +268,7 @@ export class TestConnectionHandler extends Handler {
       let apiBaseUrl: string | undefined;
       let modelName: string | undefined;
       let apiKeyEncrypted: string | undefined;
+      let endpointName: string | undefined;
 
       if (config.endpoints?.length > 0 && config.selectedModels?.length > 0) {
         // v2 多端点配置：找到第一个启用的选中模型对应的端点
@@ -277,6 +278,7 @@ export class TestConnectionHandler extends Handler {
             apiBaseUrl = ep.apiBaseUrl;
             apiKeyEncrypted = ep.apiKeyEncrypted;
             modelName = sm.modelName;
+            endpointName = ep.name;
             break;
           }
         }
@@ -313,6 +315,8 @@ export class TestConnectionHandler extends Handler {
         return;
       }
 
+      const target = endpointName ? `${endpointName} / ${modelName}` : modelName;
+
       // 创建临时 OpenAI 客户端
       const client = new OpenAIClient({
         apiBaseUrl,
@@ -330,16 +334,19 @@ export class TestConnectionHandler extends Handler {
 
         this.response.body = {
           success: true,
-          message: this.translate('ai_helper_admin_test_success'),
+          message: translateWithParams(this, 'ai_helper_admin_test_success_detail', target),
         };
         this.response.type = 'application/json';
 
       } catch (err) {
         // 调用失败，但返回 200(业务层错误，不是 HTTP 错误)
+        // 管理员需要看到真实原因（模型名错误、余额不足、参数不被支持……）才能排查。
+        const reason = describeTestFailure(err);
+        console.warn(`[TestConnectionHandler] ${target} failed: ${reason}`);
         this.response.status = 200;
         this.response.body = {
           success: false,
-          message: this.translate('ai_helper_admin_test_call_failed')
+          message: translateWithParams(this, 'ai_helper_admin_test_call_failed_detail', target, reason),
         };
         this.response.type = 'application/json';
       }
@@ -354,6 +361,15 @@ export class TestConnectionHandler extends Handler {
       this.response.type = 'application/json';
     }
   }
+}
+
+/** 连接测试失败原因：插件自身的分类文案 + 上游服务商返回的原始错误（若有且未包含在内） */
+export function describeTestFailure(err: unknown): string {
+  if (err instanceof AIServiceError) {
+    const upstream = err.context?.upstreamMessage;
+    return upstream && !err.message.includes(upstream) ? `${err.message}：${upstream}` : err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

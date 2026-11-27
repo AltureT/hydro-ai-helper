@@ -196,7 +196,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ embedded = false }) =>
         credentials: 'include',
       });
       const json = await res.json();
-      if (json.success) showToast(i18n('ai_helper_config_test_success'), 'success');
+      if (json.success) showToast(json.message || i18n('ai_helper_config_test_success'), 'success');
       else showToast(json.message || i18n('ai_helper_config_test_failed'), 'error');
     } catch (err: any) {
       console.error('Test connection error:', err);
