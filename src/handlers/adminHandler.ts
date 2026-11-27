@@ -331,13 +331,6 @@ export class TestConnectionHandler extends Handler {
           [{ role: 'user', content: 'ping' }],
           'You are a health check assistant for AI Helper.'
         );
-
-        this.response.body = {
-          success: true,
-          message: translateWithParams(this, 'ai_helper_admin_test_success_detail', target),
-        };
-        this.response.type = 'application/json';
-
       } catch (err) {
         // 调用失败，但返回 200(业务层错误，不是 HTTP 错误)
         // 管理员需要看到真实原因（模型名错误、余额不足、参数不被支持……）才能排查。
@@ -347,6 +340,31 @@ export class TestConnectionHandler extends Handler {
         this.response.body = {
           success: false,
           message: translateWithParams(this, 'ai_helper_admin_test_call_failed_detail', target, reason),
+        };
+        this.response.type = 'application/json';
+        return;
+      }
+
+      // 学生答疑走流式请求：同一个模型的流式调用也要能用，否则测试通过而答疑仍然失败。
+      try {
+        await client.chatStream(
+          [{ role: 'user', content: 'ping' }],
+          'You are a health check assistant for AI Helper.',
+          { callbacks: { onChunk: () => undefined, onDone: () => undefined, onError: () => undefined } },
+        );
+        this.response.body = {
+          success: true,
+          message: translateWithParams(this, 'ai_helper_admin_test_success_detail', target),
+        };
+        this.response.type = 'application/json';
+
+      } catch (err) {
+        const reason = describeTestFailure(err);
+        console.warn(`[TestConnectionHandler] ${target} stream failed: ${reason}`);
+        this.response.status = 200;
+        this.response.body = {
+          success: false,
+          message: translateWithParams(this, 'ai_helper_admin_test_stream_failed_detail', target, reason),
         };
         this.response.type = 'application/json';
       }

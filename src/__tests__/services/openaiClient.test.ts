@@ -188,6 +188,83 @@ describe('OpenAIClient', () => {
       expect(onDone).toHaveBeenCalledWith({ content: 'Hello', usage: expected });
     });
 
+    describe('chatStream() provider formats', () => {
+      const run = async (chunks: Array<string | Buffer>, contentType = 'text/event-stream') => {
+        mockedAxios.post.mockResolvedValueOnce({ headers: { 'content-type': contentType }, data: Readable.from(chunks) });
+        const onDone = jest.fn();
+        const onChunk = jest.fn();
+        const err = await client.chatStream([], 'System', { callbacks: { onChunk, onDone, onError: jest.fn() } })
+          .then(() => undefined, e => e);
+        return { onDone, onChunk, err };
+      };
+      const delta = (content: string) => JSON.stringify({ choices: [{ delta: { content } }] });
+
+      it('accepts "data:" without a space after the colon', async () => {
+        const { onDone, err } = await run([`data:${delta('Hel')}\n\n`, `data:${delta('lo')}\n\ndata:[DONE]\n\n`]);
+        expect(err).toBeUndefined();
+        expect(onDone).toHaveBeenCalledWith({ content: 'Hello', usage: undefined });
+      });
+
+      it('accepts CRLF line endings and a last event without a trailing newline', async () => {
+        const { onDone } = await run([`data: ${delta('A')}\r\n\r\n`, `data: ${delta('B')}`]);
+        expect(onDone).toHaveBeenCalledWith({ content: 'AB', usage: undefined });
+      });
+
+      it('keeps multi-byte characters split across chunks intact', async () => {
+        const bytes = Buffer.from(`data: ${delta('你好')}\n\n`);
+        const { onDone } = await run([bytes.subarray(0, 25), bytes.subarray(25)]);
+        expect(onDone).toHaveBeenCalledWith({ content: '你好', usage: undefined });
+      });
+
+      it('reads events that carry a whole message instead of a delta', async () => {
+        const { onDone } = await run([`data: ${JSON.stringify({ choices: [{ message: { content: 'Whole' } }] })}\n\n`]);
+        expect(onDone).toHaveBeenCalledWith({ content: 'Whole', usage: undefined });
+      });
+
+      it('reads a plain JSON body when the gateway ignores stream:true', async () => {
+        const body = JSON.stringify({ choices: [{ message: { content: 'Plain' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } }, null, 2);
+        const { onDone, err } = await run([body.slice(0, 20), body.slice(20)], 'application/json; charset=utf-8');
+        expect(err).toBeUndefined();
+        expect(onDone).toHaveBeenCalledWith({ content: 'Plain', usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } });
+      });
+
+      it('surfaces an error event sent inside the stream', async () => {
+        const { err, onDone } = await run([`data: ${JSON.stringify({ error: { message: 'model overloaded' } })}\n\n`]);
+        expect(onDone).not.toHaveBeenCalled();
+        expect(err).toBeInstanceOf(AIServiceError);
+        expect(err.message).toContain('model overloaded');
+      });
+
+      it('reports the start of the body when nothing could be read', async () => {
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const { err } = await run(['event: message\nfoo: bar\n\n']);
+        warn.mockRestore();
+        expect(err.message).toBe('AI 返回内容为空');
+        expect(err.category).toBe('server');
+        expect(err.context?.upstreamMessage).toContain('foo: bar');
+      });
+
+      it('still rejects an HTML page', async () => {
+        const { err } = await run(['<html></html>'], 'text/html');
+        expect(err.category).toBe('client');
+        expect(err.message).toContain('text/html');
+      });
+
+      it('reads the provider message from a streamed error body', async () => {
+        const error: any = new Error('Request failed with status code 402');
+        error.isAxiosError = true;
+        error.response = {
+          status: 402, headers: {}, statusText: '', config: {},
+          data: Readable.from([JSON.stringify({ error: { message: '额度已用完' } })]),
+        };
+        mockedAxios.post.mockRejectedValueOnce(error);
+        const err = await client.chatStream([], 'System', { callbacks: { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() } })
+          .then(() => undefined, e => e);
+        expect(err.category).toBe('client');
+        expect(err.message).toBe('AI API 错误 (HTTP 402): 额度已用完');
+      });
+    });
+
     it('should leave usage absent when the provider does not report it', async () => {
       mockedAxios.post.mockResolvedValueOnce({ data: { choices: [{ message: { content: 'Hello' } }] } });
       expect((await client.chat([], 'System')).usage).toBeUndefined();
